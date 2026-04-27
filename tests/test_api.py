@@ -1916,7 +1916,9 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         fake_process = object()
 
-        with patch.object(api.os, "name", "nt"):
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api, "_find_wsl_executable", return_value="wsl.exe"
+        ):
             with patch.object(api, "WinPtyProcess") as winpty:
                 with patch.object(api, "_broadcast_session_status"):
                     with patch.object(api, "_stream_local_output"):
@@ -2824,4 +2826,3 @@ class VoiceAudioRaceTestCase(unittest.TestCase):
         api._handle_vosk_audio_chunk("voice-no-conn", b"\x00\x01\x02\x03")
 
         mock_emit.assert_not_called()
-
