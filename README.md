@@ -92,7 +92,16 @@ The npm prefix is commonly:
 C:\Users\<you>\AppData\Roaming\npm
 ```
 
-After changing PATH, restart PowerShell, Windows Terminal, GridVibe, and any native window launchers so they inherit the updated environment.
+On Linux, npm global binaries usually live under the global prefix's `bin` directory. Confirm the path with:
+
+```bash
+npm prefix -g
+command -v codex claude opencode kilo copilot
+```
+
+Common locations include `/usr/local/bin`, `~/.npm-global/bin`, or `<npm prefix -g>/bin`.
+
+After changing PATH, restart your shell, GridVibe, and any native window launchers so they inherit the updated environment.
 
 ## Features
 
@@ -106,6 +115,65 @@ After changing PATH, restart PowerShell, Windows Terminal, GridVibe, and any nat
 - Theme support for system, light, and dark modes
 
 ## Quick Start
+
+### Windows Install
+
+Use the included launcher for the easiest Windows setup:
+
+```powershell
+.\GridVibe.bat
+```
+
+`GridVibe.bat` creates or repairs `.venv`, installs runtime and desktop dependencies, then launches the native window when possible.
+
+Manual Windows setup:
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python main.py --host 127.0.0.1
+```
+
+Open `http://localhost:5050`.
+
+Install optional desktop-window support with:
+
+```powershell
+pip install -r requirements-desktop.txt
+python webview_launcher.py
+```
+
+### Linux Install
+
+Install Python 3.10+ and the venv package for your distro first. For Debian or Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install python3 python3-venv python3-pip
+```
+
+Then create the environment and start GridVibe:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python main.py --host 127.0.0.1
+```
+
+Open `http://localhost:5050`.
+
+Optional native desktop-window support on Linux uses `pywebview` and may require distro GUI/WebKit packages in addition to:
+
+```bash
+pip install -r requirements-desktop.txt
+python webview_launcher.py
+```
+
+### Manual Cross-Platform Setup
 
 ```bash
 python -m venv .venv
@@ -122,7 +190,7 @@ python main.py
 
 Open `http://localhost:5050`.
 
-On Windows, you can also run `GridVibe.bat`. It creates or repairs `.venv`, installs runtime and desktop dependencies, then launches the native window when possible.
+On Windows, you can also run `GridVibe.bat`.
 
 ## Optional Dependencies
 
