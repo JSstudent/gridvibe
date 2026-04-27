@@ -71,6 +71,29 @@ Use the gear button on the launcher page to open `App Settings`. These settings 
 - `Vosk Model` sets the local Vosk model folder/name.
 - `Whisper Model`, `Device`, and `Compute Type` configure faster-whisper. GPU mode requires a working NVIDIA CUDA setup; use CPU if startup fails.
 
+### Agent CLI Detection
+
+GridVibe does not bundle agent CLIs such as Codex, Claude Code, OpenCode, Kilo, or GitHub Copilot CLI. The `Agent` selector checks whether the selected command is available in the target environment:
+
+- SSH sessions are checked on the remote host.
+- WSL terminals are checked inside the selected WSL distribution.
+- PowerShell and cmd terminals are checked through the Windows environment that launched GridVibe.
+
+If every agent shows `Missing`, confirm the CLI is installed and visible on `PATH` from a fresh terminal. For npm-installed agents on Windows, the global npm shim folder must usually be on your User PATH:
+
+```powershell
+npm prefix -g
+Get-Command codex, claude, opencode, kilo, copilot -ErrorAction SilentlyContinue
+```
+
+The npm prefix is commonly:
+
+```text
+C:\Users\<you>\AppData\Roaming\npm
+```
+
+After changing PATH, restart PowerShell, Windows Terminal, GridVibe, and any native window launchers so they inherit the updated environment.
+
 ## Features
 
 - Multi-session launcher with 1, 2, 3, 4, 6, or 8 panes
