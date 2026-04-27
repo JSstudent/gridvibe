@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+.venv-wsl-broken/
+env/
+
+# IDE and developer tooling
+.vscode/
+.idea/
+/.codex/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*~
+
+# Logs
+logs/
+*.log
+
+# Local session state
+saved_sessions.json
+gridvibe.log
+.encryption_key
+config.json
+
+# Internal docs (not for public release)
+docs/r&d/
+docs/archive/
+docs/release.md
+
+# Distribution
+build/
+dist/
+*.egg
+*.whl
+# Local AI assistant instructions (not public project docs)
+.github/copilot-instructions.md
+AGENTS.md
+CLAUDE.md

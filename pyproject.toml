@@ -1,0 +1,22 @@
+[project]
+name = "gridvibe"
+version = "0.1.0"
+description = "Browser-first multi-session terminal workspace"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "JSstudent" }]
+
+[project.urls]
+Homepage = "https://github.com/JSstudent/gridvibe"
+Repository = "https://github.com/JSstudent/gridvibe"
+Issues = "https://github.com/JSstudent/gridvibe/issues"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+

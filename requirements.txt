@@ -1,0 +1,19 @@
+# GridVibe runtime dependencies
+
+# Web framework
+Flask>=2.3.0
+Flask-SocketIO>=5.3.0
+
+# SSH support
+paramiko>=3.3.0
+
+# Socket.IO transport
+python-socketio>=5.9.0
+python-engineio>=4.7.0
+
+# Encryption for saved session passwords
+cryptography>=41.0.0
+
+# Voice service client
+websocket-client>=1.6.0
+

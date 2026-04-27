@@ -1,0 +1,7 @@
+# Optional desktop/native-window dependencies for GridVibe.
+# Install this after the core requirements if you want pywebview support.
+
+-r requirements.txt
+pywebview>=5.3.2
+pywinpty>=2.0.15; platform_system == "Windows"
+

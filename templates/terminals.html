@@ -1,0 +1,4005 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GridVibe — Terminals</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+    <style>
+        :root {
+            --t-bg: #0d0d0d;
+            --t-topbar: #161616;
+            --t-tabs-bg: #121212;
+            --t-card: #141414;
+            --t-card-header: #1e1e1e;
+            --t-terminal-bg: #0d0d0d;
+            --t-border: #2a2a2a;
+            --t-border-dim: #232323;
+            --t-border-card: #272727;
+            --t-border-tab: #2d2d2d;
+            --t-text: #e0e0e0;
+            --t-text-secondary: #bdbdbd;
+            --t-text-muted: #555;
+            --t-text-placeholder: #666;
+            --t-accent: #00d9ff;
+            --t-accent-hover: #00b8d9;
+            --t-success: #18b66a;
+            --t-success-hover: #14955a;
+            --t-btn-bg: #181818;
+            --t-btn-text: #cfcfcf;
+            --t-btn-hover-bg: #202020;
+            --t-btn-neutral: #2c2c2c;
+            --t-btn-neutral-text: #ccc;
+            --t-btn-neutral-hover: #3a3a3a;
+            --t-ctx-bg: #1e1e1e;
+            --t-ctx-border: #333;
+            --t-ctx-hover: #2a2a2a;
+            --t-spinner-track: #2a2a2a;
+            --t-empty-text: #444;
+            --t-voice-bg: #12161b;
+            --t-voice-border: #2a3741;
+            --t-voice-input-bg: #0d1115;
+            --t-voice-input-text: #e7edf4;
+            --t-voice-title: #f4f7fb;
+            --t-voice-meta: #8294a8;
+            --t-voice-label: #9fb2c4;
+            --t-voice-badge-bg: #15202b;
+            --t-voice-badge-border: #2e4050;
+            --t-voice-badge-text: #9ec4ff;
+            --t-voice-toggle-bg: #2a3741;
+            --t-voice-toggle-knob: #e7edf4;
+            --t-voice-status-bg: #101820;
+            --t-voice-status-border: #22303a;
+            --t-voice-status-text: #c5d7e6;
+            --t-voice-details-bg: #0d1318;
+            --t-voice-details-border: #22303a;
+            --t-voice-details-title: #dce8f4;
+            --t-voice-diag-title: #91a5b9;
+            --t-voice-pre-bg: #081018;
+            --t-voice-pre-border: #15212b;
+            --t-voice-pre-text: #b9d0e3;
+            --t-voice-partial-bg: #1a1a2e;
+            --t-voice-partial-border: #333;
+            --t-voice-partial-text: #8888aa;
+        }
+
+        [data-theme="light"] {
+            --t-bg: #f0f2f5;
+            --t-topbar: #ffffff;
+            --t-tabs-bg: #f8f9fa;
+            --t-card: #ffffff;
+            --t-card-header: #f3f4f6;
+            --t-terminal-bg: #0d0d0d;
+            --t-border: #d1d5db;
+            --t-border-dim: #e5e7eb;
+            --t-border-card: #d1d5db;
+            --t-border-tab: #d1d5db;
+            --t-text: #1a1a2e;
+            --t-text-secondary: #374151;
+            --t-text-muted: #6b7280;
+            --t-text-placeholder: #9ca3af;
+            --t-accent: #0891b2;
+            --t-accent-hover: #0e7490;
+            --t-success: #10b981;
+            --t-success-hover: #059669;
+            --t-btn-bg: #f3f4f6;
+            --t-btn-text: #374151;
+            --t-btn-hover-bg: #e5e7eb;
+            --t-btn-neutral: #f3f4f6;
+            --t-btn-neutral-text: #374151;
+            --t-btn-neutral-hover: #e5e7eb;
+            --t-ctx-bg: #ffffff;
+            --t-ctx-border: #d1d5db;
+            --t-ctx-hover: #f3f4f6;
+            --t-spinner-track: #d1d5db;
+            --t-empty-text: #9ca3af;
+            --t-voice-bg: #ffffff;
+            --t-voice-border: #d1d5db;
+            --t-voice-input-bg: #f9fafb;
+            --t-voice-input-text: #1f2937;
+            --t-voice-title: #111827;
+            --t-voice-meta: #6b7280;
+            --t-voice-label: #4b5563;
+            --t-voice-badge-bg: #eff6ff;
+            --t-voice-badge-border: #bfdbfe;
+            --t-voice-badge-text: #1d4ed8;
+            --t-voice-toggle-bg: #d1d5db;
+            --t-voice-toggle-knob: #ffffff;
+            --t-voice-status-bg: #f9fafb;
+            --t-voice-status-border: #e5e7eb;
+            --t-voice-status-text: #374151;
+            --t-voice-details-bg: #f9fafb;
+            --t-voice-details-border: #e5e7eb;
+            --t-voice-details-title: #1f2937;
+            --t-voice-diag-title: #6b7280;
+            --t-voice-pre-bg: #f3f4f6;
+            --t-voice-pre-border: #e5e7eb;
+            --t-voice-pre-text: #374151;
+            --t-voice-partial-bg: #ffffff;
+            --t-voice-partial-border: #d1d5db;
+            --t-voice-partial-text: #6b7280;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: var(--t-bg);
+            min-height: 100vh;
+            color: var(--t-text);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* ── Top bar ── */
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 18px;
+            background: var(--t-topbar);
+            border-bottom: 1px solid var(--t-border);
+            flex-shrink: 0;
+            height: 50px;
+        }
+
+        .session-tabs {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            padding: 10px 18px 8px;
+            background: var(--t-tabs-bg);
+            border-bottom: 1px solid var(--t-border-dim);
+            overflow-x: auto;
+            flex-shrink: 0;
+        }
+
+        .session-tab {
+            border: 1px solid var(--t-border-tab);
+            background: var(--t-card);
+            color: var(--t-text-secondary);
+            border-radius: 9px;
+            padding: 8px 12px;
+            font-size: .8rem;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background .18s, border-color .18s, color .18s;
+        }
+
+        .session-tab.draggable {
+            user-select: none;
+        }
+
+        .session-tab:hover {
+            border-color: var(--tab-color, var(--t-accent));
+            color: var(--t-text);
+        }
+
+        .session-tab.active {
+            background: var(--tab-color-bg, rgba(0, 217, 255, 0.14));
+            border-color: var(--tab-color, var(--t-accent));
+            color: var(--tab-color, var(--t-accent));
+        }
+
+        .session-tab.settings {
+            background: rgba(0, 196, 110, 0.16);
+            border-color: #00c46e;
+            color: #7ef0b4;
+        }
+
+        .session-tab.settings:hover {
+            background: rgba(0, 196, 110, 0.24);
+            border-color: #1add88;
+            color: #cffff0;
+        }
+
+        .session-tab.dragging {
+            opacity: 0.45;
+        }
+
+        .session-tab.drag-target {
+            border-color: var(--tab-color, var(--t-accent));
+            box-shadow: inset 0 0 0 1px var(--tab-color-shadow, rgba(0, 217, 255, 0.45));
+        }
+
+        .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 600; }
+        .topbar-sub   { font-size: .78rem; color: var(--t-text-muted); margin-left: 10px; }
+
+        .topbar-actions { display: flex; gap: 8px; align-items: center; }
+
+        .btn {
+            padding: 6px 14px;
+            border: none;
+            border-radius: 5px;
+            font-size: .82rem;
+            cursor: pointer;
+            transition: background .2s;
+            font-weight: 500;
+        }
+
+        .btn-primary  { background: var(--t-accent); color: #000; }
+        .btn-primary:hover  { background: var(--t-accent-hover); }
+        .btn-success  { background: var(--t-success); color: #fff; }
+        .btn-success:hover  { background: var(--t-success-hover); }
+        .btn-cyan  { background: var(--t-accent); color: #000; }
+        .btn-cyan:hover  { background: var(--t-accent-hover); }
+        .btn-danger   { background: #ff4444; color: #fff; }
+        .btn-danger:hover   { background: #d43434; }
+        .btn-neutral  { background: var(--t-btn-neutral); color: var(--t-btn-neutral-text); }
+        .btn-neutral:hover  { background: var(--t-btn-neutral-hover); }
+        .btn-icon {
+            min-width: 40px;
+            padding-left: 10px;
+            padding-right: 10px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+            line-height: 1;
+        }
+
+        /* ── Grid area ── */
+        #terminalsGrid {
+            flex: 1;
+            display: grid;
+            width: min(1800px, 100%);
+            gap: 10px;
+            padding: 10px;
+            margin: 0 auto;
+            overflow: hidden;
+        }
+
+        /* Layout classes */
+        #terminalsGrid.layout-2-vertical {
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr;
+        }
+
+        #terminalsGrid.layout-single {
+            grid-template-columns: 1fr;
+            grid-template-rows: 1fr;
+        }
+
+        #terminalsGrid.layout-2-horizontal {
+            grid-template-columns: 1fr;
+            grid-template-rows: 1fr 1fr;
+        }
+
+        #terminalsGrid.layout-3-vertical {
+            grid-template-columns: repeat(3, 1fr);
+            grid-template-rows: 1fr;
+        }
+
+        #terminalsGrid.layout-3-horizontal {
+            grid-template-columns: 1fr;
+            grid-template-rows: repeat(3, 1fr);
+        }
+
+        #terminalsGrid.layout-3-split {
+            grid-template-columns: 2fr 1fr;
+            grid-template-rows: 1fr 1fr;
+        }
+
+        #terminalsGrid.layout-3-split .terminal-container:nth-child(1) {
+            grid-column: 1;
+            grid-row: 1;
+        }
+
+        #terminalsGrid.layout-3-split .terminal-container:nth-child(2) {
+            grid-column: 1;
+            grid-row: 2;
+        }
+
+        #terminalsGrid.layout-3-split .terminal-container:nth-child(3) {
+            grid-column: 2;
+            grid-row: 1 / span 2;
+        }
+
+        #terminalsGrid.layout-grid {
+            grid-template-columns: repeat(var(--grid-columns, 2), 1fr);
+            grid-template-rows: repeat(var(--grid-rows, 2), 1fr);
+        }
+
+        /* ── Terminal card ── */
+        .terminal-container {
+            display: flex;
+            flex-direction: column;
+            background: var(--t-card);
+            border-radius: 7px;
+            overflow: hidden;
+            border: 1px solid var(--t-border-card);
+            min-height: 0;
+            min-width: 0;
+        }
+
+        .terminal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 7px 13px;
+            background: var(--t-card-header);
+            border-bottom: 1px solid var(--t-border);
+            flex-shrink: 0;
+            min-width: 0;
+        }
+
+        .terminal-header.draggable {
+            cursor: grab;
+            user-select: none;
+        }
+
+        .terminal-header.draggable:active {
+            cursor: grabbing;
+        }
+
+        .terminal-info { display: flex; align-items: center; gap: 10px; min-width: 0; }
+        .terminal-name,
+        .terminal-host {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .terminal-name { font-weight: 600; color: var(--t-accent); font-size: .88rem; }
+        .terminal-host { color: var(--t-text-muted); font-size: .78rem; }
+
+        .terminal-meta {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-shrink: 0;
+        }
+
+        .terminal-status { display: flex; align-items: center; gap: 6px; font-size: .78rem; }
+
+        .terminal-action-btn {
+            border: 1px solid var(--session-color-dim, var(--t-border-tab));
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            border-radius: 5px;
+            padding: 5px 9px;
+            font-size: .73rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background .18s, border-color .18s, color .18s;
+        }
+
+        .terminal-action-btn:hover:not(:disabled) {
+            border-color: var(--session-color, var(--t-accent));
+            color: var(--t-text);
+            background: var(--t-btn-hover-bg);
+        }
+
+        .terminal-action-btn:disabled {
+            opacity: .55;
+            cursor: wait;
+        }
+
+        /* ── Voice input ── */
+        .voice-control {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        .voice-btn {
+            position: relative;
+            transition: border-color .18s, color .18s, box-shadow .3s;
+        }
+        .voice-settings-btn {
+            min-width: 42px;
+            padding-left: 8px;
+            padding-right: 8px;
+        }
+        .voice-btn.recording {
+            border-color: #ff4444;
+            color: #ff4444;
+            background: #1a0808;
+            animation: voice-pulse 1.2s ease-in-out infinite;
+        }
+        .voice-btn.recording:hover {
+            border-color: #ff6666;
+            color: #ff6666;
+        }
+        @keyframes voice-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(255,68,68,0.35); }
+            50%      { box-shadow: 0 0 0 4px rgba(255,68,68,0); }
+        }
+        .terminal-shortcut-btn {
+            min-width: 56px;
+            text-align: center;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .voice-partial-preview {
+            position: absolute;
+            bottom: calc(100% + 6px);
+            right: 0;
+            background: var(--t-voice-partial-bg);
+            border: 1px solid var(--t-voice-partial-border);
+            border-radius: 5px;
+            padding: 3px 10px;
+            font-size: .68rem;
+            color: var(--t-voice-partial-text);
+            white-space: nowrap;
+            max-width: 220px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            pointer-events: none;
+            z-index: 5;
+        }
+        .voice-panel {
+            position: absolute;
+            top: calc(100% + 8px);
+            right: 0;
+            width: min(420px, calc(100vw - 36px));
+            background: var(--t-voice-bg);
+            border: 1px solid var(--t-voice-border);
+            border-radius: 10px;
+            box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
+            padding: 12px;
+            display: none;
+            z-index: 60;
+        }
+        .voice-panel.open {
+            display: block;
+        }
+        .voice-panel-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .voice-panel-title {
+            font-size: .82rem;
+            font-weight: 700;
+            color: var(--t-voice-title);
+        }
+        .voice-panel-meta {
+            margin-top: 3px;
+            font-size: .66rem;
+            line-height: 1.45;
+            color: var(--t-voice-meta);
+        }
+        .voice-panel-badge {
+            border: 1px solid var(--t-voice-badge-border);
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: .62rem;
+            font-weight: 700;
+            color: var(--t-voice-badge-text);
+            background: var(--t-voice-badge-bg);
+            white-space: nowrap;
+        }
+        .voice-panel-badge.recording {
+            border-color: rgba(255, 85, 85, 0.42);
+            color: #ff8a8a;
+            background: rgba(70, 18, 18, 0.92);
+        }
+        .voice-panel-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .voice-panel-label {
+            width: 78px;
+            flex-shrink: 0;
+            font-size: .71rem;
+            font-weight: 600;
+            color: var(--t-voice-label);
+        }
+        .voice-panel select {
+            flex: 1;
+            min-width: 0;
+            border: 1px solid var(--t-voice-border);
+            background: var(--t-voice-input-bg);
+            color: var(--t-voice-input-text);
+            border-radius: 6px;
+            padding: 6px 8px;
+            font-size: .72rem;
+        }
+        .voice-panel select:focus {
+            outline: none;
+            border-color: var(--t-accent);
+            box-shadow: 0 0 0 2px rgba(0, 217, 255, 0.15);
+        }
+        .voice-panel-toggle {
+            position: relative;
+            width: 36px;
+            height: 20px;
+            background: var(--t-voice-toggle-bg);
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: background .2s;
+            flex-shrink: 0;
+            padding: 0;
+        }
+        .voice-panel-toggle::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 16px;
+            height: 16px;
+            background: var(--t-voice-toggle-knob);
+            border-radius: 50%;
+            transition: transform .2s;
+        }
+        .voice-panel-toggle.active {
+            background: var(--t-accent);
+        }
+        .voice-panel-toggle.active::after {
+            transform: translateX(16px);
+        }
+        .voice-ptt-keybind {
+            flex: 1;
+            min-width: 0;
+            border: 1px solid var(--t-voice-border);
+            background: var(--t-voice-input-bg);
+            color: var(--t-voice-input-text);
+            border-radius: 6px;
+            padding: 6px 8px;
+            font-size: .72rem;
+            cursor: pointer;
+            text-align: center;
+            user-select: none;
+        }
+        .voice-ptt-keybind:focus {
+            outline: none;
+            border-color: #ffaa00;
+            box-shadow: 0 0 0 2px rgba(255, 170, 0, 0.15);
+            color: #ffaa00;
+        }
+        .voice-ptt-row {
+            display: none;
+        }
+        .voice-ptt-row.visible {
+            display: flex;
+        }
+        .voice-panel-status {
+            margin-top: 10px;
+            border: 1px solid var(--t-voice-status-border);
+            background: var(--t-voice-status-bg);
+            color: var(--t-voice-status-text);
+            border-radius: 7px;
+            padding: 9px 10px;
+            font-size: .7rem;
+            line-height: 1.45;
+        }
+        .voice-panel-section {
+            margin-top: 10px;
+        }
+        .voice-panel details {
+            border: 1px solid var(--t-voice-details-border);
+            border-radius: 7px;
+            background: var(--t-voice-details-bg);
+            padding: 8px 10px;
+        }
+        .voice-panel details + details {
+            margin-top: 8px;
+        }
+        .voice-panel summary {
+            cursor: pointer;
+            list-style: none;
+            font-size: .71rem;
+            font-weight: 700;
+            color: var(--t-voice-details-title);
+        }
+        .voice-panel summary::-webkit-details-marker {
+            display: none;
+        }
+        .voice-diagnostics {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 8px;
+        }
+        .voice-diagnostic-title {
+            margin-bottom: 4px;
+            font-size: .66rem;
+            font-weight: 700;
+            color: var(--t-voice-diag-title);
+        }
+        .voice-panel-pre {
+            margin: 0;
+            padding: 7px 8px;
+            border-radius: 6px;
+            background: var(--t-voice-pre-bg);
+            border: 1px solid var(--t-voice-pre-border);
+            color: var(--t-voice-pre-text);
+            font-size: .63rem;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 170px;
+            overflow: auto;
+        }
+
+        .status-dot {
+            width: 7px; height: 7px;
+            border-radius: 50%;
+            background: #444;
+        }
+
+        .status-dot.pending     { background: #666; }
+        .status-dot.connecting  { background: #ffaa00; animation: blink .5s infinite; }
+        .status-dot.connected   { background: #00ff88; animation: blink 2s infinite; }
+        .status-dot.error       { background: #ff4444; }
+        .status-dot.disconnected{ background: #555; }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50%       { opacity: .45; }
+        }
+
+        .terminal-wrapper {
+            flex: 1;
+            background: var(--t-terminal-bg);
+            position: relative;
+            overflow: hidden;
+            min-height: 0;
+        }
+
+        .terminal-container.dragging {
+            opacity: 0.45;
+        }
+
+        .terminal-container.drag-target {
+            border-color: var(--t-accent);
+            box-shadow: inset 0 0 0 1px rgba(0, 217, 255, 0.65);
+        }
+
+        .terminal-surface {
+            position: absolute;
+            inset: 0;
+            padding: 10px 12px 12px;
+        }
+
+        .terminal-canvas {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        .terminal-canvas .xterm          { height: 100%; }
+        .terminal-canvas .xterm-viewport { overflow-y: auto !important; }
+
+        /* ── Terminal context menu ── */
+        #term-ctx-menu {
+            position: fixed;
+            z-index: 9999;
+            background: var(--t-ctx-bg);
+            border: 1px solid var(--t-ctx-border);
+            border-radius: 6px;
+            padding: 4px 0;
+            min-width: 130px;
+            box-shadow: 0 4px 18px rgba(0,0,0,.6);
+            font-size: .83rem;
+        }
+        #term-ctx-menu button {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+            padding: 7px 14px;
+            background: none;
+            border: none;
+            color: var(--t-text);
+            text-align: left;
+            cursor: pointer;
+            gap: 18px;
+            white-space: nowrap;
+        }
+        #term-ctx-menu button:hover { background: var(--t-ctx-hover); }
+        #term-ctx-menu button .shortcut { color: var(--t-text-muted); font-size: .76rem; }
+
+        /* placeholder states */
+        .placeholder {
+            position: absolute;
+            inset: 10px 12px 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: var(--t-text-placeholder);
+            gap: 10px;
+            pointer-events: none;
+            font-size: .8rem;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .placeholder svg { opacity: .5; }
+
+        .placeholder.ph-error { color: #ff6b6b; }
+        .placeholder.ph-error .spinner { display: none; }
+
+        .spinner {
+            width: 26px; height: 26px;
+            border: 2px solid var(--t-spinner-track);
+            border-top-color: var(--t-accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* empty state (no sessions) */
+        #emptyState {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--t-empty-text);
+            gap: 14px;
+        }
+
+        #emptyState.visible { display: flex; }
+        #emptyState a { color: var(--t-accent); text-decoration: none; }
+        #emptyState a:hover { text-decoration: underline; }
+
+        @media (max-width: 700px) {
+            #terminalsGrid.layout-single,
+            #terminalsGrid.layout-2-vertical,
+            #terminalsGrid.layout-2-horizontal,
+            #terminalsGrid.layout-3-vertical,
+            #terminalsGrid.layout-3-horizontal,
+            #terminalsGrid.layout-3-split,
+            #terminalsGrid.layout-grid {
+                grid-template-columns: 1fr;
+                grid-template-rows: none;
+            }
+
+            #terminalsGrid.layout-3-split .terminal-container:nth-child(1) {
+                grid-column: auto;
+                grid-row: auto;
+            }
+
+            #terminalsGrid.layout-3-split .terminal-container:nth-child(2) {
+                grid-column: auto;
+                grid-row: auto;
+            }
+
+            #terminalsGrid.layout-3-split .terminal-container:nth-child(3) {
+                grid-column: auto;
+                grid-row: auto;
+            }
+
+            .voice-panel {
+                width: min(100vw - 28px, 360px);
+                right: -6px;
+            }
+
+            .voice-diagnostics {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body
+    data-voice-enabled="{{ 'true' if voice_enabled else 'false' }}"
+    data-voice-engine="{{ voice_engine | e }}"
+    data-voice-model="{{ voice_model | e }}"
+    data-voice-language="{{ voice_language | e }}"
+    data-voice-worklet-url="{{ url_for('static', filename='voice-capture-worklet.js') }}"
+>
+
+<!-- Top bar -->
+<div class="topbar">
+    <div>
+        <span class="topbar-title">GridVibe</span>
+        <span class="topbar-sub" id="sessionLabel">Loading…</span>
+    </div>
+    <div class="topbar-actions">
+        <button class="btn btn-neutral" id="themeToggleBtn" onclick="cycleTheme()" title="Toggle theme">🌙 Dark</button>
+        <button class="btn btn-cyan" onclick="refreshStatuses()">Refresh all</button>
+        <button class="btn btn-danger"  onclick="closeCurrentSession()">Close Session</button>
+        <button
+            class="btn btn-success btn-icon"
+            id="fullscreenBtn"
+            onclick="toggleFullscreen()"
+            title="Enter fullscreen"
+            aria-label="Enter fullscreen"
+            aria-pressed="false"
+        >&#9974;</button>
+        <a href="/" class="btn btn-neutral" onclick="return goToSettings(event)">Settings</a>
+    </div>
+</div>
+
+<div class="session-tabs" id="sessionTabs"></div>
+
+<!-- Grid (built dynamically) -->
+<div id="terminalsGrid"></div>
+
+<!-- Empty state -->
+<div id="emptyState">
+    <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/>
+        <line x1="12" y1="17" x2="12" y2="21"/>
+    </svg>
+    <p>No active sessions.</p>
+    <a href="/" onclick="return goToSettings(event)">Launch terminals →</a>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js"></script>
+<script>
+    /* ── Theme management ── */
+    const THEME_STORAGE_KEY = 'gridvibe.theme';
+
+    function normalizeThemePreference(theme) {
+        return ['system', 'light', 'dark'].includes(theme) ? theme : 'system';
+    }
+
+    function getStoredTheme() {
+        try { return normalizeThemePreference(localStorage.getItem(THEME_STORAGE_KEY)); } catch (_) { return null; }
+    }
+
+    function getSystemTheme() {
+        return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    }
+
+    function resolveTheme(theme) {
+        const preference = normalizeThemePreference(theme);
+        return preference === 'system' ? getSystemTheme() : preference;
+    }
+
+    function applyTheme(theme) {
+        const preference = normalizeThemePreference(theme);
+        const resolved = resolveTheme(preference);
+        document.documentElement.setAttribute('data-theme', resolved);
+        document.documentElement.setAttribute('data-theme-preference', preference);
+        try { localStorage.setItem(THEME_STORAGE_KEY, preference); } catch (_) {}
+        const btn = document.getElementById('themeToggleBtn');
+        if (btn) {
+            btn.textContent =
+                preference === 'light' ? '☀️ Light'
+                : preference === 'dark' ? '🌙 Dark'
+                : '◐ System';
+        }
+    }
+
+    function cycleTheme() {
+        const current = getStoredTheme() || 'system';
+        const nextTheme =
+            current === 'system' ? 'light'
+            : current === 'light' ? 'dark'
+            : 'system';
+        applyTheme(nextTheme);
+    }
+
+    (function initTheme() {
+        applyTheme(getStoredTheme() || 'system');
+        const mediaQuery = window.matchMedia('(prefers-color-scheme: light)');
+        const listener = () => {
+            const themePreference = document.documentElement.getAttribute('data-theme-preference') || getStoredTheme() || 'system';
+            if (themePreference === 'system') {
+                applyTheme('system');
+            }
+        };
+        if (typeof mediaQuery.addEventListener === 'function') {
+            mediaQuery.addEventListener('change', listener);
+        } else if (typeof mediaQuery.addListener === 'function') {
+            mediaQuery.addListener(listener);
+        }
+    })();
+
+    /* ─────────────────────────────────────────────
+       State  (socket is initialised AFTER functions
+       so that a CDN failure can't kill the whole script)
+    ───────────────────────────────────────────── */
+    let terminals  = [];
+    let sessionIds = [];
+    let gridBuilt  = false;
+    let _focusedTerminalIndex = -1;
+    let socket     = null;   // set at the bottom after all defs
+    let resizeObservers = [];
+    let cachedGroupViews = new Map();
+    let sessionRouteMap = new Map();
+    let visibleGroupId = '';
+    let nativeFullscreen = false;
+    let draggedCard = null;
+    let draggedSessionTab = null;
+    let draggedSessionTabOriginOrder = [];
+    let sessionTabDropHandled = false;
+    let suppressSessionTabClickUntil = 0;
+    let activeGroupId = new URLSearchParams(window.location.search).get('group') || '';
+    let sessionGroups = [];
+    let activeLoadToken = 0;
+    let knownGroupIds = [];
+
+    function getSessionApiPath(groupId = activeGroupId) {
+        return groupId
+            ? `/api/sessions?group=${encodeURIComponent(groupId)}`
+            : '/api/sessions';
+    }
+
+    function getGroupById(groupId) {
+        return sessionGroups.find(group => group.group_id === groupId) || null;
+    }
+
+    function setSessionRoute(sessionId, groupId, index) {
+        if (!sessionId || !groupId || !Number.isInteger(index)) {
+            return;
+        }
+        sessionRouteMap.set(sessionId, { groupId, index });
+    }
+
+    function clearSessionRoutes(ids) {
+        (ids || []).forEach(sessionId => {
+            if (sessionId) {
+                sessionRouteMap.delete(sessionId);
+            }
+        });
+    }
+
+    function resolveSessionTarget(sessionId) {
+        if (!sessionId) {
+            return null;
+        }
+
+        const route = sessionRouteMap.get(sessionId);
+        if (!route) {
+            return null;
+        }
+
+        if (route.groupId === visibleGroupId) {
+            const terminal = terminals[route.index];
+            if (!terminal) {
+                return null;
+            }
+            return {
+                groupId: route.groupId,
+                index: route.index,
+                terminal,
+                active: true
+            };
+        }
+
+        const cached = cachedGroupViews.get(route.groupId);
+        const terminal = cached?.terminals?.[route.index];
+        if (!terminal) {
+            return null;
+        }
+
+        return {
+            groupId: route.groupId,
+            index: route.index,
+            terminal,
+            active: false
+        };
+    }
+
+    function clearFitTimers(targetTerminals = terminals) {
+        (targetTerminals || []).forEach(terminal => {
+            if (!terminal?._fitTimer) {
+                return;
+            }
+            clearTimeout(terminal._fitTimer);
+            terminal._fitTimer = null;
+        });
+    }
+
+    function disconnectObservers(targetObservers = resizeObservers) {
+        (targetObservers || []).forEach(observer => observer.disconnect());
+    }
+
+    function observeTerminalResize(index) {
+        const terminal = terminals[index];
+        if (!terminal || terminal._resizeObserved || !('ResizeObserver' in window)) {
+            return;
+        }
+
+        const wrapper = document.getElementById(`tw-${index}`);
+        if (!wrapper) {
+            return;
+        }
+
+        const observer = new ResizeObserver(() => scheduleFit(index));
+        observer.observe(wrapper);
+        resizeObservers.push(observer);
+        terminal._resizeObserved = true;
+    }
+
+    function restoreActiveTerminalObservers() {
+        resizeObservers = [];
+        terminals.forEach((terminal, index) => {
+            if (!terminal) {
+                return;
+            }
+            terminal._resizeObserved = false;
+            if (terminal._attached) {
+                observeTerminalResize(index);
+            }
+        });
+    }
+
+    function updateSessionChrome(count, groupId = activeGroupId) {
+        const activeGroup = getGroupById(groupId);
+        const labelParts = [
+            activeGroup?.name || 'Session',
+            `${count} terminal${count !== 1 ? 's' : ''}`,
+            activeGroup?.connection_mode === 'wsl' ? 'Local Repo' : 'SSH'
+        ].filter(Boolean);
+        document.getElementById('sessionLabel').textContent = labelParts.join(' • ');
+        document.title = activeGroup?.name
+            ? `GridVibe — ${activeGroup.name}`
+            : 'GridVibe — Terminals';
+    }
+
+    function cacheVisibleGroupView(groupId = visibleGroupId) {
+        if (!groupId || !gridBuilt) {
+            return;
+        }
+
+        _closeVoicePanels(-1);
+        _stopAllVoice();
+        const grid = document.getElementById('terminalsGrid');
+        const fragment = document.createDocumentFragment();
+
+        clearFitTimers(terminals);
+        disconnectObservers(resizeObservers);
+        terminals.forEach(terminal => {
+            if (!terminal) {
+                return;
+            }
+            terminal._resizeObserved = false;
+            terminal._fitReady = false;
+        });
+
+        while (grid.firstChild) {
+            fragment.appendChild(grid.firstChild);
+        }
+
+        cachedGroupViews.set(groupId, {
+            groupId,
+            terminals,
+            sessionIds,
+            fragment,
+            className: grid.className,
+            gridColumns: grid.style.getPropertyValue('--grid-columns'),
+            gridRows: grid.style.getPropertyValue('--grid-rows')
+        });
+
+        terminals = [];
+        sessionIds = [];
+        resizeObservers = [];
+        gridBuilt = false;
+        visibleGroupId = '';
+        grid.className = '';
+        grid.style.removeProperty('--grid-columns');
+        grid.style.removeProperty('--grid-rows');
+    }
+
+    function restoreCachedGroupView(groupId) {
+        const cached = cachedGroupViews.get(groupId);
+        if (!cached) {
+            return false;
+        }
+
+        const grid = document.getElementById('terminalsGrid');
+        grid.innerHTML = '';
+        grid.className = cached.className || '';
+        if (cached.gridColumns) {
+            grid.style.setProperty('--grid-columns', cached.gridColumns);
+        } else {
+            grid.style.removeProperty('--grid-columns');
+        }
+        if (cached.gridRows) {
+            grid.style.setProperty('--grid-rows', cached.gridRows);
+        } else {
+            grid.style.removeProperty('--grid-rows');
+        }
+        grid.appendChild(cached.fragment);
+        grid.style.display = '';
+
+        terminals = cached.terminals || [];
+        sessionIds = cached.sessionIds || [];
+        visibleGroupId = groupId;
+        gridBuilt = terminals.length > 0;
+        terminals.forEach(terminal => {
+            if (terminal) {
+                terminal._fitReady = false;
+                terminal._resizeObserved = false;
+            }
+        });
+        restoreActiveTerminalObservers();
+        document.getElementById('emptyState').classList.remove('visible');
+        return true;
+    }
+
+    function dropCachedGroupView(groupId) {
+        const cached = cachedGroupViews.get(groupId);
+        if (!cached) {
+            return;
+        }
+
+        clearFitTimers(cached.terminals || []);
+        disconnectObservers(cached.resizeObservers || []);
+        if (socket) {
+            (cached.sessionIds || []).forEach(sessionId => {
+                if (sessionId) {
+                    socket.emit('leave_session', { session_id: sessionId });
+                }
+            });
+        }
+        clearSessionRoutes(cached.sessionIds || []);
+        (cached.terminals || []).forEach(terminal => {
+            if (terminal?.term) {
+                try { terminal.term.dispose(); } catch (_) {}
+            }
+        });
+        cachedGroupViews.delete(groupId);
+    }
+
+    function syncLocationToGroup(groupId) {
+        const url = new URL(window.location.href);
+        if (groupId) {
+            url.searchParams.set('group', groupId);
+        } else {
+            url.searchParams.delete('group');
+        }
+        window.history.replaceState({}, '', url);
+    }
+
+    const TAB_COLOUR_PALETTE = [
+        '#ff6b6b', '#ff922b', '#ffd43b', '#69db7c',
+        '#38d9a9', '#4dabf7', '#748ffc', '#da77f2',
+        '#f783ac', '#a9e34b',
+    ];
+
+    function tabColourForGroup(groupId) {
+        let hash = 0;
+        for (let i = 0; i < groupId.length; i++) {
+            hash = (hash * 31 + groupId.charCodeAt(i)) & 0xffffffff;
+        }
+        return TAB_COLOUR_PALETTE[Math.abs(hash) % TAB_COLOUR_PALETTE.length];
+    }
+
+    function hexToRgba(hex, alpha) {
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    function applyTabColour(button, groupId) {
+        const colour = tabColourForGroup(groupId);
+        button.style.setProperty('--tab-color', colour);
+        button.style.setProperty('--tab-color-bg', hexToRgba(colour, 0.14));
+        button.style.setProperty('--tab-color-shadow', hexToRgba(colour, 0.45));
+        button.style.borderColor = hexToRgba(colour, 0.4);
+    }
+
+    function renderSessionTabs() {
+        const container = document.getElementById('sessionTabs');
+        if (!container) return;
+
+        const settingsButton = document.createElement('button');
+        settingsButton.className = 'session-tab settings';
+        settingsButton.type = 'button';
+        settingsButton.textContent = '+ New Session';
+        settingsButton.addEventListener('click', goToSettings);
+
+        container.innerHTML = '';
+        container.appendChild(settingsButton);
+
+        sessionGroups.forEach(group => {
+            const button = document.createElement('button');
+            button.className = `session-tab${group.group_id === activeGroupId ? ' active' : ''} draggable`;
+            button.type = 'button';
+            button.textContent = group.name || group.group_id;
+            button.dataset.groupId = group.group_id;
+            applyTabColour(button, group.group_id);
+            button.addEventListener('click', event => {
+                if (Date.now() < suppressSessionTabClickUntil) {
+                    event.preventDefault();
+                    return;
+                }
+                switchGroup(group.group_id);
+            });
+            wireSessionTabDragAndDrop(button, container);
+            container.appendChild(button);
+        });
+    }
+
+    function setSessionGroupsOrder(orderedGroupIds) {
+        const groupsById = new Map(sessionGroups.map(group => [group.group_id, group]));
+        const nextGroups = [];
+        const seen = new Set();
+
+        orderedGroupIds.forEach(groupId => {
+            if (groupsById.has(groupId) && !seen.has(groupId)) {
+                nextGroups.push(groupsById.get(groupId));
+                seen.add(groupId);
+            }
+        });
+
+        sessionGroups.forEach(group => {
+            if (!seen.has(group.group_id)) {
+                nextGroups.push(group);
+            }
+        });
+
+        sessionGroups = nextGroups;
+    }
+
+    function getSessionGroupOrder() {
+        return sessionGroups.map(group => group.group_id);
+    }
+
+    function hasSameSessionGroupOrder(left, right) {
+        if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+            return false;
+        }
+        return left.every((groupId, index) => groupId === right[index]);
+    }
+
+    function clearSessionTabDragState() {
+        const container = document.getElementById('sessionTabs');
+        if (container) {
+            container.querySelectorAll('.session-tab.dragging, .session-tab.drag-target')
+                .forEach(tab => tab.classList.remove('dragging', 'drag-target'));
+        }
+        draggedSessionTab = null;
+        draggedSessionTabOriginOrder = [];
+        sessionTabDropHandled = false;
+    }
+
+    function getSessionTabAfterElement(container, clientX) {
+        const tabs = [...container.querySelectorAll('.session-tab[data-group-id]:not(.dragging)')];
+        return tabs.reduce((closest, tab) => {
+            const rect = tab.getBoundingClientRect();
+            const offset = clientX - rect.left - (rect.width / 2);
+            if (offset < 0 && offset > closest.offset) {
+                return { offset, element: tab };
+            }
+            return closest;
+        }, { offset: Number.NEGATIVE_INFINITY, element: null }).element;
+    }
+
+    async function persistSessionGroupOrder(groupIds) {
+        const response = await fetch('/api/session-groups/order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ group_ids: groupIds })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to save session tab order');
+        }
+
+        sessionGroups = Array.isArray(data.groups) ? data.groups : [];
+        renderSessionTabs();
+    }
+
+    function wireSessionTabDragAndDrop(button, container) {
+        if (!button || !container) {
+            return;
+        }
+
+        button.draggable = true;
+
+        button.addEventListener('dragstart', event => {
+            draggedSessionTab = button;
+            draggedSessionTabOriginOrder = getSessionGroupOrder();
+            sessionTabDropHandled = false;
+            button.classList.add('dragging');
+            if (event.dataTransfer) {
+                event.dataTransfer.effectAllowed = 'move';
+                event.dataTransfer.setData('text/plain', button.dataset.groupId || '');
+            }
+        });
+
+        button.addEventListener('dragend', () => {
+            suppressSessionTabClickUntil = Date.now() + 250;
+            if (!sessionTabDropHandled && draggedSessionTabOriginOrder.length > 0) {
+                setSessionGroupsOrder(draggedSessionTabOriginOrder);
+                renderSessionTabs();
+            }
+            clearSessionTabDragState();
+        });
+
+        button.addEventListener('dragover', event => {
+            if (!draggedSessionTab || draggedSessionTab === button) {
+                return;
+            }
+
+            event.preventDefault();
+            container.querySelectorAll('.session-tab.drag-target')
+                .forEach(tab => {
+                    if (tab !== button) {
+                        tab.classList.remove('drag-target');
+                    }
+                });
+            button.classList.add('drag-target');
+        });
+
+        button.addEventListener('dragleave', event => {
+            const next = event.relatedTarget;
+            if (next && button.contains(next)) {
+                return;
+            }
+            button.classList.remove('drag-target');
+        });
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        const container = document.getElementById('sessionTabs');
+        if (!container) {
+            return;
+        }
+
+        container.addEventListener('dragover', event => {
+            if (!draggedSessionTab) {
+                return;
+            }
+
+            event.preventDefault();
+            const afterTab = getSessionTabAfterElement(container, event.clientX);
+            if (!afterTab) {
+                container.appendChild(draggedSessionTab);
+                return;
+            }
+
+            if (afterTab !== draggedSessionTab) {
+                container.insertBefore(draggedSessionTab, afterTab);
+            }
+        });
+
+        container.addEventListener('drop', async event => {
+            if (!draggedSessionTab) {
+                return;
+            }
+
+            event.preventDefault();
+            sessionTabDropHandled = true;
+
+            const orderedGroupIds = [...container.querySelectorAll('.session-tab[data-group-id]')]
+                .map(tab => tab.dataset.groupId)
+                .filter(Boolean);
+            const previousOrder = draggedSessionTabOriginOrder.slice();
+
+            container.querySelectorAll('.session-tab.drag-target')
+                .forEach(tab => tab.classList.remove('drag-target'));
+
+            if (hasSameSessionGroupOrder(previousOrder, orderedGroupIds)) {
+                return;
+            }
+
+            setSessionGroupsOrder(orderedGroupIds);
+            try {
+                await persistSessionGroupOrder(orderedGroupIds);
+            } catch (error) {
+                console.error('Session tab reorder failed:', error);
+                setSessionGroupsOrder(previousOrder);
+                renderSessionTabs();
+            }
+        });
+    });
+
+    function getLayoutClass(count, layout) {
+        if (count === 1) return 'layout-single';
+        if (count === 2) return `layout-2-${layout === 'horizontal' ? 'horizontal' : 'vertical'}`;
+        if (count === 3) {
+            if (layout === 'horizontal') return 'layout-3-horizontal';
+            if (layout === 'split') return 'layout-3-split';
+            return 'layout-3-vertical';
+        }
+        if (count >= 4) return 'layout-grid';
+        return '';
+    }
+
+    function getGridMetrics(count) {
+        if (count >= 8) {
+            return { columns: 4, rows: 2 };
+        }
+        if (count >= 6) {
+            return { columns: 3, rows: 2 };
+        }
+        if (count >= 4) {
+            return { columns: 2, rows: 2 };
+        }
+        return null;
+    }
+
+    function hasMatchingSessionIds(existingIds, sessions) {
+        if (!Array.isArray(existingIds) || !Array.isArray(sessions) || existingIds.length !== sessions.length) {
+            return false;
+        }
+
+        return existingIds.every((sessionId, index) => sessionId === sessions[index]?.session_id);
+    }
+
+    /* ─────────────────────────────────────────────
+       Xterm factory
+    ───────────────────────────────────────────── */
+    function makeTerminal() {
+        const term = new Terminal({
+            cursorBlink   : true,
+            fontSize      : 13,
+            fontFamily    : 'Consolas, Monaco, "Courier New", monospace',
+            copyOnSelect  : true,
+            theme: {
+                background : '#0d0d0d',
+                foreground : '#e0e0e0',
+                cursor     : '#00d9ff',
+                selection  : 'rgba(0,217,255,.25)'
+            }
+        });
+        const fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        return { term, fitAddon };
+    }
+
+    function emitTerminalResize(index, force = false) {
+        const sid = sessionIds[index];
+        const terminal = terminals[index];
+        if (!sid || !socket || !terminal?._attached || !terminal.term.cols || !terminal.term.rows) {
+            return;
+        }
+
+        const cols = terminal.term.cols;
+        const rows = terminal.term.rows;
+
+        if (cols < 20 || rows < 5) {
+            return;
+        }
+
+        // Skip if dimensions haven't changed since last emit
+        if (!force && terminal._lastCols === cols && terminal._lastRows === rows) {
+            return;
+        }
+        terminal._lastCols = cols;
+        terminal._lastRows = rows;
+
+        socket.emit('terminal_resize', {
+            session_id: sid,
+            cols,
+            rows
+        });
+    }
+
+    function setTerminalRefreshState(index, refreshing) {
+        setTerminalActionState(index, refreshing ? 'refresh' : '');
+    }
+
+    function setTerminalClearState(index, clearing) {
+        setTerminalActionState(index, clearing ? 'clear' : '');
+    }
+
+    function setTerminalActionState(index, action = '') {
+        const refreshButton = document.getElementById(`trefresh-${index}`);
+        const clearButton = document.getElementById(`tclear-${index}`);
+        const isBusy = Boolean(action);
+
+        if (refreshButton) {
+            refreshButton.disabled = isBusy;
+            refreshButton.textContent = action === 'refresh' ? 'Refreshing…' : '↻';
+        }
+
+        if (clearButton) {
+            clearButton.disabled = isBusy;
+            clearButton.textContent = action === 'clear' ? 'Clearing…' : '🧹';
+        }
+
+    }
+
+    function getTerminalClearCommand(index) {
+        const session = terminals[index]?._session;
+        if (session?.mode === 'wsl' && session?.use_powershell) {
+            return 'cls\r';
+        }
+        if (session?.mode === 'wsl' && !session?.use_wsl) {
+            return 'cls\r';
+        }
+        return 'clear\r';
+    }
+
+    function flushPendingOutput(index) {
+        const terminal = terminals[index];
+        if (!terminal?._attached || !terminal._pendingOutput) {
+            return;
+        }
+
+        const pendingOutput = terminal._pendingOutput;
+        terminal._pendingOutput = '';
+        terminal.term.write(pendingOutput);
+    }
+
+    function fitTerminal(index) {
+        const terminal = terminals[index];
+        if (!terminal?._attached) {
+            return false;
+        }
+
+        const wrapper = document.getElementById(`tw-${index}`);
+        if (wrapper) {
+            const rect = wrapper.getBoundingClientRect();
+            if (rect.height < 20 || rect.width < 50) {
+                // Layout not ready — reschedule through the debounced path
+                terminal._fitReady = false;
+                if (!terminal._fitRetries) terminal._fitRetries = 0;
+                if (terminal._fitRetries < 10) {
+                    terminal._fitRetries++;
+                    scheduleFit(index);
+                }
+                return false;
+            }
+        }
+        terminal._fitRetries = 0;
+
+        terminal.fitAddon.fit();
+        if (terminal.term.rows > 0) {
+            terminal.term.refresh(0, terminal.term.rows - 1);
+        }
+        terminal._fitReady = true;
+        emitTerminalResize(index);
+        flushPendingOutput(index);
+        return true;
+    }
+
+    function scheduleFit(index) {
+        const terminal = terminals[index];
+        if (!terminal) return;
+
+        if (terminal._fitTimer) {
+            clearTimeout(terminal._fitTimer);
+        }
+
+        terminal._fitTimer = window.setTimeout(() => {
+            terminal._fitTimer = null;
+            window.requestAnimationFrame(() => fitTerminal(index));
+        }, 60);
+    }
+
+    function waitForAnimationFrames(count = 1) {
+        return new Promise(resolve => {
+            function step() {
+                count -= 1;
+                if (count <= 0) {
+                    resolve();
+                    return;
+                }
+                window.requestAnimationFrame(step);
+            }
+            window.requestAnimationFrame(step);
+        });
+    }
+
+    function waitForDelay(ms) {
+        return new Promise(resolve => {
+            window.setTimeout(resolve, ms);
+        });
+    }
+
+    async function ensureTerminalReady(index, maxAttempts = 12) {
+        const terminal = terminals[index];
+        if (!terminal?._attached) {
+            return false;
+        }
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            if (fitTerminal(index)) {
+                return true;
+            }
+            await waitForAnimationFrames(1);
+        }
+
+        return Boolean(terminals[index]?._fitReady);
+    }
+
+    async function ensureAttachedTerminalsReady(indices) {
+        const uniqueIndices = [...new Set(indices)]
+            .filter(index => Number.isInteger(index) && terminals[index]?._attached);
+        if (uniqueIndices.length === 0) {
+            return;
+        }
+
+        await waitForAnimationFrames(2);
+        await Promise.all(uniqueIndices.map(index => ensureTerminalReady(index)));
+        await waitForAnimationFrames(1);
+        uniqueIndices.forEach(index => fitTerminal(index));
+    }
+
+    async function redrawAttachedTerminals(indices, { forceResize = false, isCurrent = null } = {}) {
+        const uniqueIndices = [...new Set(indices)]
+            .filter(index => Number.isInteger(index) && terminals[index]?._attached);
+        if (uniqueIndices.length === 0) {
+            return;
+        }
+
+        const stillCurrent = typeof isCurrent === 'function' ? isCurrent : () => true;
+        if (!stillCurrent()) {
+            return;
+        }
+
+        // Mirror the repaint users get from fullscreen toggles after a hidden
+        // session grid becomes visible again and buffered output has replayed.
+        await waitForAnimationFrames(2);
+        if (!stillCurrent()) {
+            return;
+        }
+
+        uniqueIndices.forEach(index => scheduleFit(index));
+        await waitForAnimationFrames(2);
+        if (!stillCurrent()) {
+            return;
+        }
+
+        uniqueIndices.forEach(index => {
+            const terminal = terminals[index];
+            if (!terminal?._attached) {
+                return;
+            }
+
+            fitTerminal(index);
+            if (terminal.term.rows > 0) {
+                terminal.term.refresh(0, terminal.term.rows - 1);
+            }
+            if (forceResize) {
+                emitTerminalResize(index, true);
+            }
+        });
+    }
+
+    async function redrawAttachedTerminalsLikeFullscreen(indices, { isCurrent = null } = {}) {
+        const uniqueIndices = [...new Set(indices)]
+            .filter(index => Number.isInteger(index) && terminals[index]?._attached);
+        if (uniqueIndices.length === 0) {
+            return;
+        }
+
+        const stillCurrent = typeof isCurrent === 'function' ? isCurrent : () => true;
+
+        async function redrawPass({ delayMs = 0, dispatchResize = false } = {}) {
+            if (delayMs > 0) {
+                await waitForDelay(delayMs);
+            }
+            if (!stillCurrent()) {
+                return;
+            }
+
+            if (dispatchResize) {
+                window.dispatchEvent(new Event('resize'));
+                await waitForAnimationFrames(2);
+                if (!stillCurrent()) {
+                    return;
+                }
+            }
+
+            await ensureAttachedTerminalsReady(uniqueIndices);
+            if (!stillCurrent()) {
+                return;
+            }
+
+            await redrawAttachedTerminals(uniqueIndices, {
+                forceResize: true,
+                isCurrent: stillCurrent
+            });
+        }
+
+        await redrawPass();
+        await redrawPass({ dispatchResize: true });
+        await redrawPass({ delayMs: 90, dispatchResize: true });
+    }
+
+    async function refreshTerminalDisplay(index) {
+        const terminal = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!terminal) {
+            return false;
+        }
+
+        setTerminalRefreshState(index, true);
+        try {
+            logSessionWindowAction('Refreshing terminal display', {
+                index,
+                session_id: sessionId || null,
+                attached: Boolean(terminal._attached)
+            });
+
+            terminal._pendingOutput = '';
+
+            if (terminal._attached) {
+                terminal.term.reset();
+                terminal.term.clear();
+                await ensureTerminalReady(index);
+                emitTerminalResize(index, true);
+            } else {
+                attachTerminal(index);
+                await ensureTerminalReady(index);
+            }
+
+            if (sessionId && socket) {
+                socket.emit('leave_session', { session_id: sessionId });
+                socket.emit('join_session', { session_id: sessionId });
+                await redrawAttachedTerminals([index], { forceResize: true });
+                return false;
+            }
+
+            if (terminal._attached && terminal.term.rows > 0) {
+                terminal.term.refresh(0, terminal.term.rows - 1);
+            }
+        } catch (error) {
+            console.error('[GridVibe Sessions] refreshTerminalDisplay failed:', error);
+        } finally {
+            setTerminalRefreshState(index, false);
+        }
+
+        return false;
+    }
+
+    async function clearTerminalDisplay(index) {
+        const terminal = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!terminal) {
+            return false;
+        }
+
+        setTerminalClearState(index, true);
+        try {
+            logSessionWindowAction('Clearing terminal display', {
+                index,
+                session_id: sessionId || null,
+                attached: Boolean(terminal._attached)
+            });
+
+            terminal._pendingOutput = '';
+            terminal.term.reset();
+            terminal.term.clear();
+
+            if (terminal._attached) {
+                await ensureTerminalReady(index);
+                emitTerminalResize(index, true);
+            }
+
+            if (sessionId && socket && terminal._session?.status === 'connected') {
+                const clearCommand = getTerminalClearCommand(index);
+                socket.emit('clear_terminal_buffer', { session_id: sessionId });
+                socket.emit('terminal_input', { session_id: sessionId, data: clearCommand });
+            } else if (sessionId && socket) {
+                socket.emit('clear_terminal_buffer', { session_id: sessionId });
+            }
+        } catch (error) {
+            console.error('[GridVibe Sessions] clearTerminalDisplay failed:', error);
+        } finally {
+            setTerminalClearState(index, false);
+        }
+
+        return false;
+    }
+
+    function clearDragState(){
+        document.querySelectorAll('.terminal-container.dragging, .terminal-container.drag-target')
+            .forEach(card => card.classList.remove('dragging', 'drag-target'));
+        draggedCard = null;
+    }
+
+    function swapTerminalCards(cardA, cardB) {
+        if (!cardA || !cardB || cardA === cardB || cardA.parentNode !== cardB.parentNode) {
+            return;
+        }
+
+        const parent = cardA.parentNode;
+        const placeholder = document.createElement('div');
+
+        parent.replaceChild(placeholder, cardA);
+        parent.replaceChild(cardA, cardB);
+        parent.replaceChild(cardB, placeholder);
+
+        const firstIndex = Number(cardA.dataset.slot);
+        const secondIndex = Number(cardB.dataset.slot);
+        if (Number.isInteger(firstIndex)) {
+            scheduleFit(firstIndex);
+        }
+        if (Number.isInteger(secondIndex)) {
+            scheduleFit(secondIndex);
+        }
+    }
+
+    function wireCardDragAndDrop(card, header) {
+        if (!card || !header) {
+            return;
+        }
+
+        header.draggable = true;
+        header.classList.add('draggable');
+
+        header.addEventListener('dragstart', event => {
+            draggedCard = card;
+            card.classList.add('dragging');
+            if (event.dataTransfer) {
+                event.dataTransfer.effectAllowed = 'move';
+                event.dataTransfer.setData('text/plain', card.id);
+            }
+        });
+
+        header.addEventListener('dragend', () => {
+            clearDragState();
+        });
+
+        card.addEventListener('dragover', event => {
+            if (!draggedCard || draggedCard === card) {
+                return;
+            }
+
+            event.preventDefault();
+            document.querySelectorAll('.terminal-container.drag-target')
+                .forEach(node => {
+                    if (node !== card) {
+                        node.classList.remove('drag-target');
+                    }
+                });
+            card.classList.add('drag-target');
+
+            if (event.dataTransfer) {
+                event.dataTransfer.dropEffect = 'move';
+            }
+        });
+
+        card.addEventListener('drop', event => {
+            event.preventDefault();
+            if (draggedCard && draggedCard !== card) {
+                swapTerminalCards(draggedCard, card);
+            }
+            clearDragState();
+        });
+
+        card.addEventListener('dragleave', event => {
+            const next = event.relatedTarget;
+            if (next && card.contains(next)) {
+                return;
+            }
+            card.classList.remove('drag-target');
+        });
+    }
+
+    /* ─────────────────────────────────────────────
+       Tear down current sessions before switching
+    ───────────────────────────────────────────── */
+    function teardownCurrentGrid() {
+        _closeVoicePanels(-1);
+        _stopAllVoice();
+        // Leave all active SocketIO rooms so the backend clears
+        // client_joined_sessions — buffer will replay on re-join.
+        if (socket) {
+            sessionIds.forEach(sid => {
+                if (sid) socket.emit('leave_session', { session_id: sid });
+            });
+        }
+        clearFitTimers(terminals);
+        disconnectObservers(resizeObservers);
+        // Dispose xterm instances to free memory
+        terminals.forEach(t => {
+            if (t && t.term) {
+                try { t.term.dispose(); } catch (_) {}
+            }
+        });
+        clearSessionRoutes(sessionIds);
+        cachedGroupViews.delete(visibleGroupId);
+        resizeObservers = [];
+        terminals  = [];
+        sessionIds = [];
+        gridBuilt  = false;
+        _focusedTerminalIndex = -1;
+        visibleGroupId = '';
+    }
+
+    /* ─────────────────────────────────────────────
+       Build the grid from a sessions array (once)
+    ───────────────────────────────────────────── */
+    function buildGrid(sessions, layout) {
+        const grid  = document.getElementById('terminalsGrid');
+        const count = sessions.length;
+
+        if (grid.children.length > 0 || terminals.length > 0 || sessionIds.length > 0) {
+            teardownCurrentGrid();
+        }
+        grid.className = getLayoutClass(count, layout);
+        const gridMetrics = getGridMetrics(count);
+        if (gridMetrics) {
+            grid.style.setProperty('--grid-columns', String(gridMetrics.columns));
+            grid.style.setProperty('--grid-rows', String(gridMetrics.rows));
+        } else {
+            grid.style.removeProperty('--grid-columns');
+            grid.style.removeProperty('--grid-rows');
+        }
+        grid.innerHTML = '';
+
+        sessions.forEach((session, i) => {
+            /* create xterm instance */
+            const t = makeTerminal();
+            t._session = session;
+            terminals.push(t);
+            sessionIds.push(null);
+
+            /* card HTML */
+            const card = document.createElement('div');
+            card.className = 'terminal-container';
+            card.id = `tc-${i}`;
+            card.dataset.slot = String(i);
+            const sessionColour = tabColourForGroup(activeGroupId);
+            card.style.setProperty('--session-color', sessionColour);
+            card.style.setProperty('--session-color-dim', hexToRgba(sessionColour, 0.45));
+            card.innerHTML = `
+                <div class="terminal-header">
+                    <div class="terminal-info">
+                        <span class="terminal-name" id="tname-${i}">
+                            ${escHtml(session.title || `Terminal ${i + 1}`)}
+                        </span>
+                        <span class="terminal-host" id="thost-${i}">
+                            ${escHtml(session.host || '')}
+                        </span>
+                    </div>
+                    <div class="terminal-meta">
+                        <div class="terminal-status">
+                            <div class="status-dot pending" id="tdot-${i}"></div>
+                            <span id="tlabel-${i}">Pending</span>
+                        </div>
+                        <button
+                            type="button"
+                            class="terminal-action-btn"
+                            id="trefresh-${i}"
+                            data-terminal-refresh="${i}"
+                            title="Reset this terminal view and replay recent output"
+                        >
+                            ↻
+                        </button>
+                        <button
+                            type="button"
+                            class="terminal-action-btn"
+                            id="tclear-${i}"
+                            data-terminal-clear="${i}"
+                            title="Clear this terminal and purge its replay buffer"
+                        >
+                            🧹
+                        </button>
+                        <button
+                            type="button"
+                            class="terminal-action-btn terminal-shortcut-btn"
+                            id="tclearline-${i}"
+                            data-terminal-clearline="${i}"
+                            title="Clear current input line (Ctrl+U)"
+                        >
+                            🗑
+                        </button>
+                        <button
+                            type="button"
+                            class="terminal-action-btn terminal-shortcut-btn"
+                            id="tenter-${i}"
+                            data-terminal-enter="${i}"
+                            title="Send Enter keypress to terminal"
+                        >
+                            Enter
+                        </button>
+                        {% if voice_enabled %}
+                        <div class="voice-control" data-terminal-voice-control="${i}">
+                            <button
+                                type="button"
+                                class="terminal-action-btn voice-btn"
+                                id="tvoice-${i}"
+                                data-terminal-voice="${i}"
+                                title="Voice input (click to start recording)"
+                            >
+                                🎤
+                            </button>
+                            <button
+                                type="button"
+                                class="terminal-action-btn voice-settings-btn"
+                                id="tvoice-panel-toggle-${i}"
+                                data-terminal-voice-settings="${i}"
+                                title="Voice capture settings"
+                            >
+                                Mic
+                            </button>
+                            <div class="voice-panel" id="tvoice-panel-${i}" aria-hidden="true">
+                                <div class="voice-panel-header">
+                                    <div>
+                                        <div class="voice-panel-title">Voice capture</div>
+                                        <div class="voice-panel-meta" id="tvoice-meta-${i}">
+                                            Model: ${VOICE_MODEL} • Language: ${VOICE_LANGUAGE} • Target PCM: 16 kHz mono
+                                        </div>
+                                    </div>
+                                    <span class="voice-panel-badge" id="tvoice-badge-${i}">Idle</span>
+                                </div>
+                                <div class="voice-panel-row">
+                                    <label class="voice-panel-label" for="tvoice-profile-${i}">Profile</label>
+                                    <select id="tvoice-profile-${i}" data-terminal-voice-profile="${i}">
+                                        <option value="headset">Headset</option>
+                                        <option value="laptop">Laptop</option>
+                                    </select>
+                                </div>
+                                <div class="voice-panel-row">
+                                    <label class="voice-panel-label" for="tvoice-device-${i}">Microphone</label>
+                                    <select id="tvoice-device-${i}" data-terminal-voice-device="${i}">
+                                        <option value="">Default input</option>
+                                    </select>
+                                    <button
+                                        type="button"
+                                        class="terminal-action-btn voice-settings-btn"
+                                        data-terminal-voice-refresh="${i}"
+                                        title="Refresh available microphones"
+                                    >
+                                        ↻
+                                    </button>
+                                </div>
+                                <div class="voice-panel-row">
+                                    <label class="voice-panel-label">Push-to-talk</label>
+                                    <button
+                                        type="button"
+                                        class="voice-panel-toggle"
+                                        id="tvoice-ptt-toggle-${i}"
+                                        data-terminal-voice-ptt="${i}"
+                                        title="Enable push-to-talk mode"
+                                        aria-pressed="false"
+                                    ></button>
+                                </div>
+                                <div class="voice-panel-row voice-ptt-row" id="tvoice-ptt-keybind-row-${i}">
+                                    <label class="voice-panel-label" for="tvoice-ptt-keybind-${i}">Keybind</label>
+                                    <input
+                                        type="text"
+                                        class="voice-ptt-keybind"
+                                        id="tvoice-ptt-keybind-${i}"
+                                        data-terminal-voice-ptt-keybind="${i}"
+                                        readonly
+                                        placeholder="Click and press keys…"
+                                        title="Press a modifier key (Ctrl/Cmd) + another key"
+                                    >
+                                </div>
+                                <div class="voice-panel-status" id="tvoice-status-${i}">
+                                    Requested capture settings will be checked against the browser's actual applied settings after the microphone starts.
+                                </div>
+                                <div class="voice-panel-section">
+                                    <details open>
+                                        <summary>Requested vs actual capture</summary>
+                                        <div class="voice-diagnostics">
+                                            <div>
+                                                <div class="voice-diagnostic-title">Requested</div>
+                                                <pre class="voice-panel-pre" id="tvoice-requested-${i}">Awaiting capture start.</pre>
+                                            </div>
+                                            <div>
+                                                <div class="voice-diagnostic-title">Actual settings</div>
+                                                <pre class="voice-panel-pre" id="tvoice-settings-${i}">Awaiting capture start.</pre>
+                                            </div>
+                                        </div>
+                                    </details>
+                                    <details>
+                                        <summary>Browser support and capabilities</summary>
+                                        <div class="voice-diagnostics">
+                                            <div>
+                                                <div class="voice-diagnostic-title">Supported constraints</div>
+                                                <pre class="voice-panel-pre" id="tvoice-supported-${i}">Unavailable until the browser reports support data.</pre>
+                                            </div>
+                                            <div>
+                                                <div class="voice-diagnostic-title">Capabilities</div>
+                                                <pre class="voice-panel-pre" id="tvoice-capabilities-${i}">Available after an audio track is opened.</pre>
+                                            </div>
+                                        </div>
+                                    </details>
+                                </div>
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="terminal-wrapper" id="tw-${i}">
+                    <div class="terminal-surface">
+                        <div class="terminal-canvas" id="tcanvas-${i}"></div>
+                    </div>
+                    <div class="placeholder" id="ph-${i}">
+                        <div class="spinner"></div>
+                        <span style="font-size:.78rem">Connecting…</span>
+                    </div>
+                </div>
+            `;
+            wireCardDragAndDrop(card, card.querySelector('.terminal-header'));
+            const refreshButton = card.querySelector(`[data-terminal-refresh="${i}"]`);
+            if (refreshButton) {
+                refreshButton.draggable = false;
+                refreshButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                refreshButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    refreshTerminalDisplay(i);
+                });
+            }
+            const clearButton = card.querySelector(`[data-terminal-clear="${i}"]`);
+            if (clearButton) {
+                clearButton.draggable = false;
+                clearButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                clearButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    clearTerminalDisplay(i);
+                });
+            }
+            const voiceButton= card.querySelector(`[data-terminal-voice="${i}"]`);
+            if (voiceButton) {
+                voiceButton.draggable = false;
+                voiceButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                voiceButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    _voiceLog('Mic button clicked', {
+                        terminalIndex: i,
+                        sessionId: sessionIds[i] || null,
+                        recording: Boolean(_voiceState[i]?.recording),
+                        activeIndex: _voiceActiveIndex,
+                        isTrusted: event.isTrusted
+                    });
+                    _toggleVoice(i);
+                });
+            }
+            const voiceSettingsButton = card.querySelector(`[data-terminal-voice-settings="${i}"]`);
+            if (voiceSettingsButton) {
+                voiceSettingsButton.draggable = false;
+                voiceSettingsButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                voiceSettingsButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    _toggleVoicePanel(i);
+                });
+            }
+            const voiceProfileSelect = card.querySelector(`[data-terminal-voice-profile="${i}"]`);
+            if (voiceProfileSelect) {
+                voiceProfileSelect.addEventListener('mousedown', event => {
+                    event.stopPropagation();
+                });
+                voiceProfileSelect.addEventListener('change', event => {
+                    event.stopPropagation();
+                    _setVoiceProfile(event.target.value, i);
+                });
+            }
+            const voiceDeviceSelect = card.querySelector(`[data-terminal-voice-device="${i}"]`);
+            if (voiceDeviceSelect) {
+                voiceDeviceSelect.addEventListener('mousedown', event => {
+                    event.stopPropagation();
+                });
+                voiceDeviceSelect.addEventListener('change', event => {
+                    event.stopPropagation();
+                    _setVoiceDevice(event.target.value, i);
+                });
+            }
+            const voiceRefreshButton = card.querySelector(`[data-terminal-voice-refresh="${i}"]`);
+            if (voiceRefreshButton) {
+                voiceRefreshButton.draggable = false;
+                voiceRefreshButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                voiceRefreshButton.addEventListener('click', async event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    await _refreshVoiceDevices(i);
+                });
+            }
+            const pttToggle = card.querySelector(`[data-terminal-voice-ptt="${i}"]`);
+            if (pttToggle) {
+                pttToggle.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                pttToggle.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    _setPttEnabled(!_voicePrefs.pttEnabled, i);
+                });
+            }
+            const pttKeybindInput = card.querySelector(`[data-terminal-voice-ptt-keybind="${i}"]`);
+            if (pttKeybindInput) {
+                pttKeybindInput.addEventListener('mousedown', event => {
+                    event.stopPropagation();
+                });
+                pttKeybindInput.addEventListener('keydown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (_isValidPttKeybind(event)) {
+                        _setPttKeybind(_formatPttKeybind(event), i);
+                    } else {
+                        pttKeybindInput.value = _formatPttKeybind(event) + '…';
+                    }
+                });
+            }
+            _syncVoiceControls(i);
+            const enterButton = card.querySelector(`[data-terminal-enter="${i}"]`);
+            if (enterButton) {
+                enterButton.draggable = false;
+                enterButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                enterButton.addEventListener('click', async event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    await _sendEnterShortcut(i);
+                });
+            }
+            const clearLineButton = card.querySelector(`[data-terminal-clearline="${i}"]`);
+            if (clearLineButton) {
+                clearLineButton.draggable = false;
+                clearLineButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                clearLineButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    _sendToTerminal(i, '\x15');
+                });
+            }
+            grid.appendChild(card);
+        });
+
+        /* wire up terminal input events now that DOM elements exist */
+        terminals.forEach((t, i) => {
+            t.term.onData(data => {
+                _focusedTerminalIndex = i;
+                const sid = sessionIds[i];
+                if (sid && socket) socket.emit('terminal_input', { session_id: sid, data });
+            });
+            const card = document.getElementById(`tc-${i}`);
+            if (card) {
+                card.addEventListener('pointerdown', () => {
+                    _focusedTerminalIndex = i;
+                });
+            }
+        });
+
+        document.getElementById('emptyState').classList.remove('visible');
+        gridBuilt = true;
+        visibleGroupId = activeGroupId;
+        updateSessionChrome(count, activeGroupId);
+
+        /* Restore voice panel if it was open last time */
+        if (_voicePrefs.panelOpen && terminals.length > 0) {
+            const restoreIndex = _focusedTerminalIndex >= 0 && _focusedTerminalIndex < terminals.length
+                ? _focusedTerminalIndex : 0;
+            _toggleVoicePanel(restoreIndex);
+        }
+    }
+
+    /* ─────────────────────────────────────────────
+       Clipboard helpers (copy / paste)
+    ───────────────────────────────────────────── */
+    function _copyText(text) {
+        if (!text) return;
+        if (navigator.clipboard) {
+            navigator.clipboard.writeText(text).catch(() => _copyTextFallback(text));
+        } else {
+            _copyTextFallback(text);
+        }
+    }
+
+    function _copyTextFallback(text) {
+        const el = document.createElement('textarea');
+        el.value = text;
+        el.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+        document.body.appendChild(el);
+        el.select();
+        try { document.execCommand('copy'); } catch (_) {}
+        el.remove();
+    }
+
+    function _wireClipboard(index) {
+        const term = terminals[index].term;
+
+        /* Auto-copy on mouse selection */
+        term.onSelectionChange(() => {
+            const sel = term.getSelection();
+            if (sel) _copyText(sel);
+        });
+
+        /* Intercept keys before xterm processes them */
+        term.attachCustomKeyEventHandler(e => {
+            if (e.type !== 'keydown') return true;
+
+            /* Ctrl+Shift+C → copy selection */
+            if (e.ctrlKey && e.shiftKey && e.code === 'KeyC') {
+                const sel = term.getSelection();
+                _copyText(sel);
+                return false;
+            }
+
+            /* Ctrl+V → paste from clipboard */
+            if (e.ctrlKey && !e.shiftKey && e.code === 'KeyV') {
+                _pasteToTerminal(index);
+                return false;
+            }
+
+            return true;
+        });
+
+        /* Handle browser right-click → Paste menu item (fires paste event on textarea) */
+        if (term.textarea) {
+            term.textarea.addEventListener('paste', e => {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                const text = e.clipboardData?.getData('text') ?? '';
+                if (text) _sendToTerminal(index, text);
+            }, true);
+        }
+
+        /* Right-click → custom context menu */
+        term.element.addEventListener('contextmenu', e => {
+            e.preventDefault();
+            _showTermCtxMenu(e.clientX, e.clientY, index);
+        });
+    }
+
+    function _sendToTerminal(index, text) {
+        const sid = sessionIds[index];
+        if (sid && socket && text) socket.emit('terminal_input', { session_id: sid, data: text });
+    }
+
+    function _pasteToTerminal(index) {
+        if (!navigator.clipboard) return;
+        navigator.clipboard.readText()
+            .then(text => _sendToTerminal(index, text))
+            .catch(() => {});
+    }
+
+    /* ─────────────────────────────────────────────
+       Voice input — mic capture → Socket.IO → configured STT backend
+    ───────────────────────────────────────────── */
+    const PAGE_DATASET = document.body?.dataset || {};
+    const VOICE_WORKLET_MODULE_URL = PAGE_DATASET.voiceWorkletUrl || '/static/voice-capture-worklet.js';
+    const VOICE_ENGINE = PAGE_DATASET.voiceEngine || 'vosk';
+    const VOICE_MODEL = PAGE_DATASET.voiceModel || 'unknown';
+    const VOICE_LANGUAGE = PAGE_DATASET.voiceLanguage || 'en-US';
+    const VOICE_CAPTURE_PROFILES = Object.freeze({
+        headset: Object.freeze({
+            label: 'Headset',
+            constraints: Object.freeze({
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
+                channelCount: 1
+            })
+        }),
+        laptop: Object.freeze({
+            label: 'Laptop',
+            constraints: Object.freeze({
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                channelCount: 1
+            })
+        })
+    });
+    const VOICE_PREFS_STORAGE_KEY = 'gridvibe.voice.capture.v1';
+    const VOICE_TARGET_SAMPLE_RATE = 16000;
+    const VOICE_CHUNK_SIZE = 640;
+    const VOICE_DEFAULT_STATUS = 'Requested capture settings will be checked against the browser\'s actual applied settings after the microphone starts.';
+    const VOICE_LOG_PREFIX = '[GridVibe Voice]';
+    const _voiceState = {};
+    const _voiceLastDiagnostics = {};
+    let _voiceActiveIndex = -1;   // only one terminal may record at a time
+    let _voicePanelIndex = -1;
+    let _voiceDevices = [];
+    let _voicePrefs = _loadVoicePrefs();
+    let _voiceServiceStatus = {
+        enabled: PAGE_DATASET.voiceEnabled === 'true',
+        engine: VOICE_ENGINE,
+        model: VOICE_MODEL,
+        language: VOICE_LANGUAGE,
+        service_running: null,
+        service_url: ''
+    };
+
+    function _defaultVoicePrefs() {
+        return {
+            profile: 'laptop',
+            deviceId: '',
+            pttEnabled: false,
+            pttKeybind: '',
+            panelOpen: false
+        };
+    }
+
+    function _loadVoicePrefs() {
+        const defaults = _defaultVoicePrefs();
+        try {
+            const raw = window.localStorage?.getItem(VOICE_PREFS_STORAGE_KEY);
+            if (!raw) return defaults;
+            const parsed = JSON.parse(raw);
+            const profile = VOICE_CAPTURE_PROFILES[parsed?.profile]
+                ? parsed.profile
+                : defaults.profile;
+            return {
+                profile,
+                deviceId: typeof parsed?.deviceId === 'string' ? parsed.deviceId : '',
+                pttEnabled: typeof parsed?.pttEnabled === 'boolean' ? parsed.pttEnabled : false,
+                pttKeybind: typeof parsed?.pttKeybind === 'string' ? parsed.pttKeybind : '',
+                panelOpen: typeof parsed?.panelOpen === 'boolean' ? parsed.panelOpen : false
+            };
+        } catch (_) {
+            return defaults;
+        }
+    }
+
+    function _saveVoicePrefs() {
+        try {
+            window.localStorage?.setItem(VOICE_PREFS_STORAGE_KEY, JSON.stringify(_voicePrefs));
+        } catch (_) {}
+        fetch('/api/voice-prefs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(_voicePrefs)
+        }).catch(() => {});
+    }
+
+    async function _loadVoicePrefsFromServer() {
+        try {
+            const resp = await fetch('/api/voice-prefs');
+            if (!resp.ok) return;
+            const server = await resp.json();
+            const defaults = _defaultVoicePrefs();
+            const profile = VOICE_CAPTURE_PROFILES[server?.profile]
+                ? server.profile : defaults.profile;
+            _voicePrefs = {
+                profile,
+                deviceId: typeof server?.deviceId === 'string' ? server.deviceId : _voicePrefs.deviceId,
+                pttEnabled: typeof server?.pttEnabled === 'boolean' ? server.pttEnabled : _voicePrefs.pttEnabled,
+                pttKeybind: typeof server?.pttKeybind === 'string' ? server.pttKeybind : _voicePrefs.pttKeybind,
+                panelOpen: typeof server?.panelOpen === 'boolean' ? server.panelOpen : _voicePrefs.panelOpen
+            };
+            try {
+                window.localStorage?.setItem(VOICE_PREFS_STORAGE_KEY, JSON.stringify(_voicePrefs));
+            } catch (_) {}
+        } catch (_) {}
+    }
+
+    function _voiceLog(message, details) {
+        if (typeof details === 'undefined') {
+            console.log(`${VOICE_LOG_PREFIX} ${message}`);
+            return;
+        }
+        console.log(`${VOICE_LOG_PREFIX} ${message}`, details);
+    }
+
+    function _getVoiceConstraints(preferences = _voicePrefs, { includeDevice = true } = {}) {
+        const profile = VOICE_CAPTURE_PROFILES[preferences.profile] || VOICE_CAPTURE_PROFILES.laptop;
+        const constraints = { ...profile.constraints };
+        if (includeDevice && preferences.deviceId) {
+            constraints.deviceId = { exact: preferences.deviceId };
+        }
+        return constraints;
+    }
+
+    function _getVoicePanelElements(index) {
+        return {
+            control: document.querySelector(`[data-terminal-voice-control="${index}"]`),
+            panel: document.getElementById(`tvoice-panel-${index}`),
+            profile: document.getElementById(`tvoice-profile-${index}`),
+            device: document.getElementById(`tvoice-device-${index}`),
+            requested: document.getElementById(`tvoice-requested-${index}`),
+            settings: document.getElementById(`tvoice-settings-${index}`),
+            supported: document.getElementById(`tvoice-supported-${index}`),
+            capabilities: document.getElementById(`tvoice-capabilities-${index}`),
+            status: document.getElementById(`tvoice-status-${index}`),
+            meta: document.getElementById(`tvoice-meta-${index}`),
+            badge: document.getElementById(`tvoice-badge-${index}`),
+            pttToggle: document.getElementById(`tvoice-ptt-toggle-${index}`),
+            pttKeybindRow: document.getElementById(`tvoice-ptt-keybind-row-${index}`),
+            pttKeybind: document.getElementById(`tvoice-ptt-keybind-${index}`)
+        };
+    }
+
+    function _sanitizeVoiceDiagnostic(value) {
+        if (value === undefined) return undefined;
+        if (value === null) return null;
+        if (Array.isArray(value)) {
+            return value.map(item => _sanitizeVoiceDiagnostic(item));
+        }
+        if (typeof value === 'number') {
+            return Number.isFinite(value) ? Number(value.toFixed(4)) : String(value);
+        }
+        if (typeof value === 'object') {
+            const sanitized = {};
+            Object.keys(value).sort().forEach(key => {
+                const normalized = _sanitizeVoiceDiagnostic(value[key]);
+                if (normalized !== undefined) {
+                    sanitized[key] = normalized;
+                }
+            });
+            return sanitized;
+        }
+        return value;
+    }
+
+    function _formatVoiceDiagnostic(value, fallback) {
+        if (value === undefined || value === null) {
+            return fallback;
+        }
+        const sanitized = _sanitizeVoiceDiagnostic(value);
+        if (
+            typeof sanitized === 'object' &&
+            sanitized !== null &&
+            !Array.isArray(sanitized) &&
+            Object.keys(sanitized).length === 0
+        ) {
+            return fallback;
+        }
+        return JSON.stringify(sanitized, null, 2);
+    }
+
+    function _voiceDeviceLabel(device, index) {
+        if (device.label) return device.label;
+        return `Microphone ${index + 1}`;
+    }
+
+    function _voiceSummaryMessage() {
+        const parts = [
+            `Engine: ${_voiceServiceStatus.engine || VOICE_ENGINE}`,
+            `Model: ${_voiceServiceStatus.model || VOICE_MODEL}`,
+            `Language: ${_voiceServiceStatus.language || VOICE_LANGUAGE}`,
+            'Target PCM: 16 kHz mono'
+        ];
+        if ((_voiceServiceStatus.engine || VOICE_ENGINE) === 'vosk' && typeof _voiceServiceStatus.service_running === 'boolean') {
+            parts.push(`Service: ${_voiceServiceStatus.service_running ? 'running' : 'starting on demand'}`);
+        }
+        if ((_voiceServiceStatus.engine || VOICE_ENGINE) === 'whisper') {
+            parts.push('Mode: final transcript on stop');
+        }
+        if (typeof _voiceServiceStatus.startup_timeout_seconds === 'number') {
+            parts.push(`Startup wait: ${_voiceServiceStatus.startup_timeout_seconds}s`);
+        }
+        return parts.join(' • ');
+    }
+
+    function _voiceDefaultStatusMessage() {
+        if (isPywebviewAvailable()) {
+            return 'Native pywebview mode detected. Microphone capture depends on embedded webview support and may fail even when browser mode works. If capture cannot start here, use browser mode.';
+        }
+        return VOICE_DEFAULT_STATUS;
+    }
+
+    function _updateVoiceMeta(index) {
+        const { meta } = _getVoicePanelElements(index);
+        if (meta) {
+            meta.textContent = _voiceSummaryMessage();
+        }
+    }
+
+    function _renderVoiceDiagnostics(index, diagnostics) {
+        const { requested, settings, supported, capabilities } = _getVoicePanelElements(index);
+        if (requested) {
+            requested.textContent = _formatVoiceDiagnostic(
+                diagnostics?.requested,
+                'Awaiting capture start.'
+            );
+        }
+        if (settings) {
+            settings.textContent = _formatVoiceDiagnostic(
+                diagnostics?.settings,
+                'Awaiting capture start.'
+            );
+        }
+        if (supported) {
+            supported.textContent = _formatVoiceDiagnostic(
+                diagnostics?.supportedConstraints,
+                'Unavailable until the browser reports support data.'
+            );
+        }
+        if (capabilities) {
+            capabilities.textContent = _formatVoiceDiagnostic(
+                diagnostics?.capabilities,
+                'Available after an audio track is opened.'
+            );
+        }
+    }
+
+    function _syncVoiceControls(index) {
+        const elements = _getVoicePanelElements(index);
+        if (!elements.control) return;
+
+        if (elements.profile) {
+            elements.profile.value = _voicePrefs.profile;
+        }
+
+        if (elements.device) {
+            const selectedDeviceId = _voicePrefs.deviceId;
+            const devices = _voiceDevices.slice();
+            elements.device.innerHTML = '';
+            const defaultOption = document.createElement('option');
+            defaultOption.value = '';
+            defaultOption.textContent = 'Default input';
+            elements.device.appendChild(defaultOption);
+            devices.forEach((device, deviceIndex) => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                option.textContent = _voiceDeviceLabel(device, deviceIndex);
+                elements.device.appendChild(option);
+            });
+            if (
+                selectedDeviceId &&
+                !devices.some(device => device.deviceId === selectedDeviceId)
+            ) {
+                const missingOption = document.createElement('option');
+                missingOption.value = selectedDeviceId;
+                missingOption.textContent = 'Previously selected device (unavailable)';
+                elements.device.appendChild(missingOption);
+            }
+            elements.device.value = selectedDeviceId;
+        }
+
+        _updateVoiceMeta(index);
+        _renderVoiceDiagnostics(
+            index,
+            _voiceState[index]?.diagnostics || _voiceLastDiagnostics[index] || {
+                requested: _getVoiceConstraints(_voicePrefs, { includeDevice: Boolean(_voicePrefs.deviceId) }),
+                supportedConstraints: navigator.mediaDevices?.getSupportedConstraints?.()
+            }
+        );
+        if (!_voiceState[index]) {
+            _setVoicePanelStatus(index, _voiceDefaultStatusMessage());
+        }
+        _updateVoiceBtn(index, Boolean(_voiceState[index]?.recording));
+
+        if (elements.pttToggle) {
+            elements.pttToggle.classList.toggle('active', _voicePrefs.pttEnabled);
+            elements.pttToggle.setAttribute('aria-pressed', String(_voicePrefs.pttEnabled));
+        }
+        if (elements.pttKeybindRow) {
+            elements.pttKeybindRow.classList.toggle('visible', _voicePrefs.pttEnabled);
+        }
+        if (elements.pttKeybind) {
+            elements.pttKeybind.value = _voicePrefs.pttKeybind || '';
+        }
+    }
+
+    async function _loadVoiceServiceStatus() {
+        try {
+            const response = await fetch('/api/voice-status');
+            if (!response.ok) return;
+            const payload = await response.json();
+            _voiceServiceStatus = {
+                ..._voiceServiceStatus,
+                ...payload
+            };
+            terminals.forEach((_, terminalIndex) => _updateVoiceMeta(terminalIndex));
+        } catch (err) {
+            console.warn('Voice status fetch failed:', err);
+        }
+    }
+
+    function _setVoicePanelStatus(index, message) {
+        const { status } = _getVoicePanelElements(index);
+        if (status) {
+            status.textContent = message;
+        }
+    }
+
+    function _setVoiceProfile(profile, index) {
+        if (!VOICE_CAPTURE_PROFILES[profile]) return;
+        _voicePrefs.profile = profile;
+        _saveVoicePrefs();
+        terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
+        _setVoicePanelStatus(
+            index,
+            _voiceState[index]?.recording
+                ? 'Profile updated. Restart capture to apply the new DSP request.'
+                : `Profile set to ${VOICE_CAPTURE_PROFILES[profile].label}. Actual applied values will be shown after capture starts.`
+        );
+    }
+
+    function _setVoiceDevice(deviceId, index) {
+        _voicePrefs.deviceId = deviceId || '';
+        _saveVoicePrefs();
+        terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
+        _setVoicePanelStatus(
+            index,
+            _voiceState[index]?.recording
+                ? 'Microphone selection updated. Restart capture to apply the new device.'
+                : (_voicePrefs.deviceId ? 'Selected microphone will be requested on the next capture.' : 'Browser default microphone will be requested on the next capture.')
+        );
+    }
+
+    async function _refreshVoiceDevices(index = _voicePanelIndex) {
+        if (!navigator.mediaDevices?.enumerateDevices) {
+            if (Number.isInteger(index) && index >= 0) {
+                _setVoicePanelStatus(index, 'This browser does not expose enumerateDevices() for microphone selection.');
+            }
+            return;
+        }
+
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            _voiceDevices = devices.filter(device => device.kind === 'audioinput');
+            terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
+            if (Number.isInteger(index) && index >= 0) {
+                const hasNamedDevices = _voiceDevices.some(device => Boolean(device.label));
+                if (_voiceState[index]?.recording) {
+                    return;
+                }
+                if (_voiceDevices.length === 0) {
+                    _setVoicePanelStatus(index, 'No audio input devices are currently available.');
+                } else if (!hasNamedDevices) {
+                    _setVoicePanelStatus(index, 'Microphones loaded. Labels may stay generic until microphone permission is granted.');
+                } else {
+                    _setVoicePanelStatus(index, `Microphones refreshed. ${_voiceDevices.length} input device${_voiceDevices.length === 1 ? '' : 's'} available.`);
+                }
+            }
+        } catch (err) {
+            console.error('Voice device enumeration failed:', err);
+            if (Number.isInteger(index) && index >= 0) {
+                _setVoicePanelStatus(index, `Unable to refresh microphones: ${err.message || err}`);
+            }
+        }
+    }
+
+    function _closeVoicePanels(exceptIndex = -1) {
+        document.querySelectorAll('.voice-panel.open').forEach(panel => {
+            const panelId = panel.id || '';
+            const panelIndex = Number.parseInt(panelId.replace('tvoice-panel-', ''), 10);
+            if (panelIndex === exceptIndex) return;
+            panel.classList.remove('open');
+            panel.setAttribute('aria-hidden', 'true');
+        });
+        _voicePanelIndex = exceptIndex;
+    }
+
+    async function _toggleVoicePanel(index) {
+        const { panel } = _getVoicePanelElements(index);
+        if (!panel) return;
+
+        const isOpen = panel.classList.contains('open');
+        if (isOpen) {
+            _closeVoicePanels(-1);
+            _voicePrefs.panelOpen = false;
+            _saveVoicePrefs();
+            return;
+        }
+
+        _closeVoicePanels(index);
+        panel.classList.add('open');
+        panel.setAttribute('aria-hidden', 'false');
+        _voicePrefs.panelOpen = true;
+        _saveVoicePrefs();
+        _syncVoiceControls(index);
+        await _loadVoiceServiceStatus();
+        await _refreshVoiceDevices(index);
+    }
+
+    function _voiceIndexForSession(sessionId) {
+        const renderedIndex = sessionIds.indexOf(sessionId);
+        if (renderedIndex !== -1) {
+            return renderedIndex;
+        }
+        return Object.keys(_voiceState)
+            .map(key => Number.parseInt(key, 10))
+            .find(index => _voiceState[index]?.sessionId === sessionId) ?? -1;
+    }
+
+    function _voiceActualSettings(state) {
+        return {
+            ...state.trackSettings,
+            audioContextState: state.audioCtx?.state || 'unknown',
+            audioContextSampleRate: state.audioCtx?.sampleRate ?? null,
+            requestedProfile: state.profile,
+            selectedDeviceId: state.selectedDeviceId || 'default',
+            workletChunkSamples: state.format?.chunkSize ?? VOICE_CHUNK_SIZE,
+            workletSourceSampleRate: state.format?.sourceSampleRate ?? state.audioCtx?.sampleRate ?? null,
+            workletTargetSampleRate: state.format?.targetSampleRate ?? VOICE_TARGET_SAMPLE_RATE
+        };
+    }
+
+    function _applyVoiceStateDiagnostics(index) {
+        const state = _voiceState[index];
+        const diagnostics = state
+            ? {
+                requested: state.requestedConstraints,
+                settings: _voiceActualSettings(state),
+                supportedConstraints: state.supportedConstraints,
+                capabilities: state.capabilities
+            }
+            : _voiceLastDiagnostics[index];
+        if (diagnostics) {
+            if (state) {
+                state.diagnostics = diagnostics;
+            }
+            _renderVoiceDiagnostics(index, diagnostics);
+        }
+    }
+
+    async function _toggleVoice(index) {
+        _voiceLog('Toggling voice capture', {
+            terminalIndex: index,
+            sessionId: sessionIds[index] || null,
+            recording: Boolean(_voiceState[index]?.recording),
+            activeIndex: _voiceActiveIndex
+        });
+        if (_voiceState[index]?.recording) {
+            await _stopVoice(index);
+        } else {
+            if (_voiceActiveIndex !== -1 && _voiceActiveIndex !== index) {
+                _voiceLog('Stopping active voice capture before switching terminals', {
+                    fromTerminalIndex: _voiceActiveIndex,
+                    toTerminalIndex: index
+                });
+                await _stopVoice(_voiceActiveIndex);
+            }
+            await _startVoice(index);
+        }
+    }
+
+    function _setVoiceBtnsDisabled(activeIndex) {
+        document.querySelectorAll('.voice-btn').forEach(btn => {
+            const btnIdx = parseInt(btn.dataset.terminalVoice, 10);
+            if (activeIndex === -1) {
+                btn.disabled = false;
+                btn.title = 'Voice input (click to start recording)';
+            } else if (btnIdx !== activeIndex) {
+                btn.disabled = true;
+                btn.title = 'Another terminal is recording';
+            } else {
+                btn.disabled = false;
+            }
+        });
+    }
+
+    async function _startVoice(index) {
+        const sid = sessionIds[index];
+        _voiceLog('Starting voice capture', {
+            terminalIndex: index,
+            sessionId: sid || null,
+            hasSocket: Boolean(socket),
+            profile: _voicePrefs.profile,
+            selectedDeviceId: _voicePrefs.deviceId || ''
+        });
+        if (!sid || !socket) {
+            _voiceLog('Voice start aborted because session or socket is unavailable', {
+                terminalIndex: index,
+                sessionId: sid || null,
+                hasSocket: Boolean(socket)
+            });
+            return;
+        }
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+            _voiceLog('Voice start aborted because getUserMedia is unavailable', {
+                terminalIndex: index
+            });
+            _setVoicePanelStatus(
+                index,
+                isPywebviewAvailable()
+                    ? 'This pywebview environment does not expose getUserMedia() for microphone capture. Use browser mode for voice input on this machine.'
+                    : 'This browser does not expose getUserMedia() for microphone capture.'
+            );
+            return;
+        }
+
+        if (!window.AudioWorkletNode) {
+            _voiceLog('Voice start aborted because AudioWorklet is unavailable', {
+                terminalIndex: index
+            });
+            _setVoicePanelStatus(index, 'AudioWorklet is not available in this browser, so the upgraded capture pipeline cannot start.');
+            return;
+        }
+
+        const requestedConstraints = _getVoiceConstraints(_voicePrefs);
+        const supportedConstraints = navigator.mediaDevices.getSupportedConstraints
+            ? navigator.mediaDevices.getSupportedConstraints()
+            : null;
+
+        _setVoicePanelStatus(index, 'Opening microphone and verifying browser-applied capture settings...');
+        _clearVoicePreview(index);
+
+        let stream = null;
+        let audioCtx = null;
+        let source = null;
+        let workletNode = null;
+        let sink = null;
+        let selectedDeviceId = _voicePrefs.deviceId;
+        let appliedConstraints = requestedConstraints;
+        let fallbackMessage = '';
+
+        try {
+            try {
+                _voiceLog('Requesting microphone access', {
+                    terminalIndex: index,
+                    sessionId: sid,
+                    requestedConstraints
+                });
+                stream = await navigator.mediaDevices.getUserMedia({ audio: requestedConstraints });
+                _voiceLog('Microphone access granted', {
+                    terminalIndex: index,
+                    sessionId: sid,
+                    trackCount: stream.getAudioTracks().length
+                });
+            } catch (err) {
+                if (
+                    selectedDeviceId &&
+                    (err?.name === 'NotFoundError' || err?.name === 'OverconstrainedError')
+                ) {
+                    _voiceLog('Selected microphone unavailable, retrying with browser default device', {
+                        terminalIndex: index,
+                        sessionId: sid,
+                        selectedDeviceId,
+                        errorName: err?.name,
+                        errorMessage: err?.message || String(err)
+                    });
+                    fallbackMessage = 'Selected microphone was unavailable, so capture fell back to the browser default input.';
+                    selectedDeviceId = '';
+                    appliedConstraints = _getVoiceConstraints({ ..._voicePrefs, deviceId: '' }, { includeDevice: false });
+                    stream = await navigator.mediaDevices.getUserMedia({ audio: appliedConstraints });
+                    _voiceLog('Fallback microphone access granted', {
+                        terminalIndex: index,
+                        sessionId: sid,
+                        appliedConstraints
+                    });
+                } else if (isPywebviewAvailable() && err?.name !== 'NotAllowedError') {
+                    _voiceLog('Constrained capture failed in pywebview, retrying with bare {audio: true}', {
+                        terminalIndex: index,
+                        sessionId: sid,
+                        errorName: err?.name,
+                        errorMessage: err?.message || String(err),
+                        originalConstraints: appliedConstraints
+                    });
+                    try {
+                        appliedConstraints = true;
+                        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        fallbackMessage = `Capture profile constraints were not supported by this WebView2 environment (${err?.name || 'error'}). Fell back to unconstrained capture.`;
+                        _voiceLog('Bare audio capture succeeded in pywebview fallback', {
+                            terminalIndex: index,
+                            sessionId: sid
+                        });
+                    } catch (bareErr) {
+                        _voiceLog('Bare audio capture also failed', {
+                            terminalIndex: index,
+                            sessionId: sid,
+                            errorName: bareErr?.name,
+                            errorMessage: bareErr?.message || String(bareErr)
+                        });
+                        throw bareErr;
+                    }
+                } else {
+                    throw err;
+                }
+            }
+
+            const track = stream.getAudioTracks()[0];
+            const capabilities = track?.getCapabilities ? track.getCapabilities() : null;
+            const trackSettings = track?.getSettings ? track.getSettings() : {};
+            _voiceLog('Microphone track opened', {
+                terminalIndex: index,
+                sessionId: sid,
+                label: track?.label || '',
+                readyState: track?.readyState || 'unknown',
+                trackSettings
+            });
+
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+                latencyHint: 'interactive'
+            });
+            _voiceLog('AudioContext created for voice capture', {
+                terminalIndex: index,
+                sessionId: sid,
+                audioContextState: audioCtx.state,
+                sampleRate: audioCtx.sampleRate
+            });
+            await audioCtx.audioWorklet.addModule(VOICE_WORKLET_MODULE_URL);
+            _voiceLog('Voice worklet module loaded', {
+                terminalIndex: index,
+                sessionId: sid,
+                moduleUrl: VOICE_WORKLET_MODULE_URL
+            });
+            source = audioCtx.createMediaStreamSource(stream);
+            workletNode = new AudioWorkletNode(audioCtx, 'gridvibe-voice-processor', {
+                numberOfInputs: 1,
+                numberOfOutputs: 1,
+                channelCount: 1,
+                outputChannelCount: [1],
+                processorOptions: {
+                    targetSampleRate: VOICE_TARGET_SAMPLE_RATE,
+                    chunkSize: VOICE_CHUNK_SIZE
+                }
+            });
+            sink = audioCtx.createGain();
+            sink.gain.value = 0;
+
+            const state = {
+                stream,
+                audioCtx,
+                source,
+                workletNode,
+                sink,
+                track,
+                sessionId: sid,
+                recording: true,
+                requestedConstraints: appliedConstraints,
+                selectedDeviceId,
+                profile: _voicePrefs.profile,
+                supportedConstraints,
+                capabilities,
+                trackSettings,
+                format: {
+                    sourceSampleRate: audioCtx.sampleRate,
+                    targetSampleRate: VOICE_TARGET_SAMPLE_RATE,
+                    chunkSize: VOICE_CHUNK_SIZE
+                },
+                diagnostics: null,
+                pendingFlush: null
+            };
+
+            workletNode.port.onmessage = event => {
+                const currentState = _voiceState[index];
+                if (!currentState) return;
+                const message = event.data || {};
+                if (message.type === 'audio' && currentState.recording) {
+                    socket.emit('voice_audio', {
+                        session_id: sid,
+                        audio: message.audio
+                    });
+                    return;
+                }
+                if (message.type === 'format') {
+                    currentState.format = {
+                        sourceSampleRate: message.sourceSampleRate,
+                        targetSampleRate: message.targetSampleRate,
+                        chunkSize: message.chunkSize
+                    };
+                    _voiceLog('Voice worklet reported format', {
+                        terminalIndex: index,
+                        sessionId: sid,
+                        format: currentState.format
+                    });
+                    _applyVoiceStateDiagnostics(index);
+                    return;
+                }
+                if (
+                    message.type === 'flush-complete' &&
+                    currentState.pendingFlush &&
+                    currentState.pendingFlush.flushId === message.flushId
+                ) {
+                    const { resolve } = currentState.pendingFlush;
+                    currentState.pendingFlush = null;
+                    resolve();
+                }
+            };
+
+            _voiceLog('Emitting voice_start to server', {
+                terminalIndex: index,
+                sessionId: sid
+            });
+            socket.emit('voice_start', { session_id: sid });
+
+            source.connect(workletNode);
+            workletNode.connect(sink);
+            sink.connect(audioCtx.destination);
+            if (audioCtx.state === 'suspended') {
+                _voiceLog('AudioContext is suspended, attempting resume', {
+                    terminalIndex: index,
+                    sessionId: sid
+                });
+                await audioCtx.resume();
+            }
+
+            _voiceState[index] = state;
+            _voiceActiveIndex = index;
+            _voiceLastDiagnostics[index] = {
+                requested: appliedConstraints,
+                settings: _voiceActualSettings(state),
+                supportedConstraints,
+                capabilities
+            };
+            _updateVoiceBtn(index, true);
+            _setVoiceBtnsDisabled(index);
+            _applyVoiceStateDiagnostics(index);
+            _setVoicePanelStatus(
+                index,
+                fallbackMessage || 'Capture started. The requested profile is shown next to the browser\'s actual applied settings below.'
+            );
+            _voiceLog('Voice capture started successfully', {
+                terminalIndex: index,
+                sessionId: sid,
+                fallbackUsed: Boolean(fallbackMessage),
+                diagnostics: _voiceLastDiagnostics[index]
+            });
+            await _refreshVoiceDevices(index);
+        } catch (err) {
+            console.error(`${VOICE_LOG_PREFIX} Voice input error:`, err, {
+                terminalIndex: index,
+                sessionId: sid || null,
+                requestedConstraints: appliedConstraints
+            });
+            if (workletNode) {
+                try { workletNode.disconnect(); } catch (_) {}
+            }
+            if (source) {
+                try { source.disconnect(); } catch (_) {}
+            }
+            if (sink) {
+                try { sink.disconnect(); } catch (_) {}
+            }
+            if (audioCtx) {
+                try { await audioCtx.close(); } catch (_) {}
+            }
+            if (stream) {
+                stream.getTracks().forEach(track => {
+                    try { track.stop(); } catch (_) {}
+                });
+            }
+            _updateVoiceBtn(index, false);
+            _setVoiceBtnsDisabled(-1);
+            const errName = err?.name ? `[${err.name}] ` : '';
+            const errMessage = err?.message || String(err);
+            _setVoicePanelStatus(
+                index,
+                isPywebviewAvailable()
+                    ? `Voice capture failed: ${errName}${errMessage}. Native pywebview mode is less reliable for microphone capture; if this persists, use browser mode.`
+                    : `Voice capture failed: ${errName}${errMessage}`
+            );
+        }
+    }
+
+    async function _flushVoiceWorklet(index, state) {
+        if (!state?.workletNode?.port) return;
+
+        const flushId = `flush-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        await new Promise(resolve => {
+            const timer = window.setTimeout(() => {
+                if (state.pendingFlush?.flushId === flushId) {
+                    state.pendingFlush = null;
+                }
+                resolve();
+            }, 200);
+
+            state.pendingFlush = {
+                flushId,
+                resolve: () => {
+                    window.clearTimeout(timer);
+                    resolve();
+                }
+            };
+
+            state.workletNode.port.postMessage({ type: 'flush', flushId });
+        });
+    }
+
+    async function _stopVoice(index) {
+        const state = _voiceState[index];
+        if (!state) return;
+        _voiceLog('Stopping voice capture', {
+            terminalIndex: index,
+            sessionId: state.sessionId || sessionIds[index] || null
+        });
+
+        state.recording = false;
+        await _flushVoiceWorklet(index, state);
+
+        const sid = state.sessionId || sessionIds[index];
+        if (sid && socket) {
+            socket.emit('voice_stop', { session_id: sid });
+        }
+
+        _voiceLastDiagnostics[index] = {
+            requested: state.requestedConstraints,
+            settings: _voiceActualSettings(state),
+            supportedConstraints: state.supportedConstraints,
+            capabilities: state.capabilities
+        };
+
+        try { state.workletNode.disconnect(); } catch (_) {}
+        try { state.source.disconnect(); } catch (_) {}
+        try { state.sink.disconnect(); } catch (_) {}
+        state.stream.getTracks().forEach(track => {
+            try { track.stop(); } catch (_) {}
+        });
+        try { await state.audioCtx.close(); } catch (_) {}
+
+        delete _voiceState[index];
+        _voiceActiveIndex = -1;
+        _updateVoiceBtn(index, false);
+        _setVoiceBtnsDisabled(-1);
+        _clearVoicePreview(index);
+        _applyVoiceStateDiagnostics(index);
+        _setVoicePanelStatus(index, 'Capture stopped. The last applied browser settings are preserved above for comparison.');
+    }
+
+    async function _stopAllVoice() {
+        const activeIndexes = Object.keys(_voiceState)
+            .map(key => Number.parseInt(key, 10))
+            .filter(Number.isInteger);
+        for (const index of activeIndexes) {
+            await _stopVoice(index);
+        }
+    }
+
+    async function _stopActiveVoiceCapture() {
+        if (_voiceActiveIndex === -1) return;
+        await _stopVoice(_voiceActiveIndex);
+    }
+
+    /* ── Push-to-talk ── */
+    let _pttActive = false;
+    let _pttProcessing = false;
+
+    function _formatPttKeybind(event) {
+        const parts = [];
+        if (event.ctrlKey) parts.push('Ctrl');
+        if (event.metaKey) parts.push('Cmd');
+        if (event.altKey) parts.push('Alt');
+        if (event.shiftKey) parts.push('Shift');
+        const key = event.key;
+        if (!['Control', 'Meta', 'Alt', 'Shift'].includes(key)) {
+            parts.push(key.length === 1 ? key.toUpperCase() : key);
+        }
+        return parts.join('+');
+    }
+
+    function _isValidPttKeybind(event) {
+        const hasCommandKey = event.ctrlKey || event.metaKey;
+        const isModifierOnly = ['Control', 'Meta', 'Alt', 'Shift'].includes(event.key);
+        return hasCommandKey && !isModifierOnly;
+    }
+
+    function _matchesPttKeybind(event, keybind) {
+        if (!keybind) return false;
+        const parts = keybind.split('+');
+        const targetKey = parts[parts.length - 1];
+        const needsCtrl = parts.includes('Ctrl');
+        const needsCmd = parts.includes('Cmd');
+        const needsAlt = parts.includes('Alt');
+        const needsShift = parts.includes('Shift');
+        if (needsCtrl !== event.ctrlKey) return false;
+        if (needsCmd !== event.metaKey) return false;
+        if (needsAlt !== event.altKey) return false;
+        if (needsShift !== event.shiftKey) return false;
+        const eventKey = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+        return eventKey === targetKey;
+    }
+
+    function _pttKeybindReleasedBy(event, keybind) {
+        if (!keybind) return false;
+        const parts = keybind.split('+');
+        const key = event.key;
+        return (key === 'Control' && parts.includes('Ctrl'))
+            || (key === 'Meta' && parts.includes('Cmd'))
+            || (key === 'Alt' && parts.includes('Alt'))
+            || (key === 'Shift' && parts.includes('Shift'))
+            || (key.length === 1 ? key.toUpperCase() : key) === parts[parts.length - 1];
+    }
+
+    function _findPttTerminalIndex() {
+        if (_focusedTerminalIndex !== -1
+            && sessionIds[_focusedTerminalIndex]
+            && terminals[_focusedTerminalIndex]) {
+            return _focusedTerminalIndex;
+        }
+        for (let i = 0; i < sessionIds.length; i++) {
+            if (sessionIds[i] && terminals[i]) return i;
+        }
+        return -1;
+    }
+
+    function _setPttEnabled(enabled, index) {
+        _voicePrefs.pttEnabled = enabled;
+        _saveVoicePrefs();
+        terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
+        _setVoicePanelStatus(
+            index,
+            enabled
+                ? (_voicePrefs.pttKeybind
+                    ? `Push-to-talk enabled. Hold ${_voicePrefs.pttKeybind} to record.`
+                    : 'Push-to-talk enabled. Configure a keybind below.')
+                : 'Push-to-talk disabled. Click the microphone button to toggle recording.'
+        );
+    }
+
+    function _setPttKeybind(keybind, index) {
+        _voicePrefs.pttKeybind = keybind;
+        _saveVoicePrefs();
+        terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
+        if (keybind) {
+            _setVoicePanelStatus(index, `Push-to-talk keybind set to ${keybind}. Hold to record.`);
+        }
+    }
+
+    document.addEventListener('keydown', async event => {
+        if (!_voicePrefs.pttEnabled || !_voicePrefs.pttKeybind) return;
+        if (_pttActive || _pttProcessing) return;
+        if (!_matchesPttKeybind(event, _voicePrefs.pttKeybind)) return;
+
+        const activeEl = document.activeElement;
+        if (activeEl && activeEl.classList.contains('voice-ptt-keybind')) return;
+
+        event.preventDefault();
+        _pttActive = true;
+        _pttProcessing = true;
+
+        try {
+            const index = _voiceActiveIndex !== -1 ? _voiceActiveIndex : _findPttTerminalIndex();
+            if (index === -1) return;
+            if (!_voiceState[index]?.recording) {
+                await _startVoice(index);
+            }
+        } finally {
+            _pttProcessing = false;
+        }
+    });
+
+    document.addEventListener('keyup', async event => {
+        if (!_pttActive) return;
+        if (!_pttKeybindReleasedBy(event, _voicePrefs.pttKeybind)) return;
+
+        event.preventDefault();
+        _pttActive = false;
+        _pttProcessing = true;
+
+        try {
+            if (_voiceActiveIndex !== -1) {
+                await _stopVoice(_voiceActiveIndex);
+            }
+        } finally {
+            _pttProcessing = false;
+        }
+    });
+
+    async function _sendEnterShortcut(index) {
+        await _stopActiveVoiceCapture();
+        _sendToTerminal(index, '\r');
+    }
+
+    function _updateVoiceBtn(index, recording) {
+        const btn = document.getElementById(`tvoice-${index}`);
+        if (!btn) return;
+        btn.classList.toggle('recording', recording);
+        btn.title = recording
+            ? 'Voice input (recording — click to stop)'
+            : 'Voice input (click to start recording)';
+
+        const { badge } = _getVoicePanelElements(index);
+        if (badge) {
+            badge.textContent = recording ? 'Recording' : 'Idle';
+            badge.classList.toggle('recording', recording);
+        }
+    }
+
+    function _showVoicePreview(index, text) {
+        const btn = document.getElementById(`tvoice-${index}`);
+        if (!btn) return;
+        let preview = btn.querySelector('.voice-partial-preview');
+        if (!preview) {
+            preview = document.createElement('span');
+            preview.className = 'voice-partial-preview';
+            btn.appendChild(preview);
+        }
+        preview.textContent = text;
+    }
+
+    function _clearVoicePreview(index) {
+        const btn = document.getElementById(`tvoice-${index}`);
+        if (!btn) return;
+        const preview = btn.querySelector('.voice-partial-preview');
+        if (preview) preview.remove();
+    }
+
+    function _showTermCtxMenu(x, y, index) {
+        _dismissTermCtxMenu();
+        const term = terminals[index].term;
+        const menu = document.createElement('div');
+        menu.id = 'term-ctx-menu';
+
+        /* keep menu inside viewport */
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const mw = 140, mh = 72;
+        menu.style.left = `${Math.min(x, vw - mw - 8)}px`;
+        menu.style.top  = `${Math.min(y, vh - mh - 8)}px`;
+
+        const items = [
+            { label: 'Copy',  shortcut: 'Ctrl+Shift+C', action() {
+                _copyText(term.getSelection());
+            }},
+            { label: 'Paste', shortcut: 'Ctrl+V', action() { _pasteToTerminal(index); }},
+        ];
+
+        items.forEach(({ label, shortcut, action }) => {
+            const btn = document.createElement('button');
+            btn.innerHTML = `<span>${label}</span><span class="shortcut">${shortcut}</span>`;
+            btn.addEventListener('mousedown', e => { e.preventDefault(); action(); _dismissTermCtxMenu(); });
+            menu.appendChild(btn);
+        });
+
+        document.body.appendChild(menu);
+        document.addEventListener('mousedown', _dismissTermCtxMenu, { once: true });
+    }
+
+    function _dismissTermCtxMenu() {
+        document.getElementById('term-ctx-menu')?.remove();
+    }
+
+    /* ─────────────────────────────────────────────
+       Attach / show xterm into a wrapper
+    ───────────────────────────────────────────── */
+    function attachTerminal(index) {
+        const wrapper = document.getElementById(`tw-${index}`);
+        const canvas  = document.getElementById(`tcanvas-${index}`);
+        const ph      = document.getElementById(`ph-${index}`);
+
+        if (!wrapper || !canvas || terminals[index]._attached) return;
+
+        if (ph) ph.remove();
+
+        terminals[index].term.open(canvas);
+
+        _wireClipboard(index);
+
+        terminals[index]._attached = true;
+        terminals[index]._fitReady = false;
+        terminals[index]._pendingOutput = terminals[index]._pendingOutput || '';
+        observeTerminalResize(index);
+        scheduleFit(index);
+    }
+
+    /* ─────────────────────────────────────────────
+       Update status badge for a single terminal
+    ───────────────────────────────────────────── */
+    function setStatus(index, status) {
+        const dot   = document.getElementById(`tdot-${index}`);
+        const label = document.getElementById(`tlabel-${index}`);
+        if (!dot || !label) return;
+
+        const map = {
+            pending      : 'Pending',
+            connecting   : 'Connecting…',
+            connected    : 'Connected',
+            disconnected : 'Disconnected',
+            error        : 'Error'
+        };
+
+        dot.className   = `status-dot ${status}`;
+        label.textContent = map[status] || status;
+    }
+
+    /* ─────────────────────────────────────────────
+       Initial load — build grid, set up sessions
+    ───────────────────────────────────────────── */
+    async function initialLoad() {
+        const loadToken = ++activeLoadToken;
+        const label = document.getElementById('sessionLabel');
+        const grid  = document.getElementById('terminalsGrid');
+        try {
+            label.textContent = 'Loading…';
+            await loadSessionGroups();
+            if (loadToken !== activeLoadToken) {
+                return;
+            }
+            if (!activeGroupId) {
+                await resetSessionView();
+                return;
+            }
+
+            const requestedGroupId = activeGroupId;
+            const resp = await fetch(getSessionApiPath(requestedGroupId));
+            if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
+            const data = await resp.json();
+            if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
+                return;
+            }
+
+            if (!data.sessions || data.sessions.length === 0) {
+                await resetSessionView();
+                return;
+            }
+
+            const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
+            const usingCurrentView = (
+                gridBuilt
+                && visibleGroupId === requestedGroupId
+                && terminals.length === data.sessions.length
+                && grid.className === expectedLayoutClass
+                && hasMatchingSessionIds(sessionIds, data.sessions)
+            );
+            let restoredFromCache = false;
+
+            if (!usingCurrentView && gridBuilt && visibleGroupId && visibleGroupId !== requestedGroupId) {
+                cacheVisibleGroupView(visibleGroupId);
+            }
+
+            if (!usingCurrentView) {
+                const cached = cachedGroupViews.get(requestedGroupId);
+                if (cached) {
+                    const cachedMatches = (
+                        cached.terminals?.length === data.sessions.length
+                        && cached.className === expectedLayoutClass
+                        && hasMatchingSessionIds(cached.sessionIds || [], data.sessions)
+                    );
+                    if (cachedMatches) {
+                        restoredFromCache = restoreCachedGroupView(requestedGroupId);
+                    } else {
+                        dropCachedGroupView(requestedGroupId);
+                    }
+                }
+            }
+
+            grid.style.display = '';   // make sure it’s visible
+            if (!usingCurrentView && !restoredFromCache) {
+                buildGrid(data.sessions, data.layout);
+            }
+
+            const attachedIndices = [];
+            data.sessions.forEach((session, i) => {
+                if (!terminals[i]) {
+                    return;
+                }
+                terminals[i]._session = session;
+                setStatus(i, session.status);
+                sessionIds[i] = session.session_id;
+                setSessionRoute(session.session_id, requestedGroupId, i);
+
+                if (session.status === 'connected') {
+                    if (!terminals[i]._attached) {
+                        attachTerminal(i);
+                    }
+                    attachedIndices.push(i);
+                } else if (session.status === 'error') {
+                    showPlaceholderError(i, session.error_message || 'Connection failed');
+                }
+            });
+
+            updateSessionChrome(data.sessions.length, requestedGroupId);
+            await ensureAttachedTerminalsReady(attachedIndices);
+            if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
+                return;
+            }
+
+            if (!usingCurrentView && !restoredFromCache && socket) {
+                data.sessions.forEach(session => {
+                    socket.emit('join_session', { session_id: session.session_id });
+                });
+            }
+            await redrawAttachedTerminalsLikeFullscreen(attachedIndices, {
+                isCurrent: () => loadToken === activeLoadToken && requestedGroupId === activeGroupId
+            });
+        } catch (e) {
+            if (loadToken !== activeLoadToken) {
+                return;
+            }
+            console.error('Initial load failed:', e);
+            label.textContent = `❌ Load error: ${e.message}`;
+            grid.style.display = 'none';
+            document.getElementById('emptyState').classList.add('visible');
+        }
+    }
+
+    /* ─────────────────────────────────────────────
+       Show error message inside a terminal pane
+    ───────────────────────────────────────────── */
+    function showPlaceholderError(index, msg) {
+        const ph = document.getElementById(`ph-${index}`);
+        if (!ph) return;
+        ph.classList.add('ph-error');
+        ph.innerHTML = `
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.5">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" y1="8" x2="12" y2="12"/>
+                <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            <strong>Connection Error</strong>
+            <span style="color:#aaa;word-break:break-all">${escHtml(msg)}</span>`;
+    }
+
+    async function loadSessionGroups() {
+        const response = await fetch('/api/session-groups');
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to load session tabs');
+        }
+
+        const previousActiveGroupId = activeGroupId;
+        const previousGroupIds = knownGroupIds.slice();
+        sessionGroups = Array.isArray(data.groups) ? data.groups : [];
+        knownGroupIds = sessionGroups.map(group => group.group_id);
+        previousGroupIds
+            .filter(groupId => !knownGroupIds.includes(groupId))
+            .forEach(groupId => {
+                if (groupId !== visibleGroupId) {
+                    dropCachedGroupView(groupId);
+                }
+            });
+        const newestGroupId = sessionGroups.length
+            ? sessionGroups[sessionGroups.length - 1].group_id
+            : '';
+        const hasNewGroup = previousGroupIds.length > 0
+            && knownGroupIds.some(groupId => !previousGroupIds.includes(groupId));
+
+        if (activeGroupId && !getGroupById(activeGroupId)) {
+            activeGroupId = '';
+        }
+        if (!activeGroupId && sessionGroups.length > 0) {
+            activeGroupId = newestGroupId;
+        } else if (hasNewGroup && newestGroupId && activeGroupId !== newestGroupId) {
+            activeGroupId = newestGroupId;
+        }
+        syncLocationToGroup(activeGroupId);
+        renderSessionTabs();
+        return previousActiveGroupId !== activeGroupId;
+    }
+
+    function isPywebviewAvailable() {
+        return Boolean(window.pywebview && window.pywebview.api);
+    }
+
+    function updateFullscreenButton() {
+        const button = document.getElementById('fullscreenBtn');
+        if (!button) return;
+
+        const isBrowserFullscreen = Boolean(document.fullscreenElement);
+        const active = isPywebviewAvailable() ? nativeFullscreen : isBrowserFullscreen;
+        const label = active ? 'Exit fullscreen' : 'Enter fullscreen';
+        button.innerHTML = active ? '&#10005;' : '&#9974;';
+        button.title = label;
+        button.setAttribute('aria-label', label);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+
+    async function syncNativeFullscreenState() {
+        if (!isPywebviewAvailable() || !window.pywebview.api.get_session_fullscreen_state) {
+            nativeFullscreen = false;
+            updateFullscreenButton();
+            return;
+        }
+
+        try {
+            const result = await window.pywebview.api.get_session_fullscreen_state();
+            nativeFullscreen = Boolean(result && result.ok && result.is_fullscreen);
+        } catch (error) {
+            console.error('Fullscreen state sync failed:', error);
+            nativeFullscreen = false;
+        } finally {
+            updateFullscreenButton();
+        }
+    }
+
+    async function resetFullscreenState() {
+        try {
+            if (isPywebviewAvailable() && window.pywebview.api.exit_session_fullscreen) {
+                const result = await window.pywebview.api.exit_session_fullscreen();
+                if (result && result.ok) {
+                    nativeFullscreen = false;
+                }
+                return;
+            }
+
+            if (document.fullscreenElement) {
+                await document.exitFullscreen();
+            }
+        } catch (error) {
+            console.error('Fullscreen reset failed:', error);
+        } finally {
+            nativeFullscreen = false;
+            updateFullscreenButton();
+        }
+    }
+
+    async function toggleFullscreen() {
+        try {
+            if (isPywebviewAvailable()) {
+                const result = await window.pywebview.api.toggle_session_fullscreen
+                    ? await window.pywebview.api.toggle_session_fullscreen()
+                    : null;
+                if (result && result.ok) {
+                    nativeFullscreen = !nativeFullscreen;
+                    updateFullscreenButton();
+                }
+                return;
+            }
+
+            if (document.fullscreenElement) {
+                await document.exitFullscreen();
+            } else {
+                await document.documentElement.requestFullscreen();
+            }
+        } catch (error) {
+            console.error('Fullscreen toggle failed:', error);
+        } finally {
+            updateFullscreenButton();
+        }
+    }
+
+    async function resetSessionView() {
+        await resetFullscreenState();
+        teardownCurrentGrid();
+        document.getElementById('terminalsGrid').className = '';
+        document.getElementById('terminalsGrid').innerHTML = '';
+        document.getElementById('terminalsGrid').style.display = '';
+        document.getElementById('terminalsGrid').style.removeProperty('--grid-columns');
+        document.getElementById('terminalsGrid').style.removeProperty('--grid-rows');
+        document.getElementById('emptyState').classList.add('visible');
+        document.getElementById('sessionLabel').textContent = sessionGroups.length ? 'No terminals in this session' : 'No sessions';
+        document.title = 'GridVibe — Terminals';
+    }
+
+    function logSessionWindowAction(action, details = {}) {
+        console.info(`[GridVibe Sessions] ${action}`, details);
+    }
+
+    async function goToSettings(event) {
+        if (event) {
+            event.preventDefault();
+        }
+
+        if (window.pywebview?.api?.open_launcher_window) {
+            try {
+                logSessionWindowAction('+ New Session clicked', {
+                    pywebview: true,
+                    preserve_fullscreen: true
+                });
+                const result = await window.pywebview.api.open_launcher_window();
+                logSessionWindowAction('open_launcher_window result', result || {});
+                if (result?.ok) {
+                    return false;
+                }
+            } catch (error) {
+                console.error('[GridVibe Sessions] open_launcher_window failed:', error);
+            }
+        }
+
+        await resetFullscreenState();
+        window.open('/', 'gridvibe-launcher');
+        logSessionWindowAction('Opened browser launcher window fallback');
+        return false;
+    }
+
+    async function switchGroup(groupId) {
+        if (!groupId || groupId === activeGroupId) {
+            return;
+        }
+
+        activeGroupId = groupId;
+        syncLocationToGroup(activeGroupId);
+        renderSessionTabs();
+        await initialLoad();
+    }
+
+    /* ─────────────────────────────────────────────
+       Periodic status refresh (no grid rebuild)
+    ───────────────────────────────────────────── */
+    async function refreshStatuses() {
+        if (!gridBuilt) { initialLoad(); return; }
+        try {
+            const groupChanged = await loadSessionGroups();
+            if (groupChanged) {
+                await initialLoad();
+                return;
+            }
+            if (!activeGroupId) {
+                await resetSessionView();
+                return;
+            }
+
+            const resp = await fetch(getSessionApiPath());
+            const data = await resp.json();
+            if (!data.sessions || data.sessions.length === 0) {
+                await resetSessionView();
+                return;
+            }
+
+            const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
+            const sessionIdsChanged = !hasMatchingSessionIds(sessionIds, data.sessions);
+            if (
+                terminals.length !== data.sessions.length
+                || document.getElementById('terminalsGrid').className !== expectedLayoutClass
+                || sessionIdsChanged
+            ) {
+                await initialLoad();
+                return;
+            }
+
+            data.sessions.forEach((session, i) => {
+                if (!terminals[i]) {
+                    return;
+                }
+                terminals[i]._session = session;
+                setStatus(i, session.status);
+                sessionIds[i] = session.session_id;
+                setSessionRoute(session.session_id, activeGroupId, i);
+                if (session.status === 'connected' && !terminals[i]?._attached) {
+                    attachTerminal(i);
+                    redrawAttachedTerminals([i], { forceResize: true });
+                } else if (session.status === 'error' && !terminals[i]?._attached) {
+                    showPlaceholderError(i, session.error_message || 'Connection failed');
+                }
+            });
+        } catch (e) {
+            console.error('Refresh failed:', e);
+        }
+    }
+
+    /* ─────────────────────────────────────────────
+       Close all sessions
+    ───────────────────────────────────────────── */
+    async function closeCurrentSession() {
+        if (!activeGroupId) {
+            return;
+        }
+
+        try {
+            const closingGroupId = activeGroupId;
+            const response = await fetch(getSessionApiPath(), { method: 'DELETE' });
+            if (!response.ok) {
+                throw new Error(`Close session failed with status ${response.status}`);
+            }
+
+            if (visibleGroupId === closingGroupId) {
+                teardownCurrentGrid();
+            } else {
+                dropCachedGroupView(closingGroupId);
+            }
+            activeGroupId = '';
+            await loadSessionGroups();
+            await initialLoad();
+        } catch (e) {
+            console.error('Close session failed:', e);
+        }
+    }
+
+    /* ─────────────────────────────────────────────
+       Resize
+    ───────────────────────────────────────────── */
+    window.addEventListener('resize', () => {
+        terminals.forEach((terminal, index) => {
+            if (terminal._attached) scheduleFit(index);
+        });
+    });
+
+    /* ─────────────────────────────────────────────
+       Helpers
+    ───────────────────────────────────────────── */
+    function escHtml(str) {
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    /* ─────────────────────────────────────────────
+       Socket init — happens AFTER all function defs
+       so that a CDN failure cannot kill the script.
+    ───────────────────────────────────────────── */
+    try {
+        socket = io();
+
+        socket.on('terminal_output', ({ session_id, data }) => {
+            const target = resolveSessionTarget(session_id);
+            if (!target) return;
+
+            if (!target.active) {
+                if (!target.terminal._attached) {
+                    target.terminal._pendingOutput = (target.terminal._pendingOutput || '') + data;
+                    return;
+                }
+                target.terminal.term.write(data);
+                return;
+            }
+
+            const { index, terminal } = target;
+            if (!terminal._attached) attachTerminal(index);
+            if (!terminal._fitReady) {
+                terminal._pendingOutput = (terminal._pendingOutput || '') + data;
+                scheduleFit(index);
+                return;
+            }
+            terminal.term.write(data);
+        });
+
+        socket.on('session_status', (session) => {
+            const target = resolveSessionTarget(session.session_id);
+            if (!target) return;
+
+            target.terminal._session = session;
+            if (!target.active) {
+                return;
+            }
+
+            const { index, terminal } = target;
+            setStatus(index, session.status);
+            if (session.status === 'connected' && !terminal._attached) {
+                attachTerminal(index);
+                redrawAttachedTerminals([index], { forceResize: true });
+            } else if (session.status === 'connected') {
+                scheduleFit(index);
+            } else if (session.status === 'error') {
+                showPlaceholderError(index, session.error_message || 'Connection failed');
+            }
+        });
+
+        /* ── Voice transcription results ── */
+        socket.on('voice_result', ({ session_id, text, final: isFinal }) => {
+            const index = _voiceIndexForSession(session_id);
+            if (index === -1) return;
+
+            if (isFinal && text) {
+                _sendToTerminal(index, text);
+                _clearVoicePreview(index);
+            } else if (text) {
+                _showVoicePreview(index, text);
+            }
+        });
+
+        socket.on('voice_status', async ({ session_id, status, message }) => {
+            _voiceLog('Received voice status from server', {
+                sessionId: session_id || null,
+                status,
+                message: message || ''
+            });
+            if (status === 'error') {
+                console.error('Voice error:', message);
+                const index = session_id ? _voiceIndexForSession(session_id) : -1;
+                if (index !== -1) await _stopVoice(index);
+                if (index !== -1 && message) {
+                    _setVoicePanelStatus(index, message);
+                }
+                return;
+            }
+
+            const index = session_id ? _voiceIndexForSession(session_id) : -1;
+            if (index === -1) return;
+
+            if (status === 'listening') {
+                if ((_voiceServiceStatus.engine || VOICE_ENGINE) === 'whisper') {
+                    _setVoicePanelStatus(index, 'faster-whisper is ready. Capture is buffering 16 kHz PCM locally and will transcribe when recording stops.');
+                } else {
+                    _setVoicePanelStatus(index, 'Voice service is listening. Capture is streaming through AudioWorklet resampling at 16 kHz PCM.');
+                }
+            } else if (status === 'stopped') {
+                _setVoicePanelStatus(index, 'Voice service stopped for this terminal. The last capture diagnostics remain visible above.');
+            }
+        });
+    } catch (e) {
+        console.warn('Socket.IO unavailable — using polling only:', e.message);
+        document.getElementById('sessionLabel').title =
+            'Real-time disabled — using polling';
+    }
+
+    window.addEventListener('pywebviewready', () => {
+        syncNativeFullscreenState();
+    });
+    document.addEventListener('fullscreenchange', updateFullscreenButton);
+    document.addEventListener('mousedown', event => {
+        if (!event.target.closest('.voice-control')) {
+            _closeVoicePanels(-1);
+        }
+    });
+    if (navigator.mediaDevices?.addEventListener) {
+        navigator.mediaDevices.addEventListener('devicechange', () => {
+            _refreshVoiceDevices(_voicePanelIndex);
+        });
+    }
+
+    /* ─────────────────────────────────────────────
+       Boot
+    ───────────────────────────────────────────── */
+    updateFullscreenButton();
+    _loadVoicePrefsFromServer();
+    _loadVoiceServiceStatus();
+    _refreshVoiceDevices(-1);
+    initialLoad();
+    setInterval(refreshStatuses, 3000);
+</script>
+</body>
+</html>
+

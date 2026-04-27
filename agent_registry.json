@@ -1,0 +1,345 @@
+{
+  "copilot": {
+    "label": "copilot",
+    "display_name": "GitHub Copilot CLI",
+    "binary": "copilot",
+    "environments": {
+      "windows_native": {
+        "supported": true,
+        "recommended": true,
+        "warning": "GitHub documents npm as an alternative, but npm installs require Node.js 22 or later and PowerShell 6 or higher.",
+        "install_options": [
+          {
+            "label": "WinGet",
+            "command": "winget install GitHub.Copilot",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "winget",
+                "message": "WinGet is required for the preferred Windows install path."
+              }
+            ]
+          },
+          {
+            "label": "npm fallback",
+            "command": "npm install -g @github/copilot",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "npm",
+                "message": "npm is required for the fallback install path."
+              }
+            ]
+          }
+        ]
+      },
+      "wsl_linux": {
+        "supported": true,
+        "recommended": true,
+        "warning": "CLI usage still depends on account entitlement and org policy.",
+        "install_options": [
+          {
+            "label": "npm",
+            "command": "npm install -g @github/copilot",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "npm",
+                "message": "npm is required for the Linux or WSL install path."
+              }
+            ]
+          }
+        ]
+      },
+      "ssh": {
+        "supported": true,
+        "recommended": false,
+        "detect_only": true,
+        "warning": "Remote SSH targets are detect-only by default.",
+        "install_options": [
+          {
+            "label": "Manual remote install",
+            "command": "npm install -g @github/copilot",
+            "manual_only": true
+          }
+        ]
+      }
+    },
+    "verify": [
+      "copilot --version"
+    ],
+    "post_install": "Run copilot and complete /login if prompted."
+  },
+  "codex": {
+    "label": "codex",
+    "display_name": "OpenAI Codex CLI",
+    "binary": "codex",
+    "environments": {
+      "windows_native": {
+        "supported": true,
+        "recommended": false,
+        "warning": "OpenAI documents native Windows support as experimental and recommends WSL when possible.",
+        "install_options": [
+          {
+            "label": "WSL (recommended)",
+            "command": "wsl sh -lc \"npm i -g @openai/codex\"",
+            "manual_only": true,
+            "requires": [
+              {
+                "kind": "wsl",
+                "message": "WSL is required for the recommended Windows install path."
+              }
+            ]
+          },
+          {
+            "label": "npm fallback",
+            "command": "npm i -g @openai/codex",
+            "manual_only": true,
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "npm",
+                "message": "npm is required for the native Windows fallback."
+              }
+            ]
+          }
+        ]
+      },
+      "wsl_linux": {
+        "supported": true,
+        "recommended": true,
+        "install_options": [
+          {
+            "label": "npm",
+            "command": "npm i -g @openai/codex",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "npm",
+                "message": "npm is required for the Linux or WSL install path."
+              }
+            ]
+          }
+        ]
+      },
+      "ssh": {
+        "supported": true,
+        "recommended": false,
+        "detect_only": true,
+        "warning": "Remote SSH targets are detect-only by default.",
+        "install_options": [
+          {
+            "label": "Manual remote install",
+            "command": "npm i -g @openai/codex",
+            "manual_only": true
+          }
+        ]
+      }
+    },
+    "verify": [
+      "codex --version"
+    ],
+    "post_install": "Run codex once and complete sign-in."
+  },
+  "opencode": {
+    "label": "opencode",
+    "display_name": "OpenCode CLI",
+    "binary": "opencode",
+    "environments": {
+      "windows_native": {
+        "supported": true,
+        "recommended": false,
+        "warning": "OpenCode recommends WSL for the best Windows experience.",
+        "install_options": [
+          {
+            "label": "WSL (recommended)",
+            "command": "wsl sh -lc \"npm install -g opencode-ai\"",
+            "manual_only": true,
+            "requires": [
+              {
+                "kind": "wsl",
+                "message": "WSL is required for the recommended Windows install path."
+              }
+            ]
+          },
+          {
+            "label": "npm fallback",
+            "command": "npm install -g opencode-ai",
+            "manual_only": true,
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "npm",
+                "message": "npm is required for the native Windows fallback."
+              }
+            ]
+          }
+        ]
+      },
+      "wsl_linux": {
+        "supported": true,
+        "recommended": true,
+        "install_options": [
+          {
+            "label": "npm",
+            "command": "npm install -g opencode-ai",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "npm",
+                "message": "npm is required for the Linux or WSL install path."
+              }
+            ]
+          }
+        ]
+      },
+      "ssh": {
+        "supported": true,
+        "recommended": false,
+        "detect_only": true,
+        "warning": "Remote SSH targets are detect-only by default.",
+        "install_options": [
+          {
+            "label": "Manual remote install",
+            "command": "npm install -g opencode-ai",
+            "manual_only": true
+          }
+        ]
+      }
+    },
+    "verify": [
+      "opencode --help"
+    ],
+    "post_install": "Run opencode and complete /connect."
+  },
+  "kilo": {
+    "label": "kilo",
+    "display_name": "Kilo CLI",
+    "binary": "kilo",
+    "environments": {
+      "windows_native": {
+        "supported": true,
+        "recommended": true,
+        "install_options": [
+          {
+            "label": "npm",
+            "command": "npm install -g @kilocode/cli",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "npm",
+                "message": "npm is required for the Windows install path."
+              }
+            ]
+          }
+        ]
+      },
+      "wsl_linux": {
+        "supported": true,
+        "recommended": true,
+        "install_options": [
+          {
+            "label": "npm",
+            "command": "npm install -g @kilocode/cli",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "npm",
+                "message": "npm is required for the Linux or WSL install path."
+              }
+            ]
+          }
+        ]
+      },
+      "ssh": {
+        "supported": true,
+        "recommended": false,
+        "detect_only": true,
+        "warning": "Remote SSH targets are detect-only by default.",
+        "install_options": [
+          {
+            "label": "Manual remote install",
+            "command": "npm install -g @kilocode/cli",
+            "manual_only": true
+          }
+        ]
+      }
+    },
+    "verify": [
+      "kilo --version"
+    ],
+    "post_install": "Run kilo and complete /connect."
+  },
+  "claude": {
+    "label": "claude",
+    "display_name": "Claude Code",
+    "binary": "claude",
+    "environments": {
+      "windows_native": {
+        "supported": true,
+        "recommended": true,
+        "warning": "Claude Code access still depends on a supported Anthropic account.",
+        "install_options": [
+          {
+            "label": "WinGet",
+            "command": "winget install Anthropic.ClaudeCode",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "winget",
+                "message": "WinGet is required for the preferred Windows install path."
+              }
+            ]
+          },
+          {
+            "label": "npm fallback",
+            "command": "npm install -g @anthropic-ai/claude-code",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "npm",
+                "message": "npm is required for the fallback install path."
+              }
+            ]
+          }
+        ]
+      },
+      "wsl_linux": {
+        "supported": true,
+        "recommended": true,
+        "warning": "Claude Code access still depends on a supported Anthropic account.",
+        "install_options": [
+          {
+            "label": "npm",
+            "command": "npm install -g @anthropic-ai/claude-code",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "npm",
+                "message": "npm is required for the Linux or WSL install path."
+              }
+            ]
+          }
+        ]
+      },
+      "ssh": {
+        "supported": true,
+        "recommended": false,
+        "detect_only": true,
+        "warning": "Remote SSH targets are detect-only by default.",
+        "install_options": [
+          {
+            "label": "Manual remote install",
+            "command": "npm install -g @anthropic-ai/claude-code",
+            "manual_only": true
+          }
+        ]
+      }
+    },
+    "verify": [
+      "claude --version"
+    ],
+    "post_install": "Run claude once and complete browser sign-in."
+  }
+}
+

@@ -1,0 +1,3767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GridVibe</title>
+    <style>
+        :root {
+            --bg: #191d38;
+            --bg-deep: #14182d;
+            --panel: rgba(45, 52, 86, 0.95);
+            --panel-strong: rgba(35, 42, 70, 0.98);
+            --panel-soft: rgba(28, 33, 58, 0.98);
+            --line: rgba(143, 161, 210, 0.16);
+            --line-strong: rgba(79, 214, 255, 0.78);
+            --text: #f3f6ff;
+            --muted: #8d97bb;
+            --accent: #4fd6ff;
+            --accent-strong: #12bdf4;
+            --accent-soft: rgba(79, 214, 255, 0.12);
+            --danger: #ff6b7c;
+            --success: #61f6b1;
+            --shadow: 0 24px 60px rgba(4, 8, 20, 0.42);
+        }
+
+        [data-theme="light"] {
+            --bg: #f0f2f5;
+            --bg-deep: #e5e7eb;
+            --panel: rgba(255, 255, 255, 0.95);
+            --panel-strong: rgba(243, 244, 246, 0.98);
+            --panel-soft: rgba(249, 250, 251, 0.98);
+            --line: rgba(107, 114, 128, 0.18);
+            --line-strong: rgba(8, 145, 178, 0.78);
+            --text: #1a1a2e;
+            --muted: #6b7280;
+            --accent: #0891b2;
+            --accent-strong: #0e7490;
+            --accent-soft: rgba(8, 145, 178, 0.10);
+            --danger: #ef4444;
+            --success: #10b981;
+            --shadow: 0 24px 60px rgba(0, 0, 0, 0.08);
+        }
+
+        [data-theme="light"] body {
+            background: linear-gradient(135deg, #eef1f5 0%, #e8ecf2 45%, #f0f2f5 100%);
+        }
+
+        [data-theme="light"] .count-btn,
+        [data-theme="light"] .layout-btn,
+        [data-theme="light"] .mode-btn,
+        [data-theme="light"] .ghost-btn {
+            background: rgba(255, 255, 255, 0.88);
+        }
+
+        [data-theme="light"] .count-btn:hover,
+        [data-theme="light"] .layout-btn:hover,
+        [data-theme="light"] .mode-btn:hover,
+        [data-theme="light"] .ghost-btn:hover {
+            border-color: rgba(8, 145, 178, 0.56);
+        }
+
+        [data-theme="light"] .count-btn.active,
+        [data-theme="light"] .layout-btn.active,
+        [data-theme="light"] .mode-btn.active {
+            background: linear-gradient(180deg, rgba(224, 242, 248, 0.95), rgba(207, 235, 245, 0.97));
+            box-shadow: inset 0 0 0 1px rgba(8, 145, 178, 0.18), 0 0 0 1px rgba(8, 145, 178, 0.08);
+        }
+
+        [data-theme="light"] .layout-panel {
+            border-top-color: rgba(107, 114, 128, 0.14);
+        }
+
+        [data-theme="light"] .layout-preview {
+            border-color: rgba(8, 145, 178, 0.22);
+            background: rgba(240, 245, 250, 0.8);
+        }
+
+        [data-theme="light"] .layout-preview .pane {
+            background: rgba(8, 145, 178, 0.15);
+            border-color: rgba(8, 145, 178, 0.45);
+        }
+
+        [data-theme="light"] .field input,
+        [data-theme="light"] .field select {
+            border-color: rgba(107, 114, 128, 0.22);
+            background: rgba(255, 255, 255, 0.96);
+        }
+
+        [data-theme="light"] .field input:focus,
+        [data-theme="light"] .field select:focus {
+            border-color: rgba(14, 116, 144, 0.5);
+            box-shadow: 0 0 0 3px rgba(14, 116, 144, 0.12);
+        }
+
+        [data-theme="light"] .field input::placeholder {
+            color: #9ca3af;
+        }
+
+        [data-theme="light"] .tip-btn {
+            border-color: rgba(8, 145, 178, 0.28);
+            background: rgba(8, 145, 178, 0.06);
+        }
+
+        [data-theme="light"] .tip-btn:hover {
+            border-color: rgba(8, 145, 178, 0.58);
+            background: rgba(8, 145, 178, 0.12);
+        }
+
+        [data-theme="light"] .tip-btn:focus-visible {
+            outline-color: rgba(8, 145, 178, 0.4);
+        }
+
+        [data-theme="light"] .inline-tip {
+            border-color: rgba(8, 145, 178, 0.16);
+            background: rgba(8, 145, 178, 0.05);
+        }
+
+        [data-theme="light"] .inline-tip pre {
+            background: rgba(243, 244, 246, 0.85);
+        }
+
+        [data-theme="light"] .check-field {
+            border-color: rgba(107, 114, 128, 0.22);
+            background: rgba(255, 255, 255, 0.96);
+        }
+
+        [data-theme="light"] .settings-section {
+            border-color: rgba(107, 114, 128, 0.18);
+            background: rgba(243, 244, 246, 0.92);
+        }
+
+        [data-theme="light"] .picker-display {
+            border-color: rgba(107, 114, 128, 0.22);
+            background: rgba(255, 255, 255, 0.96);
+        }
+
+        [data-theme="light"] .picker-display.empty {
+            color: #9ca3af;
+        }
+
+        [data-theme="light"] .t-row {
+            background: rgba(255, 255, 255, 0.92);
+            border-color: rgba(107, 114, 128, 0.16);
+        }
+
+        [data-theme="light"] .t-row-head {
+            background: rgba(240, 242, 248, 0.85);
+            border-bottom-color: rgba(107, 114, 128, 0.12);
+        }
+
+        [data-theme="light"] .t-badge {
+            background: rgba(8, 145, 178, 0.12);
+        }
+
+        [data-theme="light"] .command-mode-btn {
+            border-color: rgba(107, 114, 128, 0.22);
+            background: rgba(255, 255, 255, 0.96);
+        }
+
+        [data-theme="light"] .command-mode-btn:hover {
+            border-color: rgba(8, 145, 178, 0.48);
+        }
+
+        [data-theme="light"] .command-mode-btn.active {
+            background: rgba(8, 145, 178, 0.1);
+        }
+
+        [data-theme="light"] .action-btn {
+            background: linear-gradient(90deg, #0891b2 0%, #0e7490 52%, #0d6e88 100%);
+            color: #ffffff;
+        }
+
+        [data-theme="light"] .secondary-link {
+            border-color: rgba(107, 114, 128, 0.22);
+            background: rgba(255, 255, 255, 0.9);
+        }
+
+        [data-theme="light"] .modal-shell {
+            background: rgba(107, 114, 128, 0.35);
+        }
+
+        [data-theme="light"] .modal-card {
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.99) 0%, rgba(249, 250, 251, 0.99) 100%);
+            border-color: rgba(107, 114, 128, 0.2);
+        }
+
+        [data-theme="light"] .saved-session-item {
+            border-color: rgba(107, 114, 128, 0.18);
+            background: rgba(255, 255, 255, 0.92);
+        }
+
+        [data-theme="light"] .saved-session-item:hover {
+            border-color: rgba(8, 145, 178, 0.54);
+            background: rgba(240, 247, 250, 0.96);
+        }
+
+        [data-theme="light"] .saved-session-tag {
+            border-color: rgba(107, 114, 128, 0.18);
+            background: rgba(243, 244, 246, 0.8);
+        }
+
+        [data-theme="light"] .saved-session-tag.current {
+            border-color: rgba(8, 145, 178, 0.32);
+            background: rgba(8, 145, 178, 0.08);
+        }
+
+        [data-theme="light"] .saved-session-selectable.selected {
+            border-color: rgba(239, 68, 68, 0.42);
+            background: rgba(254, 242, 242, 0.94);
+        }
+
+        [data-theme="light"] .danger-btn:hover {
+            border-color: rgba(239, 68, 68, 0.52);
+            background: rgba(239, 68, 68, 0.06);
+        }
+
+        [data-theme="light"] .button-tooltip-bubble {
+            border-color: rgba(107, 114, 128, 0.22);
+            background: rgba(255, 255, 255, 0.98);
+            box-shadow: 0 14px 30px rgba(17, 24, 39, 0.12);
+        }
+
+        [data-theme="light"] .button-tooltip-bubble::after {
+            border-top-color: rgba(255, 255, 255, 0.98);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        body {
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            color: var(--text);
+            background:
+                radial-gradient(circle at top left, rgba(79, 214, 255, 0.12), transparent 30%),
+                radial-gradient(circle at bottom right, rgba(12, 27, 79, 0.35), transparent 35%),
+                linear-gradient(135deg, #151a33 0%, #1a2040 45%, #131830 100%);
+            padding: 12px;
+        }
+
+        .shell {
+            width: min(1640px, 100%);
+            height: calc(100vh - 24px);
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: minmax(480px, 1fr) minmax(620px, 1.1fr);
+            gap: 18px;
+        }
+
+        .column {
+            min-height: 0;
+            display: grid;
+            gap: 18px;
+        }
+
+        .column-left {
+            grid-template-rows: auto minmax(0, 1fr);
+        }
+
+        .column-right {
+            grid-template-rows: minmax(0, 1fr) auto;
+        }
+
+        .card {
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            padding: 18px 22px 20px;
+            border-radius: 18px;
+            background: linear-gradient(180deg, var(--panel) 0%, var(--panel-strong) 100%);
+            border: 1px solid var(--line);
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+
+        .step1-card {
+            overflow: visible;
+        }
+
+        .section-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+
+        .section-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            font-size: 0.9rem;
+            font-weight: 700;
+        }
+
+        .section-title svg {
+            width: 15px;
+            height: 15px;
+            flex: 0 0 auto;
+        }
+
+        .message {
+            min-height: 20px;
+            margin-bottom: 10px;
+            font-size: 0.86rem;
+            color: var(--muted);
+        }
+
+        .message.success { color: var(--success); }
+        .message.error { color: var(--danger); }
+
+        .count-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+            gap: 12px;
+        }
+
+        .count-btn,
+        .layout-btn,
+        .mode-btn,
+        .ghost-btn,
+        .action-btn {
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: rgba(19, 24, 43, 0.92);
+            color: var(--text);
+            cursor: pointer;
+            transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+        }
+
+        .count-btn:hover,
+        .layout-btn:hover,
+        .mode-btn:hover,
+        .ghost-btn:hover,
+        .action-btn:hover {
+            border-color: rgba(79, 214, 255, 0.56);
+            transform: translateY(-1px);
+        }
+
+        .count-btn {
+            padding: 14px 16px 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            min-height: 92px;
+        }
+
+        .count-btn.active,
+        .layout-btn.active,
+        .mode-btn.active {
+            border-color: var(--line-strong);
+            background: linear-gradient(180deg, rgba(53, 93, 127, 0.92), rgba(47, 79, 109, 0.94));
+            box-shadow: inset 0 0 0 1px rgba(79, 214, 255, 0.18), 0 0 0 1px rgba(79, 214, 255, 0.08);
+        }
+
+        .count-meta {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            align-items: center;
+        }
+
+        .count-value {
+            font-size: clamp(2rem, 3vw, 3rem);
+            font-weight: 700;
+            line-height: 1;
+        }
+
+        .count-label {
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 1.6px;
+            font-size: 0.72rem;
+        }
+
+        .layout-panel {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(143, 161, 210, 0.12);
+        }
+
+        .layout-label {
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 1.4px;
+            font-size: 0.7rem;
+            margin-bottom: 10px;
+        }
+
+        .layout-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .layout-grid.single {
+            grid-template-columns: 1fr;
+        }
+
+        .layout-btn {
+            padding: 8px 10px;
+            display: grid;
+            grid-template-columns: 78px 1fr;
+            gap: 12px;
+            align-items: center;
+            text-align: left;
+        }
+
+        .layout-preview {
+            width: 78px;
+            height: 60px;
+            display: grid;
+            gap: 4px;
+            padding: 4px;
+            border-radius: 10px;
+            border: 1px solid rgba(79, 214, 255, 0.22);
+            background: rgba(15, 20, 38, 0.76);
+        }
+
+        .layout-preview .pane {
+            border-radius: 5px;
+            background: rgba(79, 214, 255, 0.18);
+            border: 1px solid rgba(79, 214, 255, 0.65);
+        }
+
+        .layout-preview.two-vertical { grid-template-columns: 1fr 1fr; }
+        .layout-preview.two-horizontal { grid-template-rows: 1fr 1fr; }
+        .layout-preview.three-vertical { grid-template-columns: repeat(3, 1fr); }
+        .layout-preview.three-horizontal { grid-template-rows: repeat(3, 1fr); }
+        .layout-preview.three-split {
+            grid-template-columns: 2fr 1fr;
+            grid-template-rows: 1fr 1fr;
+        }
+        .layout-preview.three-split .pane:nth-child(1) {
+            grid-column: 1;
+            grid-row: 1;
+        }
+        .layout-preview.three-split .pane:nth-child(2) {
+            grid-column: 1;
+            grid-row: 2;
+        }
+        .layout-preview.three-split .pane:nth-child(3) {
+            grid-column: 2;
+            grid-row: 1 / span 2;
+        }
+        .layout-preview.single {
+            grid-template-columns: 1fr;
+            grid-template-rows: 1fr;
+        }
+        .layout-preview.grid {
+            grid-template-columns: repeat(var(--preview-columns, 2), 1fr);
+            grid-template-rows: repeat(var(--preview-rows, 2), 1fr);
+        }
+
+        .layout-copy strong {
+            display: block;
+            font-size: 0.93rem;
+            margin-bottom: 4px;
+        }
+
+        .layout-copy span {
+            color: var(--muted);
+            font-size: 0.76rem;
+            line-height: 1.35;
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .toolbar-status {
+            flex-basis: 100%;
+            min-height: 18px;
+            color: var(--muted);
+            font-size: 0.76rem;
+            line-height: 1.35;
+        }
+
+        .toolbar-status.success { color: var(--success); }
+        .toolbar-status.error { color: var(--danger); }
+
+        .ghost-btn {
+            padding: 10px 14px;
+            font-size: 0.86rem;
+            background: rgba(19, 24, 43, 0.82);
+        }
+
+        .quick-controls {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 4px;
+            flex-wrap: wrap;
+        }
+
+        .quick-controls-label {
+            font-size: 0.78rem;
+            color: var(--muted);
+        }
+
+        .icon-btn {
+            width: 42px;
+            height: 42px;
+            padding: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+        }
+
+        .icon-btn svg {
+            width: 18px;
+            height: 18px;
+        }
+
+        .icon-btn.loading svg {
+            animation: tf-spin 0.9s linear infinite;
+        }
+
+        .inline-status {
+            min-height: 18px;
+            text-align: center;
+            color: var(--muted);
+            font-size: 0.76rem;
+            line-height: 1.35;
+        }
+
+        .inline-status.success { color: var(--success); }
+        .inline-status.error { color: var(--danger); }
+
+        .settings-grid {
+            min-height: 0;
+            display: grid;
+            gap: 14px;
+            overflow: auto;
+            padding-right: 4px;
+        }
+
+        .app-settings-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            align-items: start;
+            gap: 12px;
+        }
+
+        .settings-section {
+            display: grid;
+            gap: 14px;
+            padding: 14px;
+            border-radius: 14px;
+            border: 1px solid rgba(143, 161, 210, 0.12);
+            background: rgba(19, 24, 43, 0.58);
+        }
+
+        .app-settings-grid > .check-field,
+        .app-settings-grid > .settings-section {
+            grid-column: 1 / -1;
+        }
+
+        .app-settings-grid .field {
+            gap: 5px;
+        }
+
+        .app-settings-grid .field input,
+        .app-settings-grid .field select {
+            padding: 9px 12px;
+            font-size: 0.92rem;
+        }
+
+        .compact-section {
+            gap: 10px;
+            padding: 12px;
+        }
+
+        .settings-fields-inline {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            gap: 10px;
+            align-items: start;
+        }
+
+        .settings-section.hidden {
+            display: none;
+        }
+
+        .settings-section-title {
+            font-size: 0.76rem;
+            letter-spacing: 1.2px;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        .settings-hint {
+            color: var(--muted);
+            font-size: 0.76rem;
+            line-height: 1.45;
+        }
+
+        @keyframes tf-spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        .mode-toggle {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+
+        .mode-btn {
+            padding: 12px 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            font-size: 0.92rem;
+            font-weight: 600;
+        }
+
+        .mode-btn small {
+            color: var(--muted);
+            font-size: 0.74rem;
+            font-weight: 400;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+        }
+
+        .span-2 { grid-column: 1 / -1; }
+
+        .field {
+            display: flex;
+            flex-direction: column;
+            gap: 7px;
+        }
+
+        .field.hidden {
+            display: none;
+        }
+
+        .field label {
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            font-size: 0.72rem;
+        }
+
+        .field-label-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .field input,
+        .field select {
+            width: 100%;
+            padding: 11px 13px;
+            border-radius: 10px;
+            border: 1px solid rgba(143, 161, 210, 0.18);
+            background: rgba(16, 21, 39, 0.94);
+            color: var(--text);
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.18s ease, box-shadow 0.18s ease;
+        }
+
+        .field input:focus,
+        .field select:focus {
+            border-color: rgba(94, 129, 235, 0.6);
+            box-shadow: 0 0 0 3px rgba(94, 129, 235, 0.15);
+        }
+
+        .field select {
+            appearance: none;
+            cursor: pointer;
+        }
+
+        .password-input-wrapper {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .password-input-wrapper input {
+            padding-right: 40px;
+        }
+
+        .show-password-btn {
+            position: absolute;
+            right: 10px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            color: var(--muted);
+            padding: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 4px;
+            transition: color 0.18s ease;
+        }
+
+        .show-password-btn:hover {
+            color: var(--text);
+        }
+
+        .show-password-btn:active {
+            color: var(--accent);
+        }
+
+        .field input::placeholder { color: #5d6688; }
+
+        .tip-btn {
+            width: 22px;
+            height: 22px;
+            border: 1px solid rgba(79, 214, 255, 0.28);
+            border-radius: 999px;
+            background: rgba(79, 214, 255, 0.08);
+            color: var(--accent);
+            cursor: pointer;
+            font-size: 0.78rem;
+            font-weight: 700;
+            line-height: 1;
+            transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease;
+        }
+
+        .tip-btn:hover {
+            border-color: rgba(79, 214, 255, 0.58);
+            background: rgba(79, 214, 255, 0.16);
+            transform: translateY(-1px);
+        }
+
+        .tip-btn:focus-visible {
+            outline: 2px solid rgba(79, 214, 255, 0.4);
+            outline-offset: 2px;
+        }
+
+        .inline-tip {
+            display: none;
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid rgba(79, 214, 255, 0.16);
+            background: rgba(79, 214, 255, 0.08);
+            color: var(--muted);
+            font-size: 0.74rem;
+            line-height: 1.4;
+        }
+
+        .inline-tip.visible {
+            display: block;
+        }
+
+        .inline-tip code {
+            color: var(--text);
+            font-family: Consolas, Monaco, "Courier New", monospace;
+        }
+
+        .inline-tip button {
+            font: inherit;
+        }
+
+        .inline-tip ul {
+            margin: 8px 0 0 16px;
+            display: grid;
+            gap: 6px;
+        }
+
+        .inline-tip li {
+            color: var(--text);
+        }
+
+        .inline-tip pre {
+            margin-top: 8px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background: rgba(13, 18, 34, 0.72);
+            color: var(--text);
+            font-family: Consolas, Monaco, "Courier New", monospace;
+            font-size: 0.72rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .t-agent-select {
+            padding-right: 36px;
+            color-scheme: dark;
+            background-image:
+                linear-gradient(45deg, transparent 50%, currentColor 50%),
+                linear-gradient(135deg, currentColor 50%, transparent 50%);
+            background-position:
+                calc(100% - 16px) calc(50% - 3px),
+                calc(100% - 11px) calc(50% - 3px);
+            background-size: 5px 5px, 5px 5px;
+            background-repeat: no-repeat;
+        }
+
+        /* Light theme would otherwise override the select background to white;
+           keep agent-select dark in all themes so status colors remain readable. */
+        [data-theme="light"] .t-agent-select {
+            background-color: rgba(16, 21, 39, 0.94);
+            color: #f3f6ff;
+        }
+
+        .t-agent-select.status-installed {
+            border-color: rgba(57, 212, 166, 0.52);
+            background-color: #0c2520;
+            color: var(--success);
+        }
+
+        .t-agent-select.status-missing,
+        .t-agent-select.status-needs_manual_install {
+            border-color: rgba(255, 189, 89, 0.48);
+            background-color: #231a06;
+            color: #ffd084;
+        }
+
+        .t-agent-select.status-missing_prerequisite,
+        .t-agent-select.status-check_failed,
+        .t-agent-select.status-unsupported_here {
+            border-color: rgba(255, 111, 125, 0.48);
+            background-color: #22090e;
+            color: #ff8b96;
+        }
+
+        .t-agent-select.status-target_incomplete {
+            border-color: rgba(79, 214, 255, 0.48);
+            background-color: #061921;
+            color: var(--accent);
+        }
+
+        .agent-preflight-disclosure {
+            display: none;
+        }
+
+        .agent-preflight-disclosure.visible {
+            display: block;
+        }
+
+        .agent-preflight-summary {
+            cursor: pointer;
+            color: var(--muted);
+            font-size: 0.72rem;
+            line-height: 1.4;
+            user-select: none;
+        }
+
+        .agent-preflight-summary.installed {
+            color: var(--success);
+        }
+
+        .agent-preflight-summary.missing,
+        .agent-preflight-summary.needs_manual_install {
+            color: #ffd084;
+        }
+
+        .agent-preflight-summary.missing_prerequisite,
+        .agent-preflight-summary.check_failed,
+        .agent-preflight-summary.unsupported_here {
+            color: #ff8b96;
+        }
+
+        .agent-preflight-summary.target_incomplete {
+            color: var(--accent);
+        }
+
+        .agent-preflight-disclosure[open] .agent-preflight-copy {
+            margin-top: 8px;
+        }
+
+        .agent-preflight-copy {
+            display: grid;
+            gap: 4px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid rgba(143, 161, 210, 0.16);
+            background: rgba(13, 18, 34, 0.48);
+            color: var(--muted);
+            font-size: 0.74rem;
+            line-height: 1.45;
+        }
+
+        .agent-preflight-copy strong {
+            color: var(--text);
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .agent-preflight-copy code {
+            color: var(--text);
+            font-family: Consolas, Monaco, "Courier New", monospace;
+        }
+
+        .tip-link-btn {
+            display: inline-flex;
+            align-items: center;
+            padding: 0;
+            border: none;
+            background: none;
+            color: var(--accent);
+            cursor: pointer;
+            font-weight: 700;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+
+        .tip-link-btn:hover {
+            color: var(--text);
+        }
+
+        .check-field {
+            min-height: 41px;
+            padding: 10px 12px;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            border-radius: 10px;
+            border: 1px solid rgba(143, 161, 210, 0.18);
+            background: rgba(16, 21, 39, 0.94);
+        }
+
+        .check-field input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            margin-top: 2px;
+            accent-color: var(--accent-strong);
+            flex: 0 0 auto;
+        }
+
+        .check-copy {
+            display: grid;
+            gap: 3px;
+            min-width: 0;
+        }
+
+        .check-copy strong {
+            font-size: 0.84rem;
+            font-weight: 600;
+        }
+
+        .check-copy span {
+            display: block;
+            color: var(--muted);
+            font-size: 0.72rem;
+            line-height: 1.35;
+        }
+
+        .compact-check {
+            min-height: 0;
+            padding: 9px 12px;
+        }
+
+        .check-stack {
+            display: grid;
+            gap: 8px;
+        }
+
+        .path-picker {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto auto;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .picker-display {
+            min-height: 41px;
+            padding: 11px 13px;
+            border-radius: 10px;
+            border: 1px solid rgba(143, 161, 210, 0.18);
+            background: rgba(16, 21, 39, 0.94);
+            color: var(--text);
+            font-size: 0.95rem;
+            display: flex;
+            align-items: center;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+
+        .picker-display.empty {
+            color: #5d6688;
+        }
+
+        .picker-btn {
+            padding: 10px 13px;
+            white-space: nowrap;
+        }
+
+        .mode-note {
+            margin-top: 12px;
+            color: var(--muted);
+            font-size: 0.76rem;
+            line-height: 1.4;
+        }
+
+        .terminal-card {
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+            align-content: start;
+            padding: 16px 18px 14px;
+        }
+
+        .terminal-card .section-head {
+            margin-bottom: 12px;
+        }
+
+        .rows-wrap {
+            min-height: 0;
+            display: grid;
+            grid-template-columns: repeat(var(--terminal-columns, 1), minmax(0, 1fr));
+            grid-auto-rows: max-content;
+            align-content: start;
+            gap: 10px;
+            overflow: auto;
+            padding-right: 4px;
+        }
+
+        .t-row {
+            min-height: 0;
+            display: grid;
+            grid-template-rows: auto 1fr;
+            border-radius: 14px;
+            background: rgba(29, 36, 60, 0.92);
+            border: 1px solid rgba(143, 161, 210, 0.12);
+            overflow: hidden;
+        }
+
+        .t-row-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 10px;
+            background: rgba(52, 74, 108, 0.45);
+            border-bottom: 1px solid rgba(143, 161, 210, 0.1);
+        }
+
+        .t-badge {
+            min-width: 24px;
+            padding: 2px 7px;
+            border-radius: 6px;
+            background: rgba(79, 214, 255, 0.18);
+            color: var(--accent);
+            font-size: 0.68rem;
+            font-weight: 700;
+            text-align: center;
+        }
+
+        .t-name {
+            color: var(--muted);
+            font-size: 0.74rem;
+        }
+
+        .t-fields {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 8px;
+            padding: 8px 10px 10px;
+            align-content: start;
+        }
+
+        .t-fields .field {
+            gap: 5px;
+        }
+
+        .t-fields .field label {
+            font-size: 0.58rem;
+            letter-spacing: 0.9px;
+        }
+
+        .t-fields .field input {
+            padding: 7px 10px;
+            font-size: 0.84rem;
+        }
+
+        .t-fields .field select {
+            padding: 7px 10px;
+            font-size: 0.84rem;
+        }
+
+        .command-mode-toggle {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 6px;
+        }
+
+        .command-mode-btn {
+            padding: 7px 10px;
+            border: 1px solid rgba(143, 161, 210, 0.18);
+            border-radius: 10px;
+            background: rgba(16, 21, 39, 0.94);
+            color: var(--muted);
+            cursor: pointer;
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.9px;
+            text-transform: uppercase;
+            transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
+        }
+
+        .command-mode-btn:hover {
+            border-color: rgba(79, 214, 255, 0.48);
+            color: var(--text);
+        }
+
+        .command-mode-btn.active {
+            border-color: var(--line-strong);
+            background: rgba(79, 214, 255, 0.16);
+            color: var(--text);
+        }
+
+        .t-fields .check-field {
+            min-height: 0;
+            padding: 8px 10px;
+        }
+
+        .t-fields .check-copy strong {
+            font-size: 0.78rem;
+        }
+
+        .t-fields .check-copy span {
+            font-size: 0.66rem;
+        }
+
+        .action-stack {
+            display: grid;
+            gap: 14px;
+        }
+
+        .action-btn {
+            width: 100%;
+            padding: 18px 20px;
+            border: none;
+            border-radius: 14px;
+            background: linear-gradient(90deg, #46c7ed 0%, #39b9e1 52%, #30add9 100%);
+            color: #07111d;
+            font-size: 1.1rem;
+            font-weight: 800;
+            letter-spacing: 1.8px;
+            text-transform: uppercase;
+        }
+
+        .action-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .secondary-link {
+            width: fit-content;
+            justify-self: center;
+            padding: 11px 20px;
+            border-radius: 12px;
+            border: 1px solid rgba(143, 161, 210, 0.18);
+            background: rgba(45, 52, 86, 0.9);
+            color: var(--text);
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+
+        .modal-shell {
+            position: fixed;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: rgba(6, 10, 20, 0.76);
+            backdrop-filter: blur(10px);
+            z-index: 20;
+        }
+
+        .modal-shell.visible {
+            display: flex;
+        }
+
+        .modal-card {
+            width: min(720px, 100%);
+            max-height: min(70vh, 760px);
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr) auto;
+            gap: 16px;
+            padding: 18px;
+            border-radius: 18px;
+            background: linear-gradient(180deg, rgba(31, 38, 63, 0.98) 0%, rgba(24, 30, 52, 0.99) 100%);
+            border: 1px solid rgba(143, 161, 210, 0.16);
+            box-shadow: var(--shadow);
+        }
+
+        .modal-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .modal-title {
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+
+        .modal-copy {
+            color: var(--muted);
+            font-size: 0.82rem;
+            line-height: 1.45;
+        }
+
+        .saved-session-list {
+            min-height: 0;
+            display: grid;
+            gap: 10px;
+            overflow: auto;
+            padding-right: 4px;
+        }
+
+        .saved-session-item {
+            width: 100%;
+            padding: 14px 16px;
+            display: grid;
+            gap: 6px;
+            text-align: left;
+            border: 1px solid rgba(143, 161, 210, 0.14);
+            border-radius: 14px;
+            background: rgba(16, 21, 39, 0.9);
+            color: var(--text);
+            cursor: pointer;
+            transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+        }
+
+        .saved-session-item:hover {
+            transform: translateY(-1px);
+            border-color: rgba(79, 214, 255, 0.54);
+            background: rgba(20, 27, 47, 0.96);
+        }
+
+        .saved-session-content {
+            min-width: 0;
+            display: grid;
+            gap: 6px;
+        }
+
+        .saved-session-topline {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .saved-session-name {
+            font-size: 0.94rem;
+            font-weight: 700;
+        }
+
+        .saved-session-tags {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .saved-session-tag {
+            padding: 3px 8px;
+            border-radius: 999px;
+            border: 1px solid rgba(143, 161, 210, 0.14);
+            background: rgba(45, 52, 86, 0.72);
+            color: var(--muted);
+            font-size: 0.66rem;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .saved-session-tag.current {
+            border-color: rgba(79, 214, 255, 0.32);
+            background: rgba(79, 214, 255, 0.12);
+            color: var(--accent);
+        }
+
+        .saved-session-selectable {
+            grid-template-columns: auto minmax(0, 1fr);
+            align-items: start;
+            gap: 12px;
+            cursor: pointer;
+        }
+
+        .saved-session-selectable.selected {
+            border-color: rgba(255, 107, 124, 0.52);
+            background: rgba(47, 19, 28, 0.94);
+        }
+
+        .saved-session-checkbox {
+            width: 18px;
+            height: 18px;
+            margin-top: 2px;
+            accent-color: var(--danger);
+            cursor: pointer;
+        }
+
+        .saved-session-meta,
+        .saved-session-id {
+            color: var(--muted);
+            font-size: 0.76rem;
+            line-height: 1.4;
+        }
+
+        .danger-btn {
+            border-color: rgba(255, 107, 124, 0.24);
+            color: var(--danger);
+        }
+
+        .danger-btn:hover {
+            border-color: rgba(255, 107, 124, 0.52);
+            background: rgba(255, 107, 124, 0.1);
+        }
+
+        .modal-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .modal-actions-buttons {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .modal-actions .modal-copy {
+            min-height: 20px;
+        }
+
+        .app-settings-actions {
+            justify-content: flex-end;
+        }
+
+        .button-tooltip {
+            position: relative;
+            display: inline-flex;
+        }
+
+        .button-tooltip-bubble {
+            position: absolute;
+            right: 0;
+            bottom: calc(100% + 10px);
+            width: min(320px, 72vw);
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid rgba(143, 161, 210, 0.18);
+            background: rgba(16, 21, 39, 0.98);
+            color: var(--muted);
+            font-size: 0.74rem;
+            line-height: 1.45;
+            box-shadow: 0 14px 30px rgba(4, 8, 20, 0.28);
+            opacity: 0;
+            pointer-events: none;
+            transform: translateY(4px);
+            transition: opacity 0.18s ease, transform 0.18s ease;
+            z-index: 2;
+        }
+
+        .button-tooltip-bubble code {
+            color: var(--text);
+            font-family: Consolas, Monaco, "Courier New", monospace;
+        }
+
+        .button-tooltip-bubble::after {
+            content: "";
+            position: absolute;
+            right: 18px;
+            top: 100%;
+            border-width: 6px;
+            border-style: solid;
+            border-color: rgba(16, 21, 39, 0.98) transparent transparent transparent;
+        }
+
+        .button-tooltip:hover .button-tooltip-bubble,
+        .button-tooltip:focus-within .button-tooltip-bubble {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        @media (max-width: 1180px) {
+            .shell {
+                grid-template-columns: 1fr;
+                grid-template-rows: 1fr 1.1fr;
+            }
+
+            .column-left,
+            .column-right {
+                grid-template-rows: 1fr 1fr;
+            }
+        }
+
+        @media (max-width: 900px) {
+            body {
+                padding: 8px;
+            }
+
+            .shell {
+                height: calc(100vh - 16px);
+                gap: 10px;
+            }
+
+            .card {
+                padding: 14px;
+                border-radius: 14px;
+            }
+
+            .step1-card {
+                overflow: hidden;
+            }
+
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .rows-wrap {
+                grid-template-columns: 1fr;
+                overflow: auto;
+                padding-right: 4px;
+            }
+
+            .path-picker {
+                grid-template-columns: 1fr;
+            }
+
+            .span-2 {
+                grid-column: 1;
+            }
+
+            .app-settings-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .settings-fields-inline {
+                grid-template-columns: 1fr;
+            }
+
+            .modal-card {
+                max-height: calc(100vh - 32px);
+            }
+
+            .modal-head,
+            .modal-actions {
+                align-items: stretch;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="shell" data-max-sessions="{{ max_sessions }}">
+    <section class="column column-left">
+        <div class="card step1-card">
+            <div id="message" class="message">Select how many terminals you want, pick a split when needed, then choose SSH or WSL.</div>
+            <div class="section-head">
+                <div class="section-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="3" width="20" height="14" rx="2"></rect>
+                        <line x1="8" y1="21" x2="16" y2="21"></line>
+                        <line x1="12" y1="17" x2="12" y2="21"></line>
+                    </svg>
+                    Step 1 — How Many Terminals?
+                </div>
+            </div>
+
+            <div class="count-grid" id="countGrid"></div>
+
+            <div class="layout-panel">
+                <div class="layout-label">Split Layout</div>
+                <div id="layoutOptions" class="layout-grid"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="section-head">
+                <div class="section-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>
+                    </svg>
+                    Step 2 — Session Source
+                </div>
+                <div class="toolbar">
+                    <button class="ghost-btn" type="button" onclick="saveCurrentConfig()">Save Session</button>
+                    <button class="ghost-btn" type="button" onclick="importSavedSession()">Import Session</button>
+                    <button class="ghost-btn danger-btn" type="button" onclick="deleteSavedSessions()">Delete Sessions</button>
+                </div>
+                <div id="updateStatus" class="toolbar-status"></div>
+            </div>
+
+            <div class="mode-toggle">
+                <button type="button" class="mode-btn active" data-mode="ssh">
+                    SSH
+                    <small>Remote host</small>
+                </button>
+                <button type="button" class="mode-btn" data-mode="wsl">
+                    Local Repo
+                    <small>Local folder</small>
+                </button>
+            </div>
+
+            <div id="modeFields"></div>
+        </div>
+    </section>
+
+    <section class="column column-right">
+        <div class="card terminal-card">
+            <div class="section-head">
+                <div class="section-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="4 17 10 11 4 5"></polyline>
+                        <line x1="12" y1="19" x2="20" y2="19"></line>
+                    </svg>
+                    Step 3 — Terminal Setup
+                </div>
+            </div>
+            <div id="terminalRows" class="rows-wrap"></div>
+        </div>
+
+        <div class="action-stack">
+            <button id="launchBtn" type="button" class="action-btn" onclick="launchSessions()">Launch Terminals</button>
+            <a href="/terminals" class="secondary-link" target="gridvibe-sessions" onclick="return viewActiveTerminals(event)">View Active Terminals →</a>
+            <div id="themeControl" class="quick-controls">
+                <span class="quick-controls-label">Theme</span>
+                <button id="themeToggleBtnIndex" type="button" class="ghost-btn" onclick="cycleTheme()" style="font-size:.78rem;padding:5px 14px;">🌙 Dark</button>
+                <button id="checkUpdatesBtn" class="ghost-btn icon-btn" type="button" onclick="checkForUpdates()" title="Check for updates" aria-label="Check for updates">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
+                        <polyline points="21 3 21 9 15 9"></polyline>
+                    </svg>
+                </button>
+                <button id="appSettingsBtn" class="ghost-btn icon-btn" type="button" onclick="openAppSettings()" title="App settings" aria-label="App settings">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-.51A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.81-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                    </svg>
+                </button>
+            </div>
+            <div id="quickUpdateStatus" class="inline-status"></div>
+        </div>
+    </section>
+</div>
+
+<div id="savedSessionsModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="savedSessionsTitle">
+        <div class="modal-head">
+            <div>
+                <div id="savedSessionsTitle" class="modal-title">Import Saved Session</div>
+                <div class="modal-copy">Pick one saved launcher setup to load into the form.</div>
+            </div>
+            <button class="ghost-btn" type="button" onclick="closeSavedSessionModal()">Close</button>
+        </div>
+        <div id="savedSessionsList" class="saved-session-list"></div>
+        <div class="modal-actions">
+            <div id="savedSessionsFooterCopy" class="modal-copy"></div>
+            <div class="modal-actions-buttons">
+                <button id="savedSessionsPrimaryAction" class="ghost-btn danger-btn" type="button" hidden></button>
+                <button class="ghost-btn" type="button" onclick="closeSavedSessionModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="appSettingsModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="appSettingsTitle">
+        <div class="modal-head">
+            <div>
+                <div id="appSettingsTitle" class="modal-title">App Settings</div>
+                <div class="modal-copy">Machine-level voice backend settings live here. They are not stored inside saved session presets.</div>
+            </div>
+            <button class="ghost-btn" type="button" onclick="closeAppSettingsModal()">Close</button>
+        </div>
+        <div class="settings-grid app-settings-grid">
+            <label class="check-field compact-check">
+                <input id="appVoiceEnabled" type="checkbox">
+                <span class="check-copy">
+                    <strong>Enable voice input</strong>
+                    <span>Turns the microphone and speech-to-text path on or off for this machine.</span>
+                </span>
+            </label>
+            <div class="field">
+                <label>Theme</label>
+                <select id="appTheme">
+                    <option value="system">System</option>
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>Voice Backend</label>
+                <select id="appVoiceEngine" onchange="updateAppSettingsVisibility()">
+                    <option value="vosk">Vosk</option>
+                    <option value="whisper">faster-whisper</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>Language</label>
+                <input id="appVoiceLanguage" type="text" placeholder="en-US">
+            </div>
+            <div id="appVoskSettings" class="settings-section compact-section">
+                <div class="settings-section-title">Vosk</div>
+                <div class="settings-fields-inline">
+                    <div class="field">
+                        <label>Vosk Model</label>
+                        <input id="appVoskModel" type="text" placeholder="vosk-model-en-us-0.22">
+                    </div>
+                </div>
+            </div>
+            <div id="appWhisperSettings" class="settings-section compact-section">
+                <div class="settings-section-title">faster-whisper</div>
+                <div class="settings-fields-inline">
+                    <div class="field">
+                        <label>Whisper Model</label>
+                        <input id="appWhisperModel" type="text" placeholder="base">
+                    </div>
+                    <div class="field">
+                        <label>Device</label>
+                        <select id="appWhisperDevice" onchange="updateAppSettingsVisibility()">
+                            <option value="cpu">CPU</option>
+                            <option value="cuda">GPU (CUDA)</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label>Compute Type</label>
+                        <select id="appWhisperComputeType">
+                            <option value="int8">int8</option>
+                            <option value="float32">float32</option>
+                            <option value="float16">float16</option>
+                            <option value="int8_float16">int8_float16</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="appWhisperGpuHint" class="settings-hint hidden">GPU mode requires a working NVIDIA CUDA setup on this machine. If startup fails, switch the device back to CPU.</div>
+            </div>
+        </div>
+        <div class="modal-actions app-settings-actions">
+            <div class="modal-actions-buttons">
+                <div class="button-tooltip">
+                    <button id="saveAppSettingsBtn" class="ghost-btn" type="button" onclick="saveAppSettings()" aria-describedby="saveAppSettingsTip" title="Saves to config.json. If that file is missing, GridVibe falls back to default_config.json.">Save Settings</button>
+                    <div id="saveAppSettingsTip" class="button-tooltip-bubble" role="tooltip">Saves to <code>config.json</code>. If that file is missing, GridVibe falls back to the committed <code>default_config.json</code>.</div>
+                </div>
+                <button class="ghost-btn" type="button" onclick="closeAppSettingsModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    /* ── Theme management ── */
+    const THEME_STORAGE_KEY = 'gridvibe.theme';
+
+    function normalizeThemePreference(theme) {
+        return ['system', 'light', 'dark'].includes(theme) ? theme : 'system';
+    }
+
+    function getStoredTheme() {
+        try { return normalizeThemePreference(localStorage.getItem(THEME_STORAGE_KEY)); } catch (_) { return null; }
+    }
+
+    function getSystemTheme() {
+        return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    }
+
+    function resolveTheme(theme) {
+        const preference = normalizeThemePreference(theme);
+        return preference === 'system' ? getSystemTheme() : preference;
+    }
+
+    function updateThemeControls(theme) {
+        const preference = normalizeThemePreference(theme);
+        const btn = document.getElementById('themeToggleBtnIndex');
+        const select = document.getElementById('appTheme');
+        if (btn) {
+            btn.textContent =
+                preference === 'light' ? '☀️ Light'
+                : preference === 'dark' ? '🌙 Dark'
+                : '◐ System';
+        }
+        if (select && select.value !== preference) {
+            select.value = preference;
+        }
+    }
+
+    function applyTheme(theme) {
+        const preference = normalizeThemePreference(theme);
+        const resolved = resolveTheme(preference);
+        document.documentElement.setAttribute('data-theme', resolved);
+        document.documentElement.setAttribute('data-theme-preference', preference);
+        try { localStorage.setItem(THEME_STORAGE_KEY, preference); } catch (_) {}
+        updateThemeControls(preference);
+    }
+
+    async function persistThemePreference(theme) {
+        try {
+            const response = await fetch('/api/app-config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    appearance: {
+                        theme: normalizeThemePreference(theme)
+                    }
+                })
+            });
+            if (!response.ok) {
+                return;
+            }
+            const data = await response.json();
+            if (data?.appearance?.theme) {
+                appSettings.appearance.theme = data.appearance.theme;
+                applyTheme(data.appearance.theme);
+            }
+        } catch (_error) {}
+    }
+
+    function cycleTheme() {
+        const current = getStoredTheme() || 'system';
+        const nextTheme =
+            current === 'system' ? 'light'
+            : current === 'light' ? 'dark'
+            : 'system';
+        applyTheme(nextTheme);
+        if (appSettings?.appearance) {
+            appSettings.appearance.theme = nextTheme;
+        }
+        persistThemePreference(nextTheme);
+    }
+
+    (function initTheme() {
+        applyTheme(getStoredTheme() || 'system');
+        const mediaQuery = window.matchMedia('(prefers-color-scheme: light)');
+        const listener = () => {
+            const themePreference = document.documentElement.getAttribute('data-theme-preference') || getStoredTheme() || 'system';
+            if (themePreference === 'system') {
+                applyTheme('system');
+            }
+        };
+        if (typeof mediaQuery.addEventListener === 'function') {
+            mediaQuery.addEventListener('change', listener);
+        } else if (typeof mediaQuery.addListener === 'function') {
+            mediaQuery.addListener(listener);
+        }
+    })();
+
+    window.name = 'gridvibe-launcher';
+    const MAX_SESSIONS = Number(document.querySelector('.shell').dataset.maxSessions || 4);
+    const COUNT_OPTIONS = [1, 2, 3, 4, 6, 8].filter(value => value <= MAX_SESSIONS);
+    const DEFAULT_TERMINALS = Array.from({ length: MAX_SESSIONS }, (_, index) => ({
+        title: `Terminal ${index + 1}`,
+        directory: '',
+        initial_command: '',
+        initial_command_mode: 'command',
+        agent_selection: '',
+        custom_agent: '',
+        distribution: '',
+        use_wsl: false,
+        use_powershell: false
+    }));
+    const AGENT_OPTIONS = {{ agent_options|tojson }};
+    const DEFAULT_APP_SETTINGS = Object.freeze({
+        appearance: Object.freeze({
+            theme: 'system'
+        }),
+        voice_input: Object.freeze({
+            enabled: true,
+            engine: 'vosk',
+            vosk_model: 'vosk-model-en-us-0.22',
+            whisper_model: 'base',
+            whisper_device: 'cpu',
+            whisper_compute_type: 'int8',
+            language: 'en-US'
+        })
+    });
+
+    let selectedCount = COUNT_OPTIONS.includes(4) ? 4 : COUNT_OPTIONS[COUNT_OPTIONS.length - 1];
+    let selectedLayout = defaultLayoutForCount(selectedCount);
+    let connectionMode = 'ssh';
+    let savedSessionResolver = null;
+    let savedSessionModalMode = 'import';
+    let activeSavedSessionId = '';
+    let activeSavedSessionName = '';
+    let cachedWslDistros = null;
+    let lastTerminalSetupTargetSignature = '';
+    let appSettings = JSON.parse(JSON.stringify(DEFAULT_APP_SETTINGS));
+    const agentPreflightRequestState = new WeakMap();
+    const agentPreflightTimerState = new WeakMap();
+    const ACTIVE_SAVED_SESSION_STORAGE_KEY = 'gridvibe.activeSavedSession';
+    const DEFAULT_SESSION_ID = 'default-session';
+
+    const SSH_FIELDS = `
+        <div class="form-grid">
+            <div class="field span-2">
+                <label>Host — IP Address or Hostname</label>
+                <input type="text" id="ssh_host" placeholder="192.168.1.100 or myserver.local" autocomplete="off">
+            </div>
+            <div class="field">
+                <label>Username</label>
+                <input type="text" id="ssh_username" value="ubuntu" placeholder="ubuntu">
+            </div>
+            <div class="field">
+                <label>Password</label>
+                <div class="password-input-wrapper">
+                    <input type="password" id="ssh_password" placeholder="Leave blank for key auth">
+                    <button type="button" class="show-password-btn" id="show_ssh_password" aria-label="Show password">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                            <circle cx="12" cy="12" r="3"></circle>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            <div class="field">
+                <label>SSH Port</label>
+                <input type="number" id="ssh_port" value="22" min="1" max="65535">
+            </div>
+            <div class="field">
+                <label>Default Working Directory</label>
+                <input type="text" id="ssh_default_dir" placeholder="/home/ubuntu/project">
+            </div>
+        </div>
+        <p class="mode-note">Use one SSH target for all panes, then override title, directory, or command per terminal on the right.</p>
+    `;
+
+    const WSL_FIELDS = `
+        <div class="form-grid">
+            <div class="field span-2">
+                <label>Local Repository</label>
+                <input type="hidden" id="wsl_distribution" value="">
+                <input type="hidden" id="wsl_username" value="">
+                <div class="path-picker">
+                    <input type="hidden" id="wsl_default_dir" value="">
+                    <div id="wsl_default_dir_display" class="picker-display empty">Select a folder on your local drive</div>
+                    <button type="button" class="ghost-btn picker-btn" onclick="browseLocalRepo()">Browse</button>
+                    <button type="button" class="ghost-btn picker-btn" onclick="clearLocalRepo()">Clear</button>
+                </div>
+            </div>
+        </div>
+        <p class="mode-note">Local Repo starts each pane in the selected folder. By default it uses Windows cmd. Enable WSL per terminal in Step 3 and optionally type the distro name you want, such as Ubuntu. If the distro field is left blank, that pane falls back to your preferred/default WSL distro.</p>
+    `;
+
+    const LAYOUT_COPY = {
+        1: {
+            single: { label: 'Single Terminal', note: 'One focused pane', preview: 'single' }
+        },
+        2: {
+            vertical: { label: 'Vertical Split', note: 'Two side-by-side panes', preview: 'two-vertical' },
+            horizontal: { label: 'Horizontal Split', note: 'Two stacked panes', preview: 'two-horizontal' }
+        },
+        3: {
+            vertical: { label: 'Vertical Split', note: 'Three side-by-side panes', preview: 'three-vertical' },
+            horizontal: { label: 'Horizontal Split', note: 'Three stacked panes', preview: 'three-horizontal' },
+            split: { label: 'Mixed Split', note: 'One tall pane plus two stacked panes', preview: 'three-split' }
+        },
+        4: {
+            grid: { label: 'Grid Layout', note: 'Fixed 2 x 2 arrangement', preview: 'grid' }
+        },
+        6: {
+            grid: { label: 'Grid Layout', note: 'Fixed 3 x 2 arrangement', preview: 'grid' }
+        },
+        8: {
+            grid: { label: 'Grid Layout', note: 'Fixed 4 x 2 arrangement', preview: 'grid' }
+        }
+    };
+
+    document.querySelectorAll('.mode-btn').forEach(button => {
+        button.addEventListener('click', () => {
+            if (button.dataset.mode === connectionMode) {
+                return;
+            }
+            document.querySelectorAll('.mode-btn').forEach(item => item.classList.remove('active'));
+            button.classList.add('active');
+            connectionMode = button.dataset.mode;
+            renderModeFields();
+            resetTerminalSetupIfTargetChanged(connectionMode, collectModeInputs());
+        });
+    });
+
+    function escHtml(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    function getConnectionModeLabel(mode) {
+        return mode === 'wsl' ? 'Local Repo' : 'SSH';
+    }
+
+    function defaultLayoutForCount(count) {
+        if (count <= 1) {
+            return 'single';
+        }
+        return count >= 4 ? 'grid' : 'vertical';
+    }
+
+    function buildDefaultTerminalDrafts() {
+        return DEFAULT_TERMINALS.map(terminal => ({ ...terminal }));
+    }
+
+    function buildConnectionTargetSignature(mode = connectionMode, values = collectModeInputs()) {
+        const inputs = values || collectModeInputs();
+        if (mode === 'wsl') {
+            return JSON.stringify({
+                mode: 'wsl',
+                distribution: String(inputs?.wsl?.distribution || '').trim(),
+                username: String(inputs?.wsl?.username || '').trim(),
+                default_dir: String(inputs?.wsl?.default_dir || '').trim()
+            });
+        }
+
+        return JSON.stringify({
+            mode: 'ssh',
+            host: String(inputs?.ssh?.host || '').trim(),
+            username: String(inputs?.ssh?.username || '').trim(),
+            port: String(inputs?.ssh?.port || '').trim(),
+            default_dir: String(inputs?.ssh?.default_dir || '').trim()
+        });
+    }
+
+    function updateTerminalTargetSignature(mode = connectionMode, values = collectModeInputs()) {
+        lastTerminalSetupTargetSignature = buildConnectionTargetSignature(mode, values);
+    }
+
+    function resetTerminalSetup() {
+        buildTerminalRows(selectedCount, buildDefaultTerminalDrafts());
+    }
+
+    function resetTerminalSetupIfTargetChanged(mode = connectionMode, values = collectModeInputs()) {
+        const nextSignature = buildConnectionTargetSignature(mode, values);
+        if (!lastTerminalSetupTargetSignature) {
+            lastTerminalSetupTargetSignature = nextSignature;
+            return false;
+        }
+
+        if (nextSignature === lastTerminalSetupTargetSignature) {
+            return false;
+        }
+
+        lastTerminalSetupTargetSignature = nextSignature;
+        resetTerminalSetup();
+        return true;
+    }
+
+    function getGridMetrics(count) {
+        if (count >= 8) {
+            return { columns: 4, rows: 2 };
+        }
+        if (count >= 6) {
+            return { columns: 3, rows: 2 };
+        }
+        return { columns: 2, rows: 2 };
+    }
+
+    function buildDefaultSessionName() {
+        const isDefaultSelection = !activeSavedSessionId || activeSavedSessionId === DEFAULT_SESSION_ID;
+        if (!isDefaultSelection && activeSavedSessionName) {
+            return activeSavedSessionName;
+        }
+
+        const config = collectFormConfig();
+        const sshHost = config.ssh.host.trim();
+        if (config.connection_mode === 'ssh' && sshHost) {
+            return sshHost;
+        }
+
+        const defaultDir = config.connection_mode === 'wsl'
+            ? config.wsl.default_dir.trim()
+            : '';
+        const firstTerminalDir = config.terminals.find(terminal => terminal.directory.trim())?.directory?.trim() || '';
+        const directoryName = getDirectoryName(defaultDir || firstTerminalDir);
+        if (directoryName) {
+            return directoryName;
+        }
+
+        const now = new Date();
+        const parts = [
+            now.getFullYear(),
+            String(now.getMonth() + 1).padStart(2, '0'),
+            String(now.getDate()).padStart(2, '0'),
+            String(now.getHours()).padStart(2, '0'),
+            String(now.getMinutes()).padStart(2, '0'),
+            String(now.getSeconds()).padStart(2, '0')
+        ];
+        const randomPart = Math.random().toString(16).slice(2, 6);
+        return `session-${parts.join('')}-${randomPart}`;
+    }
+
+    function getDirectoryName(path) {
+        const trimmed = String(path || '').trim().replace(/[\\/]+$/, '');
+        if (!trimmed) {
+            return '';
+        }
+
+        const parts = trimmed.split(/[\\/]/).filter(Boolean);
+        return parts[parts.length - 1] || trimmed;
+    }
+
+    function getStep2DefaultDirectory(config, modeOverride = '') {
+        const mode = modeOverride || config?.connection_mode || connectionMode;
+        if (mode === 'wsl') {
+            return String(config?.wsl?.default_dir || '').trim();
+        }
+        return String(config?.ssh?.default_dir || '').trim();
+    }
+
+    function isAbsoluteDirectory(path, mode) {
+        const trimmed = String(path || '').trim();
+        if (!trimmed) {
+            return false;
+        }
+        if (/^[A-Za-z]:[\\/]/.test(trimmed)) {
+            return true;
+        }
+        if (trimmed.startsWith('\\\\')) {
+            return true;
+        }
+        if (trimmed.startsWith('/') || trimmed.startsWith('~')) {
+            return true;
+        }
+        return mode === 'wsl' && trimmed.startsWith('\\');
+    }
+
+    function normalizeComparableDirectory(path, mode) {
+        const trimmed = String(path || '').trim();
+        if (!trimmed) {
+            return '';
+        }
+
+        let normalized = trimmed.replace(/\\/g, '/');
+        if (normalized !== '/') {
+            normalized = normalized.replace(/\/+$/, '');
+        }
+        if (!normalized && trimmed.startsWith('/')) {
+            normalized = '/';
+        }
+        if (mode === 'wsl') {
+            normalized = normalized.toLowerCase();
+        }
+        return normalized;
+    }
+
+    function joinDirectories(baseDir, childDir, mode) {
+        const rawBase = String(baseDir || '').trim();
+        const base = rawBase === '/' ? '/' : rawBase.replace(/[\\/]+$/, '');
+        const child = String(childDir || '').trim().replace(/^[\\/]+/, '');
+        if (!base) {
+            return child;
+        }
+        if (!child) {
+            return base;
+        }
+
+        const separator = mode === 'wsl' && base.includes('\\') && !base.includes('/') ? '\\' : '/';
+        const normalizedChild = child.replace(/[\\/]+/g, separator);
+        if (/^[A-Za-z]:$/.test(base)) {
+            return `${base}${separator}${normalizedChild}`;
+        }
+        return `${base}${separator}${normalizedChild}`;
+    }
+
+    function getDisplaySubdirectory(directory, defaultDir, mode) {
+        const rawDirectory = String(directory || '').trim();
+        const baseDirectory = String(defaultDir || '').trim();
+        if (!rawDirectory || !baseDirectory || !isAbsoluteDirectory(rawDirectory, mode)) {
+            return rawDirectory;
+        }
+
+        const normalizedDirectory = normalizeComparableDirectory(rawDirectory, mode);
+        const normalizedBase = normalizeComparableDirectory(baseDirectory, mode);
+        if (!normalizedBase) {
+            return rawDirectory;
+        }
+        if (normalizedDirectory === normalizedBase) {
+            return '';
+        }
+
+        const prefix = normalizedBase === '/' ? '/' : `${normalizedBase}/`;
+        if (!normalizedDirectory.startsWith(prefix)) {
+            return rawDirectory;
+        }
+
+        const relativePart = rawDirectory.trim().replace(/\\/g, '/').slice(prefix.length);
+        if (!relativePart) {
+            return '';
+        }
+        return mode === 'wsl' && baseDirectory.includes('\\') && !baseDirectory.includes('/')
+            ? relativePart.replace(/\//g, '\\')
+            : relativePart;
+    }
+
+    function normalizeTerminalsForDisplay(terminals, defaultDir, mode) {
+        return (Array.isArray(terminals) ? terminals : DEFAULT_TERMINALS).map((terminal, index) => ({
+            ...DEFAULT_TERMINALS[index],
+            ...(terminal || {}),
+            directory: getDisplaySubdirectory(terminal?.directory || '', defaultDir, mode)
+        }));
+    }
+
+    function resolveTerminalDirectory(defaultDir, terminalDir, mode) {
+        const baseDirectory = String(defaultDir || '').trim();
+        const rawDirectory = String(terminalDir || '').trim();
+        if (!rawDirectory) {
+            return baseDirectory;
+        }
+        if (!baseDirectory || !isAbsoluteDirectory(rawDirectory, mode)) {
+            return rawDirectory;
+        }
+
+        const normalizedDirectory = normalizeComparableDirectory(rawDirectory, mode);
+        const normalizedBase = normalizeComparableDirectory(baseDirectory, mode);
+        if (
+            normalizedDirectory === normalizedBase
+            || normalizedBase === '/'
+            || normalizedDirectory.startsWith(`${normalizedBase}/`)
+        ) {
+            return rawDirectory;
+        }
+
+        throw new Error('Step 3 directories must stay inside the Step 2 default working directory.');
+    }
+
+    function buildLaunchDirectory(defaultDir, terminalDir, mode) {
+        const baseDirectory = String(defaultDir || '').trim();
+        const rawDirectory = String(terminalDir || '').trim();
+        if (!rawDirectory) {
+            return baseDirectory;
+        }
+        if (!baseDirectory) {
+            return rawDirectory;
+        }
+        if (!isAbsoluteDirectory(rawDirectory, mode)) {
+            return joinDirectories(baseDirectory, rawDirectory, mode);
+        }
+        return resolveTerminalDirectory(baseDirectory, rawDirectory, mode);
+    }
+
+    function buildSavedSessionTags(session) {
+        const tags = [];
+        if (session.is_default) {
+            tags.push('<span class="saved-session-tag">Default</span>');
+        }
+        if (session.id === activeSavedSessionId) {
+            tags.push('<span class="saved-session-tag current">Current</span>');
+        }
+        return tags.join('');
+    }
+
+    function buildSavedSessionCard(session, options = {}) {
+        const selectable = Boolean(options.selectable);
+        const content = `
+            <span class="saved-session-content">
+                <span class="saved-session-topline">
+                    <span class="saved-session-name">${escHtml(session.name)}</span>
+                    <span class="saved-session-tags">${buildSavedSessionTags(session)}</span>
+                </span>
+                <span class="saved-session-meta">
+                    ${escHtml(getConnectionModeLabel(session.connection_mode))} • ${escHtml(String(session.terminal_count))} terminal${session.terminal_count === 1 ? '' : 's'} • ${escHtml(session.layout)}
+                </span>
+                <span class="saved-session-id">Updated ${escHtml(session.updated_at)} • ${escHtml(session.id)}</span>
+            </span>
+        `;
+
+        if (selectable) {
+            return `
+                <label class="saved-session-item saved-session-selectable" data-session-id="${escHtml(session.id)}">
+                    <input type="checkbox" class="saved-session-checkbox" value="${escHtml(session.id)}">
+                    ${content}
+                </label>
+            `;
+        }
+
+        return `
+            <button type="button" class="saved-session-item" data-session-id="${escHtml(session.id)}">
+                ${content}
+            </button>
+        `;
+    }
+
+    function persistActiveSavedSessionMeta() {
+        try {
+            const payload = {
+                id: activeSavedSessionId,
+                name: activeSavedSessionName
+            };
+            window.sessionStorage.setItem(ACTIVE_SAVED_SESSION_STORAGE_KEY, JSON.stringify(payload));
+        } catch (_error) {
+            // Ignore storage failures in restricted browser contexts.
+        }
+    }
+
+    function restoreActiveSavedSessionMeta() {
+        try {
+            const raw = window.sessionStorage.getItem(ACTIVE_SAVED_SESSION_STORAGE_KEY);
+            if (!raw) {
+                return;
+            }
+
+            const parsed = JSON.parse(raw);
+            activeSavedSessionId = String(parsed?.id || '').trim();
+            activeSavedSessionName = String(parsed?.name || '').trim();
+        } catch (_error) {
+            activeSavedSessionId = '';
+            activeSavedSessionName = '';
+        }
+    }
+
+    function showMessage(text, type = '') {
+        const message = document.getElementById('message');
+        message.textContent = text;
+        message.className = `message ${type}`.trim();
+    }
+
+    function setUpdateStatus(text, type = '') {
+        const status = document.getElementById('updateStatus');
+        const quickStatus = document.getElementById('quickUpdateStatus');
+        if (!status) {
+            return;
+        }
+
+        status.textContent = text;
+        status.className = `toolbar-status ${type}`.trim();
+        if (quickStatus) {
+            quickStatus.textContent = text;
+            quickStatus.className = `inline-status ${type}`.trim();
+        }
+    }
+
+    function applyAppSettings(data) {
+        const appearance = data?.appearance || {};
+        const voiceInput = data?.voice_input || {};
+        appSettings = {
+            appearance: {
+                ...DEFAULT_APP_SETTINGS.appearance,
+                ...appearance
+            },
+            voice_input: {
+                ...DEFAULT_APP_SETTINGS.voice_input,
+                ...voiceInput
+            }
+        };
+        applyTheme(appSettings.appearance.theme);
+        syncAppSettingsForm();
+    }
+
+    function updateAppSettingsVisibility() {
+        const engineInput = document.getElementById('appVoiceEngine');
+        const whisperDeviceInput = document.getElementById('appWhisperDevice');
+        const voskSection = document.getElementById('appVoskSettings');
+        const whisperSection = document.getElementById('appWhisperSettings');
+        const whisperGpuHint = document.getElementById('appWhisperGpuHint');
+        const selectedEngine = engineInput?.value || 'vosk';
+        const selectedDevice = whisperDeviceInput?.value || 'cpu';
+        voskSection?.classList.toggle('hidden', selectedEngine !== 'vosk');
+        whisperSection?.classList.toggle('hidden', selectedEngine !== 'whisper');
+        whisperGpuHint?.classList.toggle('hidden', selectedDevice !== 'cuda');
+    }
+
+    function syncAppSettingsForm() {
+        const appearance = appSettings.appearance || DEFAULT_APP_SETTINGS.appearance;
+        const voice = appSettings.voice_input || DEFAULT_APP_SETTINGS.voice_input;
+        const themeInput = document.getElementById('appTheme');
+        const enabledInput = document.getElementById('appVoiceEnabled');
+        const engineInput = document.getElementById('appVoiceEngine');
+        const languageInput = document.getElementById('appVoiceLanguage');
+        const voskModelInput = document.getElementById('appVoskModel');
+        const whisperModelInput = document.getElementById('appWhisperModel');
+        const whisperDeviceInput = document.getElementById('appWhisperDevice');
+        const whisperComputeInput = document.getElementById('appWhisperComputeType');
+
+        if (themeInput) themeInput.value = appearance.theme || DEFAULT_APP_SETTINGS.appearance.theme;
+        if (enabledInput) enabledInput.checked = Boolean(voice.enabled);
+        if (engineInput) engineInput.value = voice.engine === 'whisper' ? 'whisper' : 'vosk';
+        if (languageInput) languageInput.value = voice.language || DEFAULT_APP_SETTINGS.voice_input.language;
+        if (voskModelInput) voskModelInput.value = voice.vosk_model || DEFAULT_APP_SETTINGS.voice_input.vosk_model;
+        if (whisperModelInput) whisperModelInput.value = voice.whisper_model || DEFAULT_APP_SETTINGS.voice_input.whisper_model;
+        if (whisperDeviceInput) whisperDeviceInput.value = voice.whisper_device === 'cuda' ? 'cuda' : 'cpu';
+        if (whisperComputeInput) whisperComputeInput.value = voice.whisper_compute_type || DEFAULT_APP_SETTINGS.voice_input.whisper_compute_type;
+
+        updateAppSettingsVisibility();
+    }
+
+    function collectAppSettingsForm() {
+        return {
+            appearance: {
+                theme: document.getElementById('appTheme')?.value || DEFAULT_APP_SETTINGS.appearance.theme
+            },
+            voice_input: {
+                enabled: Boolean(document.getElementById('appVoiceEnabled')?.checked),
+                engine: document.getElementById('appVoiceEngine')?.value || DEFAULT_APP_SETTINGS.voice_input.engine,
+                vosk_model: document.getElementById('appVoskModel')?.value.trim() || DEFAULT_APP_SETTINGS.voice_input.vosk_model,
+                whisper_model: document.getElementById('appWhisperModel')?.value.trim() || DEFAULT_APP_SETTINGS.voice_input.whisper_model,
+                whisper_device: document.getElementById('appWhisperDevice')?.value || DEFAULT_APP_SETTINGS.voice_input.whisper_device,
+                whisper_compute_type: document.getElementById('appWhisperComputeType')?.value || DEFAULT_APP_SETTINGS.voice_input.whisper_compute_type,
+                language: document.getElementById('appVoiceLanguage')?.value.trim() || DEFAULT_APP_SETTINGS.voice_input.language
+            }
+        };
+    }
+
+    async function loadAppSettings() {
+        const response = await fetch('/api/app-config');
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to load app settings');
+        }
+        applyAppSettings(data);
+        return data;
+    }
+
+    function closeAppSettingsModal() {
+        const modal = document.getElementById('appSettingsModal');
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+    }
+
+    async function openAppSettings() {
+        try {
+            await loadAppSettings();
+            const modal = document.getElementById('appSettingsModal');
+            modal.classList.add('visible');
+            modal.setAttribute('aria-hidden', 'false');
+        } catch (error) {
+            showMessage(`Could not load app settings: ${error.message}`, 'error');
+        }
+    }
+
+    async function saveAppSettings() {
+        const button = document.getElementById('saveAppSettingsBtn');
+        button.disabled = true;
+        button.textContent = 'Saving...';
+
+        try {
+            const response = await fetch('/api/app-config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(collectAppSettingsForm())
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to save app settings');
+            }
+
+            applyAppSettings(data);
+            closeAppSettingsModal();
+            setUpdateStatus('App settings saved.', 'success');
+            showMessage('App settings saved.', 'success');
+        } catch (error) {
+            showMessage(`Settings save failed: ${error.message}`, 'error');
+        } finally {
+            button.disabled = false;
+            button.textContent = 'Save Settings';
+        }
+    }
+
+    function shortCommit(value) {
+        return String(value || '').trim().slice(0, 7);
+    }
+
+    function getKnownAgentValues() {
+        return AGENT_OPTIONS.filter(option => option.value !== 'other').map(option => option.value);
+    }
+
+    function normalizeTerminalCommandUi(terminal) {
+        const savedMode = terminal?.initial_command_mode === 'agent' ? 'agent' : 'command';
+        const initialCommand = String(terminal?.initial_command || '').trim();
+        const knownAgents = getKnownAgentValues();
+        let mode = savedMode;
+        let agentSelection = String(terminal?.agent_selection || '').trim().toLowerCase();
+        let customAgent = String(terminal?.custom_agent || '').trim();
+        let commandValue = initialCommand;
+
+        if (mode === 'agent') {
+            if (!agentSelection) {
+                if (knownAgents.includes(initialCommand.toLowerCase())) {
+                    agentSelection = initialCommand.toLowerCase();
+                } else if (initialCommand) {
+                    agentSelection = 'other';
+                    customAgent = customAgent || initialCommand;
+                }
+            }
+
+            if (agentSelection !== 'other' && !knownAgents.includes(agentSelection)) {
+                agentSelection = customAgent ? 'other' : '';
+            }
+
+            if (agentSelection === 'other' && !customAgent && initialCommand) {
+                customAgent = initialCommand;
+            }
+
+            return {
+                mode,
+                commandValue,
+                agentSelection,
+                customAgent
+            };
+        }
+
+        if (knownAgents.includes(initialCommand.toLowerCase())) {
+            return {
+                mode: 'agent',
+                commandValue: '',
+                agentSelection: initialCommand.toLowerCase(),
+                customAgent: ''
+            };
+        }
+
+        return {
+            mode: 'command',
+            commandValue,
+            agentSelection,
+            customAgent
+        };
+    }
+
+    function renderAgentOptions(selectedValue) {
+        const normalizedValue = String(selectedValue || '').trim().toLowerCase();
+        const options = [
+            '<option value="" data-base-label="Select agent">Select agent</option>',
+            ...AGENT_OPTIONS.map(option => `
+                <option
+                    value="${escHtml(option.value)}"
+                    data-base-label="${escHtml(option.label)}"
+                    ${normalizedValue === option.value ? 'selected' : ''}
+                >${escHtml(option.label)}</option>
+            `)
+        ];
+        return options.join('');
+    }
+
+    function getTerminalCommandMode(row) {
+        return row?.dataset?.commandMode === 'agent' ? 'agent' : 'command';
+    }
+
+    function buildTerminalInitialCommand(row) {
+        if (getTerminalCommandMode(row) === 'agent') {
+            const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
+            if (selectedAgent === 'other') {
+                return row.querySelector('.t-agent-custom')?.value.trim() || '';
+            }
+            return selectedAgent;
+        }
+
+        return row.querySelector('.t-cmd')?.value.trim() || '';
+    }
+
+    function collectTerminalDrafts() {
+        const rows = Array.from(document.querySelectorAll('.t-row'));
+        if (!rows.length) {
+            return DEFAULT_TERMINALS.map(item => ({ ...item }));
+        }
+
+        const drafts = rows.map((row, index) => ({
+            title: row.querySelector('.t-title').value.trim() || `Terminal ${index + 1}`,
+            directory: row.querySelector('.t-dir').value.trim(),
+            initial_command: buildTerminalInitialCommand(row),
+            initial_command_mode: getTerminalCommandMode(row),
+            agent_selection: row.querySelector('.t-agent-select')?.value.trim() || '',
+            custom_agent: row.querySelector('.t-agent-custom')?.value.trim() || '',
+            distribution: row.querySelector('.t-distribution')?.value.trim() || '',
+            use_wsl: Boolean(row.querySelector('.t-use-wsl')?.checked),
+            use_powershell: Boolean(row.querySelector('.t-use-powershell')?.checked)
+        }));
+
+        while (drafts.length < MAX_SESSIONS) {
+            drafts.push({ ...DEFAULT_TERMINALS[drafts.length] });
+        }
+
+        return drafts;
+    }
+
+    function renderCountOptions() {
+        const countGrid = document.getElementById('countGrid');
+        countGrid.innerHTML = COUNT_OPTIONS.map(count => `
+            <button type="button" class="count-btn ${count === selectedCount ? 'active' : ''}" data-count="${count}">
+                <div class="count-meta">
+                    <span class="count-value">${count}</span>
+                    <span class="count-label">${count === 1 ? 'Terminal' : 'Terminals'}</span>
+                </div>
+            </button>
+        `).join('');
+
+        countGrid.querySelectorAll('.count-btn').forEach(button => {
+            button.addEventListener('click', () => {
+                const nextCount = Number(button.dataset.count);
+                if (nextCount === selectedCount) {
+                    return;
+                }
+
+                const drafts = collectTerminalDrafts();
+                selectedCount = nextCount;
+                selectedLayout = defaultLayoutForCount(nextCount);
+                renderCountOptions();
+                renderLayoutOptions();
+                buildTerminalRows(selectedCount, drafts);
+            });
+        });
+    }
+
+    function renderLayoutOptions() {
+        const options = LAYOUT_COPY[selectedCount];
+        const container = document.getElementById('layoutOptions');
+        const keys = Object.keys(options);
+        container.className = `layout-grid${keys.length === 1 ? ' single' : ''}`;
+        container.innerHTML = keys.map(key => {
+            const option = options[key];
+            const gridMetrics = option.preview === 'grid'
+                ? getGridMetrics(selectedCount)
+                : null;
+            const previewStyle = gridMetrics
+                ? ` style="--preview-columns:${gridMetrics.columns}; --preview-rows:${gridMetrics.rows};"`
+                : '';
+            return `
+                <button type="button" class="layout-btn ${selectedLayout === key ? 'active' : ''}" data-layout="${key}">
+                    <div class="layout-preview ${option.preview}"${previewStyle}>
+                        ${Array.from({ length: selectedCount }, () => '<span class="pane"></span>').join('')}
+                    </div>
+                    <div class="layout-copy">
+                        <strong>${option.label}</strong>
+                        <span>${option.note}</span>
+                    </div>
+                </button>
+            `;
+        }).join('');
+
+        container.querySelectorAll('.layout-btn').forEach(button => {
+            button.addEventListener('click', () => {
+                selectedLayout = button.dataset.layout;
+                renderLayoutOptions();
+            });
+        });
+    }
+
+    function renderModeFields() {
+        const container = document.getElementById('modeFields');
+        const previous = collectModeInputs();
+        container.innerHTML = connectionMode === 'ssh' ? SSH_FIELDS : WSL_FIELDS;
+        applyModeInputs(previous);
+        initShowPasswordButton();
+        bindModeFieldInteractions();
+    }
+
+    function initShowPasswordButton() {
+        const passwordInput = document.getElementById('ssh_password');
+        const showButton = document.getElementById('show_ssh_password');
+        if (!passwordInput || !showButton) return;
+
+        const togglePassword = (show) => {
+            passwordInput.type = show ? 'text' : 'password';
+        };
+
+        showButton.addEventListener('mousedown', () => togglePassword(true));
+        showButton.addEventListener('mouseup', () => togglePassword(false));
+        showButton.addEventListener('mouseleave', () => togglePassword(false));
+
+        showButton.addEventListener('touchstart', (e) => { e.preventDefault(); togglePassword(true); });
+        showButton.addEventListener('touchend', (e) => { e.preventDefault(); togglePassword(false); });
+    }
+
+    function collectModeInputs() {
+        return {
+            ssh: {
+                host: document.getElementById('ssh_host')?.value ?? '',
+                username: document.getElementById('ssh_username')?.value ?? 'ubuntu',
+                password: document.getElementById('ssh_password')?.value ?? '',
+                port: document.getElementById('ssh_port')?.value ?? '22',
+                default_dir: document.getElementById('ssh_default_dir')?.value ?? ''
+            },
+            wsl: {
+                distribution: document.getElementById('wsl_distribution')?.value ?? '',
+                username: document.getElementById('wsl_username')?.value ?? '',
+                default_dir: document.getElementById('wsl_default_dir')?.value ?? ''
+            }
+        };
+    }
+
+    function setLocalRepoPath(path) {
+        const input = document.getElementById('wsl_default_dir');
+        const display = document.getElementById('wsl_default_dir_display');
+        if (!input || !display) {
+            return;
+        }
+
+        const normalized = String(path ?? '').trim();
+        const resolved = normalized === '~' ? '' : normalized;
+        input.value = resolved;
+        display.textContent = resolved || 'Select a folder on your local drive';
+        display.classList.toggle('empty', !resolved);
+        display.title = resolved;
+    }
+
+    function applyModeInputs(values) {
+        if (document.getElementById('ssh_host')) {
+            document.getElementById('ssh_host').value = values.ssh.host ?? '';
+            document.getElementById('ssh_username').value = values.ssh.username ?? 'ubuntu';
+            document.getElementById('ssh_password').value = values.ssh.password ?? '';
+            document.getElementById('ssh_port').value = values.ssh.port ?? '22';
+            document.getElementById('ssh_default_dir').value = values.ssh.default_dir ?? '';
+        }
+
+        if (document.getElementById('wsl_default_dir')) {
+            document.getElementById('wsl_distribution').value = values.wsl.distribution ?? '';
+            document.getElementById('wsl_username').value = values.wsl.username ?? '';
+            setLocalRepoPath(values.wsl.default_dir ?? '');
+        }
+    }
+
+    function bindModeFieldInteractions() {
+        const targetFieldIds = connectionMode === 'wsl'
+            ? ['wsl_distribution', 'wsl_username', 'wsl_default_dir']
+            : ['ssh_host', 'ssh_username', 'ssh_port', 'ssh_default_dir'];
+        const preflightFieldIds = connectionMode === 'wsl'
+            ? ['wsl_distribution', 'wsl_username', 'wsl_default_dir']
+            : ['ssh_host', 'ssh_username', 'ssh_password', 'ssh_port', 'ssh_default_dir'];
+
+        targetFieldIds.forEach(fieldId => {
+            const field = document.getElementById(fieldId);
+            field?.addEventListener('change', () => {
+                resetTerminalSetupIfTargetChanged(connectionMode, collectModeInputs());
+            });
+        });
+
+        preflightFieldIds.forEach(fieldId => {
+            const field = document.getElementById(fieldId);
+            field?.addEventListener('change', () => refreshVisibleAgentPreflights());
+        });
+    }
+
+    async function browseLocalRepo() {
+        const currentPath = document.getElementById('wsl_default_dir')?.value ?? '';
+
+        try {
+            let selectedPath = '';
+
+            if (window.pywebview?.api?.select_folder) {
+                const result = await window.pywebview.api.select_folder(currentPath);
+                if (!result?.ok) {
+                    if (result?.cancelled) {
+                        return;
+                    }
+                    throw new Error(result?.error || 'Folder picker is unavailable');
+                }
+                selectedPath = String(result.path || '').trim();
+            } else {
+                const response = await fetch('/api/select-folder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ initial_dir: currentPath })
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || 'Folder picker is unavailable');
+                }
+                selectedPath = String(data.path || '').trim();
+            }
+
+            if (!selectedPath) {
+                return;
+            }
+
+            setLocalRepoPath(selectedPath);
+            resetTerminalSetupIfTargetChanged('wsl', collectModeInputs());
+        } catch (error) {
+            showMessage(`Folder selection failed: ${error.message}`, 'error');
+        }
+    }
+
+    function clearLocalRepo() {
+        setLocalRepoPath('');
+        resetTerminalSetupIfTargetChanged('wsl', collectModeInputs());
+    }
+
+    function toggleInlineTip(button) {
+        const field = button.closest('.field');
+        const tip = field?.querySelector('.inline-tip');
+        if (!tip) {
+            return;
+        }
+
+        const isVisible = tip.classList.toggle('visible');
+        button.setAttribute('aria-expanded', String(isVisible));
+    }
+
+    function selectSuggestedDistro(button) {
+        const distroName = String(button?.dataset?.distro || '').trim();
+        if (!distroName) {
+            return;
+        }
+
+        const field = button.closest('.t-distribution-field');
+        const input = field?.querySelector('.t-distribution');
+        if (!input) {
+            return;
+        }
+
+        input.value = distroName;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.focus();
+        input.select();
+    }
+
+    function renderWslDistrosTip(data) {
+        if (!data?.available) {
+            return `Could not inspect distros automatically. Run <code>${escHtml(data?.command || 'wsl -l -v')}</code> in cmd or PowerShell.`;
+        }
+
+        if (Array.isArray(data.distros) && data.distros.length > 0) {
+            const items = data.distros.map(distro => {
+                const details = [
+                    distro.state || 'Unknown state',
+                    distro.version ? `WSL ${distro.version}` : '',
+                    distro.default ? 'default' : ''
+                ].filter(Boolean).join(' • ');
+                return `
+                    <li>
+                        <button
+                            type="button"
+                            class="tip-link-btn"
+                            data-distro="${escHtml(distro.name || 'Unnamed distro')}"
+                            onclick="selectSuggestedDistro(this)"
+                        >${escHtml(distro.name || 'Unnamed distro')}</button>
+                        ${details ? ` <span>${escHtml(details)}</span>` : ''}
+                    </li>
+                `;
+            }).join('');
+            return `Fetched from <code>${escHtml(data.command || 'wsl -l -v')}</code>.<ul>${items}</ul>`;
+        }
+
+        if (data.raw_output) {
+            return `No distros were parsed from <code>${escHtml(data.command || 'wsl -l -v')}</code>.<pre>${escHtml(data.raw_output)}</pre>`;
+        }
+
+        return `No WSL distros were reported by <code>${escHtml(data.command || 'wsl -l -v')}</code>.`;
+    }
+
+    async function toggleUbuntuDistroTip(button) {
+        const field = button.closest('.field');
+        const tip = field?.querySelector('.inline-tip');
+        if (!tip) {
+            return;
+        }
+
+        if (tip.classList.contains('visible')) {
+            tip.classList.remove('visible');
+            button.setAttribute('aria-expanded', 'false');
+            return;
+        }
+
+        tip.classList.add('visible');
+        button.setAttribute('aria-expanded', 'true');
+        tip.innerHTML = 'Checking local WSL distros...';
+
+        try {
+            if (!cachedWslDistros) {
+                const response = await fetch('/api/wsl-distros');
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to inspect WSL distros');
+                }
+                cachedWslDistros = data;
+            }
+
+            tip.innerHTML = renderWslDistrosTip(cachedWslDistros);
+        } catch (error) {
+            tip.innerHTML = `Could not inspect distros automatically. Run <code>wsl -l -v</code> in cmd or PowerShell.`;
+        }
+    }
+
+    function syncTerminalWslState(row) {
+        const shouldShowDistribution = connectionMode === 'wsl' && Boolean(row.querySelector('.t-use-wsl')?.checked);
+        const distributionField = row.querySelector('.t-distribution-field');
+        if (!distributionField) {
+            return;
+        }
+
+        distributionField.classList.toggle('hidden', !shouldShowDistribution);
+        if (!shouldShowDistribution) {
+            distributionField.querySelector('.inline-tip')?.classList.remove('visible');
+            distributionField.querySelector('.tip-btn')?.setAttribute('aria-expanded', 'false');
+        }
+    }
+
+    function syncTerminalCommandState(row) {
+        const commandMode = getTerminalCommandMode(row);
+        const commandField = row.querySelector('.t-command-field');
+        const agentField = row.querySelector('.t-agent-field');
+        const customAgentField = row.querySelector('.t-agent-custom-field');
+        const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
+
+        row.querySelectorAll('.command-mode-btn').forEach(button => {
+            button.classList.toggle('active', button.dataset.commandMode === commandMode);
+        });
+
+        commandField?.classList.toggle('hidden', commandMode !== 'command');
+        agentField?.classList.toggle('hidden', commandMode !== 'agent');
+        customAgentField?.classList.toggle('hidden', !(commandMode === 'agent' && selectedAgent === 'other'));
+        if (commandMode !== 'agent') {
+            clearAgentPreflight(row);
+        }
+    }
+
+    function _resetAgentOptionLabels(select) {
+        if (!select) {
+            return;
+        }
+
+        Array.from(select.options).forEach(option => {
+            option.textContent = option.dataset.baseLabel || option.textContent;
+        });
+    }
+
+    function _clearAgentStatusClasses(select) {
+        if (!select) {
+            return;
+        }
+
+        select.classList.remove(
+            'status-installed',
+            'status-missing',
+            'status-unsupported_here',
+            'status-missing_prerequisite',
+            'status-needs_manual_install',
+            'status-target_incomplete',
+            'status-check_failed'
+        );
+    }
+
+    function clearAgentPreflight(row) {
+        const select = row?.querySelector('.t-agent-select');
+        const disclosure = row?.querySelector('.agent-preflight-disclosure');
+        const summary = row?.querySelector('.agent-preflight-summary');
+        const summaryLabel = row?.querySelector('.agent-preflight-summary-label');
+        const copy = row?.querySelector('.agent-preflight-copy');
+        const timerId = agentPreflightTimerState.get(row);
+        if (timerId) {
+            clearTimeout(timerId);
+            agentPreflightTimerState.delete(row);
+        }
+
+        _clearAgentStatusClasses(select);
+        _resetAgentOptionLabels(select);
+        if (select) {
+            select.title = '';
+        }
+        if (summary) {
+            summary.className = 'agent-preflight-summary';
+        }
+        if (summaryLabel) {
+            summaryLabel.textContent = '';
+        }
+        if (copy) {
+            copy.innerHTML = '';
+        }
+        if (disclosure) {
+            disclosure.open = false;
+            disclosure.classList.remove('visible');
+        }
+    }
+
+    function renderAgentPreflight(row, payload) {
+        const select = row?.querySelector('.t-agent-select');
+        const disclosure = row?.querySelector('.agent-preflight-disclosure');
+        const summary = row?.querySelector('.agent-preflight-summary');
+        const summaryLabel = row?.querySelector('.agent-preflight-summary-label');
+        const copy = row?.querySelector('.agent-preflight-copy');
+        if (!select || !disclosure || !summary || !summaryLabel || !copy) {
+            return;
+        }
+
+        const status = String(payload?.status || '').trim();
+        const label = String(payload?.status_label || 'Unknown').trim();
+        const message = String(payload?.message || '').trim();
+        const warning = String(payload?.warning || '').trim();
+        const installLabel = String(payload?.install?.label || '').trim();
+        const installCommand = String(payload?.install?.command || '').trim();
+        const targetLabel = String(payload?.target?.label || '').trim();
+        const prerequisite = Array.isArray(payload?.missing_prerequisites) && payload.missing_prerequisites.length
+            ? String(payload.missing_prerequisites[0] || '').trim()
+            : '';
+        const selectedOption = select.options[select.selectedIndex] || null;
+        const wasOpen = disclosure.open;
+
+        const lines = [];
+        if (message) {
+            lines.push(`<strong>${escHtml(message)}</strong>`);
+        }
+        if (targetLabel) {
+            lines.push(`Target: <code>${escHtml(targetLabel)}</code>`);
+        }
+        if (prerequisite) {
+            lines.push(`Prerequisite: ${escHtml(prerequisite)}`);
+        }
+        if (installCommand) {
+            const installPrefix = installLabel ? `${escHtml(installLabel)}: ` : 'Install: ';
+            lines.push(`${installPrefix}<code>${escHtml(installCommand)}</code>`);
+        }
+        if (warning) {
+            lines.push(escHtml(warning));
+        }
+
+        _clearAgentStatusClasses(select);
+        _resetAgentOptionLabels(select);
+        select.classList.add(`status-${status}`);
+        select.title = [message, targetLabel ? `Target: ${targetLabel}` : '', prerequisite, installCommand ? `${installLabel || 'Install'}: ${installCommand}` : '', warning]
+            .filter(Boolean)
+            .join('\n');
+        if (selectedOption && selectedOption.value) {
+            selectedOption.textContent = `${selectedOption.dataset.baseLabel || selectedOption.textContent} · ${label}`;
+        }
+
+        summary.className = `agent-preflight-summary ${escHtml(status)}`.trim();
+        summaryLabel.textContent = label;
+        copy.innerHTML = lines.join('<br>');
+        disclosure.classList.add('visible');
+        disclosure.open = wasOpen;
+    }
+
+    function buildAgentPreflightPayload(row) {
+        return {
+            agent: row?.querySelector('.t-agent-select')?.value.trim() || '',
+            connection_mode: connectionMode,
+            ssh: {
+                host: document.getElementById('ssh_host')?.value.trim() || '',
+                username: document.getElementById('ssh_username')?.value.trim() || 'ubuntu',
+                password: document.getElementById('ssh_password')?.value || '',
+                port: Number(document.getElementById('ssh_port')?.value) || 22
+            },
+            wsl: {
+                distribution: document.getElementById('wsl_distribution')?.value.trim() || '',
+                username: document.getElementById('wsl_username')?.value.trim() || '',
+                default_dir: document.getElementById('wsl_default_dir')?.value.trim() || ''
+            },
+            terminal: {
+                distribution: row?.querySelector('.t-distribution')?.value.trim() || '',
+                use_wsl: Boolean(row?.querySelector('.t-use-wsl')?.checked),
+                use_powershell: Boolean(row?.querySelector('.t-use-powershell')?.checked)
+            }
+        };
+    }
+
+    function scheduleAgentPreflight(row, delayMs = 180) {
+        if (!row) {
+            return;
+        }
+
+        const timerId = agentPreflightTimerState.get(row);
+        if (timerId) {
+            clearTimeout(timerId);
+        }
+
+        const nextTimer = window.setTimeout(() => {
+            agentPreflightTimerState.delete(row);
+            void queueAgentPreflight(row);
+        }, delayMs);
+        agentPreflightTimerState.set(row, nextTimer);
+    }
+
+    async function queueAgentPreflight(row) {
+        if (!row) {
+            return;
+        }
+
+        if (getTerminalCommandMode(row) !== 'agent') {
+            clearAgentPreflight(row);
+            return;
+        }
+
+        const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
+        if (!selectedAgent || selectedAgent === 'other') {
+            clearAgentPreflight(row);
+            return;
+        }
+
+        const requestId = (agentPreflightRequestState.get(row) || 0) + 1;
+        agentPreflightRequestState.set(row, requestId);
+        renderAgentPreflight(row, {
+            status: 'target_incomplete',
+            status_label: 'Checking',
+            message: 'Checking agent CLI availability...',
+            target: {
+                label: ''
+            },
+            install: {
+                label: '',
+                command: ''
+            },
+            missing_prerequisites: []
+        });
+
+        try {
+            const response = await fetch('/api/agent-preflight', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildAgentPreflightPayload(row))
+            });
+            const data = await response.json();
+            if (agentPreflightRequestState.get(row) !== requestId) {
+                return;
+            }
+            if (!response.ok) {
+                throw new Error(data.error || 'Agent preflight failed');
+            }
+            renderAgentPreflight(row, data);
+        } catch (error) {
+            if (agentPreflightRequestState.get(row) !== requestId) {
+                return;
+            }
+            renderAgentPreflight(row, {
+                status: 'check_failed',
+                status_label: 'Check failed',
+                message: error.message || 'Agent preflight failed.',
+                target: {
+                    label: ''
+                },
+                install: {
+                    label: '',
+                    command: ''
+                },
+                missing_prerequisites: []
+            });
+        }
+    }
+
+    function refreshVisibleAgentPreflights() {
+        document.querySelectorAll('.t-row').forEach(row => {
+            if (getTerminalCommandMode(row) !== 'agent') {
+                clearAgentPreflight(row);
+                return;
+            }
+            scheduleAgentPreflight(row, 120);
+        });
+    }
+
+    function handleTerminalShellToggle(row, shellType) {
+        const wslCheckbox = row.querySelector('.t-use-wsl');
+        const powershellCheckbox = row.querySelector('.t-use-powershell');
+
+        if (shellType === 'wsl' && wslCheckbox?.checked && powershellCheckbox) {
+            powershellCheckbox.checked = false;
+        }
+
+        if (shellType === 'powershell' && powershellCheckbox?.checked && wslCheckbox) {
+            wslCheckbox.checked = false;
+        }
+
+        syncTerminalWslState(row);
+        scheduleAgentPreflight(row, 120);
+    }
+
+    function bindTerminalRowInteractions() {
+        document.querySelectorAll('.t-row').forEach(row => {
+            const wslCheckbox = row.querySelector('.t-use-wsl');
+            const powershellCheckbox = row.querySelector('.t-use-powershell');
+            const agentSelect = row.querySelector('.t-agent-select');
+            const distributionInput = row.querySelector('.t-distribution');
+
+            row.querySelectorAll('.command-mode-btn').forEach(button => {
+                button.addEventListener('click', () => {
+                    row.dataset.commandMode = button.dataset.commandMode;
+                    syncTerminalCommandState(row);
+                    scheduleAgentPreflight(row, 60);
+                });
+            });
+            agentSelect?.addEventListener('change', () => {
+                syncTerminalCommandState(row);
+                scheduleAgentPreflight(row, 60);
+            });
+            wslCheckbox?.addEventListener('change', () => handleTerminalShellToggle(row, 'wsl'));
+            powershellCheckbox?.addEventListener('change', () => handleTerminalShellToggle(row, 'powershell'));
+            distributionInput?.addEventListener('change', () => scheduleAgentPreflight(row, 120));
+            syncTerminalCommandState(row);
+            syncTerminalWslState(row);
+            scheduleAgentPreflight(row, 30);
+        });
+    }
+
+    function buildTerminalRows(count, drafts = DEFAULT_TERMINALS) {
+        const container = document.getElementById('terminalRows');
+        const usableDrafts = drafts.length ? drafts : DEFAULT_TERMINALS;
+        const columns = count >= 3 ? 3 : count;
+
+        container.style.setProperty('--terminal-columns', String(columns));
+
+        container.innerHTML = Array.from({ length: count }, (_, index) => {
+            const terminal = usableDrafts[index] || DEFAULT_TERMINALS[index];
+            const commandUi = normalizeTerminalCommandUi(terminal);
+            return `
+                <div class="t-row" data-command-mode="${escHtml(commandUi.mode)}">
+                    <div class="t-row-head">
+                        <span class="t-badge">T${index + 1}</span>
+                        <span class="t-name">Terminal ${index + 1}</span>
+                    </div>
+                    <div class="t-fields">
+                        <div class="field">
+                            <label>Title</label>
+                            <input class="t-title" type="text" value="${escHtml(terminal.title || `Terminal ${index + 1}`)}" placeholder="Terminal ${index + 1}">
+                        </div>
+                        <div class="field">
+                            <label>Subdirectory</label>
+                            <input class="t-dir" type="text" value="${escHtml(terminal.directory || '')}" placeholder="Optional path inside Step 2 default">
+                        </div>
+                        <div class="field">
+                            <label>Startup Mode</label>
+                            <div class="command-mode-toggle">
+                                <button type="button" class="command-mode-btn ${commandUi.mode === 'command' ? 'active' : ''}" data-command-mode="command">Initial Command</button>
+                                <button type="button" class="command-mode-btn ${commandUi.mode === 'agent' ? 'active' : ''}" data-command-mode="agent">Agent</button>
+                            </div>
+                        </div>
+                        <div class="field t-command-field ${commandUi.mode === 'command' ? '' : 'hidden'}">
+                            <label>Initial Command</label>
+                            <input class="t-cmd" type="text" value="${escHtml(commandUi.commandValue)}" placeholder="Blank = shell only">
+                        </div>
+                        <div class="field t-agent-field ${commandUi.mode === 'agent' ? '' : 'hidden'}">
+                            <label>Agent</label>
+                            <select class="t-agent-select">
+                                ${renderAgentOptions(commandUi.agentSelection)}
+                            </select>
+                            <details class="agent-preflight-disclosure">
+                                <summary class="agent-preflight-summary">
+                                    <span class="agent-preflight-summary-label"></span>
+                                </summary>
+                                <div class="agent-preflight-copy"></div>
+                            </details>
+                        </div>
+                        <div class="field t-agent-custom-field ${commandUi.mode === 'agent' && commandUi.agentSelection === 'other' ? '' : 'hidden'}">
+                            <label>Custom Agent</label>
+                            <input class="t-agent-custom" type="text" value="${escHtml(commandUi.customAgent)}" placeholder="Enter agent command">
+                        </div>
+                        <div class="field ${connectionMode === 'wsl' ? '' : 'hidden'}">
+                            <div class="field-label-row">
+                                <label>Shell</label>
+                                <button
+                                    type="button"
+                                    class="tip-btn"
+                                    aria-expanded="false"
+                                    aria-label="Show WSL shell tip"
+                                    onclick="toggleInlineTip(this)"
+                                >?</button>
+                            </div>
+                            <div class="check-stack">
+                                <label class="check-field">
+                                    <input class="t-use-wsl" type="checkbox" ${terminal.use_wsl ? 'checked' : ''}>
+                                    <span class="check-copy">
+                                        <strong>Prefer WSL</strong>
+                                    </span>
+                                </label>
+                                <label class="check-field">
+                                    <input class="t-use-powershell" type="checkbox" ${terminal.use_powershell ? 'checked' : ''}>
+                                    <span class="check-copy">
+                                        <strong>Use PowerShell</strong>
+                                    </span>
+                                </label>
+                            </div>
+                            <div class="inline-tip">Leave both off for cmd. WSL and PowerShell are mutually exclusive per pane.</div>
+                        </div>
+                        <div class="field t-distribution-field ${connectionMode === 'wsl' && terminal.use_wsl ? '' : 'hidden'}">
+                            <div class="field-label-row">
+                                <label>Ubuntu Distro</label>
+                                <button
+                                    type="button"
+                                    class="tip-btn"
+                                    aria-expanded="false"
+                                    aria-label="Show Ubuntu distro tip"
+                                    onclick="toggleUbuntuDistroTip(this)"
+                                >?</button>
+                            </div>
+                            <input class="t-distribution" type="text" value="${escHtml(terminal.distribution || '')}" placeholder="Ubuntu">
+                            <div class="inline-tip">Checking local WSL distros...</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        bindTerminalRowInteractions();
+    }
+
+    function collectFormConfig() {
+        const modeInputs = collectModeInputs();
+        return {
+            connection_mode: connectionMode,
+            terminal_count: selectedCount,
+            layout: selectedLayout,
+            ssh: {
+                host: modeInputs.ssh.host.trim(),
+                username: modeInputs.ssh.username.trim() || 'ubuntu',
+                password: modeInputs.ssh.password,
+                port: Number(modeInputs.ssh.port) || 22,
+                default_dir: modeInputs.ssh.default_dir.trim()
+            },
+            wsl: {
+                distribution: modeInputs.wsl.distribution.trim(),
+                username: modeInputs.wsl.username.trim(),
+                default_dir: modeInputs.wsl.default_dir.trim()
+            },
+            terminals: collectTerminalDrafts()
+        };
+    }
+
+    function applySessionConfig(config) {
+        const normalized = config || {};
+        const count = COUNT_OPTIONS.includes(Number(normalized.terminal_count))
+            ? Number(normalized.terminal_count)
+            : selectedCount;
+
+        connectionMode = normalized.connection_mode === 'wsl' ? 'wsl' : 'ssh';
+        selectedCount = count;
+        selectedLayout = normalized.layout || defaultLayoutForCount(count);
+
+        document.querySelectorAll('.mode-btn').forEach(button => {
+            button.classList.toggle('active', button.dataset.mode === connectionMode);
+        });
+
+        renderCountOptions();
+        renderLayoutOptions();
+        renderModeFields();
+
+        applyModeInputs({
+            ssh: normalized.ssh || {},
+            wsl: normalized.wsl || {}
+        });
+
+        const defaultDir = getStep2DefaultDirectory(normalized, connectionMode);
+        buildTerminalRows(
+            selectedCount,
+            normalizeTerminalsForDisplay(normalized.terminals || DEFAULT_TERMINALS, defaultDir, connectionMode)
+        );
+        updateTerminalTargetSignature(connectionMode, collectModeInputs());
+    }
+
+    function setActiveSavedSession(meta = null) {
+        activeSavedSessionId = String(meta?.id || '').trim();
+        activeSavedSessionName = String(meta?.name || '').trim();
+        persistActiveSavedSessionMeta();
+    }
+
+    async function persistLastUsedConfig(savedSessionId = activeSavedSessionId) {
+        const response = await fetch('/api/session-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                saved_session_id: String(savedSessionId || '').trim()
+            })
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to persist settings');
+        }
+
+        setActiveSavedSession(data.saved_session);
+        return data;
+    }
+
+    async function saveCurrentConfig() {
+        try {
+            const payload = collectFormConfig();
+            const suggestedName = buildDefaultSessionName();
+            const rawName = window.prompt('Session name', suggestedName);
+            if (rawName === null) {
+                return;
+            }
+
+            const sessionName = rawName.trim() || suggestedName;
+            const shouldOverwriteActiveSession = Boolean(activeSavedSessionId) && (
+                sessionName === activeSavedSessionName || sessionName === activeSavedSessionId
+            );
+            const response = await fetch('/api/saved-sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: shouldOverwriteActiveSession ? activeSavedSessionId : undefined,
+                    name: sessionName,
+                    config: payload
+                })
+            });
+
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to save settings');
+            }
+
+            setActiveSavedSession(data.saved_session || data);
+            showMessage(`Saved session "${data.name}".`, 'success');
+            applySessionConfig(data.config);
+        } catch (error) {
+            showMessage(`Save failed: ${error.message}`, 'error');
+        }
+    }
+
+    async function loadPersistedConfig(silent = false) {
+        try {
+            const response = await fetch('/api/session-config');
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to import settings');
+            }
+
+            setActiveSavedSession(data.saved_session);
+            applySessionConfig(data);
+            if (!silent) {
+                showMessage('Imported startup session settings.', 'success');
+            }
+        } catch (error) {
+            if (!silent) {
+                showMessage(`Import failed: ${error.message}`, 'error');
+            }
+        }
+    }
+
+    function closeSavedSessionModal(result = null) {
+        const modal = document.getElementById('savedSessionsModal');
+        const primaryAction = document.getElementById('savedSessionsPrimaryAction');
+        const footerCopy = document.getElementById('savedSessionsFooterCopy');
+
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+        document.getElementById('savedSessionsList').innerHTML = '';
+        primaryAction.hidden = true;
+        primaryAction.disabled = false;
+        primaryAction.textContent = '';
+        primaryAction.onclick = null;
+        footerCopy.textContent = '';
+        savedSessionModalMode = 'import';
+
+        if (savedSessionResolver) {
+            const resolver = savedSessionResolver;
+            savedSessionResolver = null;
+            resolver(result);
+        }
+    }
+
+    function openSavedSessionModal(sessions, mode = 'import') {
+        const modal = document.getElementById('savedSessionsModal');
+        const list = document.getElementById('savedSessionsList');
+        const title = document.getElementById('savedSessionsTitle');
+        const copy = title.nextElementSibling;
+        const primaryAction = document.getElementById('savedSessionsPrimaryAction');
+        const footerCopy = document.getElementById('savedSessionsFooterCopy');
+        const isDeleteMode = mode === 'delete';
+
+        savedSessionModalMode = mode;
+        title.textContent = isDeleteMode ? 'Delete Saved Sessions' : 'Import Saved Session';
+        copy.textContent = isDeleteMode
+            ? 'Tick the saved sessions you want to remove. If you delete all of them, the launcher falls back to the built-in default.'
+            : 'Pick one saved launcher setup to load into the form.';
+        footerCopy.textContent = isDeleteMode
+            ? 'Select one or more sessions to delete.'
+            : '';
+        list.innerHTML = sessions.map(session => buildSavedSessionCard(session, { selectable: isDeleteMode })).join('');
+
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        return new Promise(resolve => {
+            savedSessionResolver = resolve;
+            if (isDeleteMode) {
+                const syncSelectionState = () => {
+                    const selectedIds = Array.from(list.querySelectorAll('.saved-session-checkbox:checked'))
+                        .map(input => input.value);
+
+                    list.querySelectorAll('.saved-session-selectable').forEach(item => {
+                        const checkbox = item.querySelector('.saved-session-checkbox');
+                        item.classList.toggle('selected', Boolean(checkbox?.checked));
+                    });
+
+                    primaryAction.disabled = selectedIds.length === 0;
+                    footerCopy.textContent = selectedIds.length > 0
+                        ? `${selectedIds.length} session${selectedIds.length === 1 ? '' : 's'} selected for deletion.`
+                        : 'Select one or more sessions to delete.';
+                };
+
+                primaryAction.hidden = false;
+                primaryAction.textContent = 'Delete Selected';
+                primaryAction.disabled = true;
+                primaryAction.onclick = () => {
+                    const selectedIds = Array.from(list.querySelectorAll('.saved-session-checkbox:checked'))
+                        .map(input => input.value);
+                    closeSavedSessionModal({ ids: selectedIds });
+                };
+
+                list.querySelectorAll('.saved-session-checkbox').forEach(input => {
+                    input.addEventListener('change', syncSelectionState);
+                });
+                syncSelectionState();
+                return;
+            }
+
+            list.querySelectorAll('.saved-session-item').forEach(button => {
+                button.addEventListener('click', () => closeSavedSessionModal({ id: button.dataset.sessionId }));
+            });
+        });
+    }
+
+    async function importSavedSession() {
+        try {
+            const listResponse = await fetch('/api/saved-sessions');
+            const listData = await listResponse.json();
+            if (!listResponse.ok) {
+                throw new Error(listData.error || 'Failed to load saved sessions');
+            }
+
+            const importableSessions = [
+                ...(listData.default_session ? [listData.default_session] : []),
+                ...(Array.isArray(listData.sessions) ? listData.sessions : [])
+            ];
+
+            const selected = await openSavedSessionModal(importableSessions, 'import');
+            const selectedId = selected?.id;
+            if (!selectedId) {
+                return;
+            }
+
+            const response = await fetch(`/api/saved-sessions/${encodeURIComponent(selectedId)}`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load saved session');
+            }
+
+            setActiveSavedSession(data);
+            applySessionConfig(data.config);
+            await persistLastUsedConfig(data.id);
+            showMessage(`Imported session "${data.name}".`, 'success');
+        } catch (error) {
+            showMessage(`Import failed: ${error.message}`, 'error');
+        }
+    }
+
+    async function deleteSavedSessions() {
+        try {
+            const listResponse = await fetch('/api/saved-sessions');
+            const listData = await listResponse.json();
+            if (!listResponse.ok) {
+                throw new Error(listData.error || 'Failed to load saved sessions');
+            }
+
+            if (!listData.sessions || listData.sessions.length === 0) {
+                showMessage('No saved sessions found yet.', 'error');
+                return;
+            }
+
+            setActiveSavedSession(listData.saved_session);
+            const selection = await openSavedSessionModal(listData.sessions, 'delete');
+            const selectedIds = Array.isArray(selection?.ids) ? selection.ids.filter(Boolean) : [];
+            if (!selectedIds.length) {
+                return;
+            }
+
+            const response = await fetch('/api/saved-sessions', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids: selectedIds })
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to delete saved sessions');
+            }
+
+            setActiveSavedSession(data.saved_session);
+            if (data.config) {
+                applySessionConfig(data.config);
+            }
+
+            showMessage(`Deleted ${selectedIds.length} saved session${selectedIds.length === 1 ? '' : 's'}.`, 'success');
+        } catch (error) {
+            showMessage(`Delete failed: ${error.message}`, 'error');
+        }
+    }
+
+    async function checkForUpdates() {
+        const button = document.getElementById('checkUpdatesBtn');
+        button.disabled = true;
+        button.classList.add('loading');
+        setUpdateStatus('Checking the git remote for new commits...');
+
+        try {
+            const response = await fetch('/api/app-update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Update check failed');
+            }
+
+            const updateSummary = data.message || (
+                data.updated
+                    ? `Updated ${data.branch || 'current branch'} to ${shortCommit(data.current_commit)}.`
+                    : 'GridVibe is already up to date.'
+            );
+
+            if (data.updated && data.restart_required) {
+                setUpdateStatus(`${updateSummary} Restarting GridVibe...`, 'success');
+                showMessage(`${updateSummary} Restarting GridVibe...`, 'success');
+
+                if (window.pywebview?.api?.restart_application) {
+                    try {
+                        const restartResult = await window.pywebview.api.restart_application();
+                        if (restartResult?.ok) {
+                            return;
+                        }
+
+                        const restartError = restartResult?.error || 'Automatic restart failed.';
+                        button.disabled = false;
+                        button.classList.remove('loading');
+                        setUpdateStatus(`${updateSummary} ${restartError} Restart GridVibe manually.`, 'error');
+                        showMessage(`${updateSummary} ${restartError} Restart GridVibe manually.`, 'error');
+                        return;
+                    } catch (error) {
+                        button.disabled = false;
+                        button.classList.remove('loading');
+                        setUpdateStatus(`${updateSummary} ${error.message} Restart GridVibe manually.`, 'error');
+                        showMessage(`${updateSummary} ${error.message} Restart GridVibe manually.`, 'error');
+                        return;
+                    }
+                }
+
+                button.disabled = false;
+                button.classList.remove('loading');
+                setUpdateStatus(`${updateSummary} Restart GridVibe to load the latest version.`, 'success');
+                showMessage(`${updateSummary} Restart GridVibe to load the latest version.`, 'success');
+                return;
+            }
+
+            button.disabled = false;
+            button.classList.remove('loading');
+            setUpdateStatus(updateSummary, 'success');
+            showMessage(updateSummary, 'success');
+        } catch (error) {
+            button.disabled = false;
+            button.classList.remove('loading');
+            setUpdateStatus(error.message, 'error');
+            showMessage(`Update failed: ${error.message}`, 'error');
+        }
+    }
+
+    function logLauncherWindowAction(action, details = {}) {
+        console.info(`[GridVibe Launcher] ${action}`, details);
+    }
+
+    async function viewActiveTerminals(event) {
+        event.preventDefault();
+        logLauncherWindowAction('View Active Terminals clicked', {
+            pywebview: Boolean(window.pywebview?.api)
+        });
+
+        if (window.pywebview?.api?.focus_session_window) {
+            try {
+                const result = await window.pywebview.api.focus_session_window();
+                logLauncherWindowAction('focus_session_window result', result || {});
+                if (result?.ok) {
+                    return false;
+                }
+            } catch (error) {
+                console.error('[GridVibe Launcher] focus_session_window failed:', error);
+            }
+        }
+
+        await openTerminalsIfActive();
+        return false;
+    }
+
+    async function openTerminalsIfActive() {
+        try {
+            const resp = await fetch('/api/sessions');
+            const data = await resp.json();
+            logLauncherWindowAction('Fetched sessions before opening terminals', {
+                count: Array.isArray(data.sessions) ? data.sessions.length : 0,
+                groups: Array.isArray(data.sessions)
+                    ? [...new Set(data.sessions.map(session => session.group_id).filter(Boolean))]
+                    : []
+            });
+            if (!data.sessions || data.sessions.length === 0) {
+                showMessage('No active sessions to display.', 'info');
+                return;
+            }
+
+            const firstGroupId = data.sessions.find(session => session.group_id)?.group_id || '';
+            if (window.pywebview?.api?.open_session_window) {
+                try {
+                    const result = await window.pywebview.api.open_session_window(firstGroupId);
+                    logLauncherWindowAction('open_session_window result', {
+                        requested_group_id: firstGroupId || 'all',
+                        ...(result || {})
+                    });
+                    if (result?.ok) {
+                        return;
+                    }
+                } catch (error) {
+                    console.error('[GridVibe Launcher] open_session_window failed:', error);
+                }
+            }
+
+            window.open('/terminals', 'gridvibe-sessions');
+            logLauncherWindowAction('Opened browser terminals window fallback', {
+                requested_group_id: firstGroupId || 'all'
+            });
+        } catch {
+            showMessage('Could not check active sessions.', 'error');
+        }
+    }
+
+    async function launchSessions() {
+        const config = collectFormConfig();
+        const button = document.getElementById('launchBtn');
+        const sessions = [];
+        const sessionName = buildDefaultSessionName();
+
+        if (config.connection_mode === 'ssh' && !config.ssh.host) {
+            showMessage('Enter an SSH host before launching.', 'error');
+            return;
+        }
+
+        if (config.connection_mode === 'wsl' && !config.wsl.default_dir) {
+            showMessage('Select a local repository folder before launching.', 'error');
+            return;
+        }
+
+        const configuredDefaultDir = getStep2DefaultDirectory(config);
+        const launchDefaultDir = configuredDefaultDir || (config.connection_mode === 'ssh' ? '/' : '');
+
+        try {
+            config.terminals.slice(0, selectedCount).forEach((terminal, index) => {
+                const resolvedDirectory = buildLaunchDirectory(
+                    configuredDefaultDir,
+                    terminal.directory,
+                    config.connection_mode
+                ) || launchDefaultDir;
+
+                const common = {
+                    title: terminal.title || `Terminal ${index + 1}`,
+                    directory: resolvedDirectory,
+                    initial_command: terminal.initial_command || null
+                };
+
+                if (config.connection_mode === 'ssh') {
+                    sessions.push({
+                        ...common,
+                        host: config.ssh.host,
+                        username: config.ssh.username || 'ubuntu',
+                        password: config.ssh.password || null,
+                        port: config.ssh.port || 22
+                    });
+                    return;
+                }
+
+                sessions.push({
+                    ...common,
+                    distribution: terminal.distribution || config.wsl.distribution || '',
+                    username: config.wsl.username || '',
+                    use_wsl: Boolean(terminal.use_wsl),
+                    use_powershell: Boolean(terminal.use_powershell)
+                });
+            });
+        } catch (error) {
+            showMessage(error.message, 'error');
+            return;
+        }
+
+        button.disabled = true;
+        button.textContent = 'Launching...';
+
+        try {
+            const response = await fetch('/api/sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    connection_mode: config.connection_mode,
+                    layout: config.layout,
+                    saved_session_id: activeSavedSessionId,
+                    session_name: sessionName,
+                    sessions
+                })
+            });
+
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to create sessions');
+            }
+
+            const launchWarnings = Array.isArray(data.warnings)
+                ? data.warnings.filter(item => String(item || '').trim())
+                : [];
+            const launchMessage = launchWarnings.length
+                ? `Launching ${data.count} ${getConnectionModeLabel(config.connection_mode)} terminals. ${launchWarnings.length === 1 ? launchWarnings[0] : `${launchWarnings.length} startup commands were cleared after preflight failed.`}`
+                : `Launching ${data.count} ${getConnectionModeLabel(config.connection_mode)} terminals.`;
+            showMessage(launchMessage, launchWarnings.length ? 'warning' : 'success');
+            if (data.launch_target === 'web') {
+                setTimeout(async () => {
+                    const targetUrl = `/terminals?group=${encodeURIComponent(data.group_id)}`;
+                    if (window.pywebview?.api?.open_session_window) {
+                        try {
+                            const result = await window.pywebview.api.open_session_window(data.group_id);
+                            logLauncherWindowAction('open_session_window after launch', {
+                                requested_group_id: data.group_id,
+                                ...(result || {})
+                            });
+                            if (!result?.ok) {
+                                window.open(targetUrl, 'gridvibe-sessions');
+                            }
+                        } catch (error) {
+                            console.error('[GridVibe Launcher] launch window open failed:', error);
+                            window.open(targetUrl, 'gridvibe-sessions');
+                        }
+                    } else {
+                        window.open(targetUrl, 'gridvibe-sessions');
+                    }
+                    button.disabled = false;
+                    button.textContent = 'Launch Terminals';
+                }, 450);
+            }
+        } catch (error) {
+            button.disabled = false;
+            button.textContent = 'Launch Terminals';
+            showMessage(`Launch failed: ${error.message}`, 'error');
+        }
+    }
+
+    restoreActiveSavedSessionMeta();
+    renderCountOptions();
+    renderLayoutOptions();
+    renderModeFields();
+    buildTerminalRows(selectedCount, DEFAULT_TERMINALS);
+    updateTerminalTargetSignature(connectionMode, collectModeInputs());
+    loadPersistedConfig(true);
+    loadAppSettings().catch(() => {});
+
+    document.getElementById('savedSessionsModal').addEventListener('click', event => {
+        if (event.target.id === 'savedSessionsModal') {
+            closeSavedSessionModal();
+        }
+    });
+
+    document.getElementById('appSettingsModal').addEventListener('click', event => {
+        if (event.target.id === 'appSettingsModal') {
+            closeAppSettingsModal();
+        }
+    });
+
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && document.getElementById('savedSessionsModal').classList.contains('visible')) {
+            closeSavedSessionModal();
+        }
+        if (event.key === 'Escape' && document.getElementById('appSettingsModal').classList.contains('visible')) {
+            closeAppSettingsModal();
+        }
+    });
+</script>
+</body>
+</html>
+
