@@ -2,7 +2,7 @@
 
 # Web framework
 Flask>=2.3.0
-Flask-SocketIO>=5.3.0
+Flask-SocketIO>=5.6.1
 
 # SSH support
 paramiko>=3.3.0
