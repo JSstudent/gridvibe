@@ -6,6 +6,71 @@ GridVibe is a browser-first terminal workspace for launching and managing multip
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 
+## Screenshots
+
+### Launcher
+
+![GridVibe launcher with terminal count, layout, connection, and per-terminal setup controls](docs/images/screenshots/launcher.png)
+
+### Terminal Workspace
+
+![GridVibe terminal workspace showing a four-pane SSH session group](docs/images/screenshots/workspace.png)
+
+## Using the Workspace
+
+### Terminal Buttons
+
+The terminal workspace has global controls in the top bar and per-pane controls in each terminal header.
+
+Top bar controls:
+
+- `Theme` cycles between system, light, and dark mode.
+- `Refresh all` reloads session status and redraws terminal panes.
+- `Close Session` closes the currently selected session group.
+- `Fullscreen` toggles the workspace into and out of fullscreen mode.
+- `Settings` returns to the launcher page.
+
+Per-terminal controls:
+
+- `↻` resets that terminal view and replays the recent output buffer.
+- `🧹` clears the terminal display and purges its replay buffer.
+- `🗑` sends `Ctrl+U` to clear the current input line.
+- `Enter` sends an Enter keypress to that terminal.
+- `🎤` starts or stops voice input for that terminal when voice input is enabled.
+- `Mic` opens voice capture settings for microphone selection, push-to-talk, and capture diagnostics.
+
+Session tabs show each active session group. Drag tabs to reorder them; GridVibe persists the order for the running app state.
+
+### Voice and Sound Settings
+
+GridVibe does not play remote audio from terminal sessions. Sound-related settings are for microphone capture used by voice input.
+
+Open `Mic` on a terminal pane to choose:
+
+- `Profile`: headset or laptop microphone capture tuning.
+- `Microphone`: browser default input or a specific available input device.
+- `Push-to-talk`: optional hold-to-record mode with a custom keybind.
+- `Requested vs actual capture`: diagnostics comparing the requested audio settings to what the browser actually applied.
+
+Voice input requires the optional voice dependencies:
+
+```bash
+pip install -r requirements-voice.txt
+```
+
+Browser mode is usually the most reliable mode for microphone permissions. Native `pywebview` mode depends on the embedded browser and OS microphone support.
+
+### General Settings
+
+Use the gear button on the launcher page to open `App Settings`. These settings are saved to `config.json` and are not stored inside saved session presets.
+
+- `Enable voice input` shows or hides voice controls and enables the speech-to-text path.
+- `Theme` sets system, light, or dark mode.
+- `Voice Backend` selects `Vosk` or `faster-whisper`.
+- `Language` sets the voice recognition language, such as `en-US`.
+- `Vosk Model` sets the local Vosk model folder/name.
+- `Whisper Model`, `Device`, and `Compute Type` configure faster-whisper. GPU mode requires a working NVIDIA CUDA setup; use CPU if startup fails.
+
 ## Features
 
 - Multi-session launcher with 1, 2, 3, 4, 6, or 8 panes
@@ -184,4 +249,3 @@ These are created or used at runtime and should not be committed:
 ## License
 
 MIT. See `LICENSE`.
-
