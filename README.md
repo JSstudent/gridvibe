@@ -116,6 +116,16 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 
 ## Quick Start
 
+### Windows One-Click Launcher
+
+For the easiest Windows start, open:
+
+```powershell
+.\START_HERE\Start GridVibe.bat
+```
+
+That visible launcher calls the working root launcher, `GridVibe.bat`.
+
 ### Windows Install
 
 Use the included launcher for the easiest Windows setup:
