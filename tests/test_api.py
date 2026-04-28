@@ -312,7 +312,12 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn('class="btn btn-cyan" onclick="refreshStatuses()">Refresh all</button>', html)
+        self.assertIn('aria-label="Refresh all"', html)
+        self.assertIn('class="refresh-all-icon"', html)
+        self.assertNotIn(">Refresh all</button>", html)
+        self.assertNotIn("Close Session</button>", html)
+        self.assertIn("closeButton.className = 'session-tab-close';", html)
+        self.assertIn("closeSessionGroup(group.group_id);", html)
         self.assertIn(".session-tab.settings {", html)
         self.assertIn("border-color: #00c46e;", html)
         self.assertIn("settingsButton.textContent = '+ New Session';", html)

@@ -166,6 +166,9 @@
             cursor: pointer;
             white-space: nowrap;
             transition: background .18s, border-color .18s, color .18s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
         }
 
         .session-tab.draggable {
@@ -202,6 +205,45 @@
         .session-tab.drag-target {
             border-color: var(--tab-color, var(--t-accent));
             box-shadow: inset 0 0 0 1px var(--tab-color-shadow, rgba(0, 217, 255, 0.45));
+        }
+
+        .session-tab-label {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .session-tab-main {
+            border: 0;
+            padding: 0;
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+            font: inherit;
+            min-width: 0;
+        }
+
+        .session-tab-close {
+            width: 18px;
+            height: 18px;
+            border: 0;
+            border-radius: 4px;
+            padding: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            color: currentColor;
+            cursor: pointer;
+            font-size: 1rem;
+            line-height: 1;
+            opacity: 0.68;
+        }
+
+        .session-tab-close:hover {
+            background: rgba(255, 68, 68, 0.18);
+            color: #ff7777;
+            opacity: 1;
         }
 
         .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 600; }
@@ -256,6 +298,11 @@
             height: 24px;
             display: block;
             filter: drop-shadow(0 0 5px rgba(0, 217, 255, 0.32));
+        }
+        .refresh-all-icon {
+            width: 18px;
+            height: 18px;
+            display: block;
         }
 
         /* ── Grid area ── */
@@ -816,8 +863,17 @@
     </div>
     <div class="topbar-actions">
         <button class="btn btn-neutral" id="themeToggleBtn" onclick="cycleTheme()" title="Toggle theme">🌙 Dark</button>
-        <button class="btn btn-cyan" onclick="refreshStatuses()">Refresh all</button>
-        <button class="btn btn-danger"  onclick="closeCurrentSession()">Close Session</button>
+        <button
+            class="btn btn-cyan btn-icon"
+            onclick="refreshStatuses()"
+            title="Refresh all"
+            aria-label="Refresh all"
+        >
+            <svg class="refresh-all-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+        </button>
         <button
             class="btn btn-success btn-icon"
             id="fullscreenBtn"
@@ -1223,19 +1279,45 @@
         container.appendChild(settingsButton);
 
         sessionGroups.forEach(group => {
-            const button = document.createElement('button');
+            const button = document.createElement('div');
             button.className = `session-tab${group.group_id === activeGroupId ? ' active' : ''} draggable`;
-            button.type = 'button';
-            button.textContent = group.name || group.group_id;
             button.dataset.groupId = group.group_id;
             applyTabColour(button, group.group_id);
-            button.addEventListener('click', event => {
+
+            const tabButton = document.createElement('button');
+            tabButton.className = 'session-tab-main';
+            tabButton.type = 'button';
+            tabButton.setAttribute('aria-label', `${group.name || group.group_id} session`);
+            tabButton.addEventListener('click', event => {
                 if (Date.now() < suppressSessionTabClickUntil) {
                     event.preventDefault();
                     return;
                 }
                 switchGroup(group.group_id);
             });
+
+            const label = document.createElement('span');
+            label.className = 'session-tab-label';
+            label.textContent = group.name || group.group_id;
+            tabButton.appendChild(label);
+            button.appendChild(tabButton);
+
+            const closeButton = document.createElement('button');
+            closeButton.className = 'session-tab-close';
+            closeButton.type = 'button';
+            closeButton.title = `Close ${group.name || group.group_id}`;
+            closeButton.setAttribute('aria-label', `Close ${group.name || group.group_id}`);
+            closeButton.textContent = '×';
+            closeButton.addEventListener('mousedown', event => {
+                event.stopPropagation();
+            });
+            closeButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                closeSessionGroup(group.group_id);
+            });
+            button.appendChild(closeButton);
+
             wireSessionTabDragAndDrop(button, container);
             container.appendChild(button);
         });
@@ -3860,35 +3942,45 @@
     }
 
     /* ─────────────────────────────────────────────
-       Close all sessions
+       Close session group
     ───────────────────────────────────────────── */
-    async function closeCurrentSession() {
-        if (!activeGroupId) {
+    async function closeSessionGroup(groupId = activeGroupId) {
+        if (!groupId) {
             return;
         }
 
         try {
-            const closingGroupId = activeGroupId;
-            const response = await fetch(getSessionApiPath(), { method: 'DELETE' });
+            const closingGroupId = groupId;
+            const closedActiveGroup = activeGroupId === closingGroupId;
+            const closedVisibleGroup = visibleGroupId === closingGroupId;
+            const response = await fetch(getSessionApiPath(closingGroupId), { method: 'DELETE' });
             if (!response.ok) {
                 throw new Error(`Close session failed with status ${response.status}`);
             }
 
-            if (visibleGroupId === closingGroupId) {
+            if (closedVisibleGroup) {
                 teardownCurrentGrid();
             } else {
                 dropCachedGroupView(closingGroupId);
             }
-            activeGroupId = '';
+            if (closedActiveGroup) {
+                activeGroupId = '';
+            }
             await loadSessionGroups();
             if (sessionGroups.length === 0) {
                 await _closeWindowAfterLastSession();
                 return;
             }
-            await initialLoad();
+            if (closedActiveGroup || closedVisibleGroup) {
+                await initialLoad();
+            }
         } catch (e) {
             console.error('Close session failed:', e);
         }
+    }
+
+    async function closeCurrentSession() {
+        await closeSessionGroup(activeGroupId);
     }
 
     async function _closeWindowAfterLastSession() {

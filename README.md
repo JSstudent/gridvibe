@@ -25,8 +25,8 @@ The terminal workspace has global controls in the top bar and per-pane controls 
 Top bar controls:
 
 - `Theme` cycles between system, light, and dark mode.
-- `Refresh all` reloads session status and redraws terminal panes.
-- `Close Session` closes the currently selected session group.
+- `Refresh` reloads session status and redraws terminal panes.
+- `Close tab` closes the selected session group from its session tab.
 - `Fullscreen` toggles the workspace into and out of fullscreen mode.
 - `Settings` returns to the launcher page.
 
