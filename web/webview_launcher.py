@@ -346,7 +346,6 @@ class GridVibeApi:
                 width=1600,
                 height=980,
                 min_size=(1180, 720),
-                background_color="#0d0d0d",
                 text_select=True,
                 js_api=self,
             )
@@ -379,6 +378,19 @@ class GridVibeApi:
             return {"ok": True}
         except Exception as exc:
             logger.exception("Failed to focus launcher window")
+            return {"ok": False, "error": str(exc)}
+
+    def close_session_window(self):
+        """Close the session window when the last session is removed."""
+        if self._session_window is None:
+            logger.warning("close_session_window called but no session window is registered")
+            return {"ok": False, "error": "No session window open"}
+        try:
+            logger.info("Closing session window (last session removed)")
+            self._session_window.destroy()
+            return {"ok": True}
+        except Exception as exc:
+            logger.exception("Failed to close session window")
             return {"ok": False, "error": str(exc)}
 
     def restart_application(self):
@@ -658,7 +670,6 @@ def main():
         width=1280,
         height=1000,
         min_size=(480, 480),
-        background_color="#0d0d0d",
         text_select=True,
         js_api=api_bridge,
     )

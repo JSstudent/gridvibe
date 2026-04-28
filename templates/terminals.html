@@ -3881,10 +3881,27 @@
             }
             activeGroupId = '';
             await loadSessionGroups();
+            if (sessionGroups.length === 0) {
+                await _closeWindowAfterLastSession();
+                return;
+            }
             await initialLoad();
         } catch (e) {
             console.error('Close session failed:', e);
         }
+    }
+
+    async function _closeWindowAfterLastSession() {
+        logSessionWindowAction('Last session closed — closing window');
+        if (isPywebviewAvailable() && window.pywebview.api.close_session_window) {
+            try {
+                await window.pywebview.api.close_session_window();
+                return;
+            } catch (e) {
+                console.error('[GridVibe Sessions] close_session_window failed:', e);
+            }
+        }
+        window.close();
     }
 
     /* ─────────────────────────────────────────────
