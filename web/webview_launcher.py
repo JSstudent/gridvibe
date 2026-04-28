@@ -346,6 +346,7 @@ class GridVibeApi:
                 width=1600,
                 height=980,
                 min_size=(1180, 720),
+                background_color="#0d0d0d",
                 text_select=True,
                 js_api=self,
             )
@@ -422,7 +423,7 @@ def _wait_for_server(base_url: str, timeout: float = 20.0) -> bool:
 def _resolve_icon_path() -> str | None:
     """Return the packaged icon path when it exists."""
     project_root = Path(__file__).resolve().parent.parent
-    icon_path = project_root / "docs" / "images" / "VibeTerm_icon.ico"
+    icon_path = project_root / "docs" / "images" / "GridVibe_icon.ico"
     return str(icon_path) if icon_path.is_file() else None
 
 
@@ -657,6 +658,7 @@ def main():
         width=1280,
         height=1000,
         min_size=(480, 480),
+        background_color="#0d0d0d",
         text_select=True,
         js_api=api_bridge,
     )
@@ -678,4 +680,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

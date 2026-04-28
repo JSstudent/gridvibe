@@ -160,6 +160,15 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertLess(open_launcher_index, reset_index)
 
+    def test_terminals_page_uses_icon_only_settings_button(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('class="btn btn-neutral btn-icon settings-window-btn"', html)
+        self.assertIn('aria-label="Open settings"', html)
+        self.assertIn('class="vibe-flow-icon"', html)
+
     def test_terminals_page_exposes_per_terminal_refresh_control(self):
         response = self.client.get("/terminals")
 

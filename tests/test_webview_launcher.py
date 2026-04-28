@@ -200,6 +200,13 @@ class WebviewLauncherTestCase(unittest.TestCase):
 
         self.assertEqual(command, [expected_python, expected_launcher])
 
+    def test_resolve_icon_path_uses_gridvibe_icon(self):
+        icon_path = webview_launcher._resolve_icon_path()
+
+        self.assertIsNotNone(icon_path)
+        self.assertTrue(icon_path.endswith("GridVibe_icon.ico"))
+        self.assertTrue(Path(icon_path).is_file())
+
     def test_restart_application_queues_restart_and_shutdown(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
         restart_command = ["/usr/bin/python3", "/tmp/webview_launcher.py", "--debug"]
@@ -257,4 +264,3 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertEqual(helper_command[0], webview_launcher.sys.executable)
         self.assertIn("WaitForSingleObject", helper_command[2])
         self.assertIn("DETACHED_PROCESS", helper_command[2])
-

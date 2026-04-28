@@ -239,6 +239,24 @@
             font-size: 1rem;
             line-height: 1;
         }
+        .settings-window-btn {
+            width: 38px;
+            height: 34px;
+            min-width: 38px;
+            padding: 0;
+            border: 1px solid var(--t-border-tab);
+            background: var(--t-btn-bg);
+        }
+        .settings-window-btn:hover {
+            border-color: var(--t-accent);
+            background: var(--t-btn-hover-bg);
+        }
+        .vibe-flow-icon {
+            width: 24px;
+            height: 24px;
+            display: block;
+            filter: drop-shadow(0 0 5px rgba(0, 217, 255, 0.32));
+        }
 
         /* ── Grid area ── */
         #terminalsGrid {
@@ -808,7 +826,20 @@
             aria-label="Enter fullscreen"
             aria-pressed="false"
         >&#9974;</button>
-        <a href="/" class="btn btn-neutral" onclick="return goToSettings(event)">Settings</a>
+        <a
+            href="/"
+            class="btn btn-neutral btn-icon settings-window-btn"
+            onclick="return goToSettings(event)"
+            title="Open settings"
+            aria-label="Open settings"
+        >
+            <svg class="vibe-flow-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+                <rect x="5" y="7" width="22" height="18" rx="5" fill="#06263a" stroke="#5eefff" stroke-width="1.4"/>
+                <path d="M9 11.5h14" stroke="#63f6ff" stroke-width="2.2" stroke-linecap="round"/>
+                <path d="M12 15l4 4-4 4" fill="none" stroke="#6dfcff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M18 22h5" stroke="#4fd6ff" stroke-width="2.2" stroke-linecap="round"/>
+            </svg>
+        </a>
     </div>
 </div>
 
@@ -4002,4 +4033,3 @@
 </script>
 </body>
 </html>
-
