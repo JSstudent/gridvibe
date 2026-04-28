@@ -70,23 +70,23 @@
             --t-card: #ffffff;
             --t-card-header: #f3f4f6;
             --t-terminal-bg: #0d0d0d;
-            --t-border: #d1d5db;
-            --t-border-dim: #e5e7eb;
-            --t-border-card: #d1d5db;
-            --t-border-tab: #d1d5db;
-            --t-text: #1a1a2e;
-            --t-text-secondary: #374151;
-            --t-text-muted: #6b7280;
-            --t-text-placeholder: #9ca3af;
-            --t-accent: #0891b2;
+            --t-border: #b7c0cc;
+            --t-border-dim: #cfd6df;
+            --t-border-card: #b7c0cc;
+            --t-border-tab: #aeb7c2;
+            --t-text: #111827;
+            --t-text-secondary: #1f2937;
+            --t-text-muted: #4b5563;
+            --t-text-placeholder: #6b7280;
+            --t-accent: #087f9b;
             --t-accent-hover: #0e7490;
-            --t-success: #10b981;
+            --t-success: #047857;
             --t-success-hover: #059669;
             --t-btn-bg: #f3f4f6;
-            --t-btn-text: #374151;
+            --t-btn-text: #1f2937;
             --t-btn-hover-bg: #e5e7eb;
             --t-btn-neutral: #f3f4f6;
-            --t-btn-neutral-text: #374151;
+            --t-btn-neutral-text: #1f2937;
             --t-btn-neutral-hover: #e5e7eb;
             --t-ctx-bg: #ffffff;
             --t-ctx-border: #d1d5db;
@@ -163,6 +163,7 @@
             border-radius: 9px;
             padding: 8px 12px;
             font-size: .8rem;
+            font-weight: 600;
             cursor: pointer;
             white-space: nowrap;
             transition: background .18s, border-color .18s, color .18s;
@@ -196,6 +197,22 @@
             background: rgba(0, 196, 110, 0.24);
             border-color: #1add88;
             color: #cffff0;
+        }
+
+        [data-theme="light"] .session-tab {
+            box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
+        }
+
+        [data-theme="light"] .session-tab.settings {
+            background: #ecfdf5;
+            border-color: rgba(4, 120, 87, 0.55);
+            color: #047857;
+        }
+
+        [data-theme="light"] .session-tab.settings:hover {
+            background: #d1fae5;
+            border-color: rgba(4, 120, 87, 0.75);
+            color: #065f46;
         }
 
         .session-tab.dragging {
@@ -246,7 +263,7 @@
             opacity: 1;
         }
 
-        .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 600; }
+        .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 700; }
         .topbar-sub   { font-size: .78rem; color: var(--t-text-muted); margin-left: 10px; }
 
         .topbar-actions { display: flex; gap: 8px; align-items: center; }

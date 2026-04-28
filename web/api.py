@@ -175,6 +175,27 @@ whisper_device = "cpu"
 whisper_compute_type = "int8"
 voice_language = "en-US"
 vosk_startup_timeout_seconds = 180
+WHISPER_MODEL_OPTIONS = {
+    "tiny.en",
+    "tiny",
+    "base.en",
+    "base",
+    "small.en",
+    "small",
+    "medium.en",
+    "medium",
+    "large-v1",
+    "large-v2",
+    "large-v3",
+    "large",
+    "distil-large-v2",
+    "distil-medium.en",
+    "distil-small.en",
+    "distil-large-v3",
+    "distil-large-v3.5",
+    "large-v3-turbo",
+    "turbo",
+}
 
 
 def _refresh_runtime_config():
@@ -208,7 +229,9 @@ def _refresh_runtime_config():
         voice_engine = "vosk"
     vosk_service_url = voice_config.get("vosk_service_url", "ws://localhost:2700")
     vosk_model = voice_config.get("vosk_model", "vosk-model-en-us-0.22")
-    whisper_model = voice_config.get("whisper_model", "base")
+    whisper_model = str(voice_config.get("whisper_model", "base")).strip() or "base"
+    if whisper_model not in WHISPER_MODEL_OPTIONS:
+        whisper_model = "base"
     whisper_device = voice_config.get("whisper_device", "cpu")
     whisper_compute_type = voice_config.get("whisper_compute_type", "int8")
     voice_language = voice_config.get("language", "en-US")
@@ -271,6 +294,12 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     if whisper_device_value not in {"cpu", "cuda"}:
         whisper_device_value = whisper_device
 
+    next_whisper_model = str(
+        voice_input.get("whisper_model", whisper_model)
+    ).strip() or whisper_model
+    if next_whisper_model not in WHISPER_MODEL_OPTIONS:
+        next_whisper_model = "base"
+
     return {
         "appearance": {
             "theme": theme,
@@ -279,9 +308,7 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
             "enabled": bool(voice_input.get("enabled", voice_enabled)),
             "engine": engine,
             "vosk_model": str(voice_input.get("vosk_model", vosk_model)).strip() or vosk_model,
-            "whisper_model": str(
-                voice_input.get("whisper_model", whisper_model)
-            ).strip() or whisper_model,
+            "whisper_model": next_whisper_model,
             "whisper_device": whisper_device_value,
             "whisper_compute_type": str(
                 voice_input.get("whisper_compute_type", whisper_compute_type)

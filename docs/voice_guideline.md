@@ -81,7 +81,7 @@ Current committed defaults in `default_config.json` are:
     "vosk_service_url": "ws://localhost:2700",
     "vosk_service_port": 2700,
     "vosk_model": "vosk-model-en-us-0.22",
-    "whisper_model": "small",
+    "whisper_model": "base",
     "whisper_device": "cpu",
     "whisper_compute_type": "int8",
     "language": "en-US"

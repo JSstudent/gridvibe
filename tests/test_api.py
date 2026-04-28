@@ -133,6 +133,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="appTheme"', html)
         self.assertIn('id="appVoiceEngine"', html)
         self.assertIn('id="appWhisperDevice"', html)
+        self.assertIn('<select id="appWhisperModel">', html)
+        self.assertIn('<option value="base">base</option>', html)
+        self.assertIn('<option value="large-v3-turbo">large-v3-turbo</option>', html)
 
     def test_launcher_page_resets_terminal_setup_when_connection_target_changes(self):
         response = self.client.get("/")
@@ -539,6 +542,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(cfg["appearance"]["theme"], "light")
         self.assertEqual(cfg["voice_input"]["engine"], "vosk")
         self.assertEqual(cfg["voice_input"]["vosk_model"], "vosk-model-small-en-us-0.15")
+
+    def test_app_config_endpoint_rejects_unknown_whisper_model(self):
+        response = self.client.post(
+            "/api/app-config",
+            json={
+                "voice_input": {
+                    "engine": "whisper",
+                    "whisper_model": "not-a-model",
+                }
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["voice_input"]["whisper_model"], "base")
 
     def test_agent_preflight_endpoint_returns_installed_when_binary_exists(self):
         with patch.object(
@@ -2391,6 +2409,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             '[data-theme="light"] .count-btn',
             '[data-theme="light"] .field input',
             '[data-theme="light"] .t-row',
+            '[data-theme="light"] .t-agent-select',
             '[data-theme="light"] .command-mode-btn',
             '[data-theme="light"] .check-field',
             '[data-theme="light"] .modal-card',

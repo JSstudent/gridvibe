@@ -26,19 +26,19 @@
         [data-theme="light"] {
             --bg: #f0f2f5;
             --bg-deep: #e5e7eb;
-            --panel: rgba(255, 255, 255, 0.95);
-            --panel-strong: rgba(243, 244, 246, 0.98);
-            --panel-soft: rgba(249, 250, 251, 0.98);
-            --line: rgba(107, 114, 128, 0.18);
-            --line-strong: rgba(8, 145, 178, 0.78);
-            --text: #1a1a2e;
-            --muted: #6b7280;
-            --accent: #0891b2;
+            --panel: rgba(255, 255, 255, 0.98);
+            --panel-strong: rgba(248, 250, 252, 0.99);
+            --panel-soft: rgba(255, 255, 255, 0.99);
+            --line: rgba(75, 85, 99, 0.34);
+            --line-strong: rgba(8, 145, 178, 0.86);
+            --text: #111827;
+            --muted: #4b5563;
+            --accent: #087f9b;
             --accent-strong: #0e7490;
-            --accent-soft: rgba(8, 145, 178, 0.10);
-            --danger: #ef4444;
-            --success: #10b981;
-            --shadow: 0 24px 60px rgba(0, 0, 0, 0.08);
+            --accent-soft: rgba(8, 145, 178, 0.14);
+            --danger: #dc2626;
+            --success: #047857;
+            --shadow: 0 18px 46px rgba(15, 23, 42, 0.13);
         }
 
         [data-theme="light"] body {
@@ -49,7 +49,8 @@
         [data-theme="light"] .layout-btn,
         [data-theme="light"] .mode-btn,
         [data-theme="light"] .ghost-btn {
-            background: rgba(255, 255, 255, 0.88);
+            background: rgba(255, 255, 255, 0.98);
+            border-color: rgba(75, 85, 99, 0.28);
         }
 
         [data-theme="light"] .count-btn:hover,
@@ -67,7 +68,7 @@
         }
 
         [data-theme="light"] .layout-panel {
-            border-top-color: rgba(107, 114, 128, 0.14);
+            border-top-color: rgba(75, 85, 99, 0.26);
         }
 
         [data-theme="light"] .layout-preview {
@@ -82,8 +83,9 @@
 
         [data-theme="light"] .field input,
         [data-theme="light"] .field select {
-            border-color: rgba(107, 114, 128, 0.22);
-            background: rgba(255, 255, 255, 0.96);
+            border-color: rgba(75, 85, 99, 0.38);
+            background: rgba(255, 255, 255, 0.99);
+            color: var(--text);
         }
 
         [data-theme="light"] .field input:focus,
@@ -93,7 +95,7 @@
         }
 
         [data-theme="light"] .field input::placeholder {
-            color: #9ca3af;
+            color: #6b7280;
         }
 
         [data-theme="light"] .tip-btn {
@@ -120,32 +122,33 @@
         }
 
         [data-theme="light"] .check-field {
-            border-color: rgba(107, 114, 128, 0.22);
-            background: rgba(255, 255, 255, 0.96);
+            border-color: rgba(75, 85, 99, 0.34);
+            background: rgba(255, 255, 255, 0.99);
         }
 
         [data-theme="light"] .settings-section {
-            border-color: rgba(107, 114, 128, 0.18);
-            background: rgba(243, 244, 246, 0.92);
+            border-color: rgba(75, 85, 99, 0.28);
+            background: rgba(248, 250, 252, 0.98);
         }
 
         [data-theme="light"] .picker-display {
-            border-color: rgba(107, 114, 128, 0.22);
-            background: rgba(255, 255, 255, 0.96);
+            border-color: rgba(75, 85, 99, 0.38);
+            background: rgba(255, 255, 255, 0.99);
         }
 
         [data-theme="light"] .picker-display.empty {
-            color: #9ca3af;
+            color: #6b7280;
         }
 
         [data-theme="light"] .t-row {
-            background: rgba(255, 255, 255, 0.92);
-            border-color: rgba(107, 114, 128, 0.16);
+            background: rgba(255, 255, 255, 0.98);
+            border-color: rgba(75, 85, 99, 0.30);
+            box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
         }
 
         [data-theme="light"] .t-row-head {
-            background: rgba(240, 242, 248, 0.85);
-            border-bottom-color: rgba(107, 114, 128, 0.12);
+            background: rgba(226, 232, 240, 0.72);
+            border-bottom-color: rgba(75, 85, 99, 0.22);
         }
 
         [data-theme="light"] .t-badge {
@@ -153,8 +156,9 @@
         }
 
         [data-theme="light"] .command-mode-btn {
-            border-color: rgba(107, 114, 128, 0.22);
-            background: rgba(255, 255, 255, 0.96);
+            border-color: rgba(75, 85, 99, 0.34);
+            background: rgba(255, 255, 255, 0.99);
+            color: #374151;
         }
 
         [data-theme="light"] .command-mode-btn:hover {
@@ -171,8 +175,8 @@
         }
 
         [data-theme="light"] .secondary-link {
-            border-color: rgba(107, 114, 128, 0.22);
-            background: rgba(255, 255, 255, 0.9);
+            border-color: rgba(75, 85, 99, 0.30);
+            background: rgba(255, 255, 255, 0.98);
         }
 
         [data-theme="light"] .modal-shell {
@@ -181,12 +185,13 @@
 
         [data-theme="light"] .modal-card {
             background: linear-gradient(180deg, rgba(255, 255, 255, 0.99) 0%, rgba(249, 250, 251, 0.99) 100%);
-            border-color: rgba(107, 114, 128, 0.2);
+            border-color: rgba(75, 85, 99, 0.30);
         }
 
         [data-theme="light"] .saved-session-item {
-            border-color: rgba(107, 114, 128, 0.18);
-            background: rgba(255, 255, 255, 0.92);
+            border-color: rgba(75, 85, 99, 0.34);
+            background: rgba(255, 255, 255, 0.99);
+            box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
         }
 
         [data-theme="light"] .saved-session-item:hover {
@@ -195,8 +200,9 @@
         }
 
         [data-theme="light"] .saved-session-tag {
-            border-color: rgba(107, 114, 128, 0.18);
-            background: rgba(243, 244, 246, 0.8);
+            border-color: rgba(75, 85, 99, 0.28);
+            background: rgba(241, 245, 249, 0.96);
+            color: #374151;
         }
 
         [data-theme="light"] .saved-session-tag.current {
@@ -205,8 +211,8 @@
         }
 
         [data-theme="light"] .saved-session-selectable.selected {
-            border-color: rgba(239, 68, 68, 0.42);
-            background: rgba(254, 242, 242, 0.94);
+            border-color: rgba(220, 38, 38, 0.58);
+            background: rgba(254, 242, 242, 0.98);
         }
 
         [data-theme="light"] .danger-btn:hover {
@@ -659,6 +665,7 @@
             text-transform: uppercase;
             letter-spacing: 1.2px;
             font-size: 0.72rem;
+            font-weight: 700;
         }
 
         .field-label-row {
@@ -811,11 +818,17 @@
             background-repeat: no-repeat;
         }
 
-        /* Light theme would otherwise override the select background to white;
-           keep agent-select dark in all themes so status colors remain readable. */
         [data-theme="light"] .t-agent-select {
-            background-color: rgba(16, 21, 39, 0.94);
-            color: #f3f6ff;
+            color-scheme: light;
+            background-color: #ffffff;
+            color: #111827;
+            border-color: rgba(75, 85, 99, 0.42);
+            font-weight: 600;
+        }
+
+        [data-theme="light"] .t-agent-select option {
+            background: #ffffff;
+            color: #111827;
         }
 
         .t-agent-select.status-installed {
@@ -845,6 +858,33 @@
             color: var(--accent);
         }
 
+        [data-theme="light"] .t-agent-select.status-installed {
+            border-color: rgba(4, 120, 87, 0.54);
+            background-color: #ecfdf5;
+            color: #047857;
+        }
+
+        [data-theme="light"] .t-agent-select.status-missing,
+        [data-theme="light"] .t-agent-select.status-needs_manual_install {
+            border-color: rgba(180, 83, 9, 0.54);
+            background-color: #fffbeb;
+            color: #92400e;
+        }
+
+        [data-theme="light"] .t-agent-select.status-missing_prerequisite,
+        [data-theme="light"] .t-agent-select.status-check_failed,
+        [data-theme="light"] .t-agent-select.status-unsupported_here {
+            border-color: rgba(220, 38, 38, 0.54);
+            background-color: #fef2f2;
+            color: #b91c1c;
+        }
+
+        [data-theme="light"] .t-agent-select.status-target_incomplete {
+            border-color: rgba(8, 145, 178, 0.54);
+            background-color: #ecfeff;
+            color: #0e7490;
+        }
+
         .agent-preflight-disclosure {
             display: none;
         }
@@ -870,14 +910,32 @@
             color: #ffd084;
         }
 
+        [data-theme="light"] .agent-preflight-summary.missing,
+        [data-theme="light"] .agent-preflight-summary.needs_manual_install {
+            color: #92400e;
+            font-weight: 700;
+        }
+
         .agent-preflight-summary.missing_prerequisite,
         .agent-preflight-summary.check_failed,
         .agent-preflight-summary.unsupported_here {
             color: #ff8b96;
         }
 
+        [data-theme="light"] .agent-preflight-summary.missing_prerequisite,
+        [data-theme="light"] .agent-preflight-summary.check_failed,
+        [data-theme="light"] .agent-preflight-summary.unsupported_here {
+            color: #b91c1c;
+            font-weight: 700;
+        }
+
         .agent-preflight-summary.target_incomplete {
             color: var(--accent);
+        }
+
+        [data-theme="light"] .agent-preflight-summary.installed,
+        [data-theme="light"] .agent-preflight-summary.target_incomplete {
+            font-weight: 700;
         }
 
         .agent-preflight-disclosure[open] .agent-preflight-copy {
@@ -1268,6 +1326,11 @@
             font-weight: 700;
         }
 
+        [data-theme="light"] .saved-session-name {
+            font-weight: 800;
+            color: #111827;
+        }
+
         .saved-session-tags {
             display: flex;
             align-items: center;
@@ -1318,6 +1381,12 @@
             color: var(--muted);
             font-size: 0.76rem;
             line-height: 1.4;
+        }
+
+        [data-theme="light"] .saved-session-meta,
+        [data-theme="light"] .saved-session-id {
+            color: #374151;
+            font-weight: 600;
         }
 
         .danger-btn {
@@ -1629,7 +1698,27 @@
                 <div class="settings-fields-inline">
                     <div class="field">
                         <label>Whisper Model</label>
-                        <input id="appWhisperModel" type="text" placeholder="base">
+                        <select id="appWhisperModel">
+                            <option value="tiny.en">tiny.en</option>
+                            <option value="tiny">tiny</option>
+                            <option value="base.en">base.en</option>
+                            <option value="base">base</option>
+                            <option value="small.en">small.en</option>
+                            <option value="small">small</option>
+                            <option value="medium.en">medium.en</option>
+                            <option value="medium">medium</option>
+                            <option value="large-v1">large-v1</option>
+                            <option value="large-v2">large-v2</option>
+                            <option value="large-v3">large-v3</option>
+                            <option value="large">large</option>
+                            <option value="distil-large-v2">distil-large-v2</option>
+                            <option value="distil-medium.en">distil-medium.en</option>
+                            <option value="distil-small.en">distil-small.en</option>
+                            <option value="distil-large-v3">distil-large-v3</option>
+                            <option value="distil-large-v3.5">distil-large-v3.5</option>
+                            <option value="large-v3-turbo">large-v3-turbo</option>
+                            <option value="turbo">turbo</option>
+                        </select>
                     </div>
                     <div class="field">
                         <label>Device</label>
@@ -1788,6 +1877,27 @@
             language: 'en-US'
         })
     });
+    const WHISPER_MODEL_OPTIONS = Object.freeze([
+        'tiny.en',
+        'tiny',
+        'base.en',
+        'base',
+        'small.en',
+        'small',
+        'medium.en',
+        'medium',
+        'large-v1',
+        'large-v2',
+        'large-v3',
+        'large',
+        'distil-large-v2',
+        'distil-medium.en',
+        'distil-small.en',
+        'distil-large-v3',
+        'distil-large-v3.5',
+        'large-v3-turbo',
+        'turbo'
+    ]);
 
     let selectedCount = COUNT_OPTIONS.includes(4) ? 4 : COUNT_OPTIONS[COUNT_OPTIONS.length - 1];
     let selectedLayout = defaultLayoutForCount(selectedCount);
@@ -2290,7 +2400,12 @@
         if (engineInput) engineInput.value = voice.engine === 'whisper' ? 'whisper' : 'vosk';
         if (languageInput) languageInput.value = voice.language || DEFAULT_APP_SETTINGS.voice_input.language;
         if (voskModelInput) voskModelInput.value = voice.vosk_model || DEFAULT_APP_SETTINGS.voice_input.vosk_model;
-        if (whisperModelInput) whisperModelInput.value = voice.whisper_model || DEFAULT_APP_SETTINGS.voice_input.whisper_model;
+        if (whisperModelInput) {
+            const model = WHISPER_MODEL_OPTIONS.includes(voice.whisper_model)
+                ? voice.whisper_model
+                : DEFAULT_APP_SETTINGS.voice_input.whisper_model;
+            whisperModelInput.value = model;
+        }
         if (whisperDeviceInput) whisperDeviceInput.value = voice.whisper_device === 'cuda' ? 'cuda' : 'cpu';
         if (whisperComputeInput) whisperComputeInput.value = voice.whisper_compute_type || DEFAULT_APP_SETTINGS.voice_input.whisper_compute_type;
 
@@ -2306,7 +2421,7 @@
                 enabled: Boolean(document.getElementById('appVoiceEnabled')?.checked),
                 engine: document.getElementById('appVoiceEngine')?.value || DEFAULT_APP_SETTINGS.voice_input.engine,
                 vosk_model: document.getElementById('appVoskModel')?.value.trim() || DEFAULT_APP_SETTINGS.voice_input.vosk_model,
-                whisper_model: document.getElementById('appWhisperModel')?.value.trim() || DEFAULT_APP_SETTINGS.voice_input.whisper_model,
+                whisper_model: document.getElementById('appWhisperModel')?.value || DEFAULT_APP_SETTINGS.voice_input.whisper_model,
                 whisper_device: document.getElementById('appWhisperDevice')?.value || DEFAULT_APP_SETTINGS.voice_input.whisper_device,
                 whisper_compute_type: document.getElementById('appWhisperComputeType')?.value || DEFAULT_APP_SETTINGS.voice_input.whisper_compute_type,
                 language: document.getElementById('appVoiceLanguage')?.value.trim() || DEFAULT_APP_SETTINGS.voice_input.language
@@ -3764,4 +3879,3 @@
 </script>
 </body>
 </html>
-
