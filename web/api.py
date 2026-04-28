@@ -24,6 +24,7 @@ from cryptography.fernet import Fernet
 from flask import Flask, jsonify, render_template, request
 from flask_socketio import SocketIO, emit, join_room, leave_room
 
+from gridvibe_version import __version__
 from sessions.manager import SessionManager, SessionStatus
 
 try:
@@ -2522,7 +2523,7 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "service": "GridVibe",
-        "version": "1.0.0"
+        "version": __version__
     })
 
 
@@ -3718,7 +3719,7 @@ def handle_voice_stop(data):
 
 # ==================== Main Entry Point ====================
 
-def run_server(host: str = "0.0.0.0", port: int = 5050, debug: bool = False):
+def run_server(host: str = "127.0.0.1", port: int = 5050, debug: bool = False):
     """Run the Flask-SocketIO server."""
     logger.info(f"Starting GridVibe server on {host}:{port}")
     socketio.run(app, host=host, port=port, debug=debug)

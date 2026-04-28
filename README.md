@@ -218,7 +218,7 @@ pip install -r requirements-dev.txt
 
 ```bash
 python main.py                  # browser mode on http://localhost:5050
-python main.py --host 127.0.0.1 # bind to localhost only
+python main.py --host 0.0.0.0   # opt in to binding on all network interfaces
 python main.py --port 8080      # custom port
 python webview_launcher.py      # native window when pywebview is installed
 ```
@@ -262,7 +262,7 @@ GridVibe generates a Flask session signing key at startup unless `GRIDVIBE_SECRE
 
 ## Security Considerations
 
-GridVibe is designed as a local desktop/browser tool, not a public web service.
+GridVibe is designed as a local desktop/browser tool, not a public web service. By default it binds to `127.0.0.1`.
 
 - There is no built-in authentication or multi-user isolation.
 - Flask-SocketIO is run with Werkzeug for local usage; do not expose it directly to the internet.

@@ -20,10 +20,10 @@ from logging.handlers import RotatingFileHandler
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from gridvibe_version import __version__ as _GRIDVIBE_VERSION
 from web.api import app, load_config, session_manager, socketio
 
-__version__ = "0.1.0"
-
+__version__ = _GRIDVIBE_VERSION
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 MAX_LOG_SIZE = 2 * 1024 * 1024  # 2 MB per file
@@ -79,7 +79,7 @@ def main():
         description="GridVibe - Multi-Session Terminal Manager"
     )
     parser.add_argument(
-        "--host", default="0.0.0.0", help="Host to bind to (default: 0.0.0.0)"
+        "--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)"
     )
     parser.add_argument(
         "--port", type=int, default=5050, help="Port to bind to (default: 5050)"
@@ -127,4 +127,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

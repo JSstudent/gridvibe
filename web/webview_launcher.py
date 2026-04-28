@@ -574,7 +574,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Launch GridVibe in a native pywebview window"
     )
-    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     parser.add_argument("--port", type=int, default=5050, help="Port to bind to")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--config", default="config.json", help="Path to configuration file")

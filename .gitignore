@@ -17,6 +17,9 @@ env/
 .vscode/
 .idea/
 /.codex/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
 
 # OS/editor files
 .DS_Store
@@ -28,12 +31,33 @@ Desktop.ini
 # Logs
 logs/
 *.log
+*.log.*
 
 # Local session state
 saved_sessions.json
+saved_sessions*.json
 gridvibe.log
 .encryption_key
 config.json
+config.local.json
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+
+# Local speech models and generated model caches
+vosk-model*/
+models/
+.cache/
+
+# Test and coverage outputs
+.coverage
+coverage.xml
+htmlcov/
 
 # Internal docs (not for public release)
 docs/r&d/

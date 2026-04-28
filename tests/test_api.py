@@ -7,12 +7,20 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import api
+from gridvibe_version import __version__
 
 
 class ApiRoutesTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
+        self.config_path = Path(self.temp_dir.name) / "config.json"
+        self.config_path_patch = patch.object(
+            api,
+            "CONFIG_PATH",
+            str(self.config_path),
+        )
+        self.config_path_patch.start()
         self.saved_sessions_path = Path(self.temp_dir.name) / "saved_sessions.json"
         self.saved_sessions_patch = patch.object(
             api,
@@ -20,7 +28,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             str(self.saved_sessions_path),
         )
         self.saved_sessions_patch.start()
-        self.addCleanup(self.saved_sessions_patch.stop)
+        api._refresh_runtime_config()
         api.app.config["TESTING"] = True
         self.client = api.app.test_client()
         api.session_manager.reset_sessions()
@@ -41,6 +49,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self._saved_voice_input = json.loads(json.dumps(cfg.get("voice_input", {})))
         self._saved_voice_prefs = cfg.pop("voice_prefs", None)
         api.save_config(cfg)
+        api._refresh_runtime_config()
 
     def tearDown(self):
         api.session_manager.reset_sessions()
@@ -65,6 +74,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             cfg.pop("voice_prefs", None)
         api.save_config(cfg)
         api._refresh_runtime_config()
+        self.saved_sessions_patch.stop()
+        self.config_path_patch.stop()
+        api._refresh_runtime_config()
 
     def test_health_check_returns_service_metadata(self):
         response = self.client.get("/api/health")
@@ -75,7 +87,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             {
                 "status": "healthy",
                 "service": "GridVibe",
-                "version": "1.0.0",
+                "version": __version__,
             },
         )
 
