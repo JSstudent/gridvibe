@@ -176,16 +176,17 @@ If a specific microphone is selected, the request adds:
 
 When recording starts, the frontend:
 
-1. checks that `getUserMedia` exists
-2. checks that `AudioWorkletNode` exists
-3. requests microphone access using the selected profile and optional device
-4. falls back to the browser default device if the selected device is unavailable
-5. in `pywebview`, may fall back to bare `{ audio: true }` if constrained capture fails
-6. opens an `AudioContext`
-7. loads `voice-capture-worklet.js`
-8. creates `MediaStreamSource -> AudioWorkletNode -> muted GainNode -> destination`
-9. emits `voice_start`
-10. streams binary PCM packets through `voice_audio`
+1. refreshes `/api/voice-status` and stops before opening the microphone if the configured backend is unavailable
+2. checks that `getUserMedia` exists
+3. checks that `AudioWorkletNode` exists
+4. requests microphone access using the selected profile and optional device
+5. falls back to the browser default device if the selected device is unavailable
+6. in `pywebview`, may fall back to bare `{ audio: true }` if constrained capture fails
+7. opens an `AudioContext`
+8. loads `voice-capture-worklet.js`
+9. creates `MediaStreamSource -> AudioWorkletNode -> muted GainNode -> destination`
+10. emits `voice_start`
+11. streams binary PCM packets through `voice_audio`
 
 The muted gain node is intentional. The pipeline stays connected to the audio graph without feeding audible mic monitoring back to the user.
 
@@ -426,4 +427,3 @@ If you modify voice behavior, keep these rules in mind:
 ## Historical Material
 
 Historical research notes were excluded from the public repository. Treat this file as the source of truth for current voice behavior.
-

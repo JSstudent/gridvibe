@@ -52,7 +52,7 @@ Open `Mic` on a terminal pane to choose:
 - `Push-to-talk`: optional hold-to-record mode with a custom keybind.
 - `Requested vs actual capture`: diagnostics comparing the requested audio settings to what the browser actually applied.
 
-Voice input requires the optional voice dependencies:
+Voice input requires optional voice dependencies. On Windows, `GridVibe.bat` checks the `.venv` and prompts to install them when missing. Manual setup:
 
 ```bash
 pip install -r requirements-voice.txt
@@ -124,7 +124,7 @@ Use the included launcher for the easiest Windows setup:
 .\GridVibe.bat
 ```
 
-`GridVibe.bat` creates or repairs `.venv`, installs runtime and desktop dependencies, then launches the native window when possible.
+`GridVibe.bat` creates or repairs `.venv`, installs runtime and desktop dependencies, checks optional voice dependencies, prompts to install them when missing, then launches the native window when possible.
 
 Manual Windows setup:
 
@@ -206,6 +206,8 @@ Offline voice input support:
 pip install -r requirements-voice.txt
 ```
 
+On Windows, `GridVibe.bat` performs this check for the project `.venv` and can install the voice packages during startup.
+
 Development tools:
 
 ```bash
@@ -273,7 +275,7 @@ See `SECURITY.md` for reporting and scope details.
 
 ## Voice Input
 
-Voice input is optional. Install `requirements-voice.txt` before enabling it.
+Voice input is optional. On Windows, `GridVibe.bat` prompts to install `requirements-voice.txt` when the voice packages are missing; for manual setup, install that file before enabling voice.
 
 Supported engines:
 

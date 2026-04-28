@@ -2515,6 +2515,7 @@
         engine: VOICE_ENGINE,
         model: VOICE_MODEL,
         language: VOICE_LANGUAGE,
+        engine_available: null,
         service_running: null,
         service_url: ''
     };
@@ -2579,6 +2580,7 @@
             try {
                 window.localStorage?.setItem(VOICE_PREFS_STORAGE_KEY, JSON.stringify(_voicePrefs));
             } catch (_) {}
+            terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
         } catch (_) {}
     }
 
@@ -2796,6 +2798,24 @@
         }
     }
 
+    function _voiceBackendUnavailableMessage() {
+        if (_voiceServiceStatus.enabled === false) {
+            return 'Voice input is disabled in app settings.';
+        }
+
+        if (_voiceServiceStatus.engine_available === false) {
+            if (_voiceServiceStatus.status_message) {
+                return _voiceServiceStatus.status_message;
+            }
+            if ((_voiceServiceStatus.engine || VOICE_ENGINE) === 'whisper') {
+                return 'faster-whisper is unavailable. Install optional voice dependencies before starting capture.';
+            }
+            return 'The configured voice backend is unavailable. Install optional voice dependencies before starting capture.';
+        }
+
+        return '';
+    }
+
     function _setVoicePanelStatus(index, message) {
         const { status } = _getVoicePanelElements(index);
         if (status) {
@@ -2986,6 +3006,19 @@
                 sessionId: sid || null,
                 hasSocket: Boolean(socket)
             });
+            return;
+        }
+
+        await _loadVoiceServiceStatus();
+        const backendUnavailableMessage = _voiceBackendUnavailableMessage();
+        if (backendUnavailableMessage) {
+            _voiceLog('Voice start aborted because the configured backend is unavailable', {
+                terminalIndex: index,
+                sessionId: sid,
+                engine: _voiceServiceStatus.engine || VOICE_ENGINE,
+                message: backendUnavailableMessage
+            });
+            _setVoicePanelStatus(index, backendUnavailableMessage);
             return;
         }
 
@@ -3290,19 +3323,20 @@
         });
     }
 
-    async function _stopVoice(index) {
+    async function _stopVoice(index, { notifyServer = true } = {}) {
         const state = _voiceState[index];
         if (!state) return;
         _voiceLog('Stopping voice capture', {
             terminalIndex: index,
-            sessionId: state.sessionId || sessionIds[index] || null
+            sessionId: state.sessionId || sessionIds[index] || null,
+            notifyServer
         });
 
         state.recording = false;
         await _flushVoiceWorklet(index, state);
 
         const sid = state.sessionId || sessionIds[index];
-        if (sid && socket) {
+        if (notifyServer && sid && socket) {
             socket.emit('voice_stop', { session_id: sid });
         }
 
@@ -4089,7 +4123,7 @@
             if (status === 'error') {
                 console.error('Voice error:', message);
                 const index = session_id ? _voiceIndexForSession(session_id) : -1;
-                if (index !== -1) await _stopVoice(index);
+                if (index !== -1) await _stopVoice(index, { notifyServer: false });
                 if (index !== -1 && message) {
                     _setVoicePanelStatus(index, message);
                 }
