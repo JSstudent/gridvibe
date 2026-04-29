@@ -7,12 +7,20 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import api
+from gridvibe_version import __version__
 
 
 class ApiRoutesTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
+        self.config_path = Path(self.temp_dir.name) / "config.json"
+        self.config_path_patch = patch.object(
+            api,
+            "CONFIG_PATH",
+            str(self.config_path),
+        )
+        self.config_path_patch.start()
         self.saved_sessions_path = Path(self.temp_dir.name) / "saved_sessions.json"
         self.saved_sessions_patch = patch.object(
             api,
@@ -20,7 +28,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             str(self.saved_sessions_path),
         )
         self.saved_sessions_patch.start()
-        self.addCleanup(self.saved_sessions_patch.stop)
+        api._refresh_runtime_config()
         api.app.config["TESTING"] = True
         self.client = api.app.test_client()
         api.session_manager.reset_sessions()
@@ -41,6 +49,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self._saved_voice_input = json.loads(json.dumps(cfg.get("voice_input", {})))
         self._saved_voice_prefs = cfg.pop("voice_prefs", None)
         api.save_config(cfg)
+        api._refresh_runtime_config()
 
     def tearDown(self):
         api.session_manager.reset_sessions()
@@ -65,6 +74,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             cfg.pop("voice_prefs", None)
         api.save_config(cfg)
         api._refresh_runtime_config()
+        self.saved_sessions_patch.stop()
+        self.config_path_patch.stop()
+        api._refresh_runtime_config()
 
     def test_health_check_returns_service_metadata(self):
         response = self.client.get("/api/health")
@@ -75,9 +87,17 @@ class ApiRoutesTestCase(unittest.TestCase):
             {
                 "status": "healthy",
                 "service": "GridVibe",
-                "version": "1.0.0",
+                "version": __version__,
             },
         )
+
+    def test_windows_launcher_prompts_for_missing_voice_dependencies(self):
+        launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
+
+        self.assertIn("Checking optional voice dependencies", launcher)
+        self.assertIn("faster_whisper", launcher)
+        self.assertIn("requirements-voice.txt", launcher)
+        self.assertIn("choice /C YN", launcher)
 
     def test_launcher_page_exposes_agent_startup_controls(self):
         response = self.client.get("/")
@@ -125,6 +145,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="appTheme"', html)
         self.assertIn('id="appVoiceEngine"', html)
         self.assertIn('id="appWhisperDevice"', html)
+        self.assertIn('<select id="appWhisperModel">', html)
+        self.assertIn('<option value="base">base</option>', html)
+        self.assertIn('<option value="large-v3-turbo">large-v3-turbo</option>', html)
 
     def test_launcher_page_resets_terminal_setup_when_connection_target_changes(self):
         response = self.client.get("/")
@@ -159,6 +182,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         reset_index = html.index("await resetFullscreenState();", go_to_settings_start)
 
         self.assertLess(open_launcher_index, reset_index)
+
+    def test_terminals_page_uses_icon_only_settings_button(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('class="btn btn-neutral btn-icon settings-window-btn"', html)
+        self.assertIn('aria-label="Open settings"', html)
+        self.assertIn('class="vibe-flow-icon"', html)
 
     def test_terminals_page_exposes_per_terminal_refresh_control(self):
         response = self.client.get("/terminals")
@@ -208,6 +240,31 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("getSettings()", html)
         self.assertIn("voice-capture-worklet.js", html)
         self.assertIn("base", html)
+
+    def test_terminals_page_preflights_voice_backend_before_microphone_start(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        start = html.index("async function _startVoice(index) {")
+        end = html.index("if (!navigator.mediaDevices?.getUserMedia)", start)
+        startup_html = html[start:end]
+
+        self.assertIn("await _loadVoiceServiceStatus();", startup_html)
+        self.assertIn("const backendUnavailableMessage = _voiceBackendUnavailableMessage();", startup_html)
+        self.assertIn("_setVoicePanelStatus(index, backendUnavailableMessage);", startup_html)
+
+    def test_terminals_page_server_voice_errors_cleanup_without_stop_echo(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        handler_start = html.index("socket.on('voice_status', async ({ session_id, status, message }) => {")
+        handler_end = html.index("return;", handler_start)
+        error_handler = html[handler_start:handler_end]
+
+        self.assertIn("await _stopVoice(index, { notifyServer: false });", error_handler)
+        self.assertIn("async function _stopVoice(index, { notifyServer = true } = {})", html)
 
     def test_terminals_page_uses_distinct_voice_toggle_and_diagnostics_ids(self):
         response = self.client.get("/terminals")
@@ -303,7 +360,12 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn('class="btn btn-cyan" onclick="refreshStatuses()">Refresh all</button>', html)
+        self.assertIn('aria-label="Refresh all"', html)
+        self.assertIn('class="refresh-all-icon"', html)
+        self.assertNotIn(">Refresh all</button>", html)
+        self.assertNotIn("Close Session</button>", html)
+        self.assertIn("closeButton.className = 'session-tab-close';", html)
+        self.assertIn("closeSessionGroup(group.group_id);", html)
         self.assertIn(".session-tab.settings {", html)
         self.assertIn("border-color: #00c46e;", html)
         self.assertIn("settingsButton.textContent = '+ New Session';", html)
@@ -426,6 +488,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["language"], "en-US")
         self.assertIn("service_url", payload)
         self.assertIn("service_running", payload)
+        self.assertIn("status_message", payload)
 
     def test_voice_status_endpoint_reports_vosk_metadata(self):
         with patch.object(api, "voice_engine", "vosk"), patch.object(
@@ -439,6 +502,18 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["model"], "vosk-model-en-us-0.22")
         self.assertEqual(payload["service_url"], api.vosk_service_url)
         self.assertFalse(payload["service_running"])
+
+    def test_voice_status_endpoint_reports_missing_whisper_dependency(self):
+        with patch.object(api, "voice_engine", "whisper"), patch.object(
+            api, "WhisperModel", None
+        ), patch.object(api, "np", object()):
+            response = self.client.get("/api/voice-status")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload["engine_available"])
+        self.assertIn("faster-whisper", payload["status_message"])
+        self.assertIn("pip install -r requirements-voice.txt", payload["status_message"])
 
     def test_app_config_endpoint_returns_settings_payload(self):
         response = self.client.get("/api/app-config")
@@ -479,6 +554,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(cfg["appearance"]["theme"], "light")
         self.assertEqual(cfg["voice_input"]["engine"], "vosk")
         self.assertEqual(cfg["voice_input"]["vosk_model"], "vosk-model-small-en-us-0.15")
+
+    def test_app_config_endpoint_rejects_unknown_whisper_model(self):
+        response = self.client.post(
+            "/api/app-config",
+            json={
+                "voice_input": {
+                    "engine": "whisper",
+                    "whisper_model": "not-a-model",
+                }
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["voice_input"]["whisper_model"], "base")
 
     def test_agent_preflight_endpoint_returns_installed_when_binary_exists(self):
         with patch.object(
@@ -1916,7 +2006,9 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         fake_process = object()
 
-        with patch.object(api.os, "name", "nt"):
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api, "_find_wsl_executable", return_value="wsl.exe"
+        ):
             with patch.object(api, "WinPtyProcess") as winpty:
                 with patch.object(api, "_broadcast_session_status"):
                     with patch.object(api, "_stream_local_output"):
@@ -2329,6 +2421,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             '[data-theme="light"] .count-btn',
             '[data-theme="light"] .field input',
             '[data-theme="light"] .t-row',
+            '[data-theme="light"] .t-agent-select',
             '[data-theme="light"] .command-mode-btn',
             '[data-theme="light"] .check-field',
             '[data-theme="light"] .modal-card',
@@ -2824,4 +2917,3 @@ class VoiceAudioRaceTestCase(unittest.TestCase):
         api._handle_vosk_audio_chunk("voice-no-conn", b"\x00\x01\x02\x03")
 
         mock_emit.assert_not_called()
-

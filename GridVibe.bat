@@ -119,6 +119,33 @@ if errorlevel 1 (
     echo.
 )
 
+echo  Checking optional voice dependencies...
+echo.
+
+"%VENV_PYTHON%" -c "import importlib.util, sys; modules=('vosk','websockets','faster_whisper','numpy'); missing=[m for m in modules if importlib.util.find_spec(m) is None]; print('Missing voice dependencies: ' + ', '.join(missing) if missing else 'Voice dependencies installed.'); sys.exit(1 if missing else 0)"
+if errorlevel 1 (
+    echo.
+    echo  Voice input needs optional packages for Vosk and faster-whisper.
+    choice /C YN /N /M " Install optional voice dependencies now? [Y/N] "
+    if errorlevel 2 (
+        echo.
+        echo  Skipping voice dependencies. GridVibe will run, but voice input may be unavailable.
+        echo  Manual fix: "%VENV_PYTHON%" -m pip install -r requirements-voice.txt
+        echo.
+    ) else (
+        echo.
+        echo  Installing optional voice dependencies...
+        echo.
+        "%VENV_PYTHON%" -m pip install -r requirements-voice.txt
+        if errorlevel 1 (
+            echo  Warning: Failed to install optional voice dependencies.
+            echo  GridVibe will still run, but voice input may be unavailable.
+            echo  Manual fix: "%VENV_PYTHON%" -m pip install -r requirements-voice.txt
+            echo.
+        )
+    )
+)
+
 echo.
 echo  Starting GridVibe...
 echo.
@@ -133,4 +160,3 @@ if errorlevel 1 (
 )
 
 exit /b 0
-

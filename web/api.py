@@ -24,6 +24,7 @@ from cryptography.fernet import Fernet
 from flask import Flask, jsonify, render_template, request
 from flask_socketio import SocketIO, emit, join_room, leave_room
 
+from gridvibe_version import __version__
 from sessions.manager import SessionManager, SessionStatus
 
 try:
@@ -175,6 +176,27 @@ whisper_device = "cpu"
 whisper_compute_type = "int8"
 voice_language = "en-US"
 vosk_startup_timeout_seconds = 180
+WHISPER_MODEL_OPTIONS = {
+    "tiny.en",
+    "tiny",
+    "base.en",
+    "base",
+    "small.en",
+    "small",
+    "medium.en",
+    "medium",
+    "large-v1",
+    "large-v2",
+    "large-v3",
+    "large",
+    "distil-large-v2",
+    "distil-medium.en",
+    "distil-small.en",
+    "distil-large-v3",
+    "distil-large-v3.5",
+    "large-v3-turbo",
+    "turbo",
+}
 
 
 def _refresh_runtime_config():
@@ -208,7 +230,9 @@ def _refresh_runtime_config():
         voice_engine = "vosk"
     vosk_service_url = voice_config.get("vosk_service_url", "ws://localhost:2700")
     vosk_model = voice_config.get("vosk_model", "vosk-model-en-us-0.22")
-    whisper_model = voice_config.get("whisper_model", "base")
+    whisper_model = str(voice_config.get("whisper_model", "base")).strip() or "base"
+    if whisper_model not in WHISPER_MODEL_OPTIONS:
+        whisper_model = "base"
     whisper_device = voice_config.get("whisper_device", "cpu")
     whisper_compute_type = voice_config.get("whisper_compute_type", "int8")
     voice_language = voice_config.get("language", "en-US")
@@ -271,6 +295,12 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     if whisper_device_value not in {"cpu", "cuda"}:
         whisper_device_value = whisper_device
 
+    next_whisper_model = str(
+        voice_input.get("whisper_model", whisper_model)
+    ).strip() or whisper_model
+    if next_whisper_model not in WHISPER_MODEL_OPTIONS:
+        next_whisper_model = "base"
+
     return {
         "appearance": {
             "theme": theme,
@@ -279,9 +309,7 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
             "enabled": bool(voice_input.get("enabled", voice_enabled)),
             "engine": engine,
             "vosk_model": str(voice_input.get("vosk_model", vosk_model)).strip() or vosk_model,
-            "whisper_model": str(
-                voice_input.get("whisper_model", whisper_model)
-            ).strip() or whisper_model,
+            "whisper_model": next_whisper_model,
             "whisper_device": whisper_device_value,
             "whisper_compute_type": str(
                 voice_input.get("whisper_compute_type", whisper_compute_type)
@@ -2495,7 +2523,7 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "service": "GridVibe",
-        "version": "1.0.0"
+        "version": __version__
     })
 
 
@@ -3107,6 +3135,32 @@ def _whisper_engine_available() -> bool:
     return WhisperModel is not None and np is not None
 
 
+def _voice_engine_unavailable_message(engine: Optional[str] = None) -> str:
+    """Return a user-facing reason the configured voice backend cannot start."""
+    selected_engine = engine or voice_engine
+    if selected_engine == "whisper":
+        missing = []
+        if WhisperModel is None:
+            missing.append("faster-whisper")
+        if np is None:
+            missing.append("numpy")
+        if missing:
+            return (
+                "Cannot start faster-whisper because missing package(s): "
+                + " and ".join(missing)
+                + ". Install optional voice dependencies with: "
+                "pip install -r requirements-voice.txt"
+            )
+        return "faster-whisper is not available."
+
+    if ws_client is None:
+        return (
+            "Cannot start Vosk because websocket-client is not installed. "
+            "Install optional voice dependencies with: pip install -r requirements-voice.txt"
+        )
+    return "Voice backend is not available."
+
+
 def _ensure_whisper_model():
     """Load the configured faster-whisper model lazily."""
     global _whisper_model_instance
@@ -3312,6 +3366,11 @@ def voice_status_endpoint():
         service_running = None
         service_url = ""
         engine_available = _whisper_engine_available()
+    status_message = (
+        "Voice backend is available."
+        if engine_available
+        else _voice_engine_unavailable_message(voice_engine)
+    )
     return jsonify({
         'enabled': voice_enabled,
         'engine': voice_engine,
@@ -3324,6 +3383,7 @@ def voice_status_endpoint():
         'startup_timeout_seconds': vosk_startup_timeout_seconds,
         'whisper_device': whisper_device,
         'whisper_compute_type': whisper_compute_type,
+        'status_message': status_message,
     })
 
 
@@ -3462,6 +3522,7 @@ def _start_whisper_voice_session(session_id: str):
     except Exception as exc:
         with _whisper_audio_lock:
             _whisper_audio_buffers.pop(session_id, None)
+        logger.error("Cannot start faster-whisper for session %s: %s", session_id, exc)
         emit('voice_status', {
             'session_id': session_id,
             'status': 'error',
@@ -3658,7 +3719,7 @@ def handle_voice_stop(data):
 
 # ==================== Main Entry Point ====================
 
-def run_server(host: str = "0.0.0.0", port: int = 5050, debug: bool = False):
+def run_server(host: str = "127.0.0.1", port: int = 5050, debug: bool = False):
     """Run the Flask-SocketIO server."""
     logger.info(f"Starting GridVibe server on {host}:{port}")
     socketio.run(app, host=host, port=port, debug=debug)
@@ -3670,4 +3731,3 @@ if __name__ == '__main__':
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     run_server(debug=True)
-

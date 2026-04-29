@@ -25,8 +25,8 @@ The terminal workspace has global controls in the top bar and per-pane controls 
 Top bar controls:
 
 - `Theme` cycles between system, light, and dark mode.
-- `Refresh all` reloads session status and redraws terminal panes.
-- `Close Session` closes the currently selected session group.
+- `Refresh` reloads session status and redraws terminal panes.
+- `Close tab` closes the selected session group from its session tab.
 - `Fullscreen` toggles the workspace into and out of fullscreen mode.
 - `Settings` returns to the launcher page.
 
@@ -52,7 +52,7 @@ Open `Mic` on a terminal pane to choose:
 - `Push-to-talk`: optional hold-to-record mode with a custom keybind.
 - `Requested vs actual capture`: diagnostics comparing the requested audio settings to what the browser actually applied.
 
-Voice input requires the optional voice dependencies:
+Voice input requires optional voice dependencies. On Windows, `GridVibe.bat` checks the `.venv` and prompts to install them when missing. Manual setup:
 
 ```bash
 pip install -r requirements-voice.txt
@@ -71,6 +71,38 @@ Use the gear button on the launcher page to open `App Settings`. These settings 
 - `Vosk Model` sets the local Vosk model folder/name.
 - `Whisper Model`, `Device`, and `Compute Type` configure faster-whisper. GPU mode requires a working NVIDIA CUDA setup; use CPU if startup fails.
 
+### Agent CLI Detection
+
+GridVibe does not bundle agent CLIs such as Codex, Claude Code, OpenCode, Kilo, or GitHub Copilot CLI. The `Agent` selector checks whether the selected command is available in the target environment:
+
+- SSH sessions are checked on the remote host.
+- WSL terminals are checked inside the selected WSL distribution.
+- PowerShell and cmd terminals are checked through the Windows environment that launched GridVibe.
+
+If every agent shows `Missing`, confirm the CLI is installed and visible on `PATH` from a fresh terminal. For npm-installed agents on Windows, the global npm shim folder must usually be on your User PATH:
+
+```powershell
+npm prefix -g
+Get-Command codex, claude, opencode, kilo, copilot -ErrorAction SilentlyContinue
+```
+
+The npm prefix is commonly:
+
+```text
+C:\Users\<you>\AppData\Roaming\npm
+```
+
+On Linux, npm global binaries usually live under the global prefix's `bin` directory. Confirm the path with:
+
+```bash
+npm prefix -g
+command -v codex claude opencode kilo copilot
+```
+
+Common locations include `/usr/local/bin`, `~/.npm-global/bin`, or `<npm prefix -g>/bin`.
+
+After changing PATH, restart your shell, GridVibe, and any native window launchers so they inherit the updated environment.
+
 ## Features
 
 - Multi-session launcher with 1, 2, 3, 4, 6, or 8 panes
@@ -83,6 +115,75 @@ Use the gear button on the launcher page to open `App Settings`. These settings 
 - Theme support for system, light, and dark modes
 
 ## Quick Start
+
+### Windows One-Click Launcher
+
+For the easiest Windows start, open:
+
+```powershell
+.\START_HERE\Start GridVibe.bat
+```
+
+That visible launcher calls the working root launcher, `GridVibe.bat`.
+
+### Windows Install
+
+Use the included launcher for the easiest Windows setup:
+
+```powershell
+.\GridVibe.bat
+```
+
+`GridVibe.bat` creates or repairs `.venv`, installs runtime and desktop dependencies, checks optional voice dependencies, prompts to install them when missing, then launches the native window when possible.
+
+Manual Windows setup:
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python main.py --host 127.0.0.1
+```
+
+Open `http://localhost:5050`.
+
+Install optional desktop-window support with:
+
+```powershell
+pip install -r requirements-desktop.txt
+python webview_launcher.py
+```
+
+### Linux Install
+
+Install Python 3.10+ and the venv package for your distro first. For Debian or Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install python3 python3-venv python3-pip
+```
+
+Then create the environment and start GridVibe:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python main.py --host 127.0.0.1
+```
+
+Open `http://localhost:5050`.
+
+Optional native desktop-window support on Linux uses `pywebview` and may require distro GUI/WebKit packages in addition to:
+
+```bash
+pip install -r requirements-desktop.txt
+python webview_launcher.py
+```
+
+### Manual Cross-Platform Setup
 
 ```bash
 python -m venv .venv
@@ -99,7 +200,7 @@ python main.py
 
 Open `http://localhost:5050`.
 
-On Windows, you can also run `GridVibe.bat`. It creates or repairs `.venv`, installs runtime and desktop dependencies, then launches the native window when possible.
+On Windows, you can also run `GridVibe.bat`.
 
 ## Optional Dependencies
 
@@ -115,6 +216,8 @@ Offline voice input support:
 pip install -r requirements-voice.txt
 ```
 
+On Windows, `GridVibe.bat` performs this check for the project `.venv` and can install the voice packages during startup.
+
 Development tools:
 
 ```bash
@@ -125,7 +228,7 @@ pip install -r requirements-dev.txt
 
 ```bash
 python main.py                  # browser mode on http://localhost:5050
-python main.py --host 127.0.0.1 # bind to localhost only
+python main.py --host 0.0.0.0   # opt in to binding on all network interfaces
 python main.py --port 8080      # custom port
 python webview_launcher.py      # native window when pywebview is installed
 ```
@@ -169,7 +272,7 @@ GridVibe generates a Flask session signing key at startup unless `GRIDVIBE_SECRE
 
 ## Security Considerations
 
-GridVibe is designed as a local desktop/browser tool, not a public web service.
+GridVibe is designed as a local desktop/browser tool, not a public web service. By default it binds to `127.0.0.1`.
 
 - There is no built-in authentication or multi-user isolation.
 - Flask-SocketIO is run with Werkzeug for local usage; do not expose it directly to the internet.
@@ -182,7 +285,7 @@ See `SECURITY.md` for reporting and scope details.
 
 ## Voice Input
 
-Voice input is optional. Install `requirements-voice.txt` before enabling it.
+Voice input is optional. On Windows, `GridVibe.bat` prompts to install `requirements-voice.txt` when the voice packages are missing; for manual setup, install that file before enabling voice.
 
 Supported engines:
 

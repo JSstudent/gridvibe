@@ -46,3 +46,8 @@ python -m ruff check .
 - Use `unittest` for tests.
 - Prefer small helpers over large route or event-handler changes when touching shared behavior.
 
+## Release Versioning
+
+- Keep `pyproject.toml`, `gridvibe_version.py`, and `CHANGELOG.md` in sync for each release.
+- Use tags in the form `v0.1.0`.
+- Do not publish a release until `python tests/run_tests.py` and `python -m ruff check .` pass.

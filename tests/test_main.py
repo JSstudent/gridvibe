@@ -5,9 +5,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import main
+from gridvibe_version import __version__
 
 
 class MainTestCase(unittest.TestCase):
+    def test_main_version_matches_public_version_module(self):
+        self.assertEqual(main.__version__, __version__)
+
     def test_setup_logging_creates_gridvibe_log_file(self):
         root_logger = logging.getLogger()
         original_handlers = list(root_logger.handlers)
@@ -32,4 +36,3 @@ class MainTestCase(unittest.TestCase):
                     for handler in original_handlers:
                         root_logger.addHandler(handler)
                     root_logger.setLevel(original_level)
-

@@ -70,23 +70,23 @@
             --t-card: #ffffff;
             --t-card-header: #f3f4f6;
             --t-terminal-bg: #0d0d0d;
-            --t-border: #d1d5db;
-            --t-border-dim: #e5e7eb;
-            --t-border-card: #d1d5db;
-            --t-border-tab: #d1d5db;
-            --t-text: #1a1a2e;
-            --t-text-secondary: #374151;
-            --t-text-muted: #6b7280;
-            --t-text-placeholder: #9ca3af;
-            --t-accent: #0891b2;
+            --t-border: #b7c0cc;
+            --t-border-dim: #cfd6df;
+            --t-border-card: #b7c0cc;
+            --t-border-tab: #aeb7c2;
+            --t-text: #111827;
+            --t-text-secondary: #1f2937;
+            --t-text-muted: #4b5563;
+            --t-text-placeholder: #6b7280;
+            --t-accent: #087f9b;
             --t-accent-hover: #0e7490;
-            --t-success: #10b981;
+            --t-success: #047857;
             --t-success-hover: #059669;
             --t-btn-bg: #f3f4f6;
-            --t-btn-text: #374151;
+            --t-btn-text: #1f2937;
             --t-btn-hover-bg: #e5e7eb;
             --t-btn-neutral: #f3f4f6;
-            --t-btn-neutral-text: #374151;
+            --t-btn-neutral-text: #1f2937;
             --t-btn-neutral-hover: #e5e7eb;
             --t-ctx-bg: #ffffff;
             --t-ctx-border: #d1d5db;
@@ -163,9 +163,13 @@
             border-radius: 9px;
             padding: 8px 12px;
             font-size: .8rem;
+            font-weight: 600;
             cursor: pointer;
             white-space: nowrap;
             transition: background .18s, border-color .18s, color .18s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
         }
 
         .session-tab.draggable {
@@ -195,6 +199,22 @@
             color: #cffff0;
         }
 
+        [data-theme="light"] .session-tab {
+            box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
+        }
+
+        [data-theme="light"] .session-tab.settings {
+            background: #ecfdf5;
+            border-color: rgba(4, 120, 87, 0.55);
+            color: #047857;
+        }
+
+        [data-theme="light"] .session-tab.settings:hover {
+            background: #d1fae5;
+            border-color: rgba(4, 120, 87, 0.75);
+            color: #065f46;
+        }
+
         .session-tab.dragging {
             opacity: 0.45;
         }
@@ -204,7 +224,46 @@
             box-shadow: inset 0 0 0 1px var(--tab-color-shadow, rgba(0, 217, 255, 0.45));
         }
 
-        .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 600; }
+        .session-tab-label {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .session-tab-main {
+            border: 0;
+            padding: 0;
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+            font: inherit;
+            min-width: 0;
+        }
+
+        .session-tab-close {
+            width: 18px;
+            height: 18px;
+            border: 0;
+            border-radius: 4px;
+            padding: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            color: currentColor;
+            cursor: pointer;
+            font-size: 1rem;
+            line-height: 1;
+            opacity: 0.68;
+        }
+
+        .session-tab-close:hover {
+            background: rgba(255, 68, 68, 0.18);
+            color: #ff7777;
+            opacity: 1;
+        }
+
+        .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 700; }
         .topbar-sub   { font-size: .78rem; color: var(--t-text-muted); margin-left: 10px; }
 
         .topbar-actions { display: flex; gap: 8px; align-items: center; }
@@ -238,6 +297,29 @@
             justify-content: center;
             font-size: 1rem;
             line-height: 1;
+        }
+        .settings-window-btn {
+            width: 38px;
+            height: 34px;
+            min-width: 38px;
+            padding: 0;
+            border: 1px solid var(--t-border-tab);
+            background: var(--t-btn-bg);
+        }
+        .settings-window-btn:hover {
+            border-color: var(--t-accent);
+            background: var(--t-btn-hover-bg);
+        }
+        .vibe-flow-icon {
+            width: 24px;
+            height: 24px;
+            display: block;
+            filter: drop-shadow(0 0 5px rgba(0, 217, 255, 0.32));
+        }
+        .refresh-all-icon {
+            width: 18px;
+            height: 18px;
+            display: block;
         }
 
         /* ── Grid area ── */
@@ -798,8 +880,17 @@
     </div>
     <div class="topbar-actions">
         <button class="btn btn-neutral" id="themeToggleBtn" onclick="cycleTheme()" title="Toggle theme">🌙 Dark</button>
-        <button class="btn btn-cyan" onclick="refreshStatuses()">Refresh all</button>
-        <button class="btn btn-danger"  onclick="closeCurrentSession()">Close Session</button>
+        <button
+            class="btn btn-cyan btn-icon"
+            onclick="refreshStatuses()"
+            title="Refresh all"
+            aria-label="Refresh all"
+        >
+            <svg class="refresh-all-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+        </button>
         <button
             class="btn btn-success btn-icon"
             id="fullscreenBtn"
@@ -808,7 +899,20 @@
             aria-label="Enter fullscreen"
             aria-pressed="false"
         >&#9974;</button>
-        <a href="/" class="btn btn-neutral" onclick="return goToSettings(event)">Settings</a>
+        <a
+            href="/"
+            class="btn btn-neutral btn-icon settings-window-btn"
+            onclick="return goToSettings(event)"
+            title="Open settings"
+            aria-label="Open settings"
+        >
+            <svg class="vibe-flow-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+                <rect x="5" y="7" width="22" height="18" rx="5" fill="#06263a" stroke="#5eefff" stroke-width="1.4"/>
+                <path d="M9 11.5h14" stroke="#63f6ff" stroke-width="2.2" stroke-linecap="round"/>
+                <path d="M12 15l4 4-4 4" fill="none" stroke="#6dfcff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M18 22h5" stroke="#4fd6ff" stroke-width="2.2" stroke-linecap="round"/>
+            </svg>
+        </a>
     </div>
 </div>
 
@@ -1192,19 +1296,45 @@
         container.appendChild(settingsButton);
 
         sessionGroups.forEach(group => {
-            const button = document.createElement('button');
+            const button = document.createElement('div');
             button.className = `session-tab${group.group_id === activeGroupId ? ' active' : ''} draggable`;
-            button.type = 'button';
-            button.textContent = group.name || group.group_id;
             button.dataset.groupId = group.group_id;
             applyTabColour(button, group.group_id);
-            button.addEventListener('click', event => {
+
+            const tabButton = document.createElement('button');
+            tabButton.className = 'session-tab-main';
+            tabButton.type = 'button';
+            tabButton.setAttribute('aria-label', `${group.name || group.group_id} session`);
+            tabButton.addEventListener('click', event => {
                 if (Date.now() < suppressSessionTabClickUntil) {
                     event.preventDefault();
                     return;
                 }
                 switchGroup(group.group_id);
             });
+
+            const label = document.createElement('span');
+            label.className = 'session-tab-label';
+            label.textContent = group.name || group.group_id;
+            tabButton.appendChild(label);
+            button.appendChild(tabButton);
+
+            const closeButton = document.createElement('button');
+            closeButton.className = 'session-tab-close';
+            closeButton.type = 'button';
+            closeButton.title = `Close ${group.name || group.group_id}`;
+            closeButton.setAttribute('aria-label', `Close ${group.name || group.group_id}`);
+            closeButton.textContent = '×';
+            closeButton.addEventListener('mousedown', event => {
+                event.stopPropagation();
+            });
+            closeButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                closeSessionGroup(group.group_id);
+            });
+            button.appendChild(closeButton);
+
             wireSessionTabDragAndDrop(button, container);
             container.appendChild(button);
         });
@@ -2402,6 +2532,7 @@
         engine: VOICE_ENGINE,
         model: VOICE_MODEL,
         language: VOICE_LANGUAGE,
+        engine_available: null,
         service_running: null,
         service_url: ''
     };
@@ -2466,6 +2597,7 @@
             try {
                 window.localStorage?.setItem(VOICE_PREFS_STORAGE_KEY, JSON.stringify(_voicePrefs));
             } catch (_) {}
+            terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
         } catch (_) {}
     }
 
@@ -2683,6 +2815,24 @@
         }
     }
 
+    function _voiceBackendUnavailableMessage() {
+        if (_voiceServiceStatus.enabled === false) {
+            return 'Voice input is disabled in app settings.';
+        }
+
+        if (_voiceServiceStatus.engine_available === false) {
+            if (_voiceServiceStatus.status_message) {
+                return _voiceServiceStatus.status_message;
+            }
+            if ((_voiceServiceStatus.engine || VOICE_ENGINE) === 'whisper') {
+                return 'faster-whisper is unavailable. Install optional voice dependencies before starting capture.';
+            }
+            return 'The configured voice backend is unavailable. Install optional voice dependencies before starting capture.';
+        }
+
+        return '';
+    }
+
     function _setVoicePanelStatus(index, message) {
         const { status } = _getVoicePanelElements(index);
         if (status) {
@@ -2873,6 +3023,19 @@
                 sessionId: sid || null,
                 hasSocket: Boolean(socket)
             });
+            return;
+        }
+
+        await _loadVoiceServiceStatus();
+        const backendUnavailableMessage = _voiceBackendUnavailableMessage();
+        if (backendUnavailableMessage) {
+            _voiceLog('Voice start aborted because the configured backend is unavailable', {
+                terminalIndex: index,
+                sessionId: sid,
+                engine: _voiceServiceStatus.engine || VOICE_ENGINE,
+                message: backendUnavailableMessage
+            });
+            _setVoicePanelStatus(index, backendUnavailableMessage);
             return;
         }
 
@@ -3177,19 +3340,20 @@
         });
     }
 
-    async function _stopVoice(index) {
+    async function _stopVoice(index, { notifyServer = true } = {}) {
         const state = _voiceState[index];
         if (!state) return;
         _voiceLog('Stopping voice capture', {
             terminalIndex: index,
-            sessionId: state.sessionId || sessionIds[index] || null
+            sessionId: state.sessionId || sessionIds[index] || null,
+            notifyServer
         });
 
         state.recording = false;
         await _flushVoiceWorklet(index, state);
 
         const sid = state.sessionId || sessionIds[index];
-        if (sid && socket) {
+        if (notifyServer && sid && socket) {
             socket.emit('voice_stop', { session_id: sid });
         }
 
@@ -3829,31 +3993,58 @@
     }
 
     /* ─────────────────────────────────────────────
-       Close all sessions
+       Close session group
     ───────────────────────────────────────────── */
-    async function closeCurrentSession() {
-        if (!activeGroupId) {
+    async function closeSessionGroup(groupId = activeGroupId) {
+        if (!groupId) {
             return;
         }
 
         try {
-            const closingGroupId = activeGroupId;
-            const response = await fetch(getSessionApiPath(), { method: 'DELETE' });
+            const closingGroupId = groupId;
+            const closedActiveGroup = activeGroupId === closingGroupId;
+            const closedVisibleGroup = visibleGroupId === closingGroupId;
+            const response = await fetch(getSessionApiPath(closingGroupId), { method: 'DELETE' });
             if (!response.ok) {
                 throw new Error(`Close session failed with status ${response.status}`);
             }
 
-            if (visibleGroupId === closingGroupId) {
+            if (closedVisibleGroup) {
                 teardownCurrentGrid();
             } else {
                 dropCachedGroupView(closingGroupId);
             }
-            activeGroupId = '';
+            if (closedActiveGroup) {
+                activeGroupId = '';
+            }
             await loadSessionGroups();
-            await initialLoad();
+            if (sessionGroups.length === 0) {
+                await _closeWindowAfterLastSession();
+                return;
+            }
+            if (closedActiveGroup || closedVisibleGroup) {
+                await initialLoad();
+            }
         } catch (e) {
             console.error('Close session failed:', e);
         }
+    }
+
+    async function closeCurrentSession() {
+        await closeSessionGroup(activeGroupId);
+    }
+
+    async function _closeWindowAfterLastSession() {
+        logSessionWindowAction('Last session closed — closing window');
+        if (isPywebviewAvailable() && window.pywebview.api.close_session_window) {
+            try {
+                await window.pywebview.api.close_session_window();
+                return;
+            } catch (e) {
+                console.error('[GridVibe Sessions] close_session_window failed:', e);
+            }
+        }
+        window.close();
     }
 
     /* ─────────────────────────────────────────────
@@ -3949,7 +4140,7 @@
             if (status === 'error') {
                 console.error('Voice error:', message);
                 const index = session_id ? _voiceIndexForSession(session_id) : -1;
-                if (index !== -1) await _stopVoice(index);
+                if (index !== -1) await _stopVoice(index, { notifyServer: false });
                 if (index !== -1 && message) {
                     _setVoicePanelStatus(index, message);
                 }
@@ -4002,4 +4193,3 @@
 </script>
 </body>
 </html>
-

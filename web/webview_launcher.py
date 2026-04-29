@@ -380,6 +380,19 @@ class GridVibeApi:
             logger.exception("Failed to focus launcher window")
             return {"ok": False, "error": str(exc)}
 
+    def close_session_window(self):
+        """Close the session window when the last session is removed."""
+        if self._session_window is None:
+            logger.warning("close_session_window called but no session window is registered")
+            return {"ok": False, "error": "No session window open"}
+        try:
+            logger.info("Closing session window (last session removed)")
+            self._session_window.destroy()
+            return {"ok": True}
+        except Exception as exc:
+            logger.exception("Failed to close session window")
+            return {"ok": False, "error": str(exc)}
+
     def restart_application(self):
         """Relaunch the native app after an update is applied."""
         project_root = str(Path(__file__).resolve().parent.parent)
@@ -422,7 +435,7 @@ def _wait_for_server(base_url: str, timeout: float = 20.0) -> bool:
 def _resolve_icon_path() -> str | None:
     """Return the packaged icon path when it exists."""
     project_root = Path(__file__).resolve().parent.parent
-    icon_path = project_root / "docs" / "images" / "VibeTerm_icon.ico"
+    icon_path = project_root / "docs" / "images" / "GridVibe_icon.ico"
     return str(icon_path) if icon_path.is_file() else None
 
 
@@ -561,7 +574,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Launch GridVibe in a native pywebview window"
     )
-    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     parser.add_argument("--port", type=int, default=5050, help="Port to bind to")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--config", default="config.json", help="Path to configuration file")
@@ -678,4 +691,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
