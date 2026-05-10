@@ -1153,7 +1153,7 @@
 
         .command-mode-toggle {
             display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
             gap: 6px;
         }
 
@@ -1856,6 +1856,7 @@
         directory: '',
         initial_command: '',
         initial_command_mode: 'command',
+        startup_mode: 'terminal',
         agent_selection: '',
         custom_agent: '',
         distribution: '',
@@ -2493,7 +2494,10 @@
     }
 
     function normalizeTerminalCommandUi(terminal) {
-        const savedMode = terminal?.initial_command_mode === 'agent' ? 'agent' : 'command';
+        const rawMode = String(terminal?.startup_mode || terminal?.initial_command_mode || '').trim();
+        const savedMode = rawMode === 'agent'
+            ? 'agent'
+            : (rawMode === 'explorer' && connectionMode === 'wsl' ? 'explorer' : 'command');
         const initialCommand = String(terminal?.initial_command || '').trim();
         const knownAgents = getKnownAgentValues();
         let mode = savedMode;
@@ -2524,6 +2528,15 @@
                 commandValue,
                 agentSelection,
                 customAgent
+            };
+        }
+
+        if (mode === 'explorer') {
+            return {
+                mode,
+                commandValue: '',
+                agentSelection: '',
+                customAgent: ''
             };
         }
 
@@ -2560,10 +2573,20 @@
     }
 
     function getTerminalCommandMode(row) {
-        return row?.dataset?.commandMode === 'agent' ? 'agent' : 'command';
+        const mode = row?.dataset?.commandMode;
+        if (mode === 'agent') {
+            return 'agent';
+        }
+        if (mode === 'explorer' && connectionMode === 'wsl') {
+            return 'explorer';
+        }
+        return 'command';
     }
 
     function buildTerminalInitialCommand(row) {
+        if (getTerminalCommandMode(row) === 'explorer') {
+            return '';
+        }
         if (getTerminalCommandMode(row) === 'agent') {
             const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
             if (selectedAgent === 'other') {
@@ -2586,11 +2609,12 @@
             directory: row.querySelector('.t-dir').value.trim(),
             initial_command: buildTerminalInitialCommand(row),
             initial_command_mode: getTerminalCommandMode(row),
+            startup_mode: getTerminalCommandMode(row),
             agent_selection: row.querySelector('.t-agent-select')?.value.trim() || '',
             custom_agent: row.querySelector('.t-agent-custom')?.value.trim() || '',
             distribution: row.querySelector('.t-distribution')?.value.trim() || '',
-            use_wsl: Boolean(row.querySelector('.t-use-wsl')?.checked),
-            use_powershell: Boolean(row.querySelector('.t-use-powershell')?.checked)
+            use_wsl: getTerminalCommandMode(row) === 'explorer' ? false : Boolean(row.querySelector('.t-use-wsl')?.checked),
+            use_powershell: getTerminalCommandMode(row) === 'explorer' ? false : Boolean(row.querySelector('.t-use-powershell')?.checked)
         }));
 
         while (drafts.length < MAX_SESSIONS) {
@@ -2898,8 +2922,14 @@
     }
 
     function syncTerminalWslState(row) {
-        const shouldShowDistribution = connectionMode === 'wsl' && Boolean(row.querySelector('.t-use-wsl')?.checked);
+        const commandMode = getTerminalCommandMode(row);
+        const shellField = row.querySelector('.t-shell-field');
+        const shellDisabled = commandMode === 'explorer';
+        const shouldShowDistribution = connectionMode === 'wsl'
+            && !shellDisabled
+            && Boolean(row.querySelector('.t-use-wsl')?.checked);
         const distributionField = row.querySelector('.t-distribution-field');
+        shellField?.classList.toggle('hidden', connectionMode !== 'wsl' || shellDisabled);
         if (!distributionField) {
             return;
         }
@@ -2928,6 +2958,13 @@
         if (commandMode !== 'agent') {
             clearAgentPreflight(row);
         }
+        if (commandMode === 'explorer') {
+            const wslCheckbox = row.querySelector('.t-use-wsl');
+            const powershellCheckbox = row.querySelector('.t-use-powershell');
+            if (wslCheckbox) wslCheckbox.checked = false;
+            if (powershellCheckbox) powershellCheckbox.checked = false;
+        }
+        syncTerminalWslState(row);
     }
 
     function _resetAgentOptionLabels(select) {
@@ -3235,6 +3272,9 @@
                             <div class="command-mode-toggle">
                                 <button type="button" class="command-mode-btn ${commandUi.mode === 'command' ? 'active' : ''}" data-command-mode="command">Initial Command</button>
                                 <button type="button" class="command-mode-btn ${commandUi.mode === 'agent' ? 'active' : ''}" data-command-mode="agent">Agent</button>
+                                ${connectionMode === 'wsl'
+                                    ? `<button type="button" class="command-mode-btn ${commandUi.mode === 'explorer' ? 'active' : ''}" data-command-mode="explorer">File Explorer</button>`
+                                    : ''}
                             </div>
                         </div>
                         <div class="field t-command-field ${commandUi.mode === 'command' ? '' : 'hidden'}">
@@ -3257,7 +3297,7 @@
                             <label>Custom Agent</label>
                             <input class="t-agent-custom" type="text" value="${escHtml(commandUi.customAgent)}" placeholder="Enter agent command">
                         </div>
-                        <div class="field ${connectionMode === 'wsl' ? '' : 'hidden'}">
+                        <div class="field t-shell-field ${connectionMode === 'wsl' && commandUi.mode !== 'explorer' ? '' : 'hidden'}">
                             <div class="field-label-row">
                                 <label>Shell</label>
                                 <button
@@ -3761,7 +3801,10 @@
                 const common = {
                     title: terminal.title || `Terminal ${index + 1}`,
                     directory: resolvedDirectory,
-                    initial_command: terminal.initial_command || null
+                    initial_command: terminal.startup_mode === 'explorer' ? null : (terminal.initial_command || null),
+                    startup_mode: terminal.startup_mode === 'explorer' && config.connection_mode === 'wsl'
+                        ? 'explorer'
+                        : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
                 };
 
                 if (config.connection_mode === 'ssh') {
@@ -3779,8 +3822,8 @@
                     ...common,
                     distribution: terminal.distribution || config.wsl.distribution || '',
                     username: config.wsl.username || '',
-                    use_wsl: Boolean(terminal.use_wsl),
-                    use_powershell: Boolean(terminal.use_powershell)
+                    use_wsl: common.startup_mode === 'explorer' ? false : Boolean(terminal.use_wsl),
+                    use_powershell: common.startup_mode === 'explorer' ? false : Boolean(terminal.use_powershell)
                 });
             });
         } catch (error) {

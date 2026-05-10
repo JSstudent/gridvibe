@@ -85,6 +85,23 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(sessions[0].host, "WSL")
         self.assertTrue(sessions[0].use_powershell)
 
+    def test_create_sessions_supports_startup_mode_metadata(self):
+        sessions = self.manager.create_sessions(
+            [
+                {
+                    "mode": "wsl",
+                    "directory": "C:\\repo",
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+            group_id="group-local",
+        )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].startup_mode, "explorer")
+        self.assertEqual(sessions[0].to_dict()["startup_mode"], "explorer")
+
     def test_update_session_status_marks_connected_and_notifies_callbacks(self):
         session = self.manager.create_session(
             group_id="group-b",
@@ -213,4 +230,3 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(groups[0].layout, "grid")
         self.assertEqual(groups[0].terminal_count, 4)
         self.assertEqual(groups[0].display_order, original.display_order)
-

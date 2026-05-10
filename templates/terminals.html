@@ -751,6 +751,112 @@
         .terminal-canvas .xterm          { height: 100%; }
         .terminal-canvas .xterm-viewport { overflow-y: auto !important; }
 
+        .explorer-pane [data-terminal-clear],
+        .explorer-pane [data-terminal-clearline],
+        .explorer-pane [data-terminal-enter],
+        .explorer-pane .voice-control {
+            display: none;
+        }
+
+        .explorer-surface {
+            height: 100%;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+            gap: 8px;
+            color: var(--t-text);
+            background: #111;
+            border: 1px solid var(--t-border-dim);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .explorer-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px;
+            border-bottom: 1px solid var(--t-border-dim);
+            background: var(--t-card-header);
+            min-width: 0;
+        }
+
+        .explorer-up {
+            width: 32px;
+            height: 28px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            cursor: pointer;
+        }
+
+        .explorer-up:disabled {
+            opacity: .45;
+            cursor: default;
+        }
+
+        .explorer-path {
+            min-width: 0;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--t-text-secondary);
+            font-size: .78rem;
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        .explorer-list {
+            min-height: 0;
+            overflow: auto;
+            display: grid;
+            align-content: start;
+        }
+
+        .explorer-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto auto;
+            gap: 10px;
+            align-items: center;
+            padding: 7px 10px;
+            border: 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            background: transparent;
+            color: var(--t-text-secondary);
+            text-align: left;
+            font: inherit;
+            cursor: default;
+        }
+
+        .explorer-row.directory {
+            cursor: pointer;
+            color: var(--t-text);
+        }
+
+        .explorer-row.directory:hover {
+            background: var(--t-btn-hover-bg);
+        }
+
+        .explorer-name {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: .8rem;
+        }
+
+        .explorer-meta {
+            color: var(--t-text-muted);
+            font-size: .72rem;
+            white-space: nowrap;
+        }
+
+        .explorer-message {
+            padding: 14px;
+            color: var(--t-text-muted);
+            font-size: .78rem;
+        }
+
         /* ── Terminal context menu ── */
         #term-ctx-menu {
             position: fixed;
@@ -1018,6 +1124,10 @@
     let sessionGroups = [];
     let activeLoadToken = 0;
     let knownGroupIds = [];
+
+    function isExplorerSession(session) {
+        return session?.mode === 'wsl' && session?.startup_mode === 'explorer';
+    }
 
     function getSessionApiPath(groupId = activeGroupId) {
         return groupId
@@ -1572,7 +1682,7 @@
     function emitTerminalResize(index, force = false) {
         const sid = sessionIds[index];
         const terminal = terminals[index];
-        if (!sid || !socket || !terminal?._attached || !terminal.term.cols || !terminal.term.rows) {
+        if (!sid || !socket || !terminal?._attached || !terminal.term || !terminal.term.cols || !terminal.term.rows) {
             return;
         }
 
@@ -1635,7 +1745,7 @@
 
     function flushPendingOutput(index) {
         const terminal = terminals[index];
-        if (!terminal?._attached || !terminal._pendingOutput) {
+        if (!terminal?._attached || !terminal.term || !terminal._pendingOutput) {
             return;
         }
 
@@ -1646,7 +1756,7 @@
 
     function fitTerminal(index) {
         const terminal = terminals[index];
-        if (!terminal?._attached) {
+        if (!terminal?._attached || !terminal.term || !terminal.fitAddon) {
             return false;
         }
 
@@ -1830,6 +1940,10 @@
 
         setTerminalRefreshState(index, true);
         try {
+            if (isExplorerSession(terminal._session)) {
+                await loadExplorerPane(index);
+                return false;
+            }
             logSessionWindowAction('Refreshing terminal display', {
                 index,
                 session_id: sessionId || null,
@@ -1871,6 +1985,11 @@
         const terminal = terminals[index];
         const sessionId = sessionIds[index];
         if (!terminal) {
+            return false;
+        }
+
+        if (isExplorerSession(terminal._session)) {
+            await refreshTerminalDisplay(index);
             return false;
         }
 
@@ -2045,15 +2164,18 @@
         grid.innerHTML = '';
 
         sessions.forEach((session, i) => {
-            /* create xterm instance */
-            const t = makeTerminal();
+            const isExplorer = isExplorerSession(session);
+            /* create pane instance */
+            const t = isExplorer
+                ? { _session: session, _paneType: 'explorer', _attached: false }
+                : makeTerminal();
             t._session = session;
             terminals.push(t);
             sessionIds.push(null);
 
             /* card HTML */
             const card = document.createElement('div');
-            card.className = 'terminal-container';
+            card.className = `terminal-container ${isExplorer ? 'explorer-pane' : ''}`;
             card.id = `tc-${i}`;
             card.dataset.slot = String(i);
             const sessionColour = tabColourForGroup(activeGroupId);
@@ -2222,11 +2344,21 @@
                 </div>
                 <div class="terminal-wrapper" id="tw-${i}">
                     <div class="terminal-surface">
-                        <div class="terminal-canvas" id="tcanvas-${i}"></div>
+                        ${isExplorer ? `
+                            <div class="explorer-surface" id="explorer-${i}">
+                                <div class="explorer-bar">
+                                    <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
+                                    <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
+                                </div>
+                                <div class="explorer-list" id="explorer-list-${i}">
+                                    <div class="explorer-message">Loading directory...</div>
+                                </div>
+                            </div>
+                        ` : `<div class="terminal-canvas" id="tcanvas-${i}"></div>`}
                     </div>
                     <div class="placeholder" id="ph-${i}">
                         <div class="spinner"></div>
-                        <span style="font-size:.78rem">Connecting…</span>
+                        <span style="font-size:.78rem">${isExplorer ? 'Loading explorer…' : 'Connecting…'}</span>
                     </div>
                 </div>
             `;
@@ -2377,11 +2509,27 @@
                     _sendToTerminal(i, '\x15');
                 });
             }
+            const explorerUpButton = card.querySelector(`[data-explorer-up="${i}"]`);
+            if (explorerUpButton) {
+                explorerUpButton.draggable = false;
+                explorerUpButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                explorerUpButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    loadExplorerPane(i, terminals[i]?._explorerParentPath || '');
+                });
+            }
             grid.appendChild(card);
         });
 
         /* wire up terminal input events now that DOM elements exist */
         terminals.forEach((t, i) => {
+            if (!t?.term) {
+                return;
+            }
             t.term.onData(data => {
                 _focusedTerminalIndex = i;
                 const sid = sessionIds[i];
@@ -3601,7 +3749,7 @@
         const canvas  = document.getElementById(`tcanvas-${index}`);
         const ph      = document.getElementById(`ph-${index}`);
 
-        if (!wrapper || !canvas || terminals[index]._attached) return;
+        if (!wrapper || !canvas || terminals[index]._attached || !terminals[index].term) return;
 
         if (ph) ph.remove();
 
@@ -3712,7 +3860,9 @@
                 sessionIds[i] = session.session_id;
                 setSessionRoute(session.session_id, requestedGroupId, i);
 
-                if (session.status === 'connected') {
+                if (session.status === 'connected' && isExplorerSession(session)) {
+                    loadExplorerPane(i);
+                } else if (session.status === 'connected') {
                     if (!terminals[i]._attached) {
                         attachTerminal(i);
                     }
@@ -3730,6 +3880,9 @@
 
             if (!usingCurrentView && !restoredFromCache && socket) {
                 data.sessions.forEach(session => {
+                    if (isExplorerSession(session)) {
+                        return;
+                    }
                     socket.emit('join_session', { session_id: session.session_id });
                 });
             }
@@ -3980,7 +4133,9 @@
                 setStatus(i, session.status);
                 sessionIds[i] = session.session_id;
                 setSessionRoute(session.session_id, activeGroupId, i);
-                if (session.status === 'connected' && !terminals[i]?._attached) {
+                if (session.status === 'connected' && isExplorerSession(session)) {
+                    loadExplorerPane(i);
+                } else if (session.status === 'connected' && !terminals[i]?._attached) {
                     attachTerminal(i);
                     redrawAttachedTerminals([i], { forceResize: true });
                 } else if (session.status === 'error' && !terminals[i]?._attached) {
@@ -4067,6 +4222,116 @@
             .replace(/"/g, '&quot;');
     }
 
+    function formatExplorerSize(value) {
+        if (value === null || value === undefined) {
+            return '';
+        }
+        const size = Number(value);
+        if (!Number.isFinite(size)) {
+            return '';
+        }
+        if (size < 1024) {
+            return `${size} B`;
+        }
+        const units = ['KB', 'MB', 'GB', 'TB'];
+        let next = size / 1024;
+        for (const unit of units) {
+            if (next < 1024) {
+                return `${next.toFixed(next >= 10 ? 0 : 1)} ${unit}`;
+            }
+            next /= 1024;
+        }
+        return `${next.toFixed(1)} PB`;
+    }
+
+    function formatExplorerDate(value) {
+        const timestamp = Number(value);
+        if (!Number.isFinite(timestamp)) {
+            return '';
+        }
+        return new Date(timestamp * 1000).toLocaleString();
+    }
+
+    function renderExplorerMessage(index, message) {
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (list) {
+            list.innerHTML = `<div class="explorer-message">${escHtml(message)}</div>`;
+        }
+    }
+
+    async function loadExplorerPane(index, path = null) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !isExplorerSession(pane._session) || !sessionId) {
+            return false;
+        }
+
+        const nextPath = path === null ? (pane._explorerPath || '') : path;
+        renderExplorerMessage(index, 'Loading directory...');
+
+        try {
+            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/entries?path=${encodeURIComponent(nextPath)}`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load directory');
+            }
+
+            pane._attached = true;
+            pane._explorerPath = data.path || '';
+            pane._explorerParentPath = data.parent_path || '';
+            document.getElementById(`ph-${index}`)?.remove();
+
+            const pathLabel = document.getElementById(`explorer-path-${index}`);
+            const upButton = document.getElementById(`explorer-up-${index}`);
+            const list = document.getElementById(`explorer-list-${index}`);
+            if (pathLabel) {
+                pathLabel.textContent = data.path ? `/${data.path}` : data.root || '/';
+                pathLabel.title = data.root || '';
+            }
+            if (upButton) {
+                upButton.disabled = !data.parent_path && !data.path;
+            }
+            if (!list) {
+                return true;
+            }
+
+            const entries = Array.isArray(data.entries) ? data.entries : [];
+            if (!entries.length) {
+                list.innerHTML = '<div class="explorer-message">Directory is empty.</div>';
+                return true;
+            }
+
+            list.innerHTML = entries.map(entry => {
+                const isDirectory = entry.type === 'directory';
+                const size = isDirectory ? 'Folder' : formatExplorerSize(entry.size);
+                const modified = formatExplorerDate(entry.modified);
+                return `
+                    <button
+                        type="button"
+                        class="explorer-row ${isDirectory ? 'directory' : 'file'}"
+                        data-explorer-path="${escHtml(entry.path || '')}"
+                        ${isDirectory ? '' : 'disabled'}
+                    >
+                        <span class="explorer-name">${isDirectory ? '[Dir] ' : ''}${escHtml(entry.name || '')}</span>
+                        <span class="explorer-meta">${escHtml(size)}</span>
+                        <span class="explorer-meta">${escHtml(modified)}</span>
+                    </button>
+                `;
+            }).join('');
+
+            list.querySelectorAll('.explorer-row.directory').forEach(button => {
+                button.addEventListener('click', () => {
+                    loadExplorerPane(index, button.dataset.explorerPath || '');
+                });
+            });
+            return true;
+        } catch (error) {
+            console.error('[GridVibe Sessions] Explorer load failed:', error);
+            renderExplorerMessage(index, error.message || 'Failed to load directory.');
+            return false;
+        }
+    }
+
     /* ─────────────────────────────────────────────
        Socket init — happens AFTER all function defs
        so that a CDN failure cannot kill the script.
@@ -4077,6 +4342,7 @@
         socket.on('terminal_output', ({ session_id, data }) => {
             const target = resolveSessionTarget(session_id);
             if (!target) return;
+            if (!target.terminal.term) return;
 
             if (!target.active) {
                 if (!target.terminal._attached) {
@@ -4108,7 +4374,9 @@
 
             const { index, terminal } = target;
             setStatus(index, session.status);
-            if (session.status === 'connected' && !terminal._attached) {
+            if (session.status === 'connected' && isExplorerSession(session)) {
+                loadExplorerPane(index);
+            } else if (session.status === 'connected' && !terminal._attached) {
                 attachTerminal(index);
                 redrawAttachedTerminals([index], { forceResize: true });
             } else if (session.status === 'connected') {

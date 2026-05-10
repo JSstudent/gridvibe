@@ -1176,6 +1176,100 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertTrue(session.use_powershell)
         self.assertFalse(session.use_wsl)
 
+    def test_create_sessions_accepts_local_repo_file_explorer_mode(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        sessions_payload = {
+            "connection_mode": "wsl",
+            "layout": "horizontal",
+            "sessions": [
+                {
+                    "directory": str(repo_dir),
+                    "title": "Files",
+                    "initial_command": "pwd",
+                    "startup_mode": "explorer",
+                    "use_wsl": True,
+                    "use_powershell": True,
+                }
+            ],
+        }
+
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        start_task.assert_not_called()
+
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertEqual(session.mode, "wsl")
+        self.assertEqual(session.host, "File Explorer")
+        self.assertEqual(session.startup_mode, "explorer")
+        self.assertEqual(session.initial_command, "")
+        self.assertFalse(session.use_wsl)
+        self.assertFalse(session.use_powershell)
+        self.assertEqual(session.status, api.SessionStatus.CONNECTED)
+
+    def test_explorer_entries_lists_local_directory_inside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        subdir = repo_dir / "src"
+        subdir.mkdir(parents=True)
+        file_path = repo_dir / "README.md"
+        file_path.write_text("# Project\n", encoding="utf-8")
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        session_id = response.get_json()["sessions"][0]["session_id"]
+
+        entries_response = self.client.get(f"/api/explorer/{session_id}/entries")
+
+        self.assertEqual(entries_response.status_code, 200)
+        payload = entries_response.get_json()
+        self.assertEqual(payload["path"], "")
+        self.assertEqual(payload["parent_path"], "")
+        self.assertEqual([entry["name"] for entry in payload["entries"]], ["src", "README.md"])
+        self.assertEqual(payload["entries"][0]["type"], "directory")
+        self.assertEqual(payload["entries"][1]["type"], "file")
+
+    def test_explorer_entries_rejects_path_outside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        outside_dir = Path(self.temp_dir.name) / "outside"
+        outside_dir.mkdir()
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        session_id = response.get_json()["sessions"][0]["session_id"]
+
+        entries_response = self.client.get(
+            f"/api/explorer/{session_id}/entries",
+            query_string={"path": str(outside_dir)},
+        )
+
+        self.assertEqual(entries_response.status_code, 400)
+        self.assertIn("inside the configured root", entries_response.get_json()["error"])
+
     def test_create_sessions_uses_cmd_label_for_local_repo_cmd_panes(self):
         sessions_payload = {
             "connection_mode": "wsl",

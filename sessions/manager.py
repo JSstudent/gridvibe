@@ -39,6 +39,7 @@ class TerminalSession:
     distribution: Optional[str] = None
     use_wsl: bool = False
     use_powershell: bool = False
+    startup_mode: str = "terminal"
     status: SessionStatus = SessionStatus.PENDING
     created_at: float = field(default_factory=time.time)
     connected_at: Optional[float] = None
@@ -59,6 +60,7 @@ class TerminalSession:
             "distribution": self.distribution,
             "use_wsl": self.use_wsl,
             "use_powershell": self.use_powershell,
+            "startup_mode": self.startup_mode,
             "status": self.status.value,
             "created_at": self.created_at,
             "connected_at": self.connected_at,
@@ -149,7 +151,8 @@ class SessionManager:
         mode: str = "ssh",
         distribution: Optional[str] = None,
         use_wsl: bool = False,
-        use_powershell: bool = False
+        use_powershell: bool = False,
+        startup_mode: str = "terminal"
     ) -> TerminalSession:
         """
         Create a new terminal session.
@@ -186,6 +189,7 @@ class SessionManager:
             distribution=distribution,
             use_wsl=use_wsl,
             use_powershell=use_powershell,
+            startup_mode=startup_mode,
             status=SessionStatus.PENDING
         )
 
@@ -232,7 +236,8 @@ class SessionManager:
                     mode=mode,
                     distribution=config.get("distribution"),
                     use_wsl=bool(config.get("use_wsl")),
-                    use_powershell=bool(config.get("use_powershell"))
+                    use_powershell=bool(config.get("use_powershell")),
+                    startup_mode=str(config.get("startup_mode") or "terminal"),
                 )
                 created.append(session)
             except Exception as e:
@@ -460,4 +465,3 @@ class SessionManager:
             ]
             for group_id in disconnected_groups:
                 del self.groups[group_id]
-
