@@ -61,6 +61,16 @@
             --t-voice-partial-bg: #1a1a2e;
             --t-voice-partial-border: #333;
             --t-voice-partial-text: #8888aa;
+            --explorer-bg: #f8fafc;
+            --explorer-bar-bg: #f3f6fa;
+            --explorer-border: #d8e0ea;
+            --explorer-row-border: #edf1f5;
+            --explorer-row-hover: #eef6ff;
+            --explorer-row-active: #dbeafe;
+            --explorer-text: #111827;
+            --explorer-muted: #64748b;
+            --explorer-folder: #d97706;
+            --explorer-file: #64748b;
         }
 
         [data-theme="light"] {
@@ -118,6 +128,16 @@
             --t-voice-partial-bg: #ffffff;
             --t-voice-partial-border: #d1d5db;
             --t-voice-partial-text: #6b7280;
+            --explorer-bg: #ffffff;
+            --explorer-bar-bg: #f6f8fb;
+            --explorer-border: #cfd6df;
+            --explorer-row-border: #e8edf3;
+            --explorer-row-hover: #edf6ff;
+            --explorer-row-active: #dbeafe;
+            --explorer-text: #111827;
+            --explorer-muted: #5f6f85;
+            --explorer-folder: #c56f05;
+            --explorer-file: #64748b;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -762,10 +782,9 @@
             height: 100%;
             display: grid;
             grid-template-rows: auto minmax(0, 1fr);
-            gap: 8px;
-            color: var(--t-text);
-            background: #111;
-            border: 1px solid var(--t-border-dim);
+            color: var(--explorer-text);
+            background: var(--explorer-bg);
+            border: 1px solid var(--explorer-border);
             border-radius: 6px;
             overflow: hidden;
         }
@@ -775,8 +794,8 @@
             align-items: center;
             gap: 8px;
             padding: 8px;
-            border-bottom: 1px solid var(--t-border-dim);
-            background: var(--t-card-header);
+            border-bottom: 1px solid var(--explorer-border);
+            background: var(--explorer-bar-bg);
             min-width: 0;
         }
 
@@ -801,7 +820,7 @@
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
-            color: var(--t-text-secondary);
+            color: var(--explorer-muted);
             font-size: .78rem;
             font-family: Consolas, Monaco, 'Courier New', monospace;
         }
@@ -815,26 +834,66 @@
 
         .explorer-row {
             display: grid;
-            grid-template-columns: minmax(0, 1fr) auto auto;
+            grid-template-columns: 24px minmax(0, 1fr) minmax(52px, 72px) minmax(92px, 150px);
             gap: 10px;
             align-items: center;
-            padding: 7px 10px;
+            min-height: 34px;
+            padding: 6px 10px;
             border: 0;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            border-bottom: 1px solid var(--explorer-row-border);
             background: transparent;
-            color: var(--t-text-secondary);
+            color: var(--explorer-muted);
             text-align: left;
             font: inherit;
             cursor: default;
         }
 
+        .explorer-row:disabled {
+            opacity: 1;
+        }
+
         .explorer-row.directory {
             cursor: pointer;
-            color: var(--t-text);
+            color: var(--explorer-text);
         }
 
         .explorer-row.directory:hover {
-            background: var(--t-btn-hover-bg);
+            background: var(--explorer-row-hover);
+        }
+
+        .explorer-row.directory:focus-visible {
+            outline: 2px solid var(--t-accent);
+            outline-offset: -2px;
+            background: var(--explorer-row-active);
+        }
+
+        .explorer-row.drag-over,
+        .explorer-row.move-target {
+            background: var(--explorer-row-active);
+            box-shadow: inset 0 0 0 1px var(--t-accent);
+        }
+
+        .explorer-icon {
+            width: 24px;
+            height: 24px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--explorer-file);
+        }
+
+        .explorer-icon svg {
+            width: 20px;
+            height: 20px;
+            display: block;
+        }
+
+        .explorer-icon.folder {
+            color: var(--explorer-folder);
+        }
+
+        .explorer-icon.file {
+            color: var(--explorer-file);
         }
 
         .explorer-name {
@@ -843,17 +902,22 @@
             text-overflow: ellipsis;
             white-space: nowrap;
             font-size: .8rem;
+            color: currentColor;
         }
 
         .explorer-meta {
-            color: var(--t-text-muted);
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: var(--explorer-muted);
             font-size: .72rem;
             white-space: nowrap;
+            text-align: right;
         }
 
         .explorer-message {
             padding: 14px;
-            color: var(--t-text-muted);
+            color: var(--explorer-muted);
             font-size: .78rem;
         }
 
@@ -4259,6 +4323,22 @@
         }
     }
 
+    const EXPLORER_FOLDER_ICON = `
+        <span class="explorer-icon folder" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+                <path fill="currentColor" d="M3 6.75A2.75 2.75 0 0 1 5.75 4h4.02c.73 0 1.43.29 1.94.8l1.2 1.2h5.34A2.75 2.75 0 0 1 21 8.75v8.5A2.75 2.75 0 0 1 18.25 20H5.75A2.75 2.75 0 0 1 3 17.25V6.75Zm2.75-1.25c-.69 0-1.25.56-1.25 1.25V8h15v-.25c0-.69-.56-1.25-1.25-1.25h-5.65a.75.75 0 0 1-.53-.22l-1.42-1.42a1.25 1.25 0 0 0-.88-.36H5.75ZM4.5 9.5v7.75c0 .69.56 1.25 1.25 1.25h12.5c.69 0 1.25-.56 1.25-1.25V9.5h-15Z"/>
+            </svg>
+        </span>
+    `;
+
+    const EXPLORER_FILE_ICON = `
+        <span class="explorer-icon file" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+                <path fill="currentColor" d="M6.75 3A2.75 2.75 0 0 0 4 5.75v12.5A2.75 2.75 0 0 0 6.75 21h10.5A2.75 2.75 0 0 0 20 18.25V8.62a2.75 2.75 0 0 0-.8-1.94L16.32 3.8A2.75 2.75 0 0 0 14.38 3H6.75ZM5.5 5.75c0-.69.56-1.25 1.25-1.25H14V8c0 1.1.9 2 2 2h2.5v8.25c0 .69-.56 1.25-1.25 1.25H6.75c-.69 0-1.25-.56-1.25-1.25V5.75Zm10 0 1.94 1.94c.23.23.4.5.49.81H16a.5.5 0 0 1-.5-.5V5.75Z"/>
+            </svg>
+        </span>
+    `;
+
     async function loadExplorerPane(index, path = null, { force = false, showLoading = true } = {}) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
@@ -4319,7 +4399,8 @@
                         data-explorer-path="${escHtml(entry.path || '')}"
                         ${isDirectory ? '' : 'disabled'}
                     >
-                        <span class="explorer-name">${isDirectory ? '[Dir] ' : ''}${escHtml(entry.name || '')}</span>
+                        ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
+                        <span class="explorer-name">${escHtml(entry.name || '')}</span>
                         <span class="explorer-meta">${escHtml(size)}</span>
                         <span class="explorer-meta">${escHtml(modified)}</span>
                     </button>
