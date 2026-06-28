@@ -238,16 +238,67 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertIn("if (showLoading)", explorer_html)
 
-    def test_terminals_page_manual_refresh_forces_explorer_reload(self):
+    def test_terminals_page_manual_refresh_keeps_open_explorer_file(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
+        explorer_refresh_start = html.index("async function refreshExplorerPane(index)")
+        explorer_refresh_end = html.index("async function loadExplorerPane(index, path = null", explorer_refresh_start)
+        explorer_refresh_html = html[explorer_refresh_start:explorer_refresh_end]
         refresh_start = html.index("async function refreshTerminalDisplay(index)")
         refresh_end = html.index("logSessionWindowAction('Refreshing terminal display'", refresh_start)
         refresh_html = html[refresh_start:refresh_end]
 
-        self.assertIn("await loadExplorerPane(index, null, { force: true });", refresh_html)
+        self.assertIn(
+            "return openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });",
+            explorer_refresh_html,
+        )
+        self.assertIn("return loadExplorerPane(index, null, { force: true });", explorer_refresh_html)
+        self.assertIn("await refreshExplorerPane(index);", refresh_html)
+        self.assertIn("function captureExplorerFileScroll(index)", html)
+        self.assertIn("function restoreExplorerFileScroll(index, state)", html)
+        self.assertIn("function updateExplorerFileInPlace(index, data, scrollState = null)", html)
+        self.assertIn("updateExplorerFileInPlace(index, data, scrollState)", html)
+        self.assertIn(".explorer-list.file-view", html)
+        self.assertIn("list.classList.add('file-view');", html)
+        self.assertIn("listScrollTop: list.scrollTop", html)
+        self.assertIn("list.scrollTop = state.listScrollTop || 0;", html)
+        self.assertIn("wasAtBottom: maxScrollTop > 0 && panel.scrollTop >= maxScrollTop - 2", html)
+        self.assertIn("panel.scrollTop = panelState.wasAtBottom", html)
+        self.assertIn("window.setTimeout(applyScroll, 80);", html)
+        self.assertIn("async function syncExplorerPane(index)", html)
+        self.assertIn("if (pane?._explorerMode === 'file' && pane._explorerFilePath) {\n            return true;\n        }", html)
+        self.assertIn("syncExplorerPane(i);", html)
+        self.assertIn("syncExplorerPane(index);", html)
+
+    def test_terminals_page_explorer_theme_defaults_to_dark(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("function hasExplorerThemeOverride(key = '')", html)
+        self.assertIn('[data-theme="dark"]', html)
+        self.assertIn("--explorer-bg: #0f141b;", html)
+        self.assertIn("card.dataset.explorerThemeSource = hasExplorerThemeOverride(explorerThemeKey) ? 'override' : 'default';", html)
+        self.assertIn("if (card.dataset.explorerThemeSource === 'override')", html)
+        self.assertIn("updateExplorerThemeButton(explorerThemeButton, card.dataset.explorerTheme || 'dark');", html)
+        self.assertIn("function syncDefaultExplorerThemes()", html)
+        self.assertIn("syncDefaultExplorerThemes();", html)
+        self.assertNotIn("store.default || currentResolvedTheme()", html)
+
+    def test_terminals_page_explorer_source_view_wraps_and_highlights_code(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("white-space: pre-wrap;", html)
+        self.assertIn("overflow-wrap: anywhere;", html)
+        self.assertIn("function highlightExplorerCode(content, language)", html)
+        self.assertIn("const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({", html)
+        self.assertIn("'.py': 'python'", html)
+        self.assertIn("'.go': 'go'", html)
+        self.assertIn("'.c': 'c'", html)
 
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
@@ -1340,6 +1391,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["size"], file_path.stat().st_size)
         self.assertEqual(payload["preview_type"], "markdown")
         self.assertIn("<h1>Project</h1>", payload["preview_html"])
+        self.assertEqual(payload["language"], "markdown")
 
     def test_explorer_file_returns_sanitized_markdown_preview(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -1383,6 +1435,24 @@ class ApiRoutesTestCase(unittest.TestCase):
         payload = file_response.get_json()
         self.assertIsNone(payload["preview_type"])
         self.assertIsNone(payload["preview_html"])
+        self.assertIsNone(payload["language"])
+
+    def test_explorer_file_returns_code_language_for_common_source_files(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "script.py").write_text("def main():\n    print('hi')\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "script.py"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertEqual(payload["preview_type"], None)
+        self.assertIsNone(payload["preview_html"])
+        self.assertEqual(payload["language"], "python")
 
     def test_explorer_file_rejects_path_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"

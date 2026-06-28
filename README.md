@@ -32,7 +32,7 @@ Top bar controls:
 
 Per-terminal controls:
 
-- `↻` resets that terminal view and replays the recent output buffer. On file explorer panes, it manually reloads the current directory.
+- `↻` resets that terminal view and replays the recent output buffer. On file explorer panes, it manually reloads the current directory or the currently open file.
 - `🧹` clears the terminal display and purges its replay buffer.
 - `🗑` sends `Ctrl+U` to clear the current input line.
 - `Enter` sends an Enter keypress to that terminal.
@@ -52,8 +52,9 @@ Explorer panes support:
 - Directory navigation with parent-folder navigation constrained to the selected root.
 - Manual refresh from the pane header without continuous auto-refresh flicker.
 - Folder/file icons, size and modified-time metadata, and per-pane light/dark explorer theme toggling.
-- Click-to-open text files in a read-only viewer.
+- Click-to-open text files in a read-only viewer with wrapped long lines.
 - Markdown files with a source tab and sanitized rendered preview when Markdown rendering dependencies are installed.
+- Lightweight syntax coloring for common source files such as Python, C/C++, Go, JavaScript/TypeScript, Java, Rust, shell, PowerShell, HTML, CSS, JSON, YAML, TOML, SQL, and related formats.
 - Size-limited previews. Binary files, directories, and paths outside the root are rejected.
 
 File moving, editing, deleting, upload, SSH/SFTP browsing, and git diff/status views are not part of the current file explorer implementation.

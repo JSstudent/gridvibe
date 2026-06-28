@@ -2219,6 +2219,39 @@ def _is_explorer_session(session: Any) -> bool:
 
 
 MARKDOWN_PREVIEW_EXTENSIONS = {".md", ".markdown"}
+CODE_PREVIEW_LANGUAGES = {
+    ".bash": "shell",
+    ".c": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cs": "csharp",
+    ".css": "css",
+    ".go": "go",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".html": "html",
+    ".java": "java",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".json": "json",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".lua": "lua",
+    ".php": "php",
+    ".ps1": "powershell",
+    ".py": "python",
+    ".rb": "ruby",
+    ".rs": "rust",
+    ".sh": "shell",
+    ".sql": "sql",
+    ".swift": "swift",
+    ".toml": "toml",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".xml": "xml",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+}
 MARKDOWN_ALLOWED_TAGS = {
     "a",
     "abbr",
@@ -2275,6 +2308,14 @@ def _is_markdown_file(path: str) -> bool:
     """Return whether an explorer file should get a Markdown preview."""
     _, extension = os.path.splitext(path.lower())
     return extension in MARKDOWN_PREVIEW_EXTENSIONS
+
+
+def _explorer_code_language(path: str) -> Optional[str]:
+    """Return the source language for code files shown in explorer previews."""
+    _, extension = os.path.splitext(path.lower())
+    if extension in MARKDOWN_PREVIEW_EXTENSIONS:
+        return "markdown"
+    return CODE_PREVIEW_LANGUAGES.get(extension)
 
 
 def _render_markdown_preview(content: str) -> Optional[str]:
@@ -2858,6 +2899,7 @@ def get_explorer_file(session_id: str):
         preview_bytes = raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]
         content = preview_bytes.decode("utf-8", errors="replace")
         preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
+        code_language = _explorer_code_language(file_path)
 
         return jsonify(
             {
@@ -2872,6 +2914,7 @@ def get_explorer_file(session_id: str):
                 "content": content,
                 "preview_type": "markdown" if preview_html is not None else None,
                 "preview_html": preview_html,
+                "language": code_language,
             }
         )
     except ValueError as exc:
