@@ -61,6 +61,16 @@
             --t-voice-partial-bg: #1a1a2e;
             --t-voice-partial-border: #333;
             --t-voice-partial-text: #8888aa;
+            --explorer-bg: #0f141b;
+            --explorer-bar-bg: #151c24;
+            --explorer-border: #2b3744;
+            --explorer-row-border: #1f2a35;
+            --explorer-row-hover: #182636;
+            --explorer-row-active: #17324a;
+            --explorer-text: #e6edf3;
+            --explorer-muted: #94a3b8;
+            --explorer-folder: #f0b35b;
+            --explorer-file: #9fb2c8;
         }
 
         [data-theme="light"] {
@@ -118,6 +128,55 @@
             --t-voice-partial-bg: #ffffff;
             --t-voice-partial-border: #d1d5db;
             --t-voice-partial-text: #6b7280;
+            --explorer-bg: #ffffff;
+            --explorer-bar-bg: #f6f8fb;
+            --explorer-border: #cfd6df;
+            --explorer-row-border: #e8edf3;
+            --explorer-row-hover: #edf6ff;
+            --explorer-row-active: #dbeafe;
+            --explorer-text: #111827;
+            --explorer-muted: #5f6f85;
+            --explorer-folder: #c56f05;
+            --explorer-file: #64748b;
+        }
+
+        [data-theme="dark"] {
+            --explorer-bg: #0f141b;
+            --explorer-bar-bg: #151c24;
+            --explorer-border: #2b3744;
+            --explorer-row-border: #1f2a35;
+            --explorer-row-hover: #182636;
+            --explorer-row-active: #17324a;
+            --explorer-text: #e6edf3;
+            --explorer-muted: #94a3b8;
+            --explorer-folder: #f0b35b;
+            --explorer-file: #9fb2c8;
+        }
+
+        .explorer-pane[data-explorer-theme="light"] {
+            --explorer-bg: #ffffff;
+            --explorer-bar-bg: #f6f8fb;
+            --explorer-border: #cfd6df;
+            --explorer-row-border: #e8edf3;
+            --explorer-row-hover: #edf6ff;
+            --explorer-row-active: #dbeafe;
+            --explorer-text: #111827;
+            --explorer-muted: #5f6f85;
+            --explorer-folder: #c56f05;
+            --explorer-file: #64748b;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] {
+            --explorer-bg: #0f141b;
+            --explorer-bar-bg: #151c24;
+            --explorer-border: #2b3744;
+            --explorer-row-border: #1f2a35;
+            --explorer-row-hover: #182636;
+            --explorer-row-active: #17324a;
+            --explorer-text: #e6edf3;
+            --explorer-muted: #94a3b8;
+            --explorer-folder: #f0b35b;
+            --explorer-file: #9fb2c8;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -384,6 +443,11 @@
             grid-template-rows: repeat(var(--grid-rows, 2), 1fr);
         }
 
+        #terminalsGrid.layout-split-local {
+            grid-template-columns: repeat(var(--split-grid-columns, 4), minmax(0, 1fr));
+            grid-template-rows: repeat(var(--split-grid-rows, 2), minmax(0, 1fr));
+        }
+
         /* ── Terminal card ── */
         .terminal-container {
             display: flex;
@@ -458,6 +522,14 @@
             cursor: wait;
         }
 
+        .terminal-split-btn:disabled {
+            cursor: not-allowed;
+        }
+
+        .explorer-theme-btn {
+            min-width: 32px;
+        }
+
         /* ── Voice input ── */
         .voice-control {
             position: relative;
@@ -513,195 +585,6 @@
             pointer-events: none;
             z-index: 5;
         }
-        .voice-panel {
-            position: absolute;
-            top: calc(100% + 8px);
-            right: 0;
-            width: min(420px, calc(100vw - 36px));
-            background: var(--t-voice-bg);
-            border: 1px solid var(--t-voice-border);
-            border-radius: 10px;
-            box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
-            padding: 12px;
-            display: none;
-            z-index: 60;
-        }
-        .voice-panel.open {
-            display: block;
-        }
-        .voice-panel-header {
-            display: flex;
-            align-items: flex-start;
-            justify-content: space-between;
-            gap: 12px;
-        }
-        .voice-panel-title {
-            font-size: .82rem;
-            font-weight: 700;
-            color: var(--t-voice-title);
-        }
-        .voice-panel-meta {
-            margin-top: 3px;
-            font-size: .66rem;
-            line-height: 1.45;
-            color: var(--t-voice-meta);
-        }
-        .voice-panel-badge {
-            border: 1px solid var(--t-voice-badge-border);
-            border-radius: 999px;
-            padding: 2px 8px;
-            font-size: .62rem;
-            font-weight: 700;
-            color: var(--t-voice-badge-text);
-            background: var(--t-voice-badge-bg);
-            white-space: nowrap;
-        }
-        .voice-panel-badge.recording {
-            border-color: rgba(255, 85, 85, 0.42);
-            color: #ff8a8a;
-            background: rgba(70, 18, 18, 0.92);
-        }
-        .voice-panel-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 10px;
-        }
-        .voice-panel-label {
-            width: 78px;
-            flex-shrink: 0;
-            font-size: .71rem;
-            font-weight: 600;
-            color: var(--t-voice-label);
-        }
-        .voice-panel select {
-            flex: 1;
-            min-width: 0;
-            border: 1px solid var(--t-voice-border);
-            background: var(--t-voice-input-bg);
-            color: var(--t-voice-input-text);
-            border-radius: 6px;
-            padding: 6px 8px;
-            font-size: .72rem;
-        }
-        .voice-panel select:focus {
-            outline: none;
-            border-color: var(--t-accent);
-            box-shadow: 0 0 0 2px rgba(0, 217, 255, 0.15);
-        }
-        .voice-panel-toggle {
-            position: relative;
-            width: 36px;
-            height: 20px;
-            background: var(--t-voice-toggle-bg);
-            border: none;
-            border-radius: 10px;
-            cursor: pointer;
-            transition: background .2s;
-            flex-shrink: 0;
-            padding: 0;
-        }
-        .voice-panel-toggle::after {
-            content: '';
-            position: absolute;
-            top: 2px;
-            left: 2px;
-            width: 16px;
-            height: 16px;
-            background: var(--t-voice-toggle-knob);
-            border-radius: 50%;
-            transition: transform .2s;
-        }
-        .voice-panel-toggle.active {
-            background: var(--t-accent);
-        }
-        .voice-panel-toggle.active::after {
-            transform: translateX(16px);
-        }
-        .voice-ptt-keybind {
-            flex: 1;
-            min-width: 0;
-            border: 1px solid var(--t-voice-border);
-            background: var(--t-voice-input-bg);
-            color: var(--t-voice-input-text);
-            border-radius: 6px;
-            padding: 6px 8px;
-            font-size: .72rem;
-            cursor: pointer;
-            text-align: center;
-            user-select: none;
-        }
-        .voice-ptt-keybind:focus {
-            outline: none;
-            border-color: #ffaa00;
-            box-shadow: 0 0 0 2px rgba(255, 170, 0, 0.15);
-            color: #ffaa00;
-        }
-        .voice-ptt-row {
-            display: none;
-        }
-        .voice-ptt-row.visible {
-            display: flex;
-        }
-        .voice-panel-status {
-            margin-top: 10px;
-            border: 1px solid var(--t-voice-status-border);
-            background: var(--t-voice-status-bg);
-            color: var(--t-voice-status-text);
-            border-radius: 7px;
-            padding: 9px 10px;
-            font-size: .7rem;
-            line-height: 1.45;
-        }
-        .voice-panel-section {
-            margin-top: 10px;
-        }
-        .voice-panel details {
-            border: 1px solid var(--t-voice-details-border);
-            border-radius: 7px;
-            background: var(--t-voice-details-bg);
-            padding: 8px 10px;
-        }
-        .voice-panel details + details {
-            margin-top: 8px;
-        }
-        .voice-panel summary {
-            cursor: pointer;
-            list-style: none;
-            font-size: .71rem;
-            font-weight: 700;
-            color: var(--t-voice-details-title);
-        }
-        .voice-panel summary::-webkit-details-marker {
-            display: none;
-        }
-        .voice-diagnostics {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 8px;
-            margin-top: 8px;
-        }
-        .voice-diagnostic-title {
-            margin-bottom: 4px;
-            font-size: .66rem;
-            font-weight: 700;
-            color: var(--t-voice-diag-title);
-        }
-        .voice-panel-pre {
-            margin: 0;
-            padding: 7px 8px;
-            border-radius: 6px;
-            background: var(--t-voice-pre-bg);
-            border: 1px solid var(--t-voice-pre-border);
-            color: var(--t-voice-pre-text);
-            font-size: .63rem;
-            line-height: 1.45;
-            white-space: pre-wrap;
-            word-break: break-word;
-            max-height: 170px;
-            overflow: auto;
-        }
-
         .status-dot {
             width: 7px; height: 7px;
             border-radius: 50%;
@@ -750,6 +633,392 @@
 
         .terminal-canvas .xterm          { height: 100%; }
         .terminal-canvas .xterm-viewport { overflow-y: auto !important; }
+
+        .explorer-pane [data-terminal-clear],
+        .explorer-pane .voice-control {
+            display: none;
+        }
+
+        .explorer-surface {
+            height: 100%;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+            color: var(--explorer-text);
+            background: var(--explorer-bg);
+            border: 1px solid var(--explorer-border);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .explorer-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px;
+            border-bottom: 1px solid var(--explorer-border);
+            background: var(--explorer-bar-bg);
+            min-width: 0;
+        }
+
+        .explorer-up {
+            width: 32px;
+            height: 28px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            cursor: pointer;
+        }
+
+        .explorer-up:disabled {
+            opacity: .45;
+            cursor: default;
+        }
+
+        .explorer-path {
+            min-width: 0;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--explorer-muted);
+            font-size: .78rem;
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        .explorer-list {
+            min-height: 0;
+            overflow: auto;
+            display: grid;
+            align-content: start;
+        }
+
+        .explorer-list.file-view {
+            overflow: hidden;
+            align-content: stretch;
+        }
+
+        .explorer-row {
+            display: grid;
+            grid-template-columns: 24px minmax(0, 1fr) minmax(52px, 72px) minmax(92px, 150px);
+            gap: 10px;
+            align-items: center;
+            min-height: 34px;
+            padding: 6px 10px;
+            border: 0;
+            border-bottom: 1px solid var(--explorer-row-border);
+            background: transparent;
+            color: var(--explorer-muted);
+            text-align: left;
+            font: inherit;
+            cursor: default;
+        }
+
+        .explorer-row:disabled {
+            opacity: 1;
+        }
+
+        .explorer-row.directory,
+        .explorer-row.file {
+            cursor: pointer;
+            color: var(--explorer-text);
+        }
+
+        .explorer-row.directory:hover,
+        .explorer-row.file:hover {
+            background: var(--explorer-row-hover);
+        }
+
+        .explorer-row.directory:focus-visible,
+        .explorer-row.file:focus-visible {
+            outline: 2px solid var(--t-accent);
+            outline-offset: -2px;
+            background: var(--explorer-row-active);
+        }
+
+        .explorer-row.drag-over,
+        .explorer-row.move-target {
+            background: var(--explorer-row-active);
+            box-shadow: inset 0 0 0 1px var(--t-accent);
+        }
+
+        .explorer-icon {
+            width: 24px;
+            height: 24px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--explorer-file);
+        }
+
+        .explorer-icon svg {
+            width: 20px;
+            height: 20px;
+            display: block;
+        }
+
+        .explorer-icon.folder {
+            color: var(--explorer-folder);
+        }
+
+        .explorer-icon.file {
+            color: var(--explorer-file);
+        }
+
+        .explorer-name {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: .8rem;
+            color: currentColor;
+        }
+
+        .explorer-meta {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: var(--explorer-muted);
+            font-size: .72rem;
+            white-space: nowrap;
+            text-align: right;
+        }
+
+        .explorer-message {
+            padding: 14px;
+            color: var(--explorer-muted);
+            font-size: .78rem;
+        }
+
+        .explorer-editor {
+            height: 100%;
+            min-height: 0;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+        }
+
+        .explorer-editor-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+            padding: 8px 10px;
+            border-bottom: 1px solid var(--explorer-row-border);
+            background: var(--explorer-bar-bg);
+        }
+
+        .explorer-editor-back {
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            cursor: pointer;
+            font-size: .74rem;
+            padding: 5px 9px;
+        }
+
+        .explorer-editor-title {
+            min-width: 0;
+            flex: 1;
+        }
+
+        .explorer-editor-tabs {
+            display: inline-flex;
+            gap: 4px;
+            flex-shrink: 0;
+        }
+
+        .explorer-editor-tab {
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            cursor: pointer;
+            font-size: .72rem;
+            padding: 5px 8px;
+        }
+
+        .explorer-editor-tab[aria-selected="true"] {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--explorer-row-active);
+        }
+
+        .explorer-editor-name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--explorer-text);
+            font-size: .82rem;
+            font-weight: 700;
+        }
+
+        .explorer-editor-meta {
+            margin-top: 2px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--explorer-muted);
+            font-size: .7rem;
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        .explorer-editor-body {
+            min-height: 0;
+            overflow: hidden;
+            display: grid;
+        }
+
+        .explorer-editor-panel {
+            min-height: 0;
+            overflow: auto;
+        }
+
+        .explorer-editor-panel[hidden] {
+            display: none;
+        }
+
+        .explorer-editor-content {
+            min-height: 0;
+            margin: 0;
+            padding: 12px 14px;
+            overflow: auto;
+            color: var(--explorer-text);
+            background: var(--explorer-bg);
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-size: .78rem;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            tab-size: 4;
+        }
+
+        .explorer-editor-content code {
+            white-space: inherit;
+            overflow-wrap: inherit;
+            word-break: inherit;
+        }
+
+        .explorer-code-keyword {
+            color: #7c3aed;
+            font-weight: 700;
+        }
+
+        .explorer-code-string {
+            color: #0f766e;
+        }
+
+        .explorer-code-comment {
+            color: var(--explorer-muted);
+            font-style: italic;
+        }
+
+        .explorer-code-number {
+            color: #b45309;
+        }
+
+        .explorer-code-builtin {
+            color: #0369a1;
+            font-weight: 600;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-code-keyword {
+            color: #c4b5fd;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-code-string {
+            color: #5eead4;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-code-number {
+            color: #fbbf24;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-code-builtin {
+            color: #7dd3fc;
+        }
+
+        .explorer-markdown-preview {
+            padding: 14px 18px 28px;
+            color: var(--explorer-text);
+            background: var(--explorer-bg);
+            font-size: .86rem;
+            line-height: 1.55;
+        }
+
+        .explorer-markdown-preview h1,
+        .explorer-markdown-preview h2,
+        .explorer-markdown-preview h3 {
+            margin: 1.15em 0 .5em;
+            line-height: 1.2;
+        }
+
+        .explorer-markdown-preview h1:first-child,
+        .explorer-markdown-preview h2:first-child,
+        .explorer-markdown-preview h3:first-child,
+        .explorer-markdown-preview p:first-child {
+            margin-top: 0;
+        }
+
+        .explorer-markdown-preview p,
+        .explorer-markdown-preview ul,
+        .explorer-markdown-preview ol,
+        .explorer-markdown-preview blockquote,
+        .explorer-markdown-preview pre,
+        .explorer-markdown-preview table {
+            margin: 0 0 .9em;
+        }
+
+        .explorer-markdown-preview code,
+        .explorer-markdown-preview pre {
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        .explorer-markdown-preview code {
+            border: 1px solid var(--explorer-row-border);
+            border-radius: 4px;
+            padding: 1px 4px;
+            background: var(--explorer-bar-bg);
+        }
+
+        .explorer-markdown-preview pre {
+            overflow: auto;
+            padding: 10px 12px;
+            border: 1px solid var(--explorer-row-border);
+            border-radius: 6px;
+            background: var(--explorer-bar-bg);
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .explorer-markdown-preview pre code {
+            border: 0;
+            padding: 0;
+            background: transparent;
+            white-space: inherit;
+            overflow-wrap: inherit;
+            word-break: inherit;
+        }
+
+        .explorer-markdown-preview blockquote {
+            border-left: 3px solid var(--explorer-border);
+            padding-left: 12px;
+            color: var(--explorer-muted);
+        }
+
+        .explorer-markdown-preview table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .explorer-markdown-preview th,
+        .explorer-markdown-preview td {
+            border: 1px solid var(--explorer-row-border);
+            padding: 6px 8px;
+            text-align: left;
+        }
 
         /* ── Terminal context menu ── */
         #term-ctx-menu {
@@ -853,14 +1122,6 @@
                 grid-row: auto;
             }
 
-            .voice-panel {
-                width: min(100vw - 28px, 360px);
-                right: -6px;
-            }
-
-            .voice-diagnostics {
-                grid-template-columns: 1fr;
-            }
         }
     </style>
 </head>
@@ -968,6 +1229,11 @@
                 : preference === 'dark' ? '🌙 Dark'
                 : '◐ System';
         }
+        syncDefaultExplorerThemes();
+    }
+
+    function currentResolvedTheme() {
+        return document.documentElement.getAttribute('data-theme') || resolveTheme(getStoredTheme() || 'system');
     }
 
     function cycleTheme() {
@@ -995,6 +1261,101 @@
         }
     })();
 
+    const EXPLORER_THEME_STORAGE_KEY = 'gridvibe.explorerTheme';
+
+    function normalizeExplorerTheme(theme) {
+        return theme === 'dark' ? 'dark' : 'light';
+    }
+
+    function getExplorerThemeStore() {
+        try {
+            const raw = localStorage.getItem(EXPLORER_THEME_STORAGE_KEY);
+            if (!raw) {
+                return {};
+            }
+            if (raw === 'light' || raw === 'dark') {
+                return {};
+            }
+            const parsed = JSON.parse(raw);
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
+    function hasExplorerThemeOverride(key = '') {
+        const store = getExplorerThemeStore();
+        return Boolean(key && Object.prototype.hasOwnProperty.call(store, key));
+    }
+
+    function getExplorerTheme(key = '') {
+        const store = getExplorerThemeStore();
+        return normalizeExplorerTheme(
+            key && Object.prototype.hasOwnProperty.call(store, key)
+                ? store[key]
+                : 'dark'
+        );
+    }
+
+    function saveExplorerTheme(key, theme) {
+        if (!key) {
+            return;
+        }
+        const store = getExplorerThemeStore();
+        store[key] = normalizeExplorerTheme(theme);
+        try {
+            localStorage.setItem(EXPLORER_THEME_STORAGE_KEY, JSON.stringify(store));
+        } catch (_) {
+        }
+    }
+
+    function explorerThemeLabel(theme) {
+        return normalizeExplorerTheme(theme) === 'dark' ? 'Light explorer theme' : 'Dark explorer theme';
+    }
+
+    function updateExplorerThemeButton(button, theme) {
+        if (!button) {
+            return;
+        }
+        const normalizedTheme = normalizeExplorerTheme(theme);
+        button.textContent = normalizedTheme === 'dark' ? '☀' : '☾';
+        button.title = explorerThemeLabel(normalizedTheme);
+        button.setAttribute('aria-label', explorerThemeLabel(normalizedTheme));
+        button.setAttribute('aria-pressed', normalizedTheme === 'dark' ? 'true' : 'false');
+    }
+
+    function applyExplorerThemeToCard(card, theme) {
+        if (!card) {
+            return;
+        }
+        const normalizedTheme = normalizeExplorerTheme(theme);
+        card.dataset.explorerTheme = normalizedTheme;
+        const button = card.querySelector('[data-explorer-theme-toggle]');
+        updateExplorerThemeButton(button, normalizedTheme);
+    }
+
+    function syncDefaultExplorerThemes() {
+        document.querySelectorAll('.explorer-pane').forEach(card => {
+            if (card.dataset.explorerThemeSource === 'override') {
+                return;
+            }
+            applyExplorerThemeToCard(card, 'dark');
+            card.dataset.explorerThemeSource = 'default';
+        });
+    }
+
+    function toggleExplorerTheme(index) {
+        const card = document.getElementById(`tc-${index}`);
+        if (!card) {
+            return;
+        }
+        const currentTheme = normalizeExplorerTheme(card.dataset.explorerTheme || 'dark');
+        const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        applyExplorerThemeToCard(card, nextTheme);
+        card.dataset.explorerThemeSource = 'override';
+        saveExplorerTheme(card.dataset.explorerThemeKey || '', nextTheme);
+    }
+
     /* ─────────────────────────────────────────────
        State  (socket is initialised AFTER functions
        so that a CDN failure can't kill the whole script)
@@ -1018,6 +1379,31 @@
     let sessionGroups = [];
     let activeLoadToken = 0;
     let knownGroupIds = [];
+    let pendingSplitRestore = null;
+    let pendingModeSwitchSessionIds = new Set();
+    const MAX_SPLIT_TERMINALS = Math.min(8, Number({{ max_sessions | tojson }} || 8));
+    const MIN_SPLIT_COLS = 8;
+    const MIN_SPLIT_ROWS = 8;
+    let splitSlotRects = null;
+    let originalSplitSlotCount = 0;
+
+    function isRecursiveSplitLayout() {
+        return originalSplitSlotCount > 0 && originalSplitSlotCount <= 2;
+    }
+
+    function getSplitPaneLimit() {
+        return isRecursiveSplitLayout()
+            ? MAX_SPLIT_TERMINALS
+            : Math.min(MAX_SPLIT_TERMINALS, Math.max(1, originalSplitSlotCount) * 2);
+    }
+
+    function isExplorerSession(session) {
+        return session?.mode === 'wsl' && session?.startup_mode === 'explorer';
+    }
+
+    function isExplorerPaneInstance(terminal) {
+        return terminal?._paneType === 'explorer';
+    }
 
     function getSessionApiPath(groupId = activeGroupId) {
         return groupId
@@ -1095,6 +1481,19 @@
         (targetObservers || []).forEach(observer => observer.disconnect());
     }
 
+    function disconnectTerminalObserver(index) {
+        const terminal = terminals[index];
+        const observer = terminal?._resizeObserver;
+        if (!observer) {
+            return;
+        }
+
+        observer.disconnect();
+        resizeObservers = resizeObservers.filter(item => item !== observer);
+        terminal._resizeObserver = null;
+        terminal._resizeObserved = false;
+    }
+
     function observeTerminalResize(index) {
         const terminal = terminals[index];
         if (!terminal || terminal._resizeObserved || !('ResizeObserver' in window)) {
@@ -1106,10 +1505,14 @@
             return;
         }
 
-        const observer = new ResizeObserver(() => scheduleFit(index));
+        const observer = new ResizeObserver(() => {
+            scheduleFit(index);
+            updateSplitButtonState(index);
+        });
         observer.observe(wrapper);
         resizeObservers.push(observer);
         terminal._resizeObserved = true;
+        terminal._resizeObserver = observer;
     }
 
     function restoreActiveTerminalObservers() {
@@ -1143,7 +1546,6 @@
             return;
         }
 
-        _closeVoicePanels(-1);
         _stopAllVoice();
         const grid = document.getElementById('terminalsGrid');
         const fragment = document.createDocumentFragment();
@@ -1162,6 +1564,7 @@
             fragment.appendChild(grid.firstChild);
         }
 
+        const hasLocalSplitLayout = grid.className === 'layout-split-local';
         cachedGroupViews.set(groupId, {
             groupId,
             terminals,
@@ -1169,7 +1572,11 @@
             fragment,
             className: grid.className,
             gridColumns: grid.style.getPropertyValue('--grid-columns'),
-            gridRows: grid.style.getPropertyValue('--grid-rows')
+            gridRows: grid.style.getPropertyValue('--grid-rows'),
+            splitGridColumns: grid.style.getPropertyValue('--split-grid-columns'),
+            splitGridRows: grid.style.getPropertyValue('--split-grid-rows'),
+            splitSlotRects: hasLocalSplitLayout ? cloneSplitSlotRects() : null,
+            originalSplitSlotCount
         });
 
         terminals = [];
@@ -1180,6 +1587,10 @@
         grid.className = '';
         grid.style.removeProperty('--grid-columns');
         grid.style.removeProperty('--grid-rows');
+        grid.style.removeProperty('--split-grid-columns');
+        grid.style.removeProperty('--split-grid-rows');
+        splitSlotRects = null;
+        originalSplitSlotCount = 0;
     }
 
     function restoreCachedGroupView(groupId) {
@@ -1201,11 +1612,25 @@
         } else {
             grid.style.removeProperty('--grid-rows');
         }
+        if (cached.splitGridColumns) {
+            grid.style.setProperty('--split-grid-columns', cached.splitGridColumns);
+        } else {
+            grid.style.removeProperty('--split-grid-columns');
+        }
+        if (cached.splitGridRows) {
+            grid.style.setProperty('--split-grid-rows', cached.splitGridRows);
+        } else {
+            grid.style.removeProperty('--split-grid-rows');
+        }
         grid.appendChild(cached.fragment);
         grid.style.display = '';
 
         terminals = cached.terminals || [];
         sessionIds = cached.sessionIds || [];
+        splitSlotRects = cached.className === 'layout-split-local'
+            ? cloneSplitSlotRects(cached.splitSlotRects)
+            : null;
+        originalSplitSlotCount = Number(cached.originalSplitSlotCount || terminals.length || 0);
         visibleGroupId = groupId;
         gridBuilt = terminals.length > 0;
         terminals.forEach(terminal => {
@@ -1214,6 +1639,9 @@
                 terminal._resizeObserved = false;
             }
         });
+        if (splitSlotRects) {
+            applySplitSlotGeometry({ fit: false });
+        }
         restoreActiveTerminalObservers();
         document.getElementById('emptyState').classList.remove('visible');
         return true;
@@ -1540,12 +1968,540 @@
         return null;
     }
 
+    function cloneSplitSlotRects(rects = splitSlotRects) {
+        return Array.isArray(rects)
+            ? rects.map(rect => normalizeSplitRectMetadata({
+                id: rect.id || makeSplitRectId(),
+                originSlot: rect.originSlot ?? 0,
+                splitId: rect.splitId || '',
+                splitRole: rect.splitRole || '',
+                isSplitChild: Boolean(rect.isSplitChild),
+                parentRect: rect.parentRect ? cloneSplitRect(rect.parentRect) : null,
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+                ancestors: cloneSplitAncestors(rect.ancestors || []),
+            }))
+            : null;
+    }
+
+    function cloneSplitRect(rect) {
+        return { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+    }
+
+    function cloneSplitAncestors(ancestors = []) {
+        return ancestors.map(ancestor => ({
+            splitId: ancestor.splitId,
+            branch: ancestor.branch,
+            parentRect: cloneSplitRect(ancestor.parentRect),
+            branchRect: cloneSplitRect(ancestor.branchRect),
+        }));
+    }
+
+    function makeSplitRectId() {
+        return `sr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    function makeSplitLeaf(rect, ancestors = []) {
+        return normalizeSplitRectMetadata({
+            id: makeSplitRectId(),
+            originSlot: rect.originSlot ?? 0,
+            splitId: rect.splitId || '',
+            splitRole: rect.splitRole || '',
+            isSplitChild: Boolean(rect.isSplitChild),
+            parentRect: rect.parentRect ? cloneSplitRect(rect.parentRect) : null,
+            ...cloneSplitRect(rect),
+            ancestors: cloneSplitAncestors(ancestors),
+        });
+    }
+
+    function normalizeSplitRectMetadata(rect) {
+        const ancestors = cloneSplitAncestors(rect.ancestors || []);
+        const lastAncestor = ancestors[ancestors.length - 1];
+        if (!lastAncestor) {
+            return {
+                ...rect,
+                splitId: '',
+                splitRole: '',
+                isSplitChild: false,
+                parentRect: null,
+                ancestors,
+            };
+        }
+
+        return {
+            ...rect,
+            splitId: lastAncestor.splitId || '',
+            splitRole: lastAncestor.branch === 'b' ? 'secondary' : 'primary',
+            isSplitChild: lastAncestor.branch === 'b',
+            parentRect: cloneSplitRect(lastAncestor.parentRect),
+            ancestors,
+        };
+    }
+
+    function getBaseLayoutSlots(count, layoutClass = '') {
+        if (count <= 0) {
+            return { columns: 1, rows: 1, slots: [] };
+        }
+        if (count === 1) {
+            return {
+                columns: 1,
+                rows: 1,
+                slots: [{ col: 1, row: 1, colSpan: 1, rowSpan: 1 }],
+            };
+        }
+        if (count === 2) {
+            if (layoutClass.includes('horizontal')) {
+                return {
+                    columns: 1,
+                    rows: 2,
+                    slots: [
+                        { col: 1, row: 1, colSpan: 1, rowSpan: 1 },
+                        { col: 1, row: 2, colSpan: 1, rowSpan: 1 },
+                    ],
+                };
+            }
+            return {
+                columns: 2,
+                rows: 1,
+                slots: [
+                    { col: 1, row: 1, colSpan: 1, rowSpan: 1 },
+                    { col: 2, row: 1, colSpan: 1, rowSpan: 1 },
+                ],
+            };
+        }
+        if (count === 3 && layoutClass.includes('layout-3-split')) {
+            return {
+                columns: 3,
+                rows: 2,
+                slots: [
+                    { col: 1, row: 1, colSpan: 2, rowSpan: 1 },
+                    { col: 1, row: 2, colSpan: 2, rowSpan: 1 },
+                    { col: 3, row: 1, colSpan: 1, rowSpan: 2 },
+                ],
+            };
+        }
+        if (count === 3 && layoutClass.includes('horizontal')) {
+            return {
+                columns: 1,
+                rows: 3,
+                slots: [
+                    { col: 1, row: 1, colSpan: 1, rowSpan: 1 },
+                    { col: 1, row: 2, colSpan: 1, rowSpan: 1 },
+                    { col: 1, row: 3, colSpan: 1, rowSpan: 1 },
+                ],
+            };
+        }
+        if (count === 3) {
+            return {
+                columns: 3,
+                rows: 1,
+                slots: [
+                    { col: 1, row: 1, colSpan: 1, rowSpan: 1 },
+                    { col: 2, row: 1, colSpan: 1, rowSpan: 1 },
+                    { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
+                ],
+            };
+        }
+
+        const metrics = getGridMetrics(count) || { columns: 2, rows: 2 };
+        return {
+            columns: metrics.columns,
+            rows: metrics.rows,
+            slots: Array.from({ length: count }, (_, index) => ({
+                col: 1 + (index % metrics.columns),
+                row: 1 + Math.floor(index / metrics.columns),
+                colSpan: 1,
+                rowSpan: 1,
+            })),
+        };
+    }
+
+    function fixedLayoutSlotRects(count, layoutClass = '') {
+        originalSplitSlotCount = Math.max(originalSplitSlotCount, count);
+        if (count === 1) {
+            return [makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 4, h: 2 })];
+        }
+        if (count === 2 && layoutClass.includes('horizontal')) {
+            return [
+                makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 4, h: 2 }),
+                makeSplitLeaf({ originSlot: 1, x: 1, y: 3, w: 4, h: 2 }),
+            ];
+        }
+        if (count === 2) {
+            return [
+                makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 2, h: 2 }),
+                makeSplitLeaf({ originSlot: 1, x: 3, y: 1, w: 2, h: 2 }),
+            ];
+        }
+
+        const base = getBaseLayoutSlots(count, layoutClass);
+        return base.slots.map((slot, index) => makeSplitLeaf({
+            originSlot: index,
+            x: 1 + (slot.col - 1) * 2,
+            y: 1 + (slot.row - 1) * 2,
+            w: slot.colSpan * 2,
+            h: slot.rowSpan * 2,
+        }));
+    }
+
+    function clearSplitSlotGeometry() {
+        splitSlotRects = null;
+        const grid = document.getElementById('terminalsGrid');
+        if (!grid) {
+            return;
+        }
+        grid.style.removeProperty('--split-grid-columns');
+        grid.style.removeProperty('--split-grid-rows');
+        Array.from(grid.children).forEach(card => {
+            card.style.gridColumn = '';
+            card.style.gridRow = '';
+        });
+    }
+
+    function ensureSplitSlotRects() {
+        const grid = document.getElementById('terminalsGrid');
+        if (!grid) {
+            return [];
+        }
+        if (!Array.isArray(splitSlotRects) || splitSlotRects.length !== grid.children.length) {
+            splitSlotRects = fixedLayoutSlotRects(grid.children.length, grid.className || '');
+        }
+        return splitSlotRects;
+    }
+
+    function applySplitSlotGeometry({ fit = true } = {}) {
+        const grid = document.getElementById('terminalsGrid');
+        if (!grid || !Array.isArray(splitSlotRects) || splitSlotRects.length !== grid.children.length) {
+            return false;
+        }
+
+        const gridColumns = Math.max(1, ...splitSlotRects.map(rect => rect.x + rect.w - 1));
+        const gridRows = Math.max(1, ...splitSlotRects.map(rect => rect.y + rect.h - 1));
+        grid.className = 'layout-split-local';
+        grid.style.removeProperty('--grid-columns');
+        grid.style.removeProperty('--grid-rows');
+        grid.style.setProperty('--split-grid-columns', String(gridColumns));
+        grid.style.setProperty('--split-grid-rows', String(gridRows));
+
+        Array.from(grid.children).forEach((card, visualIndex) => {
+            const rect = splitSlotRects[visualIndex];
+            card.style.gridColumn = `${rect.x} / span ${rect.w}`;
+            card.style.gridRow = `${rect.y} / span ${rect.h}`;
+            if (fit) {
+                const slotIndex = Number(card.dataset.slot);
+                if (Number.isInteger(slotIndex)) {
+                    scheduleFit(slotIndex);
+                }
+            }
+        });
+        updateAllSplitButtonStates();
+        return true;
+    }
+
+    function estimatePaneCharacters(index, axis = '') {
+        const terminal = terminals[index];
+        const term = terminal?.term;
+        const wrapper = document.getElementById(`tw-${index}`);
+        const card = document.getElementById(`tc-${index}`);
+        const wrapperRect = wrapper?.getBoundingClientRect();
+        const cardRect = card?.getBoundingClientRect();
+        const headerRect = card?.querySelector('.terminal-header')?.getBoundingClientRect();
+
+        let cols = Number(term?.cols || 0);
+        let rows = Number(term?.rows || 0);
+        const dimensions = term?._core?._renderService?.dimensions?.css?.cell || {};
+        const cellWidth = Number(dimensions.width || 8);
+        const cellHeight = Number(dimensions.height || 17);
+
+        if (!cols && wrapperRect?.width) {
+            cols = Math.floor(wrapperRect.width / cellWidth);
+        }
+        if (!rows && wrapperRect?.height) {
+            rows = Math.floor(wrapperRect.height / cellHeight);
+        }
+
+        if (axis === 'vertical' && cols > 0) {
+            cols = Math.floor(cols / 2);
+        }
+        if (axis === 'horizontal' && rows > 0) {
+            const duplicatedHeaderHeight = headerRect?.height || 34;
+            const availableHeight = cardRect?.height
+                ? Math.max(0, (cardRect.height / 2) - duplicatedHeaderHeight)
+                : (wrapperRect?.height || 0) / 2;
+            rows = Math.floor(availableHeight / cellHeight) || Math.floor(rows / 2);
+        }
+
+        return { cols, rows };
+    }
+
+    function getSplitCandidates(index, rect) {
+        if (
+            window.innerWidth <= 700
+            || terminals.length >= getSplitPaneLimit()
+            || (rect.splitId && !isRecursiveSplitLayout())
+            || isExplorerSession(terminals[index]?._session)
+        ) {
+            return [];
+        }
+
+        const vertical = estimatePaneCharacters(index, 'vertical');
+        const horizontal = estimatePaneCharacters(index, 'horizontal');
+        const candidates = [];
+        if (rect.w >= 2 && vertical.cols >= MIN_SPLIT_COLS && vertical.rows >= MIN_SPLIT_ROWS) {
+            candidates.push('vertical');
+        }
+        if (rect.h >= 2 && horizontal.cols >= MIN_SPLIT_COLS && horizontal.rows >= MIN_SPLIT_ROWS) {
+            candidates.push('horizontal');
+        }
+        return candidates;
+    }
+
+    function chooseSplitAxis(index, rect) {
+        const candidates = getSplitCandidates(index, rect);
+        if (candidates.length === 0) {
+            return '';
+        }
+        const card = document.getElementById(`tc-${index}`);
+        const bounds = card?.getBoundingClientRect();
+        const preferred = bounds && bounds.height > bounds.width ? 'horizontal' : 'vertical';
+        return candidates.includes(preferred) ? preferred : '';
+    }
+
+    function splitSlotRect(rect, axis) {
+        const splitId = makeSplitRectId();
+        const parentRect = cloneSplitRect(rect);
+        const ancestors = cloneSplitAncestors(rect.ancestors || []);
+        if (axis === 'vertical') {
+            const firstWidth = Math.floor(rect.w / 2);
+            const firstRect = { x: rect.x, y: rect.y, w: firstWidth, h: rect.h };
+            const secondRect = { x: rect.x + firstWidth, y: rect.y, w: rect.w - firstWidth, h: rect.h };
+            return [
+                makeSplitLeaf({
+                    ...firstRect,
+                    originSlot: rect.originSlot,
+                    splitId,
+                    splitRole: 'primary',
+                    parentRect,
+                }, [
+                    ...ancestors,
+                    { splitId, branch: 'a', parentRect, branchRect: firstRect },
+                ]),
+                makeSplitLeaf({
+                    ...secondRect,
+                    originSlot: rect.originSlot,
+                    splitId,
+                    splitRole: 'secondary',
+                    isSplitChild: true,
+                    parentRect,
+                }, [
+                    ...ancestors,
+                    { splitId, branch: 'b', parentRect, branchRect: secondRect },
+                ]),
+            ];
+        }
+
+        const firstHeight = Math.floor(rect.h / 2);
+        const firstRect = { x: rect.x, y: rect.y, w: rect.w, h: firstHeight };
+        const secondRect = { x: rect.x, y: rect.y + firstHeight, w: rect.w, h: rect.h - firstHeight };
+        return [
+            makeSplitLeaf({
+                ...firstRect,
+                originSlot: rect.originSlot,
+                splitId,
+                splitRole: 'primary',
+                parentRect,
+            }, [
+                ...ancestors,
+                { splitId, branch: 'a', parentRect, branchRect: firstRect },
+            ]),
+            makeSplitLeaf({
+                ...secondRect,
+                originSlot: rect.originSlot,
+                splitId,
+                splitRole: 'secondary',
+                isSplitChild: true,
+                parentRect,
+            }, [
+                ...ancestors,
+                { splitId, branch: 'b', parentRect, branchRect: secondRect },
+            ]),
+        ];
+    }
+
+    function scaleSplitValue(value, sourceStart, sourceSize, targetStart, targetSize) {
+        if (!sourceSize) {
+            return targetStart;
+        }
+        return targetStart + Math.round(((value - sourceStart) / sourceSize) * targetSize);
+    }
+
+    function transformSplitRect(rect, fromRect, toRect) {
+        const x1 = scaleSplitValue(rect.x, fromRect.x, fromRect.w, toRect.x, toRect.w);
+        const y1 = scaleSplitValue(rect.y, fromRect.y, fromRect.h, toRect.y, toRect.h);
+        const x2 = scaleSplitValue(rect.x + rect.w, fromRect.x, fromRect.w, toRect.x, toRect.w);
+        const y2 = scaleSplitValue(rect.y + rect.h, fromRect.y, fromRect.h, toRect.y, toRect.h);
+        return {
+            x: x1,
+            y: y1,
+            w: Math.max(1, x2 - x1),
+            h: Math.max(1, y2 - y1),
+        };
+    }
+
+    function transformSplitAncestor(ancestor, fromRect, toRect) {
+        return {
+            ...ancestor,
+            parentRect: transformSplitRect(ancestor.parentRect, fromRect, toRect),
+            branchRect: transformSplitRect(ancestor.branchRect, fromRect, toRect),
+        };
+    }
+
+    function buildCloseSplitPlan(index) {
+        const grid = document.getElementById('terminalsGrid');
+        const card = document.getElementById(`tc-${index}`);
+        const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
+        const rect = visualIndex >= 0 && Array.isArray(splitSlotRects) ? splitSlotRects[visualIndex] : null;
+        const targetAncestor = rect?.ancestors?.[rect.ancestors.length - 1];
+        if (!grid || !targetAncestor) {
+            return null;
+        }
+
+        const rectsBySessionId = {};
+        Array.from(grid.children).forEach((paneCard, paneVisualIndex) => {
+            const slotIndex = Number(paneCard.dataset.slot);
+            const sessionId = Number.isInteger(slotIndex) ? sessionIds[slotIndex] : '';
+            const paneRect = splitSlotRects[paneVisualIndex];
+            if (!sessionId || !paneRect) {
+                return;
+            }
+
+            const splitIndex = paneRect.ancestors?.findIndex(
+                ancestor => ancestor.splitId === targetAncestor.splitId
+            );
+            if (splitIndex === undefined || splitIndex < 0) {
+                rectsBySessionId[sessionId] = cloneSplitSlotRects([paneRect])[0];
+                return;
+            }
+
+            const splitAncestor = paneRect.ancestors[splitIndex];
+            if (splitAncestor.branch === targetAncestor.branch) {
+                return;
+            }
+
+            const transformedAncestors = paneRect.ancestors
+                .map((ancestor, ancestorIndex) => (
+                    ancestorIndex > splitIndex
+                        ? transformSplitAncestor(ancestor, splitAncestor.branchRect, splitAncestor.parentRect)
+                        : ancestor
+                ))
+                .filter((_, ancestorIndex) => ancestorIndex !== splitIndex);
+            const transformedRect = normalizeSplitRectMetadata({
+                ...transformSplitRect(paneRect, splitAncestor.branchRect, splitAncestor.parentRect),
+                id: paneRect.id || makeSplitRectId(),
+                originSlot: paneRect.originSlot,
+                ancestors: transformedAncestors,
+            });
+            rectsBySessionId[sessionId] = cloneSplitSlotRects([transformedRect])[0];
+        });
+
+        const sessionIdsToClose = Array.from(grid.children)
+            .map((paneCard, paneVisualIndex) => {
+                const slotIndex = Number(paneCard.dataset.slot);
+                const sessionId = Number.isInteger(slotIndex) ? sessionIds[slotIndex] : '';
+                const paneRect = splitSlotRects[paneVisualIndex];
+                const splitAncestor = paneRect?.ancestors?.find(
+                    ancestor => ancestor.splitId === targetAncestor.splitId
+                );
+                return splitAncestor?.branch === targetAncestor.branch ? sessionId : '';
+            })
+            .filter(Boolean);
+
+        if (sessionIdsToClose.length === 0 || Object.keys(rectsBySessionId).length === 0) {
+            return null;
+        }
+
+        return { sessionIdsToClose, rectsBySessionId, originalSplitSlotCount };
+    }
+
+    function updateSplitButtonState(index) {
+        const button = document.getElementById(`tsplit-${index}`);
+        if (!button) {
+            return;
+        }
+
+        if (isExplorerSession(terminals[index]?._session)) {
+            button.hidden = true;
+            button.disabled = true;
+            return;
+        }
+
+        button.hidden = false;
+        const grid = document.getElementById('terminalsGrid');
+        const card = document.getElementById(`tc-${index}`);
+        const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
+        const rects = visualIndex >= 0 ? ensureSplitSlotRects() : [];
+        const rect = rects[visualIndex];
+        const axis = rect ? chooseSplitAxis(index, rect) : '';
+        const splitLimit = getSplitPaneLimit();
+        const disabledReason = window.innerWidth <= 700
+            ? 'Splitting is disabled on narrow screens'
+            : terminals.length >= splitLimit
+                ? `Splitting is limited to ${splitLimit} terminal panes for this launcher layout`
+                : 'This pane is already at the smallest split size';
+
+        button.disabled = !axis;
+        button.title = axis ? 'Split this terminal pane' : disabledReason;
+        button.setAttribute('aria-label', button.title);
+    }
+
+    function updateUnsplitButtonState(index) {
+        const button = document.getElementById(`tunsplit-${index}`);
+        if (!button) {
+            return;
+        }
+
+        if (isExplorerSession(terminals[index]?._session)) {
+            button.hidden = true;
+            button.disabled = true;
+            return;
+        }
+
+        const grid = document.getElementById('terminalsGrid');
+        const card = document.getElementById(`tc-${index}`);
+        const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
+        const rect = visualIndex >= 0 && Array.isArray(splitSlotRects) ? splitSlotRects[visualIndex] : null;
+        const canUnsplit = Boolean(rect?.ancestors?.length || rect?.splitId);
+        button.hidden = !canUnsplit;
+        button.disabled = !canUnsplit;
+        button.title = canUnsplit ? 'Close this split pane' : 'This pane is not a split branch';
+        button.setAttribute('aria-label', button.title);
+    }
+
+    function updateAllSplitButtonStates() {
+        terminals.forEach((_, index) => {
+            updateSplitButtonState(index);
+            updateUnsplitButtonState(index);
+        });
+    }
+
     function hasMatchingSessionIds(existingIds, sessions) {
         if (!Array.isArray(existingIds) || !Array.isArray(sessions) || existingIds.length !== sessions.length) {
             return false;
         }
 
         return existingIds.every((sessionId, index) => sessionId === sessions[index]?.session_id);
+    }
+
+    function hasMatchingSessionViews(existingIds, existingTerminals, sessions) {
+        if (!hasMatchingSessionIds(existingIds, sessions) || !Array.isArray(existingTerminals)) {
+            return false;
+        }
+
+        return sessions.every((session, index) => (
+            isExplorerPaneInstance(existingTerminals[index]) === isExplorerSession(session)
+        ));
     }
 
     /* ─────────────────────────────────────────────
@@ -1572,14 +2528,14 @@
     function emitTerminalResize(index, force = false) {
         const sid = sessionIds[index];
         const terminal = terminals[index];
-        if (!sid || !socket || !terminal?._attached || !terminal.term.cols || !terminal.term.rows) {
+        if (!sid || !socket || !terminal?._attached || !terminal.term || !terminal.term.cols || !terminal.term.rows) {
             return;
         }
 
         const cols = terminal.term.cols;
         const rows = terminal.term.rows;
 
-        if (cols < 20 || rows < 5) {
+        if (cols < MIN_SPLIT_COLS || rows < MIN_SPLIT_ROWS) {
             return;
         }
 
@@ -1635,7 +2591,7 @@
 
     function flushPendingOutput(index) {
         const terminal = terminals[index];
-        if (!terminal?._attached || !terminal._pendingOutput) {
+        if (!terminal?._attached || !terminal.term || !terminal._pendingOutput) {
             return;
         }
 
@@ -1646,7 +2602,7 @@
 
     function fitTerminal(index) {
         const terminal = terminals[index];
-        if (!terminal?._attached) {
+        if (!terminal?._attached || !terminal.term || !terminal.fitAddon) {
             return false;
         }
 
@@ -1830,6 +2786,10 @@
 
         setTerminalRefreshState(index, true);
         try {
+            if (isExplorerSession(terminal._session)) {
+                await refreshExplorerPane(index);
+                return false;
+            }
             logSessionWindowAction('Refreshing terminal display', {
                 index,
                 session_id: sessionId || null,
@@ -1871,6 +2831,11 @@
         const terminal = terminals[index];
         const sessionId = sessionIds[index];
         if (!terminal) {
+            return false;
+        }
+
+        if (isExplorerSession(terminal._session)) {
+            await refreshTerminalDisplay(index);
             return false;
         }
 
@@ -1924,6 +2889,10 @@
         parent.replaceChild(placeholder, cardA);
         parent.replaceChild(cardA, cardB);
         parent.replaceChild(cardB, placeholder);
+
+        if (splitSlotRects) {
+            applySplitSlotGeometry({ fit: false });
+        }
 
         const firstIndex = Number(cardA.dataset.slot);
         const secondIndex = Number(cardB.dataset.slot);
@@ -1996,7 +2965,6 @@
        Tear down current sessions before switching
     ───────────────────────────────────────────── */
     function teardownCurrentGrid() {
-        _closeVoicePanels(-1);
         _stopAllVoice();
         // Leave all active SocketIO rooms so the backend clears
         // client_joined_sessions — buffer will replay on re-join.
@@ -2015,6 +2983,7 @@
         });
         clearSessionRoutes(sessionIds);
         cachedGroupViews.delete(visibleGroupId);
+        clearSplitSlotGeometry();
         resizeObservers = [];
         terminals  = [];
         sessionIds = [];
@@ -2033,6 +3002,8 @@
         if (grid.children.length > 0 || terminals.length > 0 || sessionIds.length > 0) {
             teardownCurrentGrid();
         }
+        clearSplitSlotGeometry();
+        originalSplitSlotCount = count;
         grid.className = getLayoutClass(count, layout);
         const gridMetrics = getGridMetrics(count);
         if (gridMetrics) {
@@ -2045,17 +3016,29 @@
         grid.innerHTML = '';
 
         sessions.forEach((session, i) => {
-            /* create xterm instance */
-            const t = makeTerminal();
+            const isExplorer = isExplorerSession(session);
+            /* create pane instance */
+            const t = isExplorer
+                ? { _session: session, _paneType: 'explorer', _attached: false }
+                : makeTerminal();
             t._session = session;
             terminals.push(t);
             sessionIds.push(null);
 
             /* card HTML */
             const card = document.createElement('div');
-            card.className = 'terminal-container';
+            card.className = `terminal-container ${isExplorer ? 'explorer-pane' : ''}`;
             card.id = `tc-${i}`;
             card.dataset.slot = String(i);
+            const explorerThemeKey = session.session_id || `${activeGroupId || 'group'}:${i}`;
+            const initialExplorerTheme = getExplorerTheme(explorerThemeKey);
+            if (isExplorer) {
+                card.dataset.explorerThemeKey = explorerThemeKey;
+                card.dataset.explorerThemeSource = hasExplorerThemeOverride(explorerThemeKey) ? 'override' : 'default';
+                if (card.dataset.explorerThemeSource === 'override') {
+                    card.dataset.explorerTheme = initialExplorerTheme;
+                }
+            }
             const sessionColour = tabColourForGroup(activeGroupId);
             card.style.setProperty('--session-color', sessionColour);
             card.style.setProperty('--session-color-dim', hexToRgba(sessionColour, 0.45));
@@ -2085,30 +3068,58 @@
                         </button>
                         <button
                             type="button"
+                            class="terminal-action-btn terminal-mode-toggle-btn"
+                            id="tmode-${i}"
+                            data-session-mode-toggle="${i}"
+                            title="${isExplorer ? 'Open terminal in current explorer directory' : 'Open file explorer for this terminal directory'}"
+                            aria-label="${isExplorer ? 'Open terminal in current explorer directory' : 'Open file explorer for this terminal directory'}"
+                        >
+                            ${isExplorer ? '&gt;_' : '📁'}
+                        </button>
+                        ${!isExplorer ? `
+                            <button
+                                type="button"
+                                class="terminal-action-btn terminal-split-btn"
+                                id="tsplit-${i}"
+                                data-terminal-split="${i}"
+                                title="Split this terminal pane"
+                                aria-label="Split this terminal pane"
+                            >
+                                ⊞
+                            </button>
+                            <button
+                                type="button"
+                                class="terminal-action-btn terminal-unsplit-btn"
+                                id="tunsplit-${i}"
+                                data-terminal-unsplit="${i}"
+                                title="Close this split pane"
+                                aria-label="Close this split pane"
+                                hidden
+                            >
+                                ⊟
+                            </button>
+                        ` : ''}
+                        ${isExplorer ? `
+                            <button
+                                type="button"
+                                class="terminal-action-btn explorer-theme-btn"
+                                id="texplorertheme-${i}"
+                                data-explorer-theme-toggle="${i}"
+                                title="Dark explorer theme"
+                                aria-label="Dark explorer theme"
+                                aria-pressed="false"
+                            >
+                                ☾
+                            </button>
+                        ` : ''}
+                        <button
+                            type="button"
                             class="terminal-action-btn"
                             id="tclear-${i}"
                             data-terminal-clear="${i}"
                             title="Clear this terminal and purge its replay buffer"
                         >
                             🧹
-                        </button>
-                        <button
-                            type="button"
-                            class="terminal-action-btn terminal-shortcut-btn"
-                            id="tclearline-${i}"
-                            data-terminal-clearline="${i}"
-                            title="Clear current input line (Ctrl+U)"
-                        >
-                            🗑
-                        </button>
-                        <button
-                            type="button"
-                            class="terminal-action-btn terminal-shortcut-btn"
-                            id="tenter-${i}"
-                            data-terminal-enter="${i}"
-                            title="Send Enter keypress to terminal"
-                        >
-                            Enter
                         </button>
                         {% if voice_enabled %}
                         <div class="voice-control" data-terminal-voice-control="${i}">
@@ -2121,112 +3132,27 @@
                             >
                                 🎤
                             </button>
-                            <button
-                                type="button"
-                                class="terminal-action-btn voice-settings-btn"
-                                id="tvoice-panel-toggle-${i}"
-                                data-terminal-voice-settings="${i}"
-                                title="Voice capture settings"
-                            >
-                                Mic
-                            </button>
-                            <div class="voice-panel" id="tvoice-panel-${i}" aria-hidden="true">
-                                <div class="voice-panel-header">
-                                    <div>
-                                        <div class="voice-panel-title">Voice capture</div>
-                                        <div class="voice-panel-meta" id="tvoice-meta-${i}">
-                                            Model: ${VOICE_MODEL} • Language: ${VOICE_LANGUAGE} • Target PCM: 16 kHz mono
-                                        </div>
-                                    </div>
-                                    <span class="voice-panel-badge" id="tvoice-badge-${i}">Idle</span>
-                                </div>
-                                <div class="voice-panel-row">
-                                    <label class="voice-panel-label" for="tvoice-profile-${i}">Profile</label>
-                                    <select id="tvoice-profile-${i}" data-terminal-voice-profile="${i}">
-                                        <option value="headset">Headset</option>
-                                        <option value="laptop">Laptop</option>
-                                    </select>
-                                </div>
-                                <div class="voice-panel-row">
-                                    <label class="voice-panel-label" for="tvoice-device-${i}">Microphone</label>
-                                    <select id="tvoice-device-${i}" data-terminal-voice-device="${i}">
-                                        <option value="">Default input</option>
-                                    </select>
-                                    <button
-                                        type="button"
-                                        class="terminal-action-btn voice-settings-btn"
-                                        data-terminal-voice-refresh="${i}"
-                                        title="Refresh available microphones"
-                                    >
-                                        ↻
-                                    </button>
-                                </div>
-                                <div class="voice-panel-row">
-                                    <label class="voice-panel-label">Push-to-talk</label>
-                                    <button
-                                        type="button"
-                                        class="voice-panel-toggle"
-                                        id="tvoice-ptt-toggle-${i}"
-                                        data-terminal-voice-ptt="${i}"
-                                        title="Enable push-to-talk mode"
-                                        aria-pressed="false"
-                                    ></button>
-                                </div>
-                                <div class="voice-panel-row voice-ptt-row" id="tvoice-ptt-keybind-row-${i}">
-                                    <label class="voice-panel-label" for="tvoice-ptt-keybind-${i}">Keybind</label>
-                                    <input
-                                        type="text"
-                                        class="voice-ptt-keybind"
-                                        id="tvoice-ptt-keybind-${i}"
-                                        data-terminal-voice-ptt-keybind="${i}"
-                                        readonly
-                                        placeholder="Click and press keys…"
-                                        title="Press a modifier key (Ctrl/Cmd) + another key"
-                                    >
-                                </div>
-                                <div class="voice-panel-status" id="tvoice-status-${i}">
-                                    Requested capture settings will be checked against the browser's actual applied settings after the microphone starts.
-                                </div>
-                                <div class="voice-panel-section">
-                                    <details open>
-                                        <summary>Requested vs actual capture</summary>
-                                        <div class="voice-diagnostics">
-                                            <div>
-                                                <div class="voice-diagnostic-title">Requested</div>
-                                                <pre class="voice-panel-pre" id="tvoice-requested-${i}">Awaiting capture start.</pre>
-                                            </div>
-                                            <div>
-                                                <div class="voice-diagnostic-title">Actual settings</div>
-                                                <pre class="voice-panel-pre" id="tvoice-settings-${i}">Awaiting capture start.</pre>
-                                            </div>
-                                        </div>
-                                    </details>
-                                    <details>
-                                        <summary>Browser support and capabilities</summary>
-                                        <div class="voice-diagnostics">
-                                            <div>
-                                                <div class="voice-diagnostic-title">Supported constraints</div>
-                                                <pre class="voice-panel-pre" id="tvoice-supported-${i}">Unavailable until the browser reports support data.</pre>
-                                            </div>
-                                            <div>
-                                                <div class="voice-diagnostic-title">Capabilities</div>
-                                                <pre class="voice-panel-pre" id="tvoice-capabilities-${i}">Available after an audio track is opened.</pre>
-                                            </div>
-                                        </div>
-                                    </details>
-                                </div>
-                            </div>
                         </div>
                         {% endif %}
                     </div>
                 </div>
                 <div class="terminal-wrapper" id="tw-${i}">
                     <div class="terminal-surface">
-                        <div class="terminal-canvas" id="tcanvas-${i}"></div>
+                        ${isExplorer ? `
+                            <div class="explorer-surface" id="explorer-${i}">
+                                <div class="explorer-bar">
+                                    <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
+                                    <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
+                                </div>
+                                <div class="explorer-list" id="explorer-list-${i}">
+                                    <div class="explorer-message">Loading directory...</div>
+                                </div>
+                            </div>
+                        ` : `<div class="terminal-canvas" id="tcanvas-${i}"></div>`}
                     </div>
                     <div class="placeholder" id="ph-${i}">
                         <div class="spinner"></div>
-                        <span style="font-size:.78rem">Connecting…</span>
+                        <span style="font-size:.78rem">${isExplorer ? 'Loading explorer…' : 'Connecting…'}</span>
                     </div>
                 </div>
             `;
@@ -2242,6 +3168,59 @@
                     event.preventDefault();
                     event.stopPropagation();
                     refreshTerminalDisplay(i);
+                });
+            }
+            const modeToggleButton = card.querySelector(`[data-session-mode-toggle="${i}"]`);
+            if (modeToggleButton) {
+                modeToggleButton.draggable = false;
+                modeToggleButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                modeToggleButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    switchSessionPaneMode(i);
+                });
+            }
+            const splitButton = card.querySelector(`[data-terminal-split="${i}"]`);
+            if (splitButton) {
+                splitButton.draggable = false;
+                splitButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                splitButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    splitTerminalPane(i);
+                });
+            }
+            const unsplitButton = card.querySelector(`[data-terminal-unsplit="${i}"]`);
+            if (unsplitButton) {
+                unsplitButton.draggable = false;
+                unsplitButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                unsplitButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    closeSplitPane(i);
+                });
+            }
+            const explorerThemeButton = card.querySelector(`[data-explorer-theme-toggle="${i}"]`);
+            if (explorerThemeButton) {
+                explorerThemeButton.draggable = false;
+                updateExplorerThemeButton(explorerThemeButton, card.dataset.explorerTheme || 'dark');
+                explorerThemeButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                explorerThemeButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleExplorerTheme(i);
                 });
             }
             const clearButton = card.querySelector(`[data-terminal-clear="${i}"]`);
@@ -2277,104 +3256,22 @@
                     _toggleVoice(i);
                 });
             }
-            const voiceSettingsButton = card.querySelector(`[data-terminal-voice-settings="${i}"]`);
-            if (voiceSettingsButton) {
-                voiceSettingsButton.draggable = false;
-                voiceSettingsButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                voiceSettingsButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    _toggleVoicePanel(i);
-                });
-            }
-            const voiceProfileSelect = card.querySelector(`[data-terminal-voice-profile="${i}"]`);
-            if (voiceProfileSelect) {
-                voiceProfileSelect.addEventListener('mousedown', event => {
-                    event.stopPropagation();
-                });
-                voiceProfileSelect.addEventListener('change', event => {
-                    event.stopPropagation();
-                    _setVoiceProfile(event.target.value, i);
-                });
-            }
-            const voiceDeviceSelect = card.querySelector(`[data-terminal-voice-device="${i}"]`);
-            if (voiceDeviceSelect) {
-                voiceDeviceSelect.addEventListener('mousedown', event => {
-                    event.stopPropagation();
-                });
-                voiceDeviceSelect.addEventListener('change', event => {
-                    event.stopPropagation();
-                    _setVoiceDevice(event.target.value, i);
-                });
-            }
-            const voiceRefreshButton = card.querySelector(`[data-terminal-voice-refresh="${i}"]`);
-            if (voiceRefreshButton) {
-                voiceRefreshButton.draggable = false;
-                voiceRefreshButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                voiceRefreshButton.addEventListener('click', async event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    await _refreshVoiceDevices(i);
-                });
-            }
-            const pttToggle = card.querySelector(`[data-terminal-voice-ptt="${i}"]`);
-            if (pttToggle) {
-                pttToggle.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                pttToggle.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    _setPttEnabled(!_voicePrefs.pttEnabled, i);
-                });
-            }
-            const pttKeybindInput = card.querySelector(`[data-terminal-voice-ptt-keybind="${i}"]`);
-            if (pttKeybindInput) {
-                pttKeybindInput.addEventListener('mousedown', event => {
-                    event.stopPropagation();
-                });
-                pttKeybindInput.addEventListener('keydown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    if (_isValidPttKeybind(event)) {
-                        _setPttKeybind(_formatPttKeybind(event), i);
-                    } else {
-                        pttKeybindInput.value = _formatPttKeybind(event) + '…';
-                    }
-                });
-            }
             _syncVoiceControls(i);
-            const enterButton = card.querySelector(`[data-terminal-enter="${i}"]`);
-            if (enterButton) {
-                enterButton.draggable = false;
-                enterButton.addEventListener('mousedown', event => {
+            const explorerUpButton = card.querySelector(`[data-explorer-up="${i}"]`);
+            if (explorerUpButton) {
+                explorerUpButton.draggable = false;
+                explorerUpButton.addEventListener('mousedown', event => {
                     event.preventDefault();
                     event.stopPropagation();
                 });
-                enterButton.addEventListener('click', async event => {
+                explorerUpButton.addEventListener('click', event => {
                     event.preventDefault();
                     event.stopPropagation();
-                    await _sendEnterShortcut(i);
-                });
-            }
-            const clearLineButton = card.querySelector(`[data-terminal-clearline="${i}"]`);
-            if (clearLineButton) {
-                clearLineButton.draggable = false;
-                clearLineButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                clearLineButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    _sendToTerminal(i, '\x15');
+                    const pane = terminals[i];
+                    const targetPath = pane?._explorerMode === 'file'
+                        ? (pane._explorerPath || '')
+                        : (pane?._explorerParentPath || '');
+                    loadExplorerPane(i, targetPath);
                 });
             }
             grid.appendChild(card);
@@ -2382,6 +3279,9 @@
 
         /* wire up terminal input events now that DOM elements exist */
         terminals.forEach((t, i) => {
+            if (!t?.term) {
+                return;
+            }
             t.term.onData(data => {
                 _focusedTerminalIndex = i;
                 const sid = sessionIds[i];
@@ -2399,12 +3299,652 @@
         gridBuilt = true;
         visibleGroupId = activeGroupId;
         updateSessionChrome(count, activeGroupId);
+        updateAllSplitButtonStates();
 
-        /* Restore voice panel if it was open last time */
-        if (_voicePrefs.panelOpen && terminals.length > 0) {
-            const restoreIndex = _focusedTerminalIndex >= 0 && _focusedTerminalIndex < terminals.length
-                ? _focusedTerminalIndex : 0;
-            _toggleVoicePanel(restoreIndex);
+    }
+
+    function remapCardIndexAttributes(card, sourceIndex, targetIndex) {
+        const sourceSuffix = `-${sourceIndex}`;
+        const targetSuffix = `-${targetIndex}`;
+        card.querySelectorAll('[id]').forEach(element => {
+            if (element.id.endsWith(sourceSuffix)) {
+                element.id = `${element.id.slice(0, -sourceSuffix.length)}${targetSuffix}`;
+            }
+        });
+        card.querySelectorAll('*').forEach(element => {
+            Array.from(element.attributes).forEach(attribute => {
+                if (attribute.name === 'for' && attribute.value.endsWith(sourceSuffix)) {
+                    element.setAttribute(attribute.name, `${attribute.value.slice(0, -sourceSuffix.length)}${targetSuffix}`);
+                    return;
+                }
+                if (!attribute.name.startsWith('data-')) {
+                    return;
+                }
+                if (attribute.value === String(sourceIndex)) {
+                    element.setAttribute(attribute.name, String(targetIndex));
+                }
+            });
+        });
+    }
+
+    function stopHeaderButtonDrag(button) {
+        if (!button) {
+            return;
+        }
+        button.draggable = false;
+        button.addEventListener('mousedown', event => {
+            event.preventDefault();
+            event.stopPropagation();
+        });
+    }
+
+    function wireSplitCardControls(card, index) {
+        wireCardDragAndDrop(card, card.querySelector('.terminal-header'));
+
+        const refreshButton = card.querySelector(`[data-terminal-refresh="${index}"]`);
+        if (refreshButton) {
+            stopHeaderButtonDrag(refreshButton);
+            refreshButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                refreshTerminalDisplay(index);
+            });
+        }
+
+        const modeToggleButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
+        if (modeToggleButton) {
+            stopHeaderButtonDrag(modeToggleButton);
+            modeToggleButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                switchSessionPaneMode(index);
+            });
+        }
+
+        const splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
+        if (splitButton) {
+            stopHeaderButtonDrag(splitButton);
+            splitButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                splitTerminalPane(index);
+            });
+        }
+
+        const unsplitButton = card.querySelector(`[data-terminal-unsplit="${index}"]`);
+        if (unsplitButton) {
+            stopHeaderButtonDrag(unsplitButton);
+            unsplitButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                closeSplitPane(index);
+            });
+        }
+
+        const clearButton = card.querySelector(`[data-terminal-clear="${index}"]`);
+        if (clearButton) {
+            stopHeaderButtonDrag(clearButton);
+            clearButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                clearTerminalDisplay(index);
+            });
+        }
+
+        const voiceButton = card.querySelector(`[data-terminal-voice="${index}"]`);
+        if (voiceButton) {
+            stopHeaderButtonDrag(voiceButton);
+            voiceButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                _toggleVoice(index);
+            });
+        }
+
+        _syncVoiceControls(index);
+    }
+
+    function createSplitTerminalCard(sourceCard, session, sourceIndex, targetIndex) {
+        const card = sourceCard.cloneNode(true);
+        card.classList.remove('dragging', 'drag-target', 'explorer-pane');
+        card.id = `tc-${targetIndex}`;
+        card.dataset.slot = String(targetIndex);
+        delete card.dataset.explorerThemeKey;
+        delete card.dataset.explorerThemeSource;
+        delete card.dataset.explorerTheme;
+        remapCardIndexAttributes(card, sourceIndex, targetIndex);
+
+        card.style.gridColumn = '';
+        card.style.gridRow = '';
+        const sessionColour = tabColourForGroup(activeGroupId);
+        card.style.setProperty('--session-color', sessionColour);
+        card.style.setProperty('--session-color-dim', hexToRgba(sessionColour, 0.45));
+
+        const name = card.querySelector(`#tname-${targetIndex}`);
+        if (name) {
+            name.textContent = session.title || `Terminal ${targetIndex + 1}`;
+        }
+        const host = card.querySelector(`#thost-${targetIndex}`);
+        if (host) {
+            host.textContent = session.host || '';
+        }
+        const dot = card.querySelector(`#tdot-${targetIndex}`);
+        if (dot) {
+            dot.className = `status-dot ${session.status || 'pending'}`;
+        }
+        const label = card.querySelector(`#tlabel-${targetIndex}`);
+        if (label) {
+            label.textContent = session.status === 'connected' ? 'Connected' : 'Pending';
+        }
+        const splitButton = card.querySelector(`#tsplit-${targetIndex}`);
+        if (splitButton) {
+            splitButton.textContent = '⊞';
+            splitButton.disabled = false;
+        }
+        const unsplitButton = card.querySelector(`#tunsplit-${targetIndex}`);
+        if (unsplitButton) {
+            unsplitButton.textContent = '⊟';
+            unsplitButton.hidden = false;
+            unsplitButton.disabled = false;
+        }
+
+        const wrapper = card.querySelector(`#tw-${targetIndex}`);
+        if (wrapper) {
+            wrapper.innerHTML = `
+                <div class="terminal-surface">
+                    <div class="terminal-canvas" id="tcanvas-${targetIndex}"></div>
+                </div>
+                <div class="placeholder" id="ph-${targetIndex}">
+                    <div class="spinner"></div>
+                    <span style="font-size:.78rem">Connecting…</span>
+                </div>
+            `;
+        }
+
+        wireSplitCardControls(card, targetIndex);
+        return card;
+    }
+
+    function attachSplitTerminalEvents(index) {
+        const terminal = terminals[index];
+        if (!terminal?.term) {
+            return;
+        }
+
+        terminal.term.onData(data => {
+            _focusedTerminalIndex = index;
+            const sid = sessionIds[index];
+            if (sid && socket) socket.emit('terminal_input', { session_id: sid, data });
+        });
+        const card = document.getElementById(`tc-${index}`);
+        if (card) {
+            card.addEventListener('pointerdown', () => {
+                _focusedTerminalIndex = index;
+            });
+        }
+    }
+
+    function getExplorerSelectedDirectory(index) {
+        const pane = terminals[index];
+        if (!pane || !isExplorerSession(pane._session)) {
+            return '';
+        }
+
+        return pane._explorerPath || '';
+    }
+
+    function updateModeToggleButton(button, isExplorer, loading = false) {
+        if (!button) {
+            return;
+        }
+
+        const label = isExplorer
+            ? 'Open terminal in current explorer directory'
+            : 'Open file explorer for this terminal directory';
+        button.disabled = loading;
+        button.textContent = loading ? '...' : (isExplorer ? '>_' : '📁');
+        button.title = label;
+        button.setAttribute('aria-label', label);
+    }
+
+    function setTerminalOnlyControlsVisible(card, visible) {
+        ['data-terminal-split', 'data-terminal-unsplit'].forEach(attribute => {
+            const button = card.querySelector(`[${attribute}]`);
+            if (button) {
+                button.hidden = !visible;
+            }
+        });
+    }
+
+    function wireExplorerOnlyControls(card, index) {
+        const explorerThemeButton = card.querySelector(`[data-explorer-theme-toggle="${index}"]`);
+        if (explorerThemeButton && !explorerThemeButton.dataset.bound) {
+            explorerThemeButton.dataset.bound = 'true';
+            explorerThemeButton.draggable = false;
+            updateExplorerThemeButton(explorerThemeButton, card.dataset.explorerTheme || 'dark');
+            explorerThemeButton.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            explorerThemeButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleExplorerTheme(index);
+            });
+        }
+
+        const explorerUpButton = card.querySelector(`[data-explorer-up="${index}"]`);
+        if (explorerUpButton && !explorerUpButton.dataset.bound) {
+            explorerUpButton.dataset.bound = 'true';
+            explorerUpButton.draggable = false;
+            explorerUpButton.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            explorerUpButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                const pane = terminals[index];
+                const targetPath = pane?._explorerMode === 'file'
+                    ? (pane._explorerPath || '')
+                    : (pane?._explorerParentPath || '');
+                loadExplorerPane(index, targetPath);
+            });
+        }
+    }
+
+    function ensureExplorerThemeButton(card, index) {
+        let button = card.querySelector(`[data-explorer-theme-toggle="${index}"]`);
+        if (button) {
+            button.hidden = false;
+            return button;
+        }
+
+        const modeButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
+        if (!modeButton) {
+            return null;
+        }
+
+        modeButton.insertAdjacentHTML('afterend', `
+            <button
+                type="button"
+                class="terminal-action-btn explorer-theme-btn"
+                id="texplorertheme-${index}"
+                data-explorer-theme-toggle="${index}"
+                title="Dark explorer theme"
+                aria-label="Dark explorer theme"
+                aria-pressed="false"
+            >
+                ☾
+            </button>
+        `);
+        button = card.querySelector(`[data-explorer-theme-toggle="${index}"]`);
+        return button;
+    }
+
+    function ensureSplitControls(card, index) {
+        let splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
+        if (splitButton) {
+            splitButton.hidden = false;
+            return;
+        }
+
+        const modeButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
+        if (!modeButton) {
+            return;
+        }
+
+        modeButton.insertAdjacentHTML('afterend', `
+            <button
+                type="button"
+                class="terminal-action-btn terminal-split-btn"
+                id="tsplit-${index}"
+                data-terminal-split="${index}"
+                title="Split this terminal pane"
+                aria-label="Split this terminal pane"
+            >
+                ⊞
+            </button>
+            <button
+                type="button"
+                class="terminal-action-btn terminal-unsplit-btn"
+                id="tunsplit-${index}"
+                data-terminal-unsplit="${index}"
+                title="Close this split pane"
+                aria-label="Close this split pane"
+                hidden
+            >
+                ⊟
+            </button>
+        `);
+
+        splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
+        if (splitButton) {
+            stopHeaderButtonDrag(splitButton);
+            splitButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                splitTerminalPane(index);
+            });
+        }
+
+        const unsplitButton = card.querySelector(`[data-terminal-unsplit="${index}"]`);
+        if (unsplitButton) {
+            stopHeaderButtonDrag(unsplitButton);
+            unsplitButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                closeSplitPane(index);
+            });
+        }
+    }
+
+    function replacePaneWithExplorer(index, session) {
+        const card = document.getElementById(`tc-${index}`);
+        const wrapper = document.getElementById(`tw-${index}`);
+        if (!card || !wrapper) {
+            return false;
+        }
+
+        const previousTerminal = terminals[index];
+        if (previousTerminal?.term) {
+            try { previousTerminal.term.dispose(); } catch (_) {}
+        }
+        disconnectTerminalObserver(index);
+        if (socket && sessionIds[index]) {
+            socket.emit('leave_session', { session_id: sessionIds[index] });
+        }
+
+        const explorerThemeKey = session.session_id || `${activeGroupId || 'group'}:${index}`;
+        const initialExplorerTheme = getExplorerTheme(explorerThemeKey);
+        terminals[index] = { _session: session, _paneType: 'explorer', _attached: false };
+        sessionIds[index] = session.session_id;
+        setSessionRoute(session.session_id, activeGroupId, index);
+
+        card.classList.add('explorer-pane');
+        card.dataset.explorerThemeKey = explorerThemeKey;
+        card.dataset.explorerThemeSource = hasExplorerThemeOverride(explorerThemeKey) ? 'override' : 'default';
+        card.dataset.explorerTheme = initialExplorerTheme;
+        setTerminalOnlyControlsVisible(card, false);
+        ensureExplorerThemeButton(card, index);
+        applyExplorerThemeToCard(card, initialExplorerTheme);
+        const nameLabel = document.getElementById(`tname-${index}`);
+        const hostLabel = document.getElementById(`thost-${index}`);
+        if (nameLabel) {
+            nameLabel.textContent = session.title || `Terminal ${index + 1}`;
+        }
+        if (hostLabel) {
+            hostLabel.textContent = session.host || '';
+        }
+        updateModeToggleButton(card.querySelector(`[data-session-mode-toggle="${index}"]`), true);
+        wrapper.innerHTML = `
+            <div class="terminal-surface">
+                <div class="explorer-surface" id="explorer-${index}">
+                    <div class="explorer-bar">
+                        <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
+                        <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
+                    </div>
+                    <div class="explorer-list" id="explorer-list-${index}">
+                        <div class="explorer-message">Loading directory...</div>
+                    </div>
+                </div>
+            </div>
+            <div class="placeholder" id="ph-${index}">
+                <div class="spinner"></div>
+                <span style="font-size:.78rem">Loading explorer...</span>
+            </div>
+        `;
+        wireExplorerOnlyControls(card, index);
+        setStatus(index, session.status);
+        loadExplorerPane(index, null, { force: true });
+        updateAllSplitButtonStates();
+        return true;
+    }
+
+    function replacePaneWithTerminal(index, session) {
+        const card = document.getElementById(`tc-${index}`);
+        const wrapper = document.getElementById(`tw-${index}`);
+        if (!card || !wrapper) {
+            return false;
+        }
+
+        const terminal = makeTerminal();
+        terminal._session = session;
+        terminals[index] = terminal;
+        sessionIds[index] = session.session_id;
+        setSessionRoute(session.session_id, activeGroupId, index);
+
+        card.classList.remove('explorer-pane');
+        delete card.dataset.explorerThemeKey;
+        delete card.dataset.explorerThemeSource;
+        delete card.dataset.explorerTheme;
+        const explorerThemeButton = card.querySelector(`[data-explorer-theme-toggle="${index}"]`);
+        if (explorerThemeButton) {
+            explorerThemeButton.remove();
+        }
+        ensureSplitControls(card, index);
+        const nameLabel = document.getElementById(`tname-${index}`);
+        const hostLabel = document.getElementById(`thost-${index}`);
+        if (nameLabel) {
+            nameLabel.textContent = session.title || `Terminal ${index + 1}`;
+        }
+        if (hostLabel) {
+            hostLabel.textContent = session.host || '';
+        }
+        updateModeToggleButton(card.querySelector(`[data-session-mode-toggle="${index}"]`), false);
+        wrapper.innerHTML = `
+            <div class="terminal-surface">
+                <div class="terminal-canvas" id="tcanvas-${index}"></div>
+            </div>
+            <div class="placeholder" id="ph-${index}">
+                <div class="spinner"></div>
+                <span style="font-size:.78rem">Connecting...</span>
+            </div>
+        `;
+        attachSplitTerminalEvents(index);
+        setStatus(index, session.status);
+        if (socket) {
+            socket.emit('join_session', { session_id: session.session_id });
+        }
+        if (session.status === 'connected') {
+            attachTerminal(index);
+        }
+        updateAllSplitButtonStates();
+        return true;
+    }
+
+    function replaceSessionPaneMode(index, session) {
+        if (isExplorerSession(session)) {
+            return replacePaneWithExplorer(index, session);
+        }
+        return replacePaneWithTerminal(index, session);
+    }
+
+    async function switchSessionPaneMode(index) {
+        const sessionId = sessionIds[index];
+        const terminal = terminals[index];
+        const button = document.getElementById(`tmode-${index}`);
+        if (!sessionId || !terminal?._session) {
+            return;
+        }
+
+        const switchingToTerminal = isExplorerSession(terminal._session);
+        const targetMode = switchingToTerminal ? 'terminal' : 'explorer';
+        const body = { startup_mode: targetMode };
+        if (switchingToTerminal) {
+            body.directory = getExplorerSelectedDirectory(index);
+        } else if (terminal._session.directory) {
+            body.directory = terminal._session.directory;
+        }
+
+        updateModeToggleButton(button, switchingToTerminal, true);
+        pendingModeSwitchSessionIds.add(sessionId);
+
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/mode`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Mode switch failed with status ${response.status}`);
+            }
+
+            if (!replaceSessionPaneMode(index, data)) {
+                await initialLoad();
+            }
+        } catch (error) {
+            console.error('[GridVibe Sessions] switchSessionPaneMode failed:', error);
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = `Mode switch failed: ${error.message}`;
+            }
+            updateModeToggleButton(button, switchingToTerminal);
+        } finally {
+            pendingModeSwitchSessionIds.delete(sessionId);
+        }
+    }
+
+    async function closeSplitPane(index) {
+        const plan = buildCloseSplitPlan(index);
+        if (!plan) {
+            updateUnsplitButtonState(index);
+            return;
+        }
+
+        const button = document.getElementById(`tunsplit-${index}`);
+        if (button) {
+            button.disabled = true;
+            button.textContent = '...';
+        }
+
+        try {
+            for (const sessionId of plan.sessionIdsToClose) {
+                const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+                    method: 'DELETE',
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(data.error || `Close split failed with status ${response.status}`);
+                }
+            }
+
+            pendingSplitRestore = {
+                groupId: activeGroupId,
+                rectsBySessionId: plan.rectsBySessionId,
+                originalSplitSlotCount: plan.originalSplitSlotCount,
+            };
+            await initialLoad();
+        } catch (error) {
+            console.error('[GridVibe Sessions] closeSplitPane failed:', error);
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = `Close split failed: ${error.message}`;
+            }
+        } finally {
+            if (button) {
+                button.textContent = '⊟';
+            }
+            updateAllSplitButtonStates();
+        }
+    }
+
+    async function splitTerminalPane(index) {
+        const sourceSessionId = sessionIds[index];
+        const sourceTerminal = terminals[index];
+        const sourceCard = document.getElementById(`tc-${index}`);
+        const grid = document.getElementById('terminalsGrid');
+        const button = document.getElementById(`tsplit-${index}`);
+        if (!sourceSessionId || !sourceTerminal || !sourceCard || !grid || isExplorerSession(sourceTerminal._session)) {
+            return;
+        }
+        if (terminals.length >= getSplitPaneLimit()) {
+            updateAllSplitButtonStates();
+            return;
+        }
+
+        const visualIndex = Array.from(grid.children).indexOf(sourceCard);
+        if (visualIndex < 0) {
+            return;
+        }
+
+        const rects = ensureSplitSlotRects();
+        const sourceRect = rects[visualIndex];
+        const axis = sourceRect ? chooseSplitAxis(index, sourceRect) : '';
+        if (!axis) {
+            updateSplitButtonState(index);
+            return;
+        }
+
+        if (button) {
+            button.disabled = true;
+            button.textContent = '...';
+        }
+
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sourceSessionId)}/split`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ axis })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Split failed with status ${response.status}`);
+            }
+
+            const session = data.session;
+            if (!session?.session_id) {
+                throw new Error('Split response did not include a session');
+            }
+
+            const newIndex = terminals.length;
+            const terminal = makeTerminal();
+            terminal._session = session;
+            terminals.push(terminal);
+            sessionIds.push(session.session_id);
+            setSessionRoute(session.session_id, activeGroupId, newIndex);
+
+            const newCard = createSplitTerminalCard(sourceCard, session, index, newIndex);
+            sourceCard.after(newCard);
+            const [firstRect, secondRect] = splitSlotRect(sourceRect, axis);
+            splitSlotRects.splice(visualIndex, 1, firstRect, secondRect);
+            applySplitSlotGeometry({ fit: false });
+            attachSplitTerminalEvents(newIndex);
+
+            if (socket) {
+                socket.emit('join_session', { session_id: session.session_id });
+            }
+            if (session.status === 'connected') {
+                attachTerminal(newIndex);
+            }
+
+            if (data.group) {
+                const groupIndex = sessionGroups.findIndex(group => group.group_id === data.group.group_id);
+                if (groupIndex >= 0) {
+                    sessionGroups[groupIndex] = data.group;
+                } else {
+                    sessionGroups.push(data.group);
+                }
+                renderSessionTabs();
+            }
+
+            updateSessionChrome(terminals.length, activeGroupId);
+            updateAllSplitButtonStates();
+            await ensureAttachedTerminalsReady([index, newIndex]);
+            emitTerminalResize(index, true);
+            emitTerminalResize(newIndex, true);
+        } catch (error) {
+            console.error('[GridVibe Sessions] splitTerminalPane failed:', error);
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = `Split failed: ${error.message}`;
+            }
+        } finally {
+            if (button) {
+                button.textContent = '⊞';
+            }
+            updateAllSplitButtonStates();
         }
     }
 
@@ -2523,9 +4063,8 @@
     const VOICE_LOG_PREFIX = '[GridVibe Voice]';
     const _voiceState = {};
     const _voiceLastDiagnostics = {};
+    const _voiceStatusMessages = {};
     let _voiceActiveIndex = -1;   // only one terminal may record at a time
-    let _voicePanelIndex = -1;
-    let _voiceDevices = [];
     let _voicePrefs = _loadVoicePrefs();
     let _voiceServiceStatus = {
         enabled: PAGE_DATASET.voiceEnabled === 'true',
@@ -2542,8 +4081,7 @@
             profile: 'laptop',
             deviceId: '',
             pttEnabled: false,
-            pttKeybind: '',
-            panelOpen: false
+            pttKeybind: ''
         };
     }
 
@@ -2560,8 +4098,7 @@
                 profile,
                 deviceId: typeof parsed?.deviceId === 'string' ? parsed.deviceId : '',
                 pttEnabled: typeof parsed?.pttEnabled === 'boolean' ? parsed.pttEnabled : false,
-                pttKeybind: typeof parsed?.pttKeybind === 'string' ? parsed.pttKeybind : '',
-                panelOpen: typeof parsed?.panelOpen === 'boolean' ? parsed.panelOpen : false
+                pttKeybind: typeof parsed?.pttKeybind === 'string' ? parsed.pttKeybind : ''
             };
         } catch (_) {
             return defaults;
@@ -2591,8 +4128,7 @@
                 profile,
                 deviceId: typeof server?.deviceId === 'string' ? server.deviceId : _voicePrefs.deviceId,
                 pttEnabled: typeof server?.pttEnabled === 'boolean' ? server.pttEnabled : _voicePrefs.pttEnabled,
-                pttKeybind: typeof server?.pttKeybind === 'string' ? server.pttKeybind : _voicePrefs.pttKeybind,
-                panelOpen: typeof server?.panelOpen === 'boolean' ? server.panelOpen : _voicePrefs.panelOpen
+                pttKeybind: typeof server?.pttKeybind === 'string' ? server.pttKeybind : _voicePrefs.pttKeybind
             };
             try {
                 window.localStorage?.setItem(VOICE_PREFS_STORAGE_KEY, JSON.stringify(_voicePrefs));
@@ -2620,20 +4156,7 @@
 
     function _getVoicePanelElements(index) {
         return {
-            control: document.querySelector(`[data-terminal-voice-control="${index}"]`),
-            panel: document.getElementById(`tvoice-panel-${index}`),
-            profile: document.getElementById(`tvoice-profile-${index}`),
-            device: document.getElementById(`tvoice-device-${index}`),
-            requested: document.getElementById(`tvoice-requested-${index}`),
-            settings: document.getElementById(`tvoice-settings-${index}`),
-            supported: document.getElementById(`tvoice-supported-${index}`),
-            capabilities: document.getElementById(`tvoice-capabilities-${index}`),
-            status: document.getElementById(`tvoice-status-${index}`),
-            meta: document.getElementById(`tvoice-meta-${index}`),
-            badge: document.getElementById(`tvoice-badge-${index}`),
-            pttToggle: document.getElementById(`tvoice-ptt-toggle-${index}`),
-            pttKeybindRow: document.getElementById(`tvoice-ptt-keybind-row-${index}`),
-            pttKeybind: document.getElementById(`tvoice-ptt-keybind-${index}`)
+            control: document.querySelector(`[data-terminal-voice-control="${index}"]`)
         };
     }
 
@@ -2675,11 +4198,6 @@
         return JSON.stringify(sanitized, null, 2);
     }
 
-    function _voiceDeviceLabel(device, index) {
-        if (device.label) return device.label;
-        return `Microphone ${index + 1}`;
-    }
-
     function _voiceSummaryMessage() {
         const parts = [
             `Engine: ${_voiceServiceStatus.engine || VOICE_ENGINE}`,
@@ -2707,73 +4225,16 @@
     }
 
     function _updateVoiceMeta(index) {
-        const { meta } = _getVoicePanelElements(index);
-        if (meta) {
-            meta.textContent = _voiceSummaryMessage();
-        }
+        return _voiceSummaryMessage();
     }
 
     function _renderVoiceDiagnostics(index, diagnostics) {
-        const { requested, settings, supported, capabilities } = _getVoicePanelElements(index);
-        if (requested) {
-            requested.textContent = _formatVoiceDiagnostic(
-                diagnostics?.requested,
-                'Awaiting capture start.'
-            );
-        }
-        if (settings) {
-            settings.textContent = _formatVoiceDiagnostic(
-                diagnostics?.settings,
-                'Awaiting capture start.'
-            );
-        }
-        if (supported) {
-            supported.textContent = _formatVoiceDiagnostic(
-                diagnostics?.supportedConstraints,
-                'Unavailable until the browser reports support data.'
-            );
-        }
-        if (capabilities) {
-            capabilities.textContent = _formatVoiceDiagnostic(
-                diagnostics?.capabilities,
-                'Available after an audio track is opened.'
-            );
-        }
+        return _formatVoiceDiagnostic(diagnostics, '');
     }
 
     function _syncVoiceControls(index) {
         const elements = _getVoicePanelElements(index);
         if (!elements.control) return;
-
-        if (elements.profile) {
-            elements.profile.value = _voicePrefs.profile;
-        }
-
-        if (elements.device) {
-            const selectedDeviceId = _voicePrefs.deviceId;
-            const devices = _voiceDevices.slice();
-            elements.device.innerHTML = '';
-            const defaultOption = document.createElement('option');
-            defaultOption.value = '';
-            defaultOption.textContent = 'Default input';
-            elements.device.appendChild(defaultOption);
-            devices.forEach((device, deviceIndex) => {
-                const option = document.createElement('option');
-                option.value = device.deviceId;
-                option.textContent = _voiceDeviceLabel(device, deviceIndex);
-                elements.device.appendChild(option);
-            });
-            if (
-                selectedDeviceId &&
-                !devices.some(device => device.deviceId === selectedDeviceId)
-            ) {
-                const missingOption = document.createElement('option');
-                missingOption.value = selectedDeviceId;
-                missingOption.textContent = 'Previously selected device (unavailable)';
-                elements.device.appendChild(missingOption);
-            }
-            elements.device.value = selectedDeviceId;
-        }
 
         _updateVoiceMeta(index);
         _renderVoiceDiagnostics(
@@ -2787,17 +4248,6 @@
             _setVoicePanelStatus(index, _voiceDefaultStatusMessage());
         }
         _updateVoiceBtn(index, Boolean(_voiceState[index]?.recording));
-
-        if (elements.pttToggle) {
-            elements.pttToggle.classList.toggle('active', _voicePrefs.pttEnabled);
-            elements.pttToggle.setAttribute('aria-pressed', String(_voicePrefs.pttEnabled));
-        }
-        if (elements.pttKeybindRow) {
-            elements.pttKeybindRow.classList.toggle('visible', _voicePrefs.pttEnabled);
-        }
-        if (elements.pttKeybind) {
-            elements.pttKeybind.value = _voicePrefs.pttKeybind || '';
-        }
     }
 
     async function _loadVoiceServiceStatus() {
@@ -2834,101 +4284,11 @@
     }
 
     function _setVoicePanelStatus(index, message) {
-        const { status } = _getVoicePanelElements(index);
-        if (status) {
-            status.textContent = message;
+        _voiceStatusMessages[index] = message;
+        const btn = document.getElementById(`tvoice-${index}`);
+        if (btn && !_voiceState[index]?.recording) {
+            btn.title = `Voice input (${message})`;
         }
-    }
-
-    function _setVoiceProfile(profile, index) {
-        if (!VOICE_CAPTURE_PROFILES[profile]) return;
-        _voicePrefs.profile = profile;
-        _saveVoicePrefs();
-        terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
-        _setVoicePanelStatus(
-            index,
-            _voiceState[index]?.recording
-                ? 'Profile updated. Restart capture to apply the new DSP request.'
-                : `Profile set to ${VOICE_CAPTURE_PROFILES[profile].label}. Actual applied values will be shown after capture starts.`
-        );
-    }
-
-    function _setVoiceDevice(deviceId, index) {
-        _voicePrefs.deviceId = deviceId || '';
-        _saveVoicePrefs();
-        terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
-        _setVoicePanelStatus(
-            index,
-            _voiceState[index]?.recording
-                ? 'Microphone selection updated. Restart capture to apply the new device.'
-                : (_voicePrefs.deviceId ? 'Selected microphone will be requested on the next capture.' : 'Browser default microphone will be requested on the next capture.')
-        );
-    }
-
-    async function _refreshVoiceDevices(index = _voicePanelIndex) {
-        if (!navigator.mediaDevices?.enumerateDevices) {
-            if (Number.isInteger(index) && index >= 0) {
-                _setVoicePanelStatus(index, 'This browser does not expose enumerateDevices() for microphone selection.');
-            }
-            return;
-        }
-
-        try {
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            _voiceDevices = devices.filter(device => device.kind === 'audioinput');
-            terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
-            if (Number.isInteger(index) && index >= 0) {
-                const hasNamedDevices = _voiceDevices.some(device => Boolean(device.label));
-                if (_voiceState[index]?.recording) {
-                    return;
-                }
-                if (_voiceDevices.length === 0) {
-                    _setVoicePanelStatus(index, 'No audio input devices are currently available.');
-                } else if (!hasNamedDevices) {
-                    _setVoicePanelStatus(index, 'Microphones loaded. Labels may stay generic until microphone permission is granted.');
-                } else {
-                    _setVoicePanelStatus(index, `Microphones refreshed. ${_voiceDevices.length} input device${_voiceDevices.length === 1 ? '' : 's'} available.`);
-                }
-            }
-        } catch (err) {
-            console.error('Voice device enumeration failed:', err);
-            if (Number.isInteger(index) && index >= 0) {
-                _setVoicePanelStatus(index, `Unable to refresh microphones: ${err.message || err}`);
-            }
-        }
-    }
-
-    function _closeVoicePanels(exceptIndex = -1) {
-        document.querySelectorAll('.voice-panel.open').forEach(panel => {
-            const panelId = panel.id || '';
-            const panelIndex = Number.parseInt(panelId.replace('tvoice-panel-', ''), 10);
-            if (panelIndex === exceptIndex) return;
-            panel.classList.remove('open');
-            panel.setAttribute('aria-hidden', 'true');
-        });
-        _voicePanelIndex = exceptIndex;
-    }
-
-    async function _toggleVoicePanel(index) {
-        const { panel } = _getVoicePanelElements(index);
-        if (!panel) return;
-
-        const isOpen = panel.classList.contains('open');
-        if (isOpen) {
-            _closeVoicePanels(-1);
-            _voicePrefs.panelOpen = false;
-            _saveVoicePrefs();
-            return;
-        }
-
-        _closeVoicePanels(index);
-        panel.classList.add('open');
-        panel.setAttribute('aria-hidden', 'false');
-        _voicePrefs.panelOpen = true;
-        _saveVoicePrefs();
-        _syncVoiceControls(index);
-        await _loadVoiceServiceStatus();
-        await _refreshVoiceDevices(index);
     }
 
     function _voiceIndexForSession(sessionId) {
@@ -3271,7 +4631,7 @@
             _applyVoiceStateDiagnostics(index);
             _setVoicePanelStatus(
                 index,
-                fallbackMessage || 'Capture started. The requested profile is shown next to the browser\'s actual applied settings below.'
+                fallbackMessage || 'Capture started with the global microphone settings.'
             );
             _voiceLog('Voice capture started successfully', {
                 terminalIndex: index,
@@ -3279,7 +4639,6 @@
                 fallbackUsed: Boolean(fallbackMessage),
                 diagnostics: _voiceLastDiagnostics[index]
             });
-            await _refreshVoiceDevices(index);
         } catch (err) {
             console.error(`${VOICE_LOG_PREFIX} Voice input error:`, err, {
                 terminalIndex: index,
@@ -3390,33 +4749,9 @@
         }
     }
 
-    async function _stopActiveVoiceCapture() {
-        if (_voiceActiveIndex === -1) return;
-        await _stopVoice(_voiceActiveIndex);
-    }
-
     /* ── Push-to-talk ── */
     let _pttActive = false;
     let _pttProcessing = false;
-
-    function _formatPttKeybind(event) {
-        const parts = [];
-        if (event.ctrlKey) parts.push('Ctrl');
-        if (event.metaKey) parts.push('Cmd');
-        if (event.altKey) parts.push('Alt');
-        if (event.shiftKey) parts.push('Shift');
-        const key = event.key;
-        if (!['Control', 'Meta', 'Alt', 'Shift'].includes(key)) {
-            parts.push(key.length === 1 ? key.toUpperCase() : key);
-        }
-        return parts.join('+');
-    }
-
-    function _isValidPttKeybind(event) {
-        const hasCommandKey = event.ctrlKey || event.metaKey;
-        const isModifierOnly = ['Control', 'Meta', 'Alt', 'Shift'].includes(event.key);
-        return hasCommandKey && !isModifierOnly;
-    }
 
     function _matchesPttKeybind(event, keybind) {
         if (!keybind) return false;
@@ -3457,36 +4792,10 @@
         return -1;
     }
 
-    function _setPttEnabled(enabled, index) {
-        _voicePrefs.pttEnabled = enabled;
-        _saveVoicePrefs();
-        terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
-        _setVoicePanelStatus(
-            index,
-            enabled
-                ? (_voicePrefs.pttKeybind
-                    ? `Push-to-talk enabled. Hold ${_voicePrefs.pttKeybind} to record.`
-                    : 'Push-to-talk enabled. Configure a keybind below.')
-                : 'Push-to-talk disabled. Click the microphone button to toggle recording.'
-        );
-    }
-
-    function _setPttKeybind(keybind, index) {
-        _voicePrefs.pttKeybind = keybind;
-        _saveVoicePrefs();
-        terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
-        if (keybind) {
-            _setVoicePanelStatus(index, `Push-to-talk keybind set to ${keybind}. Hold to record.`);
-        }
-    }
-
     document.addEventListener('keydown', async event => {
         if (!_voicePrefs.pttEnabled || !_voicePrefs.pttKeybind) return;
         if (_pttActive || _pttProcessing) return;
         if (!_matchesPttKeybind(event, _voicePrefs.pttKeybind)) return;
-
-        const activeEl = document.activeElement;
-        if (activeEl && activeEl.classList.contains('voice-ptt-keybind')) return;
 
         event.preventDefault();
         _pttActive = true;
@@ -3520,24 +4829,15 @@
         }
     });
 
-    async function _sendEnterShortcut(index) {
-        await _stopActiveVoiceCapture();
-        _sendToTerminal(index, '\r');
-    }
-
     function _updateVoiceBtn(index, recording) {
         const btn = document.getElementById(`tvoice-${index}`);
         if (!btn) return;
         btn.classList.toggle('recording', recording);
         btn.title = recording
             ? 'Voice input (recording — click to stop)'
-            : 'Voice input (click to start recording)';
-
-        const { badge } = _getVoicePanelElements(index);
-        if (badge) {
-            badge.textContent = recording ? 'Recording' : 'Idle';
-            badge.classList.toggle('recording', recording);
-        }
+            : (_voiceStatusMessages[index]
+                ? `Voice input (${_voiceStatusMessages[index]})`
+                : 'Voice input (click to start recording)');
     }
 
     function _showVoicePreview(index, text) {
@@ -3601,7 +4901,7 @@
         const canvas  = document.getElementById(`tcanvas-${index}`);
         const ph      = document.getElementById(`ph-${index}`);
 
-        if (!wrapper || !canvas || terminals[index]._attached) return;
+        if (!wrapper || !canvas || terminals[index]._attached || !terminals[index].term) return;
 
         if (ph) ph.remove();
 
@@ -3672,8 +4972,8 @@
                 gridBuilt
                 && visibleGroupId === requestedGroupId
                 && terminals.length === data.sessions.length
-                && grid.className === expectedLayoutClass
-                && hasMatchingSessionIds(sessionIds, data.sessions)
+                && (grid.className === expectedLayoutClass || grid.className === 'layout-split-local')
+                && hasMatchingSessionViews(sessionIds, terminals, data.sessions)
             );
             let restoredFromCache = false;
 
@@ -3686,8 +4986,8 @@
                 if (cached) {
                     const cachedMatches = (
                         cached.terminals?.length === data.sessions.length
-                        && cached.className === expectedLayoutClass
-                        && hasMatchingSessionIds(cached.sessionIds || [], data.sessions)
+                        && (cached.className === expectedLayoutClass || cached.className === 'layout-split-local')
+                        && hasMatchingSessionViews(cached.sessionIds || [], cached.terminals || [], data.sessions)
                     );
                     if (cachedMatches) {
                         restoredFromCache = restoreCachedGroupView(requestedGroupId);
@@ -3712,7 +5012,9 @@
                 sessionIds[i] = session.session_id;
                 setSessionRoute(session.session_id, requestedGroupId, i);
 
-                if (session.status === 'connected') {
+                if (session.status === 'connected' && isExplorerSession(session)) {
+                    loadExplorerPane(i);
+                } else if (session.status === 'connected') {
                     if (!terminals[i]._attached) {
                         attachTerminal(i);
                     }
@@ -3722,6 +5024,23 @@
                 }
             });
 
+            const pendingRestore = pendingSplitRestore?.groupId === requestedGroupId
+                ? pendingSplitRestore
+                : null;
+            if (pendingRestore) {
+                const restoredRects = data.sessions
+                    .map(session => pendingRestore.rectsBySessionId[session.session_id])
+                    .filter(Boolean);
+                if (restoredRects.length === data.sessions.length && restoredRects.length > 0) {
+                    originalSplitSlotCount = Number(
+                        pendingRestore.originalSplitSlotCount || originalSplitSlotCount || data.sessions.length
+                    );
+                    splitSlotRects = cloneSplitSlotRects(restoredRects);
+                    applySplitSlotGeometry({ fit: false });
+                }
+                pendingSplitRestore = null;
+            }
+
             updateSessionChrome(data.sessions.length, requestedGroupId);
             await ensureAttachedTerminalsReady(attachedIndices);
             if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
@@ -3730,6 +5049,9 @@
 
             if (!usingCurrentView && !restoredFromCache && socket) {
                 data.sessions.forEach(session => {
+                    if (isExplorerSession(session)) {
+                        return;
+                    }
                     socket.emit('join_session', { session_id: session.session_id });
                 });
             }
@@ -3891,6 +5213,10 @@
         document.getElementById('terminalsGrid').style.display = '';
         document.getElementById('terminalsGrid').style.removeProperty('--grid-columns');
         document.getElementById('terminalsGrid').style.removeProperty('--grid-rows');
+        document.getElementById('terminalsGrid').style.removeProperty('--split-grid-columns');
+        document.getElementById('terminalsGrid').style.removeProperty('--split-grid-rows');
+        splitSlotRects = null;
+        pendingSplitRestore = null;
         document.getElementById('emptyState').classList.add('visible');
         document.getElementById('sessionLabel').textContent = sessionGroups.length ? 'No terminals in this session' : 'No sessions';
         document.title = 'GridVibe — Terminals';
@@ -3962,11 +5288,12 @@
             }
 
             const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
-            const sessionIdsChanged = !hasMatchingSessionIds(sessionIds, data.sessions);
+            const sessionViewsChanged = !hasMatchingSessionViews(sessionIds, terminals, data.sessions);
+            const currentLayoutClass = document.getElementById('terminalsGrid').className;
             if (
                 terminals.length !== data.sessions.length
-                || document.getElementById('terminalsGrid').className !== expectedLayoutClass
-                || sessionIdsChanged
+                || (currentLayoutClass !== expectedLayoutClass && currentLayoutClass !== 'layout-split-local')
+                || sessionViewsChanged
             ) {
                 await initialLoad();
                 return;
@@ -3980,7 +5307,9 @@
                 setStatus(i, session.status);
                 sessionIds[i] = session.session_id;
                 setSessionRoute(session.session_id, activeGroupId, i);
-                if (session.status === 'connected' && !terminals[i]?._attached) {
+                if (session.status === 'connected' && isExplorerSession(session)) {
+                    syncExplorerPane(i);
+                } else if (session.status === 'connected' && !terminals[i]?._attached) {
                     attachTerminal(i);
                     redrawAttachedTerminals([i], { forceResize: true });
                 } else if (session.status === 'error' && !terminals[i]?._attached) {
@@ -4067,6 +5396,682 @@
             .replace(/"/g, '&quot;');
     }
 
+    function formatExplorerSize(value) {
+        if (value === null || value === undefined) {
+            return '';
+        }
+        const size = Number(value);
+        if (!Number.isFinite(size)) {
+            return '';
+        }
+        if (size < 1024) {
+            return `${size} B`;
+        }
+        const units = ['KB', 'MB', 'GB', 'TB'];
+        let next = size / 1024;
+        for (const unit of units) {
+            if (next < 1024) {
+                return `${next.toFixed(next >= 10 ? 0 : 1)} ${unit}`;
+            }
+            next /= 1024;
+        }
+        return `${next.toFixed(1)} PB`;
+    }
+
+    function formatExplorerDate(value) {
+        const timestamp = Number(value);
+        if (!Number.isFinite(timestamp)) {
+            return '';
+        }
+        return new Date(timestamp * 1000).toLocaleString();
+    }
+
+    const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({
+        '.bash': 'shell',
+        '.c': 'c',
+        '.cc': 'cpp',
+        '.cpp': 'cpp',
+        '.cs': 'csharp',
+        '.css': 'css',
+        '.go': 'go',
+        '.h': 'c',
+        '.hpp': 'cpp',
+        '.html': 'html',
+        '.java': 'java',
+        '.js': 'javascript',
+        '.jsx': 'javascript',
+        '.json': 'json',
+        '.kt': 'kotlin',
+        '.kts': 'kotlin',
+        '.lua': 'lua',
+        '.md': 'markdown',
+        '.markdown': 'markdown',
+        '.php': 'php',
+        '.ps1': 'powershell',
+        '.py': 'python',
+        '.rb': 'ruby',
+        '.rs': 'rust',
+        '.sh': 'shell',
+        '.sql': 'sql',
+        '.swift': 'swift',
+        '.toml': 'toml',
+        '.ts': 'typescript',
+        '.tsx': 'typescript',
+        '.xml': 'xml',
+        '.yaml': 'yaml',
+        '.yml': 'yaml'
+    });
+
+    const EXPLORER_LANGUAGE_LABELS = Object.freeze({
+        c: 'C source',
+        cpp: 'C++ source',
+        csharp: 'C# source',
+        css: 'CSS source',
+        go: 'Go source',
+        html: 'HTML source',
+        java: 'Java source',
+        javascript: 'JavaScript source',
+        json: 'JSON source',
+        kotlin: 'Kotlin source',
+        lua: 'Lua source',
+        markdown: 'Markdown source',
+        php: 'PHP source',
+        powershell: 'PowerShell source',
+        python: 'Python source',
+        ruby: 'Ruby source',
+        rust: 'Rust source',
+        shell: 'Shell source',
+        sql: 'SQL source',
+        swift: 'Swift source',
+        toml: 'TOML source',
+        typescript: 'TypeScript source',
+        xml: 'XML source',
+        yaml: 'YAML source'
+    });
+
+    const EXPLORER_CODE_KEYWORDS = Object.freeze({
+        c: ['auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void', 'volatile', 'while'],
+        cpp: ['alignas', 'alignof', 'auto', 'bool', 'break', 'case', 'catch', 'class', 'const', 'constexpr', 'continue', 'decltype', 'default', 'delete', 'do', 'double', 'else', 'enum', 'explicit', 'export', 'extern', 'false', 'float', 'for', 'friend', 'if', 'inline', 'int', 'long', 'namespace', 'new', 'noexcept', 'nullptr', 'operator', 'private', 'protected', 'public', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'template', 'this', 'throw', 'true', 'try', 'typedef', 'typename', 'union', 'unsigned', 'using', 'virtual', 'void', 'volatile', 'while'],
+        csharp: ['abstract', 'as', 'base', 'bool', 'break', 'case', 'catch', 'class', 'const', 'continue', 'decimal', 'default', 'delegate', 'do', 'double', 'else', 'enum', 'event', 'false', 'finally', 'fixed', 'float', 'for', 'foreach', 'if', 'in', 'int', 'interface', 'internal', 'is', 'lock', 'namespace', 'new', 'null', 'object', 'out', 'override', 'private', 'protected', 'public', 'readonly', 'ref', 'return', 'sealed', 'static', 'string', 'struct', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'using', 'var', 'virtual', 'void', 'while'],
+        css: ['align-items', 'background', 'border', 'color', 'display', 'flex', 'font-family', 'font-size', 'grid', 'height', 'margin', 'padding', 'position', 'width'],
+        go: ['break', 'case', 'chan', 'const', 'continue', 'default', 'defer', 'else', 'fallthrough', 'for', 'func', 'go', 'goto', 'if', 'import', 'interface', 'map', 'nil', 'package', 'range', 'return', 'select', 'struct', 'switch', 'type', 'var'],
+        html: ['DOCTYPE', 'a', 'body', 'button', 'div', 'head', 'html', 'input', 'link', 'meta', 'script', 'span', 'style', 'template'],
+        java: ['abstract', 'assert', 'boolean', 'break', 'case', 'catch', 'class', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'false', 'final', 'finally', 'float', 'for', 'if', 'implements', 'import', 'instanceof', 'int', 'interface', 'long', 'native', 'new', 'null', 'package', 'private', 'protected', 'public', 'return', 'short', 'static', 'strictfp', 'super', 'switch', 'synchronized', 'this', 'throw', 'throws', 'true', 'try', 'void', 'volatile', 'while'],
+        javascript: ['async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'extends', 'false', 'finally', 'for', 'from', 'function', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'null', 'of', 'return', 'static', 'super', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'undefined', 'var', 'void', 'while', 'yield'],
+        json: ['false', 'null', 'true'],
+        kotlin: ['as', 'break', 'class', 'continue', 'data', 'do', 'else', 'false', 'for', 'fun', 'if', 'in', 'interface', 'is', 'null', 'object', 'package', 'return', 'super', 'this', 'throw', 'true', 'try', 'typealias', 'val', 'var', 'when', 'while'],
+        lua: ['and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for', 'function', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat', 'return', 'then', 'true', 'until', 'while'],
+        php: ['abstract', 'and', 'array', 'as', 'break', 'case', 'catch', 'class', 'clone', 'const', 'continue', 'declare', 'default', 'do', 'echo', 'else', 'elseif', 'extends', 'false', 'final', 'finally', 'for', 'foreach', 'function', 'global', 'if', 'implements', 'include', 'instanceof', 'interface', 'namespace', 'new', 'null', 'or', 'private', 'protected', 'public', 'require', 'return', 'static', 'switch', 'this', 'throw', 'trait', 'true', 'try', 'use', 'var', 'while'],
+        powershell: ['begin', 'break', 'catch', 'class', 'continue', 'data', 'do', 'dynamicparam', 'else', 'elseif', 'end', 'false', 'filter', 'finally', 'for', 'foreach', 'from', 'function', 'if', 'in', 'param', 'process', 'return', 'switch', 'throw', 'trap', 'true', 'try', 'until', 'using', 'var', 'while'],
+        python: ['and', 'as', 'assert', 'async', 'await', 'break', 'case', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except', 'False', 'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'match', 'None', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'True', 'try', 'while', 'with', 'yield'],
+        ruby: ['BEGIN', 'END', 'alias', 'and', 'begin', 'break', 'case', 'class', 'def', 'defined?', 'do', 'else', 'elsif', 'end', 'ensure', 'false', 'for', 'if', 'in', 'module', 'next', 'nil', 'not', 'or', 'redo', 'rescue', 'retry', 'return', 'self', 'super', 'then', 'true', 'undef', 'unless', 'until', 'when', 'while', 'yield'],
+        rust: ['as', 'async', 'await', 'break', 'const', 'continue', 'crate', 'dyn', 'else', 'enum', 'extern', 'false', 'fn', 'for', 'if', 'impl', 'in', 'let', 'loop', 'match', 'mod', 'move', 'mut', 'pub', 'ref', 'return', 'self', 'static', 'struct', 'super', 'trait', 'true', 'type', 'unsafe', 'use', 'where', 'while'],
+        shell: ['case', 'do', 'done', 'elif', 'else', 'esac', 'export', 'fi', 'for', 'function', 'if', 'in', 'local', 'readonly', 'return', 'select', 'set', 'shift', 'then', 'until', 'while'],
+        sql: ['ALTER', 'AND', 'AS', 'ASC', 'BEGIN', 'BY', 'CASE', 'CREATE', 'DELETE', 'DESC', 'DISTINCT', 'DROP', 'ELSE', 'END', 'FROM', 'GROUP', 'HAVING', 'IN', 'INSERT', 'INTO', 'IS', 'JOIN', 'LEFT', 'LIKE', 'LIMIT', 'NOT', 'NULL', 'ON', 'OR', 'ORDER', 'RIGHT', 'SELECT', 'SET', 'TABLE', 'THEN', 'UPDATE', 'VALUES', 'WHEN', 'WHERE'],
+        swift: ['Any', 'as', 'associatedtype', 'break', 'case', 'catch', 'class', 'continue', 'default', 'defer', 'do', 'else', 'enum', 'extension', 'false', 'for', 'func', 'guard', 'if', 'import', 'in', 'init', 'inout', 'let', 'nil', 'operator', 'private', 'protocol', 'public', 'return', 'self', 'static', 'struct', 'subscript', 'switch', 'throw', 'true', 'try', 'typealias', 'var', 'where', 'while'],
+        typescript: ['abstract', 'any', 'as', 'async', 'await', 'boolean', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'declare', 'default', 'delete', 'do', 'else', 'enum', 'export', 'extends', 'false', 'finally', 'for', 'from', 'function', 'if', 'implements', 'import', 'in', 'instanceof', 'interface', 'let', 'module', 'namespace', 'new', 'null', 'number', 'of', 'private', 'protected', 'public', 'readonly', 'return', 'static', 'string', 'super', 'switch', 'this', 'throw', 'true', 'try', 'type', 'typeof', 'undefined', 'var', 'void', 'while', 'yield'],
+        xml: ['DOCTYPE'],
+        yaml: ['false', 'null', 'true'],
+        toml: ['false', 'true']
+    });
+
+    const EXPLORER_CODE_BUILTINS = Object.freeze({
+        javascript: ['Array', 'Boolean', 'Date', 'Error', 'JSON', 'Map', 'Math', 'Number', 'Object', 'Promise', 'RegExp', 'Set', 'String', 'console', 'document', 'window'],
+        python: ['bool', 'dict', 'enumerate', 'float', 'int', 'len', 'list', 'open', 'print', 'range', 'set', 'str', 'tuple'],
+        go: ['append', 'bool', 'byte', 'cap', 'close', 'complex64', 'complex128', 'copy', 'delete', 'error', 'int', 'len', 'make', 'new', 'panic', 'print', 'println', 'recover', 'string'],
+        shell: ['awk', 'cat', 'cd', 'cp', 'echo', 'grep', 'ls', 'mkdir', 'mv', 'printf', 'rm', 'sed', 'test'],
+        powershell: ['Get-ChildItem', 'Get-Content', 'New-Item', 'Remove-Item', 'Select-Object', 'Set-Content', 'Where-Object', 'Write-Host']
+    });
+
+    const EXPLORER_C_LIKE_LANGUAGES = new Set(['c', 'cpp', 'csharp', 'css', 'go', 'java', 'javascript', 'kotlin', 'php', 'rust', 'swift', 'typescript']);
+    const EXPLORER_HASH_COMMENT_LANGUAGES = new Set(['python', 'ruby', 'shell', 'powershell', 'yaml', 'toml']);
+
+    function explorerPathExtension(path) {
+        const name = String(path || '').toLowerCase();
+        const dotIndex = name.lastIndexOf('.');
+        return dotIndex >= 0 ? name.slice(dotIndex) : '';
+    }
+
+    function normalizeExplorerLanguage(language) {
+        const normalized = String(language || '').toLowerCase().replace(/[^a-z0-9+#-]/g, '');
+        if (normalized === 'js') return 'javascript';
+        if (normalized === 'ts') return 'typescript';
+        if (normalized === 'py') return 'python';
+        if (normalized === 'sh' || normalized === 'bash') return 'shell';
+        if (normalized === 'ps1') return 'powershell';
+        if (normalized === 'md') return 'markdown';
+        if (normalized === 'c++') return 'cpp';
+        if (normalized === 'c#') return 'csharp';
+        return normalized;
+    }
+
+    function explorerCodeLanguage(path) {
+        return EXPLORER_LANGUAGE_BY_EXTENSION[explorerPathExtension(path)] || '';
+    }
+
+    function explorerLanguageClass(language) {
+        return normalizeExplorerLanguage(language).replace(/[^a-z0-9-]/g, '');
+    }
+
+    function explorerFileTypeLabel(path, language = '') {
+        const detectedLanguage = normalizeExplorerLanguage(language) || explorerCodeLanguage(path);
+        if (detectedLanguage && EXPLORER_LANGUAGE_LABELS[detectedLanguage]) {
+            return EXPLORER_LANGUAGE_LABELS[detectedLanguage];
+        }
+        return explorerPathExtension(path) === '.txt' ? 'Text file' : 'Text file';
+    }
+
+    function explorerFileMetaParts(data, fileType) {
+        const size = formatExplorerSize(data.size) || 'Unknown size';
+        const modified = formatExplorerDate(data.modified);
+        const metaParts = [fileType, size, data.encoding || 'utf-8'];
+        if (modified) {
+            metaParts.push(modified);
+        }
+        if (data.truncated) {
+            metaParts.push('Preview truncated');
+        }
+        return metaParts;
+    }
+
+    function explorerCodeSpan(className, text) {
+        return `<span class="${className}">${escHtml(text)}</span>`;
+    }
+
+    function explorerReadStringToken(content, start) {
+        const quote = content[start];
+        let index = start + 1;
+        if (
+            (quote === '"' || quote === "'")
+            && content.slice(start, start + 3) === quote.repeat(3)
+        ) {
+            index = start + 3;
+            while (index < content.length && content.slice(index, index + 3) !== quote.repeat(3)) {
+                index += content[index] === '\\' ? 2 : 1;
+            }
+            return content.slice(start, Math.min(index + 3, content.length));
+        }
+        while (index < content.length) {
+            if (content[index] === '\\') {
+                index += 2;
+                continue;
+            }
+            index += 1;
+            if (content[index - 1] === quote) {
+                break;
+            }
+        }
+        return content.slice(start, index);
+    }
+
+    function highlightExplorerCode(content, language) {
+        const normalizedLanguage = normalizeExplorerLanguage(language);
+        if (!normalizedLanguage) {
+            return escHtml(content);
+        }
+
+        const keywords = new Set(EXPLORER_CODE_KEYWORDS[normalizedLanguage] || []);
+        const builtins = new Set(EXPLORER_CODE_BUILTINS[normalizedLanguage] || []);
+        const caseInsensitiveKeywords = normalizedLanguage === 'sql';
+        let output = '';
+        let index = 0;
+
+        while (index < content.length) {
+            const current = content[index];
+            const next = content[index + 1] || '';
+
+            if ((normalizedLanguage === 'html' || normalizedLanguage === 'xml') && content.startsWith('<!--', index)) {
+                const endIndex = content.indexOf('-->', index + 4);
+                const token = content.slice(index, endIndex === -1 ? content.length : endIndex + 3);
+                output += explorerCodeSpan('explorer-code-comment', token);
+                index += token.length;
+                continue;
+            }
+
+            if (EXPLORER_C_LIKE_LANGUAGES.has(normalizedLanguage) && current === '/' && next === '/') {
+                const endIndex = content.indexOf('\n', index + 2);
+                const token = content.slice(index, endIndex === -1 ? content.length : endIndex);
+                output += explorerCodeSpan('explorer-code-comment', token);
+                index += token.length;
+                continue;
+            }
+
+            if (EXPLORER_C_LIKE_LANGUAGES.has(normalizedLanguage) && current === '/' && next === '*') {
+                const endIndex = content.indexOf('*/', index + 2);
+                const token = content.slice(index, endIndex === -1 ? content.length : endIndex + 2);
+                output += explorerCodeSpan('explorer-code-comment', token);
+                index += token.length;
+                continue;
+            }
+
+            if (EXPLORER_HASH_COMMENT_LANGUAGES.has(normalizedLanguage) && current === '#') {
+                const endIndex = content.indexOf('\n', index + 1);
+                const token = content.slice(index, endIndex === -1 ? content.length : endIndex);
+                output += explorerCodeSpan('explorer-code-comment', token);
+                index += token.length;
+                continue;
+            }
+
+            if (current === '"' || current === "'" || (current === '`' && !['json', 'yaml', 'toml'].includes(normalizedLanguage))) {
+                const token = explorerReadStringToken(content, index);
+                output += explorerCodeSpan('explorer-code-string', token);
+                index += token.length;
+                continue;
+            }
+
+            if (/[0-9]/.test(current)) {
+                const match = content.slice(index).match(/^(0x[\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/);
+                if (match) {
+                    output += explorerCodeSpan('explorer-code-number', match[0]);
+                    index += match[0].length;
+                    continue;
+                }
+            }
+
+            if (/[A-Za-z_$]/.test(current)) {
+                const match = content.slice(index).match(/^[A-Za-z_$][\w$-]*/);
+                if (match) {
+                    const token = match[0];
+                    const keywordToken = caseInsensitiveKeywords ? token.toUpperCase() : token;
+                    if (keywords.has(keywordToken)) {
+                        output += explorerCodeSpan('explorer-code-keyword', token);
+                    } else if (builtins.has(token)) {
+                        output += explorerCodeSpan('explorer-code-builtin', token);
+                    } else {
+                        output += escHtml(token);
+                    }
+                    index += token.length;
+                    continue;
+                }
+            }
+
+            output += escHtml(current);
+            index += 1;
+        }
+
+        return output;
+    }
+
+    function renderExplorerMessage(index, message) {
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (list) {
+            list.classList.remove('file-view');
+            list.innerHTML = `<div class="explorer-message">${escHtml(message)}</div>`;
+        }
+    }
+
+    function setExplorerFileView(index, mode) {
+        const normalizedMode = mode === 'preview' ? 'preview' : 'source';
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!list) {
+            return;
+        }
+
+        list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
+            const isSelected = button.dataset.explorerFileView === normalizedMode;
+            button.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+        });
+        list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
+            panel.hidden = panel.dataset.explorerFilePanel !== normalizedMode;
+        });
+    }
+
+    function captureExplorerFileScroll(index) {
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!list) {
+            return null;
+        }
+
+        const activeButton = list.querySelector('[data-explorer-file-view][aria-selected="true"]');
+        const state = {
+            activeView: activeButton?.dataset.explorerFileView || 'source',
+            listScrollLeft: list.scrollLeft,
+            listScrollTop: list.scrollTop,
+            panels: {}
+        };
+        list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
+            const maxScrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+            const maxScrollLeft = Math.max(0, panel.scrollWidth - panel.clientWidth);
+            state.panels[panel.dataset.explorerFilePanel || 'source'] = {
+                scrollLeft: panel.scrollLeft,
+                scrollLeftRatio: maxScrollLeft > 0 ? panel.scrollLeft / maxScrollLeft : 0,
+                scrollTop: panel.scrollTop,
+                scrollTopRatio: maxScrollTop > 0 ? panel.scrollTop / maxScrollTop : 0,
+                wasAtBottom: maxScrollTop > 0 && panel.scrollTop >= maxScrollTop - 2
+            };
+        });
+        return state;
+    }
+
+    function restoreExplorerFileScroll(index, state) {
+        if (!state) {
+            return;
+        }
+
+        setExplorerFileView(index, state.activeView || 'source');
+
+        const applyScroll = () => {
+            const list = document.getElementById(`explorer-list-${index}`);
+            if (!list) {
+                return;
+            }
+            list.scrollLeft = state.listScrollLeft || 0;
+            list.scrollTop = state.listScrollTop || 0;
+            list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
+                const panelState = state.panels?.[panel.dataset.explorerFilePanel || 'source'];
+                if (panelState) {
+                    const maxScrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+                    const maxScrollLeft = Math.max(0, panel.scrollWidth - panel.clientWidth);
+                    panel.scrollLeft = Math.min(
+                        maxScrollLeft,
+                        maxScrollLeft > 0
+                            ? Math.round(maxScrollLeft * (panelState.scrollLeftRatio || 0))
+                            : (panelState.scrollLeft || 0)
+                    );
+                    panel.scrollTop = panelState.wasAtBottom
+                        ? maxScrollTop
+                        : Math.min(
+                            maxScrollTop,
+                            maxScrollTop > 0
+                                ? Math.round(maxScrollTop * (panelState.scrollTopRatio || 0))
+                                : (panelState.scrollTop || 0)
+                        );
+                }
+            });
+        };
+
+        applyScroll();
+        requestAnimationFrame(() => {
+            applyScroll();
+            requestAnimationFrame(applyScroll);
+        });
+        window.setTimeout(applyScroll, 80);
+    }
+
+    const EXPLORER_FOLDER_ICON = `
+        <span class="explorer-icon folder" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+                <path fill="currentColor" d="M3 6.75A2.75 2.75 0 0 1 5.75 4h4.02c.73 0 1.43.29 1.94.8l1.2 1.2h5.34A2.75 2.75 0 0 1 21 8.75v8.5A2.75 2.75 0 0 1 18.25 20H5.75A2.75 2.75 0 0 1 3 17.25V6.75Zm2.75-1.25c-.69 0-1.25.56-1.25 1.25V8h15v-.25c0-.69-.56-1.25-1.25-1.25h-5.65a.75.75 0 0 1-.53-.22l-1.42-1.42a1.25 1.25 0 0 0-.88-.36H5.75ZM4.5 9.5v7.75c0 .69.56 1.25 1.25 1.25h12.5c.69 0 1.25-.56 1.25-1.25V9.5h-15Z"/>
+            </svg>
+        </span>
+    `;
+
+    const EXPLORER_FILE_ICON = `
+        <span class="explorer-icon file" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+                <path fill="currentColor" d="M6.75 3A2.75 2.75 0 0 0 4 5.75v12.5A2.75 2.75 0 0 0 6.75 21h10.5A2.75 2.75 0 0 0 20 18.25V8.62a2.75 2.75 0 0 0-.8-1.94L16.32 3.8A2.75 2.75 0 0 0 14.38 3H6.75ZM5.5 5.75c0-.69.56-1.25 1.25-1.25H14V8c0 1.1.9 2 2 2h2.5v8.25c0 .69-.56 1.25-1.25 1.25H6.75c-.69 0-1.25-.56-1.25-1.25V5.75Zm10 0 1.94 1.94c.23.23.4.5.49.81H16a.5.5 0 0 1-.5-.5V5.75Z"/>
+            </svg>
+        </span>
+    `;
+
+    function renderExplorerFile(index, data, { scrollState = null } = {}) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!pane || !list) {
+            return false;
+        }
+
+        const path = data.path || '';
+        const fileName = data.name || path || 'File';
+        const codeLanguage = normalizeExplorerLanguage(data.language) || explorerCodeLanguage(path || fileName);
+        const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
+        const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
+        const metaParts = explorerFileMetaParts(data, fileType);
+
+        pane._attached = true;
+        pane._explorerMode = 'file';
+        pane._explorerFilePath = path;
+        document.getElementById(`ph-${index}`)?.remove();
+        list.classList.add('file-view');
+
+        const pathLabel = document.getElementById(`explorer-path-${index}`);
+        const upButton = document.getElementById(`explorer-up-${index}`);
+        if (pathLabel) {
+            pathLabel.textContent = path ? `/${path}` : fileName;
+            pathLabel.title = data.root || '';
+        }
+        if (upButton) {
+            upButton.disabled = false;
+        }
+
+        list.innerHTML = `
+            <div class="explorer-editor">
+                <div class="explorer-editor-header">
+                    <button type="button" class="explorer-editor-back" data-explorer-editor-back="${index}">Back</button>
+                    <div class="explorer-editor-title">
+                        <div class="explorer-editor-name" title="${escHtml(path || fileName)}">${escHtml(fileName)}</div>
+                        <div class="explorer-editor-meta">${escHtml(metaParts.join(' - '))}</div>
+                    </div>
+                    ${hasPreview ? `
+                        <div class="explorer-editor-tabs" role="tablist" aria-label="Markdown file view">
+                            <button type="button" class="explorer-editor-tab" data-explorer-file-view="source" role="tab" aria-selected="true">Source</button>
+                            <button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="false">Preview</button>
+                        </div>
+                    ` : ''}
+                </div>
+                <div class="explorer-editor-body">
+                    <pre class="explorer-editor-content explorer-editor-panel" data-explorer-file-panel="source"><code id="explorer-code-${index}"></code></pre>
+                    ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" hidden></div>` : ''}
+                </div>
+            </div>
+        `;
+
+        const code = document.getElementById(`explorer-code-${index}`);
+        if (code) {
+            const languageClass = explorerLanguageClass(codeLanguage);
+            code.className = languageClass ? `language-${languageClass}` : '';
+            code.innerHTML = highlightExplorerCode(data.content || '', codeLanguage);
+        }
+        const preview = document.getElementById(`explorer-preview-${index}`);
+        if (preview && hasPreview) {
+            preview.innerHTML = data.preview_html || '';
+        }
+
+        const backButton = list.querySelector(`[data-explorer-editor-back="${index}"]`);
+        if (backButton) {
+            backButton.addEventListener('click', () => {
+                loadExplorerPane(index, pane._explorerPath || '');
+            });
+        }
+        list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
+            button.addEventListener('click', () => {
+                setExplorerFileView(index, button.dataset.explorerFileView || 'source');
+            });
+        });
+        restoreExplorerFileScroll(index, scrollState);
+        return true;
+    }
+
+    function updateExplorerFileInPlace(index, data, scrollState = null) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        const code = document.getElementById(`explorer-code-${index}`);
+        if (!pane || !list || !code) {
+            return false;
+        }
+
+        const path = data.path || '';
+        if (path && pane._explorerFilePath && path !== pane._explorerFilePath) {
+            return false;
+        }
+
+        const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
+        const preview = document.getElementById(`explorer-preview-${index}`);
+        if (hasPreview !== Boolean(preview)) {
+            return false;
+        }
+
+        const fileName = data.name || path || 'File';
+        const codeLanguage = normalizeExplorerLanguage(data.language) || explorerCodeLanguage(path || fileName);
+        const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
+        const languageClass = explorerLanguageClass(codeLanguage);
+        code.className = languageClass ? `language-${languageClass}` : '';
+        code.innerHTML = highlightExplorerCode(data.content || '', codeLanguage);
+        if (preview && hasPreview) {
+            preview.innerHTML = data.preview_html || '';
+        }
+
+        const nameLabel = list.querySelector('.explorer-editor-name');
+        if (nameLabel) {
+            nameLabel.textContent = fileName;
+            nameLabel.title = path || fileName;
+        }
+        const metaLabel = list.querySelector('.explorer-editor-meta');
+        if (metaLabel) {
+            metaLabel.textContent = explorerFileMetaParts(data, fileType).join(' - ');
+        }
+        const pathLabel = document.getElementById(`explorer-path-${index}`);
+        if (pathLabel) {
+            pathLabel.textContent = path ? `/${path}` : fileName;
+            pathLabel.title = data.root || '';
+        }
+
+        pane._explorerMode = 'file';
+        pane._explorerFilePath = path || pane._explorerFilePath;
+        restoreExplorerFileScroll(index, scrollState);
+        return true;
+    }
+
+    async function openExplorerFile(index, path, { showLoading = true, preserveScroll = false } = {}) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !isExplorerSession(pane._session) || !sessionId || !path) {
+            return false;
+        }
+
+        const scrollState = preserveScroll ? captureExplorerFileScroll(index) : null;
+        if (showLoading) {
+            renderExplorerMessage(index, 'Opening file...');
+        }
+        try {
+            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(path)}`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to open file');
+            }
+            if (
+                preserveScroll
+                && pane._explorerMode === 'file'
+                && pane._explorerFilePath === (data.path || path)
+                && updateExplorerFileInPlace(index, data, scrollState)
+            ) {
+                return true;
+            }
+            return renderExplorerFile(index, data, { scrollState });
+        } catch (error) {
+            console.error('[GridVibe Sessions] Explorer file open failed:', error);
+            renderExplorerMessage(index, error.message || 'Failed to open file.');
+            return false;
+        }
+    }
+
+    async function refreshExplorerPane(index) {
+        const pane = terminals[index];
+        if (pane?._explorerMode === 'file' && pane._explorerFilePath) {
+            return openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });
+        }
+        return loadExplorerPane(index, null, { force: true });
+    }
+
+    async function syncExplorerPane(index) {
+        const pane = terminals[index];
+        if (pane?._explorerMode === 'file' && pane._explorerFilePath) {
+            return true;
+        }
+        return loadExplorerPane(index);
+    }
+
+    async function loadExplorerPane(index, path = null, { force = false, showLoading = true } = {}) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !isExplorerSession(pane._session) || !sessionId) {
+            return false;
+        }
+
+        const isNavigation = path !== null;
+        if (pane._attached && !force && !isNavigation) {
+            return true;
+        }
+
+        const nextPath = path === null ? (pane._explorerPath || null) : path;
+        if (showLoading) {
+            renderExplorerMessage(index, 'Loading directory...');
+        }
+
+        try {
+            const entriesUrl = `/api/explorer/${encodeURIComponent(sessionId)}/entries`;
+            const response = await fetch(
+                nextPath === null ? entriesUrl : `${entriesUrl}?path=${encodeURIComponent(nextPath)}`
+            );
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load directory');
+            }
+
+            pane._attached = true;
+            pane._explorerMode = 'directory';
+            pane._explorerFilePath = '';
+            pane._explorerPath = data.path || '';
+            pane._explorerParentPath = data.parent_path || '';
+            document.getElementById(`ph-${index}`)?.remove();
+
+            const pathLabel = document.getElementById(`explorer-path-${index}`);
+            const upButton = document.getElementById(`explorer-up-${index}`);
+            const list = document.getElementById(`explorer-list-${index}`);
+            if (pathLabel) {
+                pathLabel.textContent = data.path ? `/${data.path}` : data.root || '/';
+                pathLabel.title = data.root || '';
+            }
+            if (upButton) {
+                upButton.disabled = !data.parent_path && !data.path;
+            }
+            if (!list) {
+                return true;
+            }
+            list.classList.remove('file-view');
+
+            const entries = Array.isArray(data.entries) ? data.entries : [];
+            if (!entries.length) {
+                list.innerHTML = '<div class="explorer-message">Directory is empty.</div>';
+                return true;
+            }
+
+            list.innerHTML = entries.map(entry => {
+                const isDirectory = entry.type === 'directory';
+                const size = isDirectory ? 'Folder' : formatExplorerSize(entry.size);
+                const modified = formatExplorerDate(entry.modified);
+                return `
+                    <button
+                        type="button"
+                        class="explorer-row ${isDirectory ? 'directory' : 'file'}"
+                        data-explorer-path="${escHtml(entry.path || '')}"
+                    >
+                        ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
+                        <span class="explorer-name">${escHtml(entry.name || '')}</span>
+                        <span class="explorer-meta">${escHtml(size)}</span>
+                        <span class="explorer-meta">${escHtml(modified)}</span>
+                    </button>
+                `;
+            }).join('');
+
+            list.querySelectorAll('.explorer-row.directory').forEach(button => {
+                button.addEventListener('click', () => {
+                    loadExplorerPane(index, button.dataset.explorerPath || '');
+                });
+            });
+            list.querySelectorAll('.explorer-row.file').forEach(button => {
+                button.addEventListener('click', () => {
+                    openExplorerFile(index, button.dataset.explorerPath || '');
+                });
+            });
+            return true;
+        } catch (error) {
+            console.error('[GridVibe Sessions] Explorer load failed:', error);
+            renderExplorerMessage(index, error.message || 'Failed to load directory.');
+            return false;
+        }
+    }
+
     /* ─────────────────────────────────────────────
        Socket init — happens AFTER all function defs
        so that a CDN failure cannot kill the script.
@@ -4077,6 +6082,7 @@
         socket.on('terminal_output', ({ session_id, data }) => {
             const target = resolveSessionTarget(session_id);
             if (!target) return;
+            if (!target.terminal.term) return;
 
             if (!target.active) {
                 if (!target.terminal._attached) {
@@ -4108,7 +6114,16 @@
 
             const { index, terminal } = target;
             setStatus(index, session.status);
-            if (session.status === 'connected' && !terminal._attached) {
+            if (isExplorerPaneInstance(terminal) !== isExplorerSession(session)) {
+                if (pendingModeSwitchSessionIds.has(session.session_id)) {
+                    return;
+                }
+                initialLoad();
+                return;
+            }
+            if (session.status === 'connected' && isExplorerSession(session)) {
+                syncExplorerPane(index);
+            } else if (session.status === 'connected' && !terminal._attached) {
                 attachTerminal(index);
                 redrawAttachedTerminals([index], { forceResize: true });
             } else if (session.status === 'connected') {
@@ -4170,24 +6185,12 @@
         syncNativeFullscreenState();
     });
     document.addEventListener('fullscreenchange', updateFullscreenButton);
-    document.addEventListener('mousedown', event => {
-        if (!event.target.closest('.voice-control')) {
-            _closeVoicePanels(-1);
-        }
-    });
-    if (navigator.mediaDevices?.addEventListener) {
-        navigator.mediaDevices.addEventListener('devicechange', () => {
-            _refreshVoiceDevices(_voicePanelIndex);
-        });
-    }
-
     /* ─────────────────────────────────────────────
        Boot
     ───────────────────────────────────────────── */
     updateFullscreenButton();
     _loadVoicePrefsFromServer();
     _loadVoiceServiceStatus();
-    _refreshVoiceDevices(-1);
     initialLoad();
     setInterval(refreshStatuses, 3000);
 </script>

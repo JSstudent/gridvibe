@@ -55,14 +55,13 @@ There are two backend modes behind one frontend capture path:
    - Vosk can return partial and final text during the stream.
    - Result model: live partials plus final transcript.
 
-At the UX level, both engines share the same microphone controls, push-to-talk settings, and diagnostics panel.
+At the UX level, both engines share the same terminal mic toggle and launcher-owned microphone preferences.
 
 ## Non-Negotiable Product Rules
 
 These are current implementation rules and should be preserved unless deliberately changed:
 
 - Voice is per terminal pane, but only one pane may record at a time.
-- Pressing the terminal `Enter` shortcut stops active voice capture before sending `\r`.
 - Voice preferences are machine-local and user-local, not part of saved launcher session presets.
 - Browser mode is the preferred and more reliable microphone environment.
 - `pywebview` support is best-effort, even with permission patches.
@@ -120,33 +119,25 @@ Persisted preference fields:
 - `deviceId`
 - `pttEnabled`
 - `pttKeybind`
-- `panelOpen`
 
 These values are not scoped per terminal. They are shared across the terminal workspace.
 
 ## UI Contract
 
-Voice controls live in each terminal header.
+Voice recording controls live in each terminal header. Voice capture preferences live in the launcher's App Settings modal under the backend/model settings.
 
 Per terminal, the UI includes:
 
 - mic toggle button
-- mic settings button
-- voice panel
 - live partial preview above the mic button
-- status badge inside the panel
 
-The panel exposes:
+Launcher App Settings exposes:
 
 - capture profile selector
 - microphone device selector
 - microphone refresh button
 - push-to-talk toggle
 - push-to-talk keybind capture field
-- requested versus actual capture diagnostics
-- browser-supported-constraints and track capabilities diagnostics
-
-The voice panel can auto-restore if it was left open previously.
 
 ## Frontend Capture Pipeline
 
@@ -390,15 +381,14 @@ The existing test suite already covers key voice behavior. That coverage should 
 
 Notable verified areas:
 
-- terminals page exposes voice controls, profiles, diagnostics, and worklet wiring
-- push-to-talk controls are present in the rendered UI
+- terminals page exposes the voice toggle and worklet wiring
+- launcher settings expose global microphone and push-to-talk controls
 - `voice-status` reports engine, model, and language correctly
 - `voice-prefs` defaults and persistence behavior
 - Whisper flow buffers audio and emits a final transcript on stop
 - Vosk session startup stores connections safely under lock
 - Vosk startup retry closes failed or leaked connections correctly
 - Vosk audio proxy handles closed WebSocket races without crashing
-- Enter shortcut stops active voice before sending newline
 
 ## Known Constraints
 

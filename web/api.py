@@ -62,6 +62,13 @@ except ImportError:  # pragma: no cover - optional for voice input
     ws_client = None
 
 try:
+    import bleach
+    import markdown
+except ImportError:  # pragma: no cover - dependency declared for runtime installs
+    bleach = None
+    markdown = None
+
+try:
     import numpy as np
 except ImportError:  # pragma: no cover - optional for faster-whisper input handling
     np = None
@@ -78,6 +85,7 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
 AGENT_REGISTRY_PATH = os.path.join(BASE_DIR, "agent_registry.json")
 DEFAULT_SAVED_SESSION_ID = "default-session"
+EXPLORER_FILE_PREVIEW_MAX_BYTES = 1024 * 1024
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
 WINDOWS_DEVICE_ATTRIBUTES_RESPONSE = "\x1b[?1;2c"
 SELF_UPDATE_REPO_DIR = BASE_DIR
@@ -339,6 +347,7 @@ def _default_terminal_entries():
             "directory": "",
             "initial_command": "",
             "initial_command_mode": "command",
+            "startup_mode": "terminal",
             "agent_selection": "",
             "custom_agent": "",
             "distribution": "",
@@ -363,6 +372,16 @@ def _normalize_layout(value: Any, count: int) -> str:
     if count >= 4:
         return "grid"
     return "single"
+
+
+def _normalize_startup_mode(value: Any, connection_mode: str = "ssh") -> str:
+    """Normalize the requested per-pane startup mode."""
+    normalized = str(value or "").strip().lower()
+    if normalized == "agent":
+        return "agent"
+    if normalized == "explorer" and connection_mode == "wsl":
+        return "explorer"
+    return "terminal"
 
 
 def _default_session_config() -> Dict[str, Any]:
@@ -400,7 +419,7 @@ def _default_saved_session_entry() -> Dict[str, Any]:
     }
 
 
-def _normalize_terminal_entries(entries: Any) -> List[Dict[str, Any]]:
+def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> List[Dict[str, Any]]:
     """Ensure the saved terminal list is bounded and complete."""
     normalized = []
     entries = entries if isinstance(entries, list) else []
@@ -408,12 +427,17 @@ def _normalize_terminal_entries(entries: Any) -> List[Dict[str, Any]]:
     for index in range(max_sessions):
         entry = entries[index] if index < len(entries) and isinstance(entries[index], dict) else {}
         use_powershell = bool(entry.get("use_powershell"))
+        raw_startup_mode = entry.get("startup_mode")
+        if raw_startup_mode is None:
+            raw_startup_mode = "agent" if entry.get("initial_command_mode") == "agent" else "terminal"
+        startup_mode = _normalize_startup_mode(raw_startup_mode, connection_mode)
         normalized.append(
             {
                 "title": str(entry.get("title") or f"Terminal {index + 1}"),
                 "directory": str(entry.get("directory") or ""),
                 "initial_command": str(entry.get("initial_command") or ""),
-                "initial_command_mode": "agent" if entry.get("initial_command_mode") == "agent" else "command",
+                "initial_command_mode": startup_mode if startup_mode in {"agent", "explorer"} else "command",
+                "startup_mode": startup_mode,
                 "agent_selection": str(entry.get("agent_selection") or ""),
                 "custom_agent": str(entry.get("custom_agent") or ""),
                 "distribution": str(entry.get("distribution") or ""),
@@ -463,7 +487,7 @@ def _normalize_session_config(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "username": str(wsl_data.get("username") or ""),# type: ignore
             "default_dir": str(wsl_data.get("default_dir") or default_config["wsl"]["default_dir"]),# type: ignore
         },
-        "terminals": _normalize_terminal_entries(data.get("terminals")),
+        "terminals": _normalize_terminal_entries(data.get("terminals"), connection_mode),
     }
 
 
@@ -1822,8 +1846,8 @@ def _send_connection_input(connection: Dict[str, Any], input_data: str):
 
 def _resize_connection(connection: Dict[str, Any], cols: Any, rows: Any):
     """Resize an active remote or local terminal session."""
-    cols = max(20, min(int(cols), 400))
-    rows = max(5, min(int(rows), 200))
+    cols = max(8, min(int(cols), 400))
+    rows = max(8, min(int(rows), 200))
     kind = connection.get("kind")
 
     if kind == "ssh":
@@ -1921,6 +1945,10 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
 def _finalize_stream(session_id: str):
     """Mark a session disconnected after a stream ends."""
     session = session_manager.get_session(session_id)
+    if session and _is_explorer_session(session):
+        _close_ssh_connection(session_id)
+        return
+
     if session and session.status not in {SessionStatus.ERROR, SessionStatus.DISCONNECTED}:
         session_manager.update_session_status(session_id, SessionStatus.DISCONNECTED)
         _broadcast_session_status(session_id)
@@ -1956,8 +1984,12 @@ def _stream_ssh_output(session_id: str):
 
             time.sleep(0.05)
     except Exception as e:
-        logger.error(f"Error streaming output for session {session_id}: {e}")
         session = session_manager.get_session(session_id)
+        if session and _is_explorer_session(session):
+            logger.info("Ignoring stream shutdown for explorer session %s: %s", session_id, e)
+            return
+
+        logger.error(f"Error streaming output for session {session_id}: {e}")
         if session and session.status != SessionStatus.DISCONNECTED:
             session_manager.update_session_status(
                 session_id,
@@ -2051,8 +2083,12 @@ def _stream_local_output(session_id: str):
 
             time.sleep(0.05)
     except Exception as e:
-        logger.error(f"Error streaming local output for session {session_id}: {e}")
         session = session_manager.get_session(session_id)
+        if session and _is_explorer_session(session):
+            logger.info("Ignoring local stream shutdown for explorer session %s: %s", session_id, e)
+            return
+
+        logger.error(f"Error streaming local output for session {session_id}: {e}")
         if session and session.status != SessionStatus.DISCONNECTED:
             session_manager.update_session_status(
                 session_id,
@@ -2187,6 +2223,252 @@ def _resolve_local_launch_cwd(directory: Any, shell_kind: str) -> Optional[str]:
 
     resolved = os.path.abspath(os.path.expanduser(candidate))
     return resolved if os.path.isdir(resolved) else None
+
+
+def _is_explorer_session(session: Any) -> bool:
+    """Return whether a session should render as a local file explorer pane."""
+    return getattr(session, "mode", "") == "wsl" and getattr(session, "startup_mode", "") == "explorer"
+
+
+def _explorer_root_directory(session: Any) -> str:
+    """Return the stable explorer root, falling back to the session directory."""
+    return str(
+        getattr(session, "explorer_root_directory", "")
+        or getattr(session, "directory", "")
+        or ""
+    ).strip()
+
+
+def _default_explorer_candidate_path(session: Any, root_path: str) -> str:
+    """Return the default explorer directory when no path is requested."""
+    current_raw = str(getattr(session, "directory", "") or "").strip()
+    if not current_raw:
+        return root_path
+
+    candidate = os.path.realpath(os.path.abspath(os.path.expanduser(current_raw)))
+    if not os.path.isdir(candidate):
+        return root_path
+
+    try:
+        common_path = os.path.commonpath([root_path, candidate])
+    except ValueError:
+        return root_path
+
+    if os.path.normcase(common_path) != os.path.normcase(root_path):
+        return root_path
+
+    return candidate
+
+
+MARKDOWN_PREVIEW_EXTENSIONS = {".md", ".markdown"}
+CODE_PREVIEW_LANGUAGES = {
+    ".bash": "shell",
+    ".c": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cs": "csharp",
+    ".css": "css",
+    ".go": "go",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".html": "html",
+    ".java": "java",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".json": "json",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".lua": "lua",
+    ".php": "php",
+    ".ps1": "powershell",
+    ".py": "python",
+    ".rb": "ruby",
+    ".rs": "rust",
+    ".sh": "shell",
+    ".sql": "sql",
+    ".swift": "swift",
+    ".toml": "toml",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".xml": "xml",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+}
+MARKDOWN_ALLOWED_TAGS = {
+    "a",
+    "abbr",
+    "blockquote",
+    "br",
+    "code",
+    "dd",
+    "del",
+    "details",
+    "div",
+    "dl",
+    "dt",
+    "em",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hr",
+    "img",
+    "input",
+    "ins",
+    "kbd",
+    "li",
+    "ol",
+    "p",
+    "pre",
+    "s",
+    "span",
+    "strong",
+    "sub",
+    "summary",
+    "sup",
+    "table",
+    "tbody",
+    "td",
+    "th",
+    "thead",
+    "tr",
+    "ul",
+}
+MARKDOWN_ALLOWED_ATTRIBUTES = {
+    "a": ["href", "title"],
+    "abbr": ["title"],
+    "img": ["alt", "src", "title"],
+    "input": ["checked", "disabled", "type"],
+    "td": ["align"],
+    "th": ["align"],
+}
+
+
+def _is_markdown_file(path: str) -> bool:
+    """Return whether an explorer file should get a Markdown preview."""
+    _, extension = os.path.splitext(path.lower())
+    return extension in MARKDOWN_PREVIEW_EXTENSIONS
+
+
+def _explorer_code_language(path: str) -> Optional[str]:
+    """Return the source language for code files shown in explorer previews."""
+    _, extension = os.path.splitext(path.lower())
+    if extension in MARKDOWN_PREVIEW_EXTENSIONS:
+        return "markdown"
+    return CODE_PREVIEW_LANGUAGES.get(extension)
+
+
+def _render_markdown_preview(content: str) -> Optional[str]:
+    """Render Markdown to sanitized HTML for explorer previews."""
+    if markdown is None or bleach is None:
+        return None
+
+    html = markdown.markdown(
+        content,
+        extensions=["extra", "sane_lists", "tables"],
+        output_format="html",
+    )
+    return bleach.clean(
+        html,
+        tags=MARKDOWN_ALLOWED_TAGS,
+        attributes=MARKDOWN_ALLOWED_ATTRIBUTES,
+        protocols=bleach.sanitizer.ALLOWED_PROTOCOLS,
+        strip=True,
+    )
+
+
+def _resolve_explorer_candidate_path(
+    session: Any,
+    requested_path: Any = "",
+    *,
+    allow_empty_root: bool = True,
+) -> Tuple[str, str]:
+    """Resolve an explorer request path while keeping it inside the session root."""
+    if not _is_explorer_session(session):
+        raise ValueError("Session is not a file explorer pane")
+
+    root_raw = _explorer_root_directory(session)
+    if not root_raw:
+        raise ValueError("Explorer root directory is not configured")
+
+    root_path = os.path.realpath(os.path.abspath(os.path.expanduser(root_raw)))
+    if not os.path.isdir(root_path):
+        raise ValueError("Explorer root directory does not exist")
+
+    if requested_path is None:
+        if not allow_empty_root:
+            raise ValueError("Explorer file path is required")
+        candidate = _default_explorer_candidate_path(session, root_path)
+    else:
+        raw_path = str(requested_path or "").strip()
+        if not raw_path:
+            if not allow_empty_root:
+                raise ValueError("Explorer file path is required")
+            candidate = root_path
+        elif os.path.isabs(raw_path):
+            candidate = os.path.realpath(os.path.abspath(os.path.expanduser(raw_path)))
+        else:
+            candidate = os.path.realpath(os.path.abspath(os.path.join(root_path, raw_path)))
+
+    try:
+        common_path = os.path.commonpath([root_path, candidate])
+    except ValueError as exc:
+        raise ValueError("Explorer path must stay inside the configured root") from exc
+
+    if os.path.normcase(common_path) != os.path.normcase(root_path):
+        raise ValueError("Explorer path must stay inside the configured root")
+
+    return root_path, candidate
+
+
+def _resolve_explorer_paths(session: Any, requested_path: Any = "") -> Tuple[str, str]:
+    """Resolve an explorer directory path while keeping it inside the session root."""
+    root_path, candidate = _resolve_explorer_candidate_path(session, requested_path)
+    if not os.path.isdir(candidate):
+        raise ValueError("Explorer path is not a directory")
+
+    return root_path, candidate
+
+
+def _resolve_explorer_file_path(session: Any, requested_path: Any = "") -> Tuple[str, str]:
+    """Resolve an explorer file path while keeping it inside the session root."""
+    root_path, candidate = _resolve_explorer_candidate_path(
+        session,
+        requested_path,
+        allow_empty_root=False,
+    )
+    if os.path.isdir(candidate):
+        raise ValueError("Explorer path is a directory")
+    if not os.path.isfile(candidate):
+        raise ValueError("Explorer path is not a file")
+
+    return root_path, candidate
+
+
+def _relative_explorer_path(root_path: str, path: str) -> str:
+    """Return a stable slash-separated explorer path relative to the root."""
+    relative = os.path.relpath(path, root_path)
+    return "" if relative == "." else relative.replace(os.sep, "/")
+
+
+def _explorer_entry_payload(root_path: str, entry: os.DirEntry) -> Dict[str, Any]:
+    """Return metadata for one explorer entry."""
+    try:
+        stat_result = entry.stat(follow_symlinks=False)
+        is_dir = entry.is_dir(follow_symlinks=False)
+    except OSError:
+        stat_result = None
+        is_dir = False
+
+    return {
+        "name": entry.name,
+        "path": _relative_explorer_path(root_path, entry.path),
+        "type": "directory" if is_dir else "file",
+        "size": None if is_dir or stat_result is None else stat_result.st_size,
+        "modified": None if stat_result is None else stat_result.st_mtime,
+    }
 
 
 def _local_shell_display_name(
@@ -2484,6 +2766,11 @@ def _connect_session(session_id: str):
         logger.error(f"[{session_id}] Session not found in manager")
         return
 
+    if _is_explorer_session(session):
+        session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
+        _broadcast_session_status(session_id)
+        return
+
     if session.mode == "wsl":
         _connect_local_session(session_id, session)
         return
@@ -2597,6 +2884,90 @@ def get_sessions():
             }
         )
     return jsonify(payload)
+
+
+@app.route('/api/explorer/<session_id>/entries', methods=['GET'])
+def get_explorer_entries(session_id: str):
+    """List entries for a local file explorer pane."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+
+    try:
+        root_path, current_path = _resolve_explorer_paths(
+            session,
+            request.args["path"] if "path" in request.args else None,
+        )
+        entries = []
+        with os.scandir(current_path) as iterator:
+            for entry in iterator:
+                entries.append(_explorer_entry_payload(root_path, entry))
+        entries.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
+
+        parent_path = ""
+        if os.path.normcase(current_path) != os.path.normcase(root_path):
+            parent_path = _relative_explorer_path(root_path, os.path.dirname(current_path))
+
+        return jsonify(
+            {
+                "session_id": session.session_id,
+                "root": root_path,
+                "path": _relative_explorer_path(root_path, current_path),
+                "parent_path": parent_path,
+                "entries": entries,
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route('/api/explorer/<session_id>/file', methods=['GET'])
+def get_explorer_file(session_id: str):
+    """Return a safe, read-only text preview for one explorer file."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+
+    try:
+        root_path, file_path = _resolve_explorer_file_path(
+            session,
+            request.args.get("path", ""),
+        )
+        stat_result = os.stat(file_path, follow_symlinks=False)
+        with open(file_path, "rb") as file_handle:
+            raw_content = file_handle.read(EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)
+
+        if b"\x00" in raw_content:
+            raise ValueError("Explorer file appears to be binary")
+
+        truncated = len(raw_content) > EXPLORER_FILE_PREVIEW_MAX_BYTES
+        preview_bytes = raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]
+        content = preview_bytes.decode("utf-8", errors="replace")
+        preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
+        code_language = _explorer_code_language(file_path)
+
+        return jsonify(
+            {
+                "session_id": session.session_id,
+                "root": root_path,
+                "path": _relative_explorer_path(root_path, file_path),
+                "name": os.path.basename(file_path),
+                "size": stat_result.st_size,
+                "modified": stat_result.st_mtime,
+                "encoding": "utf-8",
+                "truncated": truncated,
+                "content": content,
+                "preview_type": "markdown" if preview_html is not None else None,
+                "preview_html": preview_html,
+                "language": code_language,
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route('/api/sessions/active', methods=['GET'])
@@ -2813,16 +3184,33 @@ def create_sessions():
         for config in sessions_config:
             prepared = dict(config)
             prepared["mode"] = connection_mode
+            startup_mode = _normalize_startup_mode(
+                prepared.get("startup_mode") or prepared.get("initial_command_mode"),
+                connection_mode,
+            )
+            prepared["startup_mode"] = startup_mode
 
             if connection_mode == "wsl":
-                use_powershell = bool(prepared.get("use_powershell"))
-                use_wsl = bool(prepared.get("use_wsl")) and not use_powershell
+                if startup_mode == "explorer":
+                    use_powershell = False
+                    use_wsl = False
+                    prepared["initial_command"] = ""
+                    prepared["explorer_root_directory"] = prepared.get("directory") or ""
+                    prepared["distribution"] = ""
+                    prepared["username"] = ""
+                else:
+                    use_powershell = bool(prepared.get("use_powershell"))
+                    use_wsl = bool(prepared.get("use_wsl")) and not use_powershell
                 prepared["password"] = None
                 prepared["port"] = 22
-                prepared["host"] = _local_shell_display_name(
-                    use_wsl=use_wsl,
-                    use_powershell=use_powershell,
-                    distribution=prepared.get("distribution"),
+                prepared["host"] = (
+                    "File Explorer"
+                    if startup_mode == "explorer"
+                    else _local_shell_display_name(
+                        use_wsl=use_wsl,
+                        use_powershell=use_powershell,
+                        distribution=prepared.get("distribution"),
+                    )
                 )
                 prepared["use_wsl"] = use_wsl
                 prepared["use_powershell"] = use_powershell
@@ -2885,6 +3273,10 @@ def create_sessions():
         )
 
         for session in created_sessions:
+            if _is_explorer_session(session):
+                session_manager.update_session_status(session.session_id, SessionStatus.CONNECTED)
+                _broadcast_session_status(session.session_id)
+                continue
             logger.info(
                 "Spawning connection task for session_id=%s mode=%s host=%s group_id=%s",
                 session.session_id,
@@ -2920,6 +3312,148 @@ def get_session(session_id: str):
         return jsonify({"error": "Session not found"}), 404
 
     return jsonify(session.to_dict())
+
+
+@app.route('/api/sessions/<session_id>/split', methods=['POST'])
+def split_session(session_id: str):
+    """Append one cloned terminal session to the source session's group."""
+    source = session_manager.get_session(session_id)
+    if not source:
+        return jsonify({"error": "Session not found"}), 404
+
+    if _is_explorer_session(source):
+        return jsonify({"error": "Explorer panes cannot be split"}), 400
+
+    group = session_manager.get_group(source.group_id)
+    if not group:
+        return jsonify({"error": "Session group not found"}), 404
+
+    group_sessions = session_manager.get_group_sessions(group.group_id)
+    if len(group_sessions) >= max_sessions:
+        return jsonify({"error": f"Maximum {max_sessions} sessions allowed"}), 400
+
+    title = f"Terminal {len(group_sessions) + 1}"
+    new_session = session_manager.append_session_to_group(
+        group_id=group.group_id,
+        host=source.host,
+        directory=source.directory,
+        username=source.username,
+        port=source.port,
+        password=source.password,
+        initial_command=None,
+        title=title,
+        mode=source.mode,
+        distribution=source.distribution,
+        use_wsl=source.use_wsl,
+        use_powershell=source.use_powershell,
+        startup_mode=source.startup_mode,
+        explorer_root_directory=source.explorer_root_directory,
+    )
+    if not new_session:
+        return jsonify({"error": "Session group not found"}), 404
+
+    logger.info(
+        "Split session source_id=%s new_session_id=%s group_id=%s",
+        source.session_id,
+        new_session.session_id,
+        group.group_id,
+    )
+    socketio.start_background_task(_connect_session, new_session.session_id)
+
+    return jsonify(
+        {
+            "session": new_session.to_dict(),
+            "group_id": group.group_id,
+            "group": group.to_dict(),
+            "terminal_count": group.terminal_count,
+        }
+    ), 201
+
+
+@app.route('/api/sessions/<session_id>/mode', methods=['POST'])
+def change_session_mode(session_id: str):
+    """Switch one Local Repo pane between terminal and file explorer mode."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    if session.mode != "wsl":
+        return jsonify({"error": "File explorer mode is only available for Local Repo sessions"}), 400
+
+    data = request.get_json(silent=True) or {}
+    target_mode = _normalize_startup_mode(data.get("startup_mode"), session.mode)
+    if target_mode not in {"terminal", "explorer"}:
+        return jsonify({"error": "startup_mode must be 'terminal' or 'explorer'"}), 400
+
+    if target_mode == "explorer":
+        requested_directory = data.get("directory")
+        next_directory = session.directory
+        if requested_directory:
+            next_directory = os.path.abspath(os.path.expanduser(str(requested_directory)))
+        if not next_directory or not os.path.isdir(next_directory):
+            return jsonify({"error": "Explorer root directory does not exist"}), 400
+
+        root_directory = _explorer_root_directory(session) or next_directory
+        root_directory = os.path.realpath(os.path.abspath(os.path.expanduser(root_directory)))
+        next_directory = os.path.realpath(os.path.abspath(os.path.expanduser(next_directory)))
+        try:
+            common_path = os.path.commonpath([root_directory, next_directory])
+        except ValueError:
+            common_path = ""
+        if (
+            not os.path.isdir(root_directory)
+            or os.path.normcase(common_path) != os.path.normcase(root_directory)
+        ):
+            root_directory = next_directory
+
+        session_manager.update_session_metadata(
+            session_id,
+            host="File Explorer",
+            directory=next_directory,
+            explorer_root_directory=root_directory,
+            username="",
+            port=22,
+            password=None,
+            initial_command="",
+            startup_mode="explorer",
+        )
+        session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
+        _close_ssh_connection(session_id, clear_buffer=True)
+        _broadcast_session_status(session_id)
+        return jsonify(session_manager.get_session(session_id).to_dict())
+
+    if not _is_explorer_session(session):
+        return jsonify(session.to_dict())
+
+    next_directory = session.directory
+    if _is_explorer_session(session):
+        try:
+            root_path, selected_directory = _resolve_explorer_candidate_path(
+                session,
+                data.get("directory", ""),
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if not os.path.isdir(selected_directory):
+            return jsonify({"error": "Selected explorer path is not a directory"}), 400
+        next_directory = selected_directory
+
+    session_manager.update_session_metadata(
+        session_id,
+        host=_local_shell_display_name(
+            use_wsl=session.use_wsl,
+            use_powershell=session.use_powershell,
+            distribution=session.distribution,
+        ),
+        directory=next_directory,
+        explorer_root_directory=root_path,
+        initial_command="",
+        startup_mode="terminal",
+    )
+    session_manager.update_session_status(session_id, SessionStatus.PENDING)
+    _broadcast_session_status(session_id)
+    socketio.start_background_task(_connect_session, session_id)
+    return jsonify(session_manager.get_session(session_id).to_dict())
 
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
@@ -2981,6 +3515,8 @@ _TERMINAL_QUERY_RE = re.compile(
     r'(?:0?c|\?[0-9;]*c)'  # Device Attributes request or response
     r'|'
     r'\x1b\[[56]n'  # Device Status Report / Cursor Position Report
+    r'|'
+    r'\x1b\](?:1[012]);\?(?:\x07|\x1b\\)'  # OSC foreground/background/cursor color query
 )
 
 
@@ -3387,7 +3923,7 @@ def voice_status_endpoint():
     })
 
 
-VOICE_PREFS_VALID_KEYS = {'profile', 'deviceId', 'pttEnabled', 'pttKeybind', 'panelOpen'}
+VOICE_PREFS_VALID_KEYS = {'profile', 'deviceId', 'pttEnabled', 'pttKeybind'}
 
 
 def _default_voice_prefs() -> Dict[str, Any]:
@@ -3396,7 +3932,6 @@ def _default_voice_prefs() -> Dict[str, Any]:
         'deviceId': '',
         'pttEnabled': False,
         'pttKeybind': '',
-        'panelOpen': False,
     }
 
 

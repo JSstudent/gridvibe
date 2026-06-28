@@ -85,6 +85,26 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(sessions[0].host, "WSL")
         self.assertTrue(sessions[0].use_powershell)
 
+    def test_create_sessions_supports_startup_mode_metadata(self):
+        sessions = self.manager.create_sessions(
+            [
+                {
+                    "mode": "wsl",
+                    "directory": "C:\\repo",
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                    "explorer_root_directory": "C:\\repo",
+                }
+            ],
+            group_id="group-local",
+        )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].startup_mode, "explorer")
+        self.assertEqual(sessions[0].explorer_root_directory, "C:\\repo")
+        self.assertEqual(sessions[0].to_dict()["startup_mode"], "explorer")
+        self.assertEqual(sessions[0].to_dict()["explorer_root_directory"], "C:\\repo")
+
     def test_update_session_status_marks_connected_and_notifies_callbacks(self):
         session = self.manager.create_session(
             group_id="group-b",
@@ -214,3 +234,59 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(groups[0].terminal_count, 4)
         self.assertEqual(groups[0].display_order, original.display_order)
 
+    def test_append_session_to_group_updates_existing_group_count(self):
+        self.manager.create_group(
+            name="Split",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-a",
+        )
+
+        session = self.manager.append_session_to_group(
+            group_id="group-a",
+            host="127.0.0.1",
+            directory="/tmp/project",
+            username="alice",
+            title="Terminal 2",
+        )
+
+        self.assertIsNotNone(session)
+        self.assertEqual(session.group_id, "group-a")
+        self.assertEqual(session.username, "alice")
+        self.assertEqual(self.manager.get_group("group-a").terminal_count, 2)
+        self.assertEqual(len(self.manager.get_group_sessions("group-a")), 1)
+
+    def test_append_session_to_group_rejects_missing_group(self):
+        session = self.manager.append_session_to_group(
+            group_id="missing",
+            host="127.0.0.1",
+            directory="/tmp/project",
+        )
+
+        self.assertIsNone(session)
+        self.assertEqual(self.manager.get_session_count(), 0)
+
+    def test_clear_disconnected_sessions_updates_remaining_group_count(self):
+        self.manager.create_group(
+            name="Split",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=2,
+            group_id="group-a",
+        )
+        first = self.manager.create_session(
+            group_id="group-a",
+            host="127.0.0.1",
+            directory="/tmp/one",
+        )
+        self.manager.create_session(
+            group_id="group-a",
+            host="127.0.0.2",
+            directory="/tmp/two",
+        )
+
+        self.manager.close_session(first.session_id)
+        self.manager.clear_disconnected_sessions()
+
+        self.assertEqual(self.manager.get_group("group-a").terminal_count, 1)

@@ -51,6 +51,23 @@ class ApiRoutesTestCase(unittest.TestCase):
         api.save_config(cfg)
         api._refresh_runtime_config()
 
+    def _create_explorer_session(self, repo_dir: Path) -> str:
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        return response.get_json()["sessions"][0]["session_id"]
+
     def tearDown(self):
         api.session_manager.reset_sessions()
         api.active_launch_options.update(
@@ -145,6 +162,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="appTheme"', html)
         self.assertIn('id="appVoiceEngine"', html)
         self.assertIn('id="appWhisperDevice"', html)
+        self.assertIn('id="appVoiceProfile"', html)
+        self.assertIn('id="appVoiceDevice"', html)
+        self.assertIn('id="appVoicePttEnabled"', html)
+        self.assertIn('id="appVoicePttKeybind"', html)
+        self.assertIn("function refreshLauncherMicrophones()", html)
+        self.assertIn('/api/voice-prefs', html)
         self.assertIn('<select id="appWhisperModel">', html)
         self.assertIn('<option value="base">base</option>', html)
         self.assertIn('<option value="large-v3-turbo">large-v3-turbo</option>', html)
@@ -201,6 +224,108 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function setTerminalRefreshState(index, refreshing)", html)
         self.assertIn("async function refreshTerminalDisplay(index)", html)
 
+    def test_terminals_page_exposes_session_mode_switch_controls(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('data-session-mode-toggle="${i}"', html)
+        self.assertIn("async function switchSessionPaneMode(index)", html)
+        self.assertIn("body.directory = getExplorerSelectedDirectory(index);", html)
+        self.assertIn("`/api/sessions/${encodeURIComponent(sessionId)}/mode`", html)
+        self.assertIn("hasMatchingSessionViews(sessionIds, terminals, data.sessions)", html)
+        self.assertIn("pendingModeSwitchSessionIds.add(sessionId);", html)
+        self.assertIn("replaceSessionPaneMode(index, data)", html)
+        replace_start = html.index("function replacePaneWithExplorer(index, session)")
+        replace_end = html.index("function replacePaneWithTerminal(index, session)", replace_start)
+        self.assertIn("loadExplorerPane(index, null, { force: true });", html[replace_start:replace_end])
+        self.assertNotIn("loadExplorerPane(index, '', { force: true });", html[replace_start:replace_end])
+        switch_start = html.index("async function switchSessionPaneMode(index)")
+        switch_end = html.index("async function closeSplitPane(index)", switch_start)
+        self.assertNotIn("teardownCurrentGrid();", html[switch_start:switch_end])
+
+    def test_terminals_page_explorer_refresh_requires_initial_navigation_or_force(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        explorer_start = html.index("async function loadExplorerPane(index, path = null")
+        explorer_end = html.index("/* ─────────────────────────────────────────────", explorer_start)
+        explorer_html = html[explorer_start:explorer_end]
+
+        self.assertIn(
+            "async function loadExplorerPane(index, path = null, { force = false, showLoading = true } = {})",
+            explorer_html,
+        )
+        self.assertIn("const isNavigation = path !== null;", explorer_html)
+        self.assertIn(
+            "if (pane._attached && !force && !isNavigation) {\n            return true;\n        }",
+            explorer_html,
+        )
+        self.assertIn("if (showLoading)", explorer_html)
+
+    def test_terminals_page_manual_refresh_keeps_open_explorer_file(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        explorer_refresh_start = html.index("async function refreshExplorerPane(index)")
+        explorer_refresh_end = html.index("async function loadExplorerPane(index, path = null", explorer_refresh_start)
+        explorer_refresh_html = html[explorer_refresh_start:explorer_refresh_end]
+        refresh_start = html.index("async function refreshTerminalDisplay(index)")
+        refresh_end = html.index("logSessionWindowAction('Refreshing terminal display'", refresh_start)
+        refresh_html = html[refresh_start:refresh_end]
+
+        self.assertIn(
+            "return openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });",
+            explorer_refresh_html,
+        )
+        self.assertIn("return loadExplorerPane(index, null, { force: true });", explorer_refresh_html)
+        self.assertIn("await refreshExplorerPane(index);", refresh_html)
+        self.assertIn("function captureExplorerFileScroll(index)", html)
+        self.assertIn("function restoreExplorerFileScroll(index, state)", html)
+        self.assertIn("function updateExplorerFileInPlace(index, data, scrollState = null)", html)
+        self.assertIn("updateExplorerFileInPlace(index, data, scrollState)", html)
+        self.assertIn(".explorer-list.file-view", html)
+        self.assertIn("list.classList.add('file-view');", html)
+        self.assertIn("listScrollTop: list.scrollTop", html)
+        self.assertIn("list.scrollTop = state.listScrollTop || 0;", html)
+        self.assertIn("wasAtBottom: maxScrollTop > 0 && panel.scrollTop >= maxScrollTop - 2", html)
+        self.assertIn("panel.scrollTop = panelState.wasAtBottom", html)
+        self.assertIn("window.setTimeout(applyScroll, 80);", html)
+        self.assertIn("async function syncExplorerPane(index)", html)
+        self.assertIn("if (pane?._explorerMode === 'file' && pane._explorerFilePath) {\n            return true;\n        }", html)
+        self.assertIn("syncExplorerPane(i);", html)
+        self.assertIn("syncExplorerPane(index);", html)
+
+    def test_terminals_page_explorer_theme_defaults_to_dark(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("function hasExplorerThemeOverride(key = '')", html)
+        self.assertIn('[data-theme="dark"]', html)
+        self.assertIn("--explorer-bg: #0f141b;", html)
+        self.assertIn("card.dataset.explorerThemeSource = hasExplorerThemeOverride(explorerThemeKey) ? 'override' : 'default';", html)
+        self.assertIn("if (card.dataset.explorerThemeSource === 'override')", html)
+        self.assertIn("updateExplorerThemeButton(explorerThemeButton, card.dataset.explorerTheme || 'dark');", html)
+        self.assertIn("function syncDefaultExplorerThemes()", html)
+        self.assertIn("syncDefaultExplorerThemes();", html)
+        self.assertNotIn("store.default || currentResolvedTheme()", html)
+
+    def test_terminals_page_explorer_source_view_wraps_and_highlights_code(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("white-space: pre-wrap;", html)
+        self.assertIn("overflow-wrap: anywhere;", html)
+        self.assertIn("function highlightExplorerCode(content, language)", html)
+        self.assertIn("const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({", html)
+        self.assertIn("'.py': 'python'", html)
+        self.assertIn("'.go': 'go'", html)
+        self.assertIn("'.c': 'c'", html)
+
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
 
@@ -216,11 +341,18 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn("function hasMatchingSessionIds(existingIds, sessions)", html)
-        self.assertIn("&& hasMatchingSessionIds(sessionIds, data.sessions)", html)
-        self.assertIn("hasMatchingSessionIds(cached.sessionIds || [], data.sessions)", html)
-        self.assertIn("const sessionIdsChanged = !hasMatchingSessionIds(sessionIds, data.sessions);", html)
+        self.assertIn("function hasMatchingSessionViews(existingIds, existingTerminals, sessions)", html)
+        self.assertIn("&& hasMatchingSessionViews(sessionIds, terminals, data.sessions)", html)
+        self.assertIn(
+            "hasMatchingSessionViews(cached.sessionIds || [], cached.terminals || [], data.sessions)",
+            html,
+        )
+        self.assertIn(
+            "const sessionViewsChanged = !hasMatchingSessionViews(sessionIds, terminals, data.sessions);",
+            html,
+        )
 
-    def test_terminals_page_exposes_voice_capture_profiles_and_worklet_diagnostics(self):
+    def test_terminals_page_uses_global_voice_capture_preferences_and_worklet(self):
         with patch.object(api, "voice_engine", "whisper"), patch.object(
             api, "whisper_model", "base"
         ):
@@ -229,9 +361,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn('data-voice-engine="whisper"', html)
-        self.assertIn('data-terminal-voice-settings="${i}"', html)
-        self.assertIn('data-terminal-voice-profile="${i}"', html)
-        self.assertIn('data-terminal-voice-device="${i}"', html)
+        self.assertNotIn('data-terminal-voice-settings="${i}"', html)
+        self.assertNotIn('data-terminal-voice-profile="${i}"', html)
+        self.assertNotIn('data-terminal-voice-device="${i}"', html)
         self.assertIn("VOICE_CAPTURE_PROFILES = Object.freeze({", html)
         self.assertIn("const VOICE_ENGINE = PAGE_DATASET.voiceEngine || 'vosk';", html)
         self.assertIn("new AudioWorkletNode(audioCtx, 'gridvibe-voice-processor'", html)
@@ -266,83 +398,48 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("await _stopVoice(index, { notifyServer: false });", error_handler)
         self.assertIn("async function _stopVoice(index, { notifyServer = true } = {})", html)
 
-    def test_terminals_page_uses_distinct_voice_toggle_and_diagnostics_ids(self):
+    def test_terminals_page_uses_voice_toggle_without_per_terminal_settings_panel(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn('id="tvoice-panel-toggle-${i}"', html)
-        self.assertEqual(html.count('id="tvoice-settings-${i}"'), 1)
-        self.assertIn("settings: document.getElementById(`tvoice-settings-${index}`),", html)
+        self.assertIn('data-terminal-voice="${i}"', html)
+        self.assertNotIn('id="tvoice-panel-toggle-${i}"', html)
+        self.assertNotIn('id="tvoice-settings-${i}"', html)
+        self.assertNotIn("settings: document.getElementById(`tvoice-settings-${index}`),", html)
 
-    def test_terminals_page_exposes_push_to_talk_controls(self):
+    def test_terminals_page_uses_global_push_to_talk_preferences(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn('data-terminal-voice-ptt="${i}"', html)
-        self.assertIn('data-terminal-voice-ptt-keybind="${i}"', html)
-        self.assertIn('id="tvoice-ptt-toggle-${i}"', html)
-        self.assertIn('id="tvoice-ptt-keybind-${i}"', html)
-        self.assertIn("voice-panel-toggle", html)
-        self.assertIn("voice-ptt-keybind", html)
-        self.assertIn("function _formatPttKeybind(event)", html)
-        self.assertIn("function _isValidPttKeybind(event)", html)
+        self.assertNotIn('data-terminal-voice-ptt="${i}"', html)
+        self.assertNotIn('data-terminal-voice-ptt-keybind="${i}"', html)
+        self.assertNotIn('id="tvoice-ptt-toggle-${i}"', html)
+        self.assertNotIn('id="tvoice-ptt-keybind-${i}"', html)
         self.assertIn("function _matchesPttKeybind(event, keybind)", html)
-        self.assertIn("function _setPttEnabled(enabled, index)", html)
-        self.assertIn("function _setPttKeybind(keybind, index)", html)
         self.assertIn("pttEnabled: false", html)
         self.assertIn("pttKeybind: ''", html)
 
-    def test_terminals_page_exposes_visible_enter_and_line_clear_shortcuts(self):
+    def test_terminals_page_removes_enter_and_line_clear_shortcuts(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn('class="terminal-action-btn terminal-shortcut-btn"', html)
-        self.assertIn('data-terminal-enter="${i}"', html)
-        self.assertIn('data-terminal-clearline="${i}"', html)
-        self.assertRegex(
-            html,
-            r'(?s)data-terminal-enter="\$\{i\}".*?>\s*Enter\s*</button>',
-        )
-        self.assertRegex(
-            html,
-            r'(?s)data-terminal-clearline="\$\{i\}".*?>\s*\U0001F5D1\s*</button>',
-        )
+        self.assertNotIn('class="terminal-action-btn terminal-shortcut-btn"', html)
+        self.assertNotIn('data-terminal-enter="${i}"', html)
+        self.assertNotIn('data-terminal-clearline="${i}"', html)
+        self.assertNotIn("async function _sendEnterShortcut(index)", html)
 
-    def test_terminals_page_places_clear_line_shortcut_next_to_clear(self):
+    def test_terminals_page_places_voice_control_after_clear_button(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         clear_index = html.index('data-terminal-clear="${i}"')
-        clear_line_index = html.index('data-terminal-clearline="${i}"')
-        enter_index = html.index('data-terminal-enter="${i}"')
         voice_index = html.index('data-terminal-voice-control="${i}"')
 
-        self.assertLess(clear_index, clear_line_index)
-        self.assertLess(clear_line_index, enter_index)
-        self.assertLess(enter_index, voice_index)
-
-    def test_terminals_page_enter_shortcut_stops_voice_before_sending_newline(self):
-        response = self.client.get("/terminals")
-
-        self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
-        handler_start = html.index("enterButton.addEventListener('click', async event => {")
-        helper_start = html.index("async function _sendEnterShortcut(index) {")
-        helper_end = html.index("function _updateVoiceBtn(index, recording) {", helper_start)
-        helper_html = html[helper_start:helper_end]
-
-        self.assertIn("await _sendEnterShortcut(i);", html[handler_start:])
-        self.assertIn("await _stopActiveVoiceCapture();", helper_html)
-        self.assertIn("_sendToTerminal(index, '\\r');", helper_html)
-        self.assertLess(
-            helper_html.index("await _stopActiveVoiceCapture();"),
-            helper_html.index("_sendToTerminal(index, '\\r');"),
-        )
-        self.assertNotIn("classList.toggle('visible', recording);", helper_html + html[helper_end:html.index("function _showVoicePreview(index, text) {", helper_end)])
+        self.assertLess(clear_index, voice_index)
 
     def test_terminals_page_refreshes_only_one_terminal_by_replaying_its_buffer(self):
         response = self.client.get("/terminals")
@@ -849,12 +946,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["deviceId"], "")
         self.assertFalse(payload["pttEnabled"])
         self.assertEqual(payload["pttKeybind"], "")
-        self.assertFalse(payload["panelOpen"])
 
     def test_voice_prefs_post_persists_and_returns_updated(self):
         self.client.post(
             "/api/voice-prefs",
-            json={"profile": "headset", "pttEnabled": True, "pttKeybind": "Ctrl+M", "panelOpen": True},
+            json={"profile": "headset", "pttEnabled": True, "pttKeybind": "Ctrl+M"},
         )
 
         response = self.client.get("/api/voice-prefs")
@@ -863,7 +959,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["profile"], "headset")
         self.assertTrue(payload["pttEnabled"])
         self.assertEqual(payload["pttKeybind"], "Ctrl+M")
-        self.assertTrue(payload["panelOpen"])
 
     def test_voice_prefs_post_rejects_invalid_payload(self):
         response = self.client.post("/api/voice-prefs", data="not json")
@@ -1175,6 +1270,393 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(session.host, "PowerShell")
         self.assertTrue(session.use_powershell)
         self.assertFalse(session.use_wsl)
+
+    def test_create_sessions_accepts_local_repo_file_explorer_mode(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        sessions_payload = {
+            "connection_mode": "wsl",
+            "layout": "horizontal",
+            "sessions": [
+                {
+                    "directory": str(repo_dir),
+                    "title": "Files",
+                    "initial_command": "pwd",
+                    "startup_mode": "explorer",
+                    "use_wsl": True,
+                    "use_powershell": True,
+                }
+            ],
+        }
+
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        start_task.assert_not_called()
+
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertEqual(session.mode, "wsl")
+        self.assertEqual(session.host, "File Explorer")
+        self.assertEqual(session.startup_mode, "explorer")
+        self.assertEqual(session.explorer_root_directory, str(repo_dir))
+        self.assertEqual(session.initial_command, "")
+        self.assertFalse(session.use_wsl)
+        self.assertFalse(session.use_powershell)
+        self.assertEqual(session.status, api.SessionStatus.CONNECTED)
+
+    def test_switch_explorer_pane_to_terminal_uses_selected_directory(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        selected_dir = repo_dir / "src"
+        selected_dir.mkdir(parents=True)
+        session_id = self._create_explorer_session(repo_dir)
+
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": "src"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        start_task.assert_called_once_with(api._connect_session, session_id)
+        session = api.session_manager.get_session(session_id)
+        self.assertEqual(session.startup_mode, "terminal")
+        self.assertEqual(Path(session.directory), selected_dir.resolve())
+        self.assertEqual(Path(session.explorer_root_directory), repo_dir.resolve())
+        self.assertEqual(session.status, api.SessionStatus.PENDING)
+        self.assertEqual(response.get_json()["startup_mode"], "terminal")
+
+    def test_switch_terminal_pane_to_explorer_closes_connection_and_preserves_shell_choice(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Ubuntu",
+            directory=str(repo_dir),
+            mode="wsl",
+            distribution="Ubuntu",
+            use_wsl=True,
+            startup_mode="terminal",
+        )
+        api.session_manager.update_session_status(session.session_id, api.SessionStatus.CONNECTED)
+
+        with patch.object(api, "_close_ssh_connection") as close_connection:
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "explorer"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        close_connection.assert_called_once_with(session.session_id, clear_buffer=True)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.host, "File Explorer")
+        self.assertEqual(updated.startup_mode, "explorer")
+        self.assertEqual(updated.initial_command, "")
+        self.assertEqual(Path(updated.explorer_root_directory), repo_dir.resolve())
+        self.assertTrue(updated.use_wsl)
+        self.assertEqual(updated.distribution, "Ubuntu")
+        self.assertEqual(updated.status, api.SessionStatus.CONNECTED)
+
+    def test_switch_roundtrip_preserves_explorer_root_for_parent_navigation(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        selected_dir = repo_dir / "src"
+        selected_dir.mkdir(parents=True)
+        (repo_dir / "README.md").write_text("# Root\n", encoding="utf-8")
+        (selected_dir / "main.py").write_text("print('ok')\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        with patch.object(api.socketio, "start_background_task"):
+            terminal_response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": "src"},
+            )
+        self.assertEqual(terminal_response.status_code, 200)
+
+        with patch.object(api, "_close_ssh_connection"):
+            explorer_response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={
+                    "startup_mode": "explorer",
+                    "directory": str(selected_dir),
+                },
+            )
+        self.assertEqual(explorer_response.status_code, 200)
+
+        current_response = self.client.get(f"/api/explorer/{session_id}/entries")
+        self.assertEqual(current_response.status_code, 200)
+        current_payload = current_response.get_json()
+        self.assertEqual(current_payload["path"], "src")
+        self.assertEqual(current_payload["parent_path"], "")
+        self.assertEqual(current_payload["root"], str(repo_dir.resolve()))
+
+        parent_response = self.client.get(
+            f"/api/explorer/{session_id}/entries",
+            query_string={"path": current_payload["parent_path"]},
+        )
+        self.assertEqual(parent_response.status_code, 200)
+        parent_payload = parent_response.get_json()
+        self.assertEqual(parent_payload["path"], "")
+        self.assertEqual(parent_payload["parent_path"], "")
+
+    def test_local_stream_shutdown_after_explorer_switch_does_not_mark_error(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session_id = self._create_explorer_session(repo_dir)
+
+        class ClosingPty:
+            def read(self, _size):
+                raise OSError("[WinError 10053] An established connection was aborted")
+
+        with api.connection_lock:
+            api.ssh_connections[session_id] = {
+                "kind": "local",
+                "pty_process": ClosingPty(),
+            }
+
+        api._stream_local_output(session_id)
+
+        session = api.session_manager.get_session(session_id)
+        self.assertEqual(session.status, api.SessionStatus.CONNECTED)
+        with api.connection_lock:
+            self.assertNotIn(session_id, api.ssh_connections)
+
+    def test_switch_session_mode_rejects_ssh_explorer_mode(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            mode="ssh",
+        )
+
+        response = self.client.post(
+            f"/api/sessions/{session.session_id}/mode",
+            json={"startup_mode": "explorer"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Local Repo", response.get_json()["error"])
+
+    def test_explorer_entries_lists_local_directory_inside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        subdir = repo_dir / "src"
+        subdir.mkdir(parents=True)
+        file_path = repo_dir / "README.md"
+        file_path.write_text("# Project\n", encoding="utf-8")
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        session_id = response.get_json()["sessions"][0]["session_id"]
+
+        entries_response = self.client.get(f"/api/explorer/{session_id}/entries")
+
+        self.assertEqual(entries_response.status_code, 200)
+        payload = entries_response.get_json()
+        self.assertEqual(payload["path"], "")
+        self.assertEqual(payload["parent_path"], "")
+        self.assertEqual([entry["name"] for entry in payload["entries"]], ["src", "README.md"])
+        self.assertEqual(payload["entries"][0]["type"], "directory")
+        self.assertEqual(payload["entries"][1]["type"], "file")
+
+    def test_explorer_entries_rejects_path_outside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        outside_dir = Path(self.temp_dir.name) / "outside"
+        outside_dir.mkdir()
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        session_id = response.get_json()["sessions"][0]["session_id"]
+
+        entries_response = self.client.get(
+            f"/api/explorer/{session_id}/entries",
+            query_string={"path": str(outside_dir)},
+        )
+
+        self.assertEqual(entries_response.status_code, 400)
+        self.assertIn("inside the configured root", entries_response.get_json()["error"])
+
+    def test_explorer_file_returns_text_content_inside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "README.md"
+        file_path.write_bytes("# Project\n\nHello <GridVibe>\n".encode("utf-8"))
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertEqual(payload["path"], "README.md")
+        self.assertEqual(payload["name"], "README.md")
+        self.assertEqual(payload["content"], "# Project\n\nHello <GridVibe>\n")
+        self.assertEqual(payload["encoding"], "utf-8")
+        self.assertFalse(payload["truncated"])
+        self.assertEqual(payload["size"], file_path.stat().st_size)
+        self.assertEqual(payload["preview_type"], "markdown")
+        self.assertIn("<h1>Project</h1>", payload["preview_html"])
+        self.assertEqual(payload["language"], "markdown")
+
+    def test_explorer_file_returns_sanitized_markdown_preview(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "README.md"
+        file_path.write_bytes(
+            (
+                "# Title\n\n"
+                "<script>alert('xss')</script>\n\n"
+                "[bad link](javascript:alert(1))\n\n"
+                "**Safe bold**\n"
+            ).encode("utf-8")
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertEqual(payload["preview_type"], "markdown")
+        self.assertIn("<h1>Title</h1>", payload["preview_html"])
+        self.assertIn("<strong>Safe bold</strong>", payload["preview_html"])
+        self.assertNotIn("<script", payload["preview_html"])
+        self.assertNotIn("javascript:", payload["preview_html"])
+
+    def test_explorer_file_does_not_preview_non_markdown_text(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "notes.txt").write_text("# Not markdown\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "notes.txt"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertIsNone(payload["preview_type"])
+        self.assertIsNone(payload["preview_html"])
+        self.assertIsNone(payload["language"])
+
+    def test_explorer_file_returns_code_language_for_common_source_files(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "script.py").write_text("def main():\n    print('hi')\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "script.py"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertEqual(payload["preview_type"], None)
+        self.assertIsNone(payload["preview_html"])
+        self.assertEqual(payload["language"], "python")
+
+    def test_explorer_file_rejects_path_outside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        outside_file = Path(self.temp_dir.name) / "secret.txt"
+        outside_file.write_text("secret\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": str(outside_file)},
+        )
+
+        self.assertEqual(file_response.status_code, 400)
+        self.assertIn("inside the configured root", file_response.get_json()["error"])
+
+    def test_explorer_file_rejects_directory(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        src_dir = repo_dir / "src"
+        src_dir.mkdir(parents=True)
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "src"},
+        )
+
+        self.assertEqual(file_response.status_code, 400)
+        self.assertIn("directory", file_response.get_json()["error"])
+
+    def test_explorer_file_truncates_large_text_preview(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "large.log"
+        file_path.write_text(
+            "a" * (api.EXPLORER_FILE_PREVIEW_MAX_BYTES + 10),
+            encoding="utf-8",
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "large.log"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertTrue(payload["truncated"])
+        self.assertEqual(len(payload["content"]), api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+        self.assertEqual(payload["size"], file_path.stat().st_size)
+
+    def test_explorer_file_rejects_binary_content(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "image.bin").write_bytes(b"abc\x00def")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "image.bin"},
+        )
+
+        self.assertEqual(file_response.status_code, 400)
+        self.assertIn("binary", file_response.get_json()["error"])
 
     def test_create_sessions_uses_cmd_label_for_local_repo_cmd_panes(self):
         sessions_payload = {
@@ -2073,6 +2555,92 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.get_json(), {"error": "Session not found"})
 
+    def test_split_session_appends_cloned_terminal_to_group(self):
+        api.session_manager.create_group(
+            name="Manual",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-manual",
+        )
+        source = api.session_manager.create_session(
+            group_id="group-manual",
+            host="10.0.0.12",
+            directory="/tmp/project",
+            username="alice",
+            port=2200,
+            password="secret",
+            initial_command="codex",
+            title="Primary",
+        )
+
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post(f"/api/sessions/{source.session_id}/split")
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        created = payload["session"]
+        self.assertEqual(created["group_id"], "group-manual")
+        self.assertEqual(created["host"], "10.0.0.12")
+        self.assertEqual(created["directory"], "/tmp/project")
+        self.assertEqual(created["username"], "alice")
+        self.assertEqual(created["port"], 2200)
+        self.assertIsNone(created["initial_command"])
+        self.assertNotIn("password", created)
+        self.assertEqual(payload["group"]["terminal_count"], 2)
+
+        stored = api.session_manager.get_session(created["session_id"])
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.password, "secret")
+        self.assertIsNone(stored.initial_command)
+        start_task.assert_called_once_with(api._connect_session, created["session_id"])
+
+    def test_split_session_rejects_explorer_pane(self):
+        api.session_manager.create_group(
+            name="Explorer",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+            group_id="group-explorer",
+        )
+        source = api.session_manager.create_session(
+            group_id="group-explorer",
+            host="File Explorer",
+            directory="/tmp/project",
+            mode="wsl",
+            startup_mode="explorer",
+        )
+
+        response = self.client.post(f"/api/sessions/{source.session_id}/split")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {"error": "Explorer panes cannot be split"})
+
+    def test_split_session_rejects_group_at_max_sessions(self):
+        api.session_manager.create_group(
+            name="Full",
+            connection_mode="ssh",
+            layout="grid",
+            terminal_count=api.max_sessions,
+            group_id="group-full",
+        )
+        source = None
+        for index in range(api.max_sessions):
+            session = api.session_manager.create_session(
+                group_id="group-full",
+                host=f"10.0.0.{index + 1}",
+                directory="/tmp/project",
+            )
+            source = source or session
+
+        response = self.client.post(f"/api/sessions/{source.session_id}/split")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.get_json(),
+            {"error": f"Maximum {api.max_sessions} sessions allowed"},
+        )
+
     def test_delete_session_closes_and_removes_it(self):
         api.session_manager.create_group(
             name="Manual",
@@ -2112,7 +2680,11 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         with api.connection_lock:
             api.session_output_buffers[session.session_id] = (
-                f"boot{api.WINDOWS_DEVICE_ATTRIBUTES_RESPONSE}prompt"
+                "boot"
+                f"{api.WINDOWS_DEVICE_ATTRIBUTES_RESPONSE}"
+                "\x1b]10;?\x07"
+                "\x1b]11;?\x1b\\"
+                "prompt"
             )
 
         socket_client = api.socketio.test_client(

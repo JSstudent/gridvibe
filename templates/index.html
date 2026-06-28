@@ -597,6 +597,23 @@
             align-items: start;
         }
 
+        .settings-field-with-action {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+            align-items: end;
+        }
+
+        .settings-field-with-action .field {
+            min-width: 0;
+        }
+
+        .voice-ptt-keybind {
+            cursor: pointer;
+            text-align: center;
+            user-select: none;
+        }
+
         .settings-section.hidden {
             display: none;
         }
@@ -1153,7 +1170,7 @@
 
         .command-mode-toggle {
             display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
             gap: 6px;
         }
 
@@ -1739,6 +1756,39 @@
                 </div>
                 <div id="appWhisperGpuHint" class="settings-hint hidden">GPU mode requires a working NVIDIA CUDA setup on this machine. If startup fails, switch the device back to CPU.</div>
             </div>
+            <div id="appMicSettings" class="settings-section compact-section">
+                <div class="settings-section-title">Microphone</div>
+                <div class="settings-fields-inline">
+                    <div class="field">
+                        <label>Capture Profile</label>
+                        <select id="appVoiceProfile">
+                            <option value="headset">Headset</option>
+                            <option value="laptop">Laptop</option>
+                        </select>
+                    </div>
+                    <div class="settings-field-with-action">
+                        <div class="field">
+                            <label>Microphone</label>
+                            <select id="appVoiceDevice">
+                                <option value="">Default input</option>
+                            </select>
+                        </div>
+                        <button id="refreshMicDevicesBtn" class="ghost-btn icon-btn" type="button" onclick="refreshLauncherMicrophones()" title="Refresh available microphones" aria-label="Refresh available microphones">↻</button>
+                    </div>
+                    <label class="check-field compact-check">
+                        <input id="appVoicePttEnabled" type="checkbox">
+                        <span class="check-copy">
+                            <strong>Push-to-talk</strong>
+                            <span>Hold the configured keybind to record in the terminal window.</span>
+                        </span>
+                    </label>
+                    <div class="field">
+                        <label>Push-to-talk Keybind</label>
+                        <input id="appVoicePttKeybind" class="voice-ptt-keybind" type="text" readonly placeholder="Click and press keys">
+                    </div>
+                </div>
+                <div id="appVoicePrefsStatus" class="settings-hint"></div>
+            </div>
         </div>
         <div class="modal-actions app-settings-actions">
             <div class="modal-actions-buttons">
@@ -1856,6 +1906,7 @@
         directory: '',
         initial_command: '',
         initial_command_mode: 'command',
+        startup_mode: 'terminal',
         agent_selection: '',
         custom_agent: '',
         distribution: '',
@@ -1876,6 +1927,12 @@
             whisper_compute_type: 'int8',
             language: 'en-US'
         })
+    });
+    const DEFAULT_VOICE_PREFS = Object.freeze({
+        profile: 'laptop',
+        deviceId: '',
+        pttEnabled: false,
+        pttKeybind: ''
     });
     const WHISPER_MODEL_OPTIONS = Object.freeze([
         'tiny.en',
@@ -1909,6 +1966,8 @@
     let cachedWslDistros = null;
     let lastTerminalSetupTargetSignature = '';
     let appSettings = JSON.parse(JSON.stringify(DEFAULT_APP_SETTINGS));
+    let voicePrefs = { ...DEFAULT_VOICE_PREFS };
+    let launcherMicDevices = [];
     const agentPreflightRequestState = new WeakMap();
     const agentPreflightTimerState = new WeakMap();
     const ACTIVE_SAVED_SESSION_STORAGE_KEY = 'gridvibe.activeSavedSession';
@@ -2412,6 +2471,141 @@
         updateAppSettingsVisibility();
     }
 
+    function normalizeVoicePrefs(data = {}) {
+        return {
+            profile: data.profile === 'headset' ? 'headset' : DEFAULT_VOICE_PREFS.profile,
+            deviceId: typeof data.deviceId === 'string' ? data.deviceId : '',
+            pttEnabled: typeof data.pttEnabled === 'boolean' ? data.pttEnabled : DEFAULT_VOICE_PREFS.pttEnabled,
+            pttKeybind: typeof data.pttKeybind === 'string' ? data.pttKeybind : ''
+        };
+    }
+
+    function setVoicePrefsStatus(text, type = '') {
+        const status = document.getElementById('appVoicePrefsStatus');
+        if (!status) return;
+        status.textContent = text;
+        status.className = `settings-hint ${type}`.trim();
+    }
+
+    function voiceDeviceLabel(device, index) {
+        return device.label || `Microphone ${index + 1}`;
+    }
+
+    function syncVoicePrefsForm() {
+        const profileInput = document.getElementById('appVoiceProfile');
+        const deviceInput = document.getElementById('appVoiceDevice');
+        const pttEnabledInput = document.getElementById('appVoicePttEnabled');
+        const pttKeybindInput = document.getElementById('appVoicePttKeybind');
+
+        if (profileInput) profileInput.value = voicePrefs.profile;
+        if (pttEnabledInput) pttEnabledInput.checked = Boolean(voicePrefs.pttEnabled);
+        if (pttKeybindInput) pttKeybindInput.value = voicePrefs.pttKeybind || '';
+
+        if (deviceInput) {
+            const selectedDeviceId = voicePrefs.deviceId || '';
+            deviceInput.innerHTML = '';
+            const defaultOption = document.createElement('option');
+            defaultOption.value = '';
+            defaultOption.textContent = 'Default input';
+            deviceInput.appendChild(defaultOption);
+            launcherMicDevices.forEach((device, index) => {
+                const option = document.createElement('option');
+                option.value = device.deviceId;
+                option.textContent = voiceDeviceLabel(device, index);
+                deviceInput.appendChild(option);
+            });
+            if (
+                selectedDeviceId &&
+                !launcherMicDevices.some(device => device.deviceId === selectedDeviceId)
+            ) {
+                const missingOption = document.createElement('option');
+                missingOption.value = selectedDeviceId;
+                missingOption.textContent = 'Previously selected device (unavailable)';
+                deviceInput.appendChild(missingOption);
+            }
+            deviceInput.value = selectedDeviceId;
+        }
+    }
+
+    function collectVoicePrefsForm() {
+        return {
+            profile: document.getElementById('appVoiceProfile')?.value || DEFAULT_VOICE_PREFS.profile,
+            deviceId: document.getElementById('appVoiceDevice')?.value || '',
+            pttEnabled: Boolean(document.getElementById('appVoicePttEnabled')?.checked),
+            pttKeybind: document.getElementById('appVoicePttKeybind')?.value.trim() || ''
+        };
+    }
+
+    async function loadVoicePrefs() {
+        const response = await fetch('/api/voice-prefs');
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to load microphone settings');
+        }
+        voicePrefs = normalizeVoicePrefs(data);
+        syncVoicePrefsForm();
+        return voicePrefs;
+    }
+
+    async function saveVoicePrefs() {
+        const response = await fetch('/api/voice-prefs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(collectVoicePrefsForm())
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to save microphone settings');
+        }
+        voicePrefs = normalizeVoicePrefs(data);
+        syncVoicePrefsForm();
+        return voicePrefs;
+    }
+
+    async function refreshLauncherMicrophones() {
+        if (!navigator.mediaDevices?.enumerateDevices) {
+            setVoicePrefsStatus('This browser does not expose microphone selection.');
+            return;
+        }
+
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            launcherMicDevices = devices.filter(device => device.kind === 'audioinput');
+            syncVoicePrefsForm();
+            if (launcherMicDevices.length === 0) {
+                setVoicePrefsStatus('No audio input devices are currently available.');
+                return;
+            }
+            const hasNamedDevices = launcherMicDevices.some(device => Boolean(device.label));
+            setVoicePrefsStatus(
+                hasNamedDevices
+                    ? `Microphones refreshed. ${launcherMicDevices.length} input device${launcherMicDevices.length === 1 ? '' : 's'} available.`
+                    : 'Microphones loaded. Labels may stay generic until microphone permission is granted.'
+            );
+        } catch (error) {
+            setVoicePrefsStatus(`Unable to refresh microphones: ${error.message || error}`);
+        }
+    }
+
+    function formatAppPttKeybind(event) {
+        const parts = [];
+        if (event.ctrlKey) parts.push('Ctrl');
+        if (event.metaKey) parts.push('Cmd');
+        if (event.altKey) parts.push('Alt');
+        if (event.shiftKey) parts.push('Shift');
+        const key = event.key;
+        if (!['Control', 'Meta', 'Alt', 'Shift'].includes(key)) {
+            parts.push(key.length === 1 ? key.toUpperCase() : key);
+        }
+        return parts.join('+');
+    }
+
+    function isValidAppPttKeybind(event) {
+        const hasCommandKey = event.ctrlKey || event.metaKey;
+        const isModifierOnly = ['Control', 'Meta', 'Alt', 'Shift'].includes(event.key);
+        return hasCommandKey && !isModifierOnly;
+    }
+
     function collectAppSettingsForm() {
         return {
             appearance: {
@@ -2447,7 +2641,11 @@
 
     async function openAppSettings() {
         try {
-            await loadAppSettings();
+            await Promise.all([
+                loadAppSettings(),
+                loadVoicePrefs()
+            ]);
+            refreshLauncherMicrophones().catch(() => {});
             const modal = document.getElementById('appSettingsModal');
             modal.classList.add('visible');
             modal.setAttribute('aria-hidden', 'false');
@@ -2462,13 +2660,16 @@
         button.textContent = 'Saving...';
 
         try {
-            const response = await fetch('/api/app-config', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(collectAppSettingsForm())
-            });
-            const data = await response.json();
-            if (!response.ok) {
+            const [settingsResponse] = await Promise.all([
+                fetch('/api/app-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(collectAppSettingsForm())
+                }),
+                saveVoicePrefs()
+            ]);
+            const data = await settingsResponse.json();
+            if (!settingsResponse.ok) {
                 throw new Error(data.error || 'Failed to save app settings');
             }
 
@@ -2493,7 +2694,10 @@
     }
 
     function normalizeTerminalCommandUi(terminal) {
-        const savedMode = terminal?.initial_command_mode === 'agent' ? 'agent' : 'command';
+        const rawMode = String(terminal?.startup_mode || terminal?.initial_command_mode || '').trim();
+        const savedMode = rawMode === 'agent'
+            ? 'agent'
+            : (rawMode === 'explorer' && connectionMode === 'wsl' ? 'explorer' : 'command');
         const initialCommand = String(terminal?.initial_command || '').trim();
         const knownAgents = getKnownAgentValues();
         let mode = savedMode;
@@ -2524,6 +2728,15 @@
                 commandValue,
                 agentSelection,
                 customAgent
+            };
+        }
+
+        if (mode === 'explorer') {
+            return {
+                mode,
+                commandValue: '',
+                agentSelection: '',
+                customAgent: ''
             };
         }
 
@@ -2560,10 +2773,20 @@
     }
 
     function getTerminalCommandMode(row) {
-        return row?.dataset?.commandMode === 'agent' ? 'agent' : 'command';
+        const mode = row?.dataset?.commandMode;
+        if (mode === 'agent') {
+            return 'agent';
+        }
+        if (mode === 'explorer' && connectionMode === 'wsl') {
+            return 'explorer';
+        }
+        return 'command';
     }
 
     function buildTerminalInitialCommand(row) {
+        if (getTerminalCommandMode(row) === 'explorer') {
+            return '';
+        }
         if (getTerminalCommandMode(row) === 'agent') {
             const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
             if (selectedAgent === 'other') {
@@ -2586,11 +2809,12 @@
             directory: row.querySelector('.t-dir').value.trim(),
             initial_command: buildTerminalInitialCommand(row),
             initial_command_mode: getTerminalCommandMode(row),
+            startup_mode: getTerminalCommandMode(row),
             agent_selection: row.querySelector('.t-agent-select')?.value.trim() || '',
             custom_agent: row.querySelector('.t-agent-custom')?.value.trim() || '',
             distribution: row.querySelector('.t-distribution')?.value.trim() || '',
-            use_wsl: Boolean(row.querySelector('.t-use-wsl')?.checked),
-            use_powershell: Boolean(row.querySelector('.t-use-powershell')?.checked)
+            use_wsl: getTerminalCommandMode(row) === 'explorer' ? false : Boolean(row.querySelector('.t-use-wsl')?.checked),
+            use_powershell: getTerminalCommandMode(row) === 'explorer' ? false : Boolean(row.querySelector('.t-use-powershell')?.checked)
         }));
 
         while (drafts.length < MAX_SESSIONS) {
@@ -2898,8 +3122,14 @@
     }
 
     function syncTerminalWslState(row) {
-        const shouldShowDistribution = connectionMode === 'wsl' && Boolean(row.querySelector('.t-use-wsl')?.checked);
+        const commandMode = getTerminalCommandMode(row);
+        const shellField = row.querySelector('.t-shell-field');
+        const shellDisabled = commandMode === 'explorer';
+        const shouldShowDistribution = connectionMode === 'wsl'
+            && !shellDisabled
+            && Boolean(row.querySelector('.t-use-wsl')?.checked);
         const distributionField = row.querySelector('.t-distribution-field');
+        shellField?.classList.toggle('hidden', connectionMode !== 'wsl' || shellDisabled);
         if (!distributionField) {
             return;
         }
@@ -2928,6 +3158,13 @@
         if (commandMode !== 'agent') {
             clearAgentPreflight(row);
         }
+        if (commandMode === 'explorer') {
+            const wslCheckbox = row.querySelector('.t-use-wsl');
+            const powershellCheckbox = row.querySelector('.t-use-powershell');
+            if (wslCheckbox) wslCheckbox.checked = false;
+            if (powershellCheckbox) powershellCheckbox.checked = false;
+        }
+        syncTerminalWslState(row);
     }
 
     function _resetAgentOptionLabels(select) {
@@ -3235,6 +3472,9 @@
                             <div class="command-mode-toggle">
                                 <button type="button" class="command-mode-btn ${commandUi.mode === 'command' ? 'active' : ''}" data-command-mode="command">Initial Command</button>
                                 <button type="button" class="command-mode-btn ${commandUi.mode === 'agent' ? 'active' : ''}" data-command-mode="agent">Agent</button>
+                                ${connectionMode === 'wsl'
+                                    ? `<button type="button" class="command-mode-btn ${commandUi.mode === 'explorer' ? 'active' : ''}" data-command-mode="explorer">File Explorer</button>`
+                                    : ''}
                             </div>
                         </div>
                         <div class="field t-command-field ${commandUi.mode === 'command' ? '' : 'hidden'}">
@@ -3257,7 +3497,7 @@
                             <label>Custom Agent</label>
                             <input class="t-agent-custom" type="text" value="${escHtml(commandUi.customAgent)}" placeholder="Enter agent command">
                         </div>
-                        <div class="field ${connectionMode === 'wsl' ? '' : 'hidden'}">
+                        <div class="field t-shell-field ${connectionMode === 'wsl' && commandUi.mode !== 'explorer' ? '' : 'hidden'}">
                             <div class="field-label-row">
                                 <label>Shell</label>
                                 <button
@@ -3761,7 +4001,10 @@
                 const common = {
                     title: terminal.title || `Terminal ${index + 1}`,
                     directory: resolvedDirectory,
-                    initial_command: terminal.initial_command || null
+                    initial_command: terminal.startup_mode === 'explorer' ? null : (terminal.initial_command || null),
+                    startup_mode: terminal.startup_mode === 'explorer' && config.connection_mode === 'wsl'
+                        ? 'explorer'
+                        : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
                 };
 
                 if (config.connection_mode === 'ssh') {
@@ -3779,8 +4022,8 @@
                     ...common,
                     distribution: terminal.distribution || config.wsl.distribution || '',
                     username: config.wsl.username || '',
-                    use_wsl: Boolean(terminal.use_wsl),
-                    use_powershell: Boolean(terminal.use_powershell)
+                    use_wsl: common.startup_mode === 'explorer' ? false : Boolean(terminal.use_wsl),
+                    use_powershell: common.startup_mode === 'explorer' ? false : Boolean(terminal.use_powershell)
                 });
             });
         } catch (error) {
@@ -3855,6 +4098,39 @@
     updateTerminalTargetSignature(connectionMode, collectModeInputs());
     loadPersistedConfig(true);
     loadAppSettings().catch(() => {});
+    loadVoicePrefs().catch(() => {});
+
+    document.getElementById('appVoiceProfile')?.addEventListener('change', event => {
+        voicePrefs.profile = event.target.value === 'headset' ? 'headset' : 'laptop';
+    });
+    document.getElementById('appVoiceDevice')?.addEventListener('change', event => {
+        voicePrefs.deviceId = event.target.value || '';
+    });
+    document.getElementById('appVoicePttEnabled')?.addEventListener('change', event => {
+        voicePrefs.pttEnabled = Boolean(event.target.checked);
+    });
+    document.getElementById('appVoicePttKeybind')?.addEventListener('keydown', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const input = event.currentTarget;
+        if (event.key === 'Backspace' || event.key === 'Delete' || event.key === 'Escape') {
+            input.value = '';
+            voicePrefs.pttKeybind = '';
+            return;
+        }
+        const formatted = formatAppPttKeybind(event);
+        if (isValidAppPttKeybind(event)) {
+            input.value = formatted;
+            voicePrefs.pttKeybind = formatted;
+        } else {
+            input.value = formatted ? `${formatted}...` : '';
+        }
+    });
+    if (navigator.mediaDevices?.addEventListener) {
+        navigator.mediaDevices.addEventListener('devicechange', () => {
+            refreshLauncherMicrophones().catch(() => {});
+        });
+    }
 
     document.getElementById('savedSessionsModal').addEventListener('click', event => {
         if (event.target.id === 'savedSessionsModal') {
