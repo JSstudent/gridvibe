@@ -443,6 +443,11 @@
             grid-template-rows: repeat(var(--grid-rows, 2), 1fr);
         }
 
+        #terminalsGrid.layout-split-local {
+            grid-template-columns: repeat(var(--split-grid-columns, 4), minmax(0, 1fr));
+            grid-template-rows: repeat(var(--split-grid-rows, 2), minmax(0, 1fr));
+        }
+
         /* ── Terminal card ── */
         .terminal-container {
             display: flex;
@@ -515,6 +520,10 @@
         .terminal-action-btn:disabled {
             opacity: .55;
             cursor: wait;
+        }
+
+        .terminal-split-btn:disabled {
+            cursor: not-allowed;
         }
 
         .explorer-theme-btn {
@@ -1569,6 +1578,22 @@
     let sessionGroups = [];
     let activeLoadToken = 0;
     let knownGroupIds = [];
+    let pendingSplitRestore = null;
+    const MAX_SPLIT_TERMINALS = Math.min(8, Number({{ max_sessions | tojson }} || 8));
+    const MIN_SPLIT_COLS = 8;
+    const MIN_SPLIT_ROWS = 8;
+    let splitSlotRects = null;
+    let originalSplitSlotCount = 0;
+
+    function isRecursiveSplitLayout() {
+        return originalSplitSlotCount > 0 && originalSplitSlotCount <= 2;
+    }
+
+    function getSplitPaneLimit() {
+        return isRecursiveSplitLayout()
+            ? MAX_SPLIT_TERMINALS
+            : Math.min(MAX_SPLIT_TERMINALS, Math.max(1, originalSplitSlotCount) * 2);
+    }
 
     function isExplorerSession(session) {
         return session?.mode === 'wsl' && session?.startup_mode === 'explorer';
@@ -1661,7 +1686,10 @@
             return;
         }
 
-        const observer = new ResizeObserver(() => scheduleFit(index));
+        const observer = new ResizeObserver(() => {
+            scheduleFit(index);
+            updateSplitButtonState(index);
+        });
         observer.observe(wrapper);
         resizeObservers.push(observer);
         terminal._resizeObserved = true;
@@ -1717,6 +1745,7 @@
             fragment.appendChild(grid.firstChild);
         }
 
+        const hasLocalSplitLayout = grid.className === 'layout-split-local';
         cachedGroupViews.set(groupId, {
             groupId,
             terminals,
@@ -1724,7 +1753,11 @@
             fragment,
             className: grid.className,
             gridColumns: grid.style.getPropertyValue('--grid-columns'),
-            gridRows: grid.style.getPropertyValue('--grid-rows')
+            gridRows: grid.style.getPropertyValue('--grid-rows'),
+            splitGridColumns: grid.style.getPropertyValue('--split-grid-columns'),
+            splitGridRows: grid.style.getPropertyValue('--split-grid-rows'),
+            splitSlotRects: hasLocalSplitLayout ? cloneSplitSlotRects() : null,
+            originalSplitSlotCount
         });
 
         terminals = [];
@@ -1735,6 +1768,10 @@
         grid.className = '';
         grid.style.removeProperty('--grid-columns');
         grid.style.removeProperty('--grid-rows');
+        grid.style.removeProperty('--split-grid-columns');
+        grid.style.removeProperty('--split-grid-rows');
+        splitSlotRects = null;
+        originalSplitSlotCount = 0;
     }
 
     function restoreCachedGroupView(groupId) {
@@ -1756,11 +1793,25 @@
         } else {
             grid.style.removeProperty('--grid-rows');
         }
+        if (cached.splitGridColumns) {
+            grid.style.setProperty('--split-grid-columns', cached.splitGridColumns);
+        } else {
+            grid.style.removeProperty('--split-grid-columns');
+        }
+        if (cached.splitGridRows) {
+            grid.style.setProperty('--split-grid-rows', cached.splitGridRows);
+        } else {
+            grid.style.removeProperty('--split-grid-rows');
+        }
         grid.appendChild(cached.fragment);
         grid.style.display = '';
 
         terminals = cached.terminals || [];
         sessionIds = cached.sessionIds || [];
+        splitSlotRects = cached.className === 'layout-split-local'
+            ? cloneSplitSlotRects(cached.splitSlotRects)
+            : null;
+        originalSplitSlotCount = Number(cached.originalSplitSlotCount || terminals.length || 0);
         visibleGroupId = groupId;
         gridBuilt = terminals.length > 0;
         terminals.forEach(terminal => {
@@ -1769,6 +1820,9 @@
                 terminal._resizeObserved = false;
             }
         });
+        if (splitSlotRects) {
+            applySplitSlotGeometry({ fit: false });
+        }
         restoreActiveTerminalObservers();
         document.getElementById('emptyState').classList.remove('visible');
         return true;
@@ -2095,6 +2149,511 @@
         return null;
     }
 
+    function cloneSplitSlotRects(rects = splitSlotRects) {
+        return Array.isArray(rects)
+            ? rects.map(rect => normalizeSplitRectMetadata({
+                id: rect.id || makeSplitRectId(),
+                originSlot: rect.originSlot ?? 0,
+                splitId: rect.splitId || '',
+                splitRole: rect.splitRole || '',
+                isSplitChild: Boolean(rect.isSplitChild),
+                parentRect: rect.parentRect ? cloneSplitRect(rect.parentRect) : null,
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+                ancestors: cloneSplitAncestors(rect.ancestors || []),
+            }))
+            : null;
+    }
+
+    function cloneSplitRect(rect) {
+        return { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+    }
+
+    function cloneSplitAncestors(ancestors = []) {
+        return ancestors.map(ancestor => ({
+            splitId: ancestor.splitId,
+            branch: ancestor.branch,
+            parentRect: cloneSplitRect(ancestor.parentRect),
+            branchRect: cloneSplitRect(ancestor.branchRect),
+        }));
+    }
+
+    function makeSplitRectId() {
+        return `sr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    function makeSplitLeaf(rect, ancestors = []) {
+        return normalizeSplitRectMetadata({
+            id: makeSplitRectId(),
+            originSlot: rect.originSlot ?? 0,
+            splitId: rect.splitId || '',
+            splitRole: rect.splitRole || '',
+            isSplitChild: Boolean(rect.isSplitChild),
+            parentRect: rect.parentRect ? cloneSplitRect(rect.parentRect) : null,
+            ...cloneSplitRect(rect),
+            ancestors: cloneSplitAncestors(ancestors),
+        });
+    }
+
+    function normalizeSplitRectMetadata(rect) {
+        const ancestors = cloneSplitAncestors(rect.ancestors || []);
+        const lastAncestor = ancestors[ancestors.length - 1];
+        if (!lastAncestor) {
+            return {
+                ...rect,
+                splitId: '',
+                splitRole: '',
+                isSplitChild: false,
+                parentRect: null,
+                ancestors,
+            };
+        }
+
+        return {
+            ...rect,
+            splitId: lastAncestor.splitId || '',
+            splitRole: lastAncestor.branch === 'b' ? 'secondary' : 'primary',
+            isSplitChild: lastAncestor.branch === 'b',
+            parentRect: cloneSplitRect(lastAncestor.parentRect),
+            ancestors,
+        };
+    }
+
+    function getBaseLayoutSlots(count, layoutClass = '') {
+        if (count <= 0) {
+            return { columns: 1, rows: 1, slots: [] };
+        }
+        if (count === 1) {
+            return {
+                columns: 1,
+                rows: 1,
+                slots: [{ col: 1, row: 1, colSpan: 1, rowSpan: 1 }],
+            };
+        }
+        if (count === 2) {
+            if (layoutClass.includes('horizontal')) {
+                return {
+                    columns: 1,
+                    rows: 2,
+                    slots: [
+                        { col: 1, row: 1, colSpan: 1, rowSpan: 1 },
+                        { col: 1, row: 2, colSpan: 1, rowSpan: 1 },
+                    ],
+                };
+            }
+            return {
+                columns: 2,
+                rows: 1,
+                slots: [
+                    { col: 1, row: 1, colSpan: 1, rowSpan: 1 },
+                    { col: 2, row: 1, colSpan: 1, rowSpan: 1 },
+                ],
+            };
+        }
+        if (count === 3 && layoutClass.includes('layout-3-split')) {
+            return {
+                columns: 3,
+                rows: 2,
+                slots: [
+                    { col: 1, row: 1, colSpan: 2, rowSpan: 1 },
+                    { col: 1, row: 2, colSpan: 2, rowSpan: 1 },
+                    { col: 3, row: 1, colSpan: 1, rowSpan: 2 },
+                ],
+            };
+        }
+        if (count === 3 && layoutClass.includes('horizontal')) {
+            return {
+                columns: 1,
+                rows: 3,
+                slots: [
+                    { col: 1, row: 1, colSpan: 1, rowSpan: 1 },
+                    { col: 1, row: 2, colSpan: 1, rowSpan: 1 },
+                    { col: 1, row: 3, colSpan: 1, rowSpan: 1 },
+                ],
+            };
+        }
+        if (count === 3) {
+            return {
+                columns: 3,
+                rows: 1,
+                slots: [
+                    { col: 1, row: 1, colSpan: 1, rowSpan: 1 },
+                    { col: 2, row: 1, colSpan: 1, rowSpan: 1 },
+                    { col: 3, row: 1, colSpan: 1, rowSpan: 1 },
+                ],
+            };
+        }
+
+        const metrics = getGridMetrics(count) || { columns: 2, rows: 2 };
+        return {
+            columns: metrics.columns,
+            rows: metrics.rows,
+            slots: Array.from({ length: count }, (_, index) => ({
+                col: 1 + (index % metrics.columns),
+                row: 1 + Math.floor(index / metrics.columns),
+                colSpan: 1,
+                rowSpan: 1,
+            })),
+        };
+    }
+
+    function fixedLayoutSlotRects(count, layoutClass = '') {
+        originalSplitSlotCount = Math.max(originalSplitSlotCount, count);
+        if (count === 1) {
+            return [makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 4, h: 2 })];
+        }
+        if (count === 2 && layoutClass.includes('horizontal')) {
+            return [
+                makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 4, h: 2 }),
+                makeSplitLeaf({ originSlot: 1, x: 1, y: 3, w: 4, h: 2 }),
+            ];
+        }
+        if (count === 2) {
+            return [
+                makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 2, h: 2 }),
+                makeSplitLeaf({ originSlot: 1, x: 3, y: 1, w: 2, h: 2 }),
+            ];
+        }
+
+        const base = getBaseLayoutSlots(count, layoutClass);
+        return base.slots.map((slot, index) => makeSplitLeaf({
+            originSlot: index,
+            x: 1 + (slot.col - 1) * 2,
+            y: 1 + (slot.row - 1) * 2,
+            w: slot.colSpan * 2,
+            h: slot.rowSpan * 2,
+        }));
+    }
+
+    function clearSplitSlotGeometry() {
+        splitSlotRects = null;
+        const grid = document.getElementById('terminalsGrid');
+        if (!grid) {
+            return;
+        }
+        grid.style.removeProperty('--split-grid-columns');
+        grid.style.removeProperty('--split-grid-rows');
+        Array.from(grid.children).forEach(card => {
+            card.style.gridColumn = '';
+            card.style.gridRow = '';
+        });
+    }
+
+    function ensureSplitSlotRects() {
+        const grid = document.getElementById('terminalsGrid');
+        if (!grid) {
+            return [];
+        }
+        if (!Array.isArray(splitSlotRects) || splitSlotRects.length !== grid.children.length) {
+            splitSlotRects = fixedLayoutSlotRects(grid.children.length, grid.className || '');
+        }
+        return splitSlotRects;
+    }
+
+    function applySplitSlotGeometry({ fit = true } = {}) {
+        const grid = document.getElementById('terminalsGrid');
+        if (!grid || !Array.isArray(splitSlotRects) || splitSlotRects.length !== grid.children.length) {
+            return false;
+        }
+
+        const gridColumns = Math.max(1, ...splitSlotRects.map(rect => rect.x + rect.w - 1));
+        const gridRows = Math.max(1, ...splitSlotRects.map(rect => rect.y + rect.h - 1));
+        grid.className = 'layout-split-local';
+        grid.style.removeProperty('--grid-columns');
+        grid.style.removeProperty('--grid-rows');
+        grid.style.setProperty('--split-grid-columns', String(gridColumns));
+        grid.style.setProperty('--split-grid-rows', String(gridRows));
+
+        Array.from(grid.children).forEach((card, visualIndex) => {
+            const rect = splitSlotRects[visualIndex];
+            card.style.gridColumn = `${rect.x} / span ${rect.w}`;
+            card.style.gridRow = `${rect.y} / span ${rect.h}`;
+            if (fit) {
+                const slotIndex = Number(card.dataset.slot);
+                if (Number.isInteger(slotIndex)) {
+                    scheduleFit(slotIndex);
+                }
+            }
+        });
+        updateAllSplitButtonStates();
+        return true;
+    }
+
+    function estimatePaneCharacters(index, axis = '') {
+        const terminal = terminals[index];
+        const term = terminal?.term;
+        const wrapper = document.getElementById(`tw-${index}`);
+        const card = document.getElementById(`tc-${index}`);
+        const wrapperRect = wrapper?.getBoundingClientRect();
+        const cardRect = card?.getBoundingClientRect();
+        const headerRect = card?.querySelector('.terminal-header')?.getBoundingClientRect();
+
+        let cols = Number(term?.cols || 0);
+        let rows = Number(term?.rows || 0);
+        const dimensions = term?._core?._renderService?.dimensions?.css?.cell || {};
+        const cellWidth = Number(dimensions.width || 8);
+        const cellHeight = Number(dimensions.height || 17);
+
+        if (!cols && wrapperRect?.width) {
+            cols = Math.floor(wrapperRect.width / cellWidth);
+        }
+        if (!rows && wrapperRect?.height) {
+            rows = Math.floor(wrapperRect.height / cellHeight);
+        }
+
+        if (axis === 'vertical' && cols > 0) {
+            cols = Math.floor(cols / 2);
+        }
+        if (axis === 'horizontal' && rows > 0) {
+            const duplicatedHeaderHeight = headerRect?.height || 34;
+            const availableHeight = cardRect?.height
+                ? Math.max(0, (cardRect.height / 2) - duplicatedHeaderHeight)
+                : (wrapperRect?.height || 0) / 2;
+            rows = Math.floor(availableHeight / cellHeight) || Math.floor(rows / 2);
+        }
+
+        return { cols, rows };
+    }
+
+    function getSplitCandidates(index, rect) {
+        if (
+            window.innerWidth <= 700
+            || terminals.length >= getSplitPaneLimit()
+            || (rect.splitId && !isRecursiveSplitLayout())
+            || isExplorerSession(terminals[index]?._session)
+        ) {
+            return [];
+        }
+
+        const vertical = estimatePaneCharacters(index, 'vertical');
+        const horizontal = estimatePaneCharacters(index, 'horizontal');
+        const candidates = [];
+        if (rect.w >= 2 && vertical.cols >= MIN_SPLIT_COLS && vertical.rows >= MIN_SPLIT_ROWS) {
+            candidates.push('vertical');
+        }
+        if (rect.h >= 2 && horizontal.cols >= MIN_SPLIT_COLS && horizontal.rows >= MIN_SPLIT_ROWS) {
+            candidates.push('horizontal');
+        }
+        return candidates;
+    }
+
+    function chooseSplitAxis(index, rect) {
+        const candidates = getSplitCandidates(index, rect);
+        if (candidates.length === 0) {
+            return '';
+        }
+        const card = document.getElementById(`tc-${index}`);
+        const bounds = card?.getBoundingClientRect();
+        const preferred = bounds && bounds.height > bounds.width ? 'horizontal' : 'vertical';
+        return candidates.includes(preferred) ? preferred : '';
+    }
+
+    function splitSlotRect(rect, axis) {
+        const splitId = makeSplitRectId();
+        const parentRect = cloneSplitRect(rect);
+        const ancestors = cloneSplitAncestors(rect.ancestors || []);
+        if (axis === 'vertical') {
+            const firstWidth = Math.floor(rect.w / 2);
+            const firstRect = { x: rect.x, y: rect.y, w: firstWidth, h: rect.h };
+            const secondRect = { x: rect.x + firstWidth, y: rect.y, w: rect.w - firstWidth, h: rect.h };
+            return [
+                makeSplitLeaf({
+                    ...firstRect,
+                    originSlot: rect.originSlot,
+                    splitId,
+                    splitRole: 'primary',
+                    parentRect,
+                }, [
+                    ...ancestors,
+                    { splitId, branch: 'a', parentRect, branchRect: firstRect },
+                ]),
+                makeSplitLeaf({
+                    ...secondRect,
+                    originSlot: rect.originSlot,
+                    splitId,
+                    splitRole: 'secondary',
+                    isSplitChild: true,
+                    parentRect,
+                }, [
+                    ...ancestors,
+                    { splitId, branch: 'b', parentRect, branchRect: secondRect },
+                ]),
+            ];
+        }
+
+        const firstHeight = Math.floor(rect.h / 2);
+        const firstRect = { x: rect.x, y: rect.y, w: rect.w, h: firstHeight };
+        const secondRect = { x: rect.x, y: rect.y + firstHeight, w: rect.w, h: rect.h - firstHeight };
+        return [
+            makeSplitLeaf({
+                ...firstRect,
+                originSlot: rect.originSlot,
+                splitId,
+                splitRole: 'primary',
+                parentRect,
+            }, [
+                ...ancestors,
+                { splitId, branch: 'a', parentRect, branchRect: firstRect },
+            ]),
+            makeSplitLeaf({
+                ...secondRect,
+                originSlot: rect.originSlot,
+                splitId,
+                splitRole: 'secondary',
+                isSplitChild: true,
+                parentRect,
+            }, [
+                ...ancestors,
+                { splitId, branch: 'b', parentRect, branchRect: secondRect },
+            ]),
+        ];
+    }
+
+    function scaleSplitValue(value, sourceStart, sourceSize, targetStart, targetSize) {
+        if (!sourceSize) {
+            return targetStart;
+        }
+        return targetStart + Math.round(((value - sourceStart) / sourceSize) * targetSize);
+    }
+
+    function transformSplitRect(rect, fromRect, toRect) {
+        const x1 = scaleSplitValue(rect.x, fromRect.x, fromRect.w, toRect.x, toRect.w);
+        const y1 = scaleSplitValue(rect.y, fromRect.y, fromRect.h, toRect.y, toRect.h);
+        const x2 = scaleSplitValue(rect.x + rect.w, fromRect.x, fromRect.w, toRect.x, toRect.w);
+        const y2 = scaleSplitValue(rect.y + rect.h, fromRect.y, fromRect.h, toRect.y, toRect.h);
+        return {
+            x: x1,
+            y: y1,
+            w: Math.max(1, x2 - x1),
+            h: Math.max(1, y2 - y1),
+        };
+    }
+
+    function transformSplitAncestor(ancestor, fromRect, toRect) {
+        return {
+            ...ancestor,
+            parentRect: transformSplitRect(ancestor.parentRect, fromRect, toRect),
+            branchRect: transformSplitRect(ancestor.branchRect, fromRect, toRect),
+        };
+    }
+
+    function buildCloseSplitPlan(index) {
+        const grid = document.getElementById('terminalsGrid');
+        const card = document.getElementById(`tc-${index}`);
+        const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
+        const rect = visualIndex >= 0 && Array.isArray(splitSlotRects) ? splitSlotRects[visualIndex] : null;
+        const targetAncestor = rect?.ancestors?.[rect.ancestors.length - 1];
+        if (!grid || !targetAncestor) {
+            return null;
+        }
+
+        const rectsBySessionId = {};
+        Array.from(grid.children).forEach((paneCard, paneVisualIndex) => {
+            const slotIndex = Number(paneCard.dataset.slot);
+            const sessionId = Number.isInteger(slotIndex) ? sessionIds[slotIndex] : '';
+            const paneRect = splitSlotRects[paneVisualIndex];
+            if (!sessionId || !paneRect) {
+                return;
+            }
+
+            const splitIndex = paneRect.ancestors?.findIndex(
+                ancestor => ancestor.splitId === targetAncestor.splitId
+            );
+            if (splitIndex === undefined || splitIndex < 0) {
+                rectsBySessionId[sessionId] = cloneSplitSlotRects([paneRect])[0];
+                return;
+            }
+
+            const splitAncestor = paneRect.ancestors[splitIndex];
+            if (splitAncestor.branch === targetAncestor.branch) {
+                return;
+            }
+
+            const transformedAncestors = paneRect.ancestors
+                .map((ancestor, ancestorIndex) => (
+                    ancestorIndex > splitIndex
+                        ? transformSplitAncestor(ancestor, splitAncestor.branchRect, splitAncestor.parentRect)
+                        : ancestor
+                ))
+                .filter((_, ancestorIndex) => ancestorIndex !== splitIndex);
+            const transformedRect = normalizeSplitRectMetadata({
+                ...transformSplitRect(paneRect, splitAncestor.branchRect, splitAncestor.parentRect),
+                id: paneRect.id || makeSplitRectId(),
+                originSlot: paneRect.originSlot,
+                ancestors: transformedAncestors,
+            });
+            rectsBySessionId[sessionId] = cloneSplitSlotRects([transformedRect])[0];
+        });
+
+        const sessionIdsToClose = Array.from(grid.children)
+            .map((paneCard, paneVisualIndex) => {
+                const slotIndex = Number(paneCard.dataset.slot);
+                const sessionId = Number.isInteger(slotIndex) ? sessionIds[slotIndex] : '';
+                const paneRect = splitSlotRects[paneVisualIndex];
+                const splitAncestor = paneRect?.ancestors?.find(
+                    ancestor => ancestor.splitId === targetAncestor.splitId
+                );
+                return splitAncestor?.branch === targetAncestor.branch ? sessionId : '';
+            })
+            .filter(Boolean);
+
+        if (sessionIdsToClose.length === 0 || Object.keys(rectsBySessionId).length === 0) {
+            return null;
+        }
+
+        return { sessionIdsToClose, rectsBySessionId, originalSplitSlotCount };
+    }
+
+    function updateSplitButtonState(index) {
+        const button = document.getElementById(`tsplit-${index}`);
+        if (!button) {
+            return;
+        }
+
+        const grid = document.getElementById('terminalsGrid');
+        const card = document.getElementById(`tc-${index}`);
+        const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
+        const rects = visualIndex >= 0 ? ensureSplitSlotRects() : [];
+        const rect = rects[visualIndex];
+        const axis = rect ? chooseSplitAxis(index, rect) : '';
+        const splitLimit = getSplitPaneLimit();
+        const disabledReason = window.innerWidth <= 700
+            ? 'Splitting is disabled on narrow screens'
+            : terminals.length >= splitLimit
+                ? `Splitting is limited to ${splitLimit} terminal panes for this launcher layout`
+                : 'This pane is already at the smallest split size';
+
+        button.disabled = !axis;
+        button.title = axis ? 'Split this terminal pane' : disabledReason;
+        button.setAttribute('aria-label', button.title);
+    }
+
+    function updateUnsplitButtonState(index) {
+        const button = document.getElementById(`tunsplit-${index}`);
+        if (!button) {
+            return;
+        }
+
+        const grid = document.getElementById('terminalsGrid');
+        const card = document.getElementById(`tc-${index}`);
+        const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
+        const rect = visualIndex >= 0 && Array.isArray(splitSlotRects) ? splitSlotRects[visualIndex] : null;
+        const canUnsplit = Boolean(rect?.ancestors?.length || rect?.splitId);
+        button.hidden = !canUnsplit;
+        button.disabled = !canUnsplit;
+        button.title = canUnsplit ? 'Close this split pane' : 'This pane is not a split branch';
+        button.setAttribute('aria-label', button.title);
+    }
+
+    function updateAllSplitButtonStates() {
+        terminals.forEach((_, index) => {
+            updateSplitButtonState(index);
+            updateUnsplitButtonState(index);
+        });
+    }
+
     function hasMatchingSessionIds(existingIds, sessions) {
         if (!Array.isArray(existingIds) || !Array.isArray(sessions) || existingIds.length !== sessions.length) {
             return false;
@@ -2134,7 +2693,7 @@
         const cols = terminal.term.cols;
         const rows = terminal.term.rows;
 
-        if (cols < 20 || rows < 5) {
+        if (cols < MIN_SPLIT_COLS || rows < MIN_SPLIT_ROWS) {
             return;
         }
 
@@ -2489,6 +3048,10 @@
         parent.replaceChild(cardA, cardB);
         parent.replaceChild(cardB, placeholder);
 
+        if (splitSlotRects) {
+            applySplitSlotGeometry({ fit: false });
+        }
+
         const firstIndex = Number(cardA.dataset.slot);
         const secondIndex = Number(cardB.dataset.slot);
         if (Number.isInteger(firstIndex)) {
@@ -2579,6 +3142,7 @@
         });
         clearSessionRoutes(sessionIds);
         cachedGroupViews.delete(visibleGroupId);
+        clearSplitSlotGeometry();
         resizeObservers = [];
         terminals  = [];
         sessionIds = [];
@@ -2597,6 +3161,8 @@
         if (grid.children.length > 0 || terminals.length > 0 || sessionIds.length > 0) {
             teardownCurrentGrid();
         }
+        clearSplitSlotGeometry();
+        originalSplitSlotCount = count;
         grid.className = getLayoutClass(count, layout);
         const gridMetrics = getGridMetrics(count);
         if (gridMetrics) {
@@ -2659,6 +3225,29 @@
                         >
                             ↻
                         </button>
+                        ${!isExplorer ? `
+                            <button
+                                type="button"
+                                class="terminal-action-btn terminal-split-btn"
+                                id="tsplit-${i}"
+                                data-terminal-split="${i}"
+                                title="Split this terminal pane"
+                                aria-label="Split this terminal pane"
+                            >
+                                ⊞
+                            </button>
+                            <button
+                                type="button"
+                                class="terminal-action-btn terminal-unsplit-btn"
+                                id="tunsplit-${i}"
+                                data-terminal-unsplit="${i}"
+                                title="Close this split pane"
+                                aria-label="Close this split pane"
+                                hidden
+                            >
+                                ⊟
+                            </button>
+                        ` : ''}
                         ${isExplorer ? `
                             <button
                                 type="button"
@@ -2841,6 +3430,32 @@
                     event.preventDefault();
                     event.stopPropagation();
                     refreshTerminalDisplay(i);
+                });
+            }
+            const splitButton = card.querySelector(`[data-terminal-split="${i}"]`);
+            if (splitButton) {
+                splitButton.draggable = false;
+                splitButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                splitButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    splitTerminalPane(i);
+                });
+            }
+            const unsplitButton = card.querySelector(`[data-terminal-unsplit="${i}"]`);
+            if (unsplitButton) {
+                unsplitButton.draggable = false;
+                unsplitButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                unsplitButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    closeSplitPane(i);
                 });
             }
             const explorerThemeButton = card.querySelector(`[data-explorer-theme-toggle="${i}"]`);
@@ -3032,12 +3647,408 @@
         gridBuilt = true;
         visibleGroupId = activeGroupId;
         updateSessionChrome(count, activeGroupId);
+        updateAllSplitButtonStates();
 
         /* Restore voice panel if it was open last time */
         if (_voicePrefs.panelOpen && terminals.length > 0) {
             const restoreIndex = _focusedTerminalIndex >= 0 && _focusedTerminalIndex < terminals.length
                 ? _focusedTerminalIndex : 0;
             _toggleVoicePanel(restoreIndex);
+        }
+    }
+
+    function remapCardIndexAttributes(card, sourceIndex, targetIndex) {
+        const sourceSuffix = `-${sourceIndex}`;
+        const targetSuffix = `-${targetIndex}`;
+        card.querySelectorAll('[id]').forEach(element => {
+            if (element.id.endsWith(sourceSuffix)) {
+                element.id = `${element.id.slice(0, -sourceSuffix.length)}${targetSuffix}`;
+            }
+        });
+        card.querySelectorAll('*').forEach(element => {
+            Array.from(element.attributes).forEach(attribute => {
+                if (attribute.name === 'for' && attribute.value.endsWith(sourceSuffix)) {
+                    element.setAttribute(attribute.name, `${attribute.value.slice(0, -sourceSuffix.length)}${targetSuffix}`);
+                    return;
+                }
+                if (!attribute.name.startsWith('data-')) {
+                    return;
+                }
+                if (attribute.value === String(sourceIndex)) {
+                    element.setAttribute(attribute.name, String(targetIndex));
+                }
+            });
+        });
+    }
+
+    function stopHeaderButtonDrag(button) {
+        if (!button) {
+            return;
+        }
+        button.draggable = false;
+        button.addEventListener('mousedown', event => {
+            event.preventDefault();
+            event.stopPropagation();
+        });
+    }
+
+    function wireSplitCardControls(card, index) {
+        wireCardDragAndDrop(card, card.querySelector('.terminal-header'));
+
+        const refreshButton = card.querySelector(`[data-terminal-refresh="${index}"]`);
+        if (refreshButton) {
+            stopHeaderButtonDrag(refreshButton);
+            refreshButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                refreshTerminalDisplay(index);
+            });
+        }
+
+        const splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
+        if (splitButton) {
+            stopHeaderButtonDrag(splitButton);
+            splitButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                splitTerminalPane(index);
+            });
+        }
+
+        const unsplitButton = card.querySelector(`[data-terminal-unsplit="${index}"]`);
+        if (unsplitButton) {
+            stopHeaderButtonDrag(unsplitButton);
+            unsplitButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                closeSplitPane(index);
+            });
+        }
+
+        const clearButton = card.querySelector(`[data-terminal-clear="${index}"]`);
+        if (clearButton) {
+            stopHeaderButtonDrag(clearButton);
+            clearButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                clearTerminalDisplay(index);
+            });
+        }
+
+        const voiceButton = card.querySelector(`[data-terminal-voice="${index}"]`);
+        if (voiceButton) {
+            stopHeaderButtonDrag(voiceButton);
+            voiceButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                _toggleVoice(index);
+            });
+        }
+
+        const voiceSettingsButton = card.querySelector(`[data-terminal-voice-settings="${index}"]`);
+        if (voiceSettingsButton) {
+            stopHeaderButtonDrag(voiceSettingsButton);
+            voiceSettingsButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                _toggleVoicePanel(index);
+            });
+        }
+
+        const voiceProfileSelect = card.querySelector(`[data-terminal-voice-profile="${index}"]`);
+        if (voiceProfileSelect) {
+            voiceProfileSelect.addEventListener('mousedown', event => event.stopPropagation());
+            voiceProfileSelect.addEventListener('change', event => {
+                event.stopPropagation();
+                _setVoiceProfile(event.target.value, index);
+            });
+        }
+
+        const voiceDeviceSelect = card.querySelector(`[data-terminal-voice-device="${index}"]`);
+        if (voiceDeviceSelect) {
+            voiceDeviceSelect.addEventListener('mousedown', event => event.stopPropagation());
+            voiceDeviceSelect.addEventListener('change', event => {
+                event.stopPropagation();
+                _setVoiceDevice(event.target.value, index);
+            });
+        }
+
+        const voiceRefreshButton = card.querySelector(`[data-terminal-voice-refresh="${index}"]`);
+        if (voiceRefreshButton) {
+            stopHeaderButtonDrag(voiceRefreshButton);
+            voiceRefreshButton.addEventListener('click', async event => {
+                event.preventDefault();
+                event.stopPropagation();
+                await _refreshVoiceDevices(index);
+            });
+        }
+
+        const pttToggle = card.querySelector(`[data-terminal-voice-ptt="${index}"]`);
+        if (pttToggle) {
+            stopHeaderButtonDrag(pttToggle);
+            pttToggle.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                _setPttEnabled(!_voicePrefs.pttEnabled, index);
+            });
+        }
+
+        const pttKeybindInput = card.querySelector(`[data-terminal-voice-ptt-keybind="${index}"]`);
+        if (pttKeybindInput) {
+            pttKeybindInput.addEventListener('mousedown', event => event.stopPropagation());
+            pttKeybindInput.addEventListener('keydown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (_isValidPttKeybind(event)) {
+                    _setPttKeybind(_formatPttKeybind(event), index);
+                } else {
+                    pttKeybindInput.value = _formatPttKeybind(event) + '…';
+                }
+            });
+        }
+
+        const enterButton = card.querySelector(`[data-terminal-enter="${index}"]`);
+        if (enterButton) {
+            stopHeaderButtonDrag(enterButton);
+            enterButton.addEventListener('click', async event => {
+                event.preventDefault();
+                event.stopPropagation();
+                await _sendEnterShortcut(index);
+            });
+        }
+
+        const clearLineButton = card.querySelector(`[data-terminal-clearline="${index}"]`);
+        if (clearLineButton) {
+            stopHeaderButtonDrag(clearLineButton);
+            clearLineButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                _sendToTerminal(index, '\x15');
+            });
+        }
+
+        _syncVoiceControls(index);
+    }
+
+    function createSplitTerminalCard(sourceCard, session, sourceIndex, targetIndex) {
+        const card = sourceCard.cloneNode(true);
+        card.classList.remove('dragging', 'drag-target', 'explorer-pane');
+        card.id = `tc-${targetIndex}`;
+        card.dataset.slot = String(targetIndex);
+        delete card.dataset.explorerThemeKey;
+        delete card.dataset.explorerThemeSource;
+        delete card.dataset.explorerTheme;
+        remapCardIndexAttributes(card, sourceIndex, targetIndex);
+
+        card.style.gridColumn = '';
+        card.style.gridRow = '';
+        const sessionColour = tabColourForGroup(activeGroupId);
+        card.style.setProperty('--session-color', sessionColour);
+        card.style.setProperty('--session-color-dim', hexToRgba(sessionColour, 0.45));
+
+        const name = card.querySelector(`#tname-${targetIndex}`);
+        if (name) {
+            name.textContent = session.title || `Terminal ${targetIndex + 1}`;
+        }
+        const host = card.querySelector(`#thost-${targetIndex}`);
+        if (host) {
+            host.textContent = session.host || '';
+        }
+        const dot = card.querySelector(`#tdot-${targetIndex}`);
+        if (dot) {
+            dot.className = `status-dot ${session.status || 'pending'}`;
+        }
+        const label = card.querySelector(`#tlabel-${targetIndex}`);
+        if (label) {
+            label.textContent = session.status === 'connected' ? 'Connected' : 'Pending';
+        }
+        const splitButton = card.querySelector(`#tsplit-${targetIndex}`);
+        if (splitButton) {
+            splitButton.textContent = '⊞';
+            splitButton.disabled = false;
+        }
+        const unsplitButton = card.querySelector(`#tunsplit-${targetIndex}`);
+        if (unsplitButton) {
+            unsplitButton.textContent = '⊟';
+            unsplitButton.hidden = false;
+            unsplitButton.disabled = false;
+        }
+
+        const wrapper = card.querySelector(`#tw-${targetIndex}`);
+        if (wrapper) {
+            wrapper.innerHTML = `
+                <div class="terminal-surface">
+                    <div class="terminal-canvas" id="tcanvas-${targetIndex}"></div>
+                </div>
+                <div class="placeholder" id="ph-${targetIndex}">
+                    <div class="spinner"></div>
+                    <span style="font-size:.78rem">Connecting…</span>
+                </div>
+            `;
+        }
+
+        wireSplitCardControls(card, targetIndex);
+        return card;
+    }
+
+    function attachSplitTerminalEvents(index) {
+        const terminal = terminals[index];
+        if (!terminal?.term) {
+            return;
+        }
+
+        terminal.term.onData(data => {
+            _focusedTerminalIndex = index;
+            const sid = sessionIds[index];
+            if (sid && socket) socket.emit('terminal_input', { session_id: sid, data });
+        });
+        const card = document.getElementById(`tc-${index}`);
+        if (card) {
+            card.addEventListener('pointerdown', () => {
+                _focusedTerminalIndex = index;
+            });
+        }
+    }
+
+    async function closeSplitPane(index) {
+        const plan = buildCloseSplitPlan(index);
+        if (!plan) {
+            updateUnsplitButtonState(index);
+            return;
+        }
+
+        const button = document.getElementById(`tunsplit-${index}`);
+        if (button) {
+            button.disabled = true;
+            button.textContent = '...';
+        }
+
+        try {
+            for (const sessionId of plan.sessionIdsToClose) {
+                const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+                    method: 'DELETE',
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(data.error || `Close split failed with status ${response.status}`);
+                }
+            }
+
+            pendingSplitRestore = {
+                groupId: activeGroupId,
+                rectsBySessionId: plan.rectsBySessionId,
+                originalSplitSlotCount: plan.originalSplitSlotCount,
+            };
+            await initialLoad();
+        } catch (error) {
+            console.error('[GridVibe Sessions] closeSplitPane failed:', error);
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = `Close split failed: ${error.message}`;
+            }
+        } finally {
+            if (button) {
+                button.textContent = '⊟';
+            }
+            updateAllSplitButtonStates();
+        }
+    }
+
+    async function splitTerminalPane(index) {
+        const sourceSessionId = sessionIds[index];
+        const sourceTerminal = terminals[index];
+        const sourceCard = document.getElementById(`tc-${index}`);
+        const grid = document.getElementById('terminalsGrid');
+        const button = document.getElementById(`tsplit-${index}`);
+        if (!sourceSessionId || !sourceTerminal || !sourceCard || !grid || isExplorerSession(sourceTerminal._session)) {
+            return;
+        }
+        if (terminals.length >= getSplitPaneLimit()) {
+            updateAllSplitButtonStates();
+            return;
+        }
+
+        const visualIndex = Array.from(grid.children).indexOf(sourceCard);
+        if (visualIndex < 0) {
+            return;
+        }
+
+        const rects = ensureSplitSlotRects();
+        const sourceRect = rects[visualIndex];
+        const axis = sourceRect ? chooseSplitAxis(index, sourceRect) : '';
+        if (!axis) {
+            updateSplitButtonState(index);
+            return;
+        }
+
+        if (button) {
+            button.disabled = true;
+            button.textContent = '...';
+        }
+
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sourceSessionId)}/split`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ axis })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Split failed with status ${response.status}`);
+            }
+
+            const session = data.session;
+            if (!session?.session_id) {
+                throw new Error('Split response did not include a session');
+            }
+
+            const newIndex = terminals.length;
+            const terminal = makeTerminal();
+            terminal._session = session;
+            terminals.push(terminal);
+            sessionIds.push(session.session_id);
+            setSessionRoute(session.session_id, activeGroupId, newIndex);
+
+            const newCard = createSplitTerminalCard(sourceCard, session, index, newIndex);
+            sourceCard.after(newCard);
+            const [firstRect, secondRect] = splitSlotRect(sourceRect, axis);
+            splitSlotRects.splice(visualIndex, 1, firstRect, secondRect);
+            applySplitSlotGeometry({ fit: false });
+            attachSplitTerminalEvents(newIndex);
+
+            if (socket) {
+                socket.emit('join_session', { session_id: session.session_id });
+            }
+            if (session.status === 'connected') {
+                attachTerminal(newIndex);
+            }
+
+            if (data.group) {
+                const groupIndex = sessionGroups.findIndex(group => group.group_id === data.group.group_id);
+                if (groupIndex >= 0) {
+                    sessionGroups[groupIndex] = data.group;
+                } else {
+                    sessionGroups.push(data.group);
+                }
+                renderSessionTabs();
+            }
+
+            updateSessionChrome(terminals.length, activeGroupId);
+            updateAllSplitButtonStates();
+            await ensureAttachedTerminalsReady([index, newIndex]);
+            emitTerminalResize(index, true);
+            emitTerminalResize(newIndex, true);
+        } catch (error) {
+            console.error('[GridVibe Sessions] splitTerminalPane failed:', error);
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = `Split failed: ${error.message}`;
+            }
+        } finally {
+            if (button) {
+                button.textContent = '⊞';
+            }
+            updateAllSplitButtonStates();
         }
     }
 
@@ -4305,7 +5316,7 @@
                 gridBuilt
                 && visibleGroupId === requestedGroupId
                 && terminals.length === data.sessions.length
-                && grid.className === expectedLayoutClass
+                && (grid.className === expectedLayoutClass || grid.className === 'layout-split-local')
                 && hasMatchingSessionIds(sessionIds, data.sessions)
             );
             let restoredFromCache = false;
@@ -4319,7 +5330,7 @@
                 if (cached) {
                     const cachedMatches = (
                         cached.terminals?.length === data.sessions.length
-                        && cached.className === expectedLayoutClass
+                        && (cached.className === expectedLayoutClass || cached.className === 'layout-split-local')
                         && hasMatchingSessionIds(cached.sessionIds || [], data.sessions)
                     );
                     if (cachedMatches) {
@@ -4356,6 +5367,23 @@
                     showPlaceholderError(i, session.error_message || 'Connection failed');
                 }
             });
+
+            const pendingRestore = pendingSplitRestore?.groupId === requestedGroupId
+                ? pendingSplitRestore
+                : null;
+            if (pendingRestore) {
+                const restoredRects = data.sessions
+                    .map(session => pendingRestore.rectsBySessionId[session.session_id])
+                    .filter(Boolean);
+                if (restoredRects.length === data.sessions.length && restoredRects.length > 0) {
+                    originalSplitSlotCount = Number(
+                        pendingRestore.originalSplitSlotCount || originalSplitSlotCount || data.sessions.length
+                    );
+                    splitSlotRects = cloneSplitSlotRects(restoredRects);
+                    applySplitSlotGeometry({ fit: false });
+                }
+                pendingSplitRestore = null;
+            }
 
             updateSessionChrome(data.sessions.length, requestedGroupId);
             await ensureAttachedTerminalsReady(attachedIndices);
@@ -4529,6 +5557,10 @@
         document.getElementById('terminalsGrid').style.display = '';
         document.getElementById('terminalsGrid').style.removeProperty('--grid-columns');
         document.getElementById('terminalsGrid').style.removeProperty('--grid-rows');
+        document.getElementById('terminalsGrid').style.removeProperty('--split-grid-columns');
+        document.getElementById('terminalsGrid').style.removeProperty('--split-grid-rows');
+        splitSlotRects = null;
+        pendingSplitRestore = null;
         document.getElementById('emptyState').classList.add('visible');
         document.getElementById('sessionLabel').textContent = sessionGroups.length ? 'No terminals in this session' : 'No sessions';
         document.title = 'GridVibe — Terminals';
@@ -4601,9 +5633,10 @@
 
             const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
             const sessionIdsChanged = !hasMatchingSessionIds(sessionIds, data.sessions);
+            const currentLayoutClass = document.getElementById('terminalsGrid').className;
             if (
                 terminals.length !== data.sessions.length
-                || document.getElementById('terminalsGrid').className !== expectedLayoutClass
+                || (currentLayoutClass !== expectedLayoutClass && currentLayoutClass !== 'layout-split-local')
                 || sessionIdsChanged
             ) {
                 await initialLoad();

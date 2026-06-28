@@ -199,6 +199,52 @@ class SessionManager:
         logger.info(f"Created session {session_id} for {host}")
         return session
 
+    def append_session_to_group(
+        self,
+        group_id: str,
+        host: str,
+        directory: str,
+        username: str = "root",
+        port: int = 22,
+        password: Optional[str] = None,
+        initial_command: Optional[str] = None,
+        title: Optional[str] = None,
+        mode: str = "ssh",
+        distribution: Optional[str] = None,
+        use_wsl: bool = False,
+        use_powershell: bool = False,
+        startup_mode: str = "terminal",
+    ) -> Optional[TerminalSession]:
+        """Append one session to an existing group and update its count."""
+        session_id = str(uuid.uuid4())[:8]
+        session = TerminalSession(
+            session_id=session_id,
+            group_id=group_id,
+            host=host,
+            directory=directory,
+            username=username,
+            port=port,
+            password=password,
+            initial_command=initial_command,
+            title=title,
+            mode=mode,
+            distribution=distribution,
+            use_wsl=use_wsl,
+            use_powershell=use_powershell,
+            startup_mode=startup_mode,
+            status=SessionStatus.PENDING,
+        )
+
+        with self.lock:
+            group = self.groups.get(group_id)
+            if group is None:
+                return None
+            self.sessions[session_id] = session
+            group.terminal_count += 1
+
+        logger.info(f"Appended session {session_id} to group {group_id} for {host}")
+        return session
+
     def create_sessions(
         self,
         sessions_config: List[Dict[str, Any]],
@@ -458,10 +504,16 @@ class SessionManager:
                 if sid in self._session_callbacks:
                     del self._session_callbacks[sid]
 
-            active_group_ids = {session.group_id for session in self.sessions.values()}
+            active_group_counts: Dict[str, int] = {}
+            for session in self.sessions.values():
+                active_group_counts[session.group_id] = active_group_counts.get(session.group_id, 0) + 1
             disconnected_groups = [
                 group_id for group_id in self.groups
-                if group_id not in active_group_ids
+                if group_id not in active_group_counts
             ]
             for group_id in disconnected_groups:
                 del self.groups[group_id]
+            for group_id, count in active_group_counts.items():
+                group = self.groups.get(group_id)
+                if group is not None:
+                    group.terminal_count = count

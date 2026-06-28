@@ -1846,8 +1846,8 @@ def _send_connection_input(connection: Dict[str, Any], input_data: str):
 
 def _resize_connection(connection: Dict[str, Any], cols: Any, rows: Any):
     """Resize an active remote or local terminal session."""
-    cols = max(20, min(int(cols), 400))
-    rows = max(5, min(int(rows), 200))
+    cols = max(8, min(int(cols), 400))
+    rows = max(8, min(int(rows), 200))
     kind = connection.get("kind")
 
     if kind == "ssh":
@@ -3266,6 +3266,61 @@ def get_session(session_id: str):
     return jsonify(session.to_dict())
 
 
+@app.route('/api/sessions/<session_id>/split', methods=['POST'])
+def split_session(session_id: str):
+    """Append one cloned terminal session to the source session's group."""
+    source = session_manager.get_session(session_id)
+    if not source:
+        return jsonify({"error": "Session not found"}), 404
+
+    if _is_explorer_session(source):
+        return jsonify({"error": "Explorer panes cannot be split"}), 400
+
+    group = session_manager.get_group(source.group_id)
+    if not group:
+        return jsonify({"error": "Session group not found"}), 404
+
+    group_sessions = session_manager.get_group_sessions(group.group_id)
+    if len(group_sessions) >= max_sessions:
+        return jsonify({"error": f"Maximum {max_sessions} sessions allowed"}), 400
+
+    title = f"Terminal {len(group_sessions) + 1}"
+    new_session = session_manager.append_session_to_group(
+        group_id=group.group_id,
+        host=source.host,
+        directory=source.directory,
+        username=source.username,
+        port=source.port,
+        password=source.password,
+        initial_command=None,
+        title=title,
+        mode=source.mode,
+        distribution=source.distribution,
+        use_wsl=source.use_wsl,
+        use_powershell=source.use_powershell,
+        startup_mode=source.startup_mode,
+    )
+    if not new_session:
+        return jsonify({"error": "Session group not found"}), 404
+
+    logger.info(
+        "Split session source_id=%s new_session_id=%s group_id=%s",
+        source.session_id,
+        new_session.session_id,
+        group.group_id,
+    )
+    socketio.start_background_task(_connect_session, new_session.session_id)
+
+    return jsonify(
+        {
+            "session": new_session.to_dict(),
+            "group_id": group.group_id,
+            "group": group.to_dict(),
+            "terminal_count": group.terminal_count,
+        }
+    ), 201
+
+
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 def close_session(session_id: str):
     """Close a specific session."""
@@ -3325,6 +3380,8 @@ _TERMINAL_QUERY_RE = re.compile(
     r'(?:0?c|\?[0-9;]*c)'  # Device Attributes request or response
     r'|'
     r'\x1b\[[56]n'  # Device Status Report / Cursor Position Report
+    r'|'
+    r'\x1b\](?:1[012]);\?(?:\x07|\x1b\\)'  # OSC foreground/background/cursor color query
 )
 
 

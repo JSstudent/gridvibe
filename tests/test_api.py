@@ -2415,6 +2415,92 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.get_json(), {"error": "Session not found"})
 
+    def test_split_session_appends_cloned_terminal_to_group(self):
+        api.session_manager.create_group(
+            name="Manual",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-manual",
+        )
+        source = api.session_manager.create_session(
+            group_id="group-manual",
+            host="10.0.0.12",
+            directory="/tmp/project",
+            username="alice",
+            port=2200,
+            password="secret",
+            initial_command="codex",
+            title="Primary",
+        )
+
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post(f"/api/sessions/{source.session_id}/split")
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        created = payload["session"]
+        self.assertEqual(created["group_id"], "group-manual")
+        self.assertEqual(created["host"], "10.0.0.12")
+        self.assertEqual(created["directory"], "/tmp/project")
+        self.assertEqual(created["username"], "alice")
+        self.assertEqual(created["port"], 2200)
+        self.assertIsNone(created["initial_command"])
+        self.assertNotIn("password", created)
+        self.assertEqual(payload["group"]["terminal_count"], 2)
+
+        stored = api.session_manager.get_session(created["session_id"])
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.password, "secret")
+        self.assertIsNone(stored.initial_command)
+        start_task.assert_called_once_with(api._connect_session, created["session_id"])
+
+    def test_split_session_rejects_explorer_pane(self):
+        api.session_manager.create_group(
+            name="Explorer",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+            group_id="group-explorer",
+        )
+        source = api.session_manager.create_session(
+            group_id="group-explorer",
+            host="File Explorer",
+            directory="/tmp/project",
+            mode="wsl",
+            startup_mode="explorer",
+        )
+
+        response = self.client.post(f"/api/sessions/{source.session_id}/split")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {"error": "Explorer panes cannot be split"})
+
+    def test_split_session_rejects_group_at_max_sessions(self):
+        api.session_manager.create_group(
+            name="Full",
+            connection_mode="ssh",
+            layout="grid",
+            terminal_count=api.max_sessions,
+            group_id="group-full",
+        )
+        source = None
+        for index in range(api.max_sessions):
+            session = api.session_manager.create_session(
+                group_id="group-full",
+                host=f"10.0.0.{index + 1}",
+                directory="/tmp/project",
+            )
+            source = source or session
+
+        response = self.client.post(f"/api/sessions/{source.session_id}/split")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.get_json(),
+            {"error": f"Maximum {api.max_sessions} sessions allowed"},
+        )
+
     def test_delete_session_closes_and_removes_it(self):
         api.session_manager.create_group(
             name="Manual",
@@ -2454,7 +2540,11 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         with api.connection_lock:
             api.session_output_buffers[session.session_id] = (
-                f"boot{api.WINDOWS_DEVICE_ATTRIBUTES_RESPONSE}prompt"
+                "boot"
+                f"{api.WINDOWS_DEVICE_ATTRIBUTES_RESPONSE}"
+                "\x1b]10;?\x07"
+                "\x1b]11;?\x1b\\"
+                "prompt"
             )
 
         socket_client = api.socketio.test_client(
