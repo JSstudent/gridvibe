@@ -1579,6 +1579,7 @@
     let activeLoadToken = 0;
     let knownGroupIds = [];
     let pendingSplitRestore = null;
+    let pendingModeSwitchSessionIds = new Set();
     const MAX_SPLIT_TERMINALS = Math.min(8, Number({{ max_sessions | tojson }} || 8));
     const MIN_SPLIT_COLS = 8;
     const MIN_SPLIT_ROWS = 8;
@@ -1597,6 +1598,10 @@
 
     function isExplorerSession(session) {
         return session?.mode === 'wsl' && session?.startup_mode === 'explorer';
+    }
+
+    function isExplorerPaneInstance(terminal) {
+        return terminal?._paneType === 'explorer';
     }
 
     function getSessionApiPath(groupId = activeGroupId) {
@@ -1675,6 +1680,19 @@
         (targetObservers || []).forEach(observer => observer.disconnect());
     }
 
+    function disconnectTerminalObserver(index) {
+        const terminal = terminals[index];
+        const observer = terminal?._resizeObserver;
+        if (!observer) {
+            return;
+        }
+
+        observer.disconnect();
+        resizeObservers = resizeObservers.filter(item => item !== observer);
+        terminal._resizeObserver = null;
+        terminal._resizeObserved = false;
+    }
+
     function observeTerminalResize(index) {
         const terminal = terminals[index];
         if (!terminal || terminal._resizeObserved || !('ResizeObserver' in window)) {
@@ -1693,6 +1711,7 @@
         observer.observe(wrapper);
         resizeObservers.push(observer);
         terminal._resizeObserved = true;
+        terminal._resizeObserver = observer;
     }
 
     function restoreActiveTerminalObservers() {
@@ -2612,6 +2631,13 @@
             return;
         }
 
+        if (isExplorerSession(terminals[index]?._session)) {
+            button.hidden = true;
+            button.disabled = true;
+            return;
+        }
+
+        button.hidden = false;
         const grid = document.getElementById('terminalsGrid');
         const card = document.getElementById(`tc-${index}`);
         const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
@@ -2633,6 +2659,12 @@
     function updateUnsplitButtonState(index) {
         const button = document.getElementById(`tunsplit-${index}`);
         if (!button) {
+            return;
+        }
+
+        if (isExplorerSession(terminals[index]?._session)) {
+            button.hidden = true;
+            button.disabled = true;
             return;
         }
 
@@ -2660,6 +2692,16 @@
         }
 
         return existingIds.every((sessionId, index) => sessionId === sessions[index]?.session_id);
+    }
+
+    function hasMatchingSessionViews(existingIds, existingTerminals, sessions) {
+        if (!hasMatchingSessionIds(existingIds, sessions) || !Array.isArray(existingTerminals)) {
+            return false;
+        }
+
+        return sessions.every((session, index) => (
+            isExplorerPaneInstance(existingTerminals[index]) === isExplorerSession(session)
+        ));
     }
 
     /* ─────────────────────────────────────────────
@@ -3225,6 +3267,16 @@
                         >
                             ↻
                         </button>
+                        <button
+                            type="button"
+                            class="terminal-action-btn terminal-mode-toggle-btn"
+                            id="tmode-${i}"
+                            data-session-mode-toggle="${i}"
+                            title="${isExplorer ? 'Open terminal in current explorer directory' : 'Open file explorer for this terminal directory'}"
+                            aria-label="${isExplorer ? 'Open terminal in current explorer directory' : 'Open file explorer for this terminal directory'}"
+                        >
+                            ${isExplorer ? '&gt;_' : '📁'}
+                        </button>
                         ${!isExplorer ? `
                             <button
                                 type="button"
@@ -3430,6 +3482,19 @@
                     event.preventDefault();
                     event.stopPropagation();
                     refreshTerminalDisplay(i);
+                });
+            }
+            const modeToggleButton = card.querySelector(`[data-session-mode-toggle="${i}"]`);
+            if (modeToggleButton) {
+                modeToggleButton.draggable = false;
+                modeToggleButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                modeToggleButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    switchSessionPaneMode(i);
                 });
             }
             const splitButton = card.querySelector(`[data-terminal-split="${i}"]`);
@@ -3705,6 +3770,16 @@
             });
         }
 
+        const modeToggleButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
+        if (modeToggleButton) {
+            stopHeaderButtonDrag(modeToggleButton);
+            modeToggleButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                switchSessionPaneMode(index);
+            });
+        }
+
         const splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
         if (splitButton) {
             stopHeaderButtonDrag(splitButton);
@@ -3907,6 +3982,328 @@
             card.addEventListener('pointerdown', () => {
                 _focusedTerminalIndex = index;
             });
+        }
+    }
+
+    function getExplorerSelectedDirectory(index) {
+        const pane = terminals[index];
+        if (!pane || !isExplorerSession(pane._session)) {
+            return '';
+        }
+
+        return pane._explorerPath || '';
+    }
+
+    function updateModeToggleButton(button, isExplorer, loading = false) {
+        if (!button) {
+            return;
+        }
+
+        const label = isExplorer
+            ? 'Open terminal in current explorer directory'
+            : 'Open file explorer for this terminal directory';
+        button.disabled = loading;
+        button.textContent = loading ? '...' : (isExplorer ? '>_' : '📁');
+        button.title = label;
+        button.setAttribute('aria-label', label);
+    }
+
+    function setTerminalOnlyControlsVisible(card, visible) {
+        ['data-terminal-split', 'data-terminal-unsplit'].forEach(attribute => {
+            const button = card.querySelector(`[${attribute}]`);
+            if (button) {
+                button.hidden = !visible;
+            }
+        });
+    }
+
+    function wireExplorerOnlyControls(card, index) {
+        const explorerThemeButton = card.querySelector(`[data-explorer-theme-toggle="${index}"]`);
+        if (explorerThemeButton && !explorerThemeButton.dataset.bound) {
+            explorerThemeButton.dataset.bound = 'true';
+            explorerThemeButton.draggable = false;
+            updateExplorerThemeButton(explorerThemeButton, card.dataset.explorerTheme || 'dark');
+            explorerThemeButton.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            explorerThemeButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleExplorerTheme(index);
+            });
+        }
+
+        const explorerUpButton = card.querySelector(`[data-explorer-up="${index}"]`);
+        if (explorerUpButton && !explorerUpButton.dataset.bound) {
+            explorerUpButton.dataset.bound = 'true';
+            explorerUpButton.draggable = false;
+            explorerUpButton.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            explorerUpButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                const pane = terminals[index];
+                const targetPath = pane?._explorerMode === 'file'
+                    ? (pane._explorerPath || '')
+                    : (pane?._explorerParentPath || '');
+                loadExplorerPane(index, targetPath);
+            });
+        }
+    }
+
+    function ensureExplorerThemeButton(card, index) {
+        let button = card.querySelector(`[data-explorer-theme-toggle="${index}"]`);
+        if (button) {
+            button.hidden = false;
+            return button;
+        }
+
+        const modeButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
+        if (!modeButton) {
+            return null;
+        }
+
+        modeButton.insertAdjacentHTML('afterend', `
+            <button
+                type="button"
+                class="terminal-action-btn explorer-theme-btn"
+                id="texplorertheme-${index}"
+                data-explorer-theme-toggle="${index}"
+                title="Dark explorer theme"
+                aria-label="Dark explorer theme"
+                aria-pressed="false"
+            >
+                ☾
+            </button>
+        `);
+        button = card.querySelector(`[data-explorer-theme-toggle="${index}"]`);
+        return button;
+    }
+
+    function ensureSplitControls(card, index) {
+        let splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
+        if (splitButton) {
+            splitButton.hidden = false;
+            return;
+        }
+
+        const modeButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
+        if (!modeButton) {
+            return;
+        }
+
+        modeButton.insertAdjacentHTML('afterend', `
+            <button
+                type="button"
+                class="terminal-action-btn terminal-split-btn"
+                id="tsplit-${index}"
+                data-terminal-split="${index}"
+                title="Split this terminal pane"
+                aria-label="Split this terminal pane"
+            >
+                ⊞
+            </button>
+            <button
+                type="button"
+                class="terminal-action-btn terminal-unsplit-btn"
+                id="tunsplit-${index}"
+                data-terminal-unsplit="${index}"
+                title="Close this split pane"
+                aria-label="Close this split pane"
+                hidden
+            >
+                ⊟
+            </button>
+        `);
+
+        splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
+        if (splitButton) {
+            stopHeaderButtonDrag(splitButton);
+            splitButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                splitTerminalPane(index);
+            });
+        }
+
+        const unsplitButton = card.querySelector(`[data-terminal-unsplit="${index}"]`);
+        if (unsplitButton) {
+            stopHeaderButtonDrag(unsplitButton);
+            unsplitButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                closeSplitPane(index);
+            });
+        }
+    }
+
+    function replacePaneWithExplorer(index, session) {
+        const card = document.getElementById(`tc-${index}`);
+        const wrapper = document.getElementById(`tw-${index}`);
+        if (!card || !wrapper) {
+            return false;
+        }
+
+        const previousTerminal = terminals[index];
+        if (previousTerminal?.term) {
+            try { previousTerminal.term.dispose(); } catch (_) {}
+        }
+        disconnectTerminalObserver(index);
+        if (socket && sessionIds[index]) {
+            socket.emit('leave_session', { session_id: sessionIds[index] });
+        }
+
+        const explorerThemeKey = session.session_id || `${activeGroupId || 'group'}:${index}`;
+        const initialExplorerTheme = getExplorerTheme(explorerThemeKey);
+        terminals[index] = { _session: session, _paneType: 'explorer', _attached: false };
+        sessionIds[index] = session.session_id;
+        setSessionRoute(session.session_id, activeGroupId, index);
+
+        card.classList.add('explorer-pane');
+        card.dataset.explorerThemeKey = explorerThemeKey;
+        card.dataset.explorerThemeSource = hasExplorerThemeOverride(explorerThemeKey) ? 'override' : 'default';
+        card.dataset.explorerTheme = initialExplorerTheme;
+        setTerminalOnlyControlsVisible(card, false);
+        ensureExplorerThemeButton(card, index);
+        applyExplorerThemeToCard(card, initialExplorerTheme);
+        const nameLabel = document.getElementById(`tname-${index}`);
+        const hostLabel = document.getElementById(`thost-${index}`);
+        if (nameLabel) {
+            nameLabel.textContent = session.title || `Terminal ${index + 1}`;
+        }
+        if (hostLabel) {
+            hostLabel.textContent = session.host || '';
+        }
+        updateModeToggleButton(card.querySelector(`[data-session-mode-toggle="${index}"]`), true);
+        wrapper.innerHTML = `
+            <div class="terminal-surface">
+                <div class="explorer-surface" id="explorer-${index}">
+                    <div class="explorer-bar">
+                        <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
+                        <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
+                    </div>
+                    <div class="explorer-list" id="explorer-list-${index}">
+                        <div class="explorer-message">Loading directory...</div>
+                    </div>
+                </div>
+            </div>
+            <div class="placeholder" id="ph-${index}">
+                <div class="spinner"></div>
+                <span style="font-size:.78rem">Loading explorer...</span>
+            </div>
+        `;
+        wireExplorerOnlyControls(card, index);
+        setStatus(index, session.status);
+        loadExplorerPane(index, null, { force: true });
+        updateAllSplitButtonStates();
+        return true;
+    }
+
+    function replacePaneWithTerminal(index, session) {
+        const card = document.getElementById(`tc-${index}`);
+        const wrapper = document.getElementById(`tw-${index}`);
+        if (!card || !wrapper) {
+            return false;
+        }
+
+        const terminal = makeTerminal();
+        terminal._session = session;
+        terminals[index] = terminal;
+        sessionIds[index] = session.session_id;
+        setSessionRoute(session.session_id, activeGroupId, index);
+
+        card.classList.remove('explorer-pane');
+        delete card.dataset.explorerThemeKey;
+        delete card.dataset.explorerThemeSource;
+        delete card.dataset.explorerTheme;
+        const explorerThemeButton = card.querySelector(`[data-explorer-theme-toggle="${index}"]`);
+        if (explorerThemeButton) {
+            explorerThemeButton.remove();
+        }
+        ensureSplitControls(card, index);
+        const nameLabel = document.getElementById(`tname-${index}`);
+        const hostLabel = document.getElementById(`thost-${index}`);
+        if (nameLabel) {
+            nameLabel.textContent = session.title || `Terminal ${index + 1}`;
+        }
+        if (hostLabel) {
+            hostLabel.textContent = session.host || '';
+        }
+        updateModeToggleButton(card.querySelector(`[data-session-mode-toggle="${index}"]`), false);
+        wrapper.innerHTML = `
+            <div class="terminal-surface">
+                <div class="terminal-canvas" id="tcanvas-${index}"></div>
+            </div>
+            <div class="placeholder" id="ph-${index}">
+                <div class="spinner"></div>
+                <span style="font-size:.78rem">Connecting...</span>
+            </div>
+        `;
+        attachSplitTerminalEvents(index);
+        setStatus(index, session.status);
+        if (socket) {
+            socket.emit('join_session', { session_id: session.session_id });
+        }
+        if (session.status === 'connected') {
+            attachTerminal(index);
+        }
+        updateAllSplitButtonStates();
+        return true;
+    }
+
+    function replaceSessionPaneMode(index, session) {
+        if (isExplorerSession(session)) {
+            return replacePaneWithExplorer(index, session);
+        }
+        return replacePaneWithTerminal(index, session);
+    }
+
+    async function switchSessionPaneMode(index) {
+        const sessionId = sessionIds[index];
+        const terminal = terminals[index];
+        const button = document.getElementById(`tmode-${index}`);
+        if (!sessionId || !terminal?._session) {
+            return;
+        }
+
+        const switchingToTerminal = isExplorerSession(terminal._session);
+        const targetMode = switchingToTerminal ? 'terminal' : 'explorer';
+        const body = { startup_mode: targetMode };
+        if (switchingToTerminal) {
+            body.directory = getExplorerSelectedDirectory(index);
+        } else if (terminal._session.directory) {
+            body.directory = terminal._session.directory;
+        }
+
+        updateModeToggleButton(button, switchingToTerminal, true);
+        pendingModeSwitchSessionIds.add(sessionId);
+
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/mode`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Mode switch failed with status ${response.status}`);
+            }
+
+            if (!replaceSessionPaneMode(index, data)) {
+                await initialLoad();
+            }
+        } catch (error) {
+            console.error('[GridVibe Sessions] switchSessionPaneMode failed:', error);
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = `Mode switch failed: ${error.message}`;
+            }
+            updateModeToggleButton(button, switchingToTerminal);
+        } finally {
+            pendingModeSwitchSessionIds.delete(sessionId);
         }
     }
 
@@ -5317,7 +5714,7 @@
                 && visibleGroupId === requestedGroupId
                 && terminals.length === data.sessions.length
                 && (grid.className === expectedLayoutClass || grid.className === 'layout-split-local')
-                && hasMatchingSessionIds(sessionIds, data.sessions)
+                && hasMatchingSessionViews(sessionIds, terminals, data.sessions)
             );
             let restoredFromCache = false;
 
@@ -5331,7 +5728,7 @@
                     const cachedMatches = (
                         cached.terminals?.length === data.sessions.length
                         && (cached.className === expectedLayoutClass || cached.className === 'layout-split-local')
-                        && hasMatchingSessionIds(cached.sessionIds || [], data.sessions)
+                        && hasMatchingSessionViews(cached.sessionIds || [], cached.terminals || [], data.sessions)
                     );
                     if (cachedMatches) {
                         restoredFromCache = restoreCachedGroupView(requestedGroupId);
@@ -5632,12 +6029,12 @@
             }
 
             const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
-            const sessionIdsChanged = !hasMatchingSessionIds(sessionIds, data.sessions);
+            const sessionViewsChanged = !hasMatchingSessionViews(sessionIds, terminals, data.sessions);
             const currentLayoutClass = document.getElementById('terminalsGrid').className;
             if (
                 terminals.length !== data.sessions.length
                 || (currentLayoutClass !== expectedLayoutClass && currentLayoutClass !== 'layout-split-local')
-                || sessionIdsChanged
+                || sessionViewsChanged
             ) {
                 await initialLoad();
                 return;
@@ -6337,13 +6734,16 @@
             return true;
         }
 
-        const nextPath = path === null ? (pane._explorerPath || '') : path;
+        const nextPath = path === null ? (pane._explorerPath || null) : path;
         if (showLoading) {
             renderExplorerMessage(index, 'Loading directory...');
         }
 
         try {
-            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/entries?path=${encodeURIComponent(nextPath)}`);
+            const entriesUrl = `/api/explorer/${encodeURIComponent(sessionId)}/entries`;
+            const response = await fetch(
+                nextPath === null ? entriesUrl : `${entriesUrl}?path=${encodeURIComponent(nextPath)}`
+            );
             const data = await response.json();
             if (!response.ok) {
                 throw new Error(data.error || 'Failed to load directory');
@@ -6455,6 +6855,13 @@
 
             const { index, terminal } = target;
             setStatus(index, session.status);
+            if (isExplorerPaneInstance(terminal) !== isExplorerSession(session)) {
+                if (pendingModeSwitchSessionIds.has(session.session_id)) {
+                    return;
+                }
+                initialLoad();
+                return;
+            }
             if (session.status === 'connected' && isExplorerSession(session)) {
                 syncExplorerPane(index);
             } else if (session.status === 'connected' && !terminal._attached) {

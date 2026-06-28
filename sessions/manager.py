@@ -40,6 +40,7 @@ class TerminalSession:
     use_wsl: bool = False
     use_powershell: bool = False
     startup_mode: str = "terminal"
+    explorer_root_directory: Optional[str] = None
     status: SessionStatus = SessionStatus.PENDING
     created_at: float = field(default_factory=time.time)
     connected_at: Optional[float] = None
@@ -61,6 +62,7 @@ class TerminalSession:
             "use_wsl": self.use_wsl,
             "use_powershell": self.use_powershell,
             "startup_mode": self.startup_mode,
+            "explorer_root_directory": self.explorer_root_directory,
             "status": self.status.value,
             "created_at": self.created_at,
             "connected_at": self.connected_at,
@@ -152,7 +154,8 @@ class SessionManager:
         distribution: Optional[str] = None,
         use_wsl: bool = False,
         use_powershell: bool = False,
-        startup_mode: str = "terminal"
+        startup_mode: str = "terminal",
+        explorer_root_directory: Optional[str] = None,
     ) -> TerminalSession:
         """
         Create a new terminal session.
@@ -190,6 +193,7 @@ class SessionManager:
             use_wsl=use_wsl,
             use_powershell=use_powershell,
             startup_mode=startup_mode,
+            explorer_root_directory=explorer_root_directory,
             status=SessionStatus.PENDING
         )
 
@@ -214,6 +218,7 @@ class SessionManager:
         use_wsl: bool = False,
         use_powershell: bool = False,
         startup_mode: str = "terminal",
+        explorer_root_directory: Optional[str] = None,
     ) -> Optional[TerminalSession]:
         """Append one session to an existing group and update its count."""
         session_id = str(uuid.uuid4())[:8]
@@ -232,6 +237,7 @@ class SessionManager:
             use_wsl=use_wsl,
             use_powershell=use_powershell,
             startup_mode=startup_mode,
+            explorer_root_directory=explorer_root_directory,
             status=SessionStatus.PENDING,
         )
 
@@ -284,6 +290,7 @@ class SessionManager:
                     use_wsl=bool(config.get("use_wsl")),
                     use_powershell=bool(config.get("use_powershell")),
                     startup_mode=str(config.get("startup_mode") or "terminal"),
+                    explorer_root_directory=config.get("explorer_root_directory"),
                 )
                 created.append(session)
             except Exception as e:
@@ -296,6 +303,33 @@ class SessionManager:
         """Get a session by ID."""
         with self.lock:
             return self.sessions.get(session_id)
+
+    def update_session_metadata(self, session_id: str, **updates: Any) -> Optional[TerminalSession]:
+        """Update mutable session metadata without replacing the session id."""
+        allowed_fields = {
+            "host",
+            "directory",
+            "username",
+            "port",
+            "password",
+            "initial_command",
+            "title",
+            "distribution",
+            "use_wsl",
+            "use_powershell",
+            "startup_mode",
+            "explorer_root_directory",
+        }
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                return None
+
+            for field_name, value in updates.items():
+                if field_name in allowed_fields:
+                    setattr(session, field_name, value)
+
+            return session
 
     def get_all_sessions(self) -> List[TerminalSession]:
         """Get all sessions."""

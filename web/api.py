@@ -1945,6 +1945,10 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
 def _finalize_stream(session_id: str):
     """Mark a session disconnected after a stream ends."""
     session = session_manager.get_session(session_id)
+    if session and _is_explorer_session(session):
+        _close_ssh_connection(session_id)
+        return
+
     if session and session.status not in {SessionStatus.ERROR, SessionStatus.DISCONNECTED}:
         session_manager.update_session_status(session_id, SessionStatus.DISCONNECTED)
         _broadcast_session_status(session_id)
@@ -1980,8 +1984,12 @@ def _stream_ssh_output(session_id: str):
 
             time.sleep(0.05)
     except Exception as e:
-        logger.error(f"Error streaming output for session {session_id}: {e}")
         session = session_manager.get_session(session_id)
+        if session and _is_explorer_session(session):
+            logger.info("Ignoring stream shutdown for explorer session %s: %s", session_id, e)
+            return
+
+        logger.error(f"Error streaming output for session {session_id}: {e}")
         if session and session.status != SessionStatus.DISCONNECTED:
             session_manager.update_session_status(
                 session_id,
@@ -2075,8 +2083,12 @@ def _stream_local_output(session_id: str):
 
             time.sleep(0.05)
     except Exception as e:
-        logger.error(f"Error streaming local output for session {session_id}: {e}")
         session = session_manager.get_session(session_id)
+        if session and _is_explorer_session(session):
+            logger.info("Ignoring local stream shutdown for explorer session %s: %s", session_id, e)
+            return
+
+        logger.error(f"Error streaming local output for session {session_id}: {e}")
         if session and session.status != SessionStatus.DISCONNECTED:
             session_manager.update_session_status(
                 session_id,
@@ -2218,6 +2230,36 @@ def _is_explorer_session(session: Any) -> bool:
     return getattr(session, "mode", "") == "wsl" and getattr(session, "startup_mode", "") == "explorer"
 
 
+def _explorer_root_directory(session: Any) -> str:
+    """Return the stable explorer root, falling back to the session directory."""
+    return str(
+        getattr(session, "explorer_root_directory", "")
+        or getattr(session, "directory", "")
+        or ""
+    ).strip()
+
+
+def _default_explorer_candidate_path(session: Any, root_path: str) -> str:
+    """Return the default explorer directory when no path is requested."""
+    current_raw = str(getattr(session, "directory", "") or "").strip()
+    if not current_raw:
+        return root_path
+
+    candidate = os.path.realpath(os.path.abspath(os.path.expanduser(current_raw)))
+    if not os.path.isdir(candidate):
+        return root_path
+
+    try:
+        common_path = os.path.commonpath([root_path, candidate])
+    except ValueError:
+        return root_path
+
+    if os.path.normcase(common_path) != os.path.normcase(root_path):
+        return root_path
+
+    return candidate
+
+
 MARKDOWN_PREVIEW_EXTENSIONS = {".md", ".markdown"}
 CODE_PREVIEW_LANGUAGES = {
     ".bash": "shell",
@@ -2347,7 +2389,7 @@ def _resolve_explorer_candidate_path(
     if not _is_explorer_session(session):
         raise ValueError("Session is not a file explorer pane")
 
-    root_raw = str(getattr(session, "directory", "") or "").strip()
+    root_raw = _explorer_root_directory(session)
     if not root_raw:
         raise ValueError("Explorer root directory is not configured")
 
@@ -2355,15 +2397,20 @@ def _resolve_explorer_candidate_path(
     if not os.path.isdir(root_path):
         raise ValueError("Explorer root directory does not exist")
 
-    raw_path = str(requested_path or "").strip()
-    if not raw_path:
+    if requested_path is None:
         if not allow_empty_root:
             raise ValueError("Explorer file path is required")
-        candidate = root_path
-    elif os.path.isabs(raw_path):
-        candidate = os.path.realpath(os.path.abspath(os.path.expanduser(raw_path)))
+        candidate = _default_explorer_candidate_path(session, root_path)
     else:
-        candidate = os.path.realpath(os.path.abspath(os.path.join(root_path, raw_path)))
+        raw_path = str(requested_path or "").strip()
+        if not raw_path:
+            if not allow_empty_root:
+                raise ValueError("Explorer file path is required")
+            candidate = root_path
+        elif os.path.isabs(raw_path):
+            candidate = os.path.realpath(os.path.abspath(os.path.expanduser(raw_path)))
+        else:
+            candidate = os.path.realpath(os.path.abspath(os.path.join(root_path, raw_path)))
 
     try:
         common_path = os.path.commonpath([root_path, candidate])
@@ -2849,7 +2896,7 @@ def get_explorer_entries(session_id: str):
     try:
         root_path, current_path = _resolve_explorer_paths(
             session,
-            request.args.get("path", ""),
+            request.args["path"] if "path" in request.args else None,
         )
         entries = []
         with os.scandir(current_path) as iterator:
@@ -3148,6 +3195,7 @@ def create_sessions():
                     use_powershell = False
                     use_wsl = False
                     prepared["initial_command"] = ""
+                    prepared["explorer_root_directory"] = prepared.get("directory") or ""
                     prepared["distribution"] = ""
                     prepared["username"] = ""
                 else:
@@ -3299,6 +3347,7 @@ def split_session(session_id: str):
         use_wsl=source.use_wsl,
         use_powershell=source.use_powershell,
         startup_mode=source.startup_mode,
+        explorer_root_directory=source.explorer_root_directory,
     )
     if not new_session:
         return jsonify({"error": "Session group not found"}), 404
@@ -3319,6 +3368,92 @@ def split_session(session_id: str):
             "terminal_count": group.terminal_count,
         }
     ), 201
+
+
+@app.route('/api/sessions/<session_id>/mode', methods=['POST'])
+def change_session_mode(session_id: str):
+    """Switch one Local Repo pane between terminal and file explorer mode."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    if session.mode != "wsl":
+        return jsonify({"error": "File explorer mode is only available for Local Repo sessions"}), 400
+
+    data = request.get_json(silent=True) or {}
+    target_mode = _normalize_startup_mode(data.get("startup_mode"), session.mode)
+    if target_mode not in {"terminal", "explorer"}:
+        return jsonify({"error": "startup_mode must be 'terminal' or 'explorer'"}), 400
+
+    if target_mode == "explorer":
+        requested_directory = data.get("directory")
+        next_directory = session.directory
+        if requested_directory:
+            next_directory = os.path.abspath(os.path.expanduser(str(requested_directory)))
+        if not next_directory or not os.path.isdir(next_directory):
+            return jsonify({"error": "Explorer root directory does not exist"}), 400
+
+        root_directory = _explorer_root_directory(session) or next_directory
+        root_directory = os.path.realpath(os.path.abspath(os.path.expanduser(root_directory)))
+        next_directory = os.path.realpath(os.path.abspath(os.path.expanduser(next_directory)))
+        try:
+            common_path = os.path.commonpath([root_directory, next_directory])
+        except ValueError:
+            common_path = ""
+        if (
+            not os.path.isdir(root_directory)
+            or os.path.normcase(common_path) != os.path.normcase(root_directory)
+        ):
+            root_directory = next_directory
+
+        session_manager.update_session_metadata(
+            session_id,
+            host="File Explorer",
+            directory=next_directory,
+            explorer_root_directory=root_directory,
+            username="",
+            port=22,
+            password=None,
+            initial_command="",
+            startup_mode="explorer",
+        )
+        session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
+        _close_ssh_connection(session_id, clear_buffer=True)
+        _broadcast_session_status(session_id)
+        return jsonify(session_manager.get_session(session_id).to_dict())
+
+    if not _is_explorer_session(session):
+        return jsonify(session.to_dict())
+
+    next_directory = session.directory
+    if _is_explorer_session(session):
+        try:
+            root_path, selected_directory = _resolve_explorer_candidate_path(
+                session,
+                data.get("directory", ""),
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if not os.path.isdir(selected_directory):
+            return jsonify({"error": "Selected explorer path is not a directory"}), 400
+        next_directory = selected_directory
+
+    session_manager.update_session_metadata(
+        session_id,
+        host=_local_shell_display_name(
+            use_wsl=session.use_wsl,
+            use_powershell=session.use_powershell,
+            distribution=session.distribution,
+        ),
+        directory=next_directory,
+        explorer_root_directory=root_path,
+        initial_command="",
+        startup_mode="terminal",
+    )
+    session_manager.update_session_status(session_id, SessionStatus.PENDING)
+    _broadcast_session_status(session_id)
+    socketio.start_background_task(_connect_session, session_id)
+    return jsonify(session_manager.get_session(session_id).to_dict())
 
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])

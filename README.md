@@ -33,6 +33,7 @@ Top bar controls:
 Per-terminal controls:
 
 - `↻` resets that terminal view and replays the recent output buffer. On file explorer panes, it manually reloads the current directory or the currently open file.
+- `📁` switches a Local Repo terminal pane into a file explorer; `>_` switches a file explorer pane into a terminal opened at the currently selected explorer directory. Explorer panes keep their original root so parent-folder navigation remains available after switching back and forth.
 - `🧹` clears the terminal display and purges its replay buffer.
 - `🗑` sends `Ctrl+U` to clear the current input line.
 - `Enter` sends an Enter keypress to that terminal.
@@ -50,6 +51,7 @@ File explorer panes are local-only, read-only repository views. They do not star
 Explorer panes support:
 
 - Directory navigation with parent-folder navigation constrained to the selected root.
+- Switching the pane into a regular Local Repo terminal opened at the current explorer directory.
 - Manual refresh from the pane header without continuous auto-refresh flicker.
 - Folder/file icons, size and modified-time metadata, and per-pane light/dark explorer theme toggling.
 - Click-to-open text files in a read-only viewer with wrapped long lines.

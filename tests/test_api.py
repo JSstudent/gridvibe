@@ -218,6 +218,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function setTerminalRefreshState(index, refreshing)", html)
         self.assertIn("async function refreshTerminalDisplay(index)", html)
 
+    def test_terminals_page_exposes_session_mode_switch_controls(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('data-session-mode-toggle="${i}"', html)
+        self.assertIn("async function switchSessionPaneMode(index)", html)
+        self.assertIn("body.directory = getExplorerSelectedDirectory(index);", html)
+        self.assertIn("`/api/sessions/${encodeURIComponent(sessionId)}/mode`", html)
+        self.assertIn("hasMatchingSessionViews(sessionIds, terminals, data.sessions)", html)
+        self.assertIn("pendingModeSwitchSessionIds.add(sessionId);", html)
+        self.assertIn("replaceSessionPaneMode(index, data)", html)
+        replace_start = html.index("function replacePaneWithExplorer(index, session)")
+        replace_end = html.index("function replacePaneWithTerminal(index, session)", replace_start)
+        self.assertIn("loadExplorerPane(index, null, { force: true });", html[replace_start:replace_end])
+        self.assertNotIn("loadExplorerPane(index, '', { force: true });", html[replace_start:replace_end])
+        switch_start = html.index("async function switchSessionPaneMode(index)")
+        switch_end = html.index("async function closeSplitPane(index)", switch_start)
+        self.assertNotIn("teardownCurrentGrid();", html[switch_start:switch_end])
+
     def test_terminals_page_explorer_refresh_requires_initial_navigation_or_force(self):
         response = self.client.get("/terminals")
 
@@ -315,9 +335,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn("function hasMatchingSessionIds(existingIds, sessions)", html)
-        self.assertIn("&& hasMatchingSessionIds(sessionIds, data.sessions)", html)
-        self.assertIn("hasMatchingSessionIds(cached.sessionIds || [], data.sessions)", html)
-        self.assertIn("const sessionIdsChanged = !hasMatchingSessionIds(sessionIds, data.sessions);", html)
+        self.assertIn("function hasMatchingSessionViews(existingIds, existingTerminals, sessions)", html)
+        self.assertIn("&& hasMatchingSessionViews(sessionIds, terminals, data.sessions)", html)
+        self.assertIn(
+            "hasMatchingSessionViews(cached.sessionIds || [], cached.terminals || [], data.sessions)",
+            html,
+        )
+        self.assertIn(
+            "const sessionViewsChanged = !hasMatchingSessionViews(sessionIds, terminals, data.sessions);",
+            html,
+        )
 
     def test_terminals_page_exposes_voice_capture_profiles_and_worklet_diagnostics(self):
         with patch.object(api, "voice_engine", "whisper"), patch.object(
@@ -1303,10 +1330,154 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(session.mode, "wsl")
         self.assertEqual(session.host, "File Explorer")
         self.assertEqual(session.startup_mode, "explorer")
+        self.assertEqual(session.explorer_root_directory, str(repo_dir))
         self.assertEqual(session.initial_command, "")
         self.assertFalse(session.use_wsl)
         self.assertFalse(session.use_powershell)
         self.assertEqual(session.status, api.SessionStatus.CONNECTED)
+
+    def test_switch_explorer_pane_to_terminal_uses_selected_directory(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        selected_dir = repo_dir / "src"
+        selected_dir.mkdir(parents=True)
+        session_id = self._create_explorer_session(repo_dir)
+
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": "src"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        start_task.assert_called_once_with(api._connect_session, session_id)
+        session = api.session_manager.get_session(session_id)
+        self.assertEqual(session.startup_mode, "terminal")
+        self.assertEqual(Path(session.directory), selected_dir.resolve())
+        self.assertEqual(Path(session.explorer_root_directory), repo_dir.resolve())
+        self.assertEqual(session.status, api.SessionStatus.PENDING)
+        self.assertEqual(response.get_json()["startup_mode"], "terminal")
+
+    def test_switch_terminal_pane_to_explorer_closes_connection_and_preserves_shell_choice(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Ubuntu",
+            directory=str(repo_dir),
+            mode="wsl",
+            distribution="Ubuntu",
+            use_wsl=True,
+            startup_mode="terminal",
+        )
+        api.session_manager.update_session_status(session.session_id, api.SessionStatus.CONNECTED)
+
+        with patch.object(api, "_close_ssh_connection") as close_connection:
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "explorer"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        close_connection.assert_called_once_with(session.session_id, clear_buffer=True)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.host, "File Explorer")
+        self.assertEqual(updated.startup_mode, "explorer")
+        self.assertEqual(updated.initial_command, "")
+        self.assertEqual(Path(updated.explorer_root_directory), repo_dir.resolve())
+        self.assertTrue(updated.use_wsl)
+        self.assertEqual(updated.distribution, "Ubuntu")
+        self.assertEqual(updated.status, api.SessionStatus.CONNECTED)
+
+    def test_switch_roundtrip_preserves_explorer_root_for_parent_navigation(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        selected_dir = repo_dir / "src"
+        selected_dir.mkdir(parents=True)
+        (repo_dir / "README.md").write_text("# Root\n", encoding="utf-8")
+        (selected_dir / "main.py").write_text("print('ok')\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        with patch.object(api.socketio, "start_background_task"):
+            terminal_response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": "src"},
+            )
+        self.assertEqual(terminal_response.status_code, 200)
+
+        with patch.object(api, "_close_ssh_connection"):
+            explorer_response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={
+                    "startup_mode": "explorer",
+                    "directory": str(selected_dir),
+                },
+            )
+        self.assertEqual(explorer_response.status_code, 200)
+
+        current_response = self.client.get(f"/api/explorer/{session_id}/entries")
+        self.assertEqual(current_response.status_code, 200)
+        current_payload = current_response.get_json()
+        self.assertEqual(current_payload["path"], "src")
+        self.assertEqual(current_payload["parent_path"], "")
+        self.assertEqual(current_payload["root"], str(repo_dir.resolve()))
+
+        parent_response = self.client.get(
+            f"/api/explorer/{session_id}/entries",
+            query_string={"path": current_payload["parent_path"]},
+        )
+        self.assertEqual(parent_response.status_code, 200)
+        parent_payload = parent_response.get_json()
+        self.assertEqual(parent_payload["path"], "")
+        self.assertEqual(parent_payload["parent_path"], "")
+
+    def test_local_stream_shutdown_after_explorer_switch_does_not_mark_error(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session_id = self._create_explorer_session(repo_dir)
+
+        class ClosingPty:
+            def read(self, _size):
+                raise OSError("[WinError 10053] An established connection was aborted")
+
+        with api.connection_lock:
+            api.ssh_connections[session_id] = {
+                "kind": "local",
+                "pty_process": ClosingPty(),
+            }
+
+        api._stream_local_output(session_id)
+
+        session = api.session_manager.get_session(session_id)
+        self.assertEqual(session.status, api.SessionStatus.CONNECTED)
+        with api.connection_lock:
+            self.assertNotIn(session_id, api.ssh_connections)
+
+    def test_switch_session_mode_rejects_ssh_explorer_mode(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            mode="ssh",
+        )
+
+        response = self.client.post(
+            f"/api/sessions/{session.session_id}/mode",
+            json={"startup_mode": "explorer"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Local Repo", response.get_json()["error"])
 
     def test_explorer_entries_lists_local_directory_inside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"

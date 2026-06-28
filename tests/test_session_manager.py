@@ -93,6 +93,7 @@ class SessionManagerTestCase(unittest.TestCase):
                     "directory": "C:\\repo",
                     "title": "Files",
                     "startup_mode": "explorer",
+                    "explorer_root_directory": "C:\\repo",
                 }
             ],
             group_id="group-local",
@@ -100,7 +101,9 @@ class SessionManagerTestCase(unittest.TestCase):
 
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].startup_mode, "explorer")
+        self.assertEqual(sessions[0].explorer_root_directory, "C:\\repo")
         self.assertEqual(sessions[0].to_dict()["startup_mode"], "explorer")
+        self.assertEqual(sessions[0].to_dict()["explorer_root_directory"], "C:\\repo")
 
     def test_update_session_status_marks_connected_and_notifies_callbacks(self):
         session = self.manager.create_session(
