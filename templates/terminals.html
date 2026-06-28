@@ -140,6 +140,32 @@
             --explorer-file: #64748b;
         }
 
+        .explorer-pane[data-explorer-theme="light"] {
+            --explorer-bg: #ffffff;
+            --explorer-bar-bg: #f6f8fb;
+            --explorer-border: #cfd6df;
+            --explorer-row-border: #e8edf3;
+            --explorer-row-hover: #edf6ff;
+            --explorer-row-active: #dbeafe;
+            --explorer-text: #111827;
+            --explorer-muted: #5f6f85;
+            --explorer-folder: #c56f05;
+            --explorer-file: #64748b;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] {
+            --explorer-bg: #0f141b;
+            --explorer-bar-bg: #151c24;
+            --explorer-border: #2b3744;
+            --explorer-row-border: #1f2a35;
+            --explorer-row-hover: #182636;
+            --explorer-row-active: #17324a;
+            --explorer-text: #e6edf3;
+            --explorer-muted: #94a3b8;
+            --explorer-folder: #f0b35b;
+            --explorer-file: #9fb2c8;
+        }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
@@ -476,6 +502,10 @@
         .terminal-action-btn:disabled {
             opacity: .55;
             cursor: wait;
+        }
+
+        .explorer-theme-btn {
+            min-width: 32px;
         }
 
         /* ── Voice input ── */
@@ -852,16 +882,19 @@
             opacity: 1;
         }
 
-        .explorer-row.directory {
+        .explorer-row.directory,
+        .explorer-row.file {
             cursor: pointer;
             color: var(--explorer-text);
         }
 
-        .explorer-row.directory:hover {
+        .explorer-row.directory:hover,
+        .explorer-row.file:hover {
             background: var(--explorer-row-hover);
         }
 
-        .explorer-row.directory:focus-visible {
+        .explorer-row.directory:focus-visible,
+        .explorer-row.file:focus-visible {
             outline: 2px solid var(--t-accent);
             outline-offset: -2px;
             background: var(--explorer-row-active);
@@ -919,6 +952,183 @@
             padding: 14px;
             color: var(--explorer-muted);
             font-size: .78rem;
+        }
+
+        .explorer-editor {
+            height: 100%;
+            min-height: 0;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+        }
+
+        .explorer-editor-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+            padding: 8px 10px;
+            border-bottom: 1px solid var(--explorer-row-border);
+            background: var(--explorer-bar-bg);
+        }
+
+        .explorer-editor-back {
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            cursor: pointer;
+            font-size: .74rem;
+            padding: 5px 9px;
+        }
+
+        .explorer-editor-title {
+            min-width: 0;
+            flex: 1;
+        }
+
+        .explorer-editor-tabs {
+            display: inline-flex;
+            gap: 4px;
+            flex-shrink: 0;
+        }
+
+        .explorer-editor-tab {
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            cursor: pointer;
+            font-size: .72rem;
+            padding: 5px 8px;
+        }
+
+        .explorer-editor-tab[aria-selected="true"] {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--explorer-row-active);
+        }
+
+        .explorer-editor-name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--explorer-text);
+            font-size: .82rem;
+            font-weight: 700;
+        }
+
+        .explorer-editor-meta {
+            margin-top: 2px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--explorer-muted);
+            font-size: .7rem;
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        .explorer-editor-body {
+            min-height: 0;
+            overflow: hidden;
+            display: grid;
+        }
+
+        .explorer-editor-panel {
+            min-height: 0;
+            overflow: auto;
+        }
+
+        .explorer-editor-panel[hidden] {
+            display: none;
+        }
+
+        .explorer-editor-content {
+            min-height: 0;
+            margin: 0;
+            padding: 12px 14px;
+            overflow: auto;
+            color: var(--explorer-text);
+            background: var(--explorer-bg);
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-size: .78rem;
+            line-height: 1.45;
+            white-space: pre;
+            tab-size: 4;
+        }
+
+        .explorer-markdown-preview {
+            padding: 14px 18px 28px;
+            color: var(--explorer-text);
+            background: var(--explorer-bg);
+            font-size: .86rem;
+            line-height: 1.55;
+        }
+
+        .explorer-markdown-preview h1,
+        .explorer-markdown-preview h2,
+        .explorer-markdown-preview h3 {
+            margin: 1.15em 0 .5em;
+            line-height: 1.2;
+        }
+
+        .explorer-markdown-preview h1:first-child,
+        .explorer-markdown-preview h2:first-child,
+        .explorer-markdown-preview h3:first-child,
+        .explorer-markdown-preview p:first-child {
+            margin-top: 0;
+        }
+
+        .explorer-markdown-preview p,
+        .explorer-markdown-preview ul,
+        .explorer-markdown-preview ol,
+        .explorer-markdown-preview blockquote,
+        .explorer-markdown-preview pre,
+        .explorer-markdown-preview table {
+            margin: 0 0 .9em;
+        }
+
+        .explorer-markdown-preview code,
+        .explorer-markdown-preview pre {
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        .explorer-markdown-preview code {
+            border: 1px solid var(--explorer-row-border);
+            border-radius: 4px;
+            padding: 1px 4px;
+            background: var(--explorer-bar-bg);
+        }
+
+        .explorer-markdown-preview pre {
+            overflow: auto;
+            padding: 10px 12px;
+            border: 1px solid var(--explorer-row-border);
+            border-radius: 6px;
+            background: var(--explorer-bar-bg);
+        }
+
+        .explorer-markdown-preview pre code {
+            border: 0;
+            padding: 0;
+            background: transparent;
+        }
+
+        .explorer-markdown-preview blockquote {
+            border-left: 3px solid var(--explorer-border);
+            padding-left: 12px;
+            color: var(--explorer-muted);
+        }
+
+        .explorer-markdown-preview table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .explorer-markdown-preview th,
+        .explorer-markdown-preview td {
+            border: 1px solid var(--explorer-row-border);
+            padding: 6px 8px;
+            text-align: left;
         }
 
         /* ── Terminal context menu ── */
@@ -1164,6 +1374,81 @@
             mediaQuery.addListener(listener);
         }
     })();
+
+    const EXPLORER_THEME_STORAGE_KEY = 'gridvibe.explorerTheme';
+
+    function normalizeExplorerTheme(theme) {
+        return theme === 'dark' ? 'dark' : 'light';
+    }
+
+    function getExplorerThemeStore() {
+        try {
+            const raw = localStorage.getItem(EXPLORER_THEME_STORAGE_KEY);
+            if (!raw) {
+                return {};
+            }
+            if (raw === 'light' || raw === 'dark') {
+                return { default: raw };
+            }
+            const parsed = JSON.parse(raw);
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
+    function getExplorerTheme(key = '') {
+        const store = getExplorerThemeStore();
+        return normalizeExplorerTheme((key && store[key]) || store.default || 'light');
+    }
+
+    function saveExplorerTheme(key, theme) {
+        if (!key) {
+            return;
+        }
+        const store = getExplorerThemeStore();
+        store[key] = normalizeExplorerTheme(theme);
+        try {
+            localStorage.setItem(EXPLORER_THEME_STORAGE_KEY, JSON.stringify(store));
+        } catch (_) {
+        }
+    }
+
+    function explorerThemeLabel(theme) {
+        return normalizeExplorerTheme(theme) === 'dark' ? 'Light explorer theme' : 'Dark explorer theme';
+    }
+
+    function updateExplorerThemeButton(button, theme) {
+        if (!button) {
+            return;
+        }
+        const normalizedTheme = normalizeExplorerTheme(theme);
+        button.textContent = normalizedTheme === 'dark' ? '☀' : '☾';
+        button.title = explorerThemeLabel(normalizedTheme);
+        button.setAttribute('aria-label', explorerThemeLabel(normalizedTheme));
+        button.setAttribute('aria-pressed', normalizedTheme === 'dark' ? 'true' : 'false');
+    }
+
+    function applyExplorerThemeToCard(card, theme) {
+        if (!card) {
+            return;
+        }
+        const normalizedTheme = normalizeExplorerTheme(theme);
+        card.dataset.explorerTheme = normalizedTheme;
+        const button = card.querySelector('[data-explorer-theme-toggle]');
+        updateExplorerThemeButton(button, normalizedTheme);
+    }
+
+    function toggleExplorerTheme(index) {
+        const card = document.getElementById(`tc-${index}`);
+        if (!card) {
+            return;
+        }
+        const currentTheme = normalizeExplorerTheme(card.dataset.explorerTheme);
+        const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        applyExplorerThemeToCard(card, nextTheme);
+        saveExplorerTheme(card.dataset.explorerThemeKey || '', nextTheme);
+    }
 
     /* ─────────────────────────────────────────────
        State  (socket is initialised AFTER functions
@@ -2242,6 +2527,12 @@
             card.className = `terminal-container ${isExplorer ? 'explorer-pane' : ''}`;
             card.id = `tc-${i}`;
             card.dataset.slot = String(i);
+            const explorerThemeKey = session.session_id || `${activeGroupId || 'group'}:${i}`;
+            const initialExplorerTheme = getExplorerTheme(explorerThemeKey);
+            if (isExplorer) {
+                card.dataset.explorerThemeKey = explorerThemeKey;
+                card.dataset.explorerTheme = initialExplorerTheme;
+            }
             const sessionColour = tabColourForGroup(activeGroupId);
             card.style.setProperty('--session-color', sessionColour);
             card.style.setProperty('--session-color-dim', hexToRgba(sessionColour, 0.45));
@@ -2269,6 +2560,19 @@
                         >
                             ↻
                         </button>
+                        ${isExplorer ? `
+                            <button
+                                type="button"
+                                class="terminal-action-btn explorer-theme-btn"
+                                id="texplorertheme-${i}"
+                                data-explorer-theme-toggle="${i}"
+                                title="Dark explorer theme"
+                                aria-label="Dark explorer theme"
+                                aria-pressed="false"
+                            >
+                                ☾
+                            </button>
+                        ` : ''}
                         <button
                             type="button"
                             class="terminal-action-btn"
@@ -2440,6 +2744,20 @@
                     refreshTerminalDisplay(i);
                 });
             }
+            const explorerThemeButton = card.querySelector(`[data-explorer-theme-toggle="${i}"]`);
+            if (explorerThemeButton) {
+                explorerThemeButton.draggable = false;
+                updateExplorerThemeButton(explorerThemeButton, card.dataset.explorerTheme || initialExplorerTheme);
+                explorerThemeButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                explorerThemeButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleExplorerTheme(i);
+                });
+            }
             const clearButton = card.querySelector(`[data-terminal-clear="${i}"]`);
             if (clearButton) {
                 clearButton.draggable = false;
@@ -2583,7 +2901,11 @@
                 explorerUpButton.addEventListener('click', event => {
                     event.preventDefault();
                     event.stopPropagation();
-                    loadExplorerPane(i, terminals[i]?._explorerParentPath || '');
+                    const pane = terminals[i];
+                    const targetPath = pane?._explorerMode === 'file'
+                        ? (pane._explorerPath || '')
+                        : (pane?._explorerParentPath || '');
+                    loadExplorerPane(i, targetPath);
                 });
             }
             grid.appendChild(card);
@@ -4316,11 +4638,49 @@
         return new Date(timestamp * 1000).toLocaleString();
     }
 
+    function explorerFileTypeLabel(path) {
+        const name = String(path || '').toLowerCase();
+        const dotIndex = name.lastIndexOf('.');
+        const extension = dotIndex >= 0 ? name.slice(dotIndex) : '';
+        const labels = {
+            '.css': 'CSS source',
+            '.html': 'HTML source',
+            '.ini': 'INI source',
+            '.js': 'JavaScript source',
+            '.json': 'JSON source',
+            '.md': 'Markdown source',
+            '.ps1': 'PowerShell source',
+            '.py': 'Python source',
+            '.sh': 'Shell source',
+            '.toml': 'TOML source',
+            '.txt': 'Text file',
+            '.yaml': 'YAML source',
+            '.yml': 'YAML source'
+        };
+        return labels[extension] || 'Text file';
+    }
+
     function renderExplorerMessage(index, message) {
         const list = document.getElementById(`explorer-list-${index}`);
         if (list) {
             list.innerHTML = `<div class="explorer-message">${escHtml(message)}</div>`;
         }
+    }
+
+    function setExplorerFileView(index, mode) {
+        const normalizedMode = mode === 'preview' ? 'preview' : 'source';
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!list) {
+            return;
+        }
+
+        list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
+            const isSelected = button.dataset.explorerFileView === normalizedMode;
+            button.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+        });
+        list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
+            panel.hidden = panel.dataset.explorerFilePanel !== normalizedMode;
+        });
     }
 
     const EXPLORER_FOLDER_ICON = `
@@ -4338,6 +4698,109 @@
             </svg>
         </span>
     `;
+
+    function renderExplorerFile(index, data) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!pane || !list) {
+            return false;
+        }
+
+        const path = data.path || '';
+        const fileName = data.name || path || 'File';
+        const fileType = explorerFileTypeLabel(path || fileName);
+        const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
+        const size = formatExplorerSize(data.size) || 'Unknown size';
+        const modified = formatExplorerDate(data.modified);
+        const metaParts = [fileType, size, data.encoding || 'utf-8'];
+        if (modified) {
+            metaParts.push(modified);
+        }
+        if (data.truncated) {
+            metaParts.push('Preview truncated');
+        }
+
+        pane._attached = true;
+        pane._explorerMode = 'file';
+        pane._explorerFilePath = path;
+        document.getElementById(`ph-${index}`)?.remove();
+
+        const pathLabel = document.getElementById(`explorer-path-${index}`);
+        const upButton = document.getElementById(`explorer-up-${index}`);
+        if (pathLabel) {
+            pathLabel.textContent = path ? `/${path}` : fileName;
+            pathLabel.title = data.root || '';
+        }
+        if (upButton) {
+            upButton.disabled = false;
+        }
+
+        list.innerHTML = `
+            <div class="explorer-editor">
+                <div class="explorer-editor-header">
+                    <button type="button" class="explorer-editor-back" data-explorer-editor-back="${index}">Back</button>
+                    <div class="explorer-editor-title">
+                        <div class="explorer-editor-name" title="${escHtml(path || fileName)}">${escHtml(fileName)}</div>
+                        <div class="explorer-editor-meta">${escHtml(metaParts.join(' - '))}</div>
+                    </div>
+                    ${hasPreview ? `
+                        <div class="explorer-editor-tabs" role="tablist" aria-label="Markdown file view">
+                            <button type="button" class="explorer-editor-tab" data-explorer-file-view="source" role="tab" aria-selected="true">Source</button>
+                            <button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="false">Preview</button>
+                        </div>
+                    ` : ''}
+                </div>
+                <div class="explorer-editor-body">
+                    <pre class="explorer-editor-content explorer-editor-panel" data-explorer-file-panel="source"><code id="explorer-code-${index}"></code></pre>
+                    ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" hidden></div>` : ''}
+                </div>
+            </div>
+        `;
+
+        const code = document.getElementById(`explorer-code-${index}`);
+        if (code) {
+            code.textContent = data.content || '';
+        }
+        const preview = document.getElementById(`explorer-preview-${index}`);
+        if (preview && hasPreview) {
+            preview.innerHTML = data.preview_html || '';
+        }
+
+        const backButton = list.querySelector(`[data-explorer-editor-back="${index}"]`);
+        if (backButton) {
+            backButton.addEventListener('click', () => {
+                loadExplorerPane(index, pane._explorerPath || '');
+            });
+        }
+        list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
+            button.addEventListener('click', () => {
+                setExplorerFileView(index, button.dataset.explorerFileView || 'source');
+            });
+        });
+        return true;
+    }
+
+    async function openExplorerFile(index, path) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !isExplorerSession(pane._session) || !sessionId || !path) {
+            return false;
+        }
+
+        renderExplorerMessage(index, 'Opening file...');
+        try {
+            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(path)}`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to open file');
+            }
+            return renderExplorerFile(index, data);
+        } catch (error) {
+            console.error('[GridVibe Sessions] Explorer file open failed:', error);
+            renderExplorerMessage(index, error.message || 'Failed to open file.');
+            return false;
+        }
+    }
 
     async function loadExplorerPane(index, path = null, { force = false, showLoading = true } = {}) {
         const pane = terminals[index];
@@ -4364,6 +4827,8 @@
             }
 
             pane._attached = true;
+            pane._explorerMode = 'directory';
+            pane._explorerFilePath = '';
             pane._explorerPath = data.path || '';
             pane._explorerParentPath = data.parent_path || '';
             document.getElementById(`ph-${index}`)?.remove();
@@ -4397,7 +4862,6 @@
                         type="button"
                         class="explorer-row ${isDirectory ? 'directory' : 'file'}"
                         data-explorer-path="${escHtml(entry.path || '')}"
-                        ${isDirectory ? '' : 'disabled'}
                     >
                         ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
                         <span class="explorer-name">${escHtml(entry.name || '')}</span>
@@ -4410,6 +4874,11 @@
             list.querySelectorAll('.explorer-row.directory').forEach(button => {
                 button.addEventListener('click', () => {
                     loadExplorerPane(index, button.dataset.explorerPath || '');
+                });
+            });
+            list.querySelectorAll('.explorer-row.file').forEach(button => {
+                button.addEventListener('click', () => {
+                    openExplorerFile(index, button.dataset.explorerPath || '');
                 });
             });
             return true;

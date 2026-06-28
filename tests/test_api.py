@@ -51,6 +51,23 @@ class ApiRoutesTestCase(unittest.TestCase):
         api.save_config(cfg)
         api._refresh_runtime_config()
 
+    def _create_explorer_session(self, repo_dir: Path) -> str:
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        return response.get_json()["sessions"][0]["session_id"]
+
     def tearDown(self):
         api.session_manager.reset_sessions()
         api.active_launch_options.update(
@@ -1300,6 +1317,136 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(entries_response.status_code, 400)
         self.assertIn("inside the configured root", entries_response.get_json()["error"])
+
+    def test_explorer_file_returns_text_content_inside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "README.md"
+        file_path.write_bytes("# Project\n\nHello <GridVibe>\n".encode("utf-8"))
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertEqual(payload["path"], "README.md")
+        self.assertEqual(payload["name"], "README.md")
+        self.assertEqual(payload["content"], "# Project\n\nHello <GridVibe>\n")
+        self.assertEqual(payload["encoding"], "utf-8")
+        self.assertFalse(payload["truncated"])
+        self.assertEqual(payload["size"], file_path.stat().st_size)
+        self.assertEqual(payload["preview_type"], "markdown")
+        self.assertIn("<h1>Project</h1>", payload["preview_html"])
+
+    def test_explorer_file_returns_sanitized_markdown_preview(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "README.md"
+        file_path.write_bytes(
+            (
+                "# Title\n\n"
+                "<script>alert('xss')</script>\n\n"
+                "[bad link](javascript:alert(1))\n\n"
+                "**Safe bold**\n"
+            ).encode("utf-8")
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertEqual(payload["preview_type"], "markdown")
+        self.assertIn("<h1>Title</h1>", payload["preview_html"])
+        self.assertIn("<strong>Safe bold</strong>", payload["preview_html"])
+        self.assertNotIn("<script", payload["preview_html"])
+        self.assertNotIn("javascript:", payload["preview_html"])
+
+    def test_explorer_file_does_not_preview_non_markdown_text(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "notes.txt").write_text("# Not markdown\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "notes.txt"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertIsNone(payload["preview_type"])
+        self.assertIsNone(payload["preview_html"])
+
+    def test_explorer_file_rejects_path_outside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        outside_file = Path(self.temp_dir.name) / "secret.txt"
+        outside_file.write_text("secret\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": str(outside_file)},
+        )
+
+        self.assertEqual(file_response.status_code, 400)
+        self.assertIn("inside the configured root", file_response.get_json()["error"])
+
+    def test_explorer_file_rejects_directory(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        src_dir = repo_dir / "src"
+        src_dir.mkdir(parents=True)
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "src"},
+        )
+
+        self.assertEqual(file_response.status_code, 400)
+        self.assertIn("directory", file_response.get_json()["error"])
+
+    def test_explorer_file_truncates_large_text_preview(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "large.log"
+        file_path.write_text(
+            "a" * (api.EXPLORER_FILE_PREVIEW_MAX_BYTES + 10),
+            encoding="utf-8",
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "large.log"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertTrue(payload["truncated"])
+        self.assertEqual(len(payload["content"]), api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+        self.assertEqual(payload["size"], file_path.stat().st_size)
+
+    def test_explorer_file_rejects_binary_content(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "image.bin").write_bytes(b"abc\x00def")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "image.bin"},
+        )
+
+        self.assertEqual(file_response.status_code, 400)
+        self.assertIn("binary", file_response.get_json()["error"])
 
     def test_create_sessions_uses_cmd_label_for_local_repo_cmd_panes(self):
         sessions_payload = {

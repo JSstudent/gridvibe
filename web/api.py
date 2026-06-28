@@ -62,6 +62,13 @@ except ImportError:  # pragma: no cover - optional for voice input
     ws_client = None
 
 try:
+    import bleach
+    import markdown
+except ImportError:  # pragma: no cover - dependency declared for runtime installs
+    bleach = None
+    markdown = None
+
+try:
     import numpy as np
 except ImportError:  # pragma: no cover - optional for faster-whisper input handling
     np = None
@@ -78,6 +85,7 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
 AGENT_REGISTRY_PATH = os.path.join(BASE_DIR, "agent_registry.json")
 DEFAULT_SAVED_SESSION_ID = "default-session"
+EXPLORER_FILE_PREVIEW_MAX_BYTES = 1024 * 1024
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
 WINDOWS_DEVICE_ATTRIBUTES_RESPONSE = "\x1b[?1;2c"
 SELF_UPDATE_REPO_DIR = BASE_DIR
@@ -2210,7 +2218,90 @@ def _is_explorer_session(session: Any) -> bool:
     return getattr(session, "mode", "") == "wsl" and getattr(session, "startup_mode", "") == "explorer"
 
 
-def _resolve_explorer_paths(session: Any, requested_path: Any = "") -> Tuple[str, str]:
+MARKDOWN_PREVIEW_EXTENSIONS = {".md", ".markdown"}
+MARKDOWN_ALLOWED_TAGS = {
+    "a",
+    "abbr",
+    "blockquote",
+    "br",
+    "code",
+    "dd",
+    "del",
+    "details",
+    "div",
+    "dl",
+    "dt",
+    "em",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hr",
+    "img",
+    "input",
+    "ins",
+    "kbd",
+    "li",
+    "ol",
+    "p",
+    "pre",
+    "s",
+    "span",
+    "strong",
+    "sub",
+    "summary",
+    "sup",
+    "table",
+    "tbody",
+    "td",
+    "th",
+    "thead",
+    "tr",
+    "ul",
+}
+MARKDOWN_ALLOWED_ATTRIBUTES = {
+    "a": ["href", "title"],
+    "abbr": ["title"],
+    "img": ["alt", "src", "title"],
+    "input": ["checked", "disabled", "type"],
+    "td": ["align"],
+    "th": ["align"],
+}
+
+
+def _is_markdown_file(path: str) -> bool:
+    """Return whether an explorer file should get a Markdown preview."""
+    _, extension = os.path.splitext(path.lower())
+    return extension in MARKDOWN_PREVIEW_EXTENSIONS
+
+
+def _render_markdown_preview(content: str) -> Optional[str]:
+    """Render Markdown to sanitized HTML for explorer previews."""
+    if markdown is None or bleach is None:
+        return None
+
+    html = markdown.markdown(
+        content,
+        extensions=["extra", "sane_lists", "tables"],
+        output_format="html",
+    )
+    return bleach.clean(
+        html,
+        tags=MARKDOWN_ALLOWED_TAGS,
+        attributes=MARKDOWN_ALLOWED_ATTRIBUTES,
+        protocols=bleach.sanitizer.ALLOWED_PROTOCOLS,
+        strip=True,
+    )
+
+
+def _resolve_explorer_candidate_path(
+    session: Any,
+    requested_path: Any = "",
+    *,
+    allow_empty_root: bool = True,
+) -> Tuple[str, str]:
     """Resolve an explorer request path while keeping it inside the session root."""
     if not _is_explorer_session(session):
         raise ValueError("Session is not a file explorer pane")
@@ -2225,6 +2316,8 @@ def _resolve_explorer_paths(session: Any, requested_path: Any = "") -> Tuple[str
 
     raw_path = str(requested_path or "").strip()
     if not raw_path:
+        if not allow_empty_root:
+            raise ValueError("Explorer file path is required")
         candidate = root_path
     elif os.path.isabs(raw_path):
         candidate = os.path.realpath(os.path.abspath(os.path.expanduser(raw_path)))
@@ -2238,8 +2331,30 @@ def _resolve_explorer_paths(session: Any, requested_path: Any = "") -> Tuple[str
 
     if os.path.normcase(common_path) != os.path.normcase(root_path):
         raise ValueError("Explorer path must stay inside the configured root")
+
+    return root_path, candidate
+
+
+def _resolve_explorer_paths(session: Any, requested_path: Any = "") -> Tuple[str, str]:
+    """Resolve an explorer directory path while keeping it inside the session root."""
+    root_path, candidate = _resolve_explorer_candidate_path(session, requested_path)
     if not os.path.isdir(candidate):
         raise ValueError("Explorer path is not a directory")
+
+    return root_path, candidate
+
+
+def _resolve_explorer_file_path(session: Any, requested_path: Any = "") -> Tuple[str, str]:
+    """Resolve an explorer file path while keeping it inside the session root."""
+    root_path, candidate = _resolve_explorer_candidate_path(
+        session,
+        requested_path,
+        allow_empty_root=False,
+    )
+    if os.path.isdir(candidate):
+        raise ValueError("Explorer path is a directory")
+    if not os.path.isfile(candidate):
+        raise ValueError("Explorer path is not a file")
 
     return root_path, candidate
 
@@ -2712,6 +2827,51 @@ def get_explorer_entries(session_id: str):
                 "path": _relative_explorer_path(root_path, current_path),
                 "parent_path": parent_path,
                 "entries": entries,
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route('/api/explorer/<session_id>/file', methods=['GET'])
+def get_explorer_file(session_id: str):
+    """Return a safe, read-only text preview for one explorer file."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+
+    try:
+        root_path, file_path = _resolve_explorer_file_path(
+            session,
+            request.args.get("path", ""),
+        )
+        stat_result = os.stat(file_path, follow_symlinks=False)
+        with open(file_path, "rb") as file_handle:
+            raw_content = file_handle.read(EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)
+
+        if b"\x00" in raw_content:
+            raise ValueError("Explorer file appears to be binary")
+
+        truncated = len(raw_content) > EXPLORER_FILE_PREVIEW_MAX_BYTES
+        preview_bytes = raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]
+        content = preview_bytes.decode("utf-8", errors="replace")
+        preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
+
+        return jsonify(
+            {
+                "session_id": session.session_id,
+                "root": root_path,
+                "path": _relative_explorer_path(root_path, file_path),
+                "name": os.path.basename(file_path),
+                "size": stat_result.st_size,
+                "modified": stat_result.st_mtime,
+                "encoding": "utf-8",
+                "truncated": truncated,
+                "content": content,
+                "preview_type": "markdown" if preview_html is not None else None,
+                "preview_html": preview_html,
             }
         )
     except ValueError as exc:
