@@ -558,7 +558,8 @@
         .app-settings-grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
             align-items: start;
-            gap: 12px;
+            column-gap: 12px;
+            row-gap: 14px;
         }
 
         .settings-section {
@@ -588,6 +589,20 @@
         .compact-section {
             gap: 10px;
             padding: 12px;
+        }
+
+        .app-voice-enable-row {
+            min-height: 58px;
+            padding: 12px;
+            margin-bottom: 2px;
+        }
+
+        .app-voice-enable-row .check-copy {
+            gap: 4px;
+        }
+
+        .app-voice-enable-row .check-copy span {
+            line-height: 1.45;
         }
 
         .settings-fields-inline {
@@ -1675,7 +1690,7 @@
             <button class="ghost-btn" type="button" onclick="closeAppSettingsModal()">Close</button>
         </div>
         <div class="settings-grid app-settings-grid">
-            <label class="check-field compact-check">
+            <label class="check-field app-voice-enable-row">
                 <input id="appVoiceEnabled" type="checkbox">
                 <span class="check-copy">
                     <strong>Enable voice input</strong>

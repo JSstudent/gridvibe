@@ -16,6 +16,7 @@ env/
 # IDE and developer tooling
 .vscode/
 .idea/
+/.codegraph/
 /.codex/
 .mypy_cache/
 .pytest_cache/
