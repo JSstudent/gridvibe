@@ -315,6 +315,8 @@ The full voice implementation contract is in `docs/voice_guideline.md`.
 
 ## Development
 
+`make` targets create `.venv` and install development dependencies before running checks.
+
 ```bash
 make test
 make lint
