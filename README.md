@@ -1,6 +1,6 @@
 # GridVibe
 
-GridVibe is a browser-first terminal workspace for launching and managing multiple SSH or local shell panes from one control surface. It runs in a normal browser or, when `pywebview` is installed, in a native desktop window on Windows.
+GridVibe is a browser-first workspace for launching and managing multiple SSH terminals, local shell panes, agent panes, and local repository file explorer panes from one control surface. It runs in a normal browser or, when `pywebview` is installed, in a native desktop window on Windows.
 
 [![CI](https://github.com/JSstudent/gridvibe/actions/workflows/ci.yml/badge.svg)](https://github.com/JSstudent/gridvibe/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -32,7 +32,7 @@ Top bar controls:
 
 Per-terminal controls:
 
-- `↻` resets that terminal view and replays the recent output buffer.
+- `↻` resets that terminal view and replays the recent output buffer. On file explorer panes, it manually reloads the current directory.
 - `🧹` clears the terminal display and purges its replay buffer.
 - `🗑` sends `Ctrl+U` to clear the current input line.
 - `Enter` sends an Enter keypress to that terminal.
@@ -40,6 +40,23 @@ Per-terminal controls:
 - `Mic` opens voice capture settings for microphone selection, push-to-talk, and capture diagnostics.
 
 Session tabs show each active session group. Drag tabs to reorder them; GridVibe persists the order for the running app state.
+
+### File Explorer Panes
+
+In Local Repo mode, each pane can start as `Initial Command`, `Agent`, or `File Explorer`.
+
+File explorer panes are local-only, read-only repository views. They do not start a PTY, SSH connection, WSL shell, or PowerShell process. GridVibe validates every requested path against the selected root folder before listing or reading files.
+
+Explorer panes support:
+
+- Directory navigation with parent-folder navigation constrained to the selected root.
+- Manual refresh from the pane header without continuous auto-refresh flicker.
+- Folder/file icons, size and modified-time metadata, and per-pane light/dark explorer theme toggling.
+- Click-to-open text files in a read-only viewer.
+- Markdown files with a source tab and sanitized rendered preview when Markdown rendering dependencies are installed.
+- Size-limited previews. Binary files, directories, and paths outside the root are rejected.
+
+File moving, editing, deleting, upload, SSH/SFTP browsing, and git diff/status views are not part of the current file explorer implementation.
 
 ### Voice and Sound Settings
 
@@ -106,10 +123,12 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 ## Features
 
 - Multi-session launcher with 1, 2, 3, 4, 6, or 8 panes
-- SSH and local shell modes
+- SSH, WSL, PowerShell, cmd, and local repository modes
+- Per-pane startup modes for normal commands, agent CLIs, and local file explorer panes
 - Saved launcher presets with encrypted SSH passwords
 - Session groups with tabs and drag-to-reorder persistence
 - xterm.js terminal panes with resize, refresh, clear, and replay buffer support
+- Local read-only file explorer panes with directory navigation and text/Markdown preview
 - Optional native desktop window through `pywebview`
 - Optional offline voice input through Vosk or faster-whisper
 - Theme support for system, light, and dark modes
@@ -236,11 +255,11 @@ python webview_launcher.py      # native window when pywebview is installed
 ## How It Works
 
 - `main.py` starts Flask + Socket.IO and configures rotating logs.
-- `web/api.py` contains HTTP routes, Socket.IO handlers, saved-session handling, SSH/local-shell logic, app settings, and voice integration.
+- `web/api.py` contains HTTP routes, Socket.IO handlers, saved-session handling, SSH/local-shell logic, local file explorer APIs, app settings, and voice integration.
 - `sessions/manager.py` tracks in-memory session and session-group state.
 - `templates/` contains the launcher and terminal workspace pages.
 
-Live terminal sessions are in memory. If the Python process exits, running sessions end.
+Live terminal sessions and session groups are in memory. If the Python process exits, running sessions end.
 
 ## Configuration
 
