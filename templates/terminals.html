@@ -1941,7 +1941,7 @@
         setTerminalRefreshState(index, true);
         try {
             if (isExplorerSession(terminal._session)) {
-                await loadExplorerPane(index);
+                await loadExplorerPane(index, null, { force: true });
                 return false;
             }
             logSessionWindowAction('Refreshing terminal display', {
@@ -4259,15 +4259,22 @@
         }
     }
 
-    async function loadExplorerPane(index, path = null) {
+    async function loadExplorerPane(index, path = null, { force = false, showLoading = true } = {}) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !isExplorerSession(pane._session) || !sessionId) {
             return false;
         }
 
+        const isNavigation = path !== null;
+        if (pane._attached && !force && !isNavigation) {
+            return true;
+        }
+
         const nextPath = path === null ? (pane._explorerPath || '') : path;
-        renderExplorerMessage(index, 'Loading directory...');
+        if (showLoading) {
+            renderExplorerMessage(index, 'Loading directory...');
+        }
 
         try {
             const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/entries?path=${encodeURIComponent(nextPath)}`);

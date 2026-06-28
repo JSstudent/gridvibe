@@ -201,6 +201,37 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function setTerminalRefreshState(index, refreshing)", html)
         self.assertIn("async function refreshTerminalDisplay(index)", html)
 
+    def test_terminals_page_explorer_refresh_requires_initial_navigation_or_force(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        explorer_start = html.index("async function loadExplorerPane(index, path = null")
+        explorer_end = html.index("/* ─────────────────────────────────────────────", explorer_start)
+        explorer_html = html[explorer_start:explorer_end]
+
+        self.assertIn(
+            "async function loadExplorerPane(index, path = null, { force = false, showLoading = true } = {})",
+            explorer_html,
+        )
+        self.assertIn("const isNavigation = path !== null;", explorer_html)
+        self.assertIn(
+            "if (pane._attached && !force && !isNavigation) {\n            return true;\n        }",
+            explorer_html,
+        )
+        self.assertIn("if (showLoading)", explorer_html)
+
+    def test_terminals_page_manual_refresh_forces_explorer_reload(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        refresh_start = html.index("async function refreshTerminalDisplay(index)")
+        refresh_end = html.index("logSessionWindowAction('Refreshing terminal display'", refresh_start)
+        refresh_html = html[refresh_start:refresh_end]
+
+        self.assertIn("await loadExplorerPane(index, null, { force: true });", refresh_html)
+
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
 
