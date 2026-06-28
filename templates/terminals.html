@@ -585,195 +585,6 @@
             pointer-events: none;
             z-index: 5;
         }
-        .voice-panel {
-            position: absolute;
-            top: calc(100% + 8px);
-            right: 0;
-            width: min(420px, calc(100vw - 36px));
-            background: var(--t-voice-bg);
-            border: 1px solid var(--t-voice-border);
-            border-radius: 10px;
-            box-shadow: 0 16px 36px rgba(0, 0, 0, 0.45);
-            padding: 12px;
-            display: none;
-            z-index: 60;
-        }
-        .voice-panel.open {
-            display: block;
-        }
-        .voice-panel-header {
-            display: flex;
-            align-items: flex-start;
-            justify-content: space-between;
-            gap: 12px;
-        }
-        .voice-panel-title {
-            font-size: .82rem;
-            font-weight: 700;
-            color: var(--t-voice-title);
-        }
-        .voice-panel-meta {
-            margin-top: 3px;
-            font-size: .66rem;
-            line-height: 1.45;
-            color: var(--t-voice-meta);
-        }
-        .voice-panel-badge {
-            border: 1px solid var(--t-voice-badge-border);
-            border-radius: 999px;
-            padding: 2px 8px;
-            font-size: .62rem;
-            font-weight: 700;
-            color: var(--t-voice-badge-text);
-            background: var(--t-voice-badge-bg);
-            white-space: nowrap;
-        }
-        .voice-panel-badge.recording {
-            border-color: rgba(255, 85, 85, 0.42);
-            color: #ff8a8a;
-            background: rgba(70, 18, 18, 0.92);
-        }
-        .voice-panel-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 10px;
-        }
-        .voice-panel-label {
-            width: 78px;
-            flex-shrink: 0;
-            font-size: .71rem;
-            font-weight: 600;
-            color: var(--t-voice-label);
-        }
-        .voice-panel select {
-            flex: 1;
-            min-width: 0;
-            border: 1px solid var(--t-voice-border);
-            background: var(--t-voice-input-bg);
-            color: var(--t-voice-input-text);
-            border-radius: 6px;
-            padding: 6px 8px;
-            font-size: .72rem;
-        }
-        .voice-panel select:focus {
-            outline: none;
-            border-color: var(--t-accent);
-            box-shadow: 0 0 0 2px rgba(0, 217, 255, 0.15);
-        }
-        .voice-panel-toggle {
-            position: relative;
-            width: 36px;
-            height: 20px;
-            background: var(--t-voice-toggle-bg);
-            border: none;
-            border-radius: 10px;
-            cursor: pointer;
-            transition: background .2s;
-            flex-shrink: 0;
-            padding: 0;
-        }
-        .voice-panel-toggle::after {
-            content: '';
-            position: absolute;
-            top: 2px;
-            left: 2px;
-            width: 16px;
-            height: 16px;
-            background: var(--t-voice-toggle-knob);
-            border-radius: 50%;
-            transition: transform .2s;
-        }
-        .voice-panel-toggle.active {
-            background: var(--t-accent);
-        }
-        .voice-panel-toggle.active::after {
-            transform: translateX(16px);
-        }
-        .voice-ptt-keybind {
-            flex: 1;
-            min-width: 0;
-            border: 1px solid var(--t-voice-border);
-            background: var(--t-voice-input-bg);
-            color: var(--t-voice-input-text);
-            border-radius: 6px;
-            padding: 6px 8px;
-            font-size: .72rem;
-            cursor: pointer;
-            text-align: center;
-            user-select: none;
-        }
-        .voice-ptt-keybind:focus {
-            outline: none;
-            border-color: #ffaa00;
-            box-shadow: 0 0 0 2px rgba(255, 170, 0, 0.15);
-            color: #ffaa00;
-        }
-        .voice-ptt-row {
-            display: none;
-        }
-        .voice-ptt-row.visible {
-            display: flex;
-        }
-        .voice-panel-status {
-            margin-top: 10px;
-            border: 1px solid var(--t-voice-status-border);
-            background: var(--t-voice-status-bg);
-            color: var(--t-voice-status-text);
-            border-radius: 7px;
-            padding: 9px 10px;
-            font-size: .7rem;
-            line-height: 1.45;
-        }
-        .voice-panel-section {
-            margin-top: 10px;
-        }
-        .voice-panel details {
-            border: 1px solid var(--t-voice-details-border);
-            border-radius: 7px;
-            background: var(--t-voice-details-bg);
-            padding: 8px 10px;
-        }
-        .voice-panel details + details {
-            margin-top: 8px;
-        }
-        .voice-panel summary {
-            cursor: pointer;
-            list-style: none;
-            font-size: .71rem;
-            font-weight: 700;
-            color: var(--t-voice-details-title);
-        }
-        .voice-panel summary::-webkit-details-marker {
-            display: none;
-        }
-        .voice-diagnostics {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 8px;
-            margin-top: 8px;
-        }
-        .voice-diagnostic-title {
-            margin-bottom: 4px;
-            font-size: .66rem;
-            font-weight: 700;
-            color: var(--t-voice-diag-title);
-        }
-        .voice-panel-pre {
-            margin: 0;
-            padding: 7px 8px;
-            border-radius: 6px;
-            background: var(--t-voice-pre-bg);
-            border: 1px solid var(--t-voice-pre-border);
-            color: var(--t-voice-pre-text);
-            font-size: .63rem;
-            line-height: 1.45;
-            white-space: pre-wrap;
-            word-break: break-word;
-            max-height: 170px;
-            overflow: auto;
-        }
-
         .status-dot {
             width: 7px; height: 7px;
             border-radius: 50%;
@@ -824,8 +635,6 @@
         .terminal-canvas .xterm-viewport { overflow-y: auto !important; }
 
         .explorer-pane [data-terminal-clear],
-        .explorer-pane [data-terminal-clearline],
-        .explorer-pane [data-terminal-enter],
         .explorer-pane .voice-control {
             display: none;
         }
@@ -1313,14 +1122,6 @@
                 grid-row: auto;
             }
 
-            .voice-panel {
-                width: min(100vw - 28px, 360px);
-                right: -6px;
-            }
-
-            .voice-diagnostics {
-                grid-template-columns: 1fr;
-            }
         }
     </style>
 </head>
@@ -1745,7 +1546,6 @@
             return;
         }
 
-        _closeVoicePanels(-1);
         _stopAllVoice();
         const grid = document.getElementById('terminalsGrid');
         const fragment = document.createDocumentFragment();
@@ -3165,7 +2965,6 @@
        Tear down current sessions before switching
     ───────────────────────────────────────────── */
     function teardownCurrentGrid() {
-        _closeVoicePanels(-1);
         _stopAllVoice();
         // Leave all active SocketIO rooms so the backend clears
         // client_joined_sessions — buffer will replay on re-join.
@@ -3322,24 +3121,6 @@
                         >
                             🧹
                         </button>
-                        <button
-                            type="button"
-                            class="terminal-action-btn terminal-shortcut-btn"
-                            id="tclearline-${i}"
-                            data-terminal-clearline="${i}"
-                            title="Clear current input line (Ctrl+U)"
-                        >
-                            🗑
-                        </button>
-                        <button
-                            type="button"
-                            class="terminal-action-btn terminal-shortcut-btn"
-                            id="tenter-${i}"
-                            data-terminal-enter="${i}"
-                            title="Send Enter keypress to terminal"
-                        >
-                            Enter
-                        </button>
                         {% if voice_enabled %}
                         <div class="voice-control" data-terminal-voice-control="${i}">
                             <button
@@ -3351,101 +3132,6 @@
                             >
                                 🎤
                             </button>
-                            <button
-                                type="button"
-                                class="terminal-action-btn voice-settings-btn"
-                                id="tvoice-panel-toggle-${i}"
-                                data-terminal-voice-settings="${i}"
-                                title="Voice capture settings"
-                            >
-                                Mic
-                            </button>
-                            <div class="voice-panel" id="tvoice-panel-${i}" aria-hidden="true">
-                                <div class="voice-panel-header">
-                                    <div>
-                                        <div class="voice-panel-title">Voice capture</div>
-                                        <div class="voice-panel-meta" id="tvoice-meta-${i}">
-                                            Model: ${VOICE_MODEL} • Language: ${VOICE_LANGUAGE} • Target PCM: 16 kHz mono
-                                        </div>
-                                    </div>
-                                    <span class="voice-panel-badge" id="tvoice-badge-${i}">Idle</span>
-                                </div>
-                                <div class="voice-panel-row">
-                                    <label class="voice-panel-label" for="tvoice-profile-${i}">Profile</label>
-                                    <select id="tvoice-profile-${i}" data-terminal-voice-profile="${i}">
-                                        <option value="headset">Headset</option>
-                                        <option value="laptop">Laptop</option>
-                                    </select>
-                                </div>
-                                <div class="voice-panel-row">
-                                    <label class="voice-panel-label" for="tvoice-device-${i}">Microphone</label>
-                                    <select id="tvoice-device-${i}" data-terminal-voice-device="${i}">
-                                        <option value="">Default input</option>
-                                    </select>
-                                    <button
-                                        type="button"
-                                        class="terminal-action-btn voice-settings-btn"
-                                        data-terminal-voice-refresh="${i}"
-                                        title="Refresh available microphones"
-                                    >
-                                        ↻
-                                    </button>
-                                </div>
-                                <div class="voice-panel-row">
-                                    <label class="voice-panel-label">Push-to-talk</label>
-                                    <button
-                                        type="button"
-                                        class="voice-panel-toggle"
-                                        id="tvoice-ptt-toggle-${i}"
-                                        data-terminal-voice-ptt="${i}"
-                                        title="Enable push-to-talk mode"
-                                        aria-pressed="false"
-                                    ></button>
-                                </div>
-                                <div class="voice-panel-row voice-ptt-row" id="tvoice-ptt-keybind-row-${i}">
-                                    <label class="voice-panel-label" for="tvoice-ptt-keybind-${i}">Keybind</label>
-                                    <input
-                                        type="text"
-                                        class="voice-ptt-keybind"
-                                        id="tvoice-ptt-keybind-${i}"
-                                        data-terminal-voice-ptt-keybind="${i}"
-                                        readonly
-                                        placeholder="Click and press keys…"
-                                        title="Press a modifier key (Ctrl/Cmd) + another key"
-                                    >
-                                </div>
-                                <div class="voice-panel-status" id="tvoice-status-${i}">
-                                    Requested capture settings will be checked against the browser's actual applied settings after the microphone starts.
-                                </div>
-                                <div class="voice-panel-section">
-                                    <details open>
-                                        <summary>Requested vs actual capture</summary>
-                                        <div class="voice-diagnostics">
-                                            <div>
-                                                <div class="voice-diagnostic-title">Requested</div>
-                                                <pre class="voice-panel-pre" id="tvoice-requested-${i}">Awaiting capture start.</pre>
-                                            </div>
-                                            <div>
-                                                <div class="voice-diagnostic-title">Actual settings</div>
-                                                <pre class="voice-panel-pre" id="tvoice-settings-${i}">Awaiting capture start.</pre>
-                                            </div>
-                                        </div>
-                                    </details>
-                                    <details>
-                                        <summary>Browser support and capabilities</summary>
-                                        <div class="voice-diagnostics">
-                                            <div>
-                                                <div class="voice-diagnostic-title">Supported constraints</div>
-                                                <pre class="voice-panel-pre" id="tvoice-supported-${i}">Unavailable until the browser reports support data.</pre>
-                                            </div>
-                                            <div>
-                                                <div class="voice-diagnostic-title">Capabilities</div>
-                                                <pre class="voice-panel-pre" id="tvoice-capabilities-${i}">Available after an audio track is opened.</pre>
-                                            </div>
-                                        </div>
-                                    </details>
-                                </div>
-                            </div>
                         </div>
                         {% endif %}
                     </div>
@@ -3570,106 +3256,7 @@
                     _toggleVoice(i);
                 });
             }
-            const voiceSettingsButton = card.querySelector(`[data-terminal-voice-settings="${i}"]`);
-            if (voiceSettingsButton) {
-                voiceSettingsButton.draggable = false;
-                voiceSettingsButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                voiceSettingsButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    _toggleVoicePanel(i);
-                });
-            }
-            const voiceProfileSelect = card.querySelector(`[data-terminal-voice-profile="${i}"]`);
-            if (voiceProfileSelect) {
-                voiceProfileSelect.addEventListener('mousedown', event => {
-                    event.stopPropagation();
-                });
-                voiceProfileSelect.addEventListener('change', event => {
-                    event.stopPropagation();
-                    _setVoiceProfile(event.target.value, i);
-                });
-            }
-            const voiceDeviceSelect = card.querySelector(`[data-terminal-voice-device="${i}"]`);
-            if (voiceDeviceSelect) {
-                voiceDeviceSelect.addEventListener('mousedown', event => {
-                    event.stopPropagation();
-                });
-                voiceDeviceSelect.addEventListener('change', event => {
-                    event.stopPropagation();
-                    _setVoiceDevice(event.target.value, i);
-                });
-            }
-            const voiceRefreshButton = card.querySelector(`[data-terminal-voice-refresh="${i}"]`);
-            if (voiceRefreshButton) {
-                voiceRefreshButton.draggable = false;
-                voiceRefreshButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                voiceRefreshButton.addEventListener('click', async event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    await _refreshVoiceDevices(i);
-                });
-            }
-            const pttToggle = card.querySelector(`[data-terminal-voice-ptt="${i}"]`);
-            if (pttToggle) {
-                pttToggle.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                pttToggle.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    _setPttEnabled(!_voicePrefs.pttEnabled, i);
-                });
-            }
-            const pttKeybindInput = card.querySelector(`[data-terminal-voice-ptt-keybind="${i}"]`);
-            if (pttKeybindInput) {
-                pttKeybindInput.addEventListener('mousedown', event => {
-                    event.stopPropagation();
-                });
-                pttKeybindInput.addEventListener('keydown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    if (_isValidPttKeybind(event)) {
-                        _setPttKeybind(_formatPttKeybind(event), i);
-                    } else {
-                        pttKeybindInput.value = _formatPttKeybind(event) + '…';
-                    }
-                });
-            }
             _syncVoiceControls(i);
-            const enterButton = card.querySelector(`[data-terminal-enter="${i}"]`);
-            if (enterButton) {
-                enterButton.draggable = false;
-                enterButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                enterButton.addEventListener('click', async event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    await _sendEnterShortcut(i);
-                });
-            }
-            const clearLineButton = card.querySelector(`[data-terminal-clearline="${i}"]`);
-            if (clearLineButton) {
-                clearLineButton.draggable = false;
-                clearLineButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                clearLineButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    _sendToTerminal(i, '\x15');
-                });
-            }
             const explorerUpButton = card.querySelector(`[data-explorer-up="${i}"]`);
             if (explorerUpButton) {
                 explorerUpButton.draggable = false;
@@ -3714,12 +3301,6 @@
         updateSessionChrome(count, activeGroupId);
         updateAllSplitButtonStates();
 
-        /* Restore voice panel if it was open last time */
-        if (_voicePrefs.panelOpen && terminals.length > 0) {
-            const restoreIndex = _focusedTerminalIndex >= 0 && _focusedTerminalIndex < terminals.length
-                ? _focusedTerminalIndex : 0;
-            _toggleVoicePanel(restoreIndex);
-        }
     }
 
     function remapCardIndexAttributes(card, sourceIndex, targetIndex) {
@@ -3817,88 +3398,6 @@
                 event.preventDefault();
                 event.stopPropagation();
                 _toggleVoice(index);
-            });
-        }
-
-        const voiceSettingsButton = card.querySelector(`[data-terminal-voice-settings="${index}"]`);
-        if (voiceSettingsButton) {
-            stopHeaderButtonDrag(voiceSettingsButton);
-            voiceSettingsButton.addEventListener('click', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                _toggleVoicePanel(index);
-            });
-        }
-
-        const voiceProfileSelect = card.querySelector(`[data-terminal-voice-profile="${index}"]`);
-        if (voiceProfileSelect) {
-            voiceProfileSelect.addEventListener('mousedown', event => event.stopPropagation());
-            voiceProfileSelect.addEventListener('change', event => {
-                event.stopPropagation();
-                _setVoiceProfile(event.target.value, index);
-            });
-        }
-
-        const voiceDeviceSelect = card.querySelector(`[data-terminal-voice-device="${index}"]`);
-        if (voiceDeviceSelect) {
-            voiceDeviceSelect.addEventListener('mousedown', event => event.stopPropagation());
-            voiceDeviceSelect.addEventListener('change', event => {
-                event.stopPropagation();
-                _setVoiceDevice(event.target.value, index);
-            });
-        }
-
-        const voiceRefreshButton = card.querySelector(`[data-terminal-voice-refresh="${index}"]`);
-        if (voiceRefreshButton) {
-            stopHeaderButtonDrag(voiceRefreshButton);
-            voiceRefreshButton.addEventListener('click', async event => {
-                event.preventDefault();
-                event.stopPropagation();
-                await _refreshVoiceDevices(index);
-            });
-        }
-
-        const pttToggle = card.querySelector(`[data-terminal-voice-ptt="${index}"]`);
-        if (pttToggle) {
-            stopHeaderButtonDrag(pttToggle);
-            pttToggle.addEventListener('click', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                _setPttEnabled(!_voicePrefs.pttEnabled, index);
-            });
-        }
-
-        const pttKeybindInput = card.querySelector(`[data-terminal-voice-ptt-keybind="${index}"]`);
-        if (pttKeybindInput) {
-            pttKeybindInput.addEventListener('mousedown', event => event.stopPropagation());
-            pttKeybindInput.addEventListener('keydown', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                if (_isValidPttKeybind(event)) {
-                    _setPttKeybind(_formatPttKeybind(event), index);
-                } else {
-                    pttKeybindInput.value = _formatPttKeybind(event) + '…';
-                }
-            });
-        }
-
-        const enterButton = card.querySelector(`[data-terminal-enter="${index}"]`);
-        if (enterButton) {
-            stopHeaderButtonDrag(enterButton);
-            enterButton.addEventListener('click', async event => {
-                event.preventDefault();
-                event.stopPropagation();
-                await _sendEnterShortcut(index);
-            });
-        }
-
-        const clearLineButton = card.querySelector(`[data-terminal-clearline="${index}"]`);
-        if (clearLineButton) {
-            stopHeaderButtonDrag(clearLineButton);
-            clearLineButton.addEventListener('click', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                _sendToTerminal(index, '\x15');
             });
         }
 
@@ -4564,9 +4063,8 @@
     const VOICE_LOG_PREFIX = '[GridVibe Voice]';
     const _voiceState = {};
     const _voiceLastDiagnostics = {};
+    const _voiceStatusMessages = {};
     let _voiceActiveIndex = -1;   // only one terminal may record at a time
-    let _voicePanelIndex = -1;
-    let _voiceDevices = [];
     let _voicePrefs = _loadVoicePrefs();
     let _voiceServiceStatus = {
         enabled: PAGE_DATASET.voiceEnabled === 'true',
@@ -4583,8 +4081,7 @@
             profile: 'laptop',
             deviceId: '',
             pttEnabled: false,
-            pttKeybind: '',
-            panelOpen: false
+            pttKeybind: ''
         };
     }
 
@@ -4601,8 +4098,7 @@
                 profile,
                 deviceId: typeof parsed?.deviceId === 'string' ? parsed.deviceId : '',
                 pttEnabled: typeof parsed?.pttEnabled === 'boolean' ? parsed.pttEnabled : false,
-                pttKeybind: typeof parsed?.pttKeybind === 'string' ? parsed.pttKeybind : '',
-                panelOpen: typeof parsed?.panelOpen === 'boolean' ? parsed.panelOpen : false
+                pttKeybind: typeof parsed?.pttKeybind === 'string' ? parsed.pttKeybind : ''
             };
         } catch (_) {
             return defaults;
@@ -4632,8 +4128,7 @@
                 profile,
                 deviceId: typeof server?.deviceId === 'string' ? server.deviceId : _voicePrefs.deviceId,
                 pttEnabled: typeof server?.pttEnabled === 'boolean' ? server.pttEnabled : _voicePrefs.pttEnabled,
-                pttKeybind: typeof server?.pttKeybind === 'string' ? server.pttKeybind : _voicePrefs.pttKeybind,
-                panelOpen: typeof server?.panelOpen === 'boolean' ? server.panelOpen : _voicePrefs.panelOpen
+                pttKeybind: typeof server?.pttKeybind === 'string' ? server.pttKeybind : _voicePrefs.pttKeybind
             };
             try {
                 window.localStorage?.setItem(VOICE_PREFS_STORAGE_KEY, JSON.stringify(_voicePrefs));
@@ -4661,20 +4156,7 @@
 
     function _getVoicePanelElements(index) {
         return {
-            control: document.querySelector(`[data-terminal-voice-control="${index}"]`),
-            panel: document.getElementById(`tvoice-panel-${index}`),
-            profile: document.getElementById(`tvoice-profile-${index}`),
-            device: document.getElementById(`tvoice-device-${index}`),
-            requested: document.getElementById(`tvoice-requested-${index}`),
-            settings: document.getElementById(`tvoice-settings-${index}`),
-            supported: document.getElementById(`tvoice-supported-${index}`),
-            capabilities: document.getElementById(`tvoice-capabilities-${index}`),
-            status: document.getElementById(`tvoice-status-${index}`),
-            meta: document.getElementById(`tvoice-meta-${index}`),
-            badge: document.getElementById(`tvoice-badge-${index}`),
-            pttToggle: document.getElementById(`tvoice-ptt-toggle-${index}`),
-            pttKeybindRow: document.getElementById(`tvoice-ptt-keybind-row-${index}`),
-            pttKeybind: document.getElementById(`tvoice-ptt-keybind-${index}`)
+            control: document.querySelector(`[data-terminal-voice-control="${index}"]`)
         };
     }
 
@@ -4716,11 +4198,6 @@
         return JSON.stringify(sanitized, null, 2);
     }
 
-    function _voiceDeviceLabel(device, index) {
-        if (device.label) return device.label;
-        return `Microphone ${index + 1}`;
-    }
-
     function _voiceSummaryMessage() {
         const parts = [
             `Engine: ${_voiceServiceStatus.engine || VOICE_ENGINE}`,
@@ -4748,73 +4225,16 @@
     }
 
     function _updateVoiceMeta(index) {
-        const { meta } = _getVoicePanelElements(index);
-        if (meta) {
-            meta.textContent = _voiceSummaryMessage();
-        }
+        return _voiceSummaryMessage();
     }
 
     function _renderVoiceDiagnostics(index, diagnostics) {
-        const { requested, settings, supported, capabilities } = _getVoicePanelElements(index);
-        if (requested) {
-            requested.textContent = _formatVoiceDiagnostic(
-                diagnostics?.requested,
-                'Awaiting capture start.'
-            );
-        }
-        if (settings) {
-            settings.textContent = _formatVoiceDiagnostic(
-                diagnostics?.settings,
-                'Awaiting capture start.'
-            );
-        }
-        if (supported) {
-            supported.textContent = _formatVoiceDiagnostic(
-                diagnostics?.supportedConstraints,
-                'Unavailable until the browser reports support data.'
-            );
-        }
-        if (capabilities) {
-            capabilities.textContent = _formatVoiceDiagnostic(
-                diagnostics?.capabilities,
-                'Available after an audio track is opened.'
-            );
-        }
+        return _formatVoiceDiagnostic(diagnostics, '');
     }
 
     function _syncVoiceControls(index) {
         const elements = _getVoicePanelElements(index);
         if (!elements.control) return;
-
-        if (elements.profile) {
-            elements.profile.value = _voicePrefs.profile;
-        }
-
-        if (elements.device) {
-            const selectedDeviceId = _voicePrefs.deviceId;
-            const devices = _voiceDevices.slice();
-            elements.device.innerHTML = '';
-            const defaultOption = document.createElement('option');
-            defaultOption.value = '';
-            defaultOption.textContent = 'Default input';
-            elements.device.appendChild(defaultOption);
-            devices.forEach((device, deviceIndex) => {
-                const option = document.createElement('option');
-                option.value = device.deviceId;
-                option.textContent = _voiceDeviceLabel(device, deviceIndex);
-                elements.device.appendChild(option);
-            });
-            if (
-                selectedDeviceId &&
-                !devices.some(device => device.deviceId === selectedDeviceId)
-            ) {
-                const missingOption = document.createElement('option');
-                missingOption.value = selectedDeviceId;
-                missingOption.textContent = 'Previously selected device (unavailable)';
-                elements.device.appendChild(missingOption);
-            }
-            elements.device.value = selectedDeviceId;
-        }
 
         _updateVoiceMeta(index);
         _renderVoiceDiagnostics(
@@ -4828,17 +4248,6 @@
             _setVoicePanelStatus(index, _voiceDefaultStatusMessage());
         }
         _updateVoiceBtn(index, Boolean(_voiceState[index]?.recording));
-
-        if (elements.pttToggle) {
-            elements.pttToggle.classList.toggle('active', _voicePrefs.pttEnabled);
-            elements.pttToggle.setAttribute('aria-pressed', String(_voicePrefs.pttEnabled));
-        }
-        if (elements.pttKeybindRow) {
-            elements.pttKeybindRow.classList.toggle('visible', _voicePrefs.pttEnabled);
-        }
-        if (elements.pttKeybind) {
-            elements.pttKeybind.value = _voicePrefs.pttKeybind || '';
-        }
     }
 
     async function _loadVoiceServiceStatus() {
@@ -4875,101 +4284,11 @@
     }
 
     function _setVoicePanelStatus(index, message) {
-        const { status } = _getVoicePanelElements(index);
-        if (status) {
-            status.textContent = message;
+        _voiceStatusMessages[index] = message;
+        const btn = document.getElementById(`tvoice-${index}`);
+        if (btn && !_voiceState[index]?.recording) {
+            btn.title = `Voice input (${message})`;
         }
-    }
-
-    function _setVoiceProfile(profile, index) {
-        if (!VOICE_CAPTURE_PROFILES[profile]) return;
-        _voicePrefs.profile = profile;
-        _saveVoicePrefs();
-        terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
-        _setVoicePanelStatus(
-            index,
-            _voiceState[index]?.recording
-                ? 'Profile updated. Restart capture to apply the new DSP request.'
-                : `Profile set to ${VOICE_CAPTURE_PROFILES[profile].label}. Actual applied values will be shown after capture starts.`
-        );
-    }
-
-    function _setVoiceDevice(deviceId, index) {
-        _voicePrefs.deviceId = deviceId || '';
-        _saveVoicePrefs();
-        terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
-        _setVoicePanelStatus(
-            index,
-            _voiceState[index]?.recording
-                ? 'Microphone selection updated. Restart capture to apply the new device.'
-                : (_voicePrefs.deviceId ? 'Selected microphone will be requested on the next capture.' : 'Browser default microphone will be requested on the next capture.')
-        );
-    }
-
-    async function _refreshVoiceDevices(index = _voicePanelIndex) {
-        if (!navigator.mediaDevices?.enumerateDevices) {
-            if (Number.isInteger(index) && index >= 0) {
-                _setVoicePanelStatus(index, 'This browser does not expose enumerateDevices() for microphone selection.');
-            }
-            return;
-        }
-
-        try {
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            _voiceDevices = devices.filter(device => device.kind === 'audioinput');
-            terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
-            if (Number.isInteger(index) && index >= 0) {
-                const hasNamedDevices = _voiceDevices.some(device => Boolean(device.label));
-                if (_voiceState[index]?.recording) {
-                    return;
-                }
-                if (_voiceDevices.length === 0) {
-                    _setVoicePanelStatus(index, 'No audio input devices are currently available.');
-                } else if (!hasNamedDevices) {
-                    _setVoicePanelStatus(index, 'Microphones loaded. Labels may stay generic until microphone permission is granted.');
-                } else {
-                    _setVoicePanelStatus(index, `Microphones refreshed. ${_voiceDevices.length} input device${_voiceDevices.length === 1 ? '' : 's'} available.`);
-                }
-            }
-        } catch (err) {
-            console.error('Voice device enumeration failed:', err);
-            if (Number.isInteger(index) && index >= 0) {
-                _setVoicePanelStatus(index, `Unable to refresh microphones: ${err.message || err}`);
-            }
-        }
-    }
-
-    function _closeVoicePanels(exceptIndex = -1) {
-        document.querySelectorAll('.voice-panel.open').forEach(panel => {
-            const panelId = panel.id || '';
-            const panelIndex = Number.parseInt(panelId.replace('tvoice-panel-', ''), 10);
-            if (panelIndex === exceptIndex) return;
-            panel.classList.remove('open');
-            panel.setAttribute('aria-hidden', 'true');
-        });
-        _voicePanelIndex = exceptIndex;
-    }
-
-    async function _toggleVoicePanel(index) {
-        const { panel } = _getVoicePanelElements(index);
-        if (!panel) return;
-
-        const isOpen = panel.classList.contains('open');
-        if (isOpen) {
-            _closeVoicePanels(-1);
-            _voicePrefs.panelOpen = false;
-            _saveVoicePrefs();
-            return;
-        }
-
-        _closeVoicePanels(index);
-        panel.classList.add('open');
-        panel.setAttribute('aria-hidden', 'false');
-        _voicePrefs.panelOpen = true;
-        _saveVoicePrefs();
-        _syncVoiceControls(index);
-        await _loadVoiceServiceStatus();
-        await _refreshVoiceDevices(index);
     }
 
     function _voiceIndexForSession(sessionId) {
@@ -5312,7 +4631,7 @@
             _applyVoiceStateDiagnostics(index);
             _setVoicePanelStatus(
                 index,
-                fallbackMessage || 'Capture started. The requested profile is shown next to the browser\'s actual applied settings below.'
+                fallbackMessage || 'Capture started with the global microphone settings.'
             );
             _voiceLog('Voice capture started successfully', {
                 terminalIndex: index,
@@ -5320,7 +4639,6 @@
                 fallbackUsed: Boolean(fallbackMessage),
                 diagnostics: _voiceLastDiagnostics[index]
             });
-            await _refreshVoiceDevices(index);
         } catch (err) {
             console.error(`${VOICE_LOG_PREFIX} Voice input error:`, err, {
                 terminalIndex: index,
@@ -5431,33 +4749,9 @@
         }
     }
 
-    async function _stopActiveVoiceCapture() {
-        if (_voiceActiveIndex === -1) return;
-        await _stopVoice(_voiceActiveIndex);
-    }
-
     /* ── Push-to-talk ── */
     let _pttActive = false;
     let _pttProcessing = false;
-
-    function _formatPttKeybind(event) {
-        const parts = [];
-        if (event.ctrlKey) parts.push('Ctrl');
-        if (event.metaKey) parts.push('Cmd');
-        if (event.altKey) parts.push('Alt');
-        if (event.shiftKey) parts.push('Shift');
-        const key = event.key;
-        if (!['Control', 'Meta', 'Alt', 'Shift'].includes(key)) {
-            parts.push(key.length === 1 ? key.toUpperCase() : key);
-        }
-        return parts.join('+');
-    }
-
-    function _isValidPttKeybind(event) {
-        const hasCommandKey = event.ctrlKey || event.metaKey;
-        const isModifierOnly = ['Control', 'Meta', 'Alt', 'Shift'].includes(event.key);
-        return hasCommandKey && !isModifierOnly;
-    }
 
     function _matchesPttKeybind(event, keybind) {
         if (!keybind) return false;
@@ -5498,36 +4792,10 @@
         return -1;
     }
 
-    function _setPttEnabled(enabled, index) {
-        _voicePrefs.pttEnabled = enabled;
-        _saveVoicePrefs();
-        terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
-        _setVoicePanelStatus(
-            index,
-            enabled
-                ? (_voicePrefs.pttKeybind
-                    ? `Push-to-talk enabled. Hold ${_voicePrefs.pttKeybind} to record.`
-                    : 'Push-to-talk enabled. Configure a keybind below.')
-                : 'Push-to-talk disabled. Click the microphone button to toggle recording.'
-        );
-    }
-
-    function _setPttKeybind(keybind, index) {
-        _voicePrefs.pttKeybind = keybind;
-        _saveVoicePrefs();
-        terminals.forEach((_, terminalIndex) => _syncVoiceControls(terminalIndex));
-        if (keybind) {
-            _setVoicePanelStatus(index, `Push-to-talk keybind set to ${keybind}. Hold to record.`);
-        }
-    }
-
     document.addEventListener('keydown', async event => {
         if (!_voicePrefs.pttEnabled || !_voicePrefs.pttKeybind) return;
         if (_pttActive || _pttProcessing) return;
         if (!_matchesPttKeybind(event, _voicePrefs.pttKeybind)) return;
-
-        const activeEl = document.activeElement;
-        if (activeEl && activeEl.classList.contains('voice-ptt-keybind')) return;
 
         event.preventDefault();
         _pttActive = true;
@@ -5561,24 +4829,15 @@
         }
     });
 
-    async function _sendEnterShortcut(index) {
-        await _stopActiveVoiceCapture();
-        _sendToTerminal(index, '\r');
-    }
-
     function _updateVoiceBtn(index, recording) {
         const btn = document.getElementById(`tvoice-${index}`);
         if (!btn) return;
         btn.classList.toggle('recording', recording);
         btn.title = recording
             ? 'Voice input (recording — click to stop)'
-            : 'Voice input (click to start recording)';
-
-        const { badge } = _getVoicePanelElements(index);
-        if (badge) {
-            badge.textContent = recording ? 'Recording' : 'Idle';
-            badge.classList.toggle('recording', recording);
-        }
+            : (_voiceStatusMessages[index]
+                ? `Voice input (${_voiceStatusMessages[index]})`
+                : 'Voice input (click to start recording)');
     }
 
     function _showVoicePreview(index, text) {
@@ -6926,24 +6185,12 @@
         syncNativeFullscreenState();
     });
     document.addEventListener('fullscreenchange', updateFullscreenButton);
-    document.addEventListener('mousedown', event => {
-        if (!event.target.closest('.voice-control')) {
-            _closeVoicePanels(-1);
-        }
-    });
-    if (navigator.mediaDevices?.addEventListener) {
-        navigator.mediaDevices.addEventListener('devicechange', () => {
-            _refreshVoiceDevices(_voicePanelIndex);
-        });
-    }
-
     /* ─────────────────────────────────────────────
        Boot
     ───────────────────────────────────────────── */
     updateFullscreenButton();
     _loadVoicePrefsFromServer();
     _loadVoiceServiceStatus();
-    _refreshVoiceDevices(-1);
     initialLoad();
     setInterval(refreshStatuses, 3000);
 </script>

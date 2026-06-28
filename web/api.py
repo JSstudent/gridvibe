@@ -3923,7 +3923,7 @@ def voice_status_endpoint():
     })
 
 
-VOICE_PREFS_VALID_KEYS = {'profile', 'deviceId', 'pttEnabled', 'pttKeybind', 'panelOpen'}
+VOICE_PREFS_VALID_KEYS = {'profile', 'deviceId', 'pttEnabled', 'pttKeybind'}
 
 
 def _default_voice_prefs() -> Dict[str, Any]:
@@ -3932,7 +3932,6 @@ def _default_voice_prefs() -> Dict[str, Any]:
         'deviceId': '',
         'pttEnabled': False,
         'pttKeybind': '',
-        'panelOpen': False,
     }
 
 

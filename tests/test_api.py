@@ -162,6 +162,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="appTheme"', html)
         self.assertIn('id="appVoiceEngine"', html)
         self.assertIn('id="appWhisperDevice"', html)
+        self.assertIn('id="appVoiceProfile"', html)
+        self.assertIn('id="appVoiceDevice"', html)
+        self.assertIn('id="appVoicePttEnabled"', html)
+        self.assertIn('id="appVoicePttKeybind"', html)
+        self.assertIn("function refreshLauncherMicrophones()", html)
+        self.assertIn('/api/voice-prefs', html)
         self.assertIn('<select id="appWhisperModel">', html)
         self.assertIn('<option value="base">base</option>', html)
         self.assertIn('<option value="large-v3-turbo">large-v3-turbo</option>', html)
@@ -346,7 +352,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
 
-    def test_terminals_page_exposes_voice_capture_profiles_and_worklet_diagnostics(self):
+    def test_terminals_page_uses_global_voice_capture_preferences_and_worklet(self):
         with patch.object(api, "voice_engine", "whisper"), patch.object(
             api, "whisper_model", "base"
         ):
@@ -355,9 +361,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn('data-voice-engine="whisper"', html)
-        self.assertIn('data-terminal-voice-settings="${i}"', html)
-        self.assertIn('data-terminal-voice-profile="${i}"', html)
-        self.assertIn('data-terminal-voice-device="${i}"', html)
+        self.assertNotIn('data-terminal-voice-settings="${i}"', html)
+        self.assertNotIn('data-terminal-voice-profile="${i}"', html)
+        self.assertNotIn('data-terminal-voice-device="${i}"', html)
         self.assertIn("VOICE_CAPTURE_PROFILES = Object.freeze({", html)
         self.assertIn("const VOICE_ENGINE = PAGE_DATASET.voiceEngine || 'vosk';", html)
         self.assertIn("new AudioWorkletNode(audioCtx, 'gridvibe-voice-processor'", html)
@@ -392,83 +398,48 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("await _stopVoice(index, { notifyServer: false });", error_handler)
         self.assertIn("async function _stopVoice(index, { notifyServer = true } = {})", html)
 
-    def test_terminals_page_uses_distinct_voice_toggle_and_diagnostics_ids(self):
+    def test_terminals_page_uses_voice_toggle_without_per_terminal_settings_panel(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn('id="tvoice-panel-toggle-${i}"', html)
-        self.assertEqual(html.count('id="tvoice-settings-${i}"'), 1)
-        self.assertIn("settings: document.getElementById(`tvoice-settings-${index}`),", html)
+        self.assertIn('data-terminal-voice="${i}"', html)
+        self.assertNotIn('id="tvoice-panel-toggle-${i}"', html)
+        self.assertNotIn('id="tvoice-settings-${i}"', html)
+        self.assertNotIn("settings: document.getElementById(`tvoice-settings-${index}`),", html)
 
-    def test_terminals_page_exposes_push_to_talk_controls(self):
+    def test_terminals_page_uses_global_push_to_talk_preferences(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn('data-terminal-voice-ptt="${i}"', html)
-        self.assertIn('data-terminal-voice-ptt-keybind="${i}"', html)
-        self.assertIn('id="tvoice-ptt-toggle-${i}"', html)
-        self.assertIn('id="tvoice-ptt-keybind-${i}"', html)
-        self.assertIn("voice-panel-toggle", html)
-        self.assertIn("voice-ptt-keybind", html)
-        self.assertIn("function _formatPttKeybind(event)", html)
-        self.assertIn("function _isValidPttKeybind(event)", html)
+        self.assertNotIn('data-terminal-voice-ptt="${i}"', html)
+        self.assertNotIn('data-terminal-voice-ptt-keybind="${i}"', html)
+        self.assertNotIn('id="tvoice-ptt-toggle-${i}"', html)
+        self.assertNotIn('id="tvoice-ptt-keybind-${i}"', html)
         self.assertIn("function _matchesPttKeybind(event, keybind)", html)
-        self.assertIn("function _setPttEnabled(enabled, index)", html)
-        self.assertIn("function _setPttKeybind(keybind, index)", html)
         self.assertIn("pttEnabled: false", html)
         self.assertIn("pttKeybind: ''", html)
 
-    def test_terminals_page_exposes_visible_enter_and_line_clear_shortcuts(self):
+    def test_terminals_page_removes_enter_and_line_clear_shortcuts(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn('class="terminal-action-btn terminal-shortcut-btn"', html)
-        self.assertIn('data-terminal-enter="${i}"', html)
-        self.assertIn('data-terminal-clearline="${i}"', html)
-        self.assertRegex(
-            html,
-            r'(?s)data-terminal-enter="\$\{i\}".*?>\s*Enter\s*</button>',
-        )
-        self.assertRegex(
-            html,
-            r'(?s)data-terminal-clearline="\$\{i\}".*?>\s*\U0001F5D1\s*</button>',
-        )
+        self.assertNotIn('class="terminal-action-btn terminal-shortcut-btn"', html)
+        self.assertNotIn('data-terminal-enter="${i}"', html)
+        self.assertNotIn('data-terminal-clearline="${i}"', html)
+        self.assertNotIn("async function _sendEnterShortcut(index)", html)
 
-    def test_terminals_page_places_clear_line_shortcut_next_to_clear(self):
+    def test_terminals_page_places_voice_control_after_clear_button(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         clear_index = html.index('data-terminal-clear="${i}"')
-        clear_line_index = html.index('data-terminal-clearline="${i}"')
-        enter_index = html.index('data-terminal-enter="${i}"')
         voice_index = html.index('data-terminal-voice-control="${i}"')
 
-        self.assertLess(clear_index, clear_line_index)
-        self.assertLess(clear_line_index, enter_index)
-        self.assertLess(enter_index, voice_index)
-
-    def test_terminals_page_enter_shortcut_stops_voice_before_sending_newline(self):
-        response = self.client.get("/terminals")
-
-        self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
-        handler_start = html.index("enterButton.addEventListener('click', async event => {")
-        helper_start = html.index("async function _sendEnterShortcut(index) {")
-        helper_end = html.index("function _updateVoiceBtn(index, recording) {", helper_start)
-        helper_html = html[helper_start:helper_end]
-
-        self.assertIn("await _sendEnterShortcut(i);", html[handler_start:])
-        self.assertIn("await _stopActiveVoiceCapture();", helper_html)
-        self.assertIn("_sendToTerminal(index, '\\r');", helper_html)
-        self.assertLess(
-            helper_html.index("await _stopActiveVoiceCapture();"),
-            helper_html.index("_sendToTerminal(index, '\\r');"),
-        )
-        self.assertNotIn("classList.toggle('visible', recording);", helper_html + html[helper_end:html.index("function _showVoicePreview(index, text) {", helper_end)])
+        self.assertLess(clear_index, voice_index)
 
     def test_terminals_page_refreshes_only_one_terminal_by_replaying_its_buffer(self):
         response = self.client.get("/terminals")
@@ -975,12 +946,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["deviceId"], "")
         self.assertFalse(payload["pttEnabled"])
         self.assertEqual(payload["pttKeybind"], "")
-        self.assertFalse(payload["panelOpen"])
 
     def test_voice_prefs_post_persists_and_returns_updated(self):
         self.client.post(
             "/api/voice-prefs",
-            json={"profile": "headset", "pttEnabled": True, "pttKeybind": "Ctrl+M", "panelOpen": True},
+            json={"profile": "headset", "pttEnabled": True, "pttKeybind": "Ctrl+M"},
         )
 
         response = self.client.get("/api/voice-prefs")
@@ -989,7 +959,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["profile"], "headset")
         self.assertTrue(payload["pttEnabled"])
         self.assertEqual(payload["pttKeybind"], "Ctrl+M")
-        self.assertTrue(payload["panelOpen"])
 
     def test_voice_prefs_post_rejects_invalid_payload(self):
         response = self.client.post("/api/voice-prefs", data="not json")

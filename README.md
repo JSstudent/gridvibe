@@ -35,10 +35,7 @@ Per-terminal controls:
 - `↻` resets that terminal view and replays the recent output buffer. On file explorer panes, it manually reloads the current directory or the currently open file.
 - `📁` switches a Local Repo terminal pane into a file explorer; `>_` switches a file explorer pane into a terminal opened at the currently selected explorer directory. Explorer panes keep their original root so parent-folder navigation remains available after switching back and forth.
 - `🧹` clears the terminal display and purges its replay buffer.
-- `🗑` sends `Ctrl+U` to clear the current input line.
-- `Enter` sends an Enter keypress to that terminal.
 - `🎤` starts or stops voice input for that terminal when voice input is enabled.
-- `Mic` opens voice capture settings for microphone selection, push-to-talk, and capture diagnostics.
 
 Session tabs show each active session group. Drag tabs to reorder them; GridVibe persists the order for the running app state.
 
@@ -65,12 +62,11 @@ File moving, editing, deleting, upload, SSH/SFTP browsing, and git diff/status v
 
 GridVibe does not play remote audio from terminal sessions. Sound-related settings are for microphone capture used by voice input.
 
-Open `Mic` on a terminal pane to choose:
+Open `App Settings` from the launcher gear button to choose:
 
 - `Profile`: headset or laptop microphone capture tuning.
 - `Microphone`: browser default input or a specific available input device.
 - `Push-to-talk`: optional hold-to-record mode with a custom keybind.
-- `Requested vs actual capture`: diagnostics comparing the requested audio settings to what the browser actually applied.
 
 Voice input requires optional voice dependencies. On Windows, `GridVibe.bat` checks the `.venv` and prompts to install them when missing. Manual setup:
 
@@ -90,6 +86,7 @@ Use the gear button on the launcher page to open `App Settings`. These settings 
 - `Language` sets the voice recognition language, such as `en-US`.
 - `Vosk Model` sets the local Vosk model folder/name.
 - `Whisper Model`, `Device`, and `Compute Type` configure faster-whisper. GPU mode requires a working NVIDIA CUDA setup; use CPU if startup fails.
+- `Profile`, `Microphone`, and `Push-to-talk` configure global microphone capture preferences for terminal voice input.
 
 ### Agent CLI Detection
 
