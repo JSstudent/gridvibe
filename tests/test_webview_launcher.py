@@ -1,4 +1,5 @@
 import os
+import signal
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -266,6 +267,30 @@ class WebviewLauncherTestCase(unittest.TestCase):
 
         with patch.object(webview_launcher.sys, "platform", "win32"):
             self.assertFalse(webview_launcher._is_missing_linux_pywebview_backend(exc))
+
+    @unittest.skipUnless(
+        all(hasattr(signal, name) for name in ("SIGTSTP", "SIGTTIN", "SIGTTOU")),
+        "job-control signals are not available on this platform",
+    )
+    def test_linux_job_control_stop_signals_are_ignored(self):
+        with patch.object(webview_launcher.sys, "platform", "linux"), patch.object(
+            webview_launcher.signal,
+            "signal",
+        ) as signal_mock:
+            webview_launcher._ignore_linux_job_control_stop_signals()
+
+            signal_mock.assert_any_call(signal.SIGTSTP, signal.SIG_IGN)
+            signal_mock.assert_any_call(signal.SIGTTIN, signal.SIG_IGN)
+            signal_mock.assert_any_call(signal.SIGTTOU, signal.SIG_IGN)
+
+    def test_linux_job_control_stop_signals_ignore_non_linux_platforms(self):
+        with patch.object(webview_launcher.sys, "platform", "win32"), patch.object(
+            webview_launcher.signal,
+            "signal",
+        ) as signal_mock:
+            webview_launcher._ignore_linux_job_control_stop_signals()
+
+            signal_mock.assert_not_called()
 
     def test_linux_qtwebengine_env_defaults_to_software_rendering(self):
         with patch.object(webview_launcher.sys, "platform", "linux"), patch.dict(

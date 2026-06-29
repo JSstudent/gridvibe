@@ -6,6 +6,7 @@ Falls back to the system browser if pywebview is missing.
 import argparse
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -175,6 +176,29 @@ def _log_linux_pywebview_backend_help():
         "GTK is also supported, but it requires distro PyGObject/WebKit packages "
         "that are visible to the active Python environment."
     )
+
+
+def _ignore_linux_job_control_stop_signals():
+    """Keep the desktop launcher alive if terminal job control sends stop signals."""
+    if sys.platform != "linux":
+        return
+
+    configured = []
+    for signal_name in ("SIGTSTP", "SIGTTIN", "SIGTTOU"):
+        signal_value = getattr(signal, signal_name, None)
+        if signal_value is None:
+            continue
+        try:
+            signal.signal(signal_value, signal.SIG_IGN)
+            configured.append(signal_name)
+        except (OSError, ValueError):
+            logger.debug("Could not ignore %s for Linux launcher", signal_name)
+
+    if configured:
+        logger.info(
+            "Ignoring Linux terminal job-control stop signals: %s",
+            ", ".join(configured),
+        )
 
 
 def _open_browser_fallback(base_url: str, server_thread: threading.Thread):
@@ -666,6 +690,7 @@ def main():
 
     setup_logging(debug)
     logger = logging.getLogger(__name__)
+    _ignore_linux_job_control_stop_signals()
     logger.info(f"Starting GridVibe GUI at {base_url}")
 
     server_thread = threading.Thread(

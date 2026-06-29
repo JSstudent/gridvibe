@@ -221,6 +221,10 @@ GridVibe automatically asks QtWebEngine to avoid Chromium's GPU/Vulkan path.
 You can still override that behavior by setting `QTWEBENGINE_CHROMIUM_FLAGS`,
 `QT_OPENGL`, or `LIBGL_ALWAYS_SOFTWARE` before launching.
 
+When launched from an interactive Linux shell, GridVibe also ignores terminal
+job-control stop signals so the native window is not suspended with a shell
+message like `[1]+  Stopped python webview_launcher.py`.
+
 ### Manual Cross-Platform Setup
 
 ```bash
