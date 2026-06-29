@@ -214,6 +214,10 @@ class GridVibeApi:
             logger.warning("Failed to apply top-most pulse to %s window: %s", window_name, exc)
             return False
 
+    def _should_skip_top_most_pulse(self, window_name: str) -> bool:
+        """Avoid the focus workaround only where it is known to cause renderer issues."""
+        return sys.platform == "win32" and window_name in {"session", "launcher"}
+
     def toggle_fullscreen(self):
         """Toggle native fullscreen mode for the current window."""
         if self._window is None:
@@ -309,7 +313,7 @@ class GridVibeApi:
 
             window.show()
 
-            if window_name in {"session", "launcher"}:
+            if self._should_skip_top_most_pulse(window_name):
                 logger.info(
                     "Skipping top-most pulse for %s window to avoid WebView2 focus artefacts",
                     window_name,

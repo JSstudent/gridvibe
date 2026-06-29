@@ -62,27 +62,64 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertEqual(window.show_calls, 1)
         self.assertFalse(api_bridge._is_window_minimized("session"))
 
-    def test_bring_to_front_skips_top_most_pulse_for_session_window(self):
+    def test_bring_to_front_skips_top_most_pulse_for_session_window_on_windows(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
         window = _ExplodingWindow()
 
-        with patch.object(api_bridge, "_pulse_on_top") as pulse:
+        with patch.object(webview_launcher.sys, "platform", "win32"):
+            with patch.object(api_bridge, "_pulse_on_top") as pulse:
+                result = api_bridge._bring_to_front(window, "session")
+
+        self.assertTrue(result)
+        self.assertEqual(window.show_calls, 1)
+        pulse.assert_not_called()
+
+    def test_bring_to_front_pulses_session_window_on_linux(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _ExplodingWindow()
+
+        with patch.object(webview_launcher.sys, "platform", "linux"):
+            with patch.object(api_bridge, "_pulse_on_top") as pulse:
+                result = api_bridge._bring_to_front(window, "session")
+
+        self.assertTrue(result)
+        self.assertEqual(window.show_calls, 1)
+        pulse.assert_called_once_with(window, "session")
+
+    def test_bring_to_front_skips_top_most_pulse_for_launcher_window_on_windows(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _ExplodingWindow()
+
+        with patch.object(webview_launcher.sys, "platform", "win32"):
+            with patch.object(api_bridge, "_pulse_on_top") as pulse:
+                result = api_bridge._bring_to_front(window, "launcher")
+
+        self.assertTrue(result)
+        self.assertEqual(window.show_calls, 1)
+        pulse.assert_not_called()
+
+    def test_bring_to_front_pulses_launcher_window_on_linux(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _ExplodingWindow()
+
+        with patch.object(webview_launcher.sys, "platform", "linux"):
+            with patch.object(api_bridge, "_pulse_on_top") as pulse:
+                result = api_bridge._bring_to_front(window, "launcher")
+
+        self.assertTrue(result)
+        self.assertEqual(window.show_calls, 1)
+        pulse.assert_called_once_with(window, "launcher")
+
+    def test_bring_to_front_pulse_toggles_on_top(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _ExplodingWindow()
+
+        with patch.object(webview_launcher.sys, "platform", "linux"):
             result = api_bridge._bring_to_front(window, "session")
 
         self.assertTrue(result)
         self.assertEqual(window.show_calls, 1)
-        pulse.assert_not_called()
-
-    def test_bring_to_front_skips_top_most_pulse_for_launcher_window(self):
-        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
-        window = _ExplodingWindow()
-
-        with patch.object(api_bridge, "_pulse_on_top") as pulse:
-            result = api_bridge._bring_to_front(window, "launcher")
-
-        self.assertTrue(result)
-        self.assertEqual(window.show_calls, 1)
-        pulse.assert_not_called()
+        self.assertFalse(window.on_top)
 
     def test_focus_session_window_uses_show_only(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
