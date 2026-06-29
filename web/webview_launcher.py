@@ -114,6 +114,38 @@ def _log_pywebview_runtime(requested_gui: str | None):
     )
 
 
+def _is_missing_linux_pywebview_backend(exc: Exception) -> bool:
+    """Detect pywebview's Linux error for missing GTK/Qt Python bindings."""
+    if sys.platform != "linux":
+        return False
+    message = str(exc)
+    return (
+        "either QT or GTK" in message
+        or "GTK cannot be loaded" in message
+        or "QT cannot be loaded" in message
+    )
+
+
+def _log_linux_pywebview_backend_help():
+    logger.error(
+        "pywebview is installed, but no Linux GUI backend could be loaded. "
+        "Install the Qt backend in this virtualenv with: "
+        "python -m pip install --upgrade -r requirements-desktop.txt. "
+        "GTK is also supported, but it requires distro PyGObject/WebKit packages "
+        "that are visible to the active Python environment."
+    )
+
+
+def _open_browser_fallback(base_url: str, server_thread: threading.Thread):
+    logger.warning("Falling back to the system browser at %s", base_url)
+    webbrowser.open(base_url)
+    try:
+        server_thread.join()
+    except KeyboardInterrupt:
+        logger.info("Shutting down after keyboard interrupt")
+        session_manager.close_all_sessions()
+
+
 def _should_exit_after_window_close(kind: str, open_windows: set[str]) -> bool:
     """Treat the launcher/settings window as the owner of the desktop app lifecycle."""
     return kind == "launcher" or not open_windows
@@ -605,12 +637,7 @@ def main():
 
     if webview is None:
         logger.warning("pywebview is unavailable; falling back to the system browser")
-        webbrowser.open(base_url)
-        try:
-            server_thread.join()
-        except KeyboardInterrupt:
-            logger.info("Shutting down after keyboard interrupt")
-            session_manager.close_all_sessions()
+        _open_browser_fallback(base_url, server_thread)
         return
 
     open_windows = set()
@@ -680,13 +707,20 @@ def main():
     register_window(window, "launcher")
     if preferred_gui:
         logger.info("Starting pywebview with preferred GUI backend: %s", preferred_gui)
-    webview.start(
-        func=_log_pywebview_runtime,
-        args=(preferred_gui,),
-        debug=debug,
-        icon=icon_path,
-        gui=preferred_gui,
-    )
+    try:
+        webview.start(
+            func=_log_pywebview_runtime,
+            args=(preferred_gui,),
+            debug=debug,
+            icon=icon_path,
+            gui=preferred_gui,
+        )
+    except Exception as exc:
+        if _is_missing_linux_pywebview_backend(exc):
+            _log_linux_pywebview_backend_help()
+            _open_browser_fallback(base_url, server_thread)
+            return
+        raise
 
 
 if __name__ == "__main__":

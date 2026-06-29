@@ -195,12 +195,25 @@ python main.py --host 127.0.0.1
 
 Open `http://localhost:5050`.
 
-Optional native desktop-window support on Linux uses `pywebview` and may require distro GUI/WebKit packages in addition to:
+Optional native desktop-window support on Linux uses `pywebview`. The desktop
+requirements install the Qt backend because it works inside a normal virtualenv:
 
 ```bash
 pip install -r requirements-desktop.txt
 python webview_launcher.py
 ```
+
+If you see `You must have either QT or GTK with Python extensions installed in
+order to use pywebview`, refresh the desktop dependencies in the active venv:
+
+```bash
+python -m pip install --upgrade -r requirements-desktop.txt
+```
+
+GTK is also supported by pywebview, but on Ubuntu/Debian it depends on distro
+PyGObject/WebKit packages such as `python3-gi`, `python3-gi-cairo`,
+`gir1.2-gtk-3.0`, and `gir1.2-webkit2-4.1`; those packages must be visible to
+the Python environment running GridVibe.
 
 ### Manual Cross-Platform Setup
 

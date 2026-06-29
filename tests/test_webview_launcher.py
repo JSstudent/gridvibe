@@ -207,6 +207,24 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertTrue(icon_path.endswith("GridVibe_icon.ico"))
         self.assertTrue(Path(icon_path).is_file())
 
+    def test_missing_linux_pywebview_backend_detection(self):
+        exc = Exception(
+            "You must have either QT or GTK with Python extensions installed "
+            "in order to use pywebview."
+        )
+
+        with patch.object(webview_launcher.sys, "platform", "linux"):
+            self.assertTrue(webview_launcher._is_missing_linux_pywebview_backend(exc))
+
+    def test_missing_linux_pywebview_backend_detection_ignores_other_platforms(self):
+        exc = Exception(
+            "You must have either QT or GTK with Python extensions installed "
+            "in order to use pywebview."
+        )
+
+        with patch.object(webview_launcher.sys, "platform", "win32"):
+            self.assertFalse(webview_launcher._is_missing_linux_pywebview_backend(exc))
+
     def test_restart_application_queues_restart_and_shutdown(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
         restart_command = ["/usr/bin/python3", "/tmp/webview_launcher.py", "--debug"]
