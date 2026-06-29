@@ -72,12 +72,14 @@ def _merge_env_flags(name: str, flags: tuple[str, ...]) -> str:
 
 
 def _set_linux_qtwebengine_env():
-    """Avoid QtWebEngine GPU paths that are noisy or unstable in Linux VMs.
+    """Optionally avoid QtWebEngine GPU paths that are unstable in some Linux VMs.
 
-    Do not force SwiftShader here. Some QtWebEngine builds abort when
-    ``--use-gl=swiftshader`` is combined with disabled GPU compositing.
+    This is intentionally opt-in. Forcing software/GPU flags can freeze some
+    QtWebEngine builds even when the same app works correctly in a browser.
     """
     if sys.platform != "linux":
+        return
+    if os.environ.get("GRIDVIBE_QTWEBENGINE_GPU_FALLBACK") != "1":
         return
 
     chromium_flags = _merge_env_flags(

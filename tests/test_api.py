@@ -38,6 +38,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         with api.connection_lock:
             api.ssh_connections.clear()
             api.session_output_buffers.clear()
+        with api._agent_detection_cache_lock:
+            api._agent_detection_cache.clear()
             api.client_joined_sessions.clear()
         with api._vosk_lock:
             api._vosk_ws_connections.clear()
@@ -823,6 +825,49 @@ class ApiRoutesTestCase(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["status"], "needs_manual_install")
         self.assertEqual(payload["target"]["environment_key"], "ssh")
+
+    def test_posix_detection_command_uses_fast_path_before_interactive_bash(self):
+        command = api._build_posix_detection_command("codex")
+
+        self.assertLess(command.index('command -v "$TF_BINARY"'), command.index("bash -ilc"))
+
+    def test_agent_preflight_endpoint_reuses_recent_local_detection(self):
+        with patch.object(
+            api,
+            "_detect_agent_binary",
+            return_value={
+                "found": True,
+                "path": "/usr/local/bin/codex",
+                "command": "command -v codex",
+                "error": "",
+            },
+        ) as detect_agent_binary, patch.object(
+            api,
+            "_select_install_option",
+            return_value=({}, []),
+        ):
+            first_response = self.client.post(
+                "/api/agent-preflight",
+                json={
+                    "agent": "codex",
+                    "connection_mode": "wsl",
+                    "wsl": {"distribution": "", "username": "", "default_dir": "/tmp"},
+                    "terminal": {"use_wsl": False, "use_powershell": False, "distribution": ""},
+                },
+            )
+            second_response = self.client.post(
+                "/api/agent-preflight",
+                json={
+                    "agent": "codex",
+                    "connection_mode": "wsl",
+                    "wsl": {"distribution": "", "username": "", "default_dir": "/tmp"},
+                    "terminal": {"use_wsl": False, "use_powershell": False, "distribution": ""},
+                },
+            )
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(detect_agent_binary.call_count, 1)
 
     def test_parse_posix_detection_output_accepts_aliases_without_paths(self):
         payload = api._parse_posix_detection_output(

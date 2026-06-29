@@ -216,10 +216,12 @@ PyGObject/WebKit packages such as `python3-gi`, `python3-gi-cairo`,
 the Python environment running GridVibe.
 
 If the native window starts with Qt but logs Mesa/VMware rendering warnings such
-as `MESA: error: ZINK: failed to choose pdev` or `VMware: No 3D enabled`,
-GridVibe automatically asks QtWebEngine to avoid Chromium's GPU/Vulkan path.
-You can still override that behavior by setting `QTWEBENGINE_CHROMIUM_FLAGS`,
-`QT_OPENGL`, or `LIBGL_ALWAYS_SOFTWARE` before launching.
+as `MESA: error: ZINK: failed to choose pdev` or `VMware: No 3D enabled`, but
+then freezes, use browser mode with `python main.py --host 127.0.0.1`. The
+native launcher still requests pywebview's Qt backend directly, but GridVibe no
+longer forces QtWebEngine GPU/software-rendering flags by default because those
+flags can freeze some Qt builds. To opt into that fallback for testing, launch
+with `GRIDVIBE_QTWEBENGINE_GPU_FALLBACK=1`.
 
 When launched from an interactive Linux shell, GridVibe also ignores terminal
 job-control stop signals so the native window is not suspended with a shell

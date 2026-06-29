@@ -292,10 +292,22 @@ class WebviewLauncherTestCase(unittest.TestCase):
 
             signal_mock.assert_not_called()
 
-    def test_linux_qtwebengine_env_defaults_to_software_rendering(self):
+    def test_linux_qtwebengine_env_is_opt_in(self):
         with patch.object(webview_launcher.sys, "platform", "linux"), patch.dict(
             os.environ,
             {},
+            clear=True,
+        ):
+            webview_launcher._set_linux_qtwebengine_env()
+
+            self.assertNotIn("QTWEBENGINE_CHROMIUM_FLAGS", os.environ)
+            self.assertNotIn("QT_OPENGL", os.environ)
+            self.assertNotIn("LIBGL_ALWAYS_SOFTWARE", os.environ)
+
+    def test_linux_qtwebengine_env_can_enable_gpu_fallback(self):
+        with patch.object(webview_launcher.sys, "platform", "linux"), patch.dict(
+            os.environ,
+            {"GRIDVIBE_QTWEBENGINE_GPU_FALLBACK": "1"},
             clear=True,
         ):
             webview_launcher._set_linux_qtwebengine_env()
@@ -316,6 +328,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
                 "QT_OPENGL": "desktop",
                 "QT_QUICK_BACKEND": "opengl",
                 "LIBGL_ALWAYS_SOFTWARE": "0",
+                "GRIDVIBE_QTWEBENGINE_GPU_FALLBACK": "1",
             },
             clear=False,
         ):
