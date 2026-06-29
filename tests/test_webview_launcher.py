@@ -35,6 +35,10 @@ class WebviewLauncherTestCase(unittest.TestCase):
             webview_launcher._should_exit_after_window_close("session", {"launcher"})
         )
 
+    def test_preferred_pywebview_gui_uses_qt_on_linux(self):
+        with patch.object(webview_launcher.sys, "platform", "linux"):
+            self.assertEqual(webview_launcher._preferred_pywebview_gui(), "qt")
+
     def test_last_window_close_exits_app(self):
         self.assertTrue(
             webview_launcher._should_exit_after_window_close("session", set())
@@ -274,9 +278,9 @@ class WebviewLauncherTestCase(unittest.TestCase):
             flags = os.environ["QTWEBENGINE_CHROMIUM_FLAGS"].split()
             self.assertIn("--disable-gpu", flags)
             self.assertIn("--disable-features=Vulkan", flags)
-            self.assertIn("--use-gl=swiftshader", flags)
+            self.assertNotIn("--use-gl=swiftshader", flags)
             self.assertEqual(os.environ["QT_OPENGL"], "software")
-            self.assertEqual(os.environ["QT_QUICK_BACKEND"], "software")
+            self.assertNotIn("QT_QUICK_BACKEND", os.environ)
             self.assertEqual(os.environ["LIBGL_ALWAYS_SOFTWARE"], "1")
 
     def test_linux_qtwebengine_env_preserves_existing_values(self):
@@ -296,7 +300,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
             self.assertEqual(flags.count("--disable-gpu"), 1)
             self.assertIn("--foo", flags)
             self.assertIn("--disable-features=Vulkan", flags)
-            self.assertIn("--use-gl=swiftshader", flags)
+            self.assertNotIn("--use-gl=swiftshader", flags)
             self.assertEqual(os.environ["QT_OPENGL"], "desktop")
             self.assertEqual(os.environ["QT_QUICK_BACKEND"], "opengl")
             self.assertEqual(os.environ["LIBGL_ALWAYS_SOFTWARE"], "0")

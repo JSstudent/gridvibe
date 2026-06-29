@@ -27,9 +27,11 @@ logger = logging.getLogger(__name__)
 
 
 def _preferred_pywebview_gui():
-    """Prefer Edge Chromium on Windows so browser APIs like getUserMedia work reliably."""
+    """Choose a stable pywebview backend for platforms with known needs."""
     if sys.platform == "win32":
         return "edgechromium"
+    if sys.platform == "linux":
+        return "qt"
     return None
 
 
@@ -69,10 +71,10 @@ def _merge_env_flags(name: str, flags: tuple[str, ...]) -> str:
 
 
 def _set_linux_qtwebengine_env():
-    """Prefer software rendering for QtWebEngine on Linux.
+    """Avoid QtWebEngine GPU paths that are noisy or unstable in Linux VMs.
 
-    QtWebEngine can otherwise try Mesa/Vulkan GPU paths that are unreliable in
-    virtual machines or remote desktops without 3D acceleration.
+    Do not force SwiftShader here. Some QtWebEngine builds abort when
+    ``--use-gl=swiftshader`` is combined with disabled GPU compositing.
     """
     if sys.platform != "linux":
         return
@@ -82,19 +84,15 @@ def _set_linux_qtwebengine_env():
         (
             "--disable-gpu",
             "--disable-features=Vulkan",
-            "--use-gl=swiftshader",
         ),
     )
     os.environ.setdefault("QT_OPENGL", "software")
-    os.environ.setdefault("QT_QUICK_BACKEND", "software")
     os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
     logger.info(
-        "Configured Linux QtWebEngine software rendering "
-        "QTWEBENGINE_CHROMIUM_FLAGS=%s QT_OPENGL=%s QT_QUICK_BACKEND=%s "
-        "LIBGL_ALWAYS_SOFTWARE=%s",
+        "Configured Linux QtWebEngine GPU fallback "
+        "QTWEBENGINE_CHROMIUM_FLAGS=%s QT_OPENGL=%s LIBGL_ALWAYS_SOFTWARE=%s",
         chromium_flags,
         os.environ.get("QT_OPENGL"),
-        os.environ.get("QT_QUICK_BACKEND"),
         os.environ.get("LIBGL_ALWAYS_SOFTWARE"),
     )
 
