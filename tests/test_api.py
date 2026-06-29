@@ -1357,7 +1357,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             ],
         }
 
-        with patch.object(api.socketio, "start_background_task") as start_task:
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api.socketio, "start_background_task"
+        ) as start_task:
             response = self.client.post("/api/sessions", json=sessions_payload)
 
         self.assertEqual(response.status_code, 201)
@@ -1802,7 +1804,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             ],
         }
 
-        with patch.object(api.socketio, "start_background_task") as start_task:
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api.socketio, "start_background_task"
+        ) as start_task:
             response = self.client.post("/api/sessions", json=sessions_payload)
 
         self.assertEqual(response.status_code, 201)
