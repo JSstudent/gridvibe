@@ -1929,6 +1929,7 @@
         use_powershell: false
     }));
     const AGENT_OPTIONS = {{ agent_options|tojson }};
+    const LOCAL_WINDOWS_SHELLS_AVAILABLE = {{ local_windows_shells_available|tojson }};
     const DEFAULT_APP_SETTINGS = Object.freeze({
         appearance: Object.freeze({
             theme: 'system'
@@ -2826,9 +2827,13 @@
             startup_mode: getTerminalCommandMode(row),
             agent_selection: row.querySelector('.t-agent-select')?.value.trim() || '',
             custom_agent: row.querySelector('.t-agent-custom')?.value.trim() || '',
-            distribution: row.querySelector('.t-distribution')?.value.trim() || '',
-            use_wsl: getTerminalCommandMode(row) === 'explorer' ? false : Boolean(row.querySelector('.t-use-wsl')?.checked),
-            use_powershell: getTerminalCommandMode(row) === 'explorer' ? false : Boolean(row.querySelector('.t-use-powershell')?.checked)
+            distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
+            use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && getTerminalCommandMode(row) !== 'explorer'
+                ? Boolean(row.querySelector('.t-use-wsl')?.checked)
+                : false,
+            use_powershell: LOCAL_WINDOWS_SHELLS_AVAILABLE && getTerminalCommandMode(row) !== 'explorer'
+                ? Boolean(row.querySelector('.t-use-powershell')?.checked)
+                : false
         }));
 
         while (drafts.length < MAX_SESSIONS) {
@@ -3524,6 +3529,7 @@
                             <label>Custom Agent</label>
                             <input class="t-agent-custom" type="text" value="${escHtml(commandUi.customAgent)}" placeholder="Enter agent command">
                         </div>
+                        {% if local_windows_shells_available %}
                         <div class="field t-shell-field ${connectionMode === 'wsl' && commandUi.mode !== 'explorer' ? '' : 'hidden'}">
                             <div class="field-label-row">
                                 <label>Shell</label>
@@ -3565,6 +3571,7 @@
                             <input class="t-distribution" type="text" value="${escHtml(terminal.distribution || '')}" placeholder="Ubuntu">
                             <div class="inline-tip">Checking local WSL distros...</div>
                         </div>
+                        {% endif %}
                     </div>
                 </div>
             `;

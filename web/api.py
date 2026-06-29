@@ -2482,7 +2482,7 @@ def _local_shell_display_name(
         return "PowerShell"
     if use_wsl:
         return f"WSL ({configured_distribution})" if configured_distribution else "WSL"
-    return "cmd"
+    return "cmd" if os.name == "nt" else "Shell"
 
 
 def _build_local_command(
@@ -2788,6 +2788,7 @@ def index():
         'index.html',
         max_sessions=max_sessions,
         agent_options=_agent_options(),
+        local_windows_shells_available=os.name == "nt",
     )
 
 
@@ -3210,8 +3211,8 @@ def create_sessions():
                     prepared["distribution"] = ""
                     prepared["username"] = ""
                 else:
-                    use_powershell = bool(prepared.get("use_powershell"))
-                    use_wsl = bool(prepared.get("use_wsl")) and not use_powershell
+                    use_powershell = os.name == "nt" and bool(prepared.get("use_powershell"))
+                    use_wsl = os.name == "nt" and bool(prepared.get("use_wsl")) and not use_powershell
                 prepared["password"] = None
                 prepared["port"] = 22
                 prepared["host"] = (
