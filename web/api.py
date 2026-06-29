@@ -3036,6 +3036,17 @@ def select_folder():
 
     try:
         selected = _pick_local_folder(str(data.get("initial_dir") or ""))
+    except RuntimeError as exc:
+        if str(exc) == "Native folder picker support is unavailable":
+            logger.info("Native folder picker unavailable; local repo path can be entered manually")
+            return jsonify({
+                "path": "",
+                "selected": False,
+                "manual_entry": True,
+                "error": str(exc),
+            })
+        logger.error(f"Folder picker failed: {exc}")
+        return jsonify({"error": str(exc)}), 500
     except Exception as exc:
         logger.error(f"Folder picker failed: {exc}")
         return jsonify({"error": str(exc)}), 500

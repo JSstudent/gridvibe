@@ -2029,14 +2029,13 @@
                 <input type="hidden" id="wsl_distribution" value="">
                 <input type="hidden" id="wsl_username" value="">
                 <div class="path-picker">
-                    <input type="hidden" id="wsl_default_dir" value="">
-                    <div id="wsl_default_dir_display" class="picker-display empty">Select a folder on your local drive</div>
+                    <input type="text" id="wsl_default_dir" value="" placeholder="/home/you/project" autocomplete="off" spellcheck="false">
                     <button type="button" class="ghost-btn picker-btn" onclick="browseLocalRepo()">Browse</button>
                     <button type="button" class="ghost-btn picker-btn" onclick="clearLocalRepo()">Clear</button>
                 </div>
             </div>
         </div>
-        <p class="mode-note">Local Repo starts each pane in the selected folder. By default it uses Windows cmd. Enable WSL per terminal in Step 3 and optionally type the distro name you want, such as Ubuntu. If the distro field is left blank, that pane falls back to your preferred/default WSL distro.</p>
+        <p class="mode-note">Local Repo starts each pane in the selected folder. In browser mode, type or paste the full path if Browse is unavailable. On Windows, enable WSL per terminal and optionally type a distro name such as Ubuntu; blank uses your preferred/default WSL distro.</p>
     `;
 
     const LAYOUT_COPY = {
@@ -2947,16 +2946,19 @@
     function setLocalRepoPath(path) {
         const input = document.getElementById('wsl_default_dir');
         const display = document.getElementById('wsl_default_dir_display');
-        if (!input || !display) {
+        if (!input) {
             return;
         }
 
         const normalized = String(path ?? '').trim();
         const resolved = normalized === '~' ? '' : normalized;
         input.value = resolved;
-        display.textContent = resolved || 'Select a folder on your local drive';
-        display.classList.toggle('empty', !resolved);
-        display.title = resolved;
+        input.title = resolved;
+        if (display) {
+            display.textContent = resolved || 'Select a folder on your local drive';
+            display.classList.toggle('empty', !resolved);
+            display.title = resolved;
+        }
     }
 
     function applyModeInputs(values) {
@@ -3021,6 +3023,9 @@
                 if (!response.ok) {
                     throw new Error(data.error || 'Folder picker is unavailable');
                 }
+                if (data.manual_entry) {
+                    throw new Error(data.error || 'Native folder picker support is unavailable');
+                }
                 selectedPath = String(data.path || '').trim();
             }
 
@@ -3031,6 +3036,13 @@
             setLocalRepoPath(selectedPath);
             resetTerminalSetupIfTargetChanged('wsl', collectModeInputs());
         } catch (error) {
+            const message = String(error?.message || '');
+            if (message.includes('Native folder picker support is unavailable')) {
+                const input = document.getElementById('wsl_default_dir');
+                input?.focus();
+                showMessage('Native folder picker is unavailable in browser mode. Type or paste the local repository path.', 'info');
+                return;
+            }
             showMessage(`Folder selection failed: ${error.message}`, 'error');
         }
     }

@@ -1214,6 +1214,33 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIsNone(data["saved_session"])
         self.assertFalse(self.saved_sessions_path.exists())
 
+    def test_select_folder_returns_manual_entry_fallback_when_native_picker_unavailable(self):
+        with patch.object(
+            api,
+            "_pick_local_folder",
+            side_effect=RuntimeError("Native folder picker support is unavailable"),
+        ):
+            response = self.client.post("/api/select-folder", json={"initial_dir": "/home/me"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json(),
+            {
+                "path": "",
+                "selected": False,
+                "manual_entry": True,
+                "error": "Native folder picker support is unavailable",
+            },
+        )
+
+    def test_select_folder_returns_selected_path_from_native_picker(self):
+        with patch.object(api, "_pick_local_folder", return_value="/home/me/project") as picker:
+            response = self.client.post("/api/select-folder", json={"initial_dir": "/home/me"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"path": "/home/me/project", "selected": True})
+        picker.assert_called_once_with("/home/me")
+
     def test_create_sessions_accepts_local_repo_mode_and_tracks_layout(self):
         sessions_payload = {
             "connection_mode": "wsl",
