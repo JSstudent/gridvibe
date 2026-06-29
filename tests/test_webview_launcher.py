@@ -1,3 +1,4 @@
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -261,6 +262,55 @@ class WebviewLauncherTestCase(unittest.TestCase):
 
         with patch.object(webview_launcher.sys, "platform", "win32"):
             self.assertFalse(webview_launcher._is_missing_linux_pywebview_backend(exc))
+
+    def test_linux_qtwebengine_env_defaults_to_software_rendering(self):
+        with patch.object(webview_launcher.sys, "platform", "linux"), patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ):
+            webview_launcher._set_linux_qtwebengine_env()
+
+            flags = os.environ["QTWEBENGINE_CHROMIUM_FLAGS"].split()
+            self.assertIn("--disable-gpu", flags)
+            self.assertIn("--disable-features=Vulkan", flags)
+            self.assertIn("--use-gl=swiftshader", flags)
+            self.assertEqual(os.environ["QT_OPENGL"], "software")
+            self.assertEqual(os.environ["QT_QUICK_BACKEND"], "software")
+            self.assertEqual(os.environ["LIBGL_ALWAYS_SOFTWARE"], "1")
+
+    def test_linux_qtwebengine_env_preserves_existing_values(self):
+        with patch.object(webview_launcher.sys, "platform", "linux"), patch.dict(
+            os.environ,
+            {
+                "QTWEBENGINE_CHROMIUM_FLAGS": "--foo --disable-gpu",
+                "QT_OPENGL": "desktop",
+                "QT_QUICK_BACKEND": "opengl",
+                "LIBGL_ALWAYS_SOFTWARE": "0",
+            },
+            clear=False,
+        ):
+            webview_launcher._set_linux_qtwebengine_env()
+
+            flags = os.environ["QTWEBENGINE_CHROMIUM_FLAGS"].split()
+            self.assertEqual(flags.count("--disable-gpu"), 1)
+            self.assertIn("--foo", flags)
+            self.assertIn("--disable-features=Vulkan", flags)
+            self.assertIn("--use-gl=swiftshader", flags)
+            self.assertEqual(os.environ["QT_OPENGL"], "desktop")
+            self.assertEqual(os.environ["QT_QUICK_BACKEND"], "opengl")
+            self.assertEqual(os.environ["LIBGL_ALWAYS_SOFTWARE"], "0")
+
+    def test_linux_qtwebengine_env_ignores_non_linux_platforms(self):
+        with patch.object(webview_launcher.sys, "platform", "win32"), patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ):
+            webview_launcher._set_linux_qtwebengine_env()
+
+            self.assertNotIn("QTWEBENGINE_CHROMIUM_FLAGS", os.environ)
+            self.assertNotIn("QT_OPENGL", os.environ)
 
     def test_restart_application_queues_restart_and_shutdown(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")

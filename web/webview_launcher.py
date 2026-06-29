@@ -56,6 +56,49 @@ def _set_webview2_media_env():
         logger.info("Set WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=%s", combined)
 
 
+def _merge_env_flags(name: str, flags: tuple[str, ...]) -> str:
+    """Add missing command-line flags to an environment variable."""
+    existing = os.environ.get(name, "")
+    parts = existing.split()
+    for flag in flags:
+        if flag not in parts:
+            parts.append(flag)
+    combined = " ".join(parts).strip()
+    os.environ[name] = combined
+    return combined
+
+
+def _set_linux_qtwebengine_env():
+    """Prefer software rendering for QtWebEngine on Linux.
+
+    QtWebEngine can otherwise try Mesa/Vulkan GPU paths that are unreliable in
+    virtual machines or remote desktops without 3D acceleration.
+    """
+    if sys.platform != "linux":
+        return
+
+    chromium_flags = _merge_env_flags(
+        "QTWEBENGINE_CHROMIUM_FLAGS",
+        (
+            "--disable-gpu",
+            "--disable-features=Vulkan",
+            "--use-gl=swiftshader",
+        ),
+    )
+    os.environ.setdefault("QT_OPENGL", "software")
+    os.environ.setdefault("QT_QUICK_BACKEND", "software")
+    os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+    logger.info(
+        "Configured Linux QtWebEngine software rendering "
+        "QTWEBENGINE_CHROMIUM_FLAGS=%s QT_OPENGL=%s QT_QUICK_BACKEND=%s "
+        "LIBGL_ALWAYS_SOFTWARE=%s",
+        chromium_flags,
+        os.environ.get("QT_OPENGL"),
+        os.environ.get("QT_QUICK_BACKEND"),
+        os.environ.get("LIBGL_ALWAYS_SOFTWARE"),
+    )
+
+
 def _patch_webview2_permissions():
     """Patch EdgeChrome for microphone/camera access in WebView2.
 
@@ -692,6 +735,7 @@ def main():
     api_bridge._set_register_window(register_window)
     icon_path = _resolve_icon_path()
     preferred_gui = _preferred_pywebview_gui()
+    _set_linux_qtwebengine_env()
     if preferred_gui == "edgechromium":
         _set_webview2_media_env()
         _patch_webview2_permissions()

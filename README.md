@@ -215,6 +215,12 @@ PyGObject/WebKit packages such as `python3-gi`, `python3-gi-cairo`,
 `gir1.2-gtk-3.0`, and `gir1.2-webkit2-4.1`; those packages must be visible to
 the Python environment running GridVibe.
 
+If the native window starts with Qt but logs Mesa/VMware rendering warnings such
+as `MESA: error: ZINK: failed to choose pdev` or `VMware: No 3D enabled`,
+GridVibe automatically asks QtWebEngine to use software rendering. You can still
+override that behavior by setting `QTWEBENGINE_CHROMIUM_FLAGS`, `QT_OPENGL`,
+`QT_QUICK_BACKEND`, or `LIBGL_ALWAYS_SOFTWARE` before launching.
+
 ### Manual Cross-Platform Setup
 
 ```bash
