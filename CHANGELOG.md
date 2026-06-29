@@ -4,7 +4,10 @@ All notable changes to GridVibe will be documented in this file.
 
 ## 1.1.0 - 2026-06-28
 
+- Improved Linux pywebview startup by requesting the Qt backend directly, keeping QtWebEngine GPU fallback flags opt-in, and preventing terminal job-control suspension when launching the native window.
+- Reduced repeated agent CLI preflight timeouts by checking local POSIX PATH before interactive shells and caching recent identical local detections.
 - Added Local Repo file explorer panes with safe root-bound directory navigation, file metadata, manual refresh, light/dark explorer themes, and terminal-to-explorer pane switching.
+- Added Linux desktop dependency coverage for pywebview's Qt backend and a clearer browser fallback when no GTK/Qt backend can be loaded.
 - Added read-only text file previews, Markdown source/rendered preview support, sanitized Markdown HTML, code-language hints, binary-file rejection, and size-limited explorer responses.
 - Added split-pane support for terminal sessions, including API coverage for appending cloned sessions to an existing group while enforcing session limits.
 - Improved saved launcher preset handling and launcher settings so voice capture preferences live in App Settings instead of per-terminal voice panels.

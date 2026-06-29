@@ -195,12 +195,37 @@ python main.py --host 127.0.0.1
 
 Open `http://localhost:5050`.
 
-Optional native desktop-window support on Linux uses `pywebview` and may require distro GUI/WebKit packages in addition to:
+Optional native desktop-window support on Linux uses `pywebview`. The desktop
+requirements install the Qt backend because it works inside a normal virtualenv:
 
 ```bash
 pip install -r requirements-desktop.txt
 python webview_launcher.py
 ```
+
+If you see `You must have either QT or GTK with Python extensions installed in
+order to use pywebview`, refresh the desktop dependencies in the active venv:
+
+```bash
+python -m pip install --upgrade -r requirements-desktop.txt
+```
+
+GTK is also supported by pywebview, but on Ubuntu/Debian it depends on distro
+PyGObject/WebKit packages such as `python3-gi`, `python3-gi-cairo`,
+`gir1.2-gtk-3.0`, and `gir1.2-webkit2-4.1`; those packages must be visible to
+the Python environment running GridVibe.
+
+If the native window starts with Qt but logs Mesa/VMware rendering warnings such
+as `MESA: error: ZINK: failed to choose pdev` or `VMware: No 3D enabled`, but
+then freezes, use browser mode with `python main.py --host 127.0.0.1`. The
+native launcher still requests pywebview's Qt backend directly, but GridVibe no
+longer forces QtWebEngine GPU/software-rendering flags by default because those
+flags can freeze some Qt builds. To opt into that fallback for testing, launch
+with `GRIDVIBE_QTWEBENGINE_GPU_FALLBACK=1`.
+
+When launched from an interactive Linux shell, GridVibe also ignores terminal
+job-control stop signals so the native window is not suspended with a shell
+message like `[1]+  Stopped python webview_launcher.py`.
 
 ### Manual Cross-Platform Setup
 

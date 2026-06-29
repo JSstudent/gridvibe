@@ -38,6 +38,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         with api.connection_lock:
             api.ssh_connections.clear()
             api.session_output_buffers.clear()
+        with api._agent_detection_cache_lock:
+            api._agent_detection_cache.clear()
             api.client_joined_sessions.clear()
         with api._vosk_lock:
             api._vosk_ws_connections.clear()
@@ -125,6 +127,28 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('data-command-mode="agent"', html)
         self.assertIn("function normalizeTerminalCommandUi(terminal)", html)
         self.assertIn("Custom Agent", html)
+
+    def test_launcher_page_hides_windows_shell_options_on_posix(self):
+        with patch.object(api.os, "name", "posix"):
+            response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("const LOCAL_WINDOWS_SHELLS_AVAILABLE = false;", html)
+        self.assertNotIn("Prefer WSL", html)
+        self.assertNotIn("Use PowerShell", html)
+        self.assertNotIn("Ubuntu Distro", html)
+
+    def test_launcher_page_shows_windows_shell_options_on_windows(self):
+        with patch.object(api.os, "name", "nt"):
+            response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("const LOCAL_WINDOWS_SHELLS_AVAILABLE = true;", html)
+        self.assertIn("Prefer WSL", html)
+        self.assertIn("Use PowerShell", html)
+        self.assertIn("Ubuntu Distro", html)
 
     def test_launcher_page_exposes_agent_preflight_controls(self):
         response = self.client.get("/")
@@ -802,6 +826,49 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["status"], "needs_manual_install")
         self.assertEqual(payload["target"]["environment_key"], "ssh")
 
+    def test_posix_detection_command_uses_fast_path_before_interactive_bash(self):
+        command = api._build_posix_detection_command("codex")
+
+        self.assertLess(command.index('command -v "$TF_BINARY"'), command.index("bash -ilc"))
+
+    def test_agent_preflight_endpoint_reuses_recent_local_detection(self):
+        with patch.object(
+            api,
+            "_detect_agent_binary",
+            return_value={
+                "found": True,
+                "path": "/usr/local/bin/codex",
+                "command": "command -v codex",
+                "error": "",
+            },
+        ) as detect_agent_binary, patch.object(
+            api,
+            "_select_install_option",
+            return_value=({}, []),
+        ):
+            first_response = self.client.post(
+                "/api/agent-preflight",
+                json={
+                    "agent": "codex",
+                    "connection_mode": "wsl",
+                    "wsl": {"distribution": "", "username": "", "default_dir": "/tmp"},
+                    "terminal": {"use_wsl": False, "use_powershell": False, "distribution": ""},
+                },
+            )
+            second_response = self.client.post(
+                "/api/agent-preflight",
+                json={
+                    "agent": "codex",
+                    "connection_mode": "wsl",
+                    "wsl": {"distribution": "", "username": "", "default_dir": "/tmp"},
+                    "terminal": {"use_wsl": False, "use_powershell": False, "distribution": ""},
+                },
+            )
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(detect_agent_binary.call_count, 1)
+
     def test_parse_posix_detection_output_accepts_aliases_without_paths(self):
         payload = api._parse_posix_detection_output(
             "copilot",
@@ -1096,7 +1163,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             ]
         }
 
-        with patch.object(api.socketio, "start_background_task") as start_task:
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api.socketio, "start_background_task"
+        ) as start_task:
             response = self.client.post("/api/sessions", json=sessions_payload)
 
         self.assertEqual(response.status_code, 201)
@@ -1214,6 +1283,33 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIsNone(data["saved_session"])
         self.assertFalse(self.saved_sessions_path.exists())
 
+    def test_select_folder_returns_manual_entry_fallback_when_native_picker_unavailable(self):
+        with patch.object(
+            api,
+            "_pick_local_folder",
+            side_effect=RuntimeError("Native folder picker support is unavailable"),
+        ):
+            response = self.client.post("/api/select-folder", json={"initial_dir": "/home/me"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json(),
+            {
+                "path": "",
+                "selected": False,
+                "manual_entry": True,
+                "error": "Native folder picker support is unavailable",
+            },
+        )
+
+    def test_select_folder_returns_selected_path_from_native_picker(self):
+        with patch.object(api, "_pick_local_folder", return_value="/home/me/project") as picker:
+            response = self.client.post("/api/select-folder", json={"initial_dir": "/home/me"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"path": "/home/me/project", "selected": True})
+        picker.assert_called_once_with("/home/me")
+
     def test_create_sessions_accepts_local_repo_mode_and_tracks_layout(self):
         sessions_payload = {
             "connection_mode": "wsl",
@@ -1228,7 +1324,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             ],
         }
 
-        with patch.object(api.socketio, "start_background_task") as start_task:
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api.socketio, "start_background_task"
+        ) as start_task:
             response = self.client.post("/api/sessions", json=sessions_payload)
 
         self.assertEqual(response.status_code, 201)
@@ -1270,6 +1368,37 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(session.host, "PowerShell")
         self.assertTrue(session.use_powershell)
         self.assertFalse(session.use_wsl)
+
+    def test_create_sessions_ignores_windows_shell_flags_on_posix_local_repo(self):
+        sessions_payload = {
+            "connection_mode": "wsl",
+            "layout": "horizontal",
+            "sessions": [
+                {
+                    "directory": "/home/me/repo",
+                    "title": "Linux shell",
+                    "initial_command": "pwd",
+                    "use_wsl": True,
+                    "use_powershell": True,
+                    "distribution": "Ubuntu",
+                }
+            ],
+        }
+
+        with patch.object(api.os, "name", "posix"), patch.object(
+            api.socketio, "start_background_task"
+        ) as start_task:
+            response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        start_task.assert_called_once()
+
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertEqual(session.mode, "wsl")
+        self.assertEqual(session.host, "Shell")
+        self.assertEqual(session.directory, "/home/me/repo")
+        self.assertFalse(session.use_wsl)
+        self.assertFalse(session.use_powershell)
 
     def test_create_sessions_accepts_local_repo_file_explorer_mode(self):
         repo_dir = Path(self.temp_dir.name) / "repo"

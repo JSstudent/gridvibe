@@ -6,6 +6,7 @@ Falls back to the system browser if pywebview is missing.
 import argparse
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -27,9 +28,11 @@ logger = logging.getLogger(__name__)
 
 
 def _preferred_pywebview_gui():
-    """Prefer Edge Chromium on Windows so browser APIs like getUserMedia work reliably."""
+    """Choose a stable pywebview backend for platforms with known needs."""
     if sys.platform == "win32":
         return "edgechromium"
+    if sys.platform == "linux":
+        return "qt"
     return None
 
 
@@ -54,6 +57,47 @@ def _set_webview2_media_env():
         combined = f"{existing} {_flags}".strip() if existing else _flags
         os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = combined
         logger.info("Set WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=%s", combined)
+
+
+def _merge_env_flags(name: str, flags: tuple[str, ...]) -> str:
+    """Add missing command-line flags to an environment variable."""
+    existing = os.environ.get(name, "")
+    parts = existing.split()
+    for flag in flags:
+        if flag not in parts:
+            parts.append(flag)
+    combined = " ".join(parts).strip()
+    os.environ[name] = combined
+    return combined
+
+
+def _set_linux_qtwebengine_env():
+    """Optionally avoid QtWebEngine GPU paths that are unstable in some Linux VMs.
+
+    This is intentionally opt-in. Forcing software/GPU flags can freeze some
+    QtWebEngine builds even when the same app works correctly in a browser.
+    """
+    if sys.platform != "linux":
+        return
+    if os.environ.get("GRIDVIBE_QTWEBENGINE_GPU_FALLBACK") != "1":
+        return
+
+    chromium_flags = _merge_env_flags(
+        "QTWEBENGINE_CHROMIUM_FLAGS",
+        (
+            "--disable-gpu",
+            "--disable-features=Vulkan",
+        ),
+    )
+    os.environ.setdefault("QT_OPENGL", "software")
+    os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+    logger.info(
+        "Configured Linux QtWebEngine GPU fallback "
+        "QTWEBENGINE_CHROMIUM_FLAGS=%s QT_OPENGL=%s LIBGL_ALWAYS_SOFTWARE=%s",
+        chromium_flags,
+        os.environ.get("QT_OPENGL"),
+        os.environ.get("LIBGL_ALWAYS_SOFTWARE"),
+    )
 
 
 def _patch_webview2_permissions():
@@ -112,6 +156,61 @@ def _log_pywebview_runtime(requested_gui: str | None):
         requested_gui or "default",
         actual_renderer or "unknown",
     )
+
+
+def _is_missing_linux_pywebview_backend(exc: Exception) -> bool:
+    """Detect pywebview's Linux error for missing GTK/Qt Python bindings."""
+    if sys.platform != "linux":
+        return False
+    message = str(exc)
+    return (
+        "either QT or GTK" in message
+        or "GTK cannot be loaded" in message
+        or "QT cannot be loaded" in message
+    )
+
+
+def _log_linux_pywebview_backend_help():
+    logger.error(
+        "pywebview is installed, but no Linux GUI backend could be loaded. "
+        "Install the Qt backend in this virtualenv with: "
+        "python -m pip install --upgrade -r requirements-desktop.txt. "
+        "GTK is also supported, but it requires distro PyGObject/WebKit packages "
+        "that are visible to the active Python environment."
+    )
+
+
+def _ignore_linux_job_control_stop_signals():
+    """Keep the desktop launcher alive if terminal job control sends stop signals."""
+    if sys.platform != "linux":
+        return
+
+    configured = []
+    for signal_name in ("SIGTSTP", "SIGTTIN", "SIGTTOU"):
+        signal_value = getattr(signal, signal_name, None)
+        if signal_value is None:
+            continue
+        try:
+            signal.signal(signal_value, signal.SIG_IGN)
+            configured.append(signal_name)
+        except (OSError, ValueError):
+            logger.debug("Could not ignore %s for Linux launcher", signal_name)
+
+    if configured:
+        logger.info(
+            "Ignoring Linux terminal job-control stop signals: %s",
+            ", ".join(configured),
+        )
+
+
+def _open_browser_fallback(base_url: str, server_thread: threading.Thread):
+    logger.warning("Falling back to the system browser at %s", base_url)
+    webbrowser.open(base_url)
+    try:
+        server_thread.join()
+    except KeyboardInterrupt:
+        logger.info("Shutting down after keyboard interrupt")
+        session_manager.close_all_sessions()
 
 
 def _should_exit_after_window_close(kind: str, open_windows: set[str]) -> bool:
@@ -181,6 +280,10 @@ class GridVibeApi:
         except Exception as exc:
             logger.warning("Failed to apply top-most pulse to %s window: %s", window_name, exc)
             return False
+
+    def _should_skip_top_most_pulse(self, window_name: str) -> bool:
+        """Avoid the focus workaround only where it is known to cause renderer issues."""
+        return sys.platform == "win32" and window_name in {"session", "launcher"}
 
     def toggle_fullscreen(self):
         """Toggle native fullscreen mode for the current window."""
@@ -277,7 +380,7 @@ class GridVibeApi:
 
             window.show()
 
-            if window_name in {"session", "launcher"}:
+            if self._should_skip_top_most_pulse(window_name):
                 logger.info(
                     "Skipping top-most pulse for %s window to avoid WebView2 focus artefacts",
                     window_name,
@@ -589,6 +692,7 @@ def main():
 
     setup_logging(debug)
     logger = logging.getLogger(__name__)
+    _ignore_linux_job_control_stop_signals()
     logger.info(f"Starting GridVibe GUI at {base_url}")
 
     server_thread = threading.Thread(
@@ -605,12 +709,7 @@ def main():
 
     if webview is None:
         logger.warning("pywebview is unavailable; falling back to the system browser")
-        webbrowser.open(base_url)
-        try:
-            server_thread.join()
-        except KeyboardInterrupt:
-            logger.info("Shutting down after keyboard interrupt")
-            session_manager.close_all_sessions()
+        _open_browser_fallback(base_url, server_thread)
         return
 
     open_windows = set()
@@ -661,6 +760,7 @@ def main():
     api_bridge._set_register_window(register_window)
     icon_path = _resolve_icon_path()
     preferred_gui = _preferred_pywebview_gui()
+    _set_linux_qtwebengine_env()
     if preferred_gui == "edgechromium":
         _set_webview2_media_env()
         _patch_webview2_permissions()
@@ -680,13 +780,20 @@ def main():
     register_window(window, "launcher")
     if preferred_gui:
         logger.info("Starting pywebview with preferred GUI backend: %s", preferred_gui)
-    webview.start(
-        func=_log_pywebview_runtime,
-        args=(preferred_gui,),
-        debug=debug,
-        icon=icon_path,
-        gui=preferred_gui,
-    )
+    try:
+        webview.start(
+            func=_log_pywebview_runtime,
+            args=(preferred_gui,),
+            debug=debug,
+            icon=icon_path,
+            gui=preferred_gui,
+        )
+    except Exception as exc:
+        if _is_missing_linux_pywebview_backend(exc):
+            _log_linux_pywebview_backend_help()
+            _open_browser_fallback(base_url, server_thread)
+            return
+        raise
 
 
 if __name__ == "__main__":

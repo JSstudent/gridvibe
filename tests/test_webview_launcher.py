@@ -1,3 +1,5 @@
+import os
+import signal
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -34,6 +36,10 @@ class WebviewLauncherTestCase(unittest.TestCase):
             webview_launcher._should_exit_after_window_close("session", {"launcher"})
         )
 
+    def test_preferred_pywebview_gui_uses_qt_on_linux(self):
+        with patch.object(webview_launcher.sys, "platform", "linux"):
+            self.assertEqual(webview_launcher._preferred_pywebview_gui(), "qt")
+
     def test_last_window_close_exits_app(self):
         self.assertTrue(
             webview_launcher._should_exit_after_window_close("session", set())
@@ -62,27 +68,64 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertEqual(window.show_calls, 1)
         self.assertFalse(api_bridge._is_window_minimized("session"))
 
-    def test_bring_to_front_skips_top_most_pulse_for_session_window(self):
+    def test_bring_to_front_skips_top_most_pulse_for_session_window_on_windows(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
         window = _ExplodingWindow()
 
-        with patch.object(api_bridge, "_pulse_on_top") as pulse:
+        with patch.object(webview_launcher.sys, "platform", "win32"):
+            with patch.object(api_bridge, "_pulse_on_top") as pulse:
+                result = api_bridge._bring_to_front(window, "session")
+
+        self.assertTrue(result)
+        self.assertEqual(window.show_calls, 1)
+        pulse.assert_not_called()
+
+    def test_bring_to_front_pulses_session_window_on_linux(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _ExplodingWindow()
+
+        with patch.object(webview_launcher.sys, "platform", "linux"):
+            with patch.object(api_bridge, "_pulse_on_top") as pulse:
+                result = api_bridge._bring_to_front(window, "session")
+
+        self.assertTrue(result)
+        self.assertEqual(window.show_calls, 1)
+        pulse.assert_called_once_with(window, "session")
+
+    def test_bring_to_front_skips_top_most_pulse_for_launcher_window_on_windows(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _ExplodingWindow()
+
+        with patch.object(webview_launcher.sys, "platform", "win32"):
+            with patch.object(api_bridge, "_pulse_on_top") as pulse:
+                result = api_bridge._bring_to_front(window, "launcher")
+
+        self.assertTrue(result)
+        self.assertEqual(window.show_calls, 1)
+        pulse.assert_not_called()
+
+    def test_bring_to_front_pulses_launcher_window_on_linux(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _ExplodingWindow()
+
+        with patch.object(webview_launcher.sys, "platform", "linux"):
+            with patch.object(api_bridge, "_pulse_on_top") as pulse:
+                result = api_bridge._bring_to_front(window, "launcher")
+
+        self.assertTrue(result)
+        self.assertEqual(window.show_calls, 1)
+        pulse.assert_called_once_with(window, "launcher")
+
+    def test_bring_to_front_pulse_toggles_on_top(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _ExplodingWindow()
+
+        with patch.object(webview_launcher.sys, "platform", "linux"):
             result = api_bridge._bring_to_front(window, "session")
 
         self.assertTrue(result)
         self.assertEqual(window.show_calls, 1)
-        pulse.assert_not_called()
-
-    def test_bring_to_front_skips_top_most_pulse_for_launcher_window(self):
-        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
-        window = _ExplodingWindow()
-
-        with patch.object(api_bridge, "_pulse_on_top") as pulse:
-            result = api_bridge._bring_to_front(window, "launcher")
-
-        self.assertTrue(result)
-        self.assertEqual(window.show_calls, 1)
-        pulse.assert_not_called()
+        self.assertFalse(window.on_top)
 
     def test_focus_session_window_uses_show_only(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
@@ -206,6 +249,110 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertIsNotNone(icon_path)
         self.assertTrue(icon_path.endswith("GridVibe_icon.ico"))
         self.assertTrue(Path(icon_path).is_file())
+
+    def test_missing_linux_pywebview_backend_detection(self):
+        exc = Exception(
+            "You must have either QT or GTK with Python extensions installed "
+            "in order to use pywebview."
+        )
+
+        with patch.object(webview_launcher.sys, "platform", "linux"):
+            self.assertTrue(webview_launcher._is_missing_linux_pywebview_backend(exc))
+
+    def test_missing_linux_pywebview_backend_detection_ignores_other_platforms(self):
+        exc = Exception(
+            "You must have either QT or GTK with Python extensions installed "
+            "in order to use pywebview."
+        )
+
+        with patch.object(webview_launcher.sys, "platform", "win32"):
+            self.assertFalse(webview_launcher._is_missing_linux_pywebview_backend(exc))
+
+    @unittest.skipUnless(
+        all(hasattr(signal, name) for name in ("SIGTSTP", "SIGTTIN", "SIGTTOU")),
+        "job-control signals are not available on this platform",
+    )
+    def test_linux_job_control_stop_signals_are_ignored(self):
+        with patch.object(webview_launcher.sys, "platform", "linux"), patch.object(
+            webview_launcher.signal,
+            "signal",
+        ) as signal_mock:
+            webview_launcher._ignore_linux_job_control_stop_signals()
+
+            signal_mock.assert_any_call(signal.SIGTSTP, signal.SIG_IGN)
+            signal_mock.assert_any_call(signal.SIGTTIN, signal.SIG_IGN)
+            signal_mock.assert_any_call(signal.SIGTTOU, signal.SIG_IGN)
+
+    def test_linux_job_control_stop_signals_ignore_non_linux_platforms(self):
+        with patch.object(webview_launcher.sys, "platform", "win32"), patch.object(
+            webview_launcher.signal,
+            "signal",
+        ) as signal_mock:
+            webview_launcher._ignore_linux_job_control_stop_signals()
+
+            signal_mock.assert_not_called()
+
+    def test_linux_qtwebengine_env_is_opt_in(self):
+        with patch.object(webview_launcher.sys, "platform", "linux"), patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ):
+            webview_launcher._set_linux_qtwebengine_env()
+
+            self.assertNotIn("QTWEBENGINE_CHROMIUM_FLAGS", os.environ)
+            self.assertNotIn("QT_OPENGL", os.environ)
+            self.assertNotIn("LIBGL_ALWAYS_SOFTWARE", os.environ)
+
+    def test_linux_qtwebengine_env_can_enable_gpu_fallback(self):
+        with patch.object(webview_launcher.sys, "platform", "linux"), patch.dict(
+            os.environ,
+            {"GRIDVIBE_QTWEBENGINE_GPU_FALLBACK": "1"},
+            clear=True,
+        ):
+            webview_launcher._set_linux_qtwebengine_env()
+
+            flags = os.environ["QTWEBENGINE_CHROMIUM_FLAGS"].split()
+            self.assertIn("--disable-gpu", flags)
+            self.assertIn("--disable-features=Vulkan", flags)
+            self.assertNotIn("--use-gl=swiftshader", flags)
+            self.assertEqual(os.environ["QT_OPENGL"], "software")
+            self.assertNotIn("QT_QUICK_BACKEND", os.environ)
+            self.assertEqual(os.environ["LIBGL_ALWAYS_SOFTWARE"], "1")
+
+    def test_linux_qtwebengine_env_preserves_existing_values(self):
+        with patch.object(webview_launcher.sys, "platform", "linux"), patch.dict(
+            os.environ,
+            {
+                "QTWEBENGINE_CHROMIUM_FLAGS": "--foo --disable-gpu",
+                "QT_OPENGL": "desktop",
+                "QT_QUICK_BACKEND": "opengl",
+                "LIBGL_ALWAYS_SOFTWARE": "0",
+                "GRIDVIBE_QTWEBENGINE_GPU_FALLBACK": "1",
+            },
+            clear=False,
+        ):
+            webview_launcher._set_linux_qtwebengine_env()
+
+            flags = os.environ["QTWEBENGINE_CHROMIUM_FLAGS"].split()
+            self.assertEqual(flags.count("--disable-gpu"), 1)
+            self.assertIn("--foo", flags)
+            self.assertIn("--disable-features=Vulkan", flags)
+            self.assertNotIn("--use-gl=swiftshader", flags)
+            self.assertEqual(os.environ["QT_OPENGL"], "desktop")
+            self.assertEqual(os.environ["QT_QUICK_BACKEND"], "opengl")
+            self.assertEqual(os.environ["LIBGL_ALWAYS_SOFTWARE"], "0")
+
+    def test_linux_qtwebengine_env_ignores_non_linux_platforms(self):
+        with patch.object(webview_launcher.sys, "platform", "win32"), patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ):
+            webview_launcher._set_linux_qtwebengine_env()
+
+            self.assertNotIn("QTWEBENGINE_CHROMIUM_FLAGS", os.environ)
+            self.assertNotIn("QT_OPENGL", os.environ)
 
     def test_restart_application_queues_restart_and_shutdown(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")

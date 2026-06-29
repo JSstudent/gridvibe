@@ -786,6 +786,9 @@ def _load_agent_registry() -> Dict[str, Any]:
 
 
 AGENT_REGISTRY = _load_agent_registry()
+_AGENT_DETECTION_CACHE_TTL_SECONDS = 30
+_agent_detection_cache: Dict[Tuple[str, str, str, str, str, int], Tuple[float, Dict[str, Any]]] = {}
+_agent_detection_cache_lock = threading.Lock()
 
 
 def _agent_options() -> List[Dict[str, str]]:
@@ -846,6 +849,21 @@ def _contains_html_payload(value: Any) -> bool:
 def _build_posix_detection_command(binary: str) -> str:
     """Build a shell probe that detects files, aliases, and shell functions."""
     binary_literal = _shell_single_quote(binary)
+    fast_script = (
+        f"TF_BINARY={binary_literal}; "
+        'if command -v "$TF_BINARY" >/dev/null 2>&1; then '
+        'TF_PATH=$(command -v "$TF_BINARY" 2>/dev/null || true); '
+        'TF_HEAD=""; '
+        'if [ -n "$TF_PATH" ] && [ -f "$TF_PATH" ]; then '
+        "TF_HEAD=$(LC_ALL=C head -c 256 \"$TF_PATH\" 2>/dev/null | tr '\\n' ' ' || true); "
+        'fi; '
+        "printf '__TF_FOUND__\n'; "
+        "printf '__TF_KIND__:%s\n' file; "
+        "printf '__TF_PATH__:%s\n' \"$TF_PATH\"; "
+        "printf '__TF_HEAD__:%s\n' \"$TF_HEAD\"; "
+        "exit 0; "
+        "fi"
+    )
     bash_script = (
         f"TF_BINARY={binary_literal}; "
         'if ! type "$TF_BINARY" >/dev/null 2>&1; then exit 1; fi; '
@@ -874,6 +892,7 @@ def _build_posix_detection_command(binary: str) -> str:
         "printf '__TF_HEAD__:%s\n' \"$TF_HEAD\""
     )
     return (
+        f"{fast_script}; "
         'if command -v bash >/dev/null 2>&1; then '
         f'bash -ilc {_shell_single_quote(bash_script)}; '
         'else '
@@ -1264,6 +1283,42 @@ def _detect_agent_binary(target: Dict[str, Any], binary: str) -> Dict[str, Any]:
     return _detect_wsl_command(binary, str(target.get("distribution") or "").strip())
 
 
+def _agent_detection_cache_key(
+    target: Dict[str, Any],
+    binary: str,
+) -> Tuple[str, str, str, str, str, int]:
+    """Build a stable cache key for one agent binary detection target."""
+    return (
+        str(binary or "").strip(),
+        str(target.get("environment_key") or ""),
+        str(target.get("shell_kind") or ""),
+        str(target.get("distribution") or "").strip(),
+        str(target.get("host") or "").strip(),
+        _normalize_port_number(target.get("port"), 22),
+    )
+
+
+def _detect_agent_binary_cached(target: Dict[str, Any], binary: str) -> Dict[str, Any]:
+    """Detect an agent binary while reusing recent identical probe results."""
+    if target.get("environment_key") == "ssh":
+        return _detect_agent_binary(target, binary)
+
+    key = _agent_detection_cache_key(target, binary)
+    now = time.monotonic()
+
+    with _agent_detection_cache_lock:
+        cached = _agent_detection_cache.get(key)
+        if cached is not None:
+            cached_at, cached_payload = cached
+            if now - cached_at <= _AGENT_DETECTION_CACHE_TTL_SECONDS:
+                return dict(cached_payload)
+            _agent_detection_cache.pop(key, None)
+
+        detection = _detect_agent_binary(target, binary)
+        _agent_detection_cache[key] = (time.monotonic(), dict(detection))
+        return detection
+
+
 def _check_install_requirement(requirement: Dict[str, Any], target: Dict[str, Any]) -> Tuple[bool, str]:
     """Return whether one install prerequisite is available."""
     kind = str(requirement.get("kind") or "").strip().lower()
@@ -1277,7 +1332,7 @@ def _check_install_requirement(requirement: Dict[str, Any], target: Dict[str, An
             return True, ""
         if target.get("environment_key") in {"ssh", "wsl_linux"}:
             return True, ""
-        detected = _detect_agent_binary(
+        detected = _detect_agent_binary_cached(
             {
                 **target,
                 "environment_key": target.get("environment_key"),
@@ -1429,7 +1484,7 @@ def _agent_preflight_payload(agent_key: str, payload: Dict[str, Any]) -> Dict[st
     if not environment_spec or not bool(environment_spec.get("supported")):
         return response
 
-    detection = _detect_agent_binary(target, binary)
+    detection = _detect_agent_binary_cached(target, binary)
     install_option, missing_prerequisites = _select_install_option(environment_spec, target)
     response["warning"] = str(environment_spec.get("warning") or "").strip()
     response["detection"] = {
@@ -2482,7 +2537,7 @@ def _local_shell_display_name(
         return "PowerShell"
     if use_wsl:
         return f"WSL ({configured_distribution})" if configured_distribution else "WSL"
-    return "cmd"
+    return "cmd" if os.name == "nt" else "Shell"
 
 
 def _build_local_command(
@@ -2788,6 +2843,7 @@ def index():
         'index.html',
         max_sessions=max_sessions,
         agent_options=_agent_options(),
+        local_windows_shells_available=os.name == "nt",
     )
 
 
@@ -3036,6 +3092,17 @@ def select_folder():
 
     try:
         selected = _pick_local_folder(str(data.get("initial_dir") or ""))
+    except RuntimeError as exc:
+        if str(exc) == "Native folder picker support is unavailable":
+            logger.info("Native folder picker unavailable; local repo path can be entered manually")
+            return jsonify({
+                "path": "",
+                "selected": False,
+                "manual_entry": True,
+                "error": str(exc),
+            })
+        logger.error(f"Folder picker failed: {exc}")
+        return jsonify({"error": str(exc)}), 500
     except Exception as exc:
         logger.error(f"Folder picker failed: {exc}")
         return jsonify({"error": str(exc)}), 500
@@ -3199,8 +3266,8 @@ def create_sessions():
                     prepared["distribution"] = ""
                     prepared["username"] = ""
                 else:
-                    use_powershell = bool(prepared.get("use_powershell"))
-                    use_wsl = bool(prepared.get("use_wsl")) and not use_powershell
+                    use_powershell = os.name == "nt" and bool(prepared.get("use_powershell"))
+                    use_wsl = os.name == "nt" and bool(prepared.get("use_wsl")) and not use_powershell
                 prepared["password"] = None
                 prepared["port"] = 22
                 prepared["host"] = (

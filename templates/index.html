@@ -1929,6 +1929,7 @@
         use_powershell: false
     }));
     const AGENT_OPTIONS = {{ agent_options|tojson }};
+    const LOCAL_WINDOWS_SHELLS_AVAILABLE = {{ local_windows_shells_available|tojson }};
     const DEFAULT_APP_SETTINGS = Object.freeze({
         appearance: Object.freeze({
             theme: 'system'
@@ -2029,14 +2030,13 @@
                 <input type="hidden" id="wsl_distribution" value="">
                 <input type="hidden" id="wsl_username" value="">
                 <div class="path-picker">
-                    <input type="hidden" id="wsl_default_dir" value="">
-                    <div id="wsl_default_dir_display" class="picker-display empty">Select a folder on your local drive</div>
+                    <input type="text" id="wsl_default_dir" value="" placeholder="/home/you/project" autocomplete="off" spellcheck="false">
                     <button type="button" class="ghost-btn picker-btn" onclick="browseLocalRepo()">Browse</button>
                     <button type="button" class="ghost-btn picker-btn" onclick="clearLocalRepo()">Clear</button>
                 </div>
             </div>
         </div>
-        <p class="mode-note">Local Repo starts each pane in the selected folder. By default it uses Windows cmd. Enable WSL per terminal in Step 3 and optionally type the distro name you want, such as Ubuntu. If the distro field is left blank, that pane falls back to your preferred/default WSL distro.</p>
+        <p class="mode-note">Local Repo starts each pane in the selected folder. In browser mode, type or paste the full path if Browse is unavailable. On Windows, enable WSL per terminal and optionally type a distro name such as Ubuntu; blank uses your preferred/default WSL distro.</p>
     `;
 
     const LAYOUT_COPY = {
@@ -2819,18 +2819,29 @@
             return DEFAULT_TERMINALS.map(item => ({ ...item }));
         }
 
-        const drafts = rows.map((row, index) => ({
-            title: row.querySelector('.t-title').value.trim() || `Terminal ${index + 1}`,
-            directory: row.querySelector('.t-dir').value.trim(),
-            initial_command: buildTerminalInitialCommand(row),
-            initial_command_mode: getTerminalCommandMode(row),
-            startup_mode: getTerminalCommandMode(row),
-            agent_selection: row.querySelector('.t-agent-select')?.value.trim() || '',
-            custom_agent: row.querySelector('.t-agent-custom')?.value.trim() || '',
-            distribution: row.querySelector('.t-distribution')?.value.trim() || '',
-            use_wsl: getTerminalCommandMode(row) === 'explorer' ? false : Boolean(row.querySelector('.t-use-wsl')?.checked),
-            use_powershell: getTerminalCommandMode(row) === 'explorer' ? false : Boolean(row.querySelector('.t-use-powershell')?.checked)
-        }));
+        const drafts = rows.map((row, index) => {
+            const commandMode = getTerminalCommandMode(row);
+            return {
+                title: row.querySelector('.t-title').value.trim() || `Terminal ${index + 1}`,
+                directory: row.querySelector('.t-dir').value.trim(),
+                initial_command: buildTerminalInitialCommand(row),
+                initial_command_mode: commandMode,
+                startup_mode: commandMode,
+                agent_selection: commandMode === 'agent'
+                    ? (row.querySelector('.t-agent-select')?.value.trim() || '')
+                    : '',
+                custom_agent: commandMode === 'agent'
+                    ? (row.querySelector('.t-agent-custom')?.value.trim() || '')
+                    : '',
+                distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
+                use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer'
+                    ? Boolean(row.querySelector('.t-use-wsl')?.checked)
+                    : false,
+                use_powershell: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer'
+                    ? Boolean(row.querySelector('.t-use-powershell')?.checked)
+                    : false
+            };
+        });
 
         while (drafts.length < MAX_SESSIONS) {
             drafts.push({ ...DEFAULT_TERMINALS[drafts.length] });
@@ -2947,16 +2958,19 @@
     function setLocalRepoPath(path) {
         const input = document.getElementById('wsl_default_dir');
         const display = document.getElementById('wsl_default_dir_display');
-        if (!input || !display) {
+        if (!input) {
             return;
         }
 
         const normalized = String(path ?? '').trim();
         const resolved = normalized === '~' ? '' : normalized;
         input.value = resolved;
-        display.textContent = resolved || 'Select a folder on your local drive';
-        display.classList.toggle('empty', !resolved);
-        display.title = resolved;
+        input.title = resolved;
+        if (display) {
+            display.textContent = resolved || 'Select a folder on your local drive';
+            display.classList.toggle('empty', !resolved);
+            display.title = resolved;
+        }
     }
 
     function applyModeInputs(values) {
@@ -3021,6 +3035,9 @@
                 if (!response.ok) {
                     throw new Error(data.error || 'Folder picker is unavailable');
                 }
+                if (data.manual_entry) {
+                    throw new Error(data.error || 'Native folder picker support is unavailable');
+                }
                 selectedPath = String(data.path || '').trim();
             }
 
@@ -3031,6 +3048,13 @@
             setLocalRepoPath(selectedPath);
             resetTerminalSetupIfTargetChanged('wsl', collectModeInputs());
         } catch (error) {
+            const message = String(error?.message || '');
+            if (message.includes('Native folder picker support is unavailable')) {
+                const input = document.getElementById('wsl_default_dir');
+                input?.focus();
+                showMessage('Native folder picker is unavailable in browser mode. Type or paste the local repository path.', 'info');
+                return;
+            }
             showMessage(`Folder selection failed: ${error.message}`, 'error');
         }
     }
@@ -3180,6 +3204,20 @@
             if (powershellCheckbox) powershellCheckbox.checked = false;
         }
         syncTerminalWslState(row);
+    }
+
+    function resetTerminalCommandOnModeChange(row, nextMode) {
+        const previousMode = getTerminalCommandMode(row);
+        if (previousMode !== 'agent' || nextMode === 'agent') {
+            return;
+        }
+
+        const commandInput = row.querySelector('.t-cmd');
+        const agentSelect = row.querySelector('.t-agent-select');
+        const customAgentInput = row.querySelector('.t-agent-custom');
+        if (commandInput) commandInput.value = '';
+        if (agentSelect) agentSelect.value = '';
+        if (customAgentInput) customAgentInput.value = '';
     }
 
     function _resetAgentOptionLabels(select) {
@@ -3439,6 +3477,7 @@
 
             row.querySelectorAll('.command-mode-btn').forEach(button => {
                 button.addEventListener('click', () => {
+                    resetTerminalCommandOnModeChange(row, button.dataset.commandMode);
                     row.dataset.commandMode = button.dataset.commandMode;
                     syncTerminalCommandState(row);
                     scheduleAgentPreflight(row, 60);
@@ -3512,6 +3551,7 @@
                             <label>Custom Agent</label>
                             <input class="t-agent-custom" type="text" value="${escHtml(commandUi.customAgent)}" placeholder="Enter agent command">
                         </div>
+                        {% if local_windows_shells_available %}
                         <div class="field t-shell-field ${connectionMode === 'wsl' && commandUi.mode !== 'explorer' ? '' : 'hidden'}">
                             <div class="field-label-row">
                                 <label>Shell</label>
@@ -3553,6 +3593,7 @@
                             <input class="t-distribution" type="text" value="${escHtml(terminal.distribution || '')}" placeholder="Ubuntu">
                             <div class="inline-tip">Checking local WSL distros...</div>
                         </div>
+                        {% endif %}
                     </div>
                 </div>
             `;
