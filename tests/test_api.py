@@ -1,4 +1,6 @@
+import io
 import json
+import stat
 import threading
 import unittest
 from pathlib import Path
@@ -8,6 +10,60 @@ from unittest.mock import MagicMock, patch
 
 import api
 from gridvibe_version import __version__
+
+
+class FakeSftp:
+    def __init__(self, entries):
+        self.entries = entries
+        self.closed = False
+
+    def normalize(self, path):
+        path = str(path or "/").replace("\\", "/")
+        if not path.startswith("/") and not (len(path) >= 2 and path[1] == ":"):
+            path = f"/srv/app/{path}"
+        while "//" in path:
+            path = path.replace("//", "/")
+        return path.rstrip("/") or "/"
+
+    def stat(self, path):
+        normalized = self.normalize(path)
+        if normalized not in self.entries:
+            raise OSError("No such file")
+        item = self.entries[normalized]
+        return SimpleNamespace(
+            st_mode=stat.S_IFDIR if item["type"] == "directory" else stat.S_IFREG,
+            st_size=len(item.get("content", b"")),
+            st_mtime=item.get("modified", 1000),
+        )
+
+    def listdir_attr(self, path):
+        normalized = self.normalize(path)
+        prefix = normalized.rstrip("/") + "/"
+        results = []
+        for entry_path, item in self.entries.items():
+            if not entry_path.startswith(prefix):
+                continue
+            name = entry_path[len(prefix):]
+            if "/" in name or not name:
+                continue
+            results.append(
+                SimpleNamespace(
+                    filename=name,
+                    st_mode=stat.S_IFDIR if item["type"] == "directory" else stat.S_IFREG,
+                    st_size=len(item.get("content", b"")),
+                    st_mtime=item.get("modified", 1000),
+                )
+            )
+        return results
+
+    def open(self, path, _mode="rb"):
+        normalized = self.normalize(path)
+        if normalized not in self.entries:
+            raise OSError("No such file")
+        return io.BytesIO(self.entries[normalized].get("content", b""))
+
+    def close(self):
+        self.closed = True
 
 
 class ApiRoutesTestCase(unittest.TestCase):
@@ -260,6 +316,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("hasMatchingSessionViews(sessionIds, terminals, data.sessions)", html)
         self.assertIn("pendingModeSwitchSessionIds.add(sessionId);", html)
         self.assertIn("replaceSessionPaneMode(index, data)", html)
+        self.assertIn("return ['ssh', 'wsl'].includes(session?.mode) && session?.startup_mode === 'explorer';", html)
         replace_start = html.index("function replacePaneWithExplorer(index, session)")
         replace_end = html.index("function replacePaneWithTerminal(index, session)", replace_start)
         self.assertIn("loadExplorerPane(index, null, { force: true });", html[replace_start:replace_end])
@@ -344,11 +401,27 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
-        self.assertIn("function highlightExplorerCode(content, language)", html)
+        self.assertIn("function highlightExplorerCode(content, language, searchRanges = [])", html)
         self.assertIn("const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({", html)
         self.assertIn("'.py': 'python'", html)
         self.assertIn("'.go': 'go'", html)
         self.assertIn("'.c': 'c'", html)
+
+    def test_terminals_page_explorer_file_search_is_client_side_and_safe(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('data-explorer-search-input="${index}"', html)
+        self.assertIn("function explorerFindRanges(content, query)", html)
+        self.assertIn("function explorerMarkedEscHtml(text, absoluteStart = 0, searchRanges = [])", html)
+        self.assertIn("function markExplorerSearchInElement(root, query, activeIndex = 0)", html)
+        self.assertIn("document.createTreeWalker(", html)
+        self.assertIn("node.replaceWith(fragment);", html)
+        self.assertIn("code.innerHTML = highlightExplorerCode(", html)
+        self.assertIn("function findExplorerSearchTargetIndex()", html)
+        self.assertIn("event.code !== 'KeyF'", html)
+        self.assertNotIn("/api/explorer-search", html)
 
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
@@ -507,6 +580,35 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("button.setAttribute('aria-label', label);", html)
         self.assertIn("button.setAttribute('aria-pressed', active ? 'true' : 'false');", html)
 
+    def test_terminals_page_exposes_max_surface_mode(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        grid_css = html[html.index("#terminalsGrid {"):html.index("/* Layout classes */")]
+        self.assertIn("width: 100%;", grid_css)
+        self.assertNotIn("min(1800px, 100%)", grid_css)
+        self.assertIn('id="surfaceModeBtn"', html)
+        self.assertIn('aria-label="Max surface"', html)
+        self.assertIn('<rect x="4" y="4" width="16" height="16" rx="2.5"', html)
+        self.assertIn("const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';", html)
+        self.assertIn("document.body.classList.toggle('surface-max', active);", html)
+        self.assertIn("redrawAttachedTerminals(attachedIndices, { forceResize: true });", html)
+
+    def test_terminals_page_exposes_collapsible_topbar(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('class="topbar" id="terminalTopbar"', html)
+        self.assertIn('class="session-bar"', html)
+        self.assertIn('id="topbarToggleBtn"', html)
+        self.assertIn('aria-controls="terminalTopbar"', html)
+        self.assertIn("const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';", html)
+        self.assertIn("document.body.classList.toggle('topbar-collapsed', !shouldShow);", html)
+        self.assertIn("path.setAttribute('d', visible ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6');", html)
+        self.assertIn("applyTopbarVisibility(getStoredTopbarVisible());", html)
+
     def test_terminals_page_buttons_use_session_color_frames(self):
         response = self.client.get("/terminals")
 
@@ -541,11 +643,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         initial_load_start = html.index("async function initialLoad()")
         join_index = html.index("socket.emit('join_session', { session_id: session.session_id });", initial_load_start)
         redraw_index = html.index("await redrawAttachedTerminalsLikeFullscreen(attachedIndices, {", initial_load_start)
+        soft_redraw_index = html.index("await redrawAttachedTerminals(attachedIndices, {", initial_load_start)
 
         self.assertLess(join_index, redraw_index)
+        self.assertLess(soft_redraw_index, redraw_index)
+        self.assertIn("if (usingCurrentView || restoredFromCache)", html[initial_load_start:redraw_index])
+        self.assertIn("forceResize: false", html[soft_redraw_index:redraw_index])
         self.assertIn("await redrawPass({ dispatchResize: true });", html)
         self.assertIn("await redrawPass({ delayMs: 90, dispatchResize: true });", html)
-        self.assertIn("requestedGroupId === activeGroupId", html[redraw_index:])
+        self.assertIn("const stillCurrent = () => loadToken === activeLoadToken && requestedGroupId === activeGroupId;", html[initial_load_start:redraw_index])
 
     def test_terminals_page_caches_group_views_across_switches(self):
         response = self.client.get("/terminals")
@@ -557,6 +663,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function restoreCachedGroupView(groupId)", html)
         self.assertIn("cacheVisibleGroupView(visibleGroupId);", html)
         self.assertIn("restoredFromCache = restoreCachedGroupView(requestedGroupId);", html)
+        self.assertIn("function captureTerminalViewportState(terminal)", html)
+        self.assertIn("function restoreTerminalViewportState(terminal, state)", html)
+        self.assertIn("captureCachedPaneUiState();", html)
+        self.assertIn("restoreCachedPaneUiState();", html)
 
     def test_terminals_page_routes_terminal_output_by_session_across_cached_groups(self):
         response = self.client.get("/terminals")
@@ -1436,6 +1546,40 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertFalse(session.use_powershell)
         self.assertEqual(session.status, api.SessionStatus.CONNECTED)
 
+    def test_create_sessions_accepts_ssh_file_explorer_mode(self):
+        sessions_payload = {
+            "connection_mode": "ssh",
+            "layout": "horizontal",
+            "sessions": [
+                {
+                    "host": "example.com",
+                    "username": "ubuntu",
+                    "password": "secret",
+                    "port": 2222,
+                    "directory": "/srv/app",
+                    "title": "Remote Files",
+                    "initial_command": "pwd",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        start_task.assert_not_called()
+
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertEqual(session.mode, "ssh")
+        self.assertEqual(session.host, "example.com")
+        self.assertEqual(session.username, "ubuntu")
+        self.assertEqual(session.port, 2222)
+        self.assertEqual(session.startup_mode, "explorer")
+        self.assertEqual(session.explorer_root_directory, "/srv/app")
+        self.assertEqual(session.initial_command, "")
+        self.assertEqual(session.status, api.SessionStatus.CONNECTED)
+
     def test_switch_explorer_pane_to_terminal_uses_selected_directory(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         selected_dir = repo_dir / "src"
@@ -1557,7 +1701,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         with api.connection_lock:
             self.assertNotIn(session_id, api.ssh_connections)
 
-    def test_switch_session_mode_rejects_ssh_explorer_mode(self):
+    def test_switch_ssh_terminal_pane_to_explorer_preserves_host(self):
         group = api.session_manager.create_group(
             name="SSH",
             connection_mode="ssh",
@@ -1569,15 +1713,111 @@ class ApiRoutesTestCase(unittest.TestCase):
             host="example.com",
             directory="/srv/app",
             mode="ssh",
+            username="ubuntu",
+            startup_mode="terminal",
+        )
+        api.session_manager.update_session_status(session.session_id, api.SessionStatus.CONNECTED)
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/src": {"type": "directory"},
+            }
+        )
+        client = MagicMock()
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(client, fake_sftp)), patch.object(
+            api,
+            "_close_ssh_connection",
+        ) as close_connection:
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "explorer", "directory": "/srv/app/src"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        close_connection.assert_called_once_with(session.session_id, clear_buffer=True)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.host, "example.com")
+        self.assertEqual(updated.username, "ubuntu")
+        self.assertEqual(updated.directory, "/srv/app/src")
+        self.assertEqual(updated.explorer_root_directory, "/srv/app")
+        self.assertEqual(updated.startup_mode, "explorer")
+        self.assertEqual(updated.status, api.SessionStatus.CONNECTED)
+        client.close.assert_called_once()
+
+    def test_switch_ssh_terminal_to_explorer_falls_back_from_stale_remote_root(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app/src",
+            mode="ssh",
+            username="ubuntu",
+            startup_mode="terminal",
+            explorer_root_directory="/stale/root",
+        )
+        fake_sftp = FakeSftp({"/srv/app/src": {"type": "directory"}})
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)), patch.object(
+            api,
+            "_close_ssh_connection",
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "explorer"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.directory, "/srv/app/src")
+        self.assertEqual(updated.explorer_root_directory, "/srv/app/src")
+        self.assertEqual(updated.startup_mode, "explorer")
+
+    def test_switch_ssh_explorer_pane_to_terminal_uses_selected_remote_directory(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app/src",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/src": {"type": "directory"},
+            }
         )
 
-        response = self.client.post(
-            f"/api/sessions/{session.session_id}/mode",
-            json={"startup_mode": "explorer"},
-        )
+        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)), patch.object(
+            api.socketio,
+            "start_background_task",
+        ) as start_task:
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "terminal", "directory": "src"},
+            )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("Local Repo", response.get_json()["error"])
+        self.assertEqual(response.status_code, 200)
+        start_task.assert_called_once_with(api._connect_session, session.session_id)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.host, "example.com")
+        self.assertEqual(updated.directory, "/srv/app/src")
+        self.assertEqual(updated.explorer_root_directory, "/srv/app")
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertEqual(updated.status, api.SessionStatus.PENDING)
 
     def test_explorer_entries_lists_local_directory_inside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -1611,6 +1851,41 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["entries"][0]["type"], "directory")
         self.assertEqual(payload["entries"][1]["type"], "file")
 
+    def test_explorer_entries_lists_ssh_directory_inside_root(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/src": {"type": "directory"},
+                "/srv/app/README.md": {"type": "file", "content": b"# Project\n"},
+                "/srv/app/src/main.py": {"type": "file", "content": b"print('ok')\n"},
+            }
+        )
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+            entries_response = self.client.get(f"/api/explorer/{session.session_id}/entries")
+
+        self.assertEqual(entries_response.status_code, 200)
+        payload = entries_response.get_json()
+        self.assertEqual(payload["root"], "/srv/app")
+        self.assertEqual(payload["path"], "")
+        self.assertEqual(payload["parent_path"], "")
+        self.assertEqual([entry["name"] for entry in payload["entries"]], ["src", "README.md"])
+
     def test_explorer_entries_rejects_path_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -1640,6 +1915,38 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(entries_response.status_code, 400)
         self.assertIn("inside the configured root", entries_response.get_json()["error"])
 
+    def test_explorer_entries_rejects_ssh_path_outside_root(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/etc": {"type": "directory"},
+            }
+        )
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/entries",
+                query_string={"path": "/etc"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("inside the configured root", response.get_json()["error"])
+
     def test_explorer_file_returns_text_content_inside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -1663,6 +1970,43 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["preview_type"], "markdown")
         self.assertIn("<h1>Project</h1>", payload["preview_html"])
         self.assertEqual(payload["language"], "markdown")
+
+    def test_explorer_file_returns_ssh_text_content_inside_root(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/notes.txt": {"type": "file", "content": b"hello\n"},
+            }
+        )
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "notes.txt"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["root"], "/srv/app")
+        self.assertEqual(payload["path"], "notes.txt")
+        self.assertEqual(payload["name"], "notes.txt")
+        self.assertEqual(payload["content"], "hello\n")
+        self.assertFalse(payload["truncated"])
 
     def test_explorer_file_returns_sanitized_markdown_preview(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -3183,6 +3527,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("var(--t-topbar)", html)
         self.assertIn("var(--t-text)", html)
         self.assertIn("var(--t-border)", html)
+
+    def test_terminals_page_splits_the_longer_pane_dimension(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        self.assertIn("grid?.classList.contains('layout-2-vertical')", html)
+        self.assertIn("return candidates.includes('horizontal') ? 'horizontal' : '';", html)
+        self.assertIn(
+            "const preferred = bounds && bounds.height > bounds.width ? 'horizontal' : 'vertical';",
+            html,
+        )
 
 
 # ---------------------------------------------------------------------------

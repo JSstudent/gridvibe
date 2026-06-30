@@ -2712,7 +2712,7 @@
         const rawMode = String(terminal?.startup_mode || terminal?.initial_command_mode || '').trim();
         const savedMode = rawMode === 'agent'
             ? 'agent'
-            : (rawMode === 'explorer' && connectionMode === 'wsl' ? 'explorer' : 'command');
+            : (rawMode === 'explorer' ? 'explorer' : 'command');
         const initialCommand = String(terminal?.initial_command || '').trim();
         const knownAgents = getKnownAgentValues();
         let mode = savedMode;
@@ -2792,7 +2792,7 @@
         if (mode === 'agent') {
             return 'agent';
         }
-        if (mode === 'explorer' && connectionMode === 'wsl') {
+        if (mode === 'explorer') {
             return 'explorer';
         }
         return 'command';
@@ -3526,9 +3526,7 @@
                             <div class="command-mode-toggle">
                                 <button type="button" class="command-mode-btn ${commandUi.mode === 'command' ? 'active' : ''}" data-command-mode="command">Initial Command</button>
                                 <button type="button" class="command-mode-btn ${commandUi.mode === 'agent' ? 'active' : ''}" data-command-mode="agent">Agent</button>
-                                ${connectionMode === 'wsl'
-                                    ? `<button type="button" class="command-mode-btn ${commandUi.mode === 'explorer' ? 'active' : ''}" data-command-mode="explorer">File Explorer</button>`
-                                    : ''}
+                                <button type="button" class="command-mode-btn ${commandUi.mode === 'explorer' ? 'active' : ''}" data-command-mode="explorer">File Explorer</button>
                             </div>
                         </div>
                         <div class="field t-command-field ${commandUi.mode === 'command' ? '' : 'hidden'}">
@@ -4058,7 +4056,7 @@
                     title: terminal.title || `Terminal ${index + 1}`,
                     directory: resolvedDirectory,
                     initial_command: terminal.startup_mode === 'explorer' ? null : (terminal.initial_command || null),
-                    startup_mode: terminal.startup_mode === 'explorer' && config.connection_mode === 'wsl'
+                    startup_mode: terminal.startup_mode === 'explorer'
                         ? 'explorer'
                         : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
                 };
