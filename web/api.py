@@ -7,6 +7,7 @@ import atexit
 import json
 import logging
 import os
+import posixpath
 import re
 import select
 import shlex
@@ -19,7 +20,6 @@ import sys
 import threading
 import time
 import uuid
-import posixpath
 from typing import Any, Dict, List, Optional, Tuple
 
 from cryptography.fernet import Fernet

@@ -800,6 +800,7 @@
         .explorer-editor-header {
             display: flex;
             align-items: center;
+            flex-wrap: wrap;
             gap: 10px;
             min-width: 0;
             padding: 8px 10px;
@@ -819,7 +820,7 @@
 
         .explorer-editor-title {
             min-width: 0;
-            flex: 1;
+            flex: 1 1 150px;
         }
 
         .explorer-editor-tabs {
@@ -842,6 +843,59 @@
             border-color: var(--t-accent);
             color: var(--t-accent);
             background: var(--explorer-row-active);
+        }
+
+        .explorer-editor-search {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            min-width: 160px;
+            flex: 0 1 260px;
+        }
+
+        .explorer-search-input {
+            min-width: 0;
+            width: 100%;
+            height: 28px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            padding: 4px 8px;
+            background: var(--explorer-bg);
+            color: var(--explorer-text);
+            font: inherit;
+            font-size: .74rem;
+        }
+
+        .explorer-search-input:focus {
+            outline: 2px solid var(--t-accent);
+            outline-offset: 0;
+            border-color: var(--t-accent);
+        }
+
+        .explorer-search-count {
+            min-width: 42px;
+            color: var(--explorer-muted);
+            font-size: .7rem;
+            text-align: center;
+            white-space: nowrap;
+        }
+
+        .explorer-search-btn {
+            width: 28px;
+            height: 28px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            cursor: pointer;
+            font-size: .72rem;
+            line-height: 1;
+            flex: 0 0 auto;
+        }
+
+        .explorer-search-btn:disabled {
+            opacity: .45;
+            cursor: default;
         }
 
         .explorer-editor-name {
@@ -921,6 +975,19 @@
         .explorer-code-builtin {
             color: #0369a1;
             font-weight: 600;
+        }
+
+        .explorer-search-match {
+            border-radius: 2px;
+            padding: 0 1px;
+            background: #facc15;
+            color: #111827;
+        }
+
+        .explorer-search-match.active {
+            background: #fb923c;
+            color: #111827;
+            box-shadow: 0 0 0 1px rgba(17, 24, 39, .3);
         }
 
         .explorer-pane[data-explorer-theme="dark"] .explorer-code-keyword {
@@ -4792,6 +4859,39 @@
         return -1;
     }
 
+    function findExplorerSearchTargetIndex() {
+        const activeCard = document.activeElement?.closest?.('.explorer-pane');
+        const activeSlot = activeCard ? Number(activeCard.dataset.slot) : -1;
+        if (Number.isInteger(activeSlot)
+            && terminals[activeSlot]?._explorerMode === 'file') {
+            return activeSlot;
+        }
+
+        if (_focusedTerminalIndex !== -1
+            && terminals[_focusedTerminalIndex]?._explorerMode === 'file') {
+            return _focusedTerminalIndex;
+        }
+
+        for (let i = 0; i < terminals.length; i++) {
+            if (terminals[i]?._explorerMode === 'file') {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    document.addEventListener('keydown', event => {
+        if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey || event.code !== 'KeyF') {
+            return;
+        }
+        const index = findExplorerSearchTargetIndex();
+        if (index === -1 || !focusExplorerSearch(index)) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+    });
+
     document.addEventListener('keydown', async event => {
         if (!_voicePrefs.pttEnabled || !_voicePrefs.pttKeybind) return;
         if (_pttActive || _pttProcessing) return;
@@ -5574,8 +5674,60 @@
         return metaParts;
     }
 
-    function explorerCodeSpan(className, text) {
-        return `<span class="${className}">${escHtml(text)}</span>`;
+    function explorerFindRanges(content, query) {
+        const source = String(content || '');
+        const needle = String(query || '');
+        if (!source || !needle) {
+            return [];
+        }
+
+        const ranges = [];
+        const normalizedSource = source.toLowerCase();
+        const normalizedNeedle = needle.toLowerCase();
+        let cursor = 0;
+        while (cursor < normalizedSource.length) {
+            const matchIndex = normalizedSource.indexOf(normalizedNeedle, cursor);
+            if (matchIndex === -1) {
+                break;
+            }
+            ranges.push({ start: matchIndex, end: matchIndex + needle.length });
+            cursor = matchIndex + Math.max(needle.length, 1);
+        }
+        return ranges;
+    }
+
+    function explorerMarkedEscHtml(text, absoluteStart = 0, searchRanges = []) {
+        const value = String(text || '');
+        if (!value || !searchRanges.length) {
+            return escHtml(value);
+        }
+
+        const absoluteEnd = absoluteStart + value.length;
+        let output = '';
+        let cursor = 0;
+        searchRanges.forEach(range => {
+            const start = Math.max(Number(range.start), absoluteStart);
+            const end = Math.min(Number(range.end), absoluteEnd);
+            if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+                return;
+            }
+            const localStart = start - absoluteStart;
+            const localEnd = end - absoluteStart;
+            if (localStart > cursor) {
+                output += escHtml(value.slice(cursor, localStart));
+            }
+            const className = range.active ? 'explorer-search-match active' : 'explorer-search-match';
+            output += `<mark class="${className}">${escHtml(value.slice(localStart, localEnd))}</mark>`;
+            cursor = localEnd;
+        });
+        if (cursor < value.length) {
+            output += escHtml(value.slice(cursor));
+        }
+        return output;
+    }
+
+    function explorerCodeSpan(className, text, absoluteStart = 0, searchRanges = []) {
+        return `<span class="${className}">${explorerMarkedEscHtml(text, absoluteStart, searchRanges)}</span>`;
     }
 
     function explorerReadStringToken(content, start) {
@@ -5604,10 +5756,10 @@
         return content.slice(start, index);
     }
 
-    function highlightExplorerCode(content, language) {
+    function highlightExplorerCode(content, language, searchRanges = []) {
         const normalizedLanguage = normalizeExplorerLanguage(language);
         if (!normalizedLanguage) {
-            return escHtml(content);
+            return explorerMarkedEscHtml(content, 0, searchRanges);
         }
 
         const keywords = new Set(EXPLORER_CODE_KEYWORDS[normalizedLanguage] || []);
@@ -5623,7 +5775,7 @@
             if ((normalizedLanguage === 'html' || normalizedLanguage === 'xml') && content.startsWith('<!--', index)) {
                 const endIndex = content.indexOf('-->', index + 4);
                 const token = content.slice(index, endIndex === -1 ? content.length : endIndex + 3);
-                output += explorerCodeSpan('explorer-code-comment', token);
+                output += explorerCodeSpan('explorer-code-comment', token, index, searchRanges);
                 index += token.length;
                 continue;
             }
@@ -5631,7 +5783,7 @@
             if (EXPLORER_C_LIKE_LANGUAGES.has(normalizedLanguage) && current === '/' && next === '/') {
                 const endIndex = content.indexOf('\n', index + 2);
                 const token = content.slice(index, endIndex === -1 ? content.length : endIndex);
-                output += explorerCodeSpan('explorer-code-comment', token);
+                output += explorerCodeSpan('explorer-code-comment', token, index, searchRanges);
                 index += token.length;
                 continue;
             }
@@ -5639,7 +5791,7 @@
             if (EXPLORER_C_LIKE_LANGUAGES.has(normalizedLanguage) && current === '/' && next === '*') {
                 const endIndex = content.indexOf('*/', index + 2);
                 const token = content.slice(index, endIndex === -1 ? content.length : endIndex + 2);
-                output += explorerCodeSpan('explorer-code-comment', token);
+                output += explorerCodeSpan('explorer-code-comment', token, index, searchRanges);
                 index += token.length;
                 continue;
             }
@@ -5647,14 +5799,14 @@
             if (EXPLORER_HASH_COMMENT_LANGUAGES.has(normalizedLanguage) && current === '#') {
                 const endIndex = content.indexOf('\n', index + 1);
                 const token = content.slice(index, endIndex === -1 ? content.length : endIndex);
-                output += explorerCodeSpan('explorer-code-comment', token);
+                output += explorerCodeSpan('explorer-code-comment', token, index, searchRanges);
                 index += token.length;
                 continue;
             }
 
             if (current === '"' || current === "'" || (current === '`' && !['json', 'yaml', 'toml'].includes(normalizedLanguage))) {
                 const token = explorerReadStringToken(content, index);
-                output += explorerCodeSpan('explorer-code-string', token);
+                output += explorerCodeSpan('explorer-code-string', token, index, searchRanges);
                 index += token.length;
                 continue;
             }
@@ -5662,7 +5814,7 @@
             if (/[0-9]/.test(current)) {
                 const match = content.slice(index).match(/^(0x[\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/);
                 if (match) {
-                    output += explorerCodeSpan('explorer-code-number', match[0]);
+                    output += explorerCodeSpan('explorer-code-number', match[0], index, searchRanges);
                     index += match[0].length;
                     continue;
                 }
@@ -5674,18 +5826,18 @@
                     const token = match[0];
                     const keywordToken = caseInsensitiveKeywords ? token.toUpperCase() : token;
                     if (keywords.has(keywordToken)) {
-                        output += explorerCodeSpan('explorer-code-keyword', token);
+                        output += explorerCodeSpan('explorer-code-keyword', token, index, searchRanges);
                     } else if (builtins.has(token)) {
-                        output += explorerCodeSpan('explorer-code-builtin', token);
+                        output += explorerCodeSpan('explorer-code-builtin', token, index, searchRanges);
                     } else {
-                        output += escHtml(token);
+                        output += explorerMarkedEscHtml(token, index, searchRanges);
                     }
                     index += token.length;
                     continue;
                 }
             }
 
-            output += escHtml(current);
+            output += explorerMarkedEscHtml(current, index, searchRanges);
             index += 1;
         }
 
@@ -5713,6 +5865,273 @@
         });
         list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
             panel.hidden = panel.dataset.explorerFilePanel !== normalizedMode;
+        });
+        applyExplorerSearch(index);
+    }
+
+    function ensureExplorerSearchState(pane) {
+        if (!pane._explorerSearch) {
+            pane._explorerSearch = { query: '', activeIndex: 0, matchCount: 0 };
+        }
+        return pane._explorerSearch;
+    }
+
+    function activeExplorerFileView(index) {
+        const list = document.getElementById(`explorer-list-${index}`);
+        const activeButton = list?.querySelector('[data-explorer-file-view][aria-selected="true"]');
+        return activeButton?.dataset.explorerFileView || 'source';
+    }
+
+    function decorateExplorerSearchRanges(ranges, activeIndex) {
+        return ranges.map((range, rangeIndex) => ({
+            ...range,
+            active: rangeIndex === activeIndex
+        }));
+    }
+
+    function renderExplorerSource(index, searchRanges = []) {
+        const pane = terminals[index];
+        const code = document.getElementById(`explorer-code-${index}`);
+        if (!pane || !code) {
+            return;
+        }
+
+        const language = pane._explorerFileLanguage || '';
+        const languageClass = explorerLanguageClass(language);
+        code.className = languageClass ? `language-${languageClass}` : '';
+        code.innerHTML = highlightExplorerCode(
+            pane._explorerFileContent || '',
+            language,
+            searchRanges
+        );
+    }
+
+    function restoreExplorerPreview(index) {
+        const pane = terminals[index];
+        const preview = document.getElementById(`explorer-preview-${index}`);
+        if (pane && preview) {
+            preview.innerHTML = pane._explorerPreviewHtml || '';
+        }
+        return preview;
+    }
+
+    function markExplorerSearchInElement(root, query, activeIndex = 0) {
+        if (!root || !query) {
+            return [];
+        }
+
+        const textNodes = [];
+        const walker = document.createTreeWalker(
+            root,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode(node) {
+                    if (!node.nodeValue) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    if (node.parentElement?.closest('mark.explorer-search-match')) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+            }
+        );
+        while (walker.nextNode()) {
+            textNodes.push(walker.currentNode);
+        }
+
+        const marks = [];
+        const normalizedQuery = query.toLowerCase();
+        textNodes.forEach(node => {
+            const value = node.nodeValue || '';
+            const normalizedValue = value.toLowerCase();
+            const localMatches = [];
+            let cursor = 0;
+            while (cursor < normalizedValue.length) {
+                const matchIndex = normalizedValue.indexOf(normalizedQuery, cursor);
+                if (matchIndex === -1) {
+                    break;
+                }
+                localMatches.push({
+                    start: matchIndex,
+                    end: matchIndex + query.length
+                });
+                cursor = matchIndex + Math.max(query.length, 1);
+            }
+            if (!localMatches.length) {
+                return;
+            }
+
+            const fragment = document.createDocumentFragment();
+            let localCursor = 0;
+            localMatches.forEach(match => {
+                if (match.start > localCursor) {
+                    fragment.appendChild(document.createTextNode(value.slice(localCursor, match.start)));
+                }
+                const mark = document.createElement('mark');
+                mark.className = marks.length === activeIndex
+                    ? 'explorer-search-match active'
+                    : 'explorer-search-match';
+                mark.textContent = value.slice(match.start, match.end);
+                fragment.appendChild(mark);
+                marks.push(mark);
+                localCursor = match.end;
+            });
+            if (localCursor < value.length) {
+                fragment.appendChild(document.createTextNode(value.slice(localCursor)));
+            }
+            node.replaceWith(fragment);
+        });
+
+        return marks;
+    }
+
+    function updateExplorerSearchControls(index, query, activeIndex, matchCount) {
+        const input = document.querySelector(`[data-explorer-search-input="${index}"]`);
+        const count = document.querySelector(`[data-explorer-search-count="${index}"]`);
+        const buttons = document.querySelectorAll(
+            `[data-explorer-search-prev="${index}"], [data-explorer-search-next="${index}"]`
+        );
+        if (input && input.value !== query) {
+            input.value = query;
+        }
+        if (count) {
+            count.textContent = query ? `${matchCount ? activeIndex + 1 : 0}/${matchCount}` : '';
+        }
+        buttons.forEach(button => {
+            button.disabled = matchCount === 0;
+        });
+    }
+
+    function scrollExplorerSearchMatch(index) {
+        const active = document
+            .getElementById(`explorer-list-${index}`)
+            ?.querySelector('.explorer-search-match.active');
+        if (!active) {
+            return;
+        }
+        requestAnimationFrame(() => {
+            active.scrollIntoView({ block: 'center', inline: 'nearest' });
+        });
+    }
+
+    function applyExplorerSearch(index, { resetActive = false } = {}) {
+        const pane = terminals[index];
+        if (!pane || pane._explorerMode !== 'file') {
+            return;
+        }
+
+        const state = ensureExplorerSearchState(pane);
+        if (resetActive) {
+            state.activeIndex = 0;
+        }
+
+        const query = state.query || '';
+        const view = activeExplorerFileView(index);
+        renderExplorerSource(index);
+        const preview = restoreExplorerPreview(index);
+
+        let matchCount = 0;
+        if (query && view === 'source') {
+            const ranges = explorerFindRanges(pane._explorerFileContent || '', query);
+            matchCount = ranges.length;
+            state.activeIndex = matchCount ? Math.min(state.activeIndex || 0, matchCount - 1) : 0;
+            renderExplorerSource(index, decorateExplorerSearchRanges(ranges, state.activeIndex));
+        } else if (query && view === 'preview' && preview) {
+            const previewMarks = markExplorerSearchInElement(preview, query, state.activeIndex || 0);
+            matchCount = previewMarks.length;
+            state.activeIndex = matchCount ? Math.min(state.activeIndex || 0, matchCount - 1) : 0;
+            if (matchCount && !previewMarks[state.activeIndex]?.classList.contains('active')) {
+                previewMarks.forEach((mark, markIndex) => {
+                    mark.classList.toggle('active', markIndex === state.activeIndex);
+                });
+            }
+        } else {
+            state.activeIndex = 0;
+        }
+
+        state.matchCount = matchCount;
+        updateExplorerSearchControls(index, query, state.activeIndex || 0, matchCount);
+        if (query && matchCount) {
+            scrollExplorerSearchMatch(index);
+        }
+    }
+
+    function stepExplorerSearch(index, delta) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const state = ensureExplorerSearchState(pane);
+        const matchCount = Number(state.matchCount || 0);
+        if (!matchCount) {
+            return;
+        }
+        state.activeIndex = (Number(state.activeIndex || 0) + delta + matchCount) % matchCount;
+        applyExplorerSearch(index);
+    }
+
+    function clearExplorerSearch(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const state = ensureExplorerSearchState(pane);
+        state.query = '';
+        state.activeIndex = 0;
+        state.matchCount = 0;
+        applyExplorerSearch(index);
+        document.querySelector(`[data-explorer-search-input="${index}"]`)?.focus();
+    }
+
+    function focusExplorerSearch(index) {
+        const pane = terminals[index];
+        if (!pane || pane._explorerMode !== 'file') {
+            return false;
+        }
+        const input = document.querySelector(`[data-explorer-search-input="${index}"]`);
+        if (!input) {
+            return false;
+        }
+        input.focus();
+        input.select();
+        return true;
+    }
+
+    function wireExplorerSearchControls(index) {
+        const pane = terminals[index];
+        const input = document.querySelector(`[data-explorer-search-input="${index}"]`);
+        if (!pane || !input || input.dataset.bound) {
+            return;
+        }
+
+        input.dataset.bound = 'true';
+        const state = ensureExplorerSearchState(pane);
+        input.value = state.query || '';
+        input.addEventListener('input', () => {
+            const nextState = ensureExplorerSearchState(pane);
+            nextState.query = input.value;
+            nextState.activeIndex = 0;
+            applyExplorerSearch(index, { resetActive: true });
+        });
+        input.addEventListener('keydown', event => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                stepExplorerSearch(index, event.shiftKey ? -1 : 1);
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                clearExplorerSearch(index);
+            }
+        });
+
+        document.querySelector(`[data-explorer-search-prev="${index}"]`)?.addEventListener('click', () => {
+            stepExplorerSearch(index, -1);
+        });
+        document.querySelector(`[data-explorer-search-next="${index}"]`)?.addEventListener('click', () => {
+            stepExplorerSearch(index, 1);
+        });
+        document.querySelector(`[data-explorer-search-clear="${index}"]`)?.addEventListener('click', () => {
+            clearExplorerSearch(index);
         });
     }
 
@@ -5817,10 +6236,19 @@
         const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
         const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
         const metaParts = explorerFileMetaParts(data, fileType);
+        const previousPath = pane._explorerFilePath || '';
+        const searchState = ensureExplorerSearchState(pane);
+        if (previousPath && previousPath !== path) {
+            searchState.activeIndex = 0;
+            searchState.matchCount = 0;
+        }
 
         pane._attached = true;
         pane._explorerMode = 'file';
         pane._explorerFilePath = path;
+        pane._explorerFileContent = data.content || '';
+        pane._explorerFileLanguage = codeLanguage;
+        pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
 
@@ -5848,6 +6276,21 @@
                             <button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="false">Preview</button>
                         </div>
                     ` : ''}
+                    <div class="explorer-editor-search" data-explorer-search="${index}">
+                        <input
+                            type="search"
+                            class="explorer-search-input"
+                            data-explorer-search-input="${index}"
+                            placeholder="Find"
+                            autocomplete="off"
+                            spellcheck="false"
+                            aria-label="Find in file"
+                        >
+                        <span class="explorer-search-count" data-explorer-search-count="${index}"></span>
+                        <button type="button" class="explorer-search-btn" data-explorer-search-prev="${index}" title="Previous match" aria-label="Previous match">↑</button>
+                        <button type="button" class="explorer-search-btn" data-explorer-search-next="${index}" title="Next match" aria-label="Next match">↓</button>
+                        <button type="button" class="explorer-search-btn" data-explorer-search-clear="${index}" title="Clear search" aria-label="Clear search">×</button>
+                    </div>
                 </div>
                 <div class="explorer-editor-body">
                     <pre class="explorer-editor-content explorer-editor-panel" data-explorer-file-panel="source"><code id="explorer-code-${index}"></code></pre>
@@ -5856,15 +6299,10 @@
             </div>
         `;
 
-        const code = document.getElementById(`explorer-code-${index}`);
-        if (code) {
-            const languageClass = explorerLanguageClass(codeLanguage);
-            code.className = languageClass ? `language-${languageClass}` : '';
-            code.innerHTML = highlightExplorerCode(data.content || '', codeLanguage);
-        }
+        renderExplorerSource(index);
         const preview = document.getElementById(`explorer-preview-${index}`);
         if (preview && hasPreview) {
-            preview.innerHTML = data.preview_html || '';
+            preview.innerHTML = pane._explorerPreviewHtml;
         }
 
         const backButton = list.querySelector(`[data-explorer-editor-back="${index}"]`);
@@ -5878,6 +6316,8 @@
                 setExplorerFileView(index, button.dataset.explorerFileView || 'source');
             });
         });
+        wireExplorerSearchControls(index);
+        applyExplorerSearch(index);
         restoreExplorerFileScroll(index, scrollState);
         return true;
     }
@@ -5904,11 +6344,12 @@
         const fileName = data.name || path || 'File';
         const codeLanguage = normalizeExplorerLanguage(data.language) || explorerCodeLanguage(path || fileName);
         const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
-        const languageClass = explorerLanguageClass(codeLanguage);
-        code.className = languageClass ? `language-${languageClass}` : '';
-        code.innerHTML = highlightExplorerCode(data.content || '', codeLanguage);
+        pane._explorerFileContent = data.content || '';
+        pane._explorerFileLanguage = codeLanguage;
+        pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
+        renderExplorerSource(index);
         if (preview && hasPreview) {
-            preview.innerHTML = data.preview_html || '';
+            preview.innerHTML = pane._explorerPreviewHtml;
         }
 
         const nameLabel = list.querySelector('.explorer-editor-name');
@@ -5928,6 +6369,7 @@
 
         pane._explorerMode = 'file';
         pane._explorerFilePath = path || pane._explorerFilePath;
+        applyExplorerSearch(index);
         restoreExplorerFileScroll(index, scrollState);
         return true;
     }
@@ -6011,6 +6453,9 @@
             pane._attached = true;
             pane._explorerMode = 'directory';
             pane._explorerFilePath = '';
+            pane._explorerFileContent = '';
+            pane._explorerFileLanguage = '';
+            pane._explorerPreviewHtml = '';
             pane._explorerPath = data.path || '';
             pane._explorerParentPath = data.parent_path || '';
             document.getElementById(`ph-${index}`)?.remove();

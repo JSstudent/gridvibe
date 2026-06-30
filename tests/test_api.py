@@ -1,5 +1,5 @@
-import json
 import io
+import json
 import stat
 import threading
 import unittest
@@ -401,11 +401,27 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
-        self.assertIn("function highlightExplorerCode(content, language)", html)
+        self.assertIn("function highlightExplorerCode(content, language, searchRanges = [])", html)
         self.assertIn("const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({", html)
         self.assertIn("'.py': 'python'", html)
         self.assertIn("'.go': 'go'", html)
         self.assertIn("'.c': 'c'", html)
+
+    def test_terminals_page_explorer_file_search_is_client_side_and_safe(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('data-explorer-search-input="${index}"', html)
+        self.assertIn("function explorerFindRanges(content, query)", html)
+        self.assertIn("function explorerMarkedEscHtml(text, absoluteStart = 0, searchRanges = [])", html)
+        self.assertIn("function markExplorerSearchInElement(root, query, activeIndex = 0)", html)
+        self.assertIn("document.createTreeWalker(", html)
+        self.assertIn("node.replaceWith(fragment);", html)
+        self.assertIn("code.innerHTML = highlightExplorerCode(", html)
+        self.assertIn("function findExplorerSearchTargetIndex()", html)
+        self.assertIn("event.code !== 'KeyF'", html)
+        self.assertNotIn("/api/explorer-search", html)
 
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
