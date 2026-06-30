@@ -1595,6 +1595,68 @@
         });
     }
 
+    function captureTerminalViewportState(terminal) {
+        const buffer = terminal?.term?.buffer?.active;
+        if (!buffer) {
+            return null;
+        }
+
+        const viewportY = Number(buffer.viewportY || 0);
+        const baseY = Number(buffer.baseY || 0);
+        return {
+            viewportY,
+            baseY,
+            wasAtBottom: viewportY >= baseY
+        };
+    }
+
+    function restoreTerminalViewportState(terminal, state) {
+        if (!terminal?.term || !state || state.wasAtBottom) {
+            return;
+        }
+
+        const applyScroll = () => {
+            const buffer = terminal.term?.buffer?.active;
+            if (!buffer || typeof terminal.term.scrollToLine !== 'function') {
+                return;
+            }
+            terminal.term.scrollToLine(Math.min(Number(state.viewportY || 0), Number(buffer.baseY || 0)));
+        };
+
+        applyScroll();
+        requestAnimationFrame(() => {
+            applyScroll();
+            requestAnimationFrame(applyScroll);
+        });
+        window.setTimeout(applyScroll, 80);
+    }
+
+    function captureCachedPaneUiState() {
+        terminals.forEach((terminal, index) => {
+            if (!terminal) {
+                return;
+            }
+            terminal._cachedTerminalViewport = captureTerminalViewportState(terminal);
+            terminal._cachedExplorerScroll = isExplorerPaneInstance(terminal)
+                ? captureExplorerFileScroll(index)
+                : null;
+        });
+    }
+
+    function restoreCachedPaneUiState() {
+        terminals.forEach((terminal, index) => {
+            if (!terminal) {
+                return;
+            }
+            restoreTerminalViewportState(terminal, terminal._cachedTerminalViewport);
+            if (isExplorerPaneInstance(terminal)) {
+                restoreExplorerFileScroll(index, terminal._cachedExplorerScroll);
+            }
+            terminal._cachedTerminalViewport = null;
+            terminal._cachedExplorerScroll = null;
+        });
+    }
+
     function updateSessionChrome(count, groupId = activeGroupId) {
         const activeGroup = getGroupById(groupId);
         const labelParts = [
@@ -1617,6 +1679,7 @@
         const grid = document.getElementById('terminalsGrid');
         const fragment = document.createDocumentFragment();
 
+        captureCachedPaneUiState();
         clearFitTimers(terminals);
         disconnectObservers(resizeObservers);
         terminals.forEach(terminal => {
@@ -1709,6 +1772,7 @@
         if (splitSlotRects) {
             applySplitSlotGeometry({ fit: false });
         }
+        restoreCachedPaneUiState();
         restoreActiveTerminalObservers();
         document.getElementById('emptyState').classList.remove('visible');
         return true;
@@ -5142,7 +5206,13 @@
             }
 
             updateSessionChrome(data.sessions.length, requestedGroupId);
-            await ensureAttachedTerminalsReady(attachedIndices);
+            const restoredViewportStates = (usingCurrentView || restoredFromCache)
+                ? new Map(attachedIndices.map(index => [index, captureTerminalViewportState(terminals[index])]))
+                : null;
+
+            if (!usingCurrentView && !restoredFromCache) {
+                await ensureAttachedTerminalsReady(attachedIndices);
+            }
             if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
                 return;
             }
@@ -5155,9 +5225,21 @@
                     socket.emit('join_session', { session_id: session.session_id });
                 });
             }
-            await redrawAttachedTerminalsLikeFullscreen(attachedIndices, {
-                isCurrent: () => loadToken === activeLoadToken && requestedGroupId === activeGroupId
-            });
+
+            const stillCurrent = () => loadToken === activeLoadToken && requestedGroupId === activeGroupId;
+            if (usingCurrentView || restoredFromCache) {
+                await redrawAttachedTerminals(attachedIndices, {
+                    forceResize: false,
+                    isCurrent: stillCurrent
+                });
+                restoredViewportStates?.forEach((state, index) => {
+                    restoreTerminalViewportState(terminals[index], state);
+                });
+            } else {
+                await redrawAttachedTerminalsLikeFullscreen(attachedIndices, {
+                    isCurrent: stillCurrent
+                });
+            }
         } catch (e) {
             if (loadToken !== activeLoadToken) {
                 return;

@@ -614,11 +614,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         initial_load_start = html.index("async function initialLoad()")
         join_index = html.index("socket.emit('join_session', { session_id: session.session_id });", initial_load_start)
         redraw_index = html.index("await redrawAttachedTerminalsLikeFullscreen(attachedIndices, {", initial_load_start)
+        soft_redraw_index = html.index("await redrawAttachedTerminals(attachedIndices, {", initial_load_start)
 
         self.assertLess(join_index, redraw_index)
+        self.assertLess(soft_redraw_index, redraw_index)
+        self.assertIn("if (usingCurrentView || restoredFromCache)", html[initial_load_start:redraw_index])
+        self.assertIn("forceResize: false", html[soft_redraw_index:redraw_index])
         self.assertIn("await redrawPass({ dispatchResize: true });", html)
         self.assertIn("await redrawPass({ delayMs: 90, dispatchResize: true });", html)
-        self.assertIn("requestedGroupId === activeGroupId", html[redraw_index:])
+        self.assertIn("const stillCurrent = () => loadToken === activeLoadToken && requestedGroupId === activeGroupId;", html[initial_load_start:redraw_index])
 
     def test_terminals_page_caches_group_views_across_switches(self):
         response = self.client.get("/terminals")
@@ -630,6 +634,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function restoreCachedGroupView(groupId)", html)
         self.assertIn("cacheVisibleGroupView(visibleGroupId);", html)
         self.assertIn("restoredFromCache = restoreCachedGroupView(requestedGroupId);", html)
+        self.assertIn("function captureTerminalViewportState(terminal)", html)
+        self.assertIn("function restoreTerminalViewportState(terminal, state)", html)
+        self.assertIn("captureCachedPaneUiState();", html)
+        self.assertIn("restoreCachedPaneUiState();", html)
 
     def test_terminals_page_routes_terminal_output_by_session_across_cached_groups(self):
         response = self.client.get("/terminals")
