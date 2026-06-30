@@ -580,6 +580,20 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("button.setAttribute('aria-label', label);", html)
         self.assertIn("button.setAttribute('aria-pressed', active ? 'true' : 'false');", html)
 
+    def test_terminals_page_exposes_max_surface_mode(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        grid_css = html[html.index("#terminalsGrid {"):html.index("/* Layout classes */")]
+        self.assertIn("width: 100%;", grid_css)
+        self.assertNotIn("min(1800px, 100%)", grid_css)
+        self.assertIn('id="surfaceModeBtn"', html)
+        self.assertIn('aria-label="Max surface"', html)
+        self.assertIn("const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';", html)
+        self.assertIn("document.body.classList.toggle('surface-max', active);", html)
+        self.assertIn("redrawAttachedTerminals(attachedIndices, { forceResize: true });", html)
+
     def test_terminals_page_buttons_use_session_color_frames(self):
         response = self.client.get("/terminals")
 

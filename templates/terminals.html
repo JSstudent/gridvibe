@@ -369,6 +369,25 @@
             border-color: var(--t-accent);
             background: var(--t-btn-hover-bg);
         }
+        .surface-mode-btn {
+            width: 40px;
+            height: 34px;
+            min-width: 40px;
+            padding: 0;
+            border: 1px solid var(--t-border-tab);
+            background: var(--t-btn-bg);
+        }
+        .surface-mode-btn:hover,
+        .surface-mode-btn.active {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--t-btn-hover-bg);
+        }
+        .surface-mode-icon {
+            width: 18px;
+            height: 18px;
+            display: block;
+        }
         .vibe-flow-icon {
             width: 24px;
             height: 24px;
@@ -385,9 +404,9 @@
         #terminalsGrid {
             flex: 1;
             display: grid;
-            width: min(1800px, 100%);
-            gap: 10px;
-            padding: 10px;
+            width: 100%;
+            gap: 8px;
+            padding: 8px;
             margin: 0 auto;
             overflow: hidden;
         }
@@ -622,7 +641,7 @@
         .terminal-surface {
             position: absolute;
             inset: 0;
-            padding: 10px 12px 12px;
+            padding: 8px 10px 10px;
         }
 
         .terminal-canvas {
@@ -633,6 +652,99 @@
 
         .terminal-canvas .xterm          { height: 100%; }
         .terminal-canvas .xterm-viewport { overflow-y: auto !important; }
+
+        body.surface-max .topbar {
+            height: 38px;
+            padding: 5px 8px;
+        }
+
+        body.surface-max .topbar-title {
+            font-size: .88rem;
+        }
+
+        body.surface-max .topbar-sub {
+            display: inline-block;
+            max-width: 42vw;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            vertical-align: bottom;
+        }
+
+        body.surface-max .topbar-actions {
+            gap: 5px;
+        }
+
+        body.surface-max .btn {
+            padding: 4px 9px;
+            font-size: .76rem;
+        }
+
+        body.surface-max .btn-icon,
+        body.surface-max .surface-mode-btn,
+        body.surface-max .settings-window-btn {
+            width: 32px;
+            height: 28px;
+            min-width: 32px;
+            padding: 0;
+        }
+
+        body.surface-max .session-tabs {
+            gap: 5px;
+            padding: 5px 8px 4px;
+        }
+
+        body.surface-max .session-tab {
+            border-radius: 5px;
+            padding: 5px 8px;
+            font-size: .73rem;
+            gap: 6px;
+        }
+
+        body.surface-max .session-tab-close {
+            width: 16px;
+            height: 16px;
+        }
+
+        body.surface-max #terminalsGrid {
+            gap: 4px;
+            padding: 4px;
+        }
+
+        body.surface-max .terminal-container {
+            border-radius: 3px;
+        }
+
+        body.surface-max .terminal-header {
+            padding: 4px 7px;
+        }
+
+        body.surface-max .terminal-info {
+            gap: 7px;
+        }
+
+        body.surface-max .terminal-name {
+            font-size: .78rem;
+        }
+
+        body.surface-max .terminal-host,
+        body.surface-max .terminal-status {
+            font-size: .68rem;
+        }
+
+        body.surface-max .terminal-meta {
+            gap: 5px;
+        }
+
+        body.surface-max .terminal-action-btn {
+            border-radius: 4px;
+            padding: 3px 6px;
+            font-size: .68rem;
+        }
+
+        body.surface-max .terminal-surface {
+            padding: 4px 5px 5px;
+        }
 
         .explorer-pane [data-terminal-clear],
         .explorer-pane .voice-control {
@@ -1220,6 +1332,18 @@
             </svg>
         </button>
         <button
+            class="btn btn-neutral btn-icon surface-mode-btn"
+            id="surfaceModeBtn"
+            onclick="toggleSurfaceMode()"
+            title="Max surface"
+            aria-label="Max surface"
+            aria-pressed="false"
+        >
+            <svg class="surface-mode-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+        </button>
+        <button
             class="btn btn-success btn-icon"
             id="fullscreenBtn"
             onclick="toggleFullscreen()"
@@ -1265,6 +1389,7 @@
 <script>
     /* ── Theme management ── */
     const THEME_STORAGE_KEY = 'gridvibe.theme';
+    const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';
 
     function normalizeThemePreference(theme) {
         return ['system', 'light', 'dark'].includes(theme) ? theme : 'system';
@@ -1327,6 +1452,54 @@
             mediaQuery.addListener(listener);
         }
     })();
+
+    function getStoredSurfaceMode() {
+        try {
+            return localStorage.getItem(SURFACE_MODE_STORAGE_KEY) === 'max';
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function updateSurfaceModeButton(enabled) {
+        const button = document.getElementById('surfaceModeBtn');
+        if (!button) {
+            return;
+        }
+        const label = enabled ? 'Normal surface' : 'Max surface';
+        button.classList.toggle('active', enabled);
+        button.title = label;
+        button.setAttribute('aria-label', label);
+        button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    }
+
+    async function refitAttachedTerminalsForSurfaceMode() {
+        const attachedIndices = terminals
+            .map((terminal, index) => terminal?._attached ? index : -1)
+            .filter(index => index !== -1);
+        await redrawAttachedTerminals(attachedIndices, { forceResize: true });
+    }
+
+    function applySurfaceMode(enabled, { persist = false, refit = false } = {}) {
+        const active = Boolean(enabled);
+        document.body.classList.toggle('surface-max', active);
+        updateSurfaceModeButton(active);
+        if (persist) {
+            try {
+                localStorage.setItem(SURFACE_MODE_STORAGE_KEY, active ? 'max' : 'normal');
+            } catch (_) {}
+        }
+        if (refit) {
+            refitAttachedTerminalsForSurfaceMode();
+        }
+    }
+
+    function toggleSurfaceMode() {
+        applySurfaceMode(!document.body.classList.contains('surface-max'), {
+            persist: true,
+            refit: true
+        });
+    }
 
     const EXPLORER_THEME_STORAGE_KEY = 'gridvibe.explorerTheme';
 
@@ -6715,6 +6888,7 @@
     /* ─────────────────────────────────────────────
        Boot
     ───────────────────────────────────────────── */
+    applySurfaceMode(getStoredSurfaceMode());
     updateFullscreenButton();
     _loadVoicePrefsFromServer();
     _loadVoiceServiceStatus();
