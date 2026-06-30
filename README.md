@@ -1,6 +1,6 @@
 # GridVibe
 
-GridVibe is a browser-first workspace for launching and managing multiple SSH terminals, local shell panes, agent panes, and local repository file explorer panes from one control surface. It runs in a normal browser or, when `pywebview` is installed, in a native desktop window on Windows.
+GridVibe is a browser-first workspace for launching and managing multiple SSH terminals, local shell panes, agent panes, and SSH/SFTP or local repository file explorer panes from one control surface. It runs in a normal browser or, when `pywebview` is installed, in a native desktop window on Windows.
 
 [![CI](https://github.com/JSstudent/gridvibe/actions/workflows/ci.yml/badge.svg)](https://github.com/JSstudent/gridvibe/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -20,24 +20,30 @@ GridVibe is a browser-first workspace for launching and managing multiple SSH te
 
 ### Terminal Buttons
 
-The terminal workspace has global controls in the top bar and per-pane controls in each terminal header.
+The terminal workspace has global controls in the top bar, session controls in the tab bar, and per-pane controls in each terminal header.
 
 Top bar controls:
 
 - `Theme` cycles between system, light, and dark mode.
 - `Refresh` reloads session status and redraws terminal panes.
-- `Close tab` closes the selected session group from its session tab.
+- `Max surface` reduces workspace chrome and refits attached terminals so panes get more usable space.
 - `Fullscreen` toggles the workspace into and out of fullscreen mode.
 - `Settings` returns to the launcher page.
+
+Session bar controls:
+
+- Session tabs show each active session group. Drag tabs to reorder them; GridVibe persists the order for the running app state.
+- Each session tab has a close button for closing that session group.
+- The chevron next to the session tabs hides or shows the top bar. GridVibe remembers this top-bar visibility preference in the browser.
 
 Per-terminal controls:
 
 - `↻` resets that terminal view and replays the recent output buffer. On file explorer panes, it manually reloads the current directory or the currently open file.
 - `📁` switches an SSH or Local Repo terminal pane into a file explorer; `>_` switches a file explorer pane into a terminal opened at the currently selected explorer directory. Explorer panes keep their original root so parent-folder navigation remains available after switching back and forth.
+- `⊞` splits a terminal pane by cloning its connection into a new pane in the same session group when the layout and session limit allow it.
+- `⊟` closes a split pane and expands the remaining split area. Explorer panes cannot be split.
 - `🧹` clears the terminal display and purges its replay buffer.
 - `🎤` starts or stops voice input for that terminal when voice input is enabled.
-
-Session tabs show each active session group. Drag tabs to reorder them; GridVibe persists the order for the running app state.
 
 ### File Explorer Panes
 
@@ -51,7 +57,8 @@ Explorer panes support:
 - Switching the pane into a regular terminal opened at the current explorer directory.
 - Manual refresh from the pane header without continuous auto-refresh flicker.
 - Folder/file icons, size and modified-time metadata, and per-pane light/dark explorer theme toggling.
-- Click-to-open text files in a read-only viewer with wrapped long lines.
+- Click-to-open text files in a read-only editor-style viewer with wrapped long lines.
+- Client-side find inside the open file view, including `Ctrl+F`/`Cmd+F` focus, match counts, previous/next controls, `Enter`/`Shift+Enter` navigation, and clear.
 - Markdown files with a source tab and sanitized rendered preview when Markdown rendering dependencies are installed.
 - Lightweight syntax coloring for common source files such as Python, C/C++, Go, JavaScript/TypeScript, Java, Rust, shell, PowerShell, HTML, CSS, JSON, YAML, TOML, SQL, and related formats.
 - Size-limited previews. Binary files, directories, and paths outside the root are rejected.
@@ -126,9 +133,9 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 - SSH, WSL, PowerShell, cmd, and local repository modes
 - Per-pane startup modes for normal commands, agent CLIs, and file explorer panes
 - Saved launcher presets with encrypted SSH passwords
-- Session groups with tabs and drag-to-reorder persistence
-- xterm.js terminal panes with resize, refresh, clear, and replay buffer support
-- Local and SSH read-only file explorer panes with directory navigation and text/Markdown preview
+- Session groups with closable tabs, drag-to-reorder persistence, collapsible top bar, and max surface mode
+- xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and dynamic split-pane support
+- Local and SSH read-only file explorer panes with directory navigation, text/Markdown preview, syntax highlighting, and client-side in-file search
 - Optional native desktop window through `pywebview`
 - Optional offline voice input through Vosk or faster-whisper
 - Theme support for system, light, and dark modes
