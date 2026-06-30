@@ -2,6 +2,10 @@
 
 All notable changes to GridVibe will be documented in this file.
 
+## Unreleased
+
+- Enabled read-only File Explorer panes for SSH sessions using SFTP with root-bound remote path validation and terminal/explorer mode switching.
+
 ## 1.1.0 - 2026-06-28
 
 - Improved Linux pywebview startup by requesting the Qt backend directly, keeping QtWebEngine GPU fallback flags opt-in, and preventing terminal job-control suspension when launching the native window.

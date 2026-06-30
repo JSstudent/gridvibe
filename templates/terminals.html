@@ -1398,7 +1398,7 @@
     }
 
     function isExplorerSession(session) {
-        return session?.mode === 'wsl' && session?.startup_mode === 'explorer';
+        return ['ssh', 'wsl'].includes(session?.mode) && session?.startup_mode === 'explorer';
     }
 
     function isExplorerPaneInstance(terminal) {

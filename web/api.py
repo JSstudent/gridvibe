@@ -12,12 +12,14 @@ import select
 import shlex
 import shutil
 import socket
+import stat as stat_module
 import struct
 import subprocess
 import sys
 import threading
 import time
 import uuid
+import posixpath
 from typing import Any, Dict, List, Optional, Tuple
 
 from cryptography.fernet import Fernet
@@ -379,7 +381,7 @@ def _normalize_startup_mode(value: Any, connection_mode: str = "ssh") -> str:
     normalized = str(value or "").strip().lower()
     if normalized == "agent":
         return "agent"
-    if normalized == "explorer" and connection_mode == "wsl":
+    if normalized == "explorer" and connection_mode in {"ssh", "wsl"}:
         return "explorer"
     return "terminal"
 
@@ -2281,8 +2283,16 @@ def _resolve_local_launch_cwd(directory: Any, shell_kind: str) -> Optional[str]:
 
 
 def _is_explorer_session(session: Any) -> bool:
-    """Return whether a session should render as a local file explorer pane."""
-    return getattr(session, "mode", "") == "wsl" and getattr(session, "startup_mode", "") == "explorer"
+    """Return whether a session should render as a file explorer pane."""
+    return (
+        getattr(session, "mode", "") in {"ssh", "wsl"}
+        and getattr(session, "startup_mode", "") == "explorer"
+    )
+
+
+def _is_remote_explorer_session(session: Any) -> bool:
+    """Return whether explorer requests should browse over SSH/SFTP."""
+    return getattr(session, "mode", "") == "ssh" and _is_explorer_session(session)
 
 
 def _explorer_root_directory(session: Any) -> str:
@@ -2524,6 +2534,225 @@ def _explorer_entry_payload(root_path: str, entry: os.DirEntry) -> Dict[str, Any
         "size": None if is_dir or stat_result is None else stat_result.st_size,
         "modified": None if stat_result is None else stat_result.st_mtime,
     }
+
+
+_REMOTE_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+
+def _remote_path_clean(path: Any) -> str:
+    """Normalize remote path separators without applying local OS path rules."""
+    return str(path or "").strip().replace("\\", "/")
+
+
+def _remote_path_is_absolute(path: str) -> bool:
+    """Return whether a remote path is absolute on POSIX or Windows SFTP servers."""
+    cleaned = _remote_path_clean(path)
+    return cleaned.startswith("/") or bool(_REMOTE_WINDOWS_DRIVE_RE.match(cleaned))
+
+
+def _remote_path_join(base: str, child: str) -> str:
+    """Join remote path fragments using SFTP-friendly separators."""
+    base = _remote_path_clean(base)
+    child = _remote_path_clean(child)
+    if not base:
+        return child
+    if not child:
+        return base
+    return f"{base.rstrip('/')}/{child.lstrip('/')}"
+
+
+def _remote_path_dirname(path: str) -> str:
+    """Return a remote parent path using POSIX-style separators."""
+    cleaned = _remote_path_clean(path).rstrip("/")
+    if not cleaned:
+        return ""
+    if _REMOTE_WINDOWS_DRIVE_RE.match(cleaned) and "/" not in cleaned[3:]:
+        return cleaned
+    parent = posixpath.dirname(cleaned)
+    return parent or ("/" if cleaned.startswith("/") else "")
+
+
+def _remote_compare_path(path: str) -> str:
+    """Return a stable path string for remote containment checks."""
+    cleaned = _remote_path_clean(path)
+    if cleaned != "/":
+        cleaned = cleaned.rstrip("/")
+    if _REMOTE_WINDOWS_DRIVE_RE.match(cleaned) or re.match(r"^/[A-Za-z]:", cleaned):
+        return cleaned.lower()
+    return cleaned
+
+
+def _remote_path_inside(root_path: str, candidate_path: str) -> bool:
+    """Return whether candidate_path is root_path or a descendant of it."""
+    root_compare = _remote_compare_path(root_path)
+    candidate_compare = _remote_compare_path(candidate_path)
+    if root_compare == candidate_compare:
+        return True
+    if root_compare == "/":
+        return candidate_compare.startswith("/")
+    return candidate_compare.startswith(f"{root_compare.rstrip('/')}/")
+
+
+def _relative_remote_explorer_path(root_path: str, path: str) -> str:
+    """Return a slash-separated remote explorer path relative to the root."""
+    root_clean = _remote_path_clean(root_path).rstrip("/")
+    path_clean = _remote_path_clean(path).rstrip("/")
+    if _remote_compare_path(root_clean) == _remote_compare_path(path_clean):
+        return ""
+    relative = posixpath.relpath(path_clean, root_clean or "/")
+    return "" if relative == "." else relative.replace("\\", "/")
+
+
+def _remote_explorer_entry_payload(root_path: str, directory_path: str, entry: Any) -> Dict[str, Any]:
+    """Return metadata for one remote explorer entry."""
+    mode = getattr(entry, "st_mode", None)
+    is_dir = stat_module.S_ISDIR(mode) if mode is not None else False
+    entry_path = _remote_path_join(directory_path, getattr(entry, "filename", ""))
+    return {
+        "name": getattr(entry, "filename", ""),
+        "path": _relative_remote_explorer_path(root_path, entry_path),
+        "type": "directory" if is_dir else "file",
+        "size": None if is_dir else getattr(entry, "st_size", None),
+        "modified": getattr(entry, "st_mtime", None),
+    }
+
+
+def _open_ssh_sftp(session: Any) -> Tuple[Any, Any]:
+    """Open a short-lived SSH/SFTP connection for one explorer request."""
+    if paramiko is None:
+        raise RuntimeError("Paramiko is not installed. Run `pip install -r requirements.txt`.")
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(
+        hostname=session.host,
+        port=session.port,
+        username=session.username,
+        password=session.password or None,
+        timeout=ssh_config.get("connection_timeout", 30),
+        look_for_keys=not bool(session.password),
+        allow_agent=not bool(session.password),
+    )
+    return client, client.open_sftp()
+
+
+def _close_sftp_client(client: Any, sftp: Any) -> None:
+    """Close an SFTP handle and its owning SSH client."""
+    try:
+        sftp.close()
+    except Exception:
+        pass
+    try:
+        client.close()
+    except Exception:
+        pass
+
+
+def _sftp_request_error_types() -> Tuple[type, ...]:
+    """Return expected connection and SFTP errors for explorer routes."""
+    error_types: List[type] = [OSError, RuntimeError]
+    ssh_exception = getattr(paramiko, "SSHException", None) if paramiko is not None else None
+    if isinstance(ssh_exception, type):
+        error_types.append(ssh_exception)
+    return tuple(error_types)
+
+
+def _remote_is_directory(sftp: Any, path: str) -> bool:
+    """Return whether a remote path is a directory."""
+    attrs = sftp.stat(path)
+    mode = getattr(attrs, "st_mode", None)
+    return stat_module.S_ISDIR(mode) if mode is not None else False
+
+
+def _remote_is_file(sftp: Any, path: str) -> bool:
+    """Return whether a remote path is a regular file."""
+    attrs = sftp.stat(path)
+    mode = getattr(attrs, "st_mode", None)
+    return stat_module.S_ISREG(mode) if mode is not None else True
+
+
+def _remote_explorer_root_directory(session: Any) -> str:
+    """Return a configured remote root, falling back to a sensible SSH default."""
+    return _remote_path_clean(_explorer_root_directory(session) or getattr(session, "directory", "") or "/")
+
+
+def _remote_default_explorer_candidate_path(sftp: Any, session: Any, root_path: str) -> str:
+    """Return the default remote explorer directory when no path is requested."""
+    current_raw = _remote_path_clean(getattr(session, "directory", "") or "")
+    if not current_raw:
+        return root_path
+
+    try:
+        candidate = sftp.normalize(current_raw)
+        if _remote_is_directory(sftp, candidate) and _remote_path_inside(root_path, candidate):
+            return candidate
+    except OSError:
+        pass
+    return root_path
+
+
+def _resolve_remote_explorer_candidate_path(
+    sftp: Any,
+    session: Any,
+    requested_path: Any = "",
+    *,
+    allow_empty_root: bool = True,
+) -> Tuple[str, str]:
+    """Resolve an SSH explorer path while keeping it inside the remote root."""
+    if not _is_remote_explorer_session(session):
+        raise ValueError("Session is not an SSH file explorer pane")
+
+    root_raw = _remote_explorer_root_directory(session)
+    if not root_raw:
+        raise ValueError("Explorer root directory is not configured")
+
+    root_path = sftp.normalize(root_raw)
+    if not _remote_is_directory(sftp, root_path):
+        raise ValueError("Explorer root directory does not exist")
+
+    if requested_path is None:
+        if not allow_empty_root:
+            raise ValueError("Explorer file path is required")
+        candidate = _remote_default_explorer_candidate_path(sftp, session, root_path)
+    else:
+        raw_path = _remote_path_clean(requested_path)
+        if not raw_path:
+            if not allow_empty_root:
+                raise ValueError("Explorer file path is required")
+            candidate_raw = root_path
+        elif _remote_path_is_absolute(raw_path):
+            candidate_raw = raw_path
+        else:
+            candidate_raw = _remote_path_join(root_path, raw_path)
+        candidate = sftp.normalize(candidate_raw)
+
+    if not _remote_path_inside(root_path, candidate):
+        raise ValueError("Explorer path must stay inside the configured root")
+
+    return root_path, candidate
+
+
+def _resolve_remote_explorer_paths(sftp: Any, session: Any, requested_path: Any = "") -> Tuple[str, str]:
+    """Resolve a remote explorer directory path inside the configured root."""
+    root_path, candidate = _resolve_remote_explorer_candidate_path(sftp, session, requested_path)
+    if not _remote_is_directory(sftp, candidate):
+        raise ValueError("Explorer path is not a directory")
+    return root_path, candidate
+
+
+def _resolve_remote_explorer_file_path(sftp: Any, session: Any, requested_path: Any = "") -> Tuple[str, str]:
+    """Resolve a remote explorer file path inside the configured root."""
+    root_path, candidate = _resolve_remote_explorer_candidate_path(
+        sftp,
+        session,
+        requested_path,
+        allow_empty_root=False,
+    )
+    if _remote_is_directory(sftp, candidate):
+        raise ValueError("Explorer path is a directory")
+    if not _remote_is_file(sftp, candidate):
+        raise ValueError("Explorer path is not a file")
+    return root_path, candidate
 
 
 def _local_shell_display_name(
@@ -2944,10 +3173,47 @@ def get_sessions():
 
 @app.route('/api/explorer/<session_id>/entries', methods=['GET'])
 def get_explorer_entries(session_id: str):
-    """List entries for a local file explorer pane."""
+    """List entries for a file explorer pane."""
     session = session_manager.get_session(session_id)
     if session is None:
         return jsonify({"error": "Session not found"}), 404
+
+    if _is_remote_explorer_session(session):
+        client = None
+        sftp = None
+        try:
+            client, sftp = _open_ssh_sftp(session)
+            root_path, current_path = _resolve_remote_explorer_paths(
+                sftp,
+                session,
+                request.args["path"] if "path" in request.args else None,
+            )
+            entries = [
+                _remote_explorer_entry_payload(root_path, current_path, entry)
+                for entry in sftp.listdir_attr(current_path)
+            ]
+            entries.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
+
+            parent_path = ""
+            if _remote_compare_path(current_path) != _remote_compare_path(root_path):
+                parent_path = _relative_remote_explorer_path(root_path, _remote_path_dirname(current_path))
+
+            return jsonify(
+                {
+                    "session_id": session.session_id,
+                    "root": root_path,
+                    "path": _relative_remote_explorer_path(root_path, current_path),
+                    "parent_path": parent_path,
+                    "entries": entries,
+                }
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": str(exc)}), 500
+        finally:
+            if client is not None and sftp is not None:
+                _close_sftp_client(client, sftp)
 
     try:
         root_path, current_path = _resolve_explorer_paths(
@@ -2985,6 +3251,53 @@ def get_explorer_file(session_id: str):
     session = session_manager.get_session(session_id)
     if session is None:
         return jsonify({"error": "Session not found"}), 404
+
+    if _is_remote_explorer_session(session):
+        client = None
+        sftp = None
+        try:
+            client, sftp = _open_ssh_sftp(session)
+            root_path, file_path = _resolve_remote_explorer_file_path(
+                sftp,
+                session,
+                request.args.get("path", ""),
+            )
+            stat_result = sftp.stat(file_path)
+            with sftp.open(file_path, "rb") as file_handle:
+                raw_content = file_handle.read(EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)
+
+            if b"\x00" in raw_content:
+                raise ValueError("Explorer file appears to be binary")
+
+            truncated = len(raw_content) > EXPLORER_FILE_PREVIEW_MAX_BYTES
+            preview_bytes = raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]
+            content = preview_bytes.decode("utf-8", errors="replace")
+            preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
+            code_language = _explorer_code_language(file_path)
+
+            return jsonify(
+                {
+                    "session_id": session.session_id,
+                    "root": root_path,
+                    "path": _relative_remote_explorer_path(root_path, file_path),
+                    "name": posixpath.basename(_remote_path_clean(file_path)),
+                    "size": getattr(stat_result, "st_size", None),
+                    "modified": getattr(stat_result, "st_mtime", None),
+                    "encoding": "utf-8",
+                    "truncated": truncated,
+                    "content": content,
+                    "preview_type": "markdown" if preview_html is not None else None,
+                    "preview_html": preview_html,
+                    "language": code_language,
+                }
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": str(exc)}), 500
+        finally:
+            if client is not None and sftp is not None:
+                _close_sftp_client(client, sftp)
 
     try:
         root_path, file_path = _resolve_explorer_file_path(
@@ -3257,6 +3570,10 @@ def create_sessions():
             )
             prepared["startup_mode"] = startup_mode
 
+            if connection_mode == "ssh" and startup_mode == "explorer":
+                prepared["initial_command"] = ""
+                prepared["explorer_root_directory"] = prepared.get("directory") or ""
+
             if connection_mode == "wsl":
                 if startup_mode == "explorer":
                     use_powershell = False
@@ -3439,13 +3756,13 @@ def split_session(session_id: str):
 
 @app.route('/api/sessions/<session_id>/mode', methods=['POST'])
 def change_session_mode(session_id: str):
-    """Switch one Local Repo pane between terminal and file explorer mode."""
+    """Switch one terminal pane between terminal and file explorer mode."""
     session = session_manager.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
 
-    if session.mode != "wsl":
-        return jsonify({"error": "File explorer mode is only available for Local Repo sessions"}), 400
+    if session.mode not in {"ssh", "wsl"}:
+        return jsonify({"error": "File explorer mode is only available for SSH and Local Repo sessions"}), 400
 
     data = request.get_json(silent=True) or {}
     target_mode = _normalize_startup_mode(data.get("startup_mode"), session.mode)
@@ -3455,35 +3772,73 @@ def change_session_mode(session_id: str):
     if target_mode == "explorer":
         requested_directory = data.get("directory")
         next_directory = session.directory
-        if requested_directory:
-            next_directory = os.path.abspath(os.path.expanduser(str(requested_directory)))
-        if not next_directory or not os.path.isdir(next_directory):
-            return jsonify({"error": "Explorer root directory does not exist"}), 400
+        root_directory = ""
 
-        root_directory = _explorer_root_directory(session) or next_directory
-        root_directory = os.path.realpath(os.path.abspath(os.path.expanduser(root_directory)))
-        next_directory = os.path.realpath(os.path.abspath(os.path.expanduser(next_directory)))
-        try:
-            common_path = os.path.commonpath([root_directory, next_directory])
-        except ValueError:
-            common_path = ""
-        if (
-            not os.path.isdir(root_directory)
-            or os.path.normcase(common_path) != os.path.normcase(root_directory)
-        ):
-            root_directory = next_directory
+        if session.mode == "ssh":
+            if requested_directory:
+                next_directory = _remote_path_clean(requested_directory)
+            next_directory = _remote_path_clean(next_directory or "/")
+            root_candidate = _remote_explorer_root_directory(session) or next_directory
+            client = None
+            sftp = None
+            try:
+                client, sftp = _open_ssh_sftp(session)
+                next_directory = sftp.normalize(next_directory)
+                if not _remote_is_directory(sftp, next_directory):
+                    raise ValueError("Explorer root directory does not exist")
+                try:
+                    root_directory = sftp.normalize(root_candidate)
+                    root_is_valid = _remote_is_directory(sftp, root_directory)
+                except OSError:
+                    root_directory = next_directory
+                    root_is_valid = False
+                if not root_is_valid or not _remote_path_inside(root_directory, next_directory):
+                    root_directory = next_directory
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+            except _sftp_request_error_types() as exc:
+                return jsonify({"error": str(exc)}), 500
+            finally:
+                if client is not None and sftp is not None:
+                    _close_sftp_client(client, sftp)
 
-        session_manager.update_session_metadata(
-            session_id,
-            host="File Explorer",
-            directory=next_directory,
-            explorer_root_directory=root_directory,
-            username="",
-            port=22,
-            password=None,
-            initial_command="",
-            startup_mode="explorer",
-        )
+            session_manager.update_session_metadata(
+                session_id,
+                directory=next_directory,
+                explorer_root_directory=root_directory,
+                initial_command="",
+                startup_mode="explorer",
+            )
+        else:
+            if requested_directory:
+                next_directory = os.path.abspath(os.path.expanduser(str(requested_directory)))
+            if not next_directory or not os.path.isdir(next_directory):
+                return jsonify({"error": "Explorer root directory does not exist"}), 400
+
+            root_directory = _explorer_root_directory(session) or next_directory
+            root_directory = os.path.realpath(os.path.abspath(os.path.expanduser(root_directory)))
+            next_directory = os.path.realpath(os.path.abspath(os.path.expanduser(next_directory)))
+            try:
+                common_path = os.path.commonpath([root_directory, next_directory])
+            except ValueError:
+                common_path = ""
+            if (
+                not os.path.isdir(root_directory)
+                or os.path.normcase(common_path) != os.path.normcase(root_directory)
+            ):
+                root_directory = next_directory
+
+            session_manager.update_session_metadata(
+                session_id,
+                host="File Explorer",
+                directory=next_directory,
+                explorer_root_directory=root_directory,
+                username="",
+                port=22,
+                password=None,
+                initial_command="",
+                startup_mode="explorer",
+            )
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         _close_ssh_connection(session_id, clear_buffer=True)
         _broadcast_session_status(session_id)
@@ -3493,7 +3848,26 @@ def change_session_mode(session_id: str):
         return jsonify(session.to_dict())
 
     next_directory = session.directory
-    if _is_explorer_session(session):
+    root_path = _explorer_root_directory(session)
+    if _is_remote_explorer_session(session):
+        client = None
+        sftp = None
+        try:
+            client, sftp = _open_ssh_sftp(session)
+            root_path, selected_directory = _resolve_remote_explorer_candidate_path(
+                sftp,
+                session,
+                data.get("directory", ""),
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": str(exc)}), 500
+        finally:
+            if client is not None and sftp is not None:
+                _close_sftp_client(client, sftp)
+        next_directory = selected_directory
+    else:
         try:
             root_path, selected_directory = _resolve_explorer_candidate_path(
                 session,
@@ -3505,18 +3879,19 @@ def change_session_mode(session_id: str):
             return jsonify({"error": "Selected explorer path is not a directory"}), 400
         next_directory = selected_directory
 
-    session_manager.update_session_metadata(
-        session_id,
-        host=_local_shell_display_name(
+    updates = {
+        "directory": next_directory,
+        "explorer_root_directory": root_path,
+        "initial_command": "",
+        "startup_mode": "terminal",
+    }
+    if session.mode == "wsl":
+        updates["host"] = _local_shell_display_name(
             use_wsl=session.use_wsl,
             use_powershell=session.use_powershell,
             distribution=session.distribution,
-        ),
-        directory=next_directory,
-        explorer_root_directory=root_path,
-        initial_command="",
-        startup_mode="terminal",
-    )
+        )
+    session_manager.update_session_metadata(session_id, **updates)
     session_manager.update_session_status(session_id, SessionStatus.PENDING)
     _broadcast_session_status(session_id)
     socketio.start_background_task(_connect_session, session_id)
