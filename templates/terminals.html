@@ -204,15 +204,23 @@
             height: 50px;
         }
 
+        .session-bar {
+            display: flex;
+            align-items: stretch;
+            background: var(--t-tabs-bg);
+            border-bottom: 1px solid var(--t-border-dim);
+            flex-shrink: 0;
+            min-width: 0;
+        }
+
         .session-tabs {
             display: flex;
+            flex: 1 1 auto;
             gap: 8px;
             align-items: center;
             padding: 10px 18px 8px;
-            background: var(--t-tabs-bg);
-            border-bottom: 1px solid var(--t-border-dim);
             overflow-x: auto;
-            flex-shrink: 0;
+            min-width: 0;
         }
 
         .session-tab {
@@ -368,6 +376,31 @@
         .settings-window-btn:hover {
             border-color: var(--t-accent);
             background: var(--t-btn-hover-bg);
+        }
+        .topbar-toggle-btn {
+            width: 38px;
+            min-width: 38px;
+            margin: 8px 10px 8px 0;
+            padding: 0;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background .18s, border-color .18s, color .18s;
+        }
+        .topbar-toggle-btn:hover {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--t-btn-hover-bg);
+        }
+        .topbar-toggle-icon {
+            width: 18px;
+            height: 18px;
+            display: block;
         }
         .surface-mode-btn {
             width: 40px;
@@ -658,6 +691,10 @@
             padding: 5px 8px;
         }
 
+        body.topbar-collapsed .topbar {
+            display: none;
+        }
+
         body.surface-max .topbar-title {
             font-size: .88rem;
         }
@@ -692,6 +729,12 @@
         body.surface-max .session-tabs {
             gap: 5px;
             padding: 5px 8px 4px;
+        }
+
+        body.surface-max .topbar-toggle-btn {
+            width: 30px;
+            min-width: 30px;
+            margin: 4px 6px 4px 0;
         }
 
         body.surface-max .session-tab {
@@ -1313,7 +1356,7 @@
 >
 
 <!-- Top bar -->
-<div class="topbar">
+<div class="topbar" id="terminalTopbar">
     <div>
         <span class="topbar-title">GridVibe</span>
         <span class="topbar-sub" id="sessionLabel">Loading…</span>
@@ -1340,7 +1383,8 @@
             aria-pressed="false"
         >
             <svg class="surface-mode-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <rect x="4" y="4" width="16" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+                <path d="M12 12H7m0 0 3-3m-3 3 3 3M12 12h5m0 0-3-3m3 3-3 3M12 12V7m0 0-3 3m3-3 3 3M12 12v5m0 0-3-3m3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
         </button>
         <button
@@ -1368,7 +1412,23 @@
     </div>
 </div>
 
-<div class="session-tabs" id="sessionTabs"></div>
+<div class="session-bar">
+    <div class="session-tabs" id="sessionTabs"></div>
+    <button
+        type="button"
+        class="topbar-toggle-btn"
+        id="topbarToggleBtn"
+        onclick="toggleTopbarVisibility()"
+        title="Hide top bar"
+        aria-label="Hide top bar"
+        aria-expanded="true"
+        aria-controls="terminalTopbar"
+    >
+        <svg class="topbar-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path id="topbarTogglePath" d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+    </button>
+</div>
 
 <!-- Grid (built dynamically) -->
 <div id="terminalsGrid"></div>
@@ -1390,6 +1450,7 @@
     /* ── Theme management ── */
     const THEME_STORAGE_KEY = 'gridvibe.theme';
     const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';
+    const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';
 
     function normalizeThemePreference(theme) {
         return ['system', 'light', 'dark'].includes(theme) ? theme : 'system';
@@ -1496,6 +1557,53 @@
 
     function toggleSurfaceMode() {
         applySurfaceMode(!document.body.classList.contains('surface-max'), {
+            persist: true,
+            refit: true
+        });
+    }
+
+    function getStoredTopbarVisible() {
+        try {
+            return localStorage.getItem(TOPBAR_VISIBILITY_STORAGE_KEY) !== 'hidden';
+        } catch (_) {
+            return true;
+        }
+    }
+
+    function updateTopbarToggleButton(visible) {
+        const button = document.getElementById('topbarToggleBtn');
+        const path = document.getElementById('topbarTogglePath');
+        if (!button) {
+            return;
+        }
+        const label = visible ? 'Hide top bar' : 'Show top bar';
+        button.title = label;
+        button.setAttribute('aria-label', label);
+        button.setAttribute('aria-expanded', visible ? 'true' : 'false');
+        if (path) {
+            path.setAttribute('d', visible ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6');
+        }
+    }
+
+    function applyTopbarVisibility(visible, { persist = false, refit = false } = {}) {
+        const shouldShow = Boolean(visible);
+        document.body.classList.toggle('topbar-collapsed', !shouldShow);
+        updateTopbarToggleButton(shouldShow);
+        if (persist) {
+            try {
+                localStorage.setItem(
+                    TOPBAR_VISIBILITY_STORAGE_KEY,
+                    shouldShow ? 'visible' : 'hidden'
+                );
+            } catch (_) {}
+        }
+        if (refit) {
+            refitAttachedTerminalsForSurfaceMode();
+        }
+    }
+
+    function toggleTopbarVisibility() {
+        applyTopbarVisibility(document.body.classList.contains('topbar-collapsed'), {
             persist: true,
             refit: true
         });
@@ -2566,6 +2674,14 @@
         const candidates = getSplitCandidates(index, rect);
         if (candidates.length === 0) {
             return '';
+        }
+        const grid = document.getElementById('terminalsGrid');
+        if (
+            grid?.classList.contains('layout-2-vertical')
+            && !rect.splitId
+            && !rect.ancestors?.length
+        ) {
+            return candidates.includes('horizontal') ? 'horizontal' : '';
         }
         const card = document.getElementById(`tc-${index}`);
         const bounds = card?.getBoundingClientRect();
@@ -6889,6 +7005,7 @@
        Boot
     ───────────────────────────────────────────── */
     applySurfaceMode(getStoredSurfaceMode());
+    applyTopbarVisibility(getStoredTopbarVisible());
     updateFullscreenButton();
     _loadVoicePrefsFromServer();
     _loadVoiceServiceStatus();

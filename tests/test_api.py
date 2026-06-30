@@ -590,9 +590,24 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("min(1800px, 100%)", grid_css)
         self.assertIn('id="surfaceModeBtn"', html)
         self.assertIn('aria-label="Max surface"', html)
+        self.assertIn('<rect x="4" y="4" width="16" height="16" rx="2.5"', html)
         self.assertIn("const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';", html)
         self.assertIn("document.body.classList.toggle('surface-max', active);", html)
         self.assertIn("redrawAttachedTerminals(attachedIndices, { forceResize: true });", html)
+
+    def test_terminals_page_exposes_collapsible_topbar(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('class="topbar" id="terminalTopbar"', html)
+        self.assertIn('class="session-bar"', html)
+        self.assertIn('id="topbarToggleBtn"', html)
+        self.assertIn('aria-controls="terminalTopbar"', html)
+        self.assertIn("const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';", html)
+        self.assertIn("document.body.classList.toggle('topbar-collapsed', !shouldShow);", html)
+        self.assertIn("path.setAttribute('d', visible ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6');", html)
+        self.assertIn("applyTopbarVisibility(getStoredTopbarVisible());", html)
 
     def test_terminals_page_buttons_use_session_color_frames(self):
         response = self.client.get("/terminals")
@@ -3512,6 +3527,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("var(--t-topbar)", html)
         self.assertIn("var(--t-text)", html)
         self.assertIn("var(--t-border)", html)
+
+    def test_terminals_page_splits_the_longer_pane_dimension(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        self.assertIn("grid?.classList.contains('layout-2-vertical')", html)
+        self.assertIn("return candidates.includes('horizontal') ? 'horizontal' : '';", html)
+        self.assertIn(
+            "const preferred = bounds && bounds.height > bounds.width ? 'horizontal' : 'vertical';",
+            html,
+        )
 
 
 # ---------------------------------------------------------------------------

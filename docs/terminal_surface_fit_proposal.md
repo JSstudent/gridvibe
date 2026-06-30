@@ -309,6 +309,19 @@ surface cleanup is not enough.
   - Toggling the mode refits attached xterm instances and emits forced terminal
     resize updates through the existing resize path.
 
+2026-06-30 follow-up:
+
+- Added a collapsible topbar controlled from the session-tab row.
+  - The session tabs now sit in a `session-bar` shell with a fixed chevron
+    button on the far right, outside the scrollable tab list.
+  - The chevron points up when the topbar is visible and down when it is
+    hidden.
+  - The hidden/visible state is stored in `localStorage` as
+    `gridvibe.terminalTopbarVisibility`.
+  - Collapsing or expanding the topbar refits attached xterm instances through
+    the existing forced resize path so terminals use the newly available
+    vertical space.
+
 ## Acceptance Criteria
 
 - On a wide desktop browser window, terminal grid width uses the full content
