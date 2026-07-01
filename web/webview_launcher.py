@@ -1,6 +1,8 @@
 """
-Native launcher for GridVibe using pywebview when available.
-Falls back to the system browser if pywebview is missing.
+Launcher for GridVibe browser and native pywebview modes.
+
+The default auto mode preserves the historical native-first behavior and falls
+back to the system browser if pywebview is missing.
 """
 
 import argparse
@@ -203,14 +205,27 @@ def _ignore_linux_job_control_stop_signals():
         )
 
 
-def _open_browser_fallback(base_url: str, server_thread: threading.Thread):
-    logger.warning("Falling back to the system browser at %s", base_url)
+def _open_browser_mode(base_url: str, server_thread: threading.Thread):
+    logger.info("Opening GridVibe in the system browser at %s", base_url)
     webbrowser.open(base_url)
     try:
         server_thread.join()
     except KeyboardInterrupt:
         logger.info("Shutting down after keyboard interrupt")
         session_manager.close_all_sessions()
+
+
+def _open_browser_fallback(base_url: str, server_thread: threading.Thread):
+    logger.warning("Falling back to the system browser at %s", base_url)
+    _open_browser_mode(base_url, server_thread)
+
+
+def _exit_after_startup_failure(code: int = 1):
+    try:
+        session_manager.close_all_sessions()
+    except Exception:
+        logger.exception("Failed to close sessions after launcher startup failure")
+    os._exit(code)
 
 
 def _should_exit_after_window_close(kind: str, open_windows: set[str]) -> bool:
@@ -673,9 +688,18 @@ def _run_server(host: str, port: int, debug: bool):
 
 
 def main():
-    """Start GridVibe in a native window when possible."""
+    """Start GridVibe in the selected UI mode."""
     parser = argparse.ArgumentParser(
-        description="Launch GridVibe in a native pywebview window"
+        description="Launch GridVibe in browser or native pywebview mode"
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("auto", "native", "browser"),
+        default="auto",
+        help=(
+            "Launch mode: auto preserves native-first browser fallback behavior; "
+            "native requires pywebview; browser opens the system browser only"
+        ),
     )
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     parser.add_argument("--port", type=int, default=5050, help="Port to bind to")
@@ -693,7 +717,7 @@ def main():
     setup_logging(debug)
     logger = logging.getLogger(__name__)
     _ignore_linux_job_control_stop_signals()
-    logger.info(f"Starting GridVibe GUI at {base_url}")
+    logger.info("Starting GridVibe mode=%s at %s", args.mode, base_url)
 
     server_thread = threading.Thread(
         target=_run_server,
@@ -707,10 +731,20 @@ def main():
         logger.error("GridVibe server did not become ready in time")
         raise SystemExit(1)
 
-    if webview is None:
-        logger.warning("pywebview is unavailable; falling back to the system browser")
-        _open_browser_fallback(base_url, server_thread)
+    if args.mode == "browser":
+        _open_browser_mode(base_url, server_thread)
         return
+
+    if webview is None:
+        if args.mode == "auto":
+            logger.warning("pywebview is unavailable; falling back to the system browser")
+            _open_browser_fallback(base_url, server_thread)
+            return
+        logger.error(
+            "pywebview is unavailable. Install desktop dependencies or rerun "
+            "GridVibe in browser mode."
+        )
+        _exit_after_startup_failure(1)
 
     open_windows = set()
 
@@ -791,8 +825,10 @@ def main():
     except Exception as exc:
         if _is_missing_linux_pywebview_backend(exc):
             _log_linux_pywebview_backend_help()
-            _open_browser_fallback(base_url, server_thread)
-            return
+            if args.mode == "auto":
+                _open_browser_fallback(base_url, server_thread)
+                return
+            _exit_after_startup_failure(1)
         raise
 
 

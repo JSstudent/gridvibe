@@ -240,9 +240,11 @@ Cons:
 
 ### Ubuntu/Linux Recommendation
 
-Use L2: `zenity` popup when available, with the L1 terminal prompt as the fallback.
+Use L1: a terminal prompt in `GridVibe.sh`.
 
 The Linux launcher should not require `zenity`, Qt, GTK, or `pywebview` just to ask the mode question. Those dependencies are exactly the class of startup issues this mode selection is meant to avoid.
+
+The `zenity` popup from L2 can be added later if desktop-launch polish becomes important, but the baseline Ubuntu/Linux path should stay a single terminal-friendly script.
 
 ## Dependency Flow
 
@@ -342,7 +344,7 @@ or:
 1. Add strict `--mode` support to `web/webview_launcher.py`.
 2. Update tests around fallback behavior and browser-mode isolation.
 3. Update `GridVibe.bat` with a PowerShell popup and `choice` fallback.
-4. Add `GridVibe.sh` with `zenity` popup support and terminal fallback.
+4. Add `GridVibe.sh` with the L1 terminal prompt.
 5. Update README startup instructions.
 
 This keeps the launch architecture simple: one user choice, one owning process, one server, one UI surface.

@@ -1,6 +1,6 @@
 # GridVibe
 
-GridVibe is a browser-first workspace for launching and managing multiple SSH terminals, local shell panes, agent panes, and SSH/SFTP or local repository file explorer panes from one control surface. It runs in a normal browser or, when `pywebview` is installed, in a native desktop window on Windows.
+GridVibe is a browser-first workspace for launching and managing multiple SSH terminals, local shell panes, agent panes, and SSH/SFTP or local repository file explorer panes from one control surface. It runs in a normal browser or, when `pywebview` is installed, in a native desktop window on Windows and Linux.
 
 [![CI](https://github.com/JSstudent/gridvibe/actions/workflows/ci.yml/badge.svg)](https://github.com/JSstudent/gridvibe/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -196,24 +196,35 @@ sudo apt update
 sudo apt install python3 python3-venv python3-pip
 ```
 
-Then create the environment and start GridVibe:
+Then run the Linux launcher from the project root:
+
+```bash
+chmod +x GridVibe.sh
+./GridVibe.sh
+```
+
+`GridVibe.sh` creates or repairs `.venv`, installs core dependencies, then asks
+whether to start a native window, browser mode, or quit. Browser mode opens
+`http://localhost:5050` in your default browser and keeps the server attached to
+the launcher process. Native mode also installs `requirements-desktop.txt` and
+requires a working `pywebview` backend.
+
+Manual browser setup:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install --upgrade -r requirements.txt
-python main.py --host 127.0.0.1
+python webview_launcher.py --mode browser
 ```
-
-Open `http://localhost:5050`.
 
 Optional native desktop-window support on Linux uses `pywebview`. The desktop
 requirements install the Qt backend because it works inside a normal virtualenv:
 
 ```bash
 python -m pip install --upgrade -r requirements-desktop.txt
-python webview_launcher.py
+python webview_launcher.py --mode native
 ```
 
 If you see `You must have either QT or GTK with Python extensions installed in
@@ -230,7 +241,7 @@ the Python environment running GridVibe.
 
 If the native window starts with Qt but logs Mesa/VMware rendering warnings such
 as `MESA: error: ZINK: failed to choose pdev` or `VMware: No 3D enabled`, but
-then freezes, use browser mode with `python main.py --host 127.0.0.1`. The
+then freezes, use browser mode with `python webview_launcher.py --mode browser`. The
 native launcher still requests pywebview's Qt backend directly, but GridVibe no
 longer forces QtWebEngine GPU/software-rendering flags by default because those
 flags can freeze some Qt builds. To opt into that fallback for testing, launch
@@ -288,7 +299,9 @@ python -m pip install --upgrade -r requirements-dev.txt
 python main.py                  # browser mode on http://localhost:5050
 python main.py --host 0.0.0.0   # opt in to binding on all network interfaces
 python main.py --port 8080      # custom port
-python webview_launcher.py      # native window when pywebview is installed
+python webview_launcher.py      # auto mode: native window with browser fallback
+python webview_launcher.py --mode browser
+python webview_launcher.py --mode native
 ```
 
 ## How It Works
