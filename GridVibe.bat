@@ -96,36 +96,101 @@ if defined NEEDS_VENV_CREATE (
 
 set "VENV_PYTHON=%PROJECT_DIR%\.venv\Scripts\python.exe"
 
-echo  Installing core dependencies...
+echo  Updating Python installer tooling...
 echo.
 
-"%VENV_PYTHON%" -m pip install -r requirements.txt
+"%VENV_PYTHON%" -m pip install --upgrade pip setuptools wheel
 if errorlevel 1 (
-    echo  Error: Failed to install core dependencies.
-    echo  Manual fix: "%VENV_PYTHON%" -m pip install -r requirements.txt
+    echo  Error: Failed to update Python installer tooling.
+    echo  Manual fix: "%VENV_PYTHON%" -m pip install --upgrade pip setuptools wheel
     echo.
     pause >nul
     exit /b 1
 )
 
+echo  Installing core dependencies...
+echo.
+
+"%VENV_PYTHON%" -m pip install --upgrade --upgrade-strategy eager -r requirements.txt
+if errorlevel 1 (
+    echo  Error: Failed to install core dependencies.
+    echo  Manual fix: "%VENV_PYTHON%" -m pip install --upgrade -r requirements.txt
+    echo.
+    pause >nul
+    exit /b 1
+)
+
+echo  Verifying core dependencies...
+echo.
+
+"%VENV_PYTHON%" -c "import _cffi_backend, cryptography.fernet, engineio, flask, flask_socketio, paramiko, socketio; print('Core dependency import check passed.')"
+if errorlevel 1 (
+    echo  Core dependency import check failed. Reinstalling native wheels...
+    echo.
+    "%VENV_PYTHON%" -m pip install --upgrade --force-reinstall --no-cache-dir cffi cryptography pynacl bcrypt paramiko
+    if errorlevel 1 (
+        echo  Error: Failed to repair native core dependencies.
+        echo  Manual fix: "%VENV_PYTHON%" -m pip install --upgrade --force-reinstall --no-cache-dir cffi cryptography pynacl bcrypt paramiko
+        echo.
+        pause >nul
+        exit /b 1
+    )
+    "%VENV_PYTHON%" -m pip install --upgrade --upgrade-strategy eager -r requirements.txt
+    if errorlevel 1 (
+        echo  Error: Failed to reinstall core dependencies after repair.
+        echo.
+        pause >nul
+        exit /b 1
+    )
+    "%VENV_PYTHON%" -c "import _cffi_backend, cryptography.fernet, engineio, flask, flask_socketio, paramiko, socketio; print('Core dependency import check passed.')"
+    if errorlevel 1 (
+        echo  Error: Core dependencies are still not importable after repair.
+        echo.
+        pause >nul
+        exit /b 1
+    )
+)
+
 echo  Installing optional desktop dependencies...
 echo.
 
-"%VENV_PYTHON%" -m pip install -r requirements-desktop.txt
+"%VENV_PYTHON%" -m pip install --upgrade --upgrade-strategy eager -r requirements-desktop.txt
 if errorlevel 1 (
     echo  Warning: Failed to install optional desktop dependencies.
     echo  GridVibe will still run, but may fall back to the browser.
-    echo  Manual fix: "%VENV_PYTHON%" -m pip install -r requirements-desktop.txt
+    echo  Manual fix: "%VENV_PYTHON%" -m pip install --upgrade -r requirements-desktop.txt
     echo.
+)
+
+echo  Verifying optional desktop dependencies...
+echo.
+
+"%VENV_PYTHON%" -c "import importlib, sys; import webview; importlib.import_module('winpty') if sys.platform == 'win32' else None; print('Desktop dependency import check passed.')"
+if errorlevel 1 (
+    echo  Desktop dependency import check failed. Reinstalling native desktop wheels...
+    echo.
+    "%VENV_PYTHON%" -m pip install --upgrade --force-reinstall --no-cache-dir pywebview pywinpty
+    if errorlevel 1 (
+        echo  Warning: Failed to repair optional desktop dependencies.
+        echo  GridVibe will still run, but may fall back to the browser.
+        echo.
+    ) else (
+        "%VENV_PYTHON%" -c "import importlib, sys; import webview; importlib.import_module('winpty') if sys.platform == 'win32' else None; print('Desktop dependency import check passed.')"
+        if errorlevel 1 (
+            echo  Warning: Optional desktop dependencies are still not importable after repair.
+            echo  GridVibe will still run, but may fall back to the browser.
+            echo.
+        )
+    )
 )
 
 echo  Checking optional voice dependencies...
 echo.
 
-"%VENV_PYTHON%" -c "import importlib.util, sys; modules=('vosk','websockets','faster_whisper','numpy'); missing=[m for m in modules if importlib.util.find_spec(m) is None]; print('Missing voice dependencies: ' + ', '.join(missing) if missing else 'Voice dependencies installed.'); sys.exit(1 if missing else 0)"
+"%VENV_PYTHON%" -c "import faster_whisper, numpy, vosk, websockets; print('Voice dependency import check passed.')"
 if errorlevel 1 (
     echo.
-    echo  Voice input needs optional packages for Vosk and faster-whisper.
+    echo  Voice input needs optional packages for Vosk and faster-whisper, or an installed voice package needs repair.
     choice /C YN /N /M " Install optional voice dependencies now? [Y/N] "
     if errorlevel 2 (
         echo.
@@ -136,12 +201,31 @@ if errorlevel 1 (
         echo.
         echo  Installing optional voice dependencies...
         echo.
-        "%VENV_PYTHON%" -m pip install -r requirements-voice.txt
+        "%VENV_PYTHON%" -m pip install --upgrade --upgrade-strategy eager -r requirements-voice.txt
         if errorlevel 1 (
             echo  Warning: Failed to install optional voice dependencies.
             echo  GridVibe will still run, but voice input may be unavailable.
-            echo  Manual fix: "%VENV_PYTHON%" -m pip install -r requirements-voice.txt
+            echo  Manual fix: "%VENV_PYTHON%" -m pip install --upgrade -r requirements-voice.txt
             echo.
+        ) else (
+            "%VENV_PYTHON%" -c "import faster_whisper, numpy, vosk, websockets; print('Voice dependency import check passed.')"
+            if errorlevel 1 (
+                echo  Voice dependency import check failed. Reinstalling native voice wheels...
+                echo.
+                "%VENV_PYTHON%" -m pip install --upgrade --force-reinstall --no-cache-dir numpy ctranslate2 onnxruntime av faster-whisper vosk websockets
+                if errorlevel 1 (
+                    echo  Warning: Failed to repair optional voice dependencies.
+                    echo  GridVibe will still run, but voice input may be unavailable.
+                    echo.
+                ) else (
+                    "%VENV_PYTHON%" -c "import faster_whisper, numpy, vosk, websockets; print('Voice dependency import check passed.')"
+                    if errorlevel 1 (
+                        echo  Warning: Optional voice dependencies are still not importable after repair.
+                        echo  GridVibe will still run, but voice input may be unavailable.
+                        echo.
+                    )
+                )
+            )
         )
     )
 )

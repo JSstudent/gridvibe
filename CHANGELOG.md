@@ -4,6 +4,7 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- Updated dependency floors and the Windows launcher dependency bootstrap so existing virtualenvs upgrade, verify native imports, and repair stale compiled wheels before startup.
 - Enabled read-only File Explorer panes for SSH sessions using SFTP with root-bound remote path validation and terminal/explorer mode switching.
 
 ## 1.1.0 - 2026-06-28

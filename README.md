@@ -78,7 +78,7 @@ Open `App Settings` from the launcher gear button to choose:
 Voice input requires optional voice dependencies. On Windows, `GridVibe.bat` checks the `.venv` and prompts to install them when missing. Manual setup:
 
 ```bash
-pip install -r requirements-voice.txt
+python -m pip install --upgrade -r requirements-voice.txt
 ```
 
 Browser mode is usually the most reliable mode for microphone permissions. Native `pywebview` mode depends on the embedded browser and OS microphone support.
@@ -160,7 +160,7 @@ Use the included launcher for the easiest Windows setup:
 .\GridVibe.bat
 ```
 
-`GridVibe.bat` creates or repairs `.venv`, installs runtime and desktop dependencies, checks optional voice dependencies, prompts to install them when missing, then launches the native window when possible.
+`GridVibe.bat` creates or repairs `.venv`, upgrades installer tooling, upgrades runtime and desktop dependencies, verifies native dependency imports, checks optional voice dependencies, prompts to install them when missing, then launches the native window when possible.
 
 Manual Windows setup:
 
@@ -168,7 +168,7 @@ Manual Windows setup:
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install --upgrade -r requirements.txt
 python main.py --host 127.0.0.1
 ```
 
@@ -177,7 +177,7 @@ Open `http://localhost:5050`.
 Install optional desktop-window support with:
 
 ```powershell
-pip install -r requirements-desktop.txt
+python -m pip install --upgrade -r requirements-desktop.txt
 python webview_launcher.py
 ```
 
@@ -196,7 +196,7 @@ Then create the environment and start GridVibe:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install --upgrade -r requirements.txt
 python main.py --host 127.0.0.1
 ```
 
@@ -206,7 +206,7 @@ Optional native desktop-window support on Linux uses `pywebview`. The desktop
 requirements install the Qt backend because it works inside a normal virtualenv:
 
 ```bash
-pip install -r requirements-desktop.txt
+python -m pip install --upgrade -r requirements-desktop.txt
 python webview_launcher.py
 ```
 
@@ -245,7 +245,8 @@ source .venv/bin/activate
 # Windows PowerShell
 .venv\Scripts\Activate.ps1
 
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install --upgrade -r requirements.txt
 python main.py
 ```
 
@@ -258,13 +259,13 @@ On Windows, you can also run `GridVibe.bat`.
 Native desktop window support:
 
 ```bash
-pip install -r requirements-desktop.txt
+python -m pip install --upgrade -r requirements-desktop.txt
 ```
 
 Offline voice input support:
 
 ```bash
-pip install -r requirements-voice.txt
+python -m pip install --upgrade -r requirements-voice.txt
 ```
 
 On Windows, `GridVibe.bat` performs this check for the project `.venv` and can install the voice packages during startup.
@@ -272,7 +273,7 @@ On Windows, `GridVibe.bat` performs this check for the project `.venv` and can i
 Development tools:
 
 ```bash
-pip install -r requirements-dev.txt
+python -m pip install --upgrade -r requirements-dev.txt
 ```
 
 ## Run Modes
