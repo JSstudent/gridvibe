@@ -1,6 +1,6 @@
 # GridVibe
 
-GridVibe is a browser-first workspace for launching and managing multiple SSH terminals, local shell panes, agent panes, and SSH/SFTP or local repository file explorer panes from one control surface. It runs in a normal browser or, when `pywebview` is installed, in a native desktop window on Windows.
+GridVibe is a browser-first workspace for launching and managing multiple SSH terminals, local shell panes, agent panes, and SSH/SFTP or local repository file explorer panes from one control surface. It runs in a normal browser or, when `pywebview` is installed, in a native desktop window on Windows and Linux.
 
 [![CI](https://github.com/JSstudent/gridvibe/actions/workflows/ci.yml/badge.svg)](https://github.com/JSstudent/gridvibe/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -32,7 +32,8 @@ Top bar controls:
 
 Session bar controls:
 
-- Session tabs show each active session group. Drag tabs to reorder them; GridVibe persists the order for the running app state.
+- Session tabs show each active session group with a positional number. Drag tabs to reorder them; GridVibe persists the order for the running app state.
+- `Alt+1` through `Alt+9` switch to the matching numbered session tab when focus is not inside an editable field.
 - Each session tab has a close button for closing that session group.
 - The chevron next to the session tabs hides or shows the top bar. GridVibe remembers this top-bar visibility preference in the browser.
 
@@ -44,6 +45,11 @@ Per-terminal controls:
 - `⊟` closes a split pane and expands the remaining split area. Explorer panes cannot be split.
 - `🧹` clears the terminal display and purges its replay buffer.
 - `🎤` starts or stops voice input for that terminal when voice input is enabled.
+
+Pane sizing:
+
+- Drag the visible divider between terminal panes to resize shared rows or columns. GridVibe refits xterm panes and resizes the backend PTY after the drag.
+- Pane resizing keeps every visible pane above the minimum usable surface and is disabled on narrow mobile-width layouts.
 
 ### File Explorer Panes
 
@@ -57,7 +63,7 @@ Explorer panes support:
 - Switching the pane into a regular terminal opened at the current explorer directory.
 - Manual refresh from the pane header without continuous auto-refresh flicker.
 - Folder/file icons, size and modified-time metadata, and per-pane light/dark explorer theme toggling.
-- Click-to-open text files in a read-only editor-style viewer with wrapped long lines.
+- Click-to-open text files in a read-only editor-style viewer with wrapped long lines and per-pane `-`/`+` font-size zoom controls.
 - Client-side find inside the open file view, including `Ctrl+F`/`Cmd+F` focus, match counts, previous/next controls, `Enter`/`Shift+Enter` navigation, and clear.
 - Markdown files with a source tab and sanitized rendered preview when Markdown rendering dependencies are installed.
 - Lightweight syntax coloring for common source files such as Python, C/C++, Go, JavaScript/TypeScript, Java, Rust, shell, PowerShell, HTML, CSS, JSON, YAML, TOML, SQL, and related formats.
@@ -78,7 +84,7 @@ Open `App Settings` from the launcher gear button to choose:
 Voice input requires optional voice dependencies. On Windows, `GridVibe.bat` checks the `.venv` and prompts to install them when missing. Manual setup:
 
 ```bash
-pip install -r requirements-voice.txt
+python -m pip install --upgrade -r requirements-voice.txt
 ```
 
 Browser mode is usually the most reliable mode for microphone permissions. Native `pywebview` mode depends on the embedded browser and OS microphone support.
@@ -133,9 +139,9 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 - SSH, WSL, PowerShell, cmd, and local repository modes
 - Per-pane startup modes for normal commands, agent CLIs, and file explorer panes
 - Saved launcher presets with encrypted SSH passwords
-- Session groups with closable tabs, drag-to-reorder persistence, collapsible top bar, and max surface mode
-- xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and dynamic split-pane support
-- Local and SSH read-only file explorer panes with directory navigation, text/Markdown preview, syntax highlighting, and client-side in-file search
+- Session groups with numbered closable tabs, `Alt+1` through `Alt+9` tab switching, drag-to-reorder persistence, collapsible top bar, and max surface mode
+- xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and drag-resizable dynamic split-pane support
+- Local and SSH read-only file explorer panes with directory navigation, text/Markdown preview, syntax highlighting, per-pane editor font zoom, and client-side in-file search
 - Optional native desktop window through `pywebview`
 - Optional offline voice input through Vosk or faster-whisper
 - Theme support for system, light, and dark modes
@@ -160,7 +166,7 @@ Use the included launcher for the easiest Windows setup:
 .\GridVibe.bat
 ```
 
-`GridVibe.bat` creates or repairs `.venv`, installs runtime and desktop dependencies, checks optional voice dependencies, prompts to install them when missing, then launches the native window when possible.
+`GridVibe.bat` creates or repairs `.venv`, upgrades installer tooling, upgrades runtime and desktop dependencies, verifies native dependency imports, checks optional voice dependencies, prompts to install them when missing, then launches the native window when possible.
 
 Manual Windows setup:
 
@@ -168,7 +174,7 @@ Manual Windows setup:
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install --upgrade -r requirements.txt
 python main.py --host 127.0.0.1
 ```
 
@@ -177,7 +183,7 @@ Open `http://localhost:5050`.
 Install optional desktop-window support with:
 
 ```powershell
-pip install -r requirements-desktop.txt
+python -m pip install --upgrade -r requirements-desktop.txt
 python webview_launcher.py
 ```
 
@@ -190,24 +196,35 @@ sudo apt update
 sudo apt install python3 python3-venv python3-pip
 ```
 
-Then create the environment and start GridVibe:
+Then run the Linux launcher from the project root:
+
+```bash
+chmod +x GridVibe.sh
+./GridVibe.sh
+```
+
+`GridVibe.sh` creates or repairs `.venv`, installs core dependencies, then asks
+whether to start a native window, browser mode, or quit. Browser mode opens
+`http://localhost:5050` in your default browser and keeps the server attached to
+the launcher process. Native mode also installs `requirements-desktop.txt` and
+requires a working `pywebview` backend.
+
+Manual browser setup:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -r requirements.txt
-python main.py --host 127.0.0.1
+python -m pip install --upgrade -r requirements.txt
+python webview_launcher.py --mode browser
 ```
-
-Open `http://localhost:5050`.
 
 Optional native desktop-window support on Linux uses `pywebview`. The desktop
 requirements install the Qt backend because it works inside a normal virtualenv:
 
 ```bash
-pip install -r requirements-desktop.txt
-python webview_launcher.py
+python -m pip install --upgrade -r requirements-desktop.txt
+python webview_launcher.py --mode native
 ```
 
 If you see `You must have either QT or GTK with Python extensions installed in
@@ -224,7 +241,7 @@ the Python environment running GridVibe.
 
 If the native window starts with Qt but logs Mesa/VMware rendering warnings such
 as `MESA: error: ZINK: failed to choose pdev` or `VMware: No 3D enabled`, but
-then freezes, use browser mode with `python main.py --host 127.0.0.1`. The
+then freezes, use browser mode with `python webview_launcher.py --mode browser`. The
 native launcher still requests pywebview's Qt backend directly, but GridVibe no
 longer forces QtWebEngine GPU/software-rendering flags by default because those
 flags can freeze some Qt builds. To opt into that fallback for testing, launch
@@ -245,7 +262,8 @@ source .venv/bin/activate
 # Windows PowerShell
 .venv\Scripts\Activate.ps1
 
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install --upgrade -r requirements.txt
 python main.py
 ```
 
@@ -258,13 +276,13 @@ On Windows, you can also run `GridVibe.bat`.
 Native desktop window support:
 
 ```bash
-pip install -r requirements-desktop.txt
+python -m pip install --upgrade -r requirements-desktop.txt
 ```
 
 Offline voice input support:
 
 ```bash
-pip install -r requirements-voice.txt
+python -m pip install --upgrade -r requirements-voice.txt
 ```
 
 On Windows, `GridVibe.bat` performs this check for the project `.venv` and can install the voice packages during startup.
@@ -272,7 +290,7 @@ On Windows, `GridVibe.bat` performs this check for the project `.venv` and can i
 Development tools:
 
 ```bash
-pip install -r requirements-dev.txt
+python -m pip install --upgrade -r requirements-dev.txt
 ```
 
 ## Run Modes
@@ -281,7 +299,9 @@ pip install -r requirements-dev.txt
 python main.py                  # browser mode on http://localhost:5050
 python main.py --host 0.0.0.0   # opt in to binding on all network interfaces
 python main.py --port 8080      # custom port
-python webview_launcher.py      # native window when pywebview is installed
+python webview_launcher.py      # auto mode: native window with browser fallback
+python webview_launcher.py --mode browser
+python webview_launcher.py --mode native
 ```
 
 ## How It Works

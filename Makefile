@@ -5,7 +5,11 @@ MAKEFLAGS += --no-print-directory
 .PHONY: help venv dev-deps check lint fix test test-clean run clean clear-logs cleanup
 
 VENV_DIR ?= .venv
-VENV_PYTHON = $(or $(wildcard $(VENV_DIR)/Scripts/python.exe),$(wildcard $(VENV_DIR)/bin/python))
+ifeq ($(OS),Windows_NT)
+VENV_PYTHON = $(or $(wildcard $(VENV_DIR)\Scripts\python.exe),$(wildcard $(VENV_DIR)/Scripts/python.exe))
+else
+VENV_PYTHON = $(wildcard $(VENV_DIR)/bin/python)
+endif
 BOOTSTRAP_PYTHON ?= python
 PYTHON ?= $(or $(VENV_PYTHON),$(BOOTSTRAP_PYTHON))
 DEV_DEPS_STAMP = $(VENV_DIR)/.dev-deps.stamp
@@ -26,7 +30,7 @@ dev-deps: $(DEV_DEPS_STAMP) ## Create .venv and install development dependencies
 
 $(DEV_DEPS_STAMP): requirements-dev.txt requirements.txt
 	@$(BOOTSTRAP_PYTHON) -c "from pathlib import Path; import subprocess, sys; scripts = Path('$(VENV_DIR)') / ('Scripts' if sys.platform == 'win32' else 'bin'); python = scripts / ('python.exe' if sys.platform == 'win32' else 'python'); subprocess.check_call([sys.executable, '-m', 'venv', '$(VENV_DIR)']) if not python.exists() else None"
-	@$(PYTHON) -m pip install -r requirements-dev.txt
+	@$(PYTHON) -m pip install --upgrade -r requirements-dev.txt
 	@$(PYTHON) -c "from pathlib import Path; Path('$(DEV_DEPS_STAMP)').touch()"
 
 check: dev-deps lint test ## Install dev dependencies, then run lint and tests.

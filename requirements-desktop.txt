@@ -2,7 +2,7 @@
 # Install this after the core requirements if you want pywebview support.
 
 -r requirements.txt
-pywebview[qt]>=5.3.2; platform_system == "Linux"
-pywebview>=5.3.2; platform_system != "Linux"
-pywinpty>=2.0.15; platform_system == "Windows"
+pywebview[qt]>=6.2.1; platform_system == "Linux"
+pywebview>=6.2.1; platform_system != "Linux"
+pywinpty>=3.0.5; platform_system == "Windows"
 

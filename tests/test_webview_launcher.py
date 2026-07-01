@@ -2,7 +2,7 @@ import os
 import signal
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from web import webview_launcher
 
@@ -25,6 +25,18 @@ class _ExplodingWindow:
         raise AssertionError("load_url should not be called")
 
 
+class _FakeThread:
+    def __init__(self):
+        self.started = False
+        self.joined = False
+
+    def start(self):
+        self.started = True
+
+    def join(self):
+        self.joined = True
+
+
 class WebviewLauncherTestCase(unittest.TestCase):
     def test_launcher_close_exits_even_when_session_window_is_still_open(self):
         self.assertTrue(
@@ -39,6 +51,117 @@ class WebviewLauncherTestCase(unittest.TestCase):
     def test_preferred_pywebview_gui_uses_qt_on_linux(self):
         with patch.object(webview_launcher.sys, "platform", "linux"):
             self.assertEqual(webview_launcher._preferred_pywebview_gui(), "qt")
+
+    def test_browser_mode_opens_browser_without_pywebview(self):
+        fake_thread = _FakeThread()
+        fake_webview = Mock()
+
+        with patch.object(
+            webview_launcher.sys,
+            "argv",
+            ["webview_launcher.py", "--mode", "browser"],
+        ), patch.object(
+            webview_launcher.os.path,
+            "exists",
+            return_value=False,
+        ), patch.object(
+            webview_launcher,
+            "setup_logging",
+        ), patch.object(
+            webview_launcher,
+            "_wait_for_server",
+            return_value=True,
+        ), patch.object(
+            webview_launcher.threading,
+            "Thread",
+            return_value=fake_thread,
+        ), patch.object(
+            webview_launcher,
+            "webview",
+            fake_webview,
+        ), patch.object(webview_launcher.webbrowser, "open") as browser_open:
+            webview_launcher.main()
+
+        self.assertTrue(fake_thread.started)
+        self.assertTrue(fake_thread.joined)
+        browser_open.assert_called_once_with("http://127.0.0.1:5050")
+        fake_webview.create_window.assert_not_called()
+        fake_webview.start.assert_not_called()
+
+    def test_auto_mode_preserves_browser_fallback_when_pywebview_is_missing(self):
+        fake_thread = _FakeThread()
+
+        with patch.object(
+            webview_launcher.sys,
+            "argv",
+            ["webview_launcher.py"],
+        ), patch.object(
+            webview_launcher.os.path,
+            "exists",
+            return_value=False,
+        ), patch.object(
+            webview_launcher,
+            "setup_logging",
+        ), patch.object(
+            webview_launcher,
+            "_wait_for_server",
+            return_value=True,
+        ), patch.object(
+            webview_launcher.threading,
+            "Thread",
+            return_value=fake_thread,
+        ), patch.object(
+            webview_launcher,
+            "webview",
+            None,
+        ), patch.object(webview_launcher.webbrowser, "open") as browser_open:
+            webview_launcher.main()
+
+        self.assertTrue(fake_thread.started)
+        self.assertTrue(fake_thread.joined)
+        browser_open.assert_called_once_with("http://127.0.0.1:5050")
+
+    def test_native_mode_missing_pywebview_exits_without_browser_fallback(self):
+        fake_thread = _FakeThread()
+
+        with patch.object(
+            webview_launcher.sys,
+            "argv",
+            ["webview_launcher.py", "--mode", "native"],
+        ), patch.object(
+            webview_launcher.os.path,
+            "exists",
+            return_value=False,
+        ), patch.object(
+            webview_launcher,
+            "setup_logging",
+        ), patch.object(
+            webview_launcher,
+            "_wait_for_server",
+            return_value=True,
+        ), patch.object(
+            webview_launcher.threading,
+            "Thread",
+            return_value=fake_thread,
+        ), patch.object(
+            webview_launcher,
+            "webview",
+            None,
+        ), patch.object(
+            webview_launcher.session_manager,
+            "close_all_sessions",
+        ), patch.object(webview_launcher.webbrowser, "open") as browser_open, patch.object(
+            webview_launcher.os,
+            "_exit",
+            side_effect=SystemExit(1),
+        ) as os_exit:
+            with self.assertRaises(SystemExit):
+                webview_launcher.main()
+
+        self.assertTrue(fake_thread.started)
+        self.assertFalse(fake_thread.joined)
+        browser_open.assert_not_called()
+        os_exit.assert_called_once_with(1)
 
     def test_last_window_close_exits_app(self):
         self.assertTrue(

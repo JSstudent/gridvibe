@@ -407,6 +407,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("'.go': 'go'", html)
         self.assertIn("'.c': 'c'", html)
 
+    def test_terminals_page_explorer_editor_has_font_zoom_controls(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("--explorer-editor-font-size", html)
+        self.assertIn("const EXPLORER_EDITOR_FONT_MIN = 10;", html)
+        self.assertIn("const EXPLORER_EDITOR_FONT_MAX = 24;", html)
+        self.assertIn("function applyExplorerEditorFontSize(index)", html)
+        self.assertIn("function stepExplorerEditorFontSize(index, delta)", html)
+        self.assertIn("function wireExplorerEditorZoomControls(index)", html)
+        self.assertIn('data-explorer-zoom-decrease="${index}"', html)
+        self.assertIn('data-explorer-zoom-increase="${index}"', html)
+        self.assertIn('data-explorer-zoom-value="${index}"', html)
+        self.assertIn("wireExplorerEditorZoomControls(index);", html)
+
     def test_terminals_page_explorer_file_search_is_client_side_and_safe(self):
         response = self.client.get("/terminals")
 
@@ -563,6 +579,23 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".session-tab.settings {", html)
         self.assertIn("border-color: #00c46e;", html)
         self.assertIn("settingsButton.textContent = '+ New Session';", html)
+
+    def test_terminals_page_numbers_session_tabs_and_exposes_safe_shortcut(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn(".session-tab-number {", html)
+        self.assertIn("sessionGroups.forEach((group, index) => {", html)
+        self.assertIn("const tabNumber = index + 1;", html)
+        self.assertIn("number.className = 'session-tab-number';", html)
+        self.assertIn("tabButton.appendChild(number);", html)
+        self.assertIn("function getSessionGroupByNumber(number)", html)
+        self.assertIn("return sessionGroups[number - 1] || null;", html)
+        self.assertIn("function isEditableShortcutTarget(target)", html)
+        self.assertIn("/^[1-9]$/.test(event.key)", html)
+        self.assertIn("isEditableShortcutTarget(event.target)", html)
+        self.assertIn("switchGroup(targetGroup.group_id);", html)
 
     def test_terminals_page_uses_icon_only_green_fullscreen_button(self):
         response = self.client.get("/terminals")
@@ -3537,6 +3570,48 @@ class ApiRoutesTestCase(unittest.TestCase):
             "const preferred = bounds && bounds.height > bounds.width ? 'horizontal' : 'vertical';",
             html,
         )
+
+    def test_terminals_page_exposes_grid_resize_handles(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        self.assertIn('id="terminalResizeOverlay"', html)
+        self.assertIn(".terminal-resize-handle", html)
+        self.assertIn("let splitColumnWeights = null;", html)
+        self.assertIn("let splitRowWeights = null;", html)
+        self.assertIn("let activeGridResize = null;", html)
+        self.assertIn("function ensureResizableSplitLayout()", html)
+        self.assertIn("function renderResizeHandles()", html)
+
+    def test_terminals_page_resize_validation_enforces_minimums(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        self.assertIn("const MIN_RESIZE_SURFACE_RATIO = 1 / 8;", html)
+        self.assertIn(
+            "const minimumSurface = metrics.columnTrackSpace * metrics.rowTrackSpace * MIN_RESIZE_SURFACE_RATIO;",
+            html,
+        )
+        self.assertIn("surface.width * surface.height < minimumSurface", html)
+        self.assertIn("Math.floor(availableWidth / cellWidth) >= MIN_SPLIT_COLS", html)
+        self.assertIn("Math.floor(availableHeight / cellHeight) >= MIN_SPLIT_ROWS", html)
+
+    def test_terminals_page_resize_drag_refits_and_forces_final_resize(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        self.assertIn("window.addEventListener('pointermove', updateGridResize);", html)
+        self.assertIn("window.addEventListener('pointerup', finishGridResize);", html)
+        self.assertIn("function getResizeTrackGroups(axis, lineIndex)", html)
+        self.assertIn("const beforeIndexes = resize.trackGroups.before;", html)
+        self.assertIn("resize.affectedIndices.forEach(index => scheduleFit(index));", html)
+        self.assertIn("redrawAttachedTerminals(affectedIndices, { forceResize: true });", html)
+        self.assertIn("if (activeGridResize) {\n                event.preventDefault();", html)
+
+    def test_terminals_page_cached_group_views_preserve_resize_weights(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        self.assertIn("splitColumnWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitColumnWeights) : null", html)
+        self.assertIn("splitRowWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitRowWeights) : null", html)
+        self.assertIn("splitColumnWeights = cached.className === 'layout-split-local'", html)
+        self.assertIn("splitRowWeights = cached.className === 'layout-split-local'", html)
 
 
 # ---------------------------------------------------------------------------
