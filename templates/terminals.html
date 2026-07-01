@@ -471,6 +471,50 @@
             overflow: hidden;
         }
 
+        #terminalResizeOverlay {
+            position: fixed;
+            inset: 0 auto auto 0;
+            width: 0;
+            height: 0;
+            pointer-events: none;
+            z-index: 60;
+        }
+
+        .terminal-resize-handle {
+            position: fixed;
+            border-radius: 999px;
+            background: transparent;
+            border: 1px solid transparent;
+            opacity: 0;
+            pointer-events: auto;
+            touch-action: none;
+            transition: opacity .12s ease, background .12s ease, border-color .12s ease;
+        }
+
+        .terminal-resize-handle.vertical {
+            width: 10px;
+            transform: translateX(-5px);
+            cursor: col-resize;
+        }
+
+        .terminal-resize-handle.horizontal {
+            height: 10px;
+            transform: translateY(-5px);
+            cursor: row-resize;
+        }
+
+        .terminal-resize-handle:hover,
+        .terminal-resize-handle.active {
+            opacity: 1;
+            background: color-mix(in srgb, var(--t-accent) 28%, transparent);
+            border-color: color-mix(in srgb, var(--t-accent) 70%, transparent);
+        }
+
+        body.terminal-grid-resizing,
+        body.terminal-grid-resizing * {
+            user-select: none !important;
+        }
+
         /* Layout classes */
         #terminalsGrid.layout-2-vertical {
             grid-template-columns: 1fr 1fr;
@@ -1356,6 +1400,10 @@
                 grid-template-rows: none;
             }
 
+            #terminalResizeOverlay {
+                display: none;
+            }
+
             #terminalsGrid.layout-3-split .terminal-container:nth-child(1) {
                 grid-column: auto;
                 grid-row: auto;
@@ -1459,6 +1507,7 @@
 
 <!-- Grid (built dynamically) -->
 <div id="terminalsGrid"></div>
+<div id="terminalResizeOverlay" aria-hidden="true"></div>
 
 <!-- Empty state -->
 <div id="emptyState">
@@ -1759,7 +1808,11 @@
     const MAX_SPLIT_TERMINALS = Math.min(8, Number({{ max_sessions | tojson }} || 8));
     const MIN_SPLIT_COLS = 8;
     const MIN_SPLIT_ROWS = 8;
+    const MIN_RESIZE_SURFACE_RATIO = 1 / 8;
     let splitSlotRects = null;
+    let splitColumnWeights = null;
+    let splitRowWeights = null;
+    let activeGridResize = null;
     let originalSplitSlotCount = 0;
 
     function isRecursiveSplitLayout() {
@@ -1883,6 +1936,7 @@
         const observer = new ResizeObserver(() => {
             scheduleFit(index);
             updateSplitButtonState(index);
+            renderResizeHandles();
         });
         observer.observe(wrapper);
         resizeObservers.push(observer);
@@ -1987,6 +2041,8 @@
         const grid = document.getElementById('terminalsGrid');
         const fragment = document.createDocumentFragment();
 
+        clearActiveGridResize();
+        clearResizeHandles();
         captureCachedPaneUiState();
         clearFitTimers(terminals);
         disconnectObservers(resizeObservers);
@@ -2014,6 +2070,8 @@
             splitGridColumns: grid.style.getPropertyValue('--split-grid-columns'),
             splitGridRows: grid.style.getPropertyValue('--split-grid-rows'),
             splitSlotRects: hasLocalSplitLayout ? cloneSplitSlotRects() : null,
+            splitColumnWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitColumnWeights) : null,
+            splitRowWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitRowWeights) : null,
             originalSplitSlotCount
         });
 
@@ -2027,7 +2085,11 @@
         grid.style.removeProperty('--grid-rows');
         grid.style.removeProperty('--split-grid-columns');
         grid.style.removeProperty('--split-grid-rows');
+        grid.style.gridTemplateColumns = '';
+        grid.style.gridTemplateRows = '';
         splitSlotRects = null;
+        splitColumnWeights = null;
+        splitRowWeights = null;
         originalSplitSlotCount = 0;
     }
 
@@ -2068,6 +2130,12 @@
         splitSlotRects = cached.className === 'layout-split-local'
             ? cloneSplitSlotRects(cached.splitSlotRects)
             : null;
+        splitColumnWeights = cached.className === 'layout-split-local'
+            ? cloneSplitTrackWeights(cached.splitColumnWeights)
+            : null;
+        splitRowWeights = cached.className === 'layout-split-local'
+            ? cloneSplitTrackWeights(cached.splitRowWeights)
+            : null;
         originalSplitSlotCount = Number(cached.originalSplitSlotCount || terminals.length || 0);
         visibleGroupId = groupId;
         gridBuilt = terminals.length > 0;
@@ -2079,6 +2147,8 @@
         });
         if (splitSlotRects) {
             applySplitSlotGeometry({ fit: false });
+        } else {
+            renderResizeHandles();
         }
         restoreCachedPaneUiState();
         restoreActiveTerminalObservers();
@@ -2444,6 +2514,428 @@
             : null;
     }
 
+    function cloneSplitTrackWeights(weights) {
+        return Array.isArray(weights)
+            ? weights.map(weight => Math.max(0.01, Number(weight) || 1))
+            : null;
+    }
+
+    function clearResizeHandles() {
+        const overlay = document.getElementById('terminalResizeOverlay');
+        if (overlay) {
+            overlay.innerHTML = '';
+        }
+    }
+
+    function clearActiveGridResize() {
+        if (activeGridResize?.fitFrame) {
+            cancelAnimationFrame(activeGridResize.fitFrame);
+        }
+        document.querySelectorAll('.terminal-resize-handle.active')
+            .forEach(handle => handle.classList.remove('active'));
+        document.body.classList.remove('terminal-grid-resizing');
+        document.body.style.cursor = '';
+        activeGridResize = null;
+    }
+
+    function normalizeSplitTrackWeights(weights, targetLength) {
+        const normalized = Array.from({ length: targetLength }, (_, index) => {
+            const value = Array.isArray(weights) ? Number(weights[index]) : 1;
+            return Number.isFinite(value) && value > 0 ? value : 1;
+        });
+        return normalized.length ? normalized : [1];
+    }
+
+    function initializeSplitTrackWeights(columnCount, rowCount) {
+        splitColumnWeights = normalizeSplitTrackWeights(splitColumnWeights, columnCount);
+        splitRowWeights = normalizeSplitTrackWeights(splitRowWeights, rowCount);
+    }
+
+    function applySplitTrackTemplates(grid) {
+        if (!grid) {
+            return;
+        }
+        if (Array.isArray(splitColumnWeights) && splitColumnWeights.length > 0) {
+            grid.style.gridTemplateColumns = splitColumnWeights.map(weight => `${Math.max(0.01, weight)}fr`).join(' ');
+        } else {
+            grid.style.gridTemplateColumns = '';
+        }
+        if (Array.isArray(splitRowWeights) && splitRowWeights.length > 0) {
+            grid.style.gridTemplateRows = splitRowWeights.map(weight => `${Math.max(0.01, weight)}fr`).join(' ');
+        } else {
+            grid.style.gridTemplateRows = '';
+        }
+    }
+
+    function getSplitGridSize(rects = splitSlotRects) {
+        if (!Array.isArray(rects) || rects.length === 0) {
+            return { columns: 1, rows: 1 };
+        }
+        return {
+            columns: Math.max(1, ...rects.map(rect => rect.x + rect.w - 1)),
+            rows: Math.max(1, ...rects.map(rect => rect.y + rect.h - 1)),
+        };
+    }
+
+    function getHandleSlotRects(grid) {
+        if (!grid || grid.children.length <= 1) {
+            return [];
+        }
+        if (Array.isArray(splitSlotRects) && splitSlotRects.length === grid.children.length) {
+            return splitSlotRects;
+        }
+        return fixedLayoutSlotRects(grid.children.length, grid.className || '');
+    }
+
+    function getResizableGridMetrics(grid, columnWeights = splitColumnWeights, rowWeights = splitRowWeights) {
+        if (!grid || !Array.isArray(columnWeights) || !Array.isArray(rowWeights)) {
+            return null;
+        }
+        const bounds = grid.getBoundingClientRect();
+        const style = window.getComputedStyle(grid);
+        const paddingLeft = parseFloat(style.paddingLeft) || 0;
+        const paddingRight = parseFloat(style.paddingRight) || 0;
+        const paddingTop = parseFloat(style.paddingTop) || 0;
+        const paddingBottom = parseFloat(style.paddingBottom) || 0;
+        const columnGap = parseFloat(style.columnGap || style.gap) || 0;
+        const rowGap = parseFloat(style.rowGap || style.gap) || 0;
+        const gridContentWidth = Math.max(0, bounds.width - paddingLeft - paddingRight);
+        const gridContentHeight = Math.max(0, bounds.height - paddingTop - paddingBottom);
+        const columnTrackSpace = Math.max(0, gridContentWidth - (columnWeights.length - 1) * columnGap);
+        const rowTrackSpace = Math.max(0, gridContentHeight - (rowWeights.length - 1) * rowGap);
+        const columnTotal = columnWeights.reduce((sum, weight) => sum + Math.max(0.01, weight), 0) || 1;
+        const rowTotal = rowWeights.reduce((sum, weight) => sum + Math.max(0.01, weight), 0) || 1;
+
+        return {
+            bounds,
+            paddingLeft,
+            paddingTop,
+            columnGap,
+            rowGap,
+            gridContentWidth,
+            gridContentHeight,
+            columnTrackSpace,
+            rowTrackSpace,
+            columnSizes: columnWeights.map(weight => columnTrackSpace * (Math.max(0.01, weight) / columnTotal)),
+            rowSizes: rowWeights.map(weight => rowTrackSpace * (Math.max(0.01, weight) / rowTotal)),
+        };
+    }
+
+    function sumTrackSpan(sizes, start, span, gap) {
+        const trackTotal = sizes.slice(start, start + span).reduce((sum, value) => sum + value, 0);
+        return trackTotal + Math.max(0, span - 1) * gap;
+    }
+
+    function getPaneCandidateSurface(rect, columnWeights, rowWeights, metrics) {
+        return {
+            width: sumTrackSpan(metrics.columnSizes, rect.x - 1, rect.w, metrics.columnGap),
+            height: sumTrackSpan(metrics.rowSizes, rect.y - 1, rect.h, metrics.rowGap),
+        };
+    }
+
+    function validateResizeCandidate(axis, candidateWeights) {
+        const grid = document.getElementById('terminalsGrid');
+        const rects = splitSlotRects;
+        if (!grid || !Array.isArray(rects) || rects.length !== grid.children.length) {
+            return false;
+        }
+
+        const columnWeights = axis === 'vertical' ? candidateWeights : splitColumnWeights;
+        const rowWeights = axis === 'horizontal' ? candidateWeights : splitRowWeights;
+        const metrics = getResizableGridMetrics(grid, columnWeights, rowWeights);
+        if (!metrics || metrics.gridContentWidth <= 0 || metrics.gridContentHeight <= 0) {
+            return false;
+        }
+
+        const minimumSurface = metrics.columnTrackSpace * metrics.rowTrackSpace * MIN_RESIZE_SURFACE_RATIO;
+        return rects.every((rect, visualIndex) => {
+            const surface = getPaneCandidateSurface(rect, columnWeights, rowWeights, metrics);
+            if (surface.width * surface.height < minimumSurface) {
+                return false;
+            }
+
+            const card = grid.children[visualIndex];
+            const slotIndex = Number(card?.dataset?.slot);
+            const terminal = Number.isInteger(slotIndex) ? terminals[slotIndex] : null;
+            if (isExplorerPaneInstance(terminal) || isExplorerSession(terminal?._session)) {
+                return true;
+            }
+
+            const headerHeight = card?.querySelector('.terminal-header')?.getBoundingClientRect()?.height || 34;
+            const term = terminal?.term;
+            const cell = term?._core?._renderService?.dimensions?.css?.cell || {};
+            const cellWidth = Number(cell.width || 8);
+            const cellHeight = Number(cell.height || 17);
+            const availableWidth = Math.max(0, surface.width - 2);
+            const availableHeight = Math.max(0, surface.height - headerHeight - 2);
+            return Math.floor(availableWidth / cellWidth) >= MIN_SPLIT_COLS
+                && Math.floor(availableHeight / cellHeight) >= MIN_SPLIT_ROWS;
+        });
+    }
+
+    function hasSharedGridEdge(rects, axis, lineIndex) {
+        const before = rects.filter(rect => (
+            axis === 'vertical'
+                ? rect.x + rect.w - 1 === lineIndex
+                : rect.y + rect.h - 1 === lineIndex
+        ));
+        const after = rects.filter(rect => (
+            axis === 'vertical'
+                ? rect.x === lineIndex + 1
+                : rect.y === lineIndex + 1
+        ));
+        return before.some(left => after.some(right => {
+            if (axis === 'vertical') {
+                return Math.max(left.y, right.y) < Math.min(left.y + left.h, right.y + right.h);
+            }
+            return Math.max(left.x, right.x) < Math.min(left.x + left.w, right.x + right.w);
+        }));
+    }
+
+    function lineOffset(sizes, gap, lineIndex) {
+        const trackTotal = sizes.slice(0, lineIndex).reduce((sum, value) => sum + value, 0);
+        return trackTotal + Math.max(0, lineIndex - 1) * gap + (gap / 2);
+    }
+
+    function affectedResizeIndices(axis, lineIndex) {
+        const grid = document.getElementById('terminalsGrid');
+        if (!grid || !Array.isArray(splitSlotRects)) {
+            return terminals.map((_, index) => index);
+        }
+        return Array.from(grid.children)
+            .map((card, visualIndex) => {
+                const rect = splitSlotRects[visualIndex];
+                const slotIndex = Number(card.dataset.slot);
+                if (!rect || !Number.isInteger(slotIndex)) {
+                    return -1;
+                }
+                const containsLineNeighbor = axis === 'vertical'
+                    ? rect.x <= lineIndex + 1 && rect.x + rect.w - 1 >= lineIndex
+                    : rect.y <= lineIndex + 1 && rect.y + rect.h - 1 >= lineIndex;
+                return containsLineNeighbor ? slotIndex : -1;
+            })
+            .filter(index => index >= 0);
+    }
+
+    function getResizeTrackGroups(axis, lineIndex) {
+        if (!Array.isArray(splitSlotRects)) {
+            return null;
+        }
+        const beforeRects = splitSlotRects.filter(rect => (
+            axis === 'vertical'
+                ? rect.x + rect.w - 1 === lineIndex
+                : rect.y + rect.h - 1 === lineIndex
+        ));
+        const afterRects = splitSlotRects.filter(rect => (
+            axis === 'vertical'
+                ? rect.x === lineIndex + 1
+                : rect.y === lineIndex + 1
+        ));
+        if (beforeRects.length === 0 || afterRects.length === 0) {
+            return null;
+        }
+
+        const beforeStart = axis === 'vertical'
+            ? Math.min(...beforeRects.map(rect => rect.x))
+            : Math.min(...beforeRects.map(rect => rect.y));
+        const afterEnd = axis === 'vertical'
+            ? Math.max(...afterRects.map(rect => rect.x + rect.w - 1))
+            : Math.max(...afterRects.map(rect => rect.y + rect.h - 1));
+        const makeRange = (start, end) => Array.from(
+            { length: Math.max(0, end - start + 1) },
+            (_, offset) => start - 1 + offset
+        );
+        return {
+            before: makeRange(beforeStart, lineIndex),
+            after: makeRange(lineIndex + 1, afterEnd),
+        };
+    }
+
+    function ensureResizableSplitLayout() {
+        const grid = document.getElementById('terminalsGrid');
+        if (!grid || grid.children.length <= 1 || window.innerWidth <= 700) {
+            return false;
+        }
+        ensureSplitSlotRects();
+        const size = getSplitGridSize(splitSlotRects);
+        initializeSplitTrackWeights(size.columns, size.rows);
+        return applySplitSlotGeometry({ fit: false, renderHandles: false });
+    }
+
+    function renderResizeHandles() {
+        const overlay = document.getElementById('terminalResizeOverlay');
+        const grid = document.getElementById('terminalsGrid');
+        if (!overlay) {
+            return;
+        }
+        if (activeGridResize) {
+            return;
+        }
+        overlay.innerHTML = '';
+        if (!grid || grid.children.length <= 1 || window.innerWidth <= 700) {
+            return;
+        }
+
+        const rects = getHandleSlotRects(grid);
+        const size = getSplitGridSize(rects);
+        const columnWeights = normalizeSplitTrackWeights(splitColumnWeights, size.columns);
+        const rowWeights = normalizeSplitTrackWeights(splitRowWeights, size.rows);
+        const metrics = getResizableGridMetrics(grid, columnWeights, rowWeights);
+        if (!metrics || metrics.gridContentWidth <= 0 || metrics.gridContentHeight <= 0) {
+            return;
+        }
+
+        for (let lineIndex = 1; lineIndex < size.columns; lineIndex++) {
+            if (!hasSharedGridEdge(rects, 'vertical', lineIndex)) {
+                continue;
+            }
+            const handle = document.createElement('button');
+            handle.type = 'button';
+            handle.className = 'terminal-resize-handle vertical';
+            handle.dataset.resizeAxis = 'vertical';
+            handle.dataset.resizeLine = String(lineIndex);
+            handle.setAttribute('aria-label', 'Resize terminal columns');
+            handle.style.left = `${metrics.bounds.left + metrics.paddingLeft + lineOffset(metrics.columnSizes, metrics.columnGap, lineIndex)}px`;
+            handle.style.top = `${metrics.bounds.top + metrics.paddingTop}px`;
+            handle.style.height = `${metrics.gridContentHeight}px`;
+            handle.addEventListener('pointerdown', startGridResize);
+            overlay.appendChild(handle);
+        }
+
+        for (let lineIndex = 1; lineIndex < size.rows; lineIndex++) {
+            if (!hasSharedGridEdge(rects, 'horizontal', lineIndex)) {
+                continue;
+            }
+            const handle = document.createElement('button');
+            handle.type = 'button';
+            handle.className = 'terminal-resize-handle horizontal';
+            handle.dataset.resizeAxis = 'horizontal';
+            handle.dataset.resizeLine = String(lineIndex);
+            handle.setAttribute('aria-label', 'Resize terminal rows');
+            handle.style.left = `${metrics.bounds.left + metrics.paddingLeft}px`;
+            handle.style.top = `${metrics.bounds.top + metrics.paddingTop + lineOffset(metrics.rowSizes, metrics.rowGap, lineIndex)}px`;
+            handle.style.width = `${metrics.gridContentWidth}px`;
+            handle.addEventListener('pointerdown', startGridResize);
+            overlay.appendChild(handle);
+        }
+    }
+
+    function startGridResize(event) {
+        const handle = event.currentTarget;
+        const axis = handle?.dataset?.resizeAxis;
+        const lineIndex = Number(handle?.dataset?.resizeLine);
+        if (!axis || !Number.isInteger(lineIndex) || !ensureResizableSplitLayout()) {
+            return;
+        }
+
+        const grid = document.getElementById('terminalsGrid');
+        const metrics = getResizableGridMetrics(grid, splitColumnWeights, splitRowWeights);
+        if (!metrics) {
+            return;
+        }
+        const trackGroups = getResizeTrackGroups(axis, lineIndex);
+        if (!trackGroups) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        handle.setPointerCapture?.(event.pointerId);
+        handle.classList.add('active');
+        document.body.classList.add('terminal-grid-resizing');
+        document.body.style.cursor = axis === 'vertical' ? 'col-resize' : 'row-resize';
+
+        activeGridResize = {
+            axis,
+            lineIndex,
+            pointerId: event.pointerId,
+            startClientX: event.clientX,
+            startClientY: event.clientY,
+            startColumnWeights: cloneSplitTrackWeights(splitColumnWeights),
+            startRowWeights: cloneSplitTrackWeights(splitRowWeights),
+            startColumnSizes: metrics.columnSizes.slice(),
+            startRowSizes: metrics.rowSizes.slice(),
+            trackGroups,
+            affectedIndices: affectedResizeIndices(axis, lineIndex),
+            handle,
+            fitFrame: null,
+        };
+    }
+
+    function scheduleActiveGridResizeFits() {
+        if (!activeGridResize || activeGridResize.fitFrame) {
+            return;
+        }
+        activeGridResize.fitFrame = window.requestAnimationFrame(() => {
+            const resize = activeGridResize;
+            if (!resize) {
+                return;
+            }
+            resize.fitFrame = null;
+            resize.affectedIndices.forEach(index => scheduleFit(index));
+        });
+    }
+
+    function updateGridResize(event) {
+        const resize = activeGridResize;
+        if (!resize || event.pointerId !== resize.pointerId) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+
+        const isVertical = resize.axis === 'vertical';
+        const delta = isVertical
+            ? event.clientX - resize.startClientX
+            : event.clientY - resize.startClientY;
+        const sizes = isVertical ? resize.startColumnSizes : resize.startRowSizes;
+        const weights = isVertical ? resize.startColumnWeights : resize.startRowWeights;
+        const beforeIndexes = resize.trackGroups.before;
+        const afterIndexes = resize.trackGroups.after;
+        const beforeStartSize = beforeIndexes.reduce((sum, index) => sum + (sizes[index] || 0), 0) || 1;
+        const afterStartSize = afterIndexes.reduce((sum, index) => sum + (sizes[index] || 0), 0) || 1;
+        const beforeSize = Math.max(1, beforeStartSize + delta);
+        const afterSize = Math.max(1, afterStartSize - delta);
+        const beforeScale = beforeSize / beforeStartSize;
+        const afterScale = afterSize / afterStartSize;
+        const candidateWeights = weights.slice();
+        beforeIndexes.forEach(index => {
+            candidateWeights[index] = Math.max(0.01, weights[index] * beforeScale);
+        });
+        afterIndexes.forEach(index => {
+            candidateWeights[index] = Math.max(0.01, weights[index] * afterScale);
+        });
+
+        if (!validateResizeCandidate(resize.axis, candidateWeights)) {
+            return;
+        }
+
+        if (isVertical) {
+            splitColumnWeights = candidateWeights;
+            resize.handle.style.left = `${event.clientX}px`;
+        } else {
+            splitRowWeights = candidateWeights;
+            resize.handle.style.top = `${event.clientY}px`;
+        }
+        applySplitSlotGeometry({ fit: false, renderHandles: false });
+        scheduleActiveGridResizeFits();
+    }
+
+    function finishGridResize(event) {
+        const resize = activeGridResize;
+        if (!resize || event.pointerId !== resize.pointerId) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+
+        const affectedIndices = resize.affectedIndices.slice();
+        resize.handle?.releasePointerCapture?.(event.pointerId);
+        clearActiveGridResize();
+        applySplitSlotGeometry({ fit: true });
+        redrawAttachedTerminals(affectedIndices, { forceResize: true });
+    }
+
     function cloneSplitRect(rect) {
         return { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
     }
@@ -2605,13 +3097,19 @@
     }
 
     function clearSplitSlotGeometry() {
+        clearActiveGridResize();
+        clearResizeHandles();
         splitSlotRects = null;
+        splitColumnWeights = null;
+        splitRowWeights = null;
         const grid = document.getElementById('terminalsGrid');
         if (!grid) {
             return;
         }
         grid.style.removeProperty('--split-grid-columns');
         grid.style.removeProperty('--split-grid-rows');
+        grid.style.gridTemplateColumns = '';
+        grid.style.gridTemplateRows = '';
         Array.from(grid.children).forEach(card => {
             card.style.gridColumn = '';
             card.style.gridRow = '';
@@ -2629,7 +3127,7 @@
         return splitSlotRects;
     }
 
-    function applySplitSlotGeometry({ fit = true } = {}) {
+    function applySplitSlotGeometry({ fit = true, renderHandles = true } = {}) {
         const grid = document.getElementById('terminalsGrid');
         if (!grid || !Array.isArray(splitSlotRects) || splitSlotRects.length !== grid.children.length) {
             return false;
@@ -2642,6 +3140,8 @@
         grid.style.removeProperty('--grid-rows');
         grid.style.setProperty('--split-grid-columns', String(gridColumns));
         grid.style.setProperty('--split-grid-rows', String(gridRows));
+        initializeSplitTrackWeights(gridColumns, gridRows);
+        applySplitTrackTemplates(grid);
 
         Array.from(grid.children).forEach((card, visualIndex) => {
             const rect = splitSlotRects[visualIndex];
@@ -2655,6 +3155,9 @@
             }
         });
         updateAllSplitButtonStates();
+        if (renderHandles) {
+            renderResizeHandles();
+        }
         return true;
     }
 
@@ -3379,6 +3882,10 @@
         header.classList.add('draggable');
 
         header.addEventListener('dragstart', event => {
+            if (activeGridResize) {
+                event.preventDefault();
+                return;
+            }
             draggedCard = card;
             card.classList.add('dragging');
             if (event.dataTransfer) {
@@ -3766,6 +4273,7 @@
         visibleGroupId = activeGroupId;
         updateSessionChrome(count, activeGroupId);
         updateAllSplitButtonStates();
+        renderResizeHandles();
 
     }
 
@@ -5757,8 +6265,14 @@
         document.getElementById('terminalsGrid').style.removeProperty('--grid-rows');
         document.getElementById('terminalsGrid').style.removeProperty('--split-grid-columns');
         document.getElementById('terminalsGrid').style.removeProperty('--split-grid-rows');
+        document.getElementById('terminalsGrid').style.gridTemplateColumns = '';
+        document.getElementById('terminalsGrid').style.gridTemplateRows = '';
         splitSlotRects = null;
+        splitColumnWeights = null;
+        splitRowWeights = null;
         pendingSplitRestore = null;
+        clearActiveGridResize();
+        clearResizeHandles();
         document.getElementById('emptyState').classList.add('visible');
         document.getElementById('sessionLabel').textContent = sessionGroups.length ? 'No terminals in this session' : 'No sessions';
         document.title = 'GridVibe — Terminals';
@@ -5925,7 +6439,11 @@
         terminals.forEach((terminal, index) => {
             if (terminal._attached) scheduleFit(index);
         });
+        renderResizeHandles();
     });
+    window.addEventListener('pointermove', updateGridResize);
+    window.addEventListener('pointerup', finishGridResize);
+    window.addEventListener('pointercancel', finishGridResize);
 
     /* ─────────────────────────────────────────────
        Helpers

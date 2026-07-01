@@ -46,6 +46,11 @@ Per-terminal controls:
 - `🧹` clears the terminal display and purges its replay buffer.
 - `🎤` starts or stops voice input for that terminal when voice input is enabled.
 
+Pane sizing:
+
+- Drag the visible divider between terminal panes to resize shared rows or columns. GridVibe refits xterm panes and resizes the backend PTY after the drag.
+- Pane resizing keeps every visible pane above the minimum usable surface and is disabled on narrow mobile-width layouts.
+
 ### File Explorer Panes
 
 In SSH and Local Repo modes, each pane can start as `Initial Command`, `Agent`, or `File Explorer`.
@@ -135,7 +140,7 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 - Per-pane startup modes for normal commands, agent CLIs, and file explorer panes
 - Saved launcher presets with encrypted SSH passwords
 - Session groups with numbered closable tabs, `Alt+1` through `Alt+9` tab switching, drag-to-reorder persistence, collapsible top bar, and max surface mode
-- xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and dynamic split-pane support
+- xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and drag-resizable dynamic split-pane support
 - Local and SSH read-only file explorer panes with directory navigation, text/Markdown preview, syntax highlighting, and client-side in-file search
 - Optional native desktop window through `pywebview`
 - Optional offline voice input through Vosk or faster-whisper

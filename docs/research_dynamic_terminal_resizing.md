@@ -65,6 +65,22 @@ This keeps the implementation local to `templates/terminals.html`, avoids changi
 
 For v1, keep the resize geometry session-window local, like live split geometry today. Do not persist custom pane sizes into saved sessions until the interaction has been proven stable.
 
+## Implementation Status
+
+Implemented the recommended safest/simplest approach in `templates/terminals.html`:
+
+- Added session-window-local `splitColumnWeights`, `splitRowWeights`, and `activeGridResize` state.
+- Added a sibling `#terminalResizeOverlay` with vertical and horizontal `.terminal-resize-handle` controls so pane elements remain direct `#terminalsGrid` children.
+- Converts fixed launch layouts to `layout-split-local` on the first divider drag and applies weighted CSS grid tracks with inline `gridTemplateColumns` / `gridTemplateRows`.
+- Resizes the full track span on each side of a divider, which keeps doubled fixed-layout tracks such as three-pane horizontal, vertical, and split layouts responsive.
+- Validates drag candidates against both minimum rules: every visible pane must keep at least one eighth of the grid content surface, and terminal panes must retain at least 8 columns by 8 rows.
+- Reuses existing `scheduleFit()`, `fitTerminal()`, `emitTerminalResize()`, and final `redrawAttachedTerminals(..., { forceResize: true })` behavior instead of changing backend resize handling.
+- Caches and restores local resize weights with cached session group views, but does not persist custom pane sizes into saved sessions.
+- Clears resize state, inline grid templates, and handles during layout teardown and empty-state reset.
+- Keeps handles disabled below the existing `700px` narrow-screen breakpoint.
+
+Added HTML-level regression coverage in `tests/test_api.py` for resize handle CSS/state, minimum validation, drag refit/final resize behavior, and cached group resize-weight preservation.
+
 ## Proposed Frontend Design
 
 1. Add resize state:

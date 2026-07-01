@@ -3555,6 +3555,48 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
 
+    def test_terminals_page_exposes_grid_resize_handles(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        self.assertIn('id="terminalResizeOverlay"', html)
+        self.assertIn(".terminal-resize-handle", html)
+        self.assertIn("let splitColumnWeights = null;", html)
+        self.assertIn("let splitRowWeights = null;", html)
+        self.assertIn("let activeGridResize = null;", html)
+        self.assertIn("function ensureResizableSplitLayout()", html)
+        self.assertIn("function renderResizeHandles()", html)
+
+    def test_terminals_page_resize_validation_enforces_minimums(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        self.assertIn("const MIN_RESIZE_SURFACE_RATIO = 1 / 8;", html)
+        self.assertIn(
+            "const minimumSurface = metrics.columnTrackSpace * metrics.rowTrackSpace * MIN_RESIZE_SURFACE_RATIO;",
+            html,
+        )
+        self.assertIn("surface.width * surface.height < minimumSurface", html)
+        self.assertIn("Math.floor(availableWidth / cellWidth) >= MIN_SPLIT_COLS", html)
+        self.assertIn("Math.floor(availableHeight / cellHeight) >= MIN_SPLIT_ROWS", html)
+
+    def test_terminals_page_resize_drag_refits_and_forces_final_resize(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        self.assertIn("window.addEventListener('pointermove', updateGridResize);", html)
+        self.assertIn("window.addEventListener('pointerup', finishGridResize);", html)
+        self.assertIn("function getResizeTrackGroups(axis, lineIndex)", html)
+        self.assertIn("const beforeIndexes = resize.trackGroups.before;", html)
+        self.assertIn("resize.affectedIndices.forEach(index => scheduleFit(index));", html)
+        self.assertIn("redrawAttachedTerminals(affectedIndices, { forceResize: true });", html)
+        self.assertIn("if (activeGridResize) {\n                event.preventDefault();", html)
+
+    def test_terminals_page_cached_group_views_preserve_resize_weights(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        self.assertIn("splitColumnWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitColumnWeights) : null", html)
+        self.assertIn("splitRowWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitRowWeights) : null", html)
+        self.assertIn("splitColumnWeights = cached.className === 'layout-split-local'", html)
+        self.assertIn("splitRowWeights = cached.className === 'layout-split-local'", html)
+
 
 # ---------------------------------------------------------------------------
 #  Phase 1-3 regression tests (code_review_2026_03_31.md)
