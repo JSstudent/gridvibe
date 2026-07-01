@@ -564,6 +564,23 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("border-color: #00c46e;", html)
         self.assertIn("settingsButton.textContent = '+ New Session';", html)
 
+    def test_terminals_page_numbers_session_tabs_and_exposes_safe_shortcut(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn(".session-tab-number {", html)
+        self.assertIn("sessionGroups.forEach((group, index) => {", html)
+        self.assertIn("const tabNumber = index + 1;", html)
+        self.assertIn("number.className = 'session-tab-number';", html)
+        self.assertIn("tabButton.appendChild(number);", html)
+        self.assertIn("function getSessionGroupByNumber(number)", html)
+        self.assertIn("return sessionGroups[number - 1] || null;", html)
+        self.assertIn("function isEditableShortcutTarget(target)", html)
+        self.assertIn("/^[1-9]$/.test(event.key)", html)
+        self.assertIn("isEditableShortcutTarget(event.target)", html)
+        self.assertIn("switchGroup(targetGroup.group_id);", html)
+
     def test_terminals_page_uses_icon_only_green_fullscreen_button(self):
         response = self.client.get("/terminals")
 

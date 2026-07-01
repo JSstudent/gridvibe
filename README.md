@@ -32,7 +32,8 @@ Top bar controls:
 
 Session bar controls:
 
-- Session tabs show each active session group. Drag tabs to reorder them; GridVibe persists the order for the running app state.
+- Session tabs show each active session group with a positional number. Drag tabs to reorder them; GridVibe persists the order for the running app state.
+- `Alt+1` through `Alt+9` switch to the matching numbered session tab when focus is not inside an editable field.
 - Each session tab has a close button for closing that session group.
 - The chevron next to the session tabs hides or shows the top bar. GridVibe remembers this top-bar visibility preference in the browser.
 
@@ -133,7 +134,7 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 - SSH, WSL, PowerShell, cmd, and local repository modes
 - Per-pane startup modes for normal commands, agent CLIs, and file explorer panes
 - Saved launcher presets with encrypted SSH passwords
-- Session groups with closable tabs, drag-to-reorder persistence, collapsible top bar, and max surface mode
+- Session groups with numbered closable tabs, `Alt+1` through `Alt+9` tab switching, drag-to-reorder persistence, collapsible top bar, and max surface mode
 - xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and dynamic split-pane support
 - Local and SSH read-only file explorer panes with directory navigation, text/Markdown preview, syntax highlighting, and client-side in-file search
 - Optional native desktop window through `pywebview`

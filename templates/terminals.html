@@ -297,6 +297,30 @@
             text-overflow: ellipsis;
         }
 
+        .session-tab-number {
+            width: 1.35rem;
+            height: 1.35rem;
+            border-radius: 4px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 auto;
+            background: rgba(148, 163, 184, 0.16);
+            color: var(--t-text-muted);
+            font-size: .72rem;
+            line-height: 1;
+        }
+
+        .session-tab.active .session-tab-number {
+            background: var(--tab-color-bg, rgba(0, 217, 255, 0.18));
+            color: var(--tab-color, var(--t-accent));
+        }
+
+        [data-theme="light"] .session-tab-number {
+            background: rgba(15, 23, 42, 0.08);
+            color: #475569;
+        }
+
         .session-tab-main {
             border: 0;
             padding: 0;
@@ -305,6 +329,9 @@
             cursor: pointer;
             font: inherit;
             min-width: 0;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
         }
 
         .session-tab-close {
@@ -2135,7 +2162,8 @@
         container.innerHTML = '';
         container.appendChild(settingsButton);
 
-        sessionGroups.forEach(group => {
+        sessionGroups.forEach((group, index) => {
+            const tabNumber = index + 1;
             const button = document.createElement('div');
             button.className = `session-tab${group.group_id === activeGroupId ? ' active' : ''} draggable`;
             button.dataset.groupId = group.group_id;
@@ -2144,7 +2172,15 @@
             const tabButton = document.createElement('button');
             tabButton.className = 'session-tab-main';
             tabButton.type = 'button';
-            tabButton.setAttribute('aria-label', `${group.name || group.group_id} session`);
+            tabButton.title = tabNumber <= 9
+                ? `Alt+${tabNumber}: ${group.name || group.group_id}`
+                : `${tabNumber}. ${group.name || group.group_id}`;
+            tabButton.setAttribute(
+                'aria-label',
+                tabNumber <= 9
+                    ? `Alt+${tabNumber}: ${group.name || group.group_id} session`
+                    : `${tabNumber}. ${group.name || group.group_id} session`
+            );
             tabButton.addEventListener('click', event => {
                 if (Date.now() < suppressSessionTabClickUntil) {
                     event.preventDefault();
@@ -2153,9 +2189,15 @@
                 switchGroup(group.group_id);
             });
 
+            const number = document.createElement('span');
+            number.className = 'session-tab-number';
+            number.textContent = String(tabNumber);
+            number.setAttribute('aria-hidden', 'true');
+
             const label = document.createElement('span');
             label.className = 'session-tab-label';
             label.textContent = group.name || group.group_id;
+            tabButton.appendChild(number);
             tabButton.appendChild(label);
             button.appendChild(tabButton);
 
@@ -2203,6 +2245,10 @@
 
     function getSessionGroupOrder() {
         return sessionGroups.map(group => group.group_id);
+    }
+
+    function getSessionGroupByNumber(number) {
+        return sessionGroups[number - 1] || null;
     }
 
     function hasSameSessionGroupOrder(left, right) {
@@ -5243,6 +5289,31 @@
         }
         event.preventDefault();
         event.stopPropagation();
+    });
+
+    function isEditableShortcutTarget(target) {
+        if (!(target instanceof Element)) {
+            return false;
+        }
+        return Boolean(target.closest('input, textarea, select, .voice-ptt-keybind'))
+            || target.isContentEditable;
+    }
+
+    document.addEventListener('keydown', event => {
+        if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+            return;
+        }
+        if (!/^[1-9]$/.test(event.key) || isEditableShortcutTarget(event.target)) {
+            return;
+        }
+
+        const targetGroup = getSessionGroupByNumber(Number(event.key));
+        if (!targetGroup || targetGroup.group_id === activeGroupId) {
+            return;
+        }
+
+        event.preventDefault();
+        switchGroup(targetGroup.group_id);
     });
 
     document.addEventListener('keydown', async event => {
