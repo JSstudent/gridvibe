@@ -8,6 +8,7 @@ All notable changes to GridVibe will be documented in this file.
 - Enabled read-only File Explorer panes for SSH sessions using SFTP with root-bound remote path validation and terminal/explorer mode switching.
 - Added numbered session tabs with `Alt+1` through `Alt+9` switching based on the current tab order, while ignoring editable fields.
 - Added drag-resizable terminal pane dividers with xterm refits, backend PTY resize propagation, session-local resize weight caching, and minimum pane-size guards.
+- Added per-pane `-`/`+` font-size zoom controls to the read-only file editor view, covering source and Markdown preview panels.
 
 ## 1.1.0 - 2026-06-28
 

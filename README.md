@@ -63,7 +63,7 @@ Explorer panes support:
 - Switching the pane into a regular terminal opened at the current explorer directory.
 - Manual refresh from the pane header without continuous auto-refresh flicker.
 - Folder/file icons, size and modified-time metadata, and per-pane light/dark explorer theme toggling.
-- Click-to-open text files in a read-only editor-style viewer with wrapped long lines.
+- Click-to-open text files in a read-only editor-style viewer with wrapped long lines and per-pane `-`/`+` font-size zoom controls.
 - Client-side find inside the open file view, including `Ctrl+F`/`Cmd+F` focus, match counts, previous/next controls, `Enter`/`Shift+Enter` navigation, and clear.
 - Markdown files with a source tab and sanitized rendered preview when Markdown rendering dependencies are installed.
 - Lightweight syntax coloring for common source files such as Python, C/C++, Go, JavaScript/TypeScript, Java, Rust, shell, PowerShell, HTML, CSS, JSON, YAML, TOML, SQL, and related formats.
@@ -141,7 +141,7 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 - Saved launcher presets with encrypted SSH passwords
 - Session groups with numbered closable tabs, `Alt+1` through `Alt+9` tab switching, drag-to-reorder persistence, collapsible top bar, and max surface mode
 - xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and drag-resizable dynamic split-pane support
-- Local and SSH read-only file explorer panes with directory navigation, text/Markdown preview, syntax highlighting, and client-side in-file search
+- Local and SSH read-only file explorer panes with directory navigation, text/Markdown preview, syntax highlighting, per-pane editor font zoom, and client-side in-file search
 - Optional native desktop window through `pywebview`
 - Optional offline voice input through Vosk or faster-whisper
 - Theme support for system, light, and dark modes

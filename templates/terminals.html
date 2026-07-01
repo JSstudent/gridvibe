@@ -1079,6 +1079,13 @@
             flex: 0 1 260px;
         }
 
+        .explorer-editor-zoom {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            flex: 0 0 auto;
+        }
+
         .explorer-search-input {
             min-width: 0;
             width: 100%;
@@ -1124,6 +1131,33 @@
             cursor: default;
         }
 
+        .explorer-zoom-btn {
+            width: 28px;
+            height: 28px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            cursor: pointer;
+            font-size: .82rem;
+            font-weight: 700;
+            line-height: 1;
+            flex: 0 0 auto;
+        }
+
+        .explorer-zoom-btn:disabled {
+            opacity: .45;
+            cursor: default;
+        }
+
+        .explorer-zoom-value {
+            min-width: 38px;
+            color: var(--explorer-muted);
+            font-size: .7rem;
+            text-align: center;
+            white-space: nowrap;
+        }
+
         .explorer-editor-name {
             overflow: hidden;
             text-overflow: ellipsis;
@@ -1166,7 +1200,7 @@
             color: var(--explorer-text);
             background: var(--explorer-bg);
             font-family: Consolas, Monaco, 'Courier New', monospace;
-            font-size: .78rem;
+            font-size: var(--explorer-editor-font-size, .78rem);
             line-height: 1.45;
             white-space: pre-wrap;
             overflow-wrap: anywhere;
@@ -1236,7 +1270,7 @@
             padding: 14px 18px 28px;
             color: var(--explorer-text);
             background: var(--explorer-bg);
-            font-size: .86rem;
+            font-size: var(--explorer-editor-font-size, .86rem);
             line-height: 1.55;
         }
 
@@ -6585,6 +6619,10 @@
 
     const EXPLORER_C_LIKE_LANGUAGES = new Set(['c', 'cpp', 'csharp', 'css', 'go', 'java', 'javascript', 'kotlin', 'php', 'rust', 'swift', 'typescript']);
     const EXPLORER_HASH_COMMENT_LANGUAGES = new Set(['python', 'ruby', 'shell', 'powershell', 'yaml', 'toml']);
+    const EXPLORER_EDITOR_FONT_MIN = 10;
+    const EXPLORER_EDITOR_FONT_MAX = 24;
+    const EXPLORER_EDITOR_FONT_DEFAULT = 13;
+    const EXPLORER_EDITOR_FONT_STEP = 1;
 
     function explorerPathExtension(path) {
         const name = String(path || '').toLowerCase();
@@ -6834,6 +6872,85 @@
             pane._explorerSearch = { query: '', activeIndex: 0, matchCount: 0 };
         }
         return pane._explorerSearch;
+    }
+
+    function clampExplorerEditorFontSize(value) {
+        const fontSize = Number(value);
+        if (!Number.isFinite(fontSize)) {
+            return EXPLORER_EDITOR_FONT_DEFAULT;
+        }
+        return Math.min(
+            EXPLORER_EDITOR_FONT_MAX,
+            Math.max(EXPLORER_EDITOR_FONT_MIN, Math.round(fontSize))
+        );
+    }
+
+    function ensureExplorerEditorFontSize(pane) {
+        if (!pane) {
+            return EXPLORER_EDITOR_FONT_DEFAULT;
+        }
+        pane._explorerEditorFontSize = clampExplorerEditorFontSize(
+            pane._explorerEditorFontSize || EXPLORER_EDITOR_FONT_DEFAULT
+        );
+        return pane._explorerEditorFontSize;
+    }
+
+    function applyExplorerEditorFontSize(index) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!pane || !list) {
+            return;
+        }
+
+        const fontSize = ensureExplorerEditorFontSize(pane);
+        list.style.setProperty('--explorer-editor-font-size', `${fontSize}px`);
+
+        const value = list.querySelector(`[data-explorer-zoom-value="${index}"]`);
+        if (value) {
+            value.textContent = `${fontSize}px`;
+        }
+        const decrease = list.querySelector(`[data-explorer-zoom-decrease="${index}"]`);
+        const increase = list.querySelector(`[data-explorer-zoom-increase="${index}"]`);
+        if (decrease) {
+            decrease.disabled = fontSize <= EXPLORER_EDITOR_FONT_MIN;
+        }
+        if (increase) {
+            increase.disabled = fontSize >= EXPLORER_EDITOR_FONT_MAX;
+        }
+    }
+
+    function stepExplorerEditorFontSize(index, delta) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const current = ensureExplorerEditorFontSize(pane);
+        pane._explorerEditorFontSize = clampExplorerEditorFontSize(
+            current + (Number(delta) || 0)
+        );
+        applyExplorerEditorFontSize(index);
+    }
+
+    function wireExplorerEditorZoomControls(index) {
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!list) {
+            return;
+        }
+        const decrease = list.querySelector(`[data-explorer-zoom-decrease="${index}"]`);
+        const increase = list.querySelector(`[data-explorer-zoom-increase="${index}"]`);
+        if (decrease && !decrease.dataset.bound) {
+            decrease.dataset.bound = 'true';
+            decrease.addEventListener('click', () => {
+                stepExplorerEditorFontSize(index, -EXPLORER_EDITOR_FONT_STEP);
+            });
+        }
+        if (increase && !increase.dataset.bound) {
+            increase.dataset.bound = 'true';
+            increase.addEventListener('click', () => {
+                stepExplorerEditorFontSize(index, EXPLORER_EDITOR_FONT_STEP);
+            });
+        }
+        applyExplorerEditorFontSize(index);
     }
 
     function activeExplorerFileView(index) {
@@ -7236,6 +7353,11 @@
                             <button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="false">Preview</button>
                         </div>
                     ` : ''}
+                    <div class="explorer-editor-zoom" aria-label="Editor font size controls">
+                        <button type="button" class="explorer-zoom-btn" data-explorer-zoom-decrease="${index}" title="Decrease font size" aria-label="Decrease editor font size">-</button>
+                        <span class="explorer-zoom-value" data-explorer-zoom-value="${index}"></span>
+                        <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">+</button>
+                    </div>
                     <div class="explorer-editor-search" data-explorer-search="${index}">
                         <input
                             type="search"
@@ -7276,6 +7398,7 @@
                 setExplorerFileView(index, button.dataset.explorerFileView || 'source');
             });
         });
+        wireExplorerEditorZoomControls(index);
         wireExplorerSearchControls(index);
         applyExplorerSearch(index);
         restoreExplorerFileScroll(index, scrollState);
@@ -7311,6 +7434,7 @@
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
         }
+        applyExplorerEditorFontSize(index);
 
         const nameLabel = list.querySelector('.explorer-editor-name');
         if (nameLabel) {

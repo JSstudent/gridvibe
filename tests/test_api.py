@@ -407,6 +407,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("'.go': 'go'", html)
         self.assertIn("'.c': 'c'", html)
 
+    def test_terminals_page_explorer_editor_has_font_zoom_controls(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("--explorer-editor-font-size", html)
+        self.assertIn("const EXPLORER_EDITOR_FONT_MIN = 10;", html)
+        self.assertIn("const EXPLORER_EDITOR_FONT_MAX = 24;", html)
+        self.assertIn("function applyExplorerEditorFontSize(index)", html)
+        self.assertIn("function stepExplorerEditorFontSize(index, delta)", html)
+        self.assertIn("function wireExplorerEditorZoomControls(index)", html)
+        self.assertIn('data-explorer-zoom-decrease="${index}"', html)
+        self.assertIn('data-explorer-zoom-increase="${index}"', html)
+        self.assertIn('data-explorer-zoom-value="${index}"', html)
+        self.assertIn("wireExplorerEditorZoomControls(index);", html)
+
     def test_terminals_page_explorer_file_search_is_client_side_and_safe(self):
         response = self.client.get("/terminals")
 
