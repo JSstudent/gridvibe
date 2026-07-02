@@ -68,8 +68,9 @@ Explorer panes support:
 - Markdown files with a source tab and sanitized rendered preview when Markdown rendering dependencies are installed.
 - Lightweight syntax coloring for common source files such as Python, C/C++, Go, JavaScript/TypeScript, Java, Rust, shell, PowerShell, HTML, CSS, JSON, YAML, TOML, SQL, and related formats.
 - Size-limited previews. Binary files, directories, and paths outside the root are rejected.
+- Local Repo explorers add read-only Git awareness when `git` is available: branch/dirty summary, per-entry status badges, directory dirty markers, and a bounded internal old/new Diff panel with added and removed line highlighting for changed tracked files.
 
-File moving, editing, deleting, upload, and git diff/status views are not part of the current file explorer implementation.
+File moving, editing, deleting, upload, staging, restoring, checkout, commit, pull, and push actions are not part of the current file explorer implementation.
 
 ### Voice and Sound Settings
 
@@ -141,7 +142,7 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 - Saved launcher presets with encrypted SSH passwords
 - Session groups with numbered closable tabs, `Alt+1` through `Alt+9` tab switching, drag-to-reorder persistence, collapsible top bar, and max surface mode
 - xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and drag-resizable dynamic split-pane support
-- Local and SSH read-only file explorer panes with directory navigation, text/Markdown preview, syntax highlighting, per-pane editor font zoom, and client-side in-file search
+- Local and SSH read-only file explorer panes with directory navigation, text/Markdown preview, syntax highlighting, per-pane editor font zoom, client-side in-file search, and read-only Git status/diff awareness for local repositories
 - Optional native desktop window through `pywebview`
 - Optional offline voice input through Vosk or faster-whisper
 - Theme support for system, light, and dark modes

@@ -88,6 +88,8 @@ SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
 AGENT_REGISTRY_PATH = os.path.join(BASE_DIR, "agent_registry.json")
 DEFAULT_SAVED_SESSION_ID = "default-session"
 EXPLORER_FILE_PREVIEW_MAX_BYTES = 1024 * 1024
+EXPLORER_GIT_DIFF_MAX_BYTES = 256 * 1024
+EXPLORER_GIT_DIFF_MAX_LINES = 4000
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
 WINDOWS_DEVICE_ATTRIBUTES_RESPONSE = "\x1b[?1;2c"
 SELF_UPDATE_REPO_DIR = BASE_DIR
@@ -2562,6 +2564,421 @@ def _explorer_entry_payload(root_path: str, entry: os.DirEntry) -> Dict[str, Any
     }
 
 
+def _empty_explorer_git_context(error: Optional[str] = None) -> Dict[str, Any]:
+    """Return a non-fatal empty Git metadata payload for explorer responses."""
+    return {
+        "available": False,
+        "repo_root": None,
+        "branch": None,
+        "head": None,
+        "ahead": None,
+        "behind": None,
+        "dirty": False,
+        "error": error,
+    }
+
+
+def _clean_git_path(path: str) -> str:
+    """Normalize Git path output to slash-separated relative paths."""
+    return str(path or "").strip().replace("\\", "/").strip("/")
+
+
+def _run_git_command(
+    args: List[str],
+    *,
+    cwd: str,
+    timeout: float = 2.0,
+) -> subprocess.CompletedProcess:
+    """Run a read-only Git command with predictable process settings."""
+    env = os.environ.copy()
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _decode_git_output(raw_output: bytes) -> str:
+    """Decode Git command output without raising on repository filename bytes."""
+    return raw_output.decode("utf-8", errors="replace").strip()
+
+
+def _parse_git_ahead_behind(value: str) -> Tuple[Optional[int], Optional[int]]:
+    """Parse a porcelain v2 branch.ab header value."""
+    ahead = None
+    behind = None
+    for part in value.split():
+        if part.startswith("+"):
+            try:
+                ahead = int(part[1:])
+            except ValueError:
+                ahead = None
+        elif part.startswith("-"):
+            try:
+                behind = int(part[1:])
+            except ValueError:
+                behind = None
+    return ahead, behind
+
+
+def _git_status_name(index_status: str, worktree_status: str, record_type: str) -> str:
+    """Map porcelain status codes to the compact explorer status set."""
+    if record_type == "?":
+        return "untracked"
+    if record_type == "!":
+        return "ignored"
+    status_code = f"{index_status}{worktree_status}"
+    if record_type == "u" or "U" in status_code:
+        return "conflicted"
+    if "R" in status_code:
+        return "renamed"
+    if "A" in status_code:
+        return "added"
+    if "D" in status_code:
+        return "deleted"
+    if any(code in status_code for code in ("M", "T")):
+        return "modified"
+    return "clean"
+
+
+def _clean_git_entry_status() -> Dict[str, Any]:
+    """Return the default Git status metadata for an explorer entry."""
+    return {
+        "status": "clean",
+        "index_status": " ",
+        "worktree_status": " ",
+        "has_descendant_changes": False,
+        "descendant_status": None,
+    }
+
+
+def _git_status_payload(
+    path: str,
+    index_status: str,
+    worktree_status: str,
+    record_type: str,
+    original_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build per-path Git status metadata from one porcelain record."""
+    status = _git_status_name(index_status, worktree_status, record_type)
+    payload: Dict[str, Any] = {
+        "path": path,
+        "status": status,
+        "index_status": index_status or " ",
+        "worktree_status": worktree_status or " ",
+        "has_descendant_changes": status != "clean",
+    }
+    if original_path:
+        payload["original_path"] = original_path
+    return payload
+
+
+def _parse_git_status_porcelain_v2(raw_output: bytes) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    """Parse NUL-delimited `git status --porcelain=v2 -z --branch` output."""
+    branch: Dict[str, Any] = {
+        "branch": None,
+        "head": None,
+        "ahead": None,
+        "behind": None,
+    }
+    statuses: Dict[str, Dict[str, Any]] = {}
+    records = raw_output.decode("utf-8", errors="replace").split("\0")
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if not record:
+            continue
+        if record.startswith("# "):
+            header = record[2:]
+            key, _, value = header.partition(" ")
+            if key == "branch.head" and value != "(detached)":
+                branch["branch"] = value or None
+            elif key == "branch.oid":
+                branch["head"] = None if value == "(initial)" else value[:12]
+            elif key == "branch.ab":
+                branch["ahead"], branch["behind"] = _parse_git_ahead_behind(value)
+            continue
+
+        record_type = record[0]
+        if record_type in ("?", "!"):
+            path = _clean_git_path(record[2:])
+            if path:
+                statuses[path] = _git_status_payload(path, "?", "?", record_type)
+            continue
+        if record_type == "1":
+            parts = record.split(" ", 8)
+            if len(parts) >= 9:
+                index_status, worktree_status = parts[1][0], parts[1][1]
+                path = _clean_git_path(parts[8])
+                if path:
+                    statuses[path] = _git_status_payload(path, index_status, worktree_status, record_type)
+            continue
+        if record_type == "2":
+            parts = record.split(" ", 9)
+            original_path = records[index] if index < len(records) else ""
+            if index < len(records):
+                index += 1
+            if len(parts) >= 10:
+                index_status, worktree_status = parts[1][0], parts[1][1]
+                path = _clean_git_path(parts[9])
+                if path:
+                    statuses[path] = _git_status_payload(
+                        path,
+                        index_status,
+                        worktree_status,
+                        record_type,
+                        _clean_git_path(original_path),
+                    )
+            continue
+        if record_type == "u":
+            parts = record.split(" ", 11)
+            if len(parts) >= 12:
+                index_status, worktree_status = parts[1][0], parts[1][1]
+                path = _clean_git_path(parts[11])
+                if path:
+                    statuses[path] = _git_status_payload(path, index_status, worktree_status, record_type)
+
+    return branch, statuses
+
+
+def _repo_relative_git_path(repo_root: str, path: str) -> str:
+    """Return a slash-separated path relative to a Git repository root."""
+    relative = os.path.relpath(path, repo_root)
+    return "" if relative == "." else relative.replace(os.sep, "/")
+
+
+def _git_pathspec(repo_root: str, scope_path: str) -> str:
+    """Return a Git pathspec for a validated absolute path."""
+    repo_relative = _repo_relative_git_path(repo_root, scope_path)
+    return repo_relative or "."
+
+
+def _git_status_for_entry(
+    repo_root: str,
+    entry_path: str,
+    statuses: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Return exact or descendant Git status metadata for one explorer entry."""
+    repo_relative = _clean_git_path(_repo_relative_git_path(repo_root, entry_path))
+    status = dict(statuses.get(repo_relative, _clean_git_entry_status()))
+    descendant_prefix = f"{repo_relative}/" if repo_relative else ""
+    if descendant_prefix:
+        descendant_status = _aggregate_git_status(
+            item.get("status", "clean")
+            for path, item in statuses.items()
+            if path.startswith(descendant_prefix)
+        )
+        if descendant_status:
+            status["has_descendant_changes"] = True
+            status["descendant_status"] = descendant_status
+            if status.get("status") == "clean":
+                status["status"] = descendant_status
+    return status
+
+
+def _aggregate_git_status(statuses: Any) -> Optional[str]:
+    """Return the most useful status badge for a collection of descendant changes."""
+    priority = (
+        "conflicted",
+        "modified",
+        "added",
+        "deleted",
+        "renamed",
+        "untracked",
+        "ignored",
+    )
+    status_set = {status for status in statuses if status and status != "clean"}
+    for status in priority:
+        if status in status_set:
+            return status
+    return None
+
+
+def _get_git_context(root_path: str, current_path: str) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    """Return repository metadata and path statuses for a local explorer directory."""
+    try:
+        rev_parse = _run_git_command(
+            ["rev-parse", "--show-toplevel", "--is-inside-work-tree"],
+            cwd=current_path,
+            timeout=2.0,
+        )
+    except FileNotFoundError:
+        return _empty_explorer_git_context("Git executable was not found"), {}
+    except subprocess.TimeoutExpired:
+        return _empty_explorer_git_context("Git repository detection timed out"), {}
+    except OSError as exc:
+        return _empty_explorer_git_context(str(exc)), {}
+
+    if rev_parse.returncode != 0:
+        return _empty_explorer_git_context(), {}
+
+    rev_lines = _decode_git_output(rev_parse.stdout).splitlines()
+    if len(rev_lines) < 2 or rev_lines[1].lower() != "true":
+        return _empty_explorer_git_context(), {}
+
+    repo_root = os.path.realpath(os.path.abspath(rev_lines[0]))
+    try:
+        os.path.commonpath([repo_root, root_path])
+        os.path.commonpath([repo_root, current_path])
+    except ValueError:
+        return _empty_explorer_git_context("Git repository path could not be compared"), {}
+
+    status_args = [
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--branch",
+        "--",
+        _git_pathspec(repo_root, current_path),
+    ]
+    try:
+        status_result = _run_git_command(status_args, cwd=repo_root, timeout=2.0)
+    except subprocess.TimeoutExpired:
+        context = _empty_explorer_git_context("Git status timed out")
+        context["repo_root"] = repo_root
+        return context, {}
+    except OSError as exc:
+        context = _empty_explorer_git_context(str(exc))
+        context["repo_root"] = repo_root
+        return context, {}
+
+    if status_result.returncode != 0:
+        error = _decode_git_output(status_result.stderr) or "Git status failed"
+        context = _empty_explorer_git_context(error)
+        context["repo_root"] = repo_root
+        return context, {}
+
+    branch, statuses = _parse_git_status_porcelain_v2(status_result.stdout)
+    context = {
+        "available": True,
+        "repo_root": repo_root,
+        "branch": branch.get("branch"),
+        "head": branch.get("head"),
+        "ahead": branch.get("ahead"),
+        "behind": branch.get("behind"),
+        "dirty": any(item.get("status") != "clean" for item in statuses.values()),
+        "error": None,
+    }
+    return context, statuses
+
+
+def _attach_git_status_to_entries(
+    root_path: str,
+    git_context: Dict[str, Any],
+    statuses: Dict[str, Dict[str, Any]],
+    entries: List[Dict[str, Any]],
+) -> None:
+    """Attach per-entry Git metadata to local explorer entries."""
+    if not git_context.get("available"):
+        for entry in entries:
+            entry["git"] = _clean_git_entry_status()
+        return
+
+    repo_root = str(git_context.get("repo_root") or "")
+    for entry in entries:
+        entry_path = os.path.realpath(os.path.abspath(os.path.join(root_path, entry.get("path") or "")))
+        entry["git"] = _git_status_for_entry(repo_root, entry_path, statuses)
+
+
+def _append_deleted_git_entries(
+    root_path: str,
+    current_path: str,
+    git_context: Dict[str, Any],
+    statuses: Dict[str, Dict[str, Any]],
+    entries: List[Dict[str, Any]],
+) -> None:
+    """Add read-only placeholder rows for deleted tracked files in the current directory."""
+    if not git_context.get("available"):
+        return
+
+    repo_root = str(git_context.get("repo_root") or "")
+    current_repo_relative = _clean_git_path(_repo_relative_git_path(repo_root, current_path))
+    existing_paths = {entry.get("path") for entry in entries}
+    for status_path, status in statuses.items():
+        if status.get("status") != "deleted":
+            continue
+        if current_repo_relative:
+            prefix = f"{current_repo_relative}/"
+            if not status_path.startswith(prefix):
+                continue
+            current_relative = status_path[len(prefix):]
+        else:
+            current_relative = status_path
+        if not current_relative or "/" in current_relative:
+            continue
+
+        deleted_abs_path = os.path.abspath(os.path.join(repo_root, status_path.replace("/", os.sep)))
+        deleted_explorer_path = _relative_explorer_path(root_path, deleted_abs_path)
+        if deleted_explorer_path in existing_paths:
+            continue
+        entries.append(
+            {
+                "name": current_relative,
+                "path": deleted_explorer_path,
+                "type": "file",
+                "size": None,
+                "modified": None,
+                "git": dict(status),
+                "deleted": True,
+            }
+        )
+        existing_paths.add(deleted_explorer_path)
+
+
+def _bounded_git_diff(repo_root: str, args: List[str]) -> Tuple[str, bool, int]:
+    """Run Git diff and return bounded UTF-8 text output."""
+    result = _run_git_command(args, cwd=repo_root, timeout=3.0)
+    if result.returncode != 0:
+        error = _decode_git_output(result.stderr) or "Git diff failed"
+        raise ValueError(error)
+    if b"\x00" in result.stdout:
+        raise ValueError("Git diff appears to contain binary data")
+
+    truncated = len(result.stdout) > EXPLORER_GIT_DIFF_MAX_BYTES
+    diff_bytes = result.stdout[:EXPLORER_GIT_DIFF_MAX_BYTES]
+    diff_text = diff_bytes.decode("utf-8", errors="replace")
+    lines = diff_text.splitlines(keepends=True)
+    if len(lines) > EXPLORER_GIT_DIFF_MAX_LINES:
+        diff_text = "".join(lines[:EXPLORER_GIT_DIFF_MAX_LINES])
+        truncated = True
+    return diff_text, truncated, len(result.stdout)
+
+
+def _get_git_diff(root_path: str, file_path: str, mode: str) -> Dict[str, Any]:
+    """Return a bounded read-only Git diff for a local explorer file."""
+    if mode not in {"worktree", "staged", "head"}:
+        raise ValueError("Invalid Git diff mode")
+
+    git_context, _statuses = _get_git_context(root_path, os.path.dirname(file_path))
+    if not git_context.get("available"):
+        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
+
+    repo_root = str(git_context["repo_root"])
+    pathspec = _git_pathspec(repo_root, file_path)
+    diff_args_by_mode = {
+        "worktree": ["diff", "--no-ext-diff", "--no-color", "--", pathspec],
+        "staged": ["diff", "--cached", "--no-ext-diff", "--no-color", "--", pathspec],
+        "head": ["diff", "HEAD", "--no-ext-diff", "--no-color", "--", pathspec],
+    }
+    try:
+        diff_text, truncated, raw_bytes = _bounded_git_diff(repo_root, diff_args_by_mode[mode])
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git diff timed out") from exc
+    return {
+        "git": git_context,
+        "diff": diff_text,
+        "truncated": truncated,
+        "byte_count": raw_bytes,
+        "line_count": len(diff_text.splitlines()),
+    }
+
+
 _REMOTE_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 
@@ -3250,6 +3667,9 @@ def get_explorer_entries(session_id: str):
         with os.scandir(current_path) as iterator:
             for entry in iterator:
                 entries.append(_explorer_entry_payload(root_path, entry))
+        git_context, git_statuses = _get_git_context(root_path, current_path)
+        _attach_git_status_to_entries(root_path, git_context, git_statuses, entries)
+        _append_deleted_git_entries(root_path, current_path, git_context, git_statuses, entries)
         entries.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
 
         parent_path = ""
@@ -3259,12 +3679,13 @@ def get_explorer_entries(session_id: str):
         return jsonify(
             {
                 "session_id": session.session_id,
-                "root": root_path,
-                "path": _relative_explorer_path(root_path, current_path),
-                "parent_path": parent_path,
-                "entries": entries,
-            }
-        )
+                    "root": root_path,
+                    "path": _relative_explorer_path(root_path, current_path),
+                    "parent_path": parent_path,
+                    "git": git_context,
+                    "entries": entries,
+                }
+            )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except OSError as exc:
@@ -3342,6 +3763,12 @@ def get_explorer_file(session_id: str):
         content = preview_bytes.decode("utf-8", errors="replace")
         preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
         code_language = _explorer_code_language(file_path)
+        git_context, git_statuses = _get_git_context(root_path, os.path.dirname(file_path))
+        file_git = (
+            _git_status_for_entry(str(git_context["repo_root"]), file_path, git_statuses)
+            if git_context.get("available")
+            else _clean_git_entry_status()
+        )
 
         return jsonify(
             {
@@ -3357,6 +3784,39 @@ def get_explorer_file(session_id: str):
                 "preview_type": "markdown" if preview_html is not None else None,
                 "preview_html": preview_html,
                 "language": code_language,
+                "git": file_git,
+                "git_context": git_context,
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route('/api/explorer/<session_id>/git/diff', methods=['GET'])
+def get_explorer_git_diff(session_id: str):
+    """Return a bounded read-only Git diff for one local explorer file."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if _is_remote_explorer_session(session):
+        return jsonify({"error": "Git diff is only available for local explorer panes"}), 400
+
+    mode = request.args.get("mode", "worktree")
+    try:
+        root_path, file_path = _resolve_explorer_file_path(
+            session,
+            request.args.get("path", ""),
+        )
+        diff_payload = _get_git_diff(root_path, file_path, mode)
+        return jsonify(
+            {
+                "session_id": session.session_id,
+                "root": root_path,
+                "path": _relative_explorer_path(root_path, file_path),
+                "mode": mode,
+                **diff_payload,
             }
         )
     except ValueError as exc:

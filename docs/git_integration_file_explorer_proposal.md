@@ -303,3 +303,18 @@ Manual checks:
 ## Decision
 
 Proceed with a Git CLI based, read-only v1. It fits the current browser-first local explorer architecture, avoids new dependencies, preserves root-bound safety, and gives the highest-value Git UX first: "what changed?" and "show me the diff."
+
+## Implementation Notes
+
+Implemented the recommended V1 scope as a read-only local explorer feature:
+
+- Added Git CLI helper functions in `web/api.py` using argument-list subprocess calls, `GIT_OPTIONAL_LOCKS=0`, short timeouts, porcelain v2 `-z` status parsing, and bounded diff responses.
+- Added `git` repository metadata to local `GET /api/explorer/<session_id>/entries` responses and per-entry `entry.git` status metadata, including directory descendant-change markers.
+- Added local file preview Git metadata so changed tracked files can expose a Diff tab without mutating repository state.
+- Added `GET /api/explorer/<session_id>/git/diff?path=<path>&mode=worktree|staged|head`, reusing the existing local explorer file resolver before invoking Git.
+- Updated `templates/terminals.html` with a compact branch/dirty summary, row status badges, directory badges that inherit descendant `M`/`A`/`D`-style status, and a lazy-loaded internal old/new Diff panel with added/removed line highlighting for changed tracked files.
+- Added read-only placeholder rows for deleted tracked files in local explorer listings so removed files can show a `D` badge even though they no longer exist on disk.
+- Updated `README.md` and `CHANGELOG.md` to document the new read-only Git status/diff support and the intentionally excluded mutating actions.
+- Added tests for porcelain parsing, local listing Git metadata, diff endpoint safety, and template hooks.
+
+V1 remains intentionally non-mutating: no stage, unstage, restore, checkout, commit, pull, or push actions were added.

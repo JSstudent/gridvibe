@@ -1,6 +1,8 @@
 import io
 import json
+import shutil
 import stat
+import subprocess
 import threading
 import unittest
 from pathlib import Path
@@ -125,6 +127,17 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 201)
         return response.get_json()["sessions"][0]["session_id"]
+
+    def _run_git(self, repo_dir: Path, *args: str) -> subprocess.CompletedProcess:
+        if shutil.which("git") is None:
+            self.skipTest("git executable is not available")
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
 
     def tearDown(self):
         api.session_manager.reset_sessions()
@@ -460,6 +473,25 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function findExplorerSearchTargetIndex()", html)
         self.assertIn("event.code !== 'KeyF'", html)
         self.assertNotIn("/api/explorer-search", html)
+
+    def test_terminals_page_explorer_git_hooks_are_present(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("explorer-git-summary", html)
+        self.assertIn("function explorerGitBadgeHtml(git)", html)
+        self.assertIn("function explorerGitSummaryText(git)", html)
+        self.assertIn("function loadExplorerDiff(index)", html)
+        self.assertIn("data-explorer-diff-toggle=\"${index}\"", html)
+        self.assertIn("function toggleExplorerDiffSplit(index)", html)
+        self.assertIn("function renderExplorerSideBySideDiff(diff)", html)
+        self.assertIn(".explorer-diff-cell.add", html)
+        self.assertIn(".explorer-diff-cell.delete", html)
+        self.assertIn("explorer-diff-split", html)
+        self.assertIn("split-diff", html)
+        self.assertIn("/git/diff?path=", html)
+        self.assertIn("${explorerGitBadgeHtml(entry.git)}", html)
 
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
@@ -1905,6 +1937,123 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual([entry["name"] for entry in payload["entries"]], ["src", "README.md"])
         self.assertEqual(payload["entries"][0]["type"], "directory")
         self.assertEqual(payload["entries"][1]["type"], "file")
+        self.assertIn("git", payload)
+        self.assertFalse(payload["git"]["available"])
+        self.assertEqual(payload["entries"][1]["git"]["status"], "clean")
+
+    def test_parse_git_porcelain_v2_status_fixture(self):
+        raw_status = (
+            b"# branch.oid abcdef1234567890\0"
+            b"# branch.head main\0"
+            b"# branch.ab +2 -1\0"
+            b"1 M. N... 100644 100644 100644 old new src/app.py\0"
+            b"1 .D N... 100644 100644 100644 old new deleted.txt\0"
+            b"2 R. N... 100644 100644 100644 old new R100 new_name.py\0old_name.py\0"
+            b"u UU N... 100644 100644 100644 100644 a b c d conflict.txt\0"
+            b"? notes.txt\0"
+            b"! ignored.log\0"
+        )
+
+        branch, statuses = api._parse_git_status_porcelain_v2(raw_status)
+
+        self.assertEqual(branch["branch"], "main")
+        self.assertEqual(branch["head"], "abcdef123456")
+        self.assertEqual(branch["ahead"], 2)
+        self.assertEqual(branch["behind"], 1)
+        self.assertEqual(statuses["src/app.py"]["status"], "modified")
+        self.assertEqual(statuses["deleted.txt"]["status"], "deleted")
+        self.assertEqual(statuses["new_name.py"]["status"], "renamed")
+        self.assertEqual(statuses["new_name.py"]["original_path"], "old_name.py")
+        self.assertEqual(statuses["conflict.txt"]["status"], "conflicted")
+        self.assertEqual(statuses["notes.txt"]["status"], "untracked")
+        self.assertEqual(statuses["ignored.log"]["status"], "ignored")
+
+    def test_explorer_entries_returns_git_metadata_for_local_repo(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        src_dir = repo_dir / "src"
+        src_dir.mkdir(parents=True)
+        readme = repo_dir / "README.md"
+        app_file = src_dir / "app.py"
+        obsolete_file = repo_dir / "obsolete.txt"
+        readme.write_text("# Project\n", encoding="utf-8")
+        app_file.write_text("print('v1')\n", encoding="utf-8")
+        obsolete_file.write_text("remove me\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        readme.write_text("# Project\n\nchanged\n", encoding="utf-8")
+        app_file.write_text("print('v2')\n", encoding="utf-8")
+        added_file = repo_dir / "added.py"
+        added_file.write_text("print('new')\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "added.py")
+        obsolete_file.unlink()
+        (repo_dir / "notes.txt").write_text("untracked\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        entries_response = self.client.get(f"/api/explorer/{session_id}/entries")
+
+        self.assertEqual(entries_response.status_code, 200)
+        payload = entries_response.get_json()
+        entries = {entry["name"]: entry for entry in payload["entries"]}
+        self.assertTrue(payload["git"]["available"])
+        self.assertTrue(payload["git"]["dirty"])
+        self.assertIsNotNone(payload["git"]["repo_root"])
+        self.assertEqual(entries["README.md"]["git"]["status"], "modified")
+        self.assertEqual(entries["added.py"]["git"]["status"], "added")
+        self.assertEqual(entries["obsolete.txt"]["git"]["status"], "deleted")
+        self.assertTrue(entries["obsolete.txt"]["deleted"])
+        self.assertEqual(entries["notes.txt"]["git"]["status"], "untracked")
+        self.assertEqual(entries["src"]["git"]["status"], "modified")
+        self.assertTrue(entries["src"]["git"]["has_descendant_changes"])
+
+    def test_explorer_git_diff_returns_bounded_local_file_diff(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        readme.write_text("# Project\n\nchanged\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        diff_response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "head"},
+        )
+
+        self.assertEqual(diff_response.status_code, 200)
+        payload = diff_response.get_json()
+        self.assertEqual(payload["path"], "README.md")
+        self.assertEqual(payload["mode"], "head")
+        self.assertIn("+changed", payload["diff"])
+        self.assertFalse(payload["truncated"])
+
+    def test_explorer_git_diff_rejects_invalid_mode_and_outside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project\n", encoding="utf-8")
+        outside_file = Path(self.temp_dir.name) / "outside.txt"
+        outside_file.write_text("secret\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        invalid_mode_response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "bad"},
+        )
+        outside_response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": str(outside_file), "mode": "head"},
+        )
+
+        self.assertEqual(invalid_mode_response.status_code, 400)
+        self.assertIn("Invalid Git diff mode", invalid_mode_response.get_json()["error"])
+        self.assertEqual(outside_response.status_code, 400)
+        self.assertIn("inside the configured root", outside_response.get_json()["error"])
 
     def test_explorer_entries_lists_ssh_directory_inside_root(self):
         group = api.session_manager.create_group(
