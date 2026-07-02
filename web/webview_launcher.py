@@ -802,8 +802,8 @@ def main():
         "GridVibe",
         base_url,
         width=1280,
-        height=1000,
-        min_size=(480, 480),
+        height=840,
+        min_size=(1024, 700),
         text_select=True,
         js_api=api_bridge,
     )

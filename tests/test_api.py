@@ -180,7 +180,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn("const AGENT_OPTIONS = [", html)
-        self.assertIn('data-command-mode="agent"', html)
+        self.assertIn('class="startup-mode-select"', html)
+        self.assertIn('<option value="agent"', html)
         self.assertIn("function normalizeTerminalCommandUi(terminal)", html)
         self.assertIn("Custom Agent", html)
 
@@ -3504,7 +3505,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             '[data-theme="light"] .field input',
             '[data-theme="light"] .t-row',
             '[data-theme="light"] .t-agent-select',
-            '[data-theme="light"] .command-mode-btn',
+            '[data-theme="light"] .startup-mode-select',
             '[data-theme="light"] .check-field',
             '[data-theme="light"] .modal-card',
             '[data-theme="light"] .saved-session-item',

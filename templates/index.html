@@ -6,21 +6,27 @@
     <title>GridVibe</title>
     <style>
         :root {
-            --bg: #191d38;
-            --bg-deep: #14182d;
-            --panel: rgba(45, 52, 86, 0.95);
-            --panel-strong: rgba(35, 42, 70, 0.98);
-            --panel-soft: rgba(28, 33, 58, 0.98);
-            --line: rgba(143, 161, 210, 0.16);
-            --line-strong: rgba(79, 214, 255, 0.78);
-            --text: #f3f6ff;
-            --muted: #8d97bb;
-            --accent: #4fd6ff;
-            --accent-strong: #12bdf4;
-            --accent-soft: rgba(79, 214, 255, 0.12);
-            --danger: #ff6b7c;
-            --success: #61f6b1;
-            --shadow: 0 24px 60px rgba(4, 8, 20, 0.42);
+            --bg: #070b18;
+            --bg-deep: #0b1022;
+            --panel: rgba(15, 23, 42, 0.72);
+            --panel-strong: rgba(22, 32, 58, 0.82);
+            --panel-soft: rgba(15, 23, 42, 0.72);
+            --line: rgba(148, 163, 184, 0.16);
+            --line-strong: rgba(76, 201, 240, 0.78);
+            --text: #f8fafc;
+            --muted: #94a3b8;
+            --accent: #4cc9f0;
+            --accent-strong: #38bdf8;
+            --accent-soft: rgba(76, 201, 240, 0.12);
+            --danger: #ef4444;
+            --success: #22c55e;
+            --shadow: 0 24px 60px rgba(4, 8, 20, 0.52);
+            --bg-card: rgba(22, 32, 58, 0.82);
+            --bg-card-hover: rgba(30, 44, 78, 0.95);
+            --bg-input: #090e1f;
+            --border-muted: rgba(148, 163, 184, 0.16);
+            --border-soft: rgba(148, 163, 184, 0.10);
+            --border-active: #4cc9f0;
         }
 
         [data-theme="light"] {
@@ -39,10 +45,16 @@
             --danger: #dc2626;
             --success: #047857;
             --shadow: 0 18px 46px rgba(15, 23, 42, 0.13);
+            --bg-card: rgba(255, 255, 255, 0.95);
+            --bg-card-hover: rgba(248, 250, 252, 0.98);
+            --bg-input: #ffffff;
+            --border-muted: rgba(75, 85, 99, 0.22);
+            --border-soft: rgba(75, 85, 99, 0.12);
+            --border-active: #0e7490;
         }
 
         [data-theme="light"] body {
-            background: linear-gradient(135deg, #eef1f5 0%, #e8ecf2 45%, #f0f2f5 100%);
+            background: #f0f2f5;
         }
 
         [data-theme="light"] .count-btn,
@@ -155,18 +167,14 @@
             background: rgba(8, 145, 178, 0.12);
         }
 
-        [data-theme="light"] .command-mode-btn {
+        [data-theme="light"] .startup-mode-select {
             border-color: rgba(75, 85, 99, 0.34);
             background: rgba(255, 255, 255, 0.99);
             color: #374151;
         }
 
-        [data-theme="light"] .command-mode-btn:hover {
+        [data-theme="light"] .startup-mode-select:hover {
             border-color: rgba(8, 145, 178, 0.48);
-        }
-
-        [data-theme="light"] .command-mode-btn.active {
-            background: rgba(8, 145, 178, 0.1);
         }
 
         [data-theme="light"] .action-btn {
@@ -232,101 +240,227 @@
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
-        html, body {
+        html,
+        body {
             width: 100%;
-            height: 100%;
-            overflow: hidden;
+            min-height: 100%;
+        }
+
+        html {
+            overflow: auto;
         }
 
         body {
-            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            min-height: 100vh;
+            overflow: auto;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
             color: var(--text);
-            background:
-                radial-gradient(circle at top left, rgba(79, 214, 255, 0.12), transparent 30%),
-                radial-gradient(circle at bottom right, rgba(12, 27, 79, 0.35), transparent 35%),
-                linear-gradient(135deg, #151a33 0%, #1a2040 45%, #131830 100%);
-            padding: 12px;
+            background: var(--bg);
+            padding: 0;
+        }
+
+        .app-frame {
+            display: grid;
+            grid-template-rows: auto 1fr;
+            min-height: 100vh;
+            max-height: 100vh;
+            overflow: hidden;
+        }
+
+        .app-titlebar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 24px;
+            background: var(--bg-deep);
+            border-bottom: 1px solid var(--border-soft);
+            -webkit-app-region: drag;
+        }
+
+        .app-titlebar-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .app-logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.92rem;
+            font-weight: 700;
+            color: var(--text);
+            letter-spacing: 0.3px;
+        }
+
+        .app-logo svg {
+            width: 20px;
+            height: 20px;
+            color: var(--accent);
+        }
+
+        .app-header-info {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .app-header-title {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .app-header-title h1 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
+
+        .app-header-title p {
+            color: var(--muted);
+            font-size: 0.82rem;
+        }
+
+        .app-titlebar-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            -webkit-app-region: no-drag;
+        }
+
+        .header-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 8px;
+            background: rgba(22, 32, 58, 0.72);
+            border: 1px solid var(--border-muted);
+            font-size: 0.78rem;
+            color: var(--muted);
+        }
+
+        .header-badge strong {
+            color: var(--text);
+            font-weight: 600;
+        }
+
+        .header-badge .status-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--success);
         }
 
         .shell {
-            width: min(1640px, 100%);
-            height: calc(100vh - 24px);
-            margin: 0 auto;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
             display: grid;
-            grid-template-columns: minmax(480px, 1fr) minmax(620px, 1.1fr);
-            gap: 18px;
+            grid-template-columns: minmax(380px, 0.88fr) minmax(500px, 1.12fr);
+            gap: 0;
+            padding: 16px 20px;
         }
 
         .column {
             min-height: 0;
             display: grid;
-            gap: 18px;
+            gap: 12px;
+            padding: 0 10px;
+            overflow: auto;
         }
 
         .column-left {
-            grid-template-rows: auto minmax(0, 1fr);
+            grid-template-rows: auto auto;
+            align-content: start;
         }
 
         .column-right {
-            grid-template-rows: minmax(0, 1fr) auto;
+            grid-template-rows: 1fr auto;
+            align-content: start;
         }
 
         .card {
             min-height: 0;
             display: flex;
             flex-direction: column;
-            padding: 18px 22px 20px;
-            border-radius: 18px;
-            background: linear-gradient(180deg, var(--panel) 0%, var(--panel-strong) 100%);
-            border: 1px solid var(--line);
+            padding: 16px 18px 16px;
+            border-radius: 16px;
+            background: var(--panel);
+            border: 1px solid var(--border-muted);
             box-shadow: var(--shadow);
             overflow: hidden;
+            backdrop-filter: blur(12px);
         }
 
-        .step1-card {
+        .terminal-layout-card {
             overflow: visible;
+        }
+
+        .column-left > .card:not(.terminal-layout-card) {
+            overflow: auto;
         }
 
         .section-head {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            gap: 12px;
-            margin-bottom: 16px;
+            gap: 8px;
+            margin-bottom: 10px;
             flex-wrap: wrap;
         }
 
         .section-title {
             display: flex;
             align-items: center;
-            gap: 8px;
-            color: var(--accent);
+            gap: 10px;
+            color: var(--text);
             text-transform: uppercase;
-            letter-spacing: 2px;
-            font-size: 0.9rem;
+            letter-spacing: 1.8px;
+            font-size: 0.82rem;
             font-weight: 700;
         }
 
+        .section-title .step-num {
+            color: var(--accent);
+            font-size: 0.82rem;
+            font-weight: 800;
+            letter-spacing: 1px;
+        }
+
         .section-title svg {
-            width: 15px;
-            height: 15px;
-            flex: 0 0 auto;
+            display: none;
         }
 
         .message {
-            min-height: 20px;
-            margin-bottom: 10px;
-            font-size: 0.86rem;
+            min-height: 0;
+            margin-bottom: 8px;
+            font-size: 0.82rem;
             color: var(--muted);
         }
 
         .message.success { color: var(--success); }
         .message.error { color: var(--danger); }
 
+        .terminal-layout-card .message {
+            margin-bottom: 10px;
+        }
+
+        .terminal-count-strip {
+            display: grid;
+            gap: 12px;
+        }
+
         .count-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-            gap: 12px;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 10px;
+        }
+
+        .count-option {
+            position: relative;
+            min-width: 0;
         }
 
         .count-btn,
@@ -334,12 +468,12 @@
         .mode-btn,
         .ghost-btn,
         .action-btn {
-            border: 1px solid var(--line);
-            border-radius: 14px;
-            background: rgba(19, 24, 43, 0.92);
+            border: 1px solid var(--border-muted);
+            border-radius: 12px;
+            background: var(--bg-input);
             color: var(--text);
             cursor: pointer;
-            transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+            transition: border-color 0.2s ease, background 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
         }
 
         .count-btn:hover,
@@ -347,96 +481,187 @@
         .mode-btn:hover,
         .ghost-btn:hover,
         .action-btn:hover {
-            border-color: rgba(79, 214, 255, 0.56);
+            border-color: rgba(76, 201, 240, 0.5);
             transform: translateY(-1px);
         }
 
         .count-btn {
-            padding: 14px 16px 12px;
+            width: 100%;
+            padding: 9px 8px 12px;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 6px;
-            min-height: 92px;
+            gap: 4px;
+            min-height: 50px;
         }
 
         .count-btn.active,
         .layout-btn.active,
         .mode-btn.active {
-            border-color: var(--line-strong);
-            background: linear-gradient(180deg, rgba(53, 93, 127, 0.92), rgba(47, 79, 109, 0.94));
-            box-shadow: inset 0 0 0 1px rgba(79, 214, 255, 0.18), 0 0 0 1px rgba(79, 214, 255, 0.08);
+            border-color: var(--border-active);
+            background: linear-gradient(180deg, rgba(76, 201, 240, 0.12), rgba(59, 130, 246, 0.08));
+            box-shadow: inset 0 0 0 1px rgba(76, 201, 240, 0.15), 0 0 12px rgba(76, 201, 240, 0.08);
+        }
+
+        .count-layout-toggle {
+            position: relative;
+            display: block;
+            width: 100%;
+            height: 12px;
+            margin-top: -1px;
+            border: 1px solid var(--border-muted);
+            border-top: 0;
+            border-radius: 0 0 10px 10px;
+            background: var(--bg-input);
+            color: var(--muted);
+            cursor: pointer;
+            transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease, transform 0.15s ease;
+        }
+
+        .count-layout-toggle::before {
+            content: "";
+            position: absolute;
+            left: 50%;
+            top: 2px;
+            width: 5px;
+            height: 5px;
+            border-right: 2px solid currentColor;
+            border-bottom: 2px solid currentColor;
+            transform: translateX(-50%) rotate(45deg);
+        }
+
+        .count-layout-toggle:hover,
+        .count-layout-toggle.active {
+            border-color: var(--border-active);
+            background: var(--accent-soft);
+            color: var(--accent);
+        }
+
+        .count-layout-toggle.active::before {
+            top: 5px;
+            transform: translateX(-50%) rotate(225deg);
+        }
+
+        .count-label {
+            font-size: 0.62rem;
+            color: var(--muted);
+            letter-spacing: 0.3px;
         }
 
         .count-meta {
             display: flex;
-            flex-direction: column;
-            gap: 4px;
             align-items: center;
+            justify-content: center;
         }
 
         .count-value {
-            font-size: clamp(2rem, 3vw, 3rem);
-            font-weight: 700;
+            font-size: clamp(1.1rem, 1.6vw, 1.4rem);
+            font-weight: 800;
             line-height: 1;
         }
 
-        .count-label {
+        .count-selection-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.78rem;
             color: var(--muted);
-            text-transform: uppercase;
-            letter-spacing: 1.6px;
-            font-size: 0.72rem;
+        }
+
+        .count-selection-indicator .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
         }
 
         .layout-panel {
-            margin-top: 10px;
-            padding-top: 10px;
-            border-top: 1px solid rgba(143, 161, 210, 0.12);
+            margin-top: 0;
+            padding: 13px 0 0;
+            border-top: 1px solid var(--border-muted);
+        }
+
+        .layout-panel[hidden] {
+            display: none;
+        }
+
+        .layout-panel-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 9px;
+            color: var(--muted);
+            font-size: 0.74rem;
+        }
+
+        .layout-panel-head strong {
+            color: var(--text);
+            font-size: 0.76rem;
+            letter-spacing: 1px;
+            text-transform: uppercase;
         }
 
         .layout-label {
             color: var(--muted);
-            text-transform: uppercase;
-            letter-spacing: 1.4px;
-            font-size: 0.7rem;
+            font-size: 0.74rem;
             margin-bottom: 10px;
         }
 
         .layout-grid {
             display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
             gap: 10px;
         }
 
         .layout-grid.single {
-            grid-template-columns: 1fr;
+            grid-template-columns: minmax(0, 320px);
         }
 
         .layout-btn {
-            padding: 8px 10px;
+            min-height: 58px;
+            padding: 10px 12px;
             display: grid;
-            grid-template-columns: 78px 1fr;
-            gap: 12px;
+            grid-template-columns: 52px 1fr;
+            gap: 10px;
             align-items: center;
             text-align: left;
+            position: relative;
+        }
+
+        .layout-btn.active::after {
+            content: "✓";
+            position: absolute;
+            top: -4px;
+            right: -4px;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: var(--accent);
+            color: var(--bg);
+            font-size: 0.6rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
 
         .layout-preview {
-            width: 78px;
-            height: 60px;
+            width: 52px;
+            height: 36px;
             display: grid;
-            gap: 4px;
-            padding: 4px;
-            border-radius: 10px;
-            border: 1px solid rgba(79, 214, 255, 0.22);
-            background: rgba(15, 20, 38, 0.76);
+            gap: 3px;
+            padding: 3px;
+            border-radius: 7px;
+            border: 1px solid rgba(76, 201, 240, 0.22);
+            background: rgba(9, 14, 31, 0.76);
         }
 
         .layout-preview .pane {
-            border-radius: 5px;
-            background: rgba(79, 214, 255, 0.18);
-            border: 1px solid rgba(79, 214, 255, 0.65);
+            border-radius: 4px;
+            background: rgba(76, 201, 240, 0.18);
+            border: 1px solid rgba(76, 201, 240, 0.55);
         }
 
         .layout-preview.two-vertical { grid-template-columns: 1fr 1fr; }
@@ -470,50 +695,58 @@
 
         .layout-copy strong {
             display: block;
-            font-size: 0.93rem;
-            margin-bottom: 4px;
+            font-size: 0.82rem;
+            margin-bottom: 2px;
         }
 
         .layout-copy span {
             color: var(--muted);
-            font-size: 0.76rem;
+            font-size: 0.68rem;
             line-height: 1.35;
         }
 
         .toolbar {
             display: flex;
-            gap: 10px;
+            gap: 8px;
             flex-wrap: wrap;
         }
 
         .toolbar-status {
             flex-basis: 100%;
-            min-height: 18px;
+            min-height: 0;
             color: var(--muted);
             font-size: 0.76rem;
             line-height: 1.35;
+        }
+
+        .toolbar-status:empty {
+            display: none;
         }
 
         .toolbar-status.success { color: var(--success); }
         .toolbar-status.error { color: var(--danger); }
 
         .ghost-btn {
-            padding: 10px 14px;
-            font-size: 0.86rem;
-            background: rgba(19, 24, 43, 0.82);
+            padding: 9px 14px;
+            font-size: 0.82rem;
+            background: var(--bg-input);
+            font-weight: 500;
+        }
+
+        .toolbar .ghost-btn {
+            padding: 7px 12px;
+            font-size: 0.78rem;
         }
 
         .quick-controls {
             display: flex;
             align-items: center;
-            justify-content: center;
-            gap: 10px;
-            margin-top: 4px;
-            flex-wrap: wrap;
+            gap: 8px;
+            margin-left: auto;
         }
 
         .quick-controls-label {
-            font-size: 0.78rem;
+            font-size: 0.76rem;
             color: var(--muted);
         }
 
@@ -547,6 +780,69 @@
         .inline-status.success { color: var(--success); }
         .inline-status.error { color: var(--danger); }
 
+        .app-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 24px;
+            background: var(--bg-deep);
+            border-top: 1px solid var(--border-soft);
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .app-footer-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .app-footer-right {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .action-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 0 0;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .action-bar-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .action-bar-right {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .add-terminal-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 14px;
+            border-radius: 10px;
+            border: 1px solid var(--border-active);
+            background: transparent;
+            color: var(--accent);
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
+
+        .add-terminal-btn:hover {
+            background: rgba(76, 201, 240, 0.08);
+        }
+
         .settings-grid {
             min-height: 0;
             display: grid;
@@ -567,8 +863,8 @@
             gap: 14px;
             padding: 14px;
             border-radius: 14px;
-            border: 1px solid rgba(143, 161, 210, 0.12);
-            background: rgba(19, 24, 43, 0.58);
+            border: 1px solid var(--border-muted);
+            background: var(--bg-input);
         }
 
         .app-settings-grid > .check-field,
@@ -654,18 +950,24 @@
         .mode-toggle {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 10px;
-            margin-bottom: 14px;
+            gap: 8px;
+            margin-bottom: 10px;
         }
 
         .mode-btn {
-            padding: 12px 14px;
+            padding: 10px 14px;
             display: flex;
             align-items: center;
             justify-content: center;
-            gap: 10px;
-            font-size: 0.92rem;
+            gap: 8px;
+            font-size: 0.86rem;
             font-weight: 600;
+        }
+
+        .mode-btn svg {
+            width: 16px;
+            height: 16px;
+            flex-shrink: 0;
         }
 
         .mode-btn small {
@@ -677,7 +979,7 @@
         .form-grid {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 14px;
+            gap: 10px;
         }
 
         .span-2 { grid-column: 1 / -1; }
@@ -710,20 +1012,20 @@
         .field input,
         .field select {
             width: 100%;
-            padding: 11px 13px;
+            padding: 10px 13px;
             border-radius: 10px;
-            border: 1px solid rgba(143, 161, 210, 0.18);
-            background: rgba(16, 21, 39, 0.94);
+            border: 1px solid var(--border-muted);
+            background: var(--bg-input);
             color: var(--text);
-            font-size: 0.95rem;
+            font-size: 0.88rem;
             outline: none;
-            transition: border-color 0.18s ease, box-shadow 0.18s ease;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
         }
 
         .field input:focus,
         .field select:focus {
-            border-color: rgba(94, 129, 235, 0.6);
-            box-shadow: 0 0 0 3px rgba(94, 129, 235, 0.15);
+            border-color: var(--border-active);
+            box-shadow: 0 0 0 3px rgba(76, 201, 240, 0.12);
         }
 
         .field select {
@@ -764,30 +1066,30 @@
             color: var(--accent);
         }
 
-        .field input::placeholder { color: #5d6688; }
+        .field input::placeholder { color: #64748b; }
 
         .tip-btn {
             width: 22px;
             height: 22px;
-            border: 1px solid rgba(79, 214, 255, 0.28);
+            border: 1px solid rgba(76, 201, 240, 0.28);
             border-radius: 999px;
-            background: rgba(79, 214, 255, 0.08);
+            background: rgba(76, 201, 240, 0.08);
             color: var(--accent);
             cursor: pointer;
             font-size: 0.78rem;
             font-weight: 700;
             line-height: 1;
-            transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease;
+            transition: border-color 0.2s ease, background 0.2s ease, transform 0.15s ease;
         }
 
         .tip-btn:hover {
-            border-color: rgba(79, 214, 255, 0.58);
-            background: rgba(79, 214, 255, 0.16);
+            border-color: rgba(76, 201, 240, 0.58);
+            background: rgba(76, 201, 240, 0.16);
             transform: translateY(-1px);
         }
 
         .tip-btn:focus-visible {
-            outline: 2px solid rgba(79, 214, 255, 0.4);
+            outline: 2px solid rgba(76, 201, 240, 0.4);
             outline-offset: 2px;
         }
 
@@ -795,8 +1097,8 @@
             display: none;
             padding: 10px 12px;
             border-radius: 10px;
-            border: 1px solid rgba(79, 214, 255, 0.16);
-            background: rgba(79, 214, 255, 0.08);
+            border: 1px solid rgba(76, 201, 240, 0.14);
+            background: rgba(76, 201, 240, 0.06);
             color: var(--muted);
             font-size: 0.74rem;
             line-height: 1.4;
@@ -837,7 +1139,8 @@
             word-break: break-word;
         }
 
-        .t-agent-select {
+        .t-agent-select,
+        .startup-mode-select {
             padding-right: 36px;
             color-scheme: dark;
             background-image:
@@ -850,7 +1153,8 @@
             background-repeat: no-repeat;
         }
 
-        [data-theme="light"] .t-agent-select {
+        [data-theme="light"] .t-agent-select,
+        [data-theme="light"] .startup-mode-select {
             color-scheme: light;
             background-color: #ffffff;
             color: #111827;
@@ -858,7 +1162,8 @@
             font-weight: 600;
         }
 
-        [data-theme="light"] .t-agent-select option {
+        [data-theme="light"] .t-agent-select option,
+        [data-theme="light"] .startup-mode-select option {
             background: #ffffff;
             color: #111827;
         }
@@ -885,7 +1190,7 @@
         }
 
         .t-agent-select.status-target_incomplete {
-            border-color: rgba(79, 214, 255, 0.48);
+            border-color: rgba(76, 201, 240, 0.48);
             background-color: #061921;
             color: var(--accent);
         }
@@ -979,8 +1284,8 @@
             gap: 4px;
             padding: 10px 12px;
             border-radius: 10px;
-            border: 1px solid rgba(143, 161, 210, 0.16);
-            background: rgba(13, 18, 34, 0.48);
+            border: 1px solid var(--border-muted);
+            background: var(--bg-input);
             color: var(--muted);
             font-size: 0.74rem;
             line-height: 1.45;
@@ -1021,8 +1326,8 @@
             align-items: flex-start;
             gap: 10px;
             border-radius: 10px;
-            border: 1px solid rgba(143, 161, 210, 0.18);
-            background: rgba(16, 21, 39, 0.94);
+            border: 1px solid var(--border-muted);
+            background: var(--bg-input);
         }
 
         .check-field input[type="checkbox"] {
@@ -1072,8 +1377,8 @@
             min-height: 41px;
             padding: 11px 13px;
             border-radius: 10px;
-            border: 1px solid rgba(143, 161, 210, 0.18);
-            background: rgba(16, 21, 39, 0.94);
+            border: 1px solid var(--border-muted);
+            background: var(--bg-input);
             color: var(--text);
             font-size: 0.95rem;
             display: flex;
@@ -1084,7 +1389,7 @@
         }
 
         .picker-display.empty {
-            color: #5d6688;
+            color: #64748b;
         }
 
         .picker-btn {
@@ -1093,32 +1398,34 @@
         }
 
         .mode-note {
-            margin-top: 12px;
+            margin-top: 8px;
             color: var(--muted);
-            font-size: 0.76rem;
-            line-height: 1.4;
+            font-size: 0.72rem;
+            line-height: 1.35;
         }
 
         .terminal-card {
-            display: grid;
-            grid-template-rows: auto minmax(0, 1fr);
-            align-content: start;
-            padding: 16px 18px 14px;
+            display: flex;
+            flex-direction: column;
+            padding: 18px 20px;
+            max-height: calc(100vh - 200px);
+            min-height: 0;
         }
 
         .terminal-card .section-head {
-            margin-bottom: 12px;
+            margin-bottom: 10px;
         }
 
         .rows-wrap {
             min-height: 0;
             display: grid;
-            grid-template-columns: repeat(var(--terminal-columns, 1), minmax(0, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
             grid-auto-rows: max-content;
             align-content: start;
-            gap: 10px;
+            gap: 12px;
             overflow: auto;
             padding-right: 4px;
+            flex: 1;
         }
 
         .t-row {
@@ -1126,41 +1433,66 @@
             display: grid;
             grid-template-rows: auto 1fr;
             border-radius: 14px;
-            background: rgba(29, 36, 60, 0.92);
-            border: 1px solid rgba(143, 161, 210, 0.12);
+            background: var(--bg-card);
+            border: 1px solid var(--border-muted);
             overflow: hidden;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .t-row:hover {
+            border-color: rgba(76, 201, 240, 0.3);
+            box-shadow: 0 4px 20px rgba(76, 201, 240, 0.06);
         }
 
         .t-row-head {
             display: flex;
             align-items: center;
             gap: 8px;
-            padding: 7px 10px;
-            background: rgba(52, 74, 108, 0.45);
-            border-bottom: 1px solid rgba(143, 161, 210, 0.1);
+            padding: 10px 14px;
+            background: rgba(22, 32, 58, 0.6);
+            border-bottom: 1px solid var(--border-soft);
         }
 
         .t-badge {
-            min-width: 24px;
-            padding: 2px 7px;
+            min-width: 28px;
+            padding: 3px 8px;
             border-radius: 6px;
-            background: rgba(79, 214, 255, 0.18);
+            background: rgba(76, 201, 240, 0.15);
             color: var(--accent);
-            font-size: 0.68rem;
+            font-size: 0.7rem;
             font-weight: 700;
             text-align: center;
         }
 
         .t-name {
+            flex: 1;
+            color: var(--text);
+            font-size: 0.82rem;
+            font-weight: 600;
+        }
+
+        .t-status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+        }
+
+        .t-menu-btn {
+            background: none;
+            border: none;
             color: var(--muted);
-            font-size: 0.74rem;
+            cursor: pointer;
+            padding: 2px;
+            font-size: 1rem;
+            line-height: 1;
         }
 
         .t-fields {
             display: grid;
             grid-template-columns: 1fr;
-            gap: 8px;
-            padding: 8px 10px 10px;
+            gap: 10px;
+            padding: 12px 14px 14px;
             align-content: start;
         }
 
@@ -1169,54 +1501,30 @@
         }
 
         .t-fields .field label {
-            font-size: 0.58rem;
-            letter-spacing: 0.9px;
+            font-size: 0.62rem;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: var(--muted);
+            font-weight: 700;
         }
 
         .t-fields .field input {
-            padding: 7px 10px;
+            padding: 8px 11px;
             font-size: 0.84rem;
         }
 
         .t-fields .field select {
-            padding: 7px 10px;
+            padding: 8px 11px;
             font-size: 0.84rem;
         }
 
-        .command-mode-toggle {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
-            gap: 6px;
-        }
-
-        .command-mode-btn {
-            padding: 7px 10px;
-            border: 1px solid rgba(143, 161, 210, 0.18);
-            border-radius: 10px;
-            background: rgba(16, 21, 39, 0.94);
-            color: var(--muted);
-            cursor: pointer;
-            font-size: 0.72rem;
-            font-weight: 700;
-            letter-spacing: 0.9px;
-            text-transform: uppercase;
-            transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
-        }
-
-        .command-mode-btn:hover {
-            border-color: rgba(79, 214, 255, 0.48);
-            color: var(--text);
-        }
-
-        .command-mode-btn.active {
-            border-color: var(--line-strong);
-            background: rgba(79, 214, 255, 0.16);
-            color: var(--text);
+        .startup-mode-select {
+            border-color: rgba(76, 201, 240, 0.22);
         }
 
         .t-fields .check-field {
             min-height: 0;
-            padding: 8px 10px;
+            padding: 7px 9px;
         }
 
         .t-fields .check-copy strong {
@@ -1227,40 +1535,92 @@
             font-size: 0.66rem;
         }
 
+        .t-shell-field .check-stack {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 4px;
+        }
+
+        .t-shell-field .check-field {
+            padding: 4px 6px;
+            gap: 5px;
+            min-height: 0;
+            border-radius: 7px;
+        }
+
+        .t-shell-field .check-copy strong {
+            font-size: 0.62rem;
+            white-space: nowrap;
+            letter-spacing: 0.3px;
+        }
+
+        .t-shell-field .check-field input[type="checkbox"] {
+            width: 12px;
+            height: 12px;
+            margin-top: 0;
+            flex: 0 0 12px;
+        }
+
         .action-stack {
-            display: grid;
-            gap: 14px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
         }
 
         .action-btn {
-            width: 100%;
-            padding: 18px 20px;
+            padding: 14px 32px;
             border: none;
-            border-radius: 14px;
-            background: linear-gradient(90deg, #46c7ed 0%, #39b9e1 52%, #30add9 100%);
-            color: #07111d;
-            font-size: 1.1rem;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #4cc9f0 0%, #38bdf8 50%, #3b82f6 100%);
+            color: #070b18;
+            font-size: 0.92rem;
             font-weight: 800;
-            letter-spacing: 1.8px;
-            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+            box-shadow: 0 4px 20px rgba(76, 201, 240, 0.25);
+        }
+
+        .action-btn:hover {
+            box-shadow: 0 6px 28px rgba(76, 201, 240, 0.35);
+            transform: translateY(-1px);
         }
 
         .action-btn:disabled {
             opacity: 0.6;
             cursor: not-allowed;
             transform: none;
+            box-shadow: none;
+        }
+
+        .action-btn .arrow {
+            font-size: 1.1rem;
         }
 
         .secondary-link {
-            width: fit-content;
-            justify-self: center;
-            padding: 11px 20px;
+            padding: 10px 18px;
             border-radius: 12px;
-            border: 1px solid rgba(143, 161, 210, 0.18);
-            background: rgba(45, 52, 86, 0.9);
+            border: 1px solid var(--border-muted);
+            background: var(--bg-input);
             color: var(--text);
             text-decoration: none;
-            font-size: 0.9rem;
+            font-size: 0.84rem;
+            font-weight: 500;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: border-color 0.2s ease, background 0.2s ease;
+        }
+
+        .secondary-link:hover {
+            border-color: rgba(76, 201, 240, 0.4);
+        }
+
+        .secondary-link svg {
+            width: 16px;
+            height: 16px;
         }
 
         .modal-shell {
@@ -1270,8 +1630,8 @@
             align-items: center;
             justify-content: center;
             padding: 20px;
-            background: rgba(6, 10, 20, 0.76);
-            backdrop-filter: blur(10px);
+            background: rgba(7, 11, 24, 0.8);
+            backdrop-filter: blur(12px);
             z-index: 20;
         }
 
@@ -1285,11 +1645,12 @@
             display: grid;
             grid-template-rows: auto minmax(0, 1fr) auto;
             gap: 16px;
-            padding: 18px;
+            padding: 20px;
             border-radius: 18px;
-            background: linear-gradient(180deg, rgba(31, 38, 63, 0.98) 0%, rgba(24, 30, 52, 0.99) 100%);
-            border: 1px solid rgba(143, 161, 210, 0.16);
+            background: var(--panel-strong);
+            border: 1px solid var(--border-muted);
             box-shadow: var(--shadow);
+            backdrop-filter: blur(16px);
         }
 
         .modal-head {
@@ -1325,9 +1686,9 @@
             display: grid;
             gap: 6px;
             text-align: left;
-            border: 1px solid rgba(143, 161, 210, 0.14);
+            border: 1px solid var(--border-muted);
             border-radius: 14px;
-            background: rgba(16, 21, 39, 0.9);
+            background: var(--bg-input);
             color: var(--text);
             cursor: pointer;
             transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
@@ -1335,8 +1696,8 @@
 
         .saved-session-item:hover {
             transform: translateY(-1px);
-            border-color: rgba(79, 214, 255, 0.54);
-            background: rgba(20, 27, 47, 0.96);
+            border-color: rgba(76, 201, 240, 0.5);
+            background: var(--bg-card-hover);
         }
 
         .saved-session-content {
@@ -1373,8 +1734,8 @@
         .saved-session-tag {
             padding: 3px 8px;
             border-radius: 999px;
-            border: 1px solid rgba(143, 161, 210, 0.14);
-            background: rgba(45, 52, 86, 0.72);
+            border: 1px solid var(--border-muted);
+            background: rgba(22, 32, 58, 0.72);
             color: var(--muted);
             font-size: 0.66rem;
             font-weight: 700;
@@ -1383,8 +1744,8 @@
         }
 
         .saved-session-tag.current {
-            border-color: rgba(79, 214, 255, 0.32);
-            background: rgba(79, 214, 255, 0.12);
+            border-color: rgba(76, 201, 240, 0.32);
+            background: rgba(76, 201, 240, 0.12);
             color: var(--accent);
         }
 
@@ -1465,12 +1826,12 @@
             width: min(320px, 72vw);
             padding: 10px 12px;
             border-radius: 10px;
-            border: 1px solid rgba(143, 161, 210, 0.18);
-            background: rgba(16, 21, 39, 0.98);
+            border: 1px solid var(--border-muted);
+            background: var(--bg-deep);
             color: var(--muted);
             font-size: 0.74rem;
             line-height: 1.45;
-            box-shadow: 0 14px 30px rgba(4, 8, 20, 0.28);
+            box-shadow: 0 14px 30px rgba(4, 8, 20, 0.38);
             opacity: 0;
             pointer-events: none;
             transform: translateY(4px);
@@ -1499,26 +1860,130 @@
             transform: translateY(0);
         }
 
-        @media (max-width: 1180px) {
+        @media (max-width: 960px) {
             .shell {
                 grid-template-columns: 1fr;
-                grid-template-rows: 1fr 1.1fr;
+                grid-template-rows: auto auto;
+                height: auto;
+                min-height: auto;
+                overflow: auto;
+            }
+
+            .app-frame {
+                max-height: none;
+                overflow: auto;
             }
 
             .column-left,
             .column-right {
-                grid-template-rows: 1fr 1fr;
+                grid-template-rows: auto auto;
+            }
+
+            .terminal-card {
+                max-height: min(720px, max(420px, calc(100vh - 150px)));
+            }
+
+            .app-titlebar {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+
+            .action-bar {
+                flex-wrap: wrap;
+            }
+        }
+
+        @media (max-height: 780px) and (min-width: 901px) {
+            .shell {
+                padding: 10px 16px;
+                gap: 0;
+            }
+
+            .column {
+                gap: 10px;
+            }
+
+            .card {
+                padding: 14px 16px;
+            }
+
+            .section-head {
+                margin-bottom: 10px;
+            }
+
+            .section-title {
+                font-size: 0.76rem;
+                letter-spacing: 1.4px;
+            }
+
+            .message {
+                min-height: 16px;
+                margin-bottom: 6px;
+                font-size: 0.78rem;
+            }
+
+            .count-btn {
+                min-height: 42px;
+                padding: 6px 6px;
+            }
+
+            .count-value {
+                font-size: 1rem;
+            }
+
+            .layout-btn {
+                min-height: 48px;
+                grid-template-columns: 44px 1fr;
+                gap: 8px;
+                padding: 6px 8px;
+            }
+
+            .layout-preview {
+                width: 44px;
+                height: 30px;
+                gap: 2px;
+                padding: 2px;
+            }
+
+            .layout-copy strong {
+                font-size: 0.76rem;
+            }
+
+            .layout-copy span {
+                font-size: 0.64rem;
+            }
+
+            .mode-btn,
+            .ghost-btn {
+                padding: 8px 10px;
+            }
+
+            .field input,
+            .field select {
+                padding: 9px 11px;
+            }
+
+            .action-btn {
+                padding: 12px 24px;
+            }
+
+            .app-titlebar {
+                padding: 10px 20px;
             }
         }
 
         @media (max-width: 900px) {
-            body {
-                padding: 8px;
+            .app-frame {
+                max-height: none;
+                overflow: auto;
             }
 
             .shell {
-                height: calc(100vh - 16px);
-                gap: 10px;
+                height: auto;
+                min-height: auto;
+                gap: 0;
+                padding: 10px;
+                grid-template-columns: 1fr;
             }
 
             .card {
@@ -1526,8 +1991,8 @@
                 border-radius: 14px;
             }
 
-            .step1-card {
-                overflow: hidden;
+            .terminal-layout-card {
+                overflow: visible;
             }
 
             .form-grid {
@@ -1564,29 +2029,91 @@
             .modal-actions {
                 align-items: stretch;
             }
+
+            .count-grid {
+                grid-template-columns: repeat(3, 1fr);
+            }
+
+            .app-footer {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 10px;
+            }
+
+            .action-bar {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .action-stack {
+                flex-direction: column;
+            }
+
+            .action-btn {
+                width: 100%;
+                justify-content: center;
+            }
         }
     </style>
 </head>
 <body>
+<div class="app-frame">
+<header class="app-titlebar">
+    <div class="app-titlebar-left">
+        <div class="app-logo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="4 17 10 11 4 5"></polyline>
+                <line x1="12" y1="19" x2="20" y2="19"></line>
+            </svg>
+            GridVibe
+        </div>
+        <div class="app-header-title">
+            <h1>Launcher Setup</h1>
+            <p>Configure your terminal workspace before launch.</p>
+        </div>
+    </div>
+    <div class="app-titlebar-right">
+        <div class="header-badge">
+            <span>Session</span>
+            <strong id="headerSessionName">Current Session</strong>
+        </div>
+        <div class="header-badge">
+            <span>Mode</span>
+            <strong id="headerModeBadge">SSH Remote</strong>
+            <span class="status-dot"></span>
+        </div>
+    </div>
+</header>
+
 <div class="shell" data-max-sessions="{{ max_sessions }}">
     <section class="column column-left">
-        <div class="card step1-card">
-            <div id="message" class="message">Select how many terminals you want, pick a split when needed, then choose SSH or WSL.</div>
+        <div class="card terminal-layout-card">
+            <div id="message" class="message">Choose the terminal count and layout for the workspace.</div>
             <div class="section-head">
                 <div class="section-title">
+                    <span class="step-num">01</span>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <rect x="2" y="3" width="20" height="14" rx="2"></rect>
                         <line x1="8" y1="21" x2="16" y2="21"></line>
                         <line x1="12" y1="17" x2="12" y2="21"></line>
                     </svg>
-                    Step 1 — How Many Terminals?
+                    Terminal Layout
                 </div>
             </div>
 
-            <div class="count-grid" id="countGrid"></div>
+            <div class="terminal-count-strip">
+                <div class="count-grid" id="countGrid"></div>
+                <div class="count-selection-indicator">
+                    <span class="dot"></span>
+                    <span id="countIndicator">Selected: 4 terminals</span>
+                </div>
+            </div>
 
-            <div class="layout-panel">
-                <div class="layout-label">Split Layout</div>
+            <div id="layoutPanel" class="layout-panel" hidden>
+                <div class="layout-panel-head">
+                    <strong>Layout</strong>
+                    <span id="layoutIndicator">Choose pane arrangement</span>
+                </div>
                 <div id="layoutOptions" class="layout-grid"></div>
             </div>
         </div>
@@ -1594,27 +2121,34 @@
         <div class="card">
             <div class="section-head">
                 <div class="section-title">
+                    <span class="step-num">02</span>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>
                     </svg>
-                    Step 2 — Session Source
+                    Session Source
                 </div>
                 <div class="toolbar">
-                    <button class="ghost-btn" type="button" onclick="saveCurrentConfig()">Save Session</button>
-                    <button class="ghost-btn" type="button" onclick="importSavedSession()">Import Session</button>
-                    <button class="ghost-btn danger-btn" type="button" onclick="deleteSavedSessions()">Delete Sessions</button>
+                    <button class="ghost-btn" type="button" onclick="saveCurrentConfig()">💾 Save Session</button>
+                    <button class="ghost-btn" type="button" onclick="importSavedSession()">📂 Import Session</button>
+                    <button class="ghost-btn danger-btn" type="button" onclick="deleteSavedSessions()">🗑 Delete Sessions</button>
                 </div>
                 <div id="updateStatus" class="toolbar-status"></div>
             </div>
 
             <div class="mode-toggle">
                 <button type="button" class="mode-btn active" data-mode="ssh">
-                    SSH
-                    <small>Remote host</small>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <rect x="2" y="3" width="20" height="14" rx="2"></rect>
+                        <line x1="8" y1="21" x2="16" y2="21"></line>
+                        <line x1="12" y1="17" x2="12" y2="21"></line>
+                    </svg>
+                    SSH Remote
                 </button>
                 <button type="button" class="mode-btn" data-mode="wsl">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                    </svg>
                     Local Repo
-                    <small>Local folder</small>
                 </button>
             </div>
 
@@ -1626,38 +2160,49 @@
         <div class="card terminal-card">
             <div class="section-head">
                 <div class="section-title">
+                    <span class="step-num">03</span>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="4 17 10 11 4 5"></polyline>
                         <line x1="12" y1="19" x2="20" y2="19"></line>
                     </svg>
-                    Step 3 — Terminal Setup
+                    Terminal Setup
                 </div>
+                <button type="button" class="add-terminal-btn" id="addTerminalBtn" onclick="addTerminalFromButton()">+ Add Terminal</button>
             </div>
+            <div class="message">Configure each terminal tab before launch.</div>
             <div id="terminalRows" class="rows-wrap"></div>
         </div>
 
-        <div class="action-stack">
-            <button id="launchBtn" type="button" class="action-btn" onclick="launchSessions()">Launch Terminals</button>
-            <a href="/terminals" class="secondary-link" target="gridvibe-sessions" onclick="return viewActiveTerminals(event)">View Active Terminals →</a>
-            <div id="themeControl" class="quick-controls">
-                <span class="quick-controls-label">Theme</span>
-                <button id="themeToggleBtnIndex" type="button" class="ghost-btn" onclick="cycleTheme()" style="font-size:.78rem;padding:5px 14px;">🌙 Dark</button>
-                <button id="checkUpdatesBtn" class="ghost-btn icon-btn" type="button" onclick="checkForUpdates()" title="Check for updates" aria-label="Check for updates">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
-                        <polyline points="21 3 21 9 15 9"></polyline>
-                    </svg>
-                </button>
-                <button id="appSettingsBtn" class="ghost-btn icon-btn" type="button" onclick="openAppSettings()" title="App settings" aria-label="App settings">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                        <circle cx="12" cy="12" r="3"></circle>
-                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-.51A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.81-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-                    </svg>
-                </button>
+        <div class="action-bar">
+            <div class="action-bar-left action-stack">
+                <a href="/terminals" class="secondary-link" target="gridvibe-sessions" onclick="return viewActiveTerminals(event)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                    View Active Terminals
+                </a>
+                <button id="launchBtn" type="button" class="action-btn" onclick="launchSessions()">Launch Workspace <span class="arrow">→</span></button>
             </div>
-            <div id="quickUpdateStatus" class="inline-status"></div>
+            <div class="action-bar-right">
+                <div id="themeControl" class="quick-controls">
+                    <span class="quick-controls-label">Theme</span>
+                    <button id="themeToggleBtnIndex" type="button" class="ghost-btn" onclick="cycleTheme()" style="font-size:.78rem;padding:5px 14px;">🌙 Dark</button>
+                    <button id="checkUpdatesBtn" class="ghost-btn icon-btn" type="button" onclick="checkForUpdates()" title="Check for updates" aria-label="Check for updates">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
+                            <polyline points="21 3 21 9 15 9"></polyline>
+                        </svg>
+                    </button>
+                    <button id="appSettingsBtn" class="ghost-btn icon-btn" type="button" onclick="openAppSettings()" title="App settings" aria-label="App settings">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="3"></circle>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-.51A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.81-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                        </svg>
+                    </button>
+                </div>
+                <div id="quickUpdateStatus" class="inline-status"></div>
+            </div>
         </div>
     </section>
+</div>
 </div>
 
 <div id="savedSessionsModal" class="modal-shell" aria-hidden="true">
@@ -1974,6 +2519,7 @@
 
     let selectedCount = COUNT_OPTIONS.includes(4) ? 4 : COUNT_OPTIONS[COUNT_OPTIONS.length - 1];
     let selectedLayout = defaultLayoutForCount(selectedCount);
+    let layoutChooserOpen = false;
     let connectionMode = 'ssh';
     let savedSessionResolver = null;
     let savedSessionModalMode = 'import';
@@ -2073,6 +2619,7 @@
             connectionMode = button.dataset.mode;
             renderModeFields();
             resetTerminalSetupIfTargetChanged(connectionMode, collectModeInputs());
+            updateHeaderBadges();
         });
     });
 
@@ -2852,36 +3399,89 @@
 
     function renderCountOptions() {
         const countGrid = document.getElementById('countGrid');
-        countGrid.innerHTML = COUNT_OPTIONS.map(count => `
-            <button type="button" class="count-btn ${count === selectedCount ? 'active' : ''}" data-count="${count}">
-                <div class="count-meta">
-                    <span class="count-value">${count}</span>
-                    <span class="count-label">${count === 1 ? 'Terminal' : 'Terminals'}</span>
+        countGrid.innerHTML = COUNT_OPTIONS.map(count => {
+            const isSelected = count === selectedCount;
+            const isLayoutOpen = layoutChooserOpen && isSelected;
+            return `
+                <div class="count-option ${isSelected ? 'active' : ''}">
+                    <button type="button" class="count-btn ${isSelected ? 'active' : ''}" data-count="${count}">
+                        <div class="count-meta">
+                            <span class="count-value">${count}</span>
+                        </div>
+                        <span class="count-label">${count === 1 ? 'terminal' : 'terminals'}</span>
+                    </button>
+                    <button
+                        type="button"
+                        class="count-layout-toggle ${isLayoutOpen ? 'active' : ''}"
+                        data-count="${count}"
+                        aria-label="Choose layout for ${count} terminal${count === 1 ? '' : 's'}"
+                        aria-controls="layoutPanel"
+                        aria-expanded="${isLayoutOpen ? 'true' : 'false'}"
+                    ></button>
                 </div>
-            </button>
-        `).join('');
+            `;
+        }).join('');
+
+        const indicator = document.getElementById('countIndicator');
+        if (indicator) {
+            indicator.textContent = `Selected: ${selectedCount} terminal${selectedCount === 1 ? '' : 's'}`;
+        }
 
         countGrid.querySelectorAll('.count-btn').forEach(button => {
             button.addEventListener('click', () => {
                 const nextCount = Number(button.dataset.count);
                 if (nextCount === selectedCount) {
+                    if (layoutChooserOpen) {
+                        layoutChooserOpen = false;
+                        renderCountOptions();
+                        renderLayoutOptions();
+                    }
                     return;
                 }
 
                 const drafts = collectTerminalDrafts();
                 selectedCount = nextCount;
                 selectedLayout = defaultLayoutForCount(nextCount);
+                layoutChooserOpen = false;
                 renderCountOptions();
                 renderLayoutOptions();
                 buildTerminalRows(selectedCount, drafts);
+            });
+        });
+
+        countGrid.querySelectorAll('.count-layout-toggle').forEach(button => {
+            button.addEventListener('click', () => {
+                const nextCount = Number(button.dataset.count);
+                const drafts = collectTerminalDrafts();
+                const wasOpenForCount = layoutChooserOpen && nextCount === selectedCount;
+                if (nextCount !== selectedCount) {
+                    selectedCount = nextCount;
+                    selectedLayout = defaultLayoutForCount(nextCount);
+                    buildTerminalRows(selectedCount, drafts);
+                }
+
+                layoutChooserOpen = !wasOpenForCount;
+                renderCountOptions();
+                renderLayoutOptions();
             });
         });
     }
 
     function renderLayoutOptions() {
         const options = LAYOUT_COPY[selectedCount];
+        const panel = document.getElementById('layoutPanel');
         const container = document.getElementById('layoutOptions');
         const keys = Object.keys(options);
+        if (panel) {
+            panel.hidden = !layoutChooserOpen;
+        }
+        const layoutIndicator = document.getElementById('layoutIndicator');
+        if (layoutIndicator) {
+            const activeOption = options[selectedLayout] || options[keys[0]];
+            layoutIndicator.textContent = activeOption
+                ? `${selectedCount} terminal${selectedCount === 1 ? '' : 's'} - ${activeOption.label}`
+                : 'Choose pane arrangement';
+        }
         container.className = `layout-grid${keys.length === 1 ? ' single' : ''}`;
         container.innerHTML = keys.map(key => {
             const option = options[key];
@@ -2907,6 +3507,8 @@
         container.querySelectorAll('.layout-btn').forEach(button => {
             button.addEventListener('click', () => {
                 selectedLayout = button.dataset.layout;
+                layoutChooserOpen = false;
+                renderCountOptions();
                 renderLayoutOptions();
             });
         });
@@ -3185,11 +3787,12 @@
         const commandField = row.querySelector('.t-command-field');
         const agentField = row.querySelector('.t-agent-field');
         const customAgentField = row.querySelector('.t-agent-custom-field');
+        const startupModeSelect = row.querySelector('.startup-mode-select');
         const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
 
-        row.querySelectorAll('.command-mode-btn').forEach(button => {
-            button.classList.toggle('active', button.dataset.commandMode === commandMode);
-        });
+        if (startupModeSelect && startupModeSelect.value !== commandMode) {
+            startupModeSelect.value = commandMode;
+        }
 
         commandField?.classList.toggle('hidden', commandMode !== 'command');
         agentField?.classList.toggle('hidden', commandMode !== 'agent');
@@ -3474,14 +4077,14 @@
             const powershellCheckbox = row.querySelector('.t-use-powershell');
             const agentSelect = row.querySelector('.t-agent-select');
             const distributionInput = row.querySelector('.t-distribution');
+            const startupModeSelect = row.querySelector('.startup-mode-select');
 
-            row.querySelectorAll('.command-mode-btn').forEach(button => {
-                button.addEventListener('click', () => {
-                    resetTerminalCommandOnModeChange(row, button.dataset.commandMode);
-                    row.dataset.commandMode = button.dataset.commandMode;
-                    syncTerminalCommandState(row);
-                    scheduleAgentPreflight(row, 60);
-                });
+            startupModeSelect?.addEventListener('change', () => {
+                const nextMode = startupModeSelect.value;
+                resetTerminalCommandOnModeChange(row, nextMode);
+                row.dataset.commandMode = nextMode;
+                syncTerminalCommandState(row);
+                scheduleAgentPreflight(row, 60);
             });
             agentSelect?.addEventListener('change', () => {
                 syncTerminalCommandState(row);
@@ -3511,6 +4114,8 @@
                     <div class="t-row-head">
                         <span class="t-badge">T${index + 1}</span>
                         <span class="t-name">Terminal ${index + 1}</span>
+                        <span class="t-status-dot"></span>
+                        <button type="button" class="t-menu-btn" title="Options">⋮</button>
                     </div>
                     <div class="t-fields">
                         <div class="field">
@@ -3523,11 +4128,11 @@
                         </div>
                         <div class="field">
                             <label>Startup Mode</label>
-                            <div class="command-mode-toggle">
-                                <button type="button" class="command-mode-btn ${commandUi.mode === 'command' ? 'active' : ''}" data-command-mode="command">Initial Command</button>
-                                <button type="button" class="command-mode-btn ${commandUi.mode === 'agent' ? 'active' : ''}" data-command-mode="agent">Agent</button>
-                                <button type="button" class="command-mode-btn ${commandUi.mode === 'explorer' ? 'active' : ''}" data-command-mode="explorer">File Explorer</button>
-                            </div>
+                            <select class="startup-mode-select">
+                                <option value="command" ${commandUi.mode === 'command' ? 'selected' : ''}>Initial Command</option>
+                                <option value="agent" ${commandUi.mode === 'agent' ? 'selected' : ''}>Agent</option>
+                                <option value="explorer" ${commandUi.mode === 'explorer' ? 'selected' : ''}>File Explorer</option>
+                            </select>
                         </div>
                         <div class="field t-command-field ${commandUi.mode === 'command' ? '' : 'hidden'}">
                             <label>Initial Command</label>
@@ -3630,7 +4235,10 @@
 
         connectionMode = normalized.connection_mode === 'wsl' ? 'wsl' : 'ssh';
         selectedCount = count;
-        selectedLayout = normalized.layout || defaultLayoutForCount(count);
+        selectedLayout = LAYOUT_COPY[count]?.[normalized.layout]
+            ? normalized.layout
+            : defaultLayoutForCount(count);
+        layoutChooserOpen = false;
 
         document.querySelectorAll('.mode-btn').forEach(button => {
             button.classList.toggle('active', button.dataset.mode === connectionMode);
@@ -3657,6 +4265,7 @@
         activeSavedSessionId = String(meta?.id || '').trim();
         activeSavedSessionName = String(meta?.name || '').trim();
         persistActiveSavedSessionMeta();
+        if (typeof updateHeaderBadges === 'function') updateHeaderBadges();
     }
 
     async function persistLastUsedConfig(savedSessionId = activeSavedSessionId) {
@@ -4153,6 +4762,43 @@
     loadPersistedConfig(true);
     loadAppSettings().catch(() => {});
     loadVoicePrefs().catch(() => {});
+    updateHeaderBadges();
+
+    function updateHeaderBadges() {
+        const modeBadge = document.getElementById('headerModeBadge');
+        const sessionBadge = document.getElementById('headerSessionName');
+        if (modeBadge) {
+            modeBadge.textContent = connectionMode === 'ssh' ? 'SSH Remote' : 'Local Repo';
+        }
+        if (sessionBadge) {
+            sessionBadge.textContent = activeSavedSessionName || 'Current Session';
+        }
+    }
+
+    function addTerminalFromButton() {
+        if (selectedCount >= MAX_SESSIONS) {
+            showMessage(`Maximum ${MAX_SESSIONS} terminals allowed.`, 'error');
+            return;
+        }
+        const drafts = collectTerminalDrafts();
+        const nextCount = selectedCount + 1;
+        if (COUNT_OPTIONS.includes(nextCount)) {
+            selectedCount = nextCount;
+        } else {
+            const nextValid = COUNT_OPTIONS.find(n => n > selectedCount);
+            if (nextValid) {
+                selectedCount = nextValid;
+            } else {
+                showMessage(`Maximum ${MAX_SESSIONS} terminals allowed.`, 'error');
+                return;
+            }
+        }
+        selectedLayout = defaultLayoutForCount(selectedCount);
+        layoutChooserOpen = false;
+        renderCountOptions();
+        renderLayoutOptions();
+        buildTerminalRows(selectedCount, drafts);
+    }
 
     document.getElementById('appVoiceProfile')?.addEventListener('change', event => {
         voicePrefs.profile = event.target.value === 'headset' ? 'headset' : 'laptop';
