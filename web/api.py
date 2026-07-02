@@ -2328,21 +2328,30 @@ def _default_explorer_candidate_path(session: Any, root_path: str) -> str:
 MARKDOWN_PREVIEW_EXTENSIONS = {".md", ".markdown"}
 CODE_PREVIEW_LANGUAGES = {
     ".bash": "shell",
+    ".bat": "batch",
     ".c": "c",
     ".cc": "cpp",
+    ".cfg": "config",
+    ".cmd": "batch",
+    ".conf": "config",
     ".cpp": "cpp",
     ".cs": "csharp",
     ".css": "css",
+    ".env": "dotenv",
+    ".example": "config",
     ".go": "go",
     ".h": "c",
     ".hpp": "cpp",
     ".html": "html",
+    ".ini": "ini",
     ".java": "java",
     ".js": "javascript",
     ".jsx": "javascript",
     ".json": "json",
+    ".jsonl": "jsonl",
     ".kt": "kotlin",
     ".kts": "kotlin",
+    ".log": "log",
     ".lua": "lua",
     ".php": "php",
     ".ps1": "powershell",
@@ -2351,13 +2360,25 @@ CODE_PREVIEW_LANGUAGES = {
     ".rs": "rust",
     ".sh": "shell",
     ".sql": "sql",
+    ".spec": "python",
     ".swift": "swift",
+    ".txt": "text",
     ".toml": "toml",
     ".ts": "typescript",
     ".tsx": "typescript",
     ".xml": "xml",
     ".yaml": "yaml",
     ".yml": "yaml",
+}
+CODE_PREVIEW_FILENAMES = {
+    ".editorconfig": "ini",
+    ".env": "dotenv",
+    ".gitattributes": "config",
+    ".gitignore": "gitignore",
+    ".gitkeep": "text",
+    ".python-version": "text",
+    "dockerfile": "dockerfile",
+    "makefile": "makefile",
 }
 MARKDOWN_ALLOWED_TAGS = {
     "a",
@@ -2419,6 +2440,11 @@ def _is_markdown_file(path: str) -> bool:
 
 def _explorer_code_language(path: str) -> Optional[str]:
     """Return the source language for code files shown in explorer previews."""
+    filename = os.path.basename(path).lower()
+    if filename in CODE_PREVIEW_FILENAMES:
+        return CODE_PREVIEW_FILENAMES[filename]
+    if filename.startswith(".env."):
+        return "dotenv"
     _, extension = os.path.splitext(path.lower())
     if extension in MARKDOWN_PREVIEW_EXTENSIONS:
         return "markdown"

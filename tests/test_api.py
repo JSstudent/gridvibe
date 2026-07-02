@@ -406,6 +406,28 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("'.py': 'python'", html)
         self.assertIn("'.go': 'go'", html)
         self.assertIn("'.c': 'c'", html)
+        self.assertIn("'.jsonl': 'jsonl'", html)
+        self.assertIn("'.log': 'log'", html)
+        self.assertIn("'.txt': 'text'", html)
+        self.assertIn("'.bat': 'batch'", html)
+        self.assertIn("const EXPLORER_LANGUAGE_BY_FILENAME = Object.freeze({", html)
+        self.assertIn("'.gitignore': 'gitignore'", html)
+        self.assertIn("'dockerfile': 'dockerfile'", html)
+
+    def test_terminals_page_explorer_formats_common_operational_text_files(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("jsonl: 'JSON Lines source'", html)
+        self.assertIn("log: 'Log file'", html)
+        self.assertIn("dotenv: 'Environment file'", html)
+        self.assertIn("batch: 'Batch source'", html)
+        self.assertIn("function highlightExplorerLog(content, searchRanges = [])", html)
+        self.assertIn("function highlightExplorerLogLine(line, absoluteStart, searchRanges = [])", html)
+        self.assertIn("const EXPLORER_LOG_LEVELS = new Set", html)
+        self.assertIn("explorer-log-timestamp", html)
+        self.assertIn("explorer-log-level", html)
 
     def test_terminals_page_explorer_editor_has_font_zoom_controls(self):
         response = self.client.get("/terminals")
@@ -2083,7 +2105,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         payload = file_response.get_json()
         self.assertIsNone(payload["preview_type"])
         self.assertIsNone(payload["preview_html"])
-        self.assertIsNone(payload["language"])
+        self.assertEqual(payload["language"], "text")
 
     def test_explorer_file_returns_code_language_for_common_source_files(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -2101,6 +2123,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["preview_type"], None)
         self.assertIsNone(payload["preview_html"])
         self.assertEqual(payload["language"], "python")
+
+    def test_explorer_code_language_covers_common_workspace_text_files(self):
+        cases = {
+            "events.jsonl": "jsonl",
+            "system.log": "log",
+            "notes.txt": "text",
+            "setup.bat": "batch",
+            "run.cmd": "batch",
+            ".env": "dotenv",
+            ".env.local": "dotenv",
+            ".gitignore": "gitignore",
+            "settings.example": "config",
+            "app.conf": "config",
+            "build.spec": "python",
+            "Dockerfile": "dockerfile",
+            "Makefile": "makefile",
+        }
+        for path, expected_language in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(api._explorer_code_language(path), expected_language)
 
     def test_explorer_file_rejects_path_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
