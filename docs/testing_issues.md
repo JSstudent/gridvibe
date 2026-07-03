@@ -3,32 +3,6 @@ Last updated: 2026-07-03
 
 ## Open Issues
 
-### Issue ID: ISSUE-2026-008
-- Title: Add active workspace Save Session button
-- Priority: Low
-- Status: Open
-- Area: `templates/terminals.html`, `templates/index.html`, `web/api.py`, `sessions/manager.py`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `session`, `launcher`, `ui`, `tests`
-- Reported: 2026-07-03
-
-Description:
-The terminal workspace does not provide a Save Session action for the currently selected session group after the user customizes it. Users can save launcher form presets before launch, but changes made in the live workspace, such as resized panes, split/window arrangement, terminal or explorer mode changes, and agent CLI setup, are not directly captured as a reusable saved session layout.
-
-Steps to reproduce:
-1. Launch a GridVibe session group, then open the `/terminals` workspace.
-2. Change the active group after launch by resizing panes, changing pane modes, splitting or arranging terminals, or adjusting agent/terminal setup.
-3. Inspect the tab bar near the `+ New Session` button and attempt to save the active group's current layout for later relaunch.
-
-Expected behavior:
-The terminal workspace should expose a Save Session button immediately after `+ New Session`. Saving should persist the selected active group as a saved launcher/session preset, including the current pane count, layout geometry, startup modes, terminal/explorer/agent metadata, and enough per-pane configuration to recreate the same setup later. If the user wants to override that saved layout from the launcher, recreating the session there and saving it should continue to work.
-
-Actual behavior / logs:
-Code inspection confirms `renderSessionTabs()` in `templates/terminals.html` creates only the `+ New Session` button before rendering session group tabs. The existing `Save Session` control is in `templates/index.html` on the launcher page, where `saveCurrentConfig()` posts `collectFormConfig()` to `POST /api/saved-sessions`. `web/api.py` exposes saved-session endpoints for launcher presets and `POST /api/sessions` creates session groups from submitted launch configuration, but there is no workspace save control or endpoint that serializes the active group's runtime layout, split/resize state, pane startup mode changes, or agent CLI state back into a saved session preset.
-
-### Proposed solution:
-Add an active-workspace Save Session control in `templates/terminals.html` immediately after the `+ New Session` tab button. Implement client-side serialization for the selected `activeGroupId`, including ordered panes, session IDs, current group layout class, split rectangles or resize weights, per-pane startup mode, explorer root/current directory where available, terminal title, connection mode, shell/WSL/PowerShell flags, initial command or selected agent metadata, and any fields required by the launcher preset schema. Add a backend endpoint or extend the saved-session API in `web/api.py` to accept a sanitized active-group snapshot and upsert it through the existing saved-session persistence path without storing transient terminal output or secrets beyond the existing encrypted preset handling. Keep launcher overwrite behavior compatible so a user can later recreate the preset from the launcher and save over it. Add focused tests in `tests/test_api.py` and `tests/test_session_manager.py` for workspace save button placement, active-group serialization, saved preset roundtrip, launcher overwrite behavior, split/resize persistence, mode-change persistence, and agent startup metadata preservation.
-
 ### Issue ID: ISSUE-2026-007
 - Title: Opening binary files can freeze explorer mode
 - Priority: Medium
@@ -108,6 +82,22 @@ User report: the search function is extremely slow on large files and causes the
 Make explorer file search bounded and asynchronous enough for large previews. In `templates/terminals.html`, debounce input, cancel stale searches, cap or progressively count matches, and avoid re-rendering the full file on every keystroke when possible. Consider chunked search with `requestIdleCallback`/`setTimeout`, a Web Worker for large content, or virtualized line rendering so highlighting only touches visible content plus nearby matches. Keep `web/api.py` preview truncation behavior intact unless a smaller preview or explicit large-file warning is chosen. Add regression tests in `tests/test_api.py` for the presence of debounce/cancellation or worker wiring, match-cap behavior, truncated-file messaging, and preservation of existing source/preview search controls.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-008
+- Title: Add active workspace Save Session button
+- Priority: Low
+- Status: Closed
+- Area: `templates/terminals.html`, `templates/index.html`, `web/api.py`, `sessions/manager.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `session`, `launcher`, `ui`, `tests`
+- Reported: 2026-07-03
+- Closed: 2026-07-03
+
+Description:
+The terminal workspace did not provide a Save Session action for the currently selected session group after the user customized it. Users could save launcher form presets before launch, but changes made in the live workspace, such as resized panes, split/window arrangement, terminal or explorer mode changes, and agent CLI setup, were not directly captured as a reusable saved session layout.
+
+Resolution:
+`templates/terminals.html` now adds a `Save Session` tab button immediately after `+ New Session`. The workspace save flow serializes the active group into the existing launcher preset schema, including pane count, connection mode, terminal titles, directories, startup modes, explorer-selected directories, shell flags, agent command metadata, and sanitized split/resize geometry. `web/api.py` now normalizes optional `workspace_layout` metadata through the saved-session API, attaches it to launched session groups, and returns it through session-group/session responses so relaunched presets can restore layout geometry. `templates/index.html` preserves imported workspace layout metadata and forwards it when launching saved presets. `sessions/manager.py` now retains runtime agent metadata and group workspace layout metadata. Focused API/template/session-manager tests cover button placement, serialization hooks, geometry roundtrip, launch metadata, and agent metadata preservation.
 
 ### Issue ID: ISSUE-2026-002
 - Title: Add per-terminal close buttons with neighbor expansion

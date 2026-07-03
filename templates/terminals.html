@@ -266,6 +266,23 @@
             color: #cffff0;
         }
 
+        .session-tab.save {
+            background: rgba(37, 99, 235, 0.16);
+            border-color: #3b82f6;
+            color: #bfdbfe;
+        }
+
+        .session-tab.save:hover {
+            background: rgba(37, 99, 235, 0.24);
+            border-color: #60a5fa;
+            color: #eff6ff;
+        }
+
+        .session-tab.save:disabled {
+            cursor: wait;
+            opacity: 0.65;
+        }
+
         [data-theme="light"] .session-tab {
             box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
         }
@@ -280,6 +297,18 @@
             background: #d1fae5;
             border-color: rgba(4, 120, 87, 0.75);
             color: #065f46;
+        }
+
+        [data-theme="light"] .session-tab.save {
+            background: #eff6ff;
+            border-color: rgba(37, 99, 235, 0.55);
+            color: #1d4ed8;
+        }
+
+        [data-theme="light"] .session-tab.save:hover {
+            background: #dbeafe;
+            border-color: rgba(37, 99, 235, 0.75);
+            color: #1e40af;
         }
 
         .session-tab.dragging {
@@ -2470,6 +2499,221 @@
         button.style.borderColor = hexToRgba(colour, 0.4);
     }
 
+    function savedSessionIdFromGroupId(groupId) {
+        const prefix = 'saved-session-';
+        const value = String(groupId || '');
+        return value.startsWith(prefix) ? value.slice(prefix.length) : '';
+    }
+
+    function setWorkspaceSaveMessage(message, type = '') {
+        const label = document.getElementById('sessionLabel');
+        if (!label || !message) {
+            return;
+        }
+        label.textContent = message;
+        label.dataset.workspaceSaveStatus = type;
+    }
+
+    function buildWorkspaceLayoutSnapshotFromState(count, className, rects, columnWeights, rowWeights, baseCount) {
+        if (!count || !Array.isArray(rects) || rects.length !== count) {
+            return null;
+        }
+
+        return {
+            class_name: 'layout-split-local',
+            split_slot_rects: rects.map((rect, index) => ({
+                originSlot: Number.isInteger(Number(rect.originSlot)) ? Number(rect.originSlot) : index,
+                x: Math.max(1, Number(rect.x) || 1),
+                y: Math.max(1, Number(rect.y) || 1),
+                w: Math.max(1, Number(rect.w) || 1),
+                h: Math.max(1, Number(rect.h) || 1)
+            })),
+            split_column_weights: cloneSplitTrackWeights(columnWeights),
+            split_row_weights: cloneSplitTrackWeights(rowWeights),
+            original_split_slot_count: Math.max(1, Number(baseCount || count) || count)
+        };
+    }
+
+    function buildActiveWorkspaceLayoutSnapshot() {
+        if (!activeGroupId) {
+            return null;
+        }
+
+        if (visibleGroupId === activeGroupId && gridBuilt) {
+            const grid = document.getElementById('terminalsGrid');
+            const rects = cloneSplitSlotRects(
+                grid?.className === 'layout-split-local'
+                    ? ensureSplitSlotRects()
+                    : fixedLayoutSlotRects(terminals.length, grid?.className || '')
+            );
+            const size = getSplitGridSize(rects);
+            return buildWorkspaceLayoutSnapshotFromState(
+                terminals.length,
+                grid?.className || '',
+                rects,
+                normalizeSplitTrackWeights(splitColumnWeights, size.columns),
+                normalizeSplitTrackWeights(splitRowWeights, size.rows),
+                originalSplitSlotCount || terminals.length
+            );
+        }
+
+        const cached = cachedGroupViews.get(activeGroupId);
+        if (!cached) {
+            return null;
+        }
+
+        return buildWorkspaceLayoutSnapshotFromState(
+            cached.terminals?.length || 0,
+            cached.className || '',
+            cached.splitSlotRects,
+            cached.splitColumnWeights,
+            cached.splitRowWeights,
+            cached.originalSplitSlotCount || cached.terminals?.length || 0
+        );
+    }
+
+    function getWorkspacePanesInVisualOrder(groupId = activeGroupId) {
+        if (!groupId) {
+            return [];
+        }
+
+        if (visibleGroupId === groupId && gridBuilt) {
+            const grid = document.getElementById('terminalsGrid');
+            const cards = Array.from(grid?.children || []);
+            if (cards.length) {
+                return cards
+                    .map(card => terminals[Number(card.dataset.slot)])
+                    .filter(Boolean);
+            }
+            return terminals.filter(Boolean);
+        }
+
+        const cached = cachedGroupViews.get(groupId);
+        if (!cached) {
+            return [];
+        }
+
+        const cachedTerminals = cached.terminals || [];
+        const cachedCards = Array.from(cached.fragment?.children || []);
+        if (cachedCards.length) {
+            return cachedCards
+                .map(card => cachedTerminals[Number(card.dataset.slot)])
+                .filter(Boolean);
+        }
+        return cachedTerminals.filter(Boolean);
+    }
+
+    function buildWorkspaceTerminalEntry(terminal, index, connectionMode) {
+        const session = terminal?._session || {};
+        const rawStartupMode = String(session.startup_mode || '').trim();
+        const startupMode = isExplorerPaneInstance(terminal) || isExplorerSession(session)
+            ? 'explorer'
+            : (rawStartupMode === 'agent' ? 'agent' : 'terminal');
+        const commandMode = startupMode === 'agent'
+            ? 'agent'
+            : (startupMode === 'explorer' ? 'explorer' : 'command');
+        const selectedDirectory = startupMode === 'explorer'
+            ? (terminal?._explorerPath || session.directory || session.explorer_root_directory || '')
+            : (session.directory || '');
+
+        return {
+            title: session.title || `Terminal ${index + 1}`,
+            directory: selectedDirectory,
+            initial_command: startupMode === 'explorer' ? '' : (session.initial_command || ''),
+            initial_command_mode: commandMode,
+            startup_mode: startupMode,
+            agent_selection: commandMode === 'agent' ? (session.agent_selection || '') : '',
+            custom_agent: commandMode === 'agent' ? (session.custom_agent || '') : '',
+            distribution: connectionMode === 'wsl' ? (session.distribution || '') : '',
+            use_wsl: connectionMode === 'wsl' ? Boolean(session.use_wsl) : false,
+            use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false
+        };
+    }
+
+    function buildActiveWorkspaceSessionConfig() {
+        const group = getGroupById(activeGroupId);
+        const groupTerminals = getWorkspacePanesInVisualOrder(activeGroupId);
+        const connectionMode = group?.connection_mode === 'wsl' ? 'wsl' : 'ssh';
+        const terminalEntries = groupTerminals.map((terminal, index) => (
+            buildWorkspaceTerminalEntry(terminal, index, connectionMode)
+        ));
+        const firstSession = groupTerminals.find(terminal => terminal?._session)?._session || {};
+        const firstDirectory = terminalEntries.find(entry => entry.directory)?.directory || '';
+
+        return {
+            connection_mode: connectionMode,
+            terminal_count: terminalEntries.length,
+            layout: group?.layout || 'single',
+            ssh: {
+                host: connectionMode === 'ssh' ? (firstSession.host || '') : '',
+                username: connectionMode === 'ssh' ? (firstSession.username || 'ubuntu') : 'ubuntu',
+                password: '',
+                port: connectionMode === 'ssh' ? (Number(firstSession.port) || 22) : 22,
+                default_dir: connectionMode === 'ssh' ? firstDirectory : ''
+            },
+            wsl: {
+                distribution: connectionMode === 'wsl' ? (firstSession.distribution || '') : '',
+                username: connectionMode === 'wsl' ? (firstSession.username || '') : '',
+                default_dir: connectionMode === 'wsl' ? firstDirectory : ''
+            },
+            terminals: terminalEntries,
+            workspace_layout: buildActiveWorkspaceLayoutSnapshot()
+        };
+    }
+
+    async function saveActiveWorkspaceSession(button = null) {
+        if (!activeGroupId) {
+            setWorkspaceSaveMessage('No active session group to save.', 'error');
+            return;
+        }
+
+        const group = getGroupById(activeGroupId);
+        const config = buildActiveWorkspaceSessionConfig();
+        if (!config.terminals.length) {
+            setWorkspaceSaveMessage('No active terminals to save.', 'error');
+            return;
+        }
+
+        const suggestedName = group?.name || `Workspace ${new Date().toLocaleTimeString()}`;
+        const rawName = window.prompt('Session name', suggestedName);
+        if (rawName === null) {
+            return;
+        }
+
+        const sessionName = rawName.trim() || suggestedName;
+        const savedSessionId = savedSessionIdFromGroupId(activeGroupId);
+        const previousText = button?.textContent;
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Saving...';
+        }
+
+        try {
+            const response = await fetch('/api/saved-sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: savedSessionId || undefined,
+                    name: sessionName,
+                    config
+                })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Save failed with status ${response.status}`);
+            }
+            setWorkspaceSaveMessage(`Saved session "${data.name || sessionName}".`, 'success');
+        } catch (error) {
+            console.error('[GridVibe Sessions] workspace save failed:', error);
+            setWorkspaceSaveMessage(`Save failed: ${error.message}`, 'error');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = previousText || 'Save Session';
+            }
+        }
+    }
+
     function renderSessionTabs() {
         const container = document.getElementById('sessionTabs');
         if (!container) return;
@@ -2480,8 +2724,17 @@
         settingsButton.textContent = '+ New Session';
         settingsButton.addEventListener('click', goToSettings);
 
+        const saveButton = document.createElement('button');
+        saveButton.className = 'session-tab save';
+        saveButton.type = 'button';
+        saveButton.textContent = 'Save Session';
+        saveButton.title = 'Save the active workspace as a launcher session';
+        saveButton.setAttribute('aria-label', 'Save active workspace session');
+        saveButton.addEventListener('click', () => saveActiveWorkspaceSession(saveButton));
+
         container.innerHTML = '';
         container.appendChild(settingsButton);
+        container.appendChild(saveButton);
 
         sessionGroups.forEach((group, index) => {
             const tabNumber = index + 1;
@@ -3462,6 +3715,34 @@
             renderResizeHandles();
         }
         return true;
+    }
+
+    function applyWorkspaceLayoutSnapshot(snapshot, expectedCount) {
+        if (
+            !snapshot
+            || !Array.isArray(snapshot.split_slot_rects)
+            || snapshot.split_slot_rects.length !== expectedCount
+        ) {
+            return false;
+        }
+
+        const rects = snapshot.split_slot_rects.map((rect, index) => normalizeSplitRectMetadata({
+            id: makeSplitRectId(),
+            originSlot: Number.isInteger(Number(rect.originSlot)) ? Number(rect.originSlot) : index,
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h
+        }));
+        const size = getSplitGridSize(rects);
+        originalSplitSlotCount = Math.max(
+            1,
+            Number(snapshot.original_split_slot_count || expectedCount) || expectedCount
+        );
+        splitSlotRects = cloneSplitSlotRects(rects);
+        splitColumnWeights = normalizeSplitTrackWeights(snapshot.split_column_weights, size.columns);
+        splitRowWeights = normalizeSplitTrackWeights(snapshot.split_row_weights, size.rows);
+        return applySplitSlotGeometry({ fit: false });
     }
 
     function estimatePaneCharacters(index, axis = '') {
@@ -6714,6 +6995,7 @@
             grid.style.display = '';   // make sure it’s visible
             if (!usingCurrentView && !restoredFromCache) {
                 buildGrid(data.sessions, data.layout);
+                applyWorkspaceLayoutSnapshot(data.workspace_layout, data.sessions.length);
             }
 
             const attachedIndices = [];

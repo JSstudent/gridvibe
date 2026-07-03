@@ -2525,6 +2525,7 @@
     let savedSessionModalMode = 'import';
     let activeSavedSessionId = '';
     let activeSavedSessionName = '';
+    let activeWorkspaceLayout = null;
     let cachedWslDistros = null;
     let lastTerminalSetupTargetSignature = '';
     let appSettings = JSON.parse(JSON.stringify(DEFAULT_APP_SETTINGS));
@@ -4207,6 +4208,10 @@
 
     function collectFormConfig() {
         const modeInputs = collectModeInputs();
+        const workspaceLayout = Array.isArray(activeWorkspaceLayout?.split_slot_rects)
+            && activeWorkspaceLayout.split_slot_rects.length === selectedCount
+            ? activeWorkspaceLayout
+            : null;
         return {
             connection_mode: connectionMode,
             terminal_count: selectedCount,
@@ -4223,7 +4228,8 @@
                 username: modeInputs.wsl.username.trim(),
                 default_dir: modeInputs.wsl.default_dir.trim()
             },
-            terminals: collectTerminalDrafts()
+            terminals: collectTerminalDrafts(),
+            workspace_layout: workspaceLayout
         };
     }
 
@@ -4238,6 +4244,7 @@
         selectedLayout = LAYOUT_COPY[count]?.[normalized.layout]
             ? normalized.layout
             : defaultLayoutForCount(count);
+        activeWorkspaceLayout = normalized.workspace_layout || null;
         layoutChooserOpen = false;
 
         document.querySelectorAll('.mode-btn').forEach(button => {
@@ -4665,6 +4672,15 @@
                     title: terminal.title || `Terminal ${index + 1}`,
                     directory: resolvedDirectory,
                     initial_command: terminal.startup_mode === 'explorer' ? null : (terminal.initial_command || null),
+                    initial_command_mode: terminal.startup_mode === 'explorer'
+                        ? 'explorer'
+                        : (terminal.initial_command_mode === 'agent' ? 'agent' : 'command'),
+                    agent_selection: terminal.initial_command_mode === 'agent'
+                        ? (terminal.agent_selection || '')
+                        : '',
+                    custom_agent: terminal.initial_command_mode === 'agent'
+                        ? (terminal.custom_agent || '')
+                        : '',
                     startup_mode: terminal.startup_mode === 'explorer'
                         ? 'explorer'
                         : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
@@ -4704,6 +4720,7 @@
                 body: JSON.stringify({
                     connection_mode: config.connection_mode,
                     layout: config.layout,
+                    workspace_layout: config.workspace_layout,
                     saved_session_id: activeSavedSessionId,
                     session_name: sessionName,
                     sessions

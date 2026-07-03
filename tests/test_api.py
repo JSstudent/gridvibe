@@ -316,6 +316,46 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
 
+    def test_terminals_page_exposes_active_workspace_save_session_button(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("saveButton.textContent = 'Save Session';", html)
+        self.assertIn("container.appendChild(settingsButton);", html)
+        self.assertIn("container.appendChild(saveButton);", html)
+        self.assertLess(
+            html.index("container.appendChild(settingsButton);"),
+            html.index("container.appendChild(saveButton);"),
+        )
+        self.assertIn("async function saveActiveWorkspaceSession(button = null)", html)
+        self.assertIn("function getWorkspacePanesInVisualOrder(groupId = activeGroupId)", html)
+        self.assertIn("function buildActiveWorkspaceSessionConfig()", html)
+        self.assertIn("function buildActiveWorkspaceLayoutSnapshot()", html)
+        self.assertIn("function applyWorkspaceLayoutSnapshot(snapshot, expectedCount)", html)
+        self.assertIn("workspace_layout: buildActiveWorkspaceLayoutSnapshot()", html)
+        self.assertIn("applyWorkspaceLayoutSnapshot(data.workspace_layout, data.sessions.length);", html)
+        save_config_start = html.index("function buildActiveWorkspaceSessionConfig()")
+        save_config_end = html.index("async function saveActiveWorkspaceSession", save_config_start)
+        save_config_html = html[save_config_start:save_config_end]
+        self.assertIn("const groupTerminals = getWorkspacePanesInVisualOrder(activeGroupId);", save_config_html)
+        self.assertNotIn("? terminals", save_config_html)
+        entry_start = html.index("function buildWorkspaceTerminalEntry")
+        entry_end = html.index("function buildActiveWorkspaceSessionConfig()", entry_start)
+        self.assertIn("terminal?._explorerPath || session.directory", html[entry_start:entry_end])
+
+    def test_launcher_forwards_saved_workspace_layout_and_agent_metadata(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("let activeWorkspaceLayout = null;", html)
+        self.assertIn("workspace_layout: workspaceLayout", html)
+        self.assertIn("activeWorkspaceLayout = normalized.workspace_layout || null;", html)
+        self.assertIn("workspace_layout: config.workspace_layout", html)
+        self.assertIn("initial_command_mode: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("agent_selection: terminal.initial_command_mode === 'agent'", html)
+
     def test_terminals_page_preserves_fullscreen_for_native_new_session_focus(self):
         response = self.client.get("/terminals")
 
@@ -2863,6 +2903,109 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(fetched_terminal["initial_command_mode"], "agent")
         self.assertEqual(fetched_terminal["agent_selection"], "other")
         self.assertEqual(fetched_terminal["custom_agent"], "claude-code")
+
+    def test_saved_sessions_roundtrip_preserves_workspace_layout_geometry(self):
+        payload = {
+            "name": "split-workspace",
+            "config": {
+                "connection_mode": "ssh",
+                "terminal_count": 2,
+                "layout": "vertical",
+                "ssh": {
+                    "host": "10.0.0.20",
+                    "username": "ubuntu",
+                    "password": "",
+                    "port": 22,
+                    "default_dir": "/srv/dev",
+                },
+                "wsl": {
+                    "distribution": "",
+                    "username": "",
+                    "default_dir": "",
+                },
+                "terminals": [
+                    {"title": "Left", "directory": "/srv/dev", "initial_command": ""},
+                    {"title": "Right", "directory": "/srv/dev", "initial_command": "htop"},
+                ],
+                "workspace_layout": {
+                    "class_name": "layout-split-local",
+                    "split_slot_rects": [
+                        {"originSlot": 0, "x": 1, "y": 1, "w": 3, "h": 2},
+                        {"originSlot": 1, "x": 4, "y": 1, "w": 1, "h": 2},
+                    ],
+                    "split_column_weights": [2, 2, 2, 1],
+                    "split_row_weights": [1, 1],
+                    "original_split_slot_count": 2,
+                },
+            },
+        }
+
+        created = self.client.post("/api/saved-sessions", json=payload)
+
+        self.assertEqual(created.status_code, 201)
+        layout = created.get_json()["config"]["workspace_layout"]
+        self.assertEqual(layout["class_name"], "layout-split-local")
+        self.assertEqual(layout["split_slot_rects"][0]["w"], 3)
+        self.assertEqual(layout["split_column_weights"], [2.0, 2.0, 2.0, 1.0])
+
+        fetched = self.client.get(f"/api/saved-sessions/{created.get_json()['id']}")
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(
+            fetched.get_json()["config"]["workspace_layout"]["split_row_weights"],
+            [1.0, 1.0],
+        )
+
+    def test_create_sessions_returns_workspace_layout_and_agent_metadata(self):
+        sessions_payload = {
+            "connection_mode": "ssh",
+            "layout": "vertical",
+            "workspace_layout": {
+                "class_name": "layout-split-local",
+                "split_slot_rects": [
+                    {"originSlot": 0, "x": 1, "y": 1, "w": 2, "h": 2},
+                    {"originSlot": 1, "x": 3, "y": 1, "w": 2, "h": 2},
+                ],
+                "split_column_weights": [3, 1, 1, 3],
+                "split_row_weights": [1, 1],
+                "original_split_slot_count": 2,
+            },
+            "sessions": [
+                {
+                    "host": "10.0.0.20",
+                    "directory": "/srv/dev",
+                    "username": "ubuntu",
+                    "title": "Agent",
+                    "initial_command": "claude-code",
+                    "initial_command_mode": "agent",
+                    "startup_mode": "agent",
+                    "agent_selection": "other",
+                    "custom_agent": "claude-code",
+                },
+                {
+                    "host": "10.0.0.20",
+                    "directory": "/srv/dev",
+                    "username": "ubuntu",
+                    "title": "Shell",
+                },
+            ],
+        }
+
+        with patch.object(api.socketio, "start_background_task"):
+            created = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(created.status_code, 201)
+        data = created.get_json()
+        self.assertEqual(data["workspace_layout"]["split_column_weights"], [3.0, 1.0, 1.0, 3.0])
+        self.assertEqual(data["sessions"][0]["initial_command_mode"], "agent")
+        self.assertEqual(data["sessions"][0]["agent_selection"], "other")
+        self.assertEqual(data["sessions"][0]["custom_agent"], "claude-code")
+
+        listed = self.client.get(f"/api/sessions?group={data['group_id']}")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(
+            listed.get_json()["workspace_layout"]["split_slot_rects"][1]["x"],
+            3,
+        )
 
     def test_get_saved_session_returns_virtual_default_session(self):
         response = self.client.get(f"/api/saved-sessions/{api.DEFAULT_SAVED_SESSION_ID}")

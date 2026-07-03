@@ -388,6 +388,72 @@ def _normalize_startup_mode(value: Any, connection_mode: str = "ssh") -> str:
     return "terminal"
 
 
+def _normalize_workspace_layout(data: Any, terminal_count: int) -> Optional[Dict[str, Any]]:
+    """Normalize optional runtime workspace geometry stored with a saved preset."""
+    if not isinstance(data, dict):
+        return None
+
+    raw_rects = data.get("split_slot_rects")
+    if not isinstance(raw_rects, list) or len(raw_rects) != terminal_count:
+        return None
+
+    rects = []
+    max_grid_line = max(2, max_sessions * 4)
+    for index, raw_rect in enumerate(raw_rects):
+        if not isinstance(raw_rect, dict):
+            return None
+        try:
+            x = int(raw_rect.get("x", 1))
+            y = int(raw_rect.get("y", 1))
+            w = int(raw_rect.get("w", 1))
+            h = int(raw_rect.get("h", 1))
+            origin_slot = int(raw_rect.get("originSlot", index))
+        except (TypeError, ValueError):
+            return None
+
+        if x < 1 or y < 1 or w < 1 or h < 1:
+            return None
+        if x + w - 1 > max_grid_line or y + h - 1 > max_grid_line:
+            return None
+
+        rects.append(
+            {
+                "originSlot": max(0, min(max_sessions - 1, origin_slot)),
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+            }
+        )
+
+    def normalize_weights(values: Any, target_length: int) -> List[float]:
+        if not isinstance(values, list):
+            return [1.0 for _ in range(target_length)]
+        normalized = []
+        for index in range(target_length):
+            try:
+                value = float(values[index])
+            except (IndexError, TypeError, ValueError):
+                value = 1.0
+            normalized.append(max(0.01, min(value, 100.0)))
+        return normalized
+
+    column_count = max(rect["x"] + rect["w"] - 1 for rect in rects)
+    row_count = max(rect["y"] + rect["h"] - 1 for rect in rects)
+    try:
+        original_count = int(data.get("original_split_slot_count", terminal_count))
+    except (TypeError, ValueError):
+        original_count = terminal_count
+
+    return {
+        "class_name": "layout-split-local",
+        "split_slot_rects": rects,
+        "split_column_weights": normalize_weights(data.get("split_column_weights"), column_count),
+        "split_row_weights": normalize_weights(data.get("split_row_weights"), row_count),
+        "original_split_slot_count": max(1, min(max_sessions, original_count)),
+    }
+
+
 def _default_session_config() -> Dict[str, Any]:
     """Default saved setup used by the launcher form."""
     default_count = min(4, max_sessions)
@@ -408,6 +474,7 @@ def _default_session_config() -> Dict[str, Any]:
             "default_dir": "",
         },
         "terminals": _default_terminal_entries(),
+        "workspace_layout": None,
     }
 
 
@@ -492,6 +559,7 @@ def _normalize_session_config(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "default_dir": str(wsl_data.get("default_dir") or default_config["wsl"]["default_dir"]),# type: ignore
         },
         "terminals": _normalize_terminal_entries(data.get("terminals"), connection_mode),
+        "workspace_layout": _normalize_workspace_layout(data.get("workspace_layout"), terminal_count),
     }
 
 
@@ -1751,6 +1819,7 @@ def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
             "layout": active_launch_options["layout"],
             "connection_mode": active_launch_options["connection_mode"],
             "terminal_count": 0,
+            "workspace_layout": None,
         }
 
     return {
@@ -1758,6 +1827,7 @@ def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
         "layout": group.layout,
         "connection_mode": group.connection_mode,
         "terminal_count": group.terminal_count,
+        "workspace_layout": group.workspace_layout,
     }
 
 
@@ -3928,6 +3998,7 @@ def get_sessions():
                 "layout": active_launch_options["layout"],
                 "connection_mode": active_launch_options["connection_mode"],
                 "terminal_count": active_launch_options["terminal_count"],
+                "workspace_layout": None,
             }
         )
     return jsonify(payload)
@@ -4200,6 +4271,7 @@ def get_active_sessions():
             "layout": active_launch_options["layout"],
             "connection_mode": active_launch_options["connection_mode"],
             "terminal_count": active_launch_options["terminal_count"],
+            "workspace_layout": None,
         }
     return jsonify({
         "sessions": [s.to_dict() for s in sessions],
@@ -4399,6 +4471,7 @@ def create_sessions():
 
         connection_mode = _normalize_connection_mode(data.get("connection_mode"))
         layout = _normalize_layout(data.get("layout"), len(sessions_config))
+        workspace_layout = _normalize_workspace_layout(data.get("workspace_layout"), len(sessions_config))
         session_name = str(data.get("session_name") or "").strip()
         saved_session_id = _normalize_launch_session_id(data.get("saved_session_id"))
         stable_group_id = _build_launch_group_id(saved_session_id) or None
@@ -4463,6 +4536,7 @@ def create_sessions():
             layout=layout,
             terminal_count=len(prepared_sessions),
             group_id=stable_group_id,
+            workspace_layout=workspace_layout,
         )
         logger.info(
             "Created session group group_id=%s saved_session_id=%r name=%r mode=%s layout=%s terminal_count=%d",
@@ -4521,6 +4595,7 @@ def create_sessions():
             "layout": layout,
             "connection_mode": connection_mode,
             "terminal_count": len(created_sessions),
+            "workspace_layout": workspace_layout,
             "launch_target": "web",
             "warnings": launch_warnings,
         }), 201
@@ -4568,6 +4643,9 @@ def split_session(session_id: str):
         port=source.port,
         password=source.password,
         initial_command=None,
+        initial_command_mode="command",
+        agent_selection="",
+        custom_agent="",
         title=title,
         mode=source.mode,
         distribution=source.distribution,
