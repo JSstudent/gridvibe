@@ -29,32 +29,6 @@ User report: opening a binary causes explorer mode to freeze. Code inspection sh
 ### Proposed solution:
 Harden binary preview handling in both `web/api.py` and `templates/terminals.html`. Add faster binary detection before the full preview/render path, including extension or MIME hints where available plus byte-sample heuristics beyond only checking for `NUL`. Return a structured unsupported-preview response or a stable 400 error that the client can display without losing the previous directory context. Update `openExplorerFile()` so failed binary opens restore or preserve the directory listing/navigation state instead of leaving only a transient loading/message view, and ensure large local and SSH binaries cannot block the UI thread. Add tests in `tests/test_api.py` for non-NUL binary-like bytes, large binary files, remote binary errors, and client-template behavior that preserves a usable explorer state after an unsupported file open.
 
-### Issue ID: ISSUE-2026-006
-- Title: Add find support to explorer directory view
-- Priority: Low
-- Status: Open
-- Area: `templates/terminals.html`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `ui`, `tests`
-- Reported: 2026-07-02
-
-Description:
-Explorer mode exposes find controls only after opening a file. Directory/file-list panes do not provide a find field or `Ctrl+F`/`Cmd+F` target for locating files by name, so users browsing large directories must visually scan the list or use an external shell command.
-
-Steps to reproduce:
-1. Open GridVibe in explorer mode for a directory with many files and folders.
-2. Stay in the directory listing view without opening a file.
-3. Press `Ctrl+F`/`Cmd+F` or inspect the explorer toolbar for a way to find a file by name.
-
-Expected behavior:
-Explorer directory view should provide a find/search affordance for file and folder names. Keyboard find should focus that control when an explorer directory pane is active, and results should be clearly filtered or highlighted without opening a file first.
-
-Actual behavior / logs:
-Code inspection confirms `findExplorerSearchTargetIndex()` in `templates/terminals.html` only returns panes where `_explorerMode === 'file'`, and `focusExplorerSearch()` also rejects non-file explorer panes. `renderExplorerFile()` renders the `data-explorer-search-input` controls for opened files, while `loadExplorerPane()` renders directory rows directly with `.explorer-row` buttons and no equivalent search input, match state, or keyboard target for the directory listing.
-
-### Proposed solution:
-Extend `templates/terminals.html` with a directory-mode explorer find control that searches current directory entries by name, keeps directory navigation and file opening behavior unchanged, and preserves the read-only explorer contract. Decide whether the first version is a client-side current-directory filter/highlighter using the already loaded `entries`, or a backend-assisted recursive file search if broader workspace search is required. Update `findExplorerSearchTargetIndex()` and `focusExplorerSearch()` so active directory explorer panes can receive `Ctrl+F`/`Cmd+F`. Add focused tests in `tests/test_api.py` covering directory search UI rendering, keyboard focus behavior for directory mode, file-mode search preservation, clearing search, empty-result display, and filename escaping.
-
 ### Issue ID: ISSUE-2026-005
 - Title: Explorer file find blocks terminal UI on large previews
 - Priority: Medium
@@ -82,6 +56,22 @@ User report: the search function is extremely slow on large files and causes the
 Make explorer file search bounded and asynchronous enough for large previews. In `templates/terminals.html`, debounce input, cancel stale searches, cap or progressively count matches, and avoid re-rendering the full file on every keystroke when possible. Consider chunked search with `requestIdleCallback`/`setTimeout`, a Web Worker for large content, or virtualized line rendering so highlighting only touches visible content plus nearby matches. Keep `web/api.py` preview truncation behavior intact unless a smaller preview or explicit large-file warning is chosen. Add regression tests in `tests/test_api.py` for the presence of debounce/cancellation or worker wiring, match-cap behavior, truncated-file messaging, and preservation of existing source/preview search controls.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-006
+- Title: Add find support to explorer directory view
+- Priority: Low
+- Status: Closed
+- Area: `templates/terminals.html`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `tests`
+- Reported: 2026-07-02
+- Closed: 2026-07-03
+
+Description:
+Explorer mode exposed find controls only after opening a file. Directory/file-list panes did not provide a find field or `Ctrl+F`/`Cmd+F` target for locating files by name, so users browsing large directories had to visually scan the list or use an external shell command.
+
+Resolution:
+`templates/terminals.html` now renders a directory-mode find control in explorer bars, stores directory search state separately from file-content search state, filters the currently loaded directory entries by filename, highlights matching name text, supports previous/next/clear actions, shows an empty-result message, and lets `Ctrl+F`/`Cmd+F` focus active directory explorer panes. File-mode source/preview search remains unchanged and the explorer remains read-only. `tests/test_api.py` includes focused template coverage for the directory search UI, keyboard target selection, state separation, empty results, and filename escaping/highlighting hooks.
 
 ### Issue ID: ISSUE-2026-008
 - Title: Add active workspace Save Session button

@@ -928,6 +928,19 @@
             min-width: 0;
         }
 
+        .explorer-directory-search {
+            display: none;
+            align-items: center;
+            gap: 4px;
+            min-width: 170px;
+            flex: 0 1 280px;
+            margin-left: auto;
+        }
+
+        .explorer-directory-search.active {
+            display: inline-flex;
+        }
+
         .explorer-up {
             width: 32px;
             height: 28px;
@@ -4989,6 +5002,7 @@
                                     <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
                                     <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
                                     <div class="explorer-git-summary" id="explorer-git-${i}" aria-live="polite"></div>
+                                    <div class="explorer-directory-search" id="explorer-directory-search-${i}"></div>
                                 </div>
                                 <div class="explorer-list" id="explorer-list-${i}">
                                     <div class="explorer-message">Loading directory...</div>
@@ -5554,6 +5568,7 @@
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
                         <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
                         <div class="explorer-git-summary" id="explorer-git-${index}" aria-live="polite"></div>
+                        <div class="explorer-directory-search" id="explorer-directory-search-${index}"></div>
                     </div>
                     <div class="explorer-list" id="explorer-list-${index}">
                         <div class="explorer-message">Loading directory...</div>
@@ -6733,17 +6748,17 @@
         const activeCard = document.activeElement?.closest?.('.explorer-pane');
         const activeSlot = activeCard ? Number(activeCard.dataset.slot) : -1;
         if (Number.isInteger(activeSlot)
-            && terminals[activeSlot]?._explorerMode === 'file') {
+            && isExplorerSearchablePane(terminals[activeSlot])) {
             return activeSlot;
         }
 
         if (_focusedTerminalIndex !== -1
-            && terminals[_focusedTerminalIndex]?._explorerMode === 'file') {
+            && isExplorerSearchablePane(terminals[_focusedTerminalIndex])) {
             return _focusedTerminalIndex;
         }
 
         for (let i = 0; i < terminals.length; i++) {
-            if (terminals[i]?._explorerMode === 'file') {
+            if (isExplorerSearchablePane(terminals[i])) {
                 return i;
             }
         }
@@ -8167,11 +8182,16 @@
         applyExplorerSearch(index);
     }
 
-    function ensureExplorerSearchState(pane) {
-        if (!pane._explorerSearch) {
-            pane._explorerSearch = { query: '', activeIndex: 0, matchCount: 0 };
+    function isExplorerSearchablePane(pane) {
+        return pane?._explorerMode === 'file' || pane?._explorerMode === 'directory';
+    }
+
+    function ensureExplorerSearchState(pane, mode = pane?._explorerMode) {
+        const key = mode === 'directory' ? '_explorerDirectorySearch' : '_explorerSearch';
+        if (!pane[key]) {
+            pane[key] = { query: '', activeIndex: 0, matchCount: 0 };
         }
-        return pane._explorerSearch;
+        return pane[key];
     }
 
     function clampExplorerEditorFontSize(value) {
@@ -8363,6 +8383,125 @@
         return marks;
     }
 
+    function renderExplorerDirectorySearchControls(index) {
+        const container = document.getElementById(`explorer-directory-search-${index}`);
+        if (!container) {
+            return;
+        }
+
+        container.classList.add('active');
+        container.innerHTML = `
+            <input
+                type="search"
+                class="explorer-search-input"
+                data-explorer-search-input="${index}"
+                placeholder="Find file"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Find files and folders"
+            >
+            <span class="explorer-search-count" data-explorer-search-count="${index}"></span>
+            <button type="button" class="explorer-search-btn" data-explorer-search-prev="${index}" title="Previous match" aria-label="Previous match">↑</button>
+            <button type="button" class="explorer-search-btn" data-explorer-search-next="${index}" title="Next match" aria-label="Next match">↓</button>
+            <button type="button" class="explorer-search-btn" data-explorer-search-clear="${index}" title="Clear search" aria-label="Clear search">×</button>
+        `;
+    }
+
+    function clearExplorerDirectorySearchControls(index) {
+        const container = document.getElementById(`explorer-directory-search-${index}`);
+        if (!container) {
+            return;
+        }
+        container.classList.remove('active');
+        container.innerHTML = '';
+    }
+
+    function explorerDirectoryRowHtml(entry, query = '', active = false) {
+        const isDirectory = entry.type === 'directory';
+        const isDeleted = Boolean(entry.deleted);
+        const size = isDirectory ? 'Folder' : (isDeleted ? 'Deleted' : formatExplorerSize(entry.size));
+        const modified = formatExplorerDate(entry.modified);
+        const name = entry.name || '';
+        const normalizedName = name.toLowerCase();
+        const normalizedQuery = String(query || '').toLowerCase();
+        const matchIndex = normalizedQuery ? normalizedName.indexOf(normalizedQuery) : -1;
+        const nameRanges = matchIndex === -1 ? [] : [{
+            start: matchIndex,
+            end: matchIndex + String(query).length,
+            active
+        }];
+
+        return `
+            <button
+                type="button"
+                class="explorer-row ${isDirectory ? 'directory' : 'file'}${isDeleted ? ' deleted' : ''}"
+                data-explorer-path="${escHtml(entry.path || '')}"
+                ${isDeleted ? 'disabled' : ''}
+            >
+                ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
+                ${explorerGitBadgeHtml(entry.git)}
+                <span class="explorer-name">${explorerMarkedEscHtml(name, 0, nameRanges)}</span>
+                <span class="explorer-meta">${escHtml(size)}</span>
+                <span class="explorer-meta">${escHtml(modified)}</span>
+            </button>
+        `;
+    }
+
+    function wireExplorerDirectoryRows(index) {
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!list) {
+            return;
+        }
+
+        list.querySelectorAll('.explorer-row.directory').forEach(button => {
+            button.addEventListener('click', () => {
+                loadExplorerPane(index, button.dataset.explorerPath || '');
+            });
+        });
+        list.querySelectorAll('.explorer-row.file').forEach(button => {
+            button.addEventListener('click', () => {
+                openExplorerFile(index, button.dataset.explorerPath || '');
+            });
+        });
+    }
+
+    function renderExplorerDirectoryRows(index) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!pane || !list) {
+            return;
+        }
+
+        const entries = Array.isArray(pane._explorerEntries) ? pane._explorerEntries : [];
+        const state = ensureExplorerSearchState(pane, 'directory');
+        const query = state.query || '';
+        const normalizedQuery = String(query).toLowerCase();
+        let visibleEntries = entries;
+        if (normalizedQuery) {
+            visibleEntries = entries.filter(entry => String(entry.name || '').toLowerCase().includes(normalizedQuery));
+        }
+
+        const matchCount = normalizedQuery ? visibleEntries.length : 0;
+        state.matchCount = matchCount;
+        state.activeIndex = matchCount ? Math.min(Number(state.activeIndex || 0), matchCount - 1) : 0;
+
+        if (!entries.length && !query) {
+            list.innerHTML = '<div class="explorer-message">Directory is empty.</div>';
+        } else if (!visibleEntries.length) {
+            list.innerHTML = `<div class="explorer-message">No files or folders match "${escHtml(query)}".</div>`;
+        } else {
+            list.innerHTML = visibleEntries
+                .map((entry, entryIndex) => explorerDirectoryRowHtml(entry, query, Boolean(normalizedQuery) && entryIndex === state.activeIndex))
+                .join('');
+            wireExplorerDirectoryRows(index);
+        }
+
+        updateExplorerSearchControls(index, query, state.activeIndex || 0, matchCount);
+        if (normalizedQuery && matchCount) {
+            scrollExplorerSearchMatch(index);
+        }
+    }
+
     function updateExplorerSearchControls(index, query, activeIndex, matchCount) {
         const input = document.querySelector(`[data-explorer-search-input="${index}"]`);
         const count = document.querySelector(`[data-explorer-search-count="${index}"]`);
@@ -8394,13 +8533,18 @@
 
     function applyExplorerSearch(index, { resetActive = false } = {}) {
         const pane = terminals[index];
-        if (!pane || pane._explorerMode !== 'file') {
+        if (!pane || !isExplorerSearchablePane(pane)) {
             return;
         }
 
         const state = ensureExplorerSearchState(pane);
         if (resetActive) {
             state.activeIndex = 0;
+        }
+
+        if (pane._explorerMode === 'directory') {
+            renderExplorerDirectoryRows(index);
+            return;
         }
 
         const query = state.query || '';
@@ -8463,7 +8607,7 @@
 
     function focusExplorerSearch(index) {
         const pane = terminals[index];
-        if (!pane || pane._explorerMode !== 'file') {
+        if (!pane || !isExplorerSearchablePane(pane)) {
             return false;
         }
         const input = document.querySelector(`[data-explorer-search-input="${index}"]`);
@@ -8616,11 +8760,12 @@
         const metaParts = explorerFileMetaParts(data, fileType);
         const previousPath = pane._explorerFilePath || '';
         const keepDiffSplit = previousPath === path && pane._explorerDiffSplit && hasGitDiff;
-        const searchState = ensureExplorerSearchState(pane);
+        const searchState = ensureExplorerSearchState(pane, 'file');
         if (previousPath && previousPath !== path) {
             searchState.activeIndex = 0;
             searchState.matchCount = 0;
         }
+        clearExplorerDirectorySearchControls(index);
 
         pane._attached = true;
         pane._explorerMode = 'file';
@@ -8877,8 +9022,10 @@
             pane._explorerDiffContent = '';
             pane._explorerPath = data.path || '';
             pane._explorerParentPath = data.parent_path || '';
+            pane._explorerEntries = Array.isArray(data.entries) ? data.entries : [];
             document.getElementById(`ph-${index}`)?.remove();
             updateExplorerGitSummary(index, data.git || null);
+            renderExplorerDirectorySearchControls(index);
 
             const pathLabel = document.getElementById(`explorer-path-${index}`);
             const upButton = document.getElementById(`explorer-up-${index}`);
@@ -8894,44 +9041,8 @@
                 return true;
             }
             list.classList.remove('file-view');
-
-            const entries = Array.isArray(data.entries) ? data.entries : [];
-            if (!entries.length) {
-                list.innerHTML = '<div class="explorer-message">Directory is empty.</div>';
-                return true;
-            }
-
-            list.innerHTML = entries.map(entry => {
-                const isDirectory = entry.type === 'directory';
-                const isDeleted = Boolean(entry.deleted);
-                const size = isDirectory ? 'Folder' : (isDeleted ? 'Deleted' : formatExplorerSize(entry.size));
-                const modified = formatExplorerDate(entry.modified);
-                return `
-                    <button
-                        type="button"
-                        class="explorer-row ${isDirectory ? 'directory' : 'file'}${isDeleted ? ' deleted' : ''}"
-                        data-explorer-path="${escHtml(entry.path || '')}"
-                        ${isDeleted ? 'disabled' : ''}
-                    >
-                        ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
-                        ${explorerGitBadgeHtml(entry.git)}
-                        <span class="explorer-name">${escHtml(entry.name || '')}</span>
-                        <span class="explorer-meta">${escHtml(size)}</span>
-                        <span class="explorer-meta">${escHtml(modified)}</span>
-                    </button>
-                `;
-            }).join('');
-
-            list.querySelectorAll('.explorer-row.directory').forEach(button => {
-                button.addEventListener('click', () => {
-                    loadExplorerPane(index, button.dataset.explorerPath || '');
-                });
-            });
-            list.querySelectorAll('.explorer-row.file').forEach(button => {
-                button.addEventListener('click', () => {
-                    openExplorerFile(index, button.dataset.explorerPath || '');
-                });
-            });
+            wireExplorerSearchControls(index);
+            applyExplorerSearch(index, { resetActive: true });
             return true;
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer load failed:', error);

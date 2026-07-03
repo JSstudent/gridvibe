@@ -571,6 +571,47 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("event.code !== 'KeyF'", html)
         self.assertNotIn("/api/explorer-search", html)
 
+    def test_terminals_page_explorer_directory_search_filters_current_entries(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("explorer-directory-search", html)
+        self.assertIn('id="explorer-directory-search-${i}"', html)
+        self.assertIn('id="explorer-directory-search-${index}"', html)
+        self.assertIn("function renderExplorerDirectorySearchControls(index)", html)
+        self.assertIn('aria-label="Find files and folders"', html)
+        self.assertIn("pane._explorerEntries = Array.isArray(data.entries) ? data.entries : [];", html)
+        self.assertIn("function renderExplorerDirectoryRows(index)", html)
+        self.assertIn("visibleEntries = entries.filter(entry => String(entry.name || '').toLowerCase().includes(normalizedQuery));", html)
+        self.assertIn("No files or folders match", html)
+        self.assertIn("explorerMarkedEscHtml(name, 0, nameRanges)", html)
+        self.assertIn("wireExplorerDirectoryRows(index);", html)
+        self.assertIn("wireExplorerSearchControls(index);", html)
+        self.assertIn("applyExplorerSearch(index, { resetActive: true });", html)
+
+    def test_terminals_page_explorer_directory_search_is_keyboard_target(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("function isExplorerSearchablePane(pane)", html)
+        self.assertIn("pane?._explorerMode === 'file' || pane?._explorerMode === 'directory'", html)
+        self.assertIn("isExplorerSearchablePane(terminals[activeSlot])", html)
+        self.assertIn("isExplorerSearchablePane(terminals[_focusedTerminalIndex])", html)
+        self.assertIn("!pane || !isExplorerSearchablePane(pane)", html)
+        self.assertNotIn("!pane || pane._explorerMode !== 'file'", html)
+
+    def test_terminals_page_explorer_directory_search_preserves_file_search_state(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("const key = mode === 'directory' ? '_explorerDirectorySearch' : '_explorerSearch';", html)
+        self.assertIn("const searchState = ensureExplorerSearchState(pane, 'file');", html)
+        self.assertIn("const state = ensureExplorerSearchState(pane, 'directory');", html)
+        self.assertIn("clearExplorerDirectorySearchControls(index);", html)
+
     def test_terminals_page_explorer_git_hooks_are_present(self):
         response = self.client.get("/terminals")
 
