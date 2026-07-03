@@ -1,5 +1,5 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-02
+Last updated: 2026-07-03
 
 ## Open Issues
 
@@ -134,14 +134,17 @@ Code inspection confirms `templates/terminals.html` renders pane header controls
 ### Proposed solution:
 Add an icon-only close button to each terminal pane header in `templates/terminals.html`, wire it to a new `closeTerminalPane(index)` client handler, and reuse `DELETE /api/sessions/<session_id>` for the backend close operation. Extend the client layout code so a closed pane is removed from `terminals`, `sessionIds`, cached group views, split geometry, resize observers, voice state, and session routes without tearing down unrelated panes. For layout compaction, compute adjacent candidate panes from the current grid/split rectangles, calculate each candidate's shared border length with the closed pane, and expand the candidate with the longest shared border into the vacated rectangle; define a deterministic tie-breaker such as visual order. Cover single-pane close, two-pane close, nested split close, and each supported terminal startup mode with focused tests in `tests/test_api.py` plus session-manager/API regression tests where group membership or final-pane cleanup changes.
 
+## Closed Issues
+
 ### Issue ID: ISSUE-2026-001
 - Title: Terminal resize hover handle spans unrelated panes
 - Priority: Medium
-- Status: Open
-- Area: `templates/terminals.html`
+- Status: Closed
+- Area: `templates/terminals.html`, `tests/test_api.py`
 - Assignee: Unassigned
 - Tags: `terminal`, `ui`, `resize`, `tests`
 - Reported: 2026-07-01
+- Closed: 2026-07-03
 
 Description:
 The terminal grid resize highlight and mouse hit area can extend across the entire terminal grid even when the divider only belongs to a smaller split region. In nested or uneven layouts, hovering near a border can highlight or activate a resize handle associated with a different terminal span, making the visible affordance misleading and increasing the chance of resizing the wrong panes.
@@ -155,12 +158,10 @@ Expected behavior:
 Resize handles should be scoped to the shared edge between the panes they resize. Hover highlights and pointer hit areas should stop at the relevant pane boundary and should not appear across unrelated terminals.
 
 Actual behavior / logs:
-User report: the terminal resize highlight bar extends across the entire screen regardless of whether the target terminal border is only half-screen, and hovering one border can highlight a divider from a different terminal span. Code inspection confirms `templates/terminals.html` renders a fixed `#terminalResizeOverlay` with fixed-position `.terminal-resize-handle` buttons; `renderResizeHandles()` sets vertical handles to `metrics.gridContentHeight` and horizontal handles to `metrics.gridContentWidth`, so each handle spans the full grid content along the perpendicular axis.
+User report: the terminal resize highlight bar extends across the entire screen regardless of whether the target terminal border is only half-screen, and hovering one border can highlight a divider from a different terminal span. Code inspection confirmed `templates/terminals.html` rendered a fixed `#terminalResizeOverlay` with fixed-position `.terminal-resize-handle` buttons, and `renderResizeHandles()` set vertical handles to `metrics.gridContentHeight` and horizontal handles to `metrics.gridContentWidth`, so each handle spanned the full grid content along the perpendicular axis.
 
-### Proposed solution:
-Update `templates/terminals.html` so `renderResizeHandles()` computes handle segments from the actual shared edge rectangles returned by `getHandleSlotRects()` / `hasSharedGridEdge()` instead of drawing one full-grid handle per track line. The fix should create one or more bounded handle segments per divider line, use only the contiguous pane-edge span being resized, and keep `startGridResize()` metadata tied to the correct axis and line. Add focused HTML/unit coverage in `tests/test_api.py` for bounded handle generation, and add a browser-level regression check if available to verify hover areas do not cross unrelated panes in split and three-pane layouts.
-
-## Closed Issues
+Resolution:
+`templates/terminals.html` now computes shared-edge segments for each resize track line and renders one bounded handle per segment. Vertical handles get their `top` and `height` from the overlapping row span, horizontal handles get their `left` and `width` from the overlapping column span, and drag metadata remains tied to the existing axis and line. `tests/test_api.py` includes regression coverage that rejects the previous full-grid handle spans.
 
 ### Issue ID: ISSUE-2026-004
 - Title: Explorer editor lacks log and JSONL formatting

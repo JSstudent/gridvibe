@@ -3949,6 +3949,23 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function ensureResizableSplitLayout()", html)
         self.assertIn("function renderResizeHandles()", html)
 
+    def test_terminals_page_bounds_resize_handles_to_shared_edges(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        self.assertIn("function getSharedGridEdgeSegments(rects, axis, lineIndex)", html)
+        self.assertIn("function getSharedGridEdgeSegmentStyle(axis, segment, metrics)", html)
+        self.assertIn("segments.forEach(segment => {", html)
+        self.assertIn("handle.style.top = `${segmentStyle.top}px`;", html)
+        self.assertIn("handle.style.height = `${segmentStyle.size}px`;", html)
+        self.assertIn("handle.style.left = `${segmentStyle.left}px`;", html)
+        self.assertIn("handle.style.width = `${segmentStyle.size}px`;", html)
+        self.assertIn(
+            "return getSharedGridEdgeSegments(rects, axis, lineIndex).length > 0;",
+            html,
+        )
+        self.assertNotIn("handle.style.height = `${metrics.gridContentHeight}px`;", html)
+        self.assertNotIn("handle.style.width = `${metrics.gridContentWidth}px`;", html)
+
     def test_terminals_page_resize_validation_enforces_minimums(self):
         response = self.client.get("/terminals")
         html = response.get_data(as_text=True)

@@ -2912,6 +2912,10 @@
     }
 
     function hasSharedGridEdge(rects, axis, lineIndex) {
+        return getSharedGridEdgeSegments(rects, axis, lineIndex).length > 0;
+    }
+
+    function getSharedGridEdgeSegments(rects, axis, lineIndex) {
         const before = rects.filter(rect => (
             axis === 'vertical'
                 ? rect.x + rect.w - 1 === lineIndex
@@ -2922,12 +2926,52 @@
                 ? rect.x === lineIndex + 1
                 : rect.y === lineIndex + 1
         ));
-        return before.some(left => after.some(right => {
-            if (axis === 'vertical') {
-                return Math.max(left.y, right.y) < Math.min(left.y + left.h, right.y + right.h);
+        const segments = [];
+        before.forEach(left => {
+            after.forEach(right => {
+                const start = axis === 'vertical'
+                    ? Math.max(left.y, right.y)
+                    : Math.max(left.x, right.x);
+                const end = axis === 'vertical'
+                    ? Math.min(left.y + left.h, right.y + right.h)
+                    : Math.min(left.x + left.w, right.x + right.w);
+                if (start < end) {
+                    segments.push({ start, end });
+                }
+            });
+        });
+        segments.sort((a, b) => a.start - b.start || a.end - b.end);
+        return segments.reduce((merged, segment) => {
+            const previous = merged[merged.length - 1];
+            if (previous && segment.start <= previous.end) {
+                previous.end = Math.max(previous.end, segment.end);
+            } else {
+                merged.push({ ...segment });
             }
-            return Math.max(left.x, right.x) < Math.min(left.x + left.w, right.x + right.w);
-        }));
+            return merged;
+        }, []);
+    }
+
+    function getSharedGridEdgeSegmentStyle(axis, segment, metrics) {
+        if (axis === 'vertical') {
+            const startIndex = segment.start - 1;
+            const span = segment.end - segment.start;
+            return {
+                top: metrics.bounds.top + metrics.paddingTop + trackStartOffset(metrics.rowSizes, metrics.rowGap, startIndex),
+                size: sumTrackSpan(metrics.rowSizes, startIndex, span, metrics.rowGap),
+            };
+        }
+        const startIndex = segment.start - 1;
+        const span = segment.end - segment.start;
+        return {
+            left: metrics.bounds.left + metrics.paddingLeft + trackStartOffset(metrics.columnSizes, metrics.columnGap, startIndex),
+            size: sumTrackSpan(metrics.columnSizes, startIndex, span, metrics.columnGap),
+        };
+    }
+
+    function trackStartOffset(sizes, gap, startIndex) {
+        const trackTotal = sizes.slice(0, startIndex).reduce((sum, value) => sum + value, 0);
+        return trackTotal + Math.max(0, startIndex) * gap;
     }
 
     function lineOffset(sizes, gap, lineIndex) {
@@ -3024,37 +3068,45 @@
         }
 
         for (let lineIndex = 1; lineIndex < size.columns; lineIndex++) {
-            if (!hasSharedGridEdge(rects, 'vertical', lineIndex)) {
+            const segments = getSharedGridEdgeSegments(rects, 'vertical', lineIndex);
+            if (segments.length === 0) {
                 continue;
             }
-            const handle = document.createElement('button');
-            handle.type = 'button';
-            handle.className = 'terminal-resize-handle vertical';
-            handle.dataset.resizeAxis = 'vertical';
-            handle.dataset.resizeLine = String(lineIndex);
-            handle.setAttribute('aria-label', 'Resize terminal columns');
-            handle.style.left = `${metrics.bounds.left + metrics.paddingLeft + lineOffset(metrics.columnSizes, metrics.columnGap, lineIndex)}px`;
-            handle.style.top = `${metrics.bounds.top + metrics.paddingTop}px`;
-            handle.style.height = `${metrics.gridContentHeight}px`;
-            handle.addEventListener('pointerdown', startGridResize);
-            overlay.appendChild(handle);
+            segments.forEach(segment => {
+                const segmentStyle = getSharedGridEdgeSegmentStyle('vertical', segment, metrics);
+                const handle = document.createElement('button');
+                handle.type = 'button';
+                handle.className = 'terminal-resize-handle vertical';
+                handle.dataset.resizeAxis = 'vertical';
+                handle.dataset.resizeLine = String(lineIndex);
+                handle.setAttribute('aria-label', 'Resize terminal columns');
+                handle.style.left = `${metrics.bounds.left + metrics.paddingLeft + lineOffset(metrics.columnSizes, metrics.columnGap, lineIndex)}px`;
+                handle.style.top = `${segmentStyle.top}px`;
+                handle.style.height = `${segmentStyle.size}px`;
+                handle.addEventListener('pointerdown', startGridResize);
+                overlay.appendChild(handle);
+            });
         }
 
         for (let lineIndex = 1; lineIndex < size.rows; lineIndex++) {
-            if (!hasSharedGridEdge(rects, 'horizontal', lineIndex)) {
+            const segments = getSharedGridEdgeSegments(rects, 'horizontal', lineIndex);
+            if (segments.length === 0) {
                 continue;
             }
-            const handle = document.createElement('button');
-            handle.type = 'button';
-            handle.className = 'terminal-resize-handle horizontal';
-            handle.dataset.resizeAxis = 'horizontal';
-            handle.dataset.resizeLine = String(lineIndex);
-            handle.setAttribute('aria-label', 'Resize terminal rows');
-            handle.style.left = `${metrics.bounds.left + metrics.paddingLeft}px`;
-            handle.style.top = `${metrics.bounds.top + metrics.paddingTop + lineOffset(metrics.rowSizes, metrics.rowGap, lineIndex)}px`;
-            handle.style.width = `${metrics.gridContentWidth}px`;
-            handle.addEventListener('pointerdown', startGridResize);
-            overlay.appendChild(handle);
+            segments.forEach(segment => {
+                const segmentStyle = getSharedGridEdgeSegmentStyle('horizontal', segment, metrics);
+                const handle = document.createElement('button');
+                handle.type = 'button';
+                handle.className = 'terminal-resize-handle horizontal';
+                handle.dataset.resizeAxis = 'horizontal';
+                handle.dataset.resizeLine = String(lineIndex);
+                handle.setAttribute('aria-label', 'Resize terminal rows');
+                handle.style.left = `${segmentStyle.left}px`;
+                handle.style.top = `${metrics.bounds.top + metrics.paddingTop + lineOffset(metrics.rowSizes, metrics.rowGap, lineIndex)}px`;
+                handle.style.width = `${segmentStyle.size}px`;
+                handle.addEventListener('pointerdown', startGridResize);
+                overlay.appendChild(handle);
+            });
         }
     }
 
