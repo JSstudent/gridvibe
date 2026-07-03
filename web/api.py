@@ -2529,6 +2529,8 @@ CODE_PREVIEW_FILENAMES = {
     "dockerfile": "dockerfile",
     "makefile": "makefile",
 }
+EXPLORER_BINARY_SAMPLE_BYTES = 4096
+EXPLORER_TEXT_CONTROL_BYTES = {7, 8, 9, 10, 12, 13, 27}
 MARKDOWN_ALLOWED_TAGS = {
     "a",
     "abbr",
@@ -2598,6 +2600,33 @@ def _explorer_code_language(path: str) -> Optional[str]:
     if extension in MARKDOWN_PREVIEW_EXTENSIONS:
         return "markdown"
     return CODE_PREVIEW_LANGUAGES.get(extension)
+
+
+def _explorer_editor_language(path: str) -> str:
+    """Return the editor language or reject unsupported explorer formats."""
+    language = _explorer_code_language(path)
+    if language is None:
+        raise ValueError("Explorer file format is not supported for editor preview")
+    return language
+
+
+def _explorer_content_looks_binary(raw_content: bytes) -> bool:
+    """Return whether a preview sample should be treated as binary content."""
+    sample = raw_content[:EXPLORER_BINARY_SAMPLE_BYTES]
+    if not sample:
+        return False
+    if b"\x00" in sample:
+        return True
+    try:
+        sample.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    control_count = sum(
+        1
+        for byte in sample
+        if byte < 32 and byte not in EXPLORER_TEXT_CONTROL_BYTES
+    )
+    return control_count / len(sample) > 0.30
 
 
 def _render_markdown_preview(content: str) -> Optional[str]:
@@ -4104,17 +4133,17 @@ def get_explorer_file(session_id: str):
                 request.args.get("path", ""),
             )
             stat_result = sftp.stat(file_path)
+            code_language = _explorer_editor_language(file_path)
             with sftp.open(file_path, "rb") as file_handle:
                 raw_content = file_handle.read(EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)
 
-            if b"\x00" in raw_content:
+            if _explorer_content_looks_binary(raw_content):
                 raise ValueError("Explorer file appears to be binary")
 
             truncated = len(raw_content) > EXPLORER_FILE_PREVIEW_MAX_BYTES
             preview_bytes = raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]
             content = preview_bytes.decode("utf-8", errors="replace")
             preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
-            code_language = _explorer_code_language(file_path)
             git_context, git_statuses = _get_remote_git_context(client, root_path, _remote_path_dirname(file_path))
             file_git = (
                 _remote_git_status_for_entry(str(git_context["repo_root"]), file_path, git_statuses)
@@ -4154,17 +4183,17 @@ def get_explorer_file(session_id: str):
             request.args.get("path", ""),
         )
         stat_result = os.stat(file_path, follow_symlinks=False)
+        code_language = _explorer_editor_language(file_path)
         with open(file_path, "rb") as file_handle:
             raw_content = file_handle.read(EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)
 
-        if b"\x00" in raw_content:
+        if _explorer_content_looks_binary(raw_content):
             raise ValueError("Explorer file appears to be binary")
 
         truncated = len(raw_content) > EXPLORER_FILE_PREVIEW_MAX_BYTES
         preview_bytes = raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]
         content = preview_bytes.decode("utf-8", errors="replace")
         preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
-        code_language = _explorer_code_language(file_path)
         git_context, git_statuses = _get_git_context(root_path, os.path.dirname(file_path))
         file_git = (
             _git_status_for_entry(str(git_context["repo_root"]), file_path, git_statuses)

@@ -1116,6 +1116,15 @@
             font-size: .78rem;
         }
 
+        .explorer-file-open-error {
+            border-bottom: 1px solid var(--explorer-row-border);
+            color: #b45309;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-file-open-error {
+            color: #fbbf24;
+        }
+
         .explorer-editor {
             height: 100%;
             min-height: 0;
@@ -7610,6 +7619,10 @@
     const EXPLORER_EDITOR_FONT_MAX = 24;
     const EXPLORER_EDITOR_FONT_DEFAULT = 13;
     const EXPLORER_EDITOR_FONT_STEP = 1;
+    const EXPLORER_SEARCH_DEBOUNCE_MS = 160;
+    const EXPLORER_SEARCH_MAX_MATCHES = 1000;
+    const EXPLORER_SEARCH_CHUNK_SIZE = 65536;
+    const EXPLORER_SEARCH_YIELD_MS = 8;
     const EXPLORER_GIT_STATUS_LABELS = Object.freeze({
         modified: 'M',
         added: 'A',
@@ -7682,7 +7695,7 @@
         return metaParts;
     }
 
-    function explorerFindRanges(content, query) {
+    function explorerFindRanges(content, query, maxMatches = EXPLORER_SEARCH_MAX_MATCHES) {
         const source = String(content || '');
         const needle = String(query || '');
         if (!source || !needle) {
@@ -7690,18 +7703,73 @@
         }
 
         const ranges = [];
-        const normalizedSource = source.toLowerCase();
         const normalizedNeedle = needle.toLowerCase();
-        let cursor = 0;
-        while (cursor < normalizedSource.length) {
-            const matchIndex = normalizedSource.indexOf(normalizedNeedle, cursor);
-            if (matchIndex === -1) {
-                break;
+        const stride = Math.max(EXPLORER_SEARCH_CHUNK_SIZE, normalizedNeedle.length);
+        for (let offset = 0; offset < source.length && ranges.length < maxMatches; offset += stride) {
+            const chunkEnd = Math.min(source.length, offset + stride + normalizedNeedle.length - 1);
+            const normalizedChunk = source.slice(offset, chunkEnd).toLowerCase();
+            let localCursor = 0;
+            while (localCursor < normalizedChunk.length && ranges.length < maxMatches) {
+                const matchIndex = normalizedChunk.indexOf(normalizedNeedle, localCursor);
+                if (matchIndex === -1) {
+                    break;
+                }
+                const absoluteIndex = offset + matchIndex;
+                if (absoluteIndex >= offset + stride && chunkEnd < source.length) {
+                    break;
+                }
+                ranges.push({ start: absoluteIndex, end: absoluteIndex + needle.length });
+                localCursor = matchIndex + Math.max(needle.length, 1);
             }
-            ranges.push({ start: matchIndex, end: matchIndex + needle.length });
-            cursor = matchIndex + Math.max(needle.length, 1);
         }
+        ranges.capped = ranges.length >= maxMatches;
         return ranges;
+    }
+
+    async function explorerFindRangesAsync(content, query, token, maxMatches = EXPLORER_SEARCH_MAX_MATCHES) {
+        const source = String(content || '');
+        const needle = String(query || '');
+        if (!source || !needle) {
+            return { ranges: [], capped: false, cancelled: Boolean(token?.cancelled) };
+        }
+
+        const ranges = [];
+        const normalizedNeedle = needle.toLowerCase();
+        const stride = Math.max(EXPLORER_SEARCH_CHUNK_SIZE, normalizedNeedle.length);
+        let lastYield = performance.now();
+
+        for (let offset = 0; offset < source.length && ranges.length < maxMatches; offset += stride) {
+            if (token?.cancelled) {
+                return { ranges, capped: false, cancelled: true };
+            }
+
+            const chunkEnd = Math.min(source.length, offset + stride + normalizedNeedle.length - 1);
+            const normalizedChunk = source.slice(offset, chunkEnd).toLowerCase();
+            let localCursor = 0;
+            while (localCursor < normalizedChunk.length && ranges.length < maxMatches) {
+                const matchIndex = normalizedChunk.indexOf(normalizedNeedle, localCursor);
+                if (matchIndex === -1) {
+                    break;
+                }
+                const absoluteIndex = offset + matchIndex;
+                if (absoluteIndex >= offset + stride && chunkEnd < source.length) {
+                    break;
+                }
+                ranges.push({ start: absoluteIndex, end: absoluteIndex + needle.length });
+                localCursor = matchIndex + Math.max(needle.length, 1);
+            }
+
+            if (performance.now() - lastYield >= EXPLORER_SEARCH_YIELD_MS) {
+                await new Promise(resolve => window.setTimeout(resolve, 0));
+                lastYield = performance.now();
+            }
+        }
+
+        return {
+            ranges,
+            capped: ranges.length >= maxMatches,
+            cancelled: Boolean(token?.cancelled)
+        };
     }
 
     function explorerMarkedEscHtml(text, absoluteStart = 0, searchRanges = []) {
@@ -7928,6 +7996,21 @@
             list.classList.remove('file-view');
             list.innerHTML = `<div class="explorer-message">${escHtml(message)}</div>`;
         }
+    }
+
+    function renderExplorerDirectoryOpenError(index, message) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!pane || !list || pane._explorerMode !== 'directory') {
+            renderExplorerMessage(index, message);
+            return;
+        }
+        renderExplorerDirectorySearchControls(index);
+        renderExplorerDirectoryRows(index);
+        const notice = document.createElement('div');
+        notice.className = 'explorer-message explorer-file-open-error';
+        notice.textContent = message;
+        list.prepend(notice);
     }
 
     function explorerGitStatusLabel(git) {
@@ -8189,7 +8272,7 @@
     function ensureExplorerSearchState(pane, mode = pane?._explorerMode) {
         const key = mode === 'directory' ? '_explorerDirectorySearch' : '_explorerSearch';
         if (!pane[key]) {
-            pane[key] = { query: '', activeIndex: 0, matchCount: 0 };
+            pane[key] = { query: '', activeIndex: 0, matchCount: 0, matchCapped: false, ranges: [], resultQuery: '' };
         }
         return pane[key];
     }
@@ -8312,7 +8395,7 @@
         return preview;
     }
 
-    function markExplorerSearchInElement(root, query, activeIndex = 0) {
+    function markExplorerSearchInElement(root, query, activeIndex = 0, maxMatches = EXPLORER_SEARCH_MAX_MATCHES) {
         if (!root || !query) {
             return [];
         }
@@ -8339,12 +8422,17 @@
 
         const marks = [];
         const normalizedQuery = query.toLowerCase();
+        let capped = false;
         textNodes.forEach(node => {
+            if (marks.length >= maxMatches) {
+                capped = true;
+                return;
+            }
             const value = node.nodeValue || '';
             const normalizedValue = value.toLowerCase();
             const localMatches = [];
             let cursor = 0;
-            while (cursor < normalizedValue.length) {
+            while (cursor < normalizedValue.length && marks.length + localMatches.length < maxMatches) {
                 const matchIndex = normalizedValue.indexOf(normalizedQuery, cursor);
                 if (matchIndex === -1) {
                     break;
@@ -8355,6 +8443,7 @@
                 });
                 cursor = matchIndex + Math.max(query.length, 1);
             }
+            capped = capped || marks.length + localMatches.length >= maxMatches;
             if (!localMatches.length) {
                 return;
             }
@@ -8380,6 +8469,7 @@
             node.replaceWith(fragment);
         });
 
+        marks.capped = capped;
         return marks;
     }
 
@@ -8414,6 +8504,14 @@
         }
         container.classList.remove('active');
         container.innerHTML = '';
+    }
+
+    function resetExplorerDirectorySearch(pane) {
+        const state = ensureExplorerSearchState(pane, 'directory');
+        state.query = '';
+        state.activeIndex = 0;
+        state.matchCount = 0;
+        state.matchCapped = false;
     }
 
     function explorerDirectoryRowHtml(entry, query = '', active = false) {
@@ -8502,7 +8600,7 @@
         }
     }
 
-    function updateExplorerSearchControls(index, query, activeIndex, matchCount) {
+    function updateExplorerSearchControls(index, query, activeIndex, matchCount, capped = false) {
         const input = document.querySelector(`[data-explorer-search-input="${index}"]`);
         const count = document.querySelector(`[data-explorer-search-count="${index}"]`);
         const buttons = document.querySelectorAll(
@@ -8512,7 +8610,8 @@
             input.value = query;
         }
         if (count) {
-            count.textContent = query ? `${matchCount ? activeIndex + 1 : 0}/${matchCount}` : '';
+            count.textContent = query ? `${matchCount ? activeIndex + 1 : 0}/${matchCount}${capped ? '+' : ''}` : '';
+            count.title = capped ? `Showing first ${matchCount} matches` : '';
         }
         buttons.forEach(button => {
             button.disabled = matchCount === 0;
@@ -8531,7 +8630,39 @@
         });
     }
 
-    function applyExplorerSearch(index, { resetActive = false } = {}) {
+    function cancelExplorerSearch(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        if (pane._explorerSearchTimer) {
+            window.clearTimeout(pane._explorerSearchTimer);
+            pane._explorerSearchTimer = null;
+        }
+        if (pane._explorerSearchToken) {
+            pane._explorerSearchToken.cancelled = true;
+            pane._explorerSearchToken = null;
+        }
+    }
+
+    function scheduleExplorerSearch(index, { resetActive = false, delay = EXPLORER_SEARCH_DEBOUNCE_MS } = {}) {
+        const pane = terminals[index];
+        if (!pane || !isExplorerSearchablePane(pane)) {
+            return;
+        }
+        if (pane._explorerMode === 'directory') {
+            applyExplorerSearch(index, { resetActive });
+            return;
+        }
+
+        cancelExplorerSearch(index);
+        pane._explorerSearchTimer = window.setTimeout(() => {
+            pane._explorerSearchTimer = null;
+            applyExplorerSearch(index, { resetActive });
+        }, delay);
+    }
+
+    async function applyExplorerSearch(index, { resetActive = false } = {}) {
         const pane = terminals[index];
         if (!pane || !isExplorerSearchablePane(pane)) {
             return;
@@ -8549,18 +8680,46 @@
 
         const query = state.query || '';
         const view = activeExplorerFileView(index);
-        renderExplorerSource(index);
-        const preview = restoreExplorerPreview(index);
-
         let matchCount = 0;
+        let capped = false;
         if (query && view === 'source') {
-            const ranges = explorerFindRanges(pane._explorerFileContent || '', query);
+            const cachedRanges = state.resultQuery === query && Array.isArray(state.ranges)
+                ? state.ranges
+                : null;
+            const ranges = cachedRanges || [];
+            if (!cachedRanges) {
+                cancelExplorerSearch(index);
+                const token = { cancelled: false };
+                pane._explorerSearchToken = token;
+                updateExplorerSearchControls(index, query, 0, 0);
+                const result = await explorerFindRangesAsync(pane._explorerFileContent || '', query, token);
+                if (token.cancelled || pane._explorerSearchToken !== token) {
+                    return;
+                }
+                pane._explorerSearchToken = null;
+                ranges.splice(0, ranges.length, ...result.ranges);
+                ranges.capped = result.capped;
+                state.ranges = ranges;
+                state.resultQuery = query;
+            }
             matchCount = ranges.length;
+            capped = Boolean(ranges.capped);
             state.activeIndex = matchCount ? Math.min(state.activeIndex || 0, matchCount - 1) : 0;
             renderExplorerSource(index, decorateExplorerSearchRanges(ranges, state.activeIndex));
-        } else if (query && view === 'preview' && preview) {
+        } else if (query && view === 'preview') {
+            cancelExplorerSearch(index);
+            renderExplorerSource(index);
+            const preview = restoreExplorerPreview(index);
+            if (!preview) {
+                state.activeIndex = 0;
+                state.matchCount = 0;
+                state.matchCapped = false;
+                updateExplorerSearchControls(index, query, 0, 0);
+                return;
+            }
             const previewMarks = markExplorerSearchInElement(preview, query, state.activeIndex || 0);
             matchCount = previewMarks.length;
+            capped = Boolean(previewMarks.capped);
             state.activeIndex = matchCount ? Math.min(state.activeIndex || 0, matchCount - 1) : 0;
             if (matchCount && !previewMarks[state.activeIndex]?.classList.contains('active')) {
                 previewMarks.forEach((mark, markIndex) => {
@@ -8568,11 +8727,17 @@
                 });
             }
         } else {
+            cancelExplorerSearch(index);
+            state.ranges = [];
+            state.resultQuery = '';
+            renderExplorerSource(index);
+            restoreExplorerPreview(index);
             state.activeIndex = 0;
         }
 
         state.matchCount = matchCount;
-        updateExplorerSearchControls(index, query, state.activeIndex || 0, matchCount);
+        state.matchCapped = capped;
+        updateExplorerSearchControls(index, query, state.activeIndex || 0, matchCount, capped);
         if (query && matchCount) {
             scrollExplorerSearchMatch(index);
         }
@@ -8601,6 +8766,9 @@
         state.query = '';
         state.activeIndex = 0;
         state.matchCount = 0;
+        state.matchCapped = false;
+        state.ranges = [];
+        state.resultQuery = '';
         applyExplorerSearch(index);
         document.querySelector(`[data-explorer-search-input="${index}"]`)?.focus();
     }
@@ -8633,7 +8801,10 @@
             const nextState = ensureExplorerSearchState(pane);
             nextState.query = input.value;
             nextState.activeIndex = 0;
-            applyExplorerSearch(index, { resetActive: true });
+            nextState.ranges = [];
+            nextState.resultQuery = '';
+            nextState.matchCapped = false;
+            scheduleExplorerSearch(index, { resetActive: true });
         });
         input.addEventListener('keydown', event => {
             if (event.key === 'Enter') {
@@ -8762,8 +8933,12 @@
         const keepDiffSplit = previousPath === path && pane._explorerDiffSplit && hasGitDiff;
         const searchState = ensureExplorerSearchState(pane, 'file');
         if (previousPath && previousPath !== path) {
+            cancelExplorerSearch(index);
             searchState.activeIndex = 0;
             searchState.matchCount = 0;
+            searchState.matchCapped = false;
+            searchState.ranges = [];
+            searchState.resultQuery = '';
         }
         clearExplorerDirectorySearchControls(index);
 
@@ -8892,6 +9067,11 @@
         const fileName = data.name || path || 'File';
         const codeLanguage = normalizeExplorerLanguage(data.language) || explorerCodeLanguage(path || fileName);
         const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
+        cancelExplorerSearch(index);
+        const searchState = ensureExplorerSearchState(pane, 'file');
+        searchState.ranges = [];
+        searchState.resultQuery = '';
+        searchState.matchCapped = false;
         pane._explorerFileContent = data.content || '';
         pane._explorerFileLanguage = codeLanguage;
         pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
@@ -8941,8 +9121,9 @@
             return false;
         }
 
+        const wasDirectoryOpen = pane._explorerMode === 'directory';
         const scrollState = preserveScroll ? captureExplorerFileScroll(index) : null;
-        if (showLoading) {
+        if (showLoading && !wasDirectoryOpen) {
             renderExplorerMessage(index, 'Opening file...');
         }
         try {
@@ -8962,7 +9143,7 @@
             return renderExplorerFile(index, data, { scrollState });
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer file open failed:', error);
-            renderExplorerMessage(index, error.message || 'Failed to open file.');
+            renderExplorerDirectoryOpenError(index, error.message || 'Failed to open file.');
             return false;
         }
     }
@@ -9023,6 +9204,10 @@
             pane._explorerPath = data.path || '';
             pane._explorerParentPath = data.parent_path || '';
             pane._explorerEntries = Array.isArray(data.entries) ? data.entries : [];
+            cancelExplorerSearch(index);
+            if (isNavigation) {
+                resetExplorerDirectorySearch(pane);
+            }
             document.getElementById(`ph-${index}`)?.remove();
             updateExplorerGitSummary(index, data.git || null);
             renderExplorerDirectorySearchControls(index);

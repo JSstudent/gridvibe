@@ -6,11 +6,12 @@ Last updated: 2026-07-03
 ### Issue ID: ISSUE-2026-007
 - Title: Opening binary files can freeze explorer mode
 - Priority: Medium
-- Status: Open
+- Status: Closed
 - Area: `templates/terminals.html`, `web/api.py`, `tests/test_api.py`
 - Assignee: Unassigned
 - Tags: `file-explorer`, `ui`, `flask`, `tests`
 - Reported: 2026-07-02
+- Closed: 2026-07-03
 
 Description:
 Opening a binary file from explorer mode can make the explorer pane appear frozen. The user-facing impact is that a normal file-list click can leave the pane stuck or unresponsive instead of quickly declining to preview unsupported binary content and returning the user to a usable explorer state.
@@ -29,33 +30,26 @@ User report: opening a binary causes explorer mode to freeze. Code inspection sh
 ### Proposed solution:
 Harden binary preview handling in both `web/api.py` and `templates/terminals.html`. Add faster binary detection before the full preview/render path, including extension or MIME hints where available plus byte-sample heuristics beyond only checking for `NUL`. Return a structured unsupported-preview response or a stable 400 error that the client can display without losing the previous directory context. Update `openExplorerFile()` so failed binary opens restore or preserve the directory listing/navigation state instead of leaving only a transient loading/message view, and ensure large local and SSH binaries cannot block the UI thread. Add tests in `tests/test_api.py` for non-NUL binary-like bytes, large binary files, remote binary errors, and client-template behavior that preserves a usable explorer state after an unsupported file open.
 
+Resolution:
+Explorer file editor mode now only accepts known preview/source formats from the existing language and filename maps. Unsupported extensions are rejected before preview decoding, known formats are checked for NUL bytes, invalid UTF-8, and excessive control bytes, and SSH/local paths share the same validation. The frontend keeps the directory listing active on failed opens and prepends a non-blocking error notice instead of leaving the pane stuck on an opening message. Tests cover unsupported local and remote formats, non-NUL binary-like content, and the directory-preserving client path.
+
+## Closed Issues
+
 ### Issue ID: ISSUE-2026-005
 - Title: Explorer file find blocks terminal UI on large previews
 - Priority: Medium
-- Status: Open
+- Status: Closed
 - Area: `templates/terminals.html`, `web/api.py`, `tests/test_api.py`
 - Assignee: Unassigned
 - Tags: `file-explorer`, `terminal`, `ui`, `tests`
 - Reported: 2026-07-02
+- Closed: 2026-07-03
 
 Description:
-The explorer file find flow can become extremely slow on large text files and make the terminal workspace appear frozen while searching. The practical impact is that users inspecting large logs or source files can temporarily lose terminal responsiveness because the search work runs synchronously in the browser UI thread.
+The explorer file find flow could become extremely slow on large text files and make the terminal workspace appear frozen while searching. The practical impact was that users inspecting large logs or source files could temporarily lose terminal responsiveness because the search work ran synchronously in the browser UI thread.
 
-Steps to reproduce:
-1. Open GridVibe in explorer mode and open a large text/log/source file.
-2. Use the file find input to search for a common token, especially one with many matches.
-3. Continue typing or navigate between matches while observing terminal pane responsiveness.
-
-Expected behavior:
-Searching within large file previews should remain responsive. Typing in the find box, navigating matches, and terminal input/output rendering should not visibly freeze the workspace; long searches should be bounded, debounced, chunked, cancellable, or moved off the UI thread.
-
-Actual behavior / logs:
-User report: the search function is extremely slow on large files and causes the entire terminal to freeze while searching. Code inspection shows `web/api.py` can send up to `EXPLORER_FILE_PREVIEW_MAX_BYTES` of text content per opened file, currently 1 MiB. In `templates/terminals.html`, each find input event updates state and calls `applyExplorerSearch()`, which calls `explorerFindRanges()` to lowercase the full preview content and collect every match, then calls `renderExplorerSource()` / `highlightExplorerCode()` to rebuild the full source HTML with search markup. These operations are synchronous on the main browser thread and have no debounce, match cap, cancellation, worker handoff, or incremental rendering.
-
-### Proposed solution:
-Make explorer file search bounded and asynchronous enough for large previews. In `templates/terminals.html`, debounce input, cancel stale searches, cap or progressively count matches, and avoid re-rendering the full file on every keystroke when possible. Consider chunked search with `requestIdleCallback`/`setTimeout`, a Web Worker for large content, or virtualized line rendering so highlighting only touches visible content plus nearby matches. Keep `web/api.py` preview truncation behavior intact unless a smaller preview or explicit large-file warning is chosen. Add regression tests in `tests/test_api.py` for the presence of debounce/cancellation or worker wiring, match-cap behavior, truncated-file messaging, and preservation of existing source/preview search controls.
-
-## Closed Issues
+Resolution:
+`templates/terminals.html` now debounces file search input, cancels stale pending or in-flight searches, scans source previews in bounded chunks with event-loop yields, caps highlighted matches, reuses cached source ranges when navigating previous/next matches, and clears stale search work when file content or pane mode changes. Preview-mode DOM marking is also capped. `web/api.py` preview truncation behavior remains unchanged. `tests/test_api.py` includes rendered-template coverage for the debounce constants, async chunked search, cancellation token wiring, match cap display, and cached range reuse.
 
 ### Issue ID: ISSUE-2026-006
 - Title: Add find support to explorer directory view

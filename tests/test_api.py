@@ -561,15 +561,35 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn('data-explorer-search-input="${index}"', html)
-        self.assertIn("function explorerFindRanges(content, query)", html)
+        self.assertIn("function explorerFindRanges(content, query, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
         self.assertIn("function explorerMarkedEscHtml(text, absoluteStart = 0, searchRanges = [])", html)
-        self.assertIn("function markExplorerSearchInElement(root, query, activeIndex = 0)", html)
+        self.assertIn("function markExplorerSearchInElement(root, query, activeIndex = 0, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
         self.assertIn("document.createTreeWalker(", html)
         self.assertIn("node.replaceWith(fragment);", html)
         self.assertIn("code.innerHTML = highlightExplorerCode(", html)
         self.assertIn("function findExplorerSearchTargetIndex()", html)
         self.assertIn("event.code !== 'KeyF'", html)
         self.assertNotIn("/api/explorer-search", html)
+
+    def test_terminals_page_explorer_file_search_is_bounded_and_debounced(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("const EXPLORER_SEARCH_DEBOUNCE_MS = 160;", html)
+        self.assertIn("const EXPLORER_SEARCH_MAX_MATCHES = 1000;", html)
+        self.assertIn("const EXPLORER_SEARCH_CHUNK_SIZE = 65536;", html)
+        self.assertIn("async function explorerFindRangesAsync(content, query, token, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
+        self.assertIn("await new Promise(resolve => window.setTimeout(resolve, 0));", html)
+        self.assertIn("function cancelExplorerSearch(index)", html)
+        self.assertIn("window.clearTimeout(pane._explorerSearchTimer);", html)
+        self.assertIn("pane._explorerSearchToken.cancelled = true;", html)
+        self.assertIn("function scheduleExplorerSearch(index, { resetActive = false, delay = EXPLORER_SEARCH_DEBOUNCE_MS } = {})", html)
+        self.assertIn("scheduleExplorerSearch(index, { resetActive: true });", html)
+        self.assertIn("ranges.capped = ranges.length >= maxMatches;", html)
+        self.assertIn("count.title = capped ? `Showing first ${matchCount} matches` : '';", html)
+        self.assertIn("state.resultQuery === query && Array.isArray(state.ranges)", html)
+        self.assertIn("state.matchCapped = capped;", html)
 
     def test_terminals_page_explorer_directory_search_filters_current_entries(self):
         response = self.client.get("/terminals")
@@ -611,6 +631,28 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const searchState = ensureExplorerSearchState(pane, 'file');", html)
         self.assertIn("const state = ensureExplorerSearchState(pane, 'directory');", html)
         self.assertIn("clearExplorerDirectorySearchControls(index);", html)
+
+    def test_terminals_page_explorer_file_open_failures_keep_directory_usable(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("function renderExplorerDirectoryOpenError(index, message)", html)
+        self.assertIn("renderExplorerDirectoryRows(index);", html)
+        self.assertIn("list.prepend(notice);", html)
+        self.assertIn("const wasDirectoryOpen = pane._explorerMode === 'directory';", html)
+        self.assertIn("if (showLoading && !wasDirectoryOpen)", html)
+        self.assertIn("renderExplorerDirectoryOpenError(index, error.message || 'Failed to open file.');", html)
+
+    def test_terminals_page_explorer_directory_search_clears_on_navigation(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("function resetExplorerDirectorySearch(pane)", html)
+        self.assertIn("if (isNavigation) {\n                resetExplorerDirectorySearch(pane);\n            }", html)
+        self.assertIn("state.query = '';", html)
+        self.assertIn("state.matchCount = 0;", html)
 
     def test_terminals_page_explorer_git_hooks_are_present(self):
         response = self.client.get("/terminals")
@@ -2708,16 +2750,76 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_explorer_file_rejects_binary_content(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
-        (repo_dir / "image.bin").write_bytes(b"abc\x00def")
+        (repo_dir / "image.log").write_bytes(b"abc\x00def")
         session_id = self._create_explorer_session(repo_dir)
 
         file_response = self.client.get(
             f"/api/explorer/{session_id}/file",
-            query_string={"path": "image.bin"},
+            query_string={"path": "image.log"},
         )
 
         self.assertEqual(file_response.status_code, 400)
         self.assertIn("binary", file_response.get_json()["error"])
+
+    def test_explorer_file_rejects_non_utf8_binary_content_in_known_format(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "events.log").write_bytes(b"\xff\xfe\xfd\xfc" * 64)
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "events.log"},
+        )
+
+        self.assertEqual(file_response.status_code, 400)
+        self.assertIn("binary", file_response.get_json()["error"])
+
+    def test_explorer_file_rejects_unsupported_editor_format(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "archive.bin").write_bytes(b"plain bytes without nul")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "archive.bin"},
+        )
+
+        self.assertEqual(file_response.status_code, 400)
+        self.assertIn("format is not supported", file_response.get_json()["error"])
+
+    def test_explorer_file_rejects_unsupported_remote_editor_format(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/archive.bin": {"type": "file", "content": b"plain bytes"},
+            }
+        )
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "archive.bin"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("format is not supported", response.get_json()["error"])
 
     def test_create_sessions_uses_cmd_label_for_local_repo_cmd_panes(self):
         sessions_payload = {
