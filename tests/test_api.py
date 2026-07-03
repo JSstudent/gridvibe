@@ -68,6 +68,36 @@ class FakeSftp:
         self.closed = True
 
 
+class FakeSshStream:
+    def __init__(self, data=b"", returncode=0):
+        self._data = data
+        self.channel = SimpleNamespace(recv_exit_status=lambda: returncode)
+
+    def read(self):
+        return self._data
+
+
+class FakeSshExecClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.commands = []
+        self.closed = False
+
+    def exec_command(self, command, timeout=None):
+        self.commands.append((command, timeout))
+        if not self.responses:
+            raise OSError("Unexpected SSH command")
+        returncode, stdout, stderr = self.responses.pop(0)
+        return (
+            None,
+            FakeSshStream(stdout, returncode),
+            FakeSshStream(stderr, returncode),
+        )
+
+    def close(self):
+        self.closed = True
+
+
 class ApiRoutesTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
@@ -2091,6 +2121,60 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["parent_path"], "")
         self.assertEqual([entry["name"] for entry in payload["entries"]], ["src", "README.md"])
 
+    def test_explorer_entries_returns_git_metadata_for_ssh_repo(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/src": {"type": "directory"},
+                "/srv/app/README.md": {"type": "file", "content": b"# Project\n"},
+                "/srv/app/src/main.py": {"type": "file", "content": b"print('ok')\n"},
+            }
+        )
+        raw_status = (
+            b"# branch.oid abcdef1234567890\0"
+            b"# branch.head main\0"
+            b"1 .M N... 100644 100644 100644 old new README.md\0"
+            b"1 .M N... 100644 100644 100644 old new src/main.py\0"
+            b"1 .D N... 100644 100644 100644 old new obsolete.txt\0"
+            b"? notes.txt\0"
+        )
+        fake_client = FakeSshExecClient(
+            [
+                (0, b"/srv/app\ntrue\n", b""),
+                (0, raw_status, b""),
+            ]
+        )
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
+            entries_response = self.client.get(f"/api/explorer/{session.session_id}/entries")
+
+        self.assertEqual(entries_response.status_code, 200)
+        payload = entries_response.get_json()
+        entries = {entry["name"]: entry for entry in payload["entries"]}
+        self.assertTrue(payload["git"]["available"])
+        self.assertTrue(payload["git"]["dirty"])
+        self.assertEqual(payload["git"]["branch"], "main")
+        self.assertEqual(entries["README.md"]["git"]["status"], "modified")
+        self.assertEqual(entries["src"]["git"]["status"], "modified")
+        self.assertTrue(entries["src"]["git"]["has_descendant_changes"])
+        self.assertEqual(entries["obsolete.txt"]["git"]["status"], "deleted")
+        self.assertTrue(entries["obsolete.txt"]["deleted"])
+
     def test_explorer_entries_rejects_path_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -2212,6 +2296,97 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["name"], "notes.txt")
         self.assertEqual(payload["content"], "hello\n")
         self.assertFalse(payload["truncated"])
+
+    def test_explorer_file_returns_ssh_git_metadata(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/notes.txt": {"type": "file", "content": b"hello\n"},
+            }
+        )
+        fake_client = FakeSshExecClient(
+            [
+                (0, b"/srv/app\ntrue\n", b""),
+                (
+                    0,
+                    b"# branch.oid abcdef1234567890\0"
+                    b"# branch.head main\0"
+                    b"1 .M N... 100644 100644 100644 old new notes.txt\0",
+                    b"",
+                ),
+            ]
+        )
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "notes.txt"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["git_context"]["available"])
+        self.assertEqual(payload["git_context"]["branch"], "main")
+        self.assertEqual(payload["git"]["status"], "modified")
+
+    def test_explorer_git_diff_returns_bounded_ssh_file_diff(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/README.md": {"type": "file", "content": b"# Project\n"},
+            }
+        )
+        fake_client = FakeSshExecClient(
+            [
+                (0, b"/srv/app\ntrue\n", b""),
+                (0, b"# branch.oid abcdef1234567890\0# branch.head main\0", b""),
+                (0, b"diff --git a/README.md b/README.md\n+changed\n", b""),
+            ]
+        )
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/git/diff",
+                query_string={"path": "README.md", "mode": "head"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["path"], "README.md")
+        self.assertEqual(payload["mode"], "head")
+        self.assertIn("+changed", payload["diff"])
+        self.assertFalse(payload["truncated"])
+        self.assertIn("git -C /srv/app diff HEAD", fake_client.commands[-1][0])
 
     def test_explorer_file_returns_sanitized_markdown_preview(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
