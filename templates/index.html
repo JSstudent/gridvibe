@@ -143,6 +143,11 @@
             background: rgba(248, 250, 252, 0.98);
         }
 
+        [data-theme="light"] .voice-settings-panel {
+            border-color: rgba(75, 85, 99, 0.34);
+            background: rgba(229, 231, 235, 0.92);
+        }
+
         [data-theme="light"] .picker-display {
             border-color: rgba(75, 85, 99, 0.38);
             background: rgba(255, 255, 255, 0.99);
@@ -858,6 +863,11 @@
             row-gap: 14px;
         }
 
+        .app-settings-card .settings-grid {
+            overflow: visible;
+            padding-right: 0;
+        }
+
         .settings-section {
             display: grid;
             gap: 14px;
@@ -887,10 +897,34 @@
             padding: 12px;
         }
 
+        .voice-settings-panel {
+            grid-column: 1 / -1;
+            display: grid;
+            gap: 12px;
+            padding: 14px;
+            border-radius: 14px;
+            border: 1px solid rgba(76, 201, 240, 0.18);
+            background: rgba(7, 11, 24, 0.46);
+        }
+
         .app-voice-enable-row {
             min-height: 58px;
             padding: 12px;
-            margin-bottom: 2px;
+            margin-bottom: 0;
+        }
+
+        .voice-settings-panel .app-voice-enable-row {
+            background: rgba(5, 8, 17, 0.5);
+        }
+
+        .voice-settings-details {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .voice-settings-details.hidden {
+            display: none;
         }
 
         .app-voice-enable-row .check-copy {
@@ -926,6 +960,10 @@
         }
 
         .settings-section.hidden {
+            display: none;
+        }
+
+        .settings-hint.hidden {
             display: none;
         }
 
@@ -1653,6 +1691,15 @@
             backdrop-filter: blur(16px);
         }
 
+        .app-settings-card {
+            width: min(760px, 100%);
+            max-height: min(92vh, 860px);
+        }
+
+        .app-settings-card.voice-enabled {
+            max-height: min(96vh, 900px);
+        }
+
         .modal-head {
             display: flex;
             justify-content: space-between;
@@ -2021,8 +2068,17 @@
                 grid-template-columns: 1fr;
             }
 
+            .voice-settings-details {
+                grid-template-columns: 1fr;
+            }
+
             .modal-card {
                 max-height: calc(100vh - 32px);
+            }
+
+            .app-settings-card .settings-grid {
+                overflow: auto;
+                padding-right: 4px;
             }
 
             .modal-head,
@@ -2226,22 +2282,15 @@
 </div>
 
 <div id="appSettingsModal" class="modal-shell" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="appSettingsTitle">
+    <div class="modal-card app-settings-card" role="dialog" aria-modal="true" aria-labelledby="appSettingsTitle">
         <div class="modal-head">
             <div>
                 <div id="appSettingsTitle" class="modal-title">App Settings</div>
-                <div class="modal-copy">Machine-level voice backend settings live here. They are not stored inside saved session presets.</div>
+                <div class="modal-copy">Machine-level launcher and voice settings live here. They are not stored inside saved session presets.</div>
             </div>
             <button class="ghost-btn" type="button" onclick="closeAppSettingsModal()">Close</button>
         </div>
         <div class="settings-grid app-settings-grid">
-            <label class="check-field app-voice-enable-row">
-                <input id="appVoiceEnabled" type="checkbox">
-                <span class="check-copy">
-                    <strong>Enable voice input</strong>
-                    <span>Turns the microphone and speech-to-text path on or off for this machine.</span>
-                </span>
-            </label>
             <div class="field">
                 <label>Theme</label>
                 <select id="appTheme">
@@ -2251,103 +2300,121 @@
                 </select>
             </div>
             <div class="field">
-                <label>Voice Backend</label>
-                <select id="appVoiceEngine" onchange="updateAppSettingsVisibility()">
-                    <option value="vosk">Vosk</option>
-                    <option value="whisper">faster-whisper</option>
+                <label>Session Window</label>
+                <select id="appSurfaceMode">
+                    <option value="normal">Normal surface</option>
+                    <option value="max">Max surface</option>
                 </select>
             </div>
-            <div class="field">
-                <label>Language</label>
-                <input id="appVoiceLanguage" type="text" placeholder="en-US">
-            </div>
-            <div id="appVoskSettings" class="settings-section compact-section">
-                <div class="settings-section-title">Vosk</div>
-                <div class="settings-fields-inline">
+            <div class="voice-settings-panel">
+                <label class="check-field app-voice-enable-row">
+                    <input id="appVoiceEnabled" type="checkbox" onchange="updateAppSettingsVisibility()">
+                    <span class="check-copy">
+                        <strong>Enable voice input</strong>
+                        <span>Turns the microphone and speech-to-text path on or off for this machine.</span>
+                    </span>
+                </label>
+                <div id="appVoiceSettingsDetails" class="voice-settings-details">
                     <div class="field">
-                        <label>Vosk Model</label>
-                        <input id="appVoskModel" type="text" placeholder="vosk-model-en-us-0.22">
-                    </div>
-                </div>
-            </div>
-            <div id="appWhisperSettings" class="settings-section compact-section">
-                <div class="settings-section-title">faster-whisper</div>
-                <div class="settings-fields-inline">
-                    <div class="field">
-                        <label>Whisper Model</label>
-                        <select id="appWhisperModel">
-                            <option value="tiny.en">tiny.en</option>
-                            <option value="tiny">tiny</option>
-                            <option value="base.en">base.en</option>
-                            <option value="base">base</option>
-                            <option value="small.en">small.en</option>
-                            <option value="small">small</option>
-                            <option value="medium.en">medium.en</option>
-                            <option value="medium">medium</option>
-                            <option value="large-v1">large-v1</option>
-                            <option value="large-v2">large-v2</option>
-                            <option value="large-v3">large-v3</option>
-                            <option value="large">large</option>
-                            <option value="distil-large-v2">distil-large-v2</option>
-                            <option value="distil-medium.en">distil-medium.en</option>
-                            <option value="distil-small.en">distil-small.en</option>
-                            <option value="distil-large-v3">distil-large-v3</option>
-                            <option value="distil-large-v3.5">distil-large-v3.5</option>
-                            <option value="large-v3-turbo">large-v3-turbo</option>
-                            <option value="turbo">turbo</option>
+                        <label>Voice Backend</label>
+                        <select id="appVoiceEngine" onchange="updateAppSettingsVisibility()">
+                            <option value="vosk">Vosk</option>
+                            <option value="whisper">faster-whisper</option>
                         </select>
                     </div>
                     <div class="field">
-                        <label>Device</label>
-                        <select id="appWhisperDevice" onchange="updateAppSettingsVisibility()">
-                            <option value="cpu">CPU</option>
-                            <option value="cuda">GPU (CUDA)</option>
-                        </select>
+                        <label>Language</label>
+                        <input id="appVoiceLanguage" type="text" placeholder="en-US">
                     </div>
-                    <div class="field">
-                        <label>Compute Type</label>
-                        <select id="appWhisperComputeType">
-                            <option value="int8">int8</option>
-                            <option value="float32">float32</option>
-                            <option value="float16">float16</option>
-                            <option value="int8_float16">int8_float16</option>
-                        </select>
-                    </div>
-                </div>
-                <div id="appWhisperGpuHint" class="settings-hint hidden">GPU mode requires a working NVIDIA CUDA setup on this machine. If startup fails, switch the device back to CPU.</div>
-            </div>
-            <div id="appMicSettings" class="settings-section compact-section">
-                <div class="settings-section-title">Microphone</div>
-                <div class="settings-fields-inline">
-                    <div class="field">
-                        <label>Capture Profile</label>
-                        <select id="appVoiceProfile">
-                            <option value="headset">Headset</option>
-                            <option value="laptop">Laptop</option>
-                        </select>
-                    </div>
-                    <div class="settings-field-with-action">
-                        <div class="field">
-                            <label>Microphone</label>
-                            <select id="appVoiceDevice">
-                                <option value="">Default input</option>
-                            </select>
+                    <div id="appVoskSettings" class="settings-section compact-section">
+                        <div class="settings-section-title">Vosk</div>
+                        <div class="settings-fields-inline">
+                            <div class="field">
+                                <label>Vosk Model</label>
+                                <input id="appVoskModel" type="text" placeholder="vosk-model-en-us-0.22">
+                            </div>
                         </div>
-                        <button id="refreshMicDevicesBtn" class="ghost-btn icon-btn" type="button" onclick="refreshLauncherMicrophones()" title="Refresh available microphones" aria-label="Refresh available microphones">↻</button>
                     </div>
-                    <label class="check-field compact-check">
-                        <input id="appVoicePttEnabled" type="checkbox">
-                        <span class="check-copy">
-                            <strong>Push-to-talk</strong>
-                            <span>Hold the configured keybind to record in the terminal window.</span>
-                        </span>
-                    </label>
-                    <div class="field">
-                        <label>Push-to-talk Keybind</label>
-                        <input id="appVoicePttKeybind" class="voice-ptt-keybind" type="text" readonly placeholder="Click and press keys">
+                    <div id="appWhisperSettings" class="settings-section compact-section">
+                        <div class="settings-section-title">faster-whisper</div>
+                        <div class="settings-fields-inline">
+                            <div class="field">
+                                <label>Whisper Model</label>
+                                <select id="appWhisperModel">
+                                    <option value="tiny.en">tiny.en</option>
+                                    <option value="tiny">tiny</option>
+                                    <option value="base.en">base.en</option>
+                                    <option value="base">base</option>
+                                    <option value="small.en">small.en</option>
+                                    <option value="small">small</option>
+                                    <option value="medium.en">medium.en</option>
+                                    <option value="medium">medium</option>
+                                    <option value="large-v1">large-v1</option>
+                                    <option value="large-v2">large-v2</option>
+                                    <option value="large-v3">large-v3</option>
+                                    <option value="large">large</option>
+                                    <option value="distil-large-v2">distil-large-v2</option>
+                                    <option value="distil-medium.en">distil-medium.en</option>
+                                    <option value="distil-small.en">distil-small.en</option>
+                                    <option value="distil-large-v3">distil-large-v3</option>
+                                    <option value="distil-large-v3.5">distil-large-v3.5</option>
+                                    <option value="large-v3-turbo">large-v3-turbo</option>
+                                    <option value="turbo">turbo</option>
+                                </select>
+                            </div>
+                            <div class="field">
+                                <label>Device</label>
+                                <select id="appWhisperDevice" onchange="updateAppSettingsVisibility()">
+                                    <option value="cpu">CPU</option>
+                                    <option value="cuda">GPU (CUDA)</option>
+                                </select>
+                            </div>
+                            <div class="field">
+                                <label>Compute Type</label>
+                                <select id="appWhisperComputeType">
+                                    <option value="int8">int8</option>
+                                    <option value="float32">float32</option>
+                                    <option value="float16">float16</option>
+                                    <option value="int8_float16">int8_float16</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="appWhisperGpuHint" class="settings-hint hidden">GPU mode requires a working NVIDIA CUDA setup on this machine. If startup fails, switch the device back to CPU.</div>
+                    </div>
+                    <div id="appMicSettings" class="settings-section compact-section">
+                        <div class="settings-section-title">Microphone</div>
+                        <div class="settings-fields-inline">
+                            <div class="field">
+                                <label>Capture Profile</label>
+                                <select id="appVoiceProfile">
+                                    <option value="headset">Headset</option>
+                                    <option value="laptop">Laptop</option>
+                                </select>
+                            </div>
+                            <div class="settings-field-with-action">
+                                <div class="field">
+                                    <label>Microphone</label>
+                                    <select id="appVoiceDevice">
+                                        <option value="">Default input</option>
+                                    </select>
+                                </div>
+                                <button id="refreshMicDevicesBtn" class="ghost-btn icon-btn" type="button" onclick="refreshLauncherMicrophones()" title="Refresh available microphones" aria-label="Refresh available microphones">↻</button>
+                            </div>
+                            <label class="check-field compact-check">
+                                <input id="appVoicePttEnabled" type="checkbox">
+                                <span class="check-copy">
+                                    <strong>Push-to-talk</strong>
+                                    <span>Hold the configured keybind to record in the terminal window.</span>
+                                </span>
+                            </label>
+                            <div class="field">
+                                <label>Push-to-talk Keybind</label>
+                                <input id="appVoicePttKeybind" class="voice-ptt-keybind" type="text" readonly placeholder="Click and press keys">
+                            </div>
+                        </div>
+                        <div id="appVoicePrefsStatus" class="settings-hint"></div>
                     </div>
                 </div>
-                <div id="appVoicePrefsStatus" class="settings-hint"></div>
             </div>
         </div>
         <div class="modal-actions app-settings-actions">
@@ -2478,6 +2545,9 @@
     const DEFAULT_APP_SETTINGS = Object.freeze({
         appearance: Object.freeze({
             theme: 'system'
+        }),
+        workspace: Object.freeze({
+            surface_mode: 'normal'
         }),
         voice_input: Object.freeze({
             enabled: true,
@@ -2977,11 +3047,16 @@
 
     function applyAppSettings(data) {
         const appearance = data?.appearance || {};
+        const workspace = data?.workspace || {};
         const voiceInput = data?.voice_input || {};
         appSettings = {
             appearance: {
                 ...DEFAULT_APP_SETTINGS.appearance,
                 ...appearance
+            },
+            workspace: {
+                ...DEFAULT_APP_SETTINGS.workspace,
+                ...workspace
             },
             voice_input: {
                 ...DEFAULT_APP_SETTINGS.voice_input,
@@ -2993,22 +3068,32 @@
     }
 
     function updateAppSettingsVisibility() {
+        const enabledInput = document.getElementById('appVoiceEnabled');
         const engineInput = document.getElementById('appVoiceEngine');
         const whisperDeviceInput = document.getElementById('appWhisperDevice');
+        const modalCard = document.querySelector('#appSettingsModal .app-settings-card');
+        const voiceDetails = document.getElementById('appVoiceSettingsDetails');
         const voskSection = document.getElementById('appVoskSettings');
         const whisperSection = document.getElementById('appWhisperSettings');
+        const micSection = document.getElementById('appMicSettings');
         const whisperGpuHint = document.getElementById('appWhisperGpuHint');
+        const voiceEnabled = Boolean(enabledInput?.checked);
         const selectedEngine = engineInput?.value || 'vosk';
         const selectedDevice = whisperDeviceInput?.value || 'cpu';
-        voskSection?.classList.toggle('hidden', selectedEngine !== 'vosk');
-        whisperSection?.classList.toggle('hidden', selectedEngine !== 'whisper');
-        whisperGpuHint?.classList.toggle('hidden', selectedDevice !== 'cuda');
+        modalCard?.classList.toggle('voice-enabled', voiceEnabled);
+        voiceDetails?.classList.toggle('hidden', !voiceEnabled);
+        voskSection?.classList.toggle('hidden', !voiceEnabled || selectedEngine !== 'vosk');
+        whisperSection?.classList.toggle('hidden', !voiceEnabled || selectedEngine !== 'whisper');
+        micSection?.classList.toggle('hidden', !voiceEnabled);
+        whisperGpuHint?.classList.toggle('hidden', !voiceEnabled || selectedEngine !== 'whisper' || selectedDevice !== 'cuda');
     }
 
     function syncAppSettingsForm() {
         const appearance = appSettings.appearance || DEFAULT_APP_SETTINGS.appearance;
+        const workspace = appSettings.workspace || DEFAULT_APP_SETTINGS.workspace;
         const voice = appSettings.voice_input || DEFAULT_APP_SETTINGS.voice_input;
         const themeInput = document.getElementById('appTheme');
+        const surfaceModeInput = document.getElementById('appSurfaceMode');
         const enabledInput = document.getElementById('appVoiceEnabled');
         const engineInput = document.getElementById('appVoiceEngine');
         const languageInput = document.getElementById('appVoiceLanguage');
@@ -3018,6 +3103,7 @@
         const whisperComputeInput = document.getElementById('appWhisperComputeType');
 
         if (themeInput) themeInput.value = appearance.theme || DEFAULT_APP_SETTINGS.appearance.theme;
+        if (surfaceModeInput) surfaceModeInput.value = workspace.surface_mode === 'max' ? 'max' : 'normal';
         if (enabledInput) enabledInput.checked = Boolean(voice.enabled);
         if (engineInput) engineInput.value = voice.engine === 'whisper' ? 'whisper' : 'vosk';
         if (languageInput) languageInput.value = voice.language || DEFAULT_APP_SETTINGS.voice_input.language;
@@ -3173,6 +3259,9 @@
         return {
             appearance: {
                 theme: document.getElementById('appTheme')?.value || DEFAULT_APP_SETTINGS.appearance.theme
+            },
+            workspace: {
+                surface_mode: document.getElementById('appSurfaceMode')?.value === 'max' ? 'max' : 'normal'
             },
             voice_input: {
                 enabled: Boolean(document.getElementById('appVoiceEnabled')?.checked),
@@ -4721,6 +4810,7 @@
                     connection_mode: config.connection_mode,
                     layout: config.layout,
                     workspace_layout: config.workspace_layout,
+                    surface_mode: appSettings.workspace?.surface_mode === 'max' ? 'max' : 'normal',
                     saved_session_id: activeSavedSessionId,
                     session_name: sessionName,
                     sessions

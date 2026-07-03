@@ -146,6 +146,18 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(group.workspace_layout, workspace_layout)
         self.assertEqual(group.to_dict()["workspace_layout"], workspace_layout)
 
+    def test_create_group_preserves_surface_mode_metadata(self):
+        group = self.manager.create_group(
+            name="maxed",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            surface_mode="max",
+        )
+
+        self.assertEqual(group.surface_mode, "max")
+        self.assertEqual(group.to_dict()["surface_mode"], "max")
+
     def test_update_session_status_marks_connected_and_notifies_callbacks(self):
         session = self.manager.create_session(
             group_id="group-b",

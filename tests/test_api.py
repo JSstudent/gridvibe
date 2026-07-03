@@ -284,6 +284,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="appSettingsModal"', html)
         self.assertIn('/api/app-config', html)
         self.assertIn('id="appTheme"', html)
+        self.assertIn('id="appSurfaceMode"', html)
+        self.assertIn('Session Window', html)
         self.assertIn('id="appVoiceEngine"', html)
         self.assertIn('id="appWhisperDevice"', html)
         self.assertIn('id="appVoiceProfile"', html)
@@ -353,6 +355,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("workspace_layout: workspaceLayout", html)
         self.assertIn("activeWorkspaceLayout = normalized.workspace_layout || null;", html)
         self.assertIn("workspace_layout: config.workspace_layout", html)
+        self.assertIn("surface_mode: appSettings.workspace?.surface_mode === 'max' ? 'max' : 'normal'", html)
         self.assertIn("initial_command_mode: terminal.startup_mode === 'explorer'", html)
         self.assertIn("agent_selection: terminal.initial_command_mode === 'agent'", html)
 
@@ -861,6 +864,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('aria-label="Max surface"', html)
         self.assertIn('<rect x="4" y="4" width="16" height="16" rx="2.5"', html)
         self.assertIn("const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';", html)
+        self.assertIn("const DEFAULT_SURFACE_MODE =", html)
+        self.assertIn("applyConfiguredSurfaceMode(data, { refit: gridBuilt });", html)
+        self.assertIn("applySurfaceMode(normalizeSurfaceMode(DEFAULT_SURFACE_MODE) === 'max');", html)
         self.assertIn("document.body.classList.toggle('surface-max', active);", html)
         self.assertIn("redrawAttachedTerminals(attachedIndices, { forceResize: true });", html)
 
@@ -1023,6 +1029,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         payload = response.get_json()
         self.assertIn("appearance", payload)
         self.assertIn("theme", payload["appearance"])
+        self.assertIn("workspace", payload)
+        self.assertIn("surface_mode", payload["workspace"])
         self.assertIn("voice_input", payload)
         self.assertIn("engine", payload["voice_input"])
         self.assertIn("whisper_model", payload["voice_input"])
@@ -1033,6 +1041,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             json={
                 "appearance": {
                     "theme": "light",
+                },
+                "workspace": {
+                    "surface_mode": "max",
                 },
                 "voice_input": {
                     "engine": "vosk",
@@ -1048,11 +1059,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["appearance"]["theme"], "light")
+        self.assertEqual(payload["workspace"]["surface_mode"], "max")
         self.assertEqual(payload["voice_input"]["engine"], "vosk")
         self.assertEqual(payload["voice_input"]["vosk_model"], "vosk-model-small-en-us-0.15")
         self.assertEqual(payload["voice_input"]["language"], "en-GB")
         cfg = api.load_config()
         self.assertEqual(cfg["appearance"]["theme"], "light")
+        self.assertEqual(cfg["workspace"]["surface_mode"], "max")
         self.assertEqual(cfg["voice_input"]["engine"], "vosk")
         self.assertEqual(cfg["voice_input"]["vosk_model"], "vosk-model-small-en-us-0.15")
 
@@ -3102,6 +3115,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         sessions_payload = {
             "connection_mode": "ssh",
             "layout": "vertical",
+            "surface_mode": "max",
             "workspace_layout": {
                 "class_name": "layout-split-local",
                 "split_slot_rects": [
@@ -3139,12 +3153,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(created.status_code, 201)
         data = created.get_json()
         self.assertEqual(data["workspace_layout"]["split_column_weights"], [3.0, 1.0, 1.0, 3.0])
+        self.assertEqual(data["surface_mode"], "max")
+        self.assertEqual(data["group"]["surface_mode"], "max")
         self.assertEqual(data["sessions"][0]["initial_command_mode"], "agent")
         self.assertEqual(data["sessions"][0]["agent_selection"], "other")
         self.assertEqual(data["sessions"][0]["custom_agent"], "claude-code")
 
         listed = self.client.get(f"/api/sessions?group={data['group_id']}")
         self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.get_json()["surface_mode"], "max")
         self.assertEqual(
             listed.get_json()["workspace_layout"]["split_slot_rects"][1]["x"],
             3,

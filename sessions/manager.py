@@ -86,6 +86,7 @@ class SessionGroup:
     terminal_count: int
     display_order: int = 0
     workspace_layout: Optional[Dict[str, Any]] = None
+    surface_mode: str = "normal"
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -98,6 +99,7 @@ class SessionGroup:
             "terminal_count": self.terminal_count,
             "display_order": self.display_order,
             "workspace_layout": self.workspace_layout,
+            "surface_mode": self.surface_mode,
             "created_at": self.created_at,
         }
 
@@ -123,6 +125,7 @@ class SessionManager:
         terminal_count: int,
         group_id: Optional[str] = None,
         workspace_layout: Optional[Dict[str, Any]] = None,
+        surface_mode: str = "normal",
     ) -> SessionGroup:
         """Create one group of launched sessions."""
         resolved_group_id = str(group_id or uuid.uuid4().hex[:12])
@@ -143,6 +146,7 @@ class SessionManager:
             terminal_count=terminal_count,
             display_order=next_display_order,
             workspace_layout=workspace_layout,
+            surface_mode=surface_mode if surface_mode in {"normal", "max"} else "normal",
         )
 
         with self.lock:

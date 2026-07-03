@@ -1829,6 +1829,7 @@
     const THEME_STORAGE_KEY = 'gridvibe.theme';
     const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';
     const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';
+    const DEFAULT_SURFACE_MODE = {{ app_surface_mode|tojson }};
 
     function normalizeThemePreference(theme) {
         return ['system', 'light', 'dark'].includes(theme) ? theme : 'system';
@@ -1892,6 +1893,10 @@
         }
     })();
 
+    function normalizeSurfaceMode(mode) {
+        return mode === 'max' ? 'max' : 'normal';
+    }
+
     function getStoredSurfaceMode() {
         try {
             return localStorage.getItem(SURFACE_MODE_STORAGE_KEY) === 'max';
@@ -1934,10 +1939,29 @@
     }
 
     function toggleSurfaceMode() {
+        surfaceModeChangedManually = true;
         applySurfaceMode(!document.body.classList.contains('surface-max'), {
             persist: true,
             refit: true
         });
+    }
+
+    function applyConfiguredSurfaceMode(data, { refit = false } = {}) {
+        if (surfaceModeChangedManually) {
+            return;
+        }
+
+        const groupId = data?.group?.group_id || activeGroupId || '';
+        const mode = normalizeSurfaceMode(data?.surface_mode || DEFAULT_SURFACE_MODE);
+        const applyKey = `${data?.group?.created_at || ''}:${mode}`;
+        if (groupId && surfaceModeAppliedGroups.get(groupId) === applyKey) {
+            return;
+        }
+
+        applySurfaceMode(mode === 'max', { refit });
+        if (groupId) {
+            surfaceModeAppliedGroups.set(groupId, applyKey);
+        }
     }
 
     function getStoredTopbarVisible() {
@@ -2105,6 +2129,8 @@
     let sessionGroups = [];
     let activeLoadToken = 0;
     let knownGroupIds = [];
+    let surfaceModeChangedManually = false;
+    let surfaceModeAppliedGroups = new Map();
     let pendingSplitRestore = null;
     let pendingModeSwitchSessionIds = new Set();
     const MAX_SPLIT_TERMINALS = Math.min(8, Number({{ max_sessions | tojson }} || 8));
@@ -6986,6 +7012,7 @@
                 return;
             }
 
+            applyConfiguredSurfaceMode(data, { refit: gridBuilt });
             const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
             const usingCurrentView = (
                 gridBuilt
@@ -9353,7 +9380,7 @@
     /* ─────────────────────────────────────────────
        Boot
     ───────────────────────────────────────────── */
-    applySurfaceMode(getStoredSurfaceMode());
+    applySurfaceMode(normalizeSurfaceMode(DEFAULT_SURFACE_MODE) === 'max');
     applyTopbarVisibility(getStoredTopbarVisible());
     updateFullscreenButton();
     _loadVoicePrefsFromServer();

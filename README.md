@@ -96,6 +96,7 @@ Use the gear button on the launcher page to open `App Settings`. These settings 
 
 - `Enable voice input` shows or hides voice controls and enables the speech-to-text path.
 - `Theme` sets system, light, or dark mode.
+- `Session Window` sets whether newly opened session windows start in normal or max surface mode.
 - `Voice Backend` selects `Vosk` or `faster-whisper`.
 - `Language` sets the voice recognition language, such as `en-US`.
 - `Vosk Model` sets the local Vosk model folder/name.

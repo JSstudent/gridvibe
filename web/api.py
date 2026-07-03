@@ -179,6 +179,7 @@ app_config: Dict[str, Any] = {}
 ssh_config: Dict[str, Any] = {}
 max_sessions = 4
 app_theme = "system"
+app_surface_mode = "normal"
 voice_enabled = True
 voice_engine = "vosk"
 vosk_service_url = "ws://localhost:2700"
@@ -211,12 +212,21 @@ WHISPER_MODEL_OPTIONS = {
 }
 
 
+def _normalize_surface_mode(value: Any, default: str = "normal") -> str:
+    """Normalize workspace chrome density for terminal session windows."""
+    normalized = str(value or "").strip().lower()
+    if normalized in {"normal", "max"}:
+        return normalized
+    return default if default in {"normal", "max"} else "normal"
+
+
 def _refresh_runtime_config():
     """Reload runtime config-backed globals from disk."""
     global app_config
     global ssh_config
     global max_sessions
     global app_theme
+    global app_surface_mode
     global voice_enabled
     global voice_engine
     global vosk_service_url
@@ -234,6 +244,9 @@ def _refresh_runtime_config():
     app_theme = str(appearance_config.get("theme", "system")).strip().lower()
     if app_theme not in {"system", "light", "dark"}:
         app_theme = "system"
+
+    workspace_config = app_config.get("workspace", {})
+    app_surface_mode = _normalize_surface_mode(workspace_config.get("surface_mode"))
 
     voice_config = app_config.get("voice_input", {})
     voice_enabled = voice_config.get("enabled", True)
@@ -271,6 +284,9 @@ def _public_app_config() -> Dict[str, Any]:
         "appearance": {
             "theme": app_theme,
         },
+        "workspace": {
+            "surface_mode": app_surface_mode,
+        },
         "voice_input": {
             "enabled": voice_enabled,
             "engine": voice_engine,
@@ -292,6 +308,11 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     theme = str(appearance.get("theme", app_theme)).strip().lower()
     if theme not in {"system", "light", "dark"}:
         theme = app_theme
+
+    workspace = payload.get("workspace")
+    if not isinstance(workspace, dict):
+        workspace = {}
+    surface_mode = _normalize_surface_mode(workspace.get("surface_mode"), app_surface_mode)
 
     voice_input = payload.get("voice_input")
     if not isinstance(voice_input, dict):
@@ -316,6 +337,9 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     return {
         "appearance": {
             "theme": theme,
+        },
+        "workspace": {
+            "surface_mode": surface_mode,
         },
         "voice_input": {
             "enabled": bool(voice_input.get("enabled", voice_enabled)),
@@ -1820,6 +1844,7 @@ def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
             "connection_mode": active_launch_options["connection_mode"],
             "terminal_count": 0,
             "workspace_layout": None,
+            "surface_mode": app_surface_mode,
         }
 
     return {
@@ -1828,6 +1853,7 @@ def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
         "connection_mode": group.connection_mode,
         "terminal_count": group.terminal_count,
         "workspace_layout": group.workspace_layout,
+        "surface_mode": group.surface_mode,
     }
 
 
@@ -3942,6 +3968,7 @@ def terminals_page():
     """Page showing active terminal instances."""
     logger.info("GET /terminals")
     return render_template('terminals.html', max_sessions=max_sessions,
+                           app_surface_mode=app_surface_mode,
                            voice_enabled=voice_enabled,
                            voice_engine=voice_engine,
                            voice_model=_active_voice_model_name(),
@@ -4028,6 +4055,7 @@ def get_sessions():
                 "connection_mode": active_launch_options["connection_mode"],
                 "terminal_count": active_launch_options["terminal_count"],
                 "workspace_layout": None,
+                "surface_mode": app_surface_mode,
             }
         )
     return jsonify(payload)
@@ -4501,6 +4529,7 @@ def create_sessions():
         connection_mode = _normalize_connection_mode(data.get("connection_mode"))
         layout = _normalize_layout(data.get("layout"), len(sessions_config))
         workspace_layout = _normalize_workspace_layout(data.get("workspace_layout"), len(sessions_config))
+        surface_mode = _normalize_surface_mode(data.get("surface_mode"), app_surface_mode)
         session_name = str(data.get("session_name") or "").strip()
         saved_session_id = _normalize_launch_session_id(data.get("saved_session_id"))
         stable_group_id = _build_launch_group_id(saved_session_id) or None
@@ -4566,6 +4595,7 @@ def create_sessions():
             terminal_count=len(prepared_sessions),
             group_id=stable_group_id,
             workspace_layout=workspace_layout,
+            surface_mode=surface_mode,
         )
         logger.info(
             "Created session group group_id=%s saved_session_id=%r name=%r mode=%s layout=%s terminal_count=%d",
@@ -4625,6 +4655,7 @@ def create_sessions():
             "connection_mode": connection_mode,
             "terminal_count": len(created_sessions),
             "workspace_layout": workspace_layout,
+            "surface_mode": surface_mode,
             "launch_target": "web",
             "warnings": launch_warnings,
         }), 201
