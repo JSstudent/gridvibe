@@ -912,6 +912,17 @@
             font-family: Consolas, Monaco, 'Courier New', monospace;
         }
 
+        .explorer-git-summary {
+            max-width: 42%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--explorer-muted);
+            font-size: .72rem;
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+            flex: 0 1 auto;
+        }
+
         .explorer-list {
             min-height: 0;
             overflow: auto;
@@ -926,7 +937,7 @@
 
         .explorer-row {
             display: grid;
-            grid-template-columns: 24px minmax(0, 1fr) minmax(52px, 72px) minmax(92px, 150px);
+            grid-template-columns: 24px 22px minmax(0, 1fr) minmax(52px, 72px) minmax(92px, 150px);
             gap: 10px;
             align-items: center;
             min-height: 34px;
@@ -989,6 +1000,40 @@
 
         .explorer-icon.file {
             color: var(--explorer-file);
+        }
+
+        .explorer-git-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 18px;
+            height: 18px;
+            border: 1px solid var(--explorer-row-border);
+            border-radius: 4px;
+            color: var(--t-accent);
+            background: var(--explorer-bar-bg);
+            font-size: .68rem;
+            font-weight: 700;
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        .explorer-git-badge.clean {
+            visibility: hidden;
+        }
+
+        .explorer-git-badge.untracked,
+        .explorer-git-badge.ignored {
+            color: var(--explorer-muted);
+        }
+
+        .explorer-git-badge.conflicted,
+        .explorer-git-badge.deleted {
+            color: #b91c1c;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-git-badge.conflicted,
+        .explorer-pane[data-explorer-theme="dark"] .explorer-git-badge.deleted {
+            color: #fca5a5;
         }
 
         .explorer-name {
@@ -1183,6 +1228,21 @@
             display: grid;
         }
 
+        .explorer-editor-body.split-diff {
+            grid-template-columns: minmax(0, 1fr);
+        }
+
+        .explorer-editor-main {
+            min-width: 0;
+            min-height: 0;
+            overflow: hidden;
+            display: grid;
+        }
+
+        .explorer-editor-body.split-diff .explorer-editor-main {
+            display: none;
+        }
+
         .explorer-editor-panel {
             min-height: 0;
             overflow: auto;
@@ -1214,6 +1274,106 @@
             word-break: inherit;
         }
 
+        .explorer-diff-content {
+            color: var(--explorer-text);
+        }
+
+        .explorer-diff-split {
+            min-width: 0;
+            min-height: 0;
+            overflow: auto;
+            background: var(--explorer-bg);
+        }
+
+        .explorer-diff-split[hidden] {
+            display: none;
+        }
+
+        .explorer-side-by-side-diff {
+            min-width: 720px;
+            display: grid;
+            align-content: start;
+            color: var(--explorer-text);
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-size: var(--explorer-editor-font-size, .78rem);
+            line-height: 1.45;
+        }
+
+        .explorer-diff-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            min-height: 22px;
+            border-bottom: 1px solid rgba(127, 127, 127, .08);
+        }
+
+        .explorer-diff-cell {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: 54px minmax(0, 1fr);
+            border-right: 1px solid var(--explorer-row-border);
+        }
+
+        .explorer-diff-cell:last-child {
+            border-right: 0;
+        }
+
+        .explorer-diff-line-number {
+            padding: 2px 8px;
+            color: var(--explorer-muted);
+            text-align: right;
+            user-select: none;
+            border-right: 1px solid rgba(127, 127, 127, .12);
+        }
+
+        .explorer-diff-line-code {
+            min-width: 0;
+            padding: 2px 10px;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .explorer-diff-cell.add {
+            background: rgba(34, 197, 94, .18);
+        }
+
+        .explorer-diff-cell.delete {
+            background: rgba(239, 68, 68, .18);
+        }
+
+        .explorer-diff-cell.empty {
+            background:
+                repeating-linear-gradient(
+                    -45deg,
+                    rgba(127, 127, 127, .12),
+                    rgba(127, 127, 127, .12) 2px,
+                    transparent 2px,
+                    transparent 7px
+                );
+        }
+
+        .explorer-diff-cell.hunk {
+            grid-column: 1 / 3;
+            grid-template-columns: 1fr;
+            padding: 3px 10px;
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-right: 0;
+            font-weight: 700;
+        }
+
+        .explorer-diff-empty {
+            padding: 14px;
+            color: var(--explorer-muted);
+            font-size: .78rem;
+        }
+
+        @media (max-width: 900px) {
+            .explorer-side-by-side-diff {
+                min-width: 620px;
+            }
+        }
+
         .explorer-code-keyword {
             color: #7c3aed;
             font-weight: 700;
@@ -1235,6 +1395,32 @@
         .explorer-code-builtin {
             color: #0369a1;
             font-weight: 600;
+        }
+
+        .explorer-log-timestamp {
+            color: #64748b;
+            font-weight: 600;
+        }
+
+        .explorer-log-level {
+            font-weight: 700;
+        }
+
+        .explorer-log-level.trace,
+        .explorer-log-level.debug {
+            color: #64748b;
+        }
+
+        .explorer-log-level.info {
+            color: #0369a1;
+        }
+
+        .explorer-log-level.warn {
+            color: #b45309;
+        }
+
+        .explorer-log-level.error {
+            color: #b91c1c;
         }
 
         .explorer-search-match {
@@ -1264,6 +1450,24 @@
 
         .explorer-pane[data-explorer-theme="dark"] .explorer-code-builtin {
             color: #7dd3fc;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-log-timestamp,
+        .explorer-pane[data-explorer-theme="dark"] .explorer-log-level.trace,
+        .explorer-pane[data-explorer-theme="dark"] .explorer-log-level.debug {
+            color: #94a3b8;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-log-level.info {
+            color: #7dd3fc;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-log-level.warn {
+            color: #fbbf24;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-log-level.error {
+            color: #fca5a5;
         }
 
         .explorer-markdown-preview {
@@ -4150,6 +4354,7 @@
                                 <div class="explorer-bar">
                                     <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
                                     <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
+                                    <div class="explorer-git-summary" id="explorer-git-${i}" aria-live="polite"></div>
                                 </div>
                                 <div class="explorer-list" id="explorer-list-${i}">
                                     <div class="explorer-message">Loading directory...</div>
@@ -4691,6 +4896,7 @@
                     <div class="explorer-bar">
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
                         <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
+                        <div class="explorer-git-summary" id="explorer-git-${index}" aria-live="polite"></div>
                     </div>
                     <div class="explorer-list" id="explorer-list-${index}">
                         <div class="explorer-message">Loading directory...</div>
@@ -6522,21 +6728,33 @@
 
     const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({
         '.bash': 'shell',
+        '.bat': 'batch',
         '.c': 'c',
         '.cc': 'cpp',
+        '.cfg': 'config',
+        '.cmd': 'batch',
+        '.conf': 'config',
         '.cpp': 'cpp',
         '.cs': 'csharp',
         '.css': 'css',
+        '.env': 'dotenv',
+        '.example': 'config',
         '.go': 'go',
+        '.gitattributes': 'config',
+        '.gitignore': 'gitignore',
+        '.gitkeep': 'text',
         '.h': 'c',
         '.hpp': 'cpp',
         '.html': 'html',
+        '.ini': 'ini',
         '.java': 'java',
         '.js': 'javascript',
         '.jsx': 'javascript',
         '.json': 'json',
+        '.jsonl': 'jsonl',
         '.kt': 'kotlin',
         '.kts': 'kotlin',
+        '.log': 'log',
         '.lua': 'lua',
         '.md': 'markdown',
         '.markdown': 'markdown',
@@ -6547,7 +6765,9 @@
         '.rs': 'rust',
         '.sh': 'shell',
         '.sql': 'sql',
+        '.spec': 'python',
         '.swift': 'swift',
+        '.txt': 'text',
         '.toml': 'toml',
         '.ts': 'typescript',
         '.tsx': 'typescript',
@@ -6556,18 +6776,38 @@
         '.yml': 'yaml'
     });
 
+    const EXPLORER_LANGUAGE_BY_FILENAME = Object.freeze({
+        '.editorconfig': 'ini',
+        '.env': 'dotenv',
+        '.gitattributes': 'config',
+        '.gitignore': 'gitignore',
+        '.gitkeep': 'text',
+        '.python-version': 'text',
+        'dockerfile': 'dockerfile',
+        'makefile': 'makefile'
+    });
+
     const EXPLORER_LANGUAGE_LABELS = Object.freeze({
+        batch: 'Batch source',
         c: 'C source',
+        config: 'Config file',
         cpp: 'C++ source',
         csharp: 'C# source',
         css: 'CSS source',
+        dockerfile: 'Dockerfile',
+        dotenv: 'Environment file',
+        gitignore: 'Git ignore file',
         go: 'Go source',
         html: 'HTML source',
+        ini: 'INI config',
         java: 'Java source',
         javascript: 'JavaScript source',
         json: 'JSON source',
+        jsonl: 'JSON Lines source',
         kotlin: 'Kotlin source',
+        log: 'Log file',
         lua: 'Lua source',
+        makefile: 'Makefile',
         markdown: 'Markdown source',
         php: 'PHP source',
         powershell: 'PowerShell source',
@@ -6577,6 +6817,7 @@
         shell: 'Shell source',
         sql: 'SQL source',
         swift: 'Swift source',
+        text: 'Text file',
         toml: 'TOML source',
         typescript: 'TypeScript source',
         xml: 'XML source',
@@ -6584,15 +6825,21 @@
     });
 
     const EXPLORER_CODE_KEYWORDS = Object.freeze({
+        batch: ['call', 'do', 'echo', 'else', 'errorlevel', 'exist', 'exit', 'for', 'goto', 'if', 'in', 'not', 'pause', 'rem', 'set', 'shift'],
         c: ['auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void', 'volatile', 'while'],
+        config: ['false', 'no', 'null', 'off', 'on', 'true', 'yes'],
         cpp: ['alignas', 'alignof', 'auto', 'bool', 'break', 'case', 'catch', 'class', 'const', 'constexpr', 'continue', 'decltype', 'default', 'delete', 'do', 'double', 'else', 'enum', 'explicit', 'export', 'extern', 'false', 'float', 'for', 'friend', 'if', 'inline', 'int', 'long', 'namespace', 'new', 'noexcept', 'nullptr', 'operator', 'private', 'protected', 'public', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'template', 'this', 'throw', 'true', 'try', 'typedef', 'typename', 'union', 'unsigned', 'using', 'virtual', 'void', 'volatile', 'while'],
         csharp: ['abstract', 'as', 'base', 'bool', 'break', 'case', 'catch', 'class', 'const', 'continue', 'decimal', 'default', 'delegate', 'do', 'double', 'else', 'enum', 'event', 'false', 'finally', 'fixed', 'float', 'for', 'foreach', 'if', 'in', 'int', 'interface', 'internal', 'is', 'lock', 'namespace', 'new', 'null', 'object', 'out', 'override', 'private', 'protected', 'public', 'readonly', 'ref', 'return', 'sealed', 'static', 'string', 'struct', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'using', 'var', 'virtual', 'void', 'while'],
         css: ['align-items', 'background', 'border', 'color', 'display', 'flex', 'font-family', 'font-size', 'grid', 'height', 'margin', 'padding', 'position', 'width'],
+        dockerfile: ['ADD', 'ARG', 'CMD', 'COPY', 'ENTRYPOINT', 'ENV', 'EXPOSE', 'FROM', 'HEALTHCHECK', 'LABEL', 'RUN', 'USER', 'VOLUME', 'WORKDIR'],
+        dotenv: ['false', 'no', 'off', 'on', 'true', 'yes'],
+        gitignore: ['false', 'true'],
         go: ['break', 'case', 'chan', 'const', 'continue', 'default', 'defer', 'else', 'fallthrough', 'for', 'func', 'go', 'goto', 'if', 'import', 'interface', 'map', 'nil', 'package', 'range', 'return', 'select', 'struct', 'switch', 'type', 'var'],
         html: ['DOCTYPE', 'a', 'body', 'button', 'div', 'head', 'html', 'input', 'link', 'meta', 'script', 'span', 'style', 'template'],
         java: ['abstract', 'assert', 'boolean', 'break', 'case', 'catch', 'class', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'false', 'final', 'finally', 'float', 'for', 'if', 'implements', 'import', 'instanceof', 'int', 'interface', 'long', 'native', 'new', 'null', 'package', 'private', 'protected', 'public', 'return', 'short', 'static', 'strictfp', 'super', 'switch', 'synchronized', 'this', 'throw', 'throws', 'true', 'try', 'void', 'volatile', 'while'],
         javascript: ['async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'extends', 'false', 'finally', 'for', 'from', 'function', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'null', 'of', 'return', 'static', 'super', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'undefined', 'var', 'void', 'while', 'yield'],
         json: ['false', 'null', 'true'],
+        jsonl: ['false', 'null', 'true'],
         kotlin: ['as', 'break', 'class', 'continue', 'data', 'do', 'else', 'false', 'for', 'fun', 'if', 'in', 'interface', 'is', 'null', 'object', 'package', 'return', 'super', 'this', 'throw', 'true', 'try', 'typealias', 'val', 'var', 'when', 'while'],
         lua: ['and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for', 'function', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat', 'return', 'then', 'true', 'until', 'while'],
         php: ['abstract', 'and', 'array', 'as', 'break', 'case', 'catch', 'class', 'clone', 'const', 'continue', 'declare', 'default', 'do', 'echo', 'else', 'elseif', 'extends', 'false', 'final', 'finally', 'for', 'foreach', 'function', 'global', 'if', 'implements', 'include', 'instanceof', 'interface', 'namespace', 'new', 'null', 'or', 'private', 'protected', 'public', 'require', 'return', 'static', 'switch', 'this', 'throw', 'trait', 'true', 'try', 'use', 'var', 'while'],
@@ -6618,11 +6865,22 @@
     });
 
     const EXPLORER_C_LIKE_LANGUAGES = new Set(['c', 'cpp', 'csharp', 'css', 'go', 'java', 'javascript', 'kotlin', 'php', 'rust', 'swift', 'typescript']);
-    const EXPLORER_HASH_COMMENT_LANGUAGES = new Set(['python', 'ruby', 'shell', 'powershell', 'yaml', 'toml']);
+    const EXPLORER_HASH_COMMENT_LANGUAGES = new Set(['config', 'dockerfile', 'dotenv', 'gitignore', 'ini', 'makefile', 'python', 'ruby', 'shell', 'powershell', 'yaml', 'toml']);
+    const EXPLORER_LOG_LEVELS = new Set(['TRACE', 'DEBUG', 'INFO', 'WARN', 'WARNING', 'ERROR', 'CRITICAL', 'FATAL']);
     const EXPLORER_EDITOR_FONT_MIN = 10;
     const EXPLORER_EDITOR_FONT_MAX = 24;
     const EXPLORER_EDITOR_FONT_DEFAULT = 13;
     const EXPLORER_EDITOR_FONT_STEP = 1;
+    const EXPLORER_GIT_STATUS_LABELS = Object.freeze({
+        modified: 'M',
+        added: 'A',
+        deleted: 'D',
+        renamed: 'R',
+        conflicted: 'U',
+        untracked: '?',
+        ignored: '!',
+        clean: ''
+    });
 
     function explorerPathExtension(path) {
         const name = String(path || '').toLowerCase();
@@ -6630,8 +6888,14 @@
         return dotIndex >= 0 ? name.slice(dotIndex) : '';
     }
 
+    function explorerPathFilename(path) {
+        const parts = String(path || '').toLowerCase().split(/[\\/]/);
+        return parts[parts.length - 1] || '';
+    }
+
     function normalizeExplorerLanguage(language) {
         const normalized = String(language || '').toLowerCase().replace(/[^a-z0-9+#-]/g, '');
+        if (normalized === 'bat' || normalized === 'cmd') return 'batch';
         if (normalized === 'js') return 'javascript';
         if (normalized === 'ts') return 'typescript';
         if (normalized === 'py') return 'python';
@@ -6644,6 +6908,13 @@
     }
 
     function explorerCodeLanguage(path) {
+        const filename = explorerPathFilename(path);
+        if (filename && EXPLORER_LANGUAGE_BY_FILENAME[filename]) {
+            return EXPLORER_LANGUAGE_BY_FILENAME[filename];
+        }
+        if (filename.startsWith('.env.')) {
+            return 'dotenv';
+        }
         return EXPLORER_LANGUAGE_BY_EXTENSION[explorerPathExtension(path)] || '';
     }
 
@@ -6754,10 +7025,80 @@
         return content.slice(start, index);
     }
 
+    function explorerLogLevelClass(level) {
+        const normalized = String(level || '').toUpperCase();
+        if (normalized === 'TRACE' || normalized === 'DEBUG') {
+            return normalized.toLowerCase();
+        }
+        if (normalized === 'WARN' || normalized === 'WARNING') {
+            return 'warn';
+        }
+        if (normalized === 'ERROR' || normalized === 'CRITICAL' || normalized === 'FATAL') {
+            return 'error';
+        }
+        return 'info';
+    }
+
+    function highlightExplorerLogLine(line, absoluteStart, searchRanges = []) {
+        const timestampPattern = /^(\s*(?:\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\d{2}:\d{2}:\d{2}(?:[.,]\d+)?|\[[^\]\n]*(?:\d{4}-\d{2}-\d{2}|\d{2}:\d{2}:\d{2})[^\]\n]*\]))/;
+        const levelPattern = /\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL|FATAL)\b/i;
+        const timestampMatch = line.match(timestampPattern);
+        let output = '';
+        let cursor = 0;
+
+        if (timestampMatch) {
+            const token = timestampMatch[1];
+            output += explorerCodeSpan('explorer-log-timestamp', token, absoluteStart, searchRanges);
+            cursor = token.length;
+        }
+
+        const levelMatch = line.slice(cursor).match(levelPattern);
+        if (levelMatch && EXPLORER_LOG_LEVELS.has(levelMatch[1].toUpperCase())) {
+            const levelStart = cursor + Number(levelMatch.index || 0);
+            if (levelStart > cursor) {
+                output += explorerMarkedEscHtml(line.slice(cursor, levelStart), absoluteStart + cursor, searchRanges);
+            }
+            const level = levelMatch[1];
+            output += explorerCodeSpan(
+                `explorer-log-level ${explorerLogLevelClass(level)}`,
+                level,
+                absoluteStart + levelStart,
+                searchRanges
+            );
+            cursor = levelStart + level.length;
+        }
+
+        if (cursor < line.length) {
+            output += explorerMarkedEscHtml(line.slice(cursor), absoluteStart + cursor, searchRanges);
+        }
+        return output;
+    }
+
+    function highlightExplorerLog(content, searchRanges = []) {
+        const source = String(content || '');
+        let output = '';
+        let index = 0;
+        while (index < source.length) {
+            const newlineIndex = source.indexOf('\n', index);
+            const lineEnd = newlineIndex === -1 ? source.length : newlineIndex;
+            output += highlightExplorerLogLine(source.slice(index, lineEnd), index, searchRanges);
+            if (newlineIndex === -1) {
+                break;
+            }
+            output += explorerMarkedEscHtml('\n', lineEnd, searchRanges);
+            index = lineEnd + 1;
+        }
+        return output;
+    }
+
     function highlightExplorerCode(content, language, searchRanges = []) {
         const normalizedLanguage = normalizeExplorerLanguage(language);
         if (!normalizedLanguage) {
             return explorerMarkedEscHtml(content, 0, searchRanges);
+        }
+
+        if (normalizedLanguage === 'log') {
+            return highlightExplorerLog(content, searchRanges);
         }
 
         const keywords = new Set(EXPLORER_CODE_KEYWORDS[normalizedLanguage] || []);
@@ -6802,7 +7143,7 @@
                 continue;
             }
 
-            if (current === '"' || current === "'" || (current === '`' && !['json', 'yaml', 'toml'].includes(normalizedLanguage))) {
+            if (current === '"' || current === "'" || (current === '`' && !['json', 'jsonl', 'yaml', 'toml'].includes(normalizedLanguage))) {
                 const token = explorerReadStringToken(content, index);
                 output += explorerCodeSpan('explorer-code-string', token, index, searchRanges);
                 index += token.length;
@@ -6847,6 +7188,241 @@
         if (list) {
             list.classList.remove('file-view');
             list.innerHTML = `<div class="explorer-message">${escHtml(message)}</div>`;
+        }
+    }
+
+    function explorerGitStatusLabel(git) {
+        if (!git || typeof git !== 'object') {
+            return '';
+        }
+        const status = git.status || 'clean';
+        if (status === 'clean' && git.has_descendant_changes) {
+            return '*';
+        }
+        return EXPLORER_GIT_STATUS_LABELS[status] || '';
+    }
+
+    function explorerGitStatusTitle(git) {
+        if (!git || typeof git !== 'object') {
+            return 'Git status unavailable';
+        }
+        const status = git.status || 'clean';
+        if (git.has_descendant_changes && git.descendant_status) {
+            return `Directory contains ${git.descendant_status} Git changes`;
+        }
+        if (status === 'clean' && git.has_descendant_changes) {
+            return 'Directory contains Git changes';
+        }
+        return `Git status: ${status}`;
+    }
+
+    function explorerGitBadgeHtml(git) {
+        const label = explorerGitStatusLabel(git);
+        const status = git?.status || 'clean';
+        const className = label ? status : 'clean';
+        return `<span class="explorer-git-badge ${escHtml(className)}" title="${escHtml(explorerGitStatusTitle(git))}">${escHtml(label)}</span>`;
+    }
+
+    function explorerHasGitDiff(git) {
+        if (!git || typeof git !== 'object') {
+            return false;
+        }
+        return ['modified', 'added', 'deleted', 'renamed', 'conflicted'].includes(git.status || '');
+    }
+
+    function explorerGitSummaryText(git) {
+        if (!git || typeof git !== 'object') {
+            return '';
+        }
+        if (!git.available) {
+            return git.error ? 'Git unavailable' : 'No Git repo';
+        }
+        const parts = [git.branch || (git.head ? git.head.slice(0, 7) : 'Git')];
+        if (Number(git.ahead || 0) > 0) {
+            parts.push(`↑${git.ahead}`);
+        }
+        if (Number(git.behind || 0) > 0) {
+            parts.push(`↓${git.behind}`);
+        }
+        if (git.dirty) {
+            parts.push('*');
+        }
+        return parts.join(' ');
+    }
+
+    function updateExplorerGitSummary(index, git) {
+        const summary = document.getElementById(`explorer-git-${index}`);
+        if (!summary) {
+            return;
+        }
+        const text = explorerGitSummaryText(git);
+        summary.textContent = text;
+        summary.title = git?.error || (git?.repo_root || text);
+    }
+
+    function renderExplorerDiff(index) {
+        const pane = terminals[index];
+        const code = document.getElementById(`explorer-diff-code-${index}`);
+        if (!pane || !code) {
+            return;
+        }
+        const diff = pane._explorerDiffContent || '';
+        if (!diff) {
+            code.innerHTML = '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
+            return;
+        }
+        code.innerHTML = renderExplorerSideBySideDiff(diff);
+    }
+
+    function explorerDiffCellHtml(cell, side) {
+        if (!cell) {
+            return `
+                <div class="explorer-diff-cell empty ${side}">
+                    <span class="explorer-diff-line-number"></span>
+                    <span class="explorer-diff-line-code"></span>
+                </div>
+            `;
+        }
+        return `
+            <div class="explorer-diff-cell ${escHtml(cell.type || 'context')} ${side}">
+                <span class="explorer-diff-line-number">${cell.number ? escHtml(String(cell.number)) : ''}</span>
+                <span class="explorer-diff-line-code">${escHtml(cell.text || '')}</span>
+            </div>
+        `;
+    }
+
+    function explorerDiffRowHtml(left, right) {
+        if (left?.type === 'hunk') {
+            return `
+                <div class="explorer-diff-row">
+                    <div class="explorer-diff-cell hunk">${escHtml(left.text || '')}</div>
+                </div>
+            `;
+        }
+        return `
+            <div class="explorer-diff-row">
+                ${explorerDiffCellHtml(left, 'old')}
+                ${explorerDiffCellHtml(right, 'new')}
+            </div>
+        `;
+    }
+
+    function renderExplorerSideBySideDiff(diff) {
+        const source = String(diff || '');
+        if (!source.trim()) {
+            return '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
+        }
+
+        const lines = source.split(/\r?\n/);
+        const rows = [];
+        let oldLine = 0;
+        let newLine = 0;
+        const pendingDeletes = [];
+
+        const flushDeletes = () => {
+            while (pendingDeletes.length) {
+                rows.push(explorerDiffRowHtml(pendingDeletes.shift(), null));
+            }
+        };
+
+        lines.forEach(line => {
+            const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
+            if (hunk) {
+                flushDeletes();
+                oldLine = Number(hunk[1]);
+                newLine = Number(hunk[2]);
+                rows.push(explorerDiffRowHtml({ type: 'hunk', text: line }, null));
+                return;
+            }
+            if (!oldLine && !newLine) {
+                return;
+            }
+            if (line.startsWith('\\ No newline')) {
+                return;
+            }
+            if (line.startsWith('-') && !line.startsWith('---')) {
+                pendingDeletes.push({
+                    type: 'delete',
+                    number: oldLine,
+                    text: line.slice(1)
+                });
+                oldLine += 1;
+                return;
+            }
+            if (line.startsWith('+') && !line.startsWith('+++')) {
+                const right = {
+                    type: 'add',
+                    number: newLine,
+                    text: line.slice(1)
+                };
+                newLine += 1;
+                rows.push(explorerDiffRowHtml(pendingDeletes.shift() || null, right));
+                return;
+            }
+            if (line.startsWith(' ')) {
+                flushDeletes();
+                rows.push(explorerDiffRowHtml(
+                    { type: 'context', number: oldLine, text: line.slice(1) },
+                    { type: 'context', number: newLine, text: line.slice(1) }
+                ));
+                oldLine += 1;
+                newLine += 1;
+            }
+        });
+
+        flushDeletes();
+        return `<div class="explorer-side-by-side-diff">${rows.join('')}</div>`;
+    }
+
+    function setExplorerDiffSplit(index, open) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        const body = list?.querySelector('.explorer-editor-body');
+        const panel = document.getElementById(`explorer-diff-panel-${index}`);
+        const toggle = list?.querySelector(`[data-explorer-diff-toggle="${index}"]`);
+        if (!pane || !body || !panel || !toggle) {
+            return;
+        }
+
+        const isOpen = Boolean(open);
+        pane._explorerDiffSplit = isOpen;
+        body.classList.toggle('split-diff', isOpen);
+        panel.hidden = !isOpen;
+        toggle.setAttribute('aria-pressed', isOpen ? 'true' : 'false');
+        if (isOpen) {
+            loadExplorerDiff(index);
+        }
+    }
+
+    function toggleExplorerDiffSplit(index) {
+        const pane = terminals[index];
+        setExplorerDiffSplit(index, !pane?._explorerDiffSplit);
+    }
+
+    async function loadExplorerDiff(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        const code = document.getElementById(`explorer-diff-code-${index}`);
+        if (!pane || !sessionId || !pane._explorerFilePath || !code || pane._explorerDiffLoaded) {
+            renderExplorerDiff(index);
+            return;
+        }
+
+        code.textContent = 'Loading diff...';
+        try {
+            const response = await fetch(
+                `/api/explorer/${encodeURIComponent(sessionId)}/git/diff?path=${encodeURIComponent(pane._explorerFilePath)}&mode=head`
+            );
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load Git diff');
+            }
+            pane._explorerDiffLoaded = true;
+            pane._explorerDiffContent = data.diff || '';
+            renderExplorerDiff(index);
+        } catch (error) {
+            console.error('[GridVibe Sessions] Explorer Git diff failed:', error);
+            code.innerHTML = `<span class="explorer-diff-empty">${escHtml(error.message || 'Failed to load Git diff.')}</span>`;
         }
     }
 
@@ -7312,8 +7888,10 @@
         const codeLanguage = normalizeExplorerLanguage(data.language) || explorerCodeLanguage(path || fileName);
         const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
         const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
+        const hasGitDiff = explorerHasGitDiff(data.git);
         const metaParts = explorerFileMetaParts(data, fileType);
         const previousPath = pane._explorerFilePath || '';
+        const keepDiffSplit = previousPath === path && pane._explorerDiffSplit && hasGitDiff;
         const searchState = ensureExplorerSearchState(pane);
         if (previousPath && previousPath !== path) {
             searchState.activeIndex = 0;
@@ -7326,8 +7904,14 @@
         pane._explorerFileContent = data.content || '';
         pane._explorerFileLanguage = codeLanguage;
         pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
+        pane._explorerGit = data.git || null;
+        pane._explorerGitContext = data.git_context || null;
+        pane._explorerDiffLoaded = false;
+        pane._explorerDiffContent = '';
+        pane._explorerDiffSplit = keepDiffSplit;
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
+        updateExplorerGitSummary(index, data.git_context || null);
 
         const pathLabel = document.getElementById(`explorer-path-${index}`);
         const upButton = document.getElementById(`explorer-up-${index}`);
@@ -7347,10 +7931,11 @@
                         <div class="explorer-editor-name" title="${escHtml(path || fileName)}">${escHtml(fileName)}</div>
                         <div class="explorer-editor-meta">${escHtml(metaParts.join(' - '))}</div>
                     </div>
-                    ${hasPreview ? `
-                        <div class="explorer-editor-tabs" role="tablist" aria-label="Markdown file view">
+                    ${(hasPreview || hasGitDiff) ? `
+                        <div class="explorer-editor-tabs" role="tablist" aria-label="File view">
                             <button type="button" class="explorer-editor-tab" data-explorer-file-view="source" role="tab" aria-selected="true">Source</button>
-                            <button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="false">Preview</button>
+                            ${hasPreview ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="false">Preview</button>` : ''}
+                            ${hasGitDiff ? `<button type="button" class="explorer-editor-tab" data-explorer-diff-toggle="${index}" aria-pressed="${keepDiffSplit ? 'true' : 'false'}">Diff</button>` : ''}
                         </div>
                     ` : ''}
                     <div class="explorer-editor-zoom" aria-label="Editor font size controls">
@@ -7374,9 +7959,12 @@
                         <button type="button" class="explorer-search-btn" data-explorer-search-clear="${index}" title="Clear search" aria-label="Clear search">×</button>
                     </div>
                 </div>
-                <div class="explorer-editor-body">
-                    <pre class="explorer-editor-content explorer-editor-panel" data-explorer-file-panel="source"><code id="explorer-code-${index}"></code></pre>
-                    ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" hidden></div>` : ''}
+                <div class="explorer-editor-body${keepDiffSplit ? ' split-diff' : ''}">
+                    <div class="explorer-editor-main">
+                        <pre class="explorer-editor-content explorer-editor-panel" data-explorer-file-panel="source"><code id="explorer-code-${index}"></code></pre>
+                        ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" hidden></div>` : ''}
+                    </div>
+                    ${hasGitDiff ? `<aside class="explorer-diff-split" id="explorer-diff-panel-${index}" ${keepDiffSplit ? '' : 'hidden'}><div class="explorer-diff-content" id="explorer-diff-code-${index}"></div></aside>` : ''}
                 </div>
             </div>
         `;
@@ -7398,6 +7986,12 @@
                 setExplorerFileView(index, button.dataset.explorerFileView || 'source');
             });
         });
+        list.querySelector(`[data-explorer-diff-toggle="${index}"]`)?.addEventListener('click', () => {
+            toggleExplorerDiffSplit(index);
+        });
+        if (keepDiffSplit) {
+            loadExplorerDiff(index);
+        }
         wireExplorerEditorZoomControls(index);
         wireExplorerSearchControls(index);
         applyExplorerSearch(index);
@@ -7419,8 +8013,10 @@
         }
 
         const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
+        const hasGitDiff = explorerHasGitDiff(data.git);
         const preview = document.getElementById(`explorer-preview-${index}`);
-        if (hasPreview !== Boolean(preview)) {
+        const diffPanel = document.getElementById(`explorer-diff-code-${index}`);
+        if (hasPreview !== Boolean(preview) || hasGitDiff !== Boolean(diffPanel)) {
             return false;
         }
 
@@ -7430,11 +8026,22 @@
         pane._explorerFileContent = data.content || '';
         pane._explorerFileLanguage = codeLanguage;
         pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
+        pane._explorerGit = data.git || null;
+        pane._explorerGitContext = data.git_context || null;
+        pane._explorerDiffLoaded = false;
+        pane._explorerDiffContent = '';
         renderExplorerSource(index);
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
         }
+        if (diffPanel && hasGitDiff) {
+            renderExplorerDiff(index);
+            if (pane._explorerDiffSplit) {
+                loadExplorerDiff(index);
+            }
+        }
         applyExplorerEditorFontSize(index);
+        updateExplorerGitSummary(index, data.git_context || null);
 
         const nameLabel = list.querySelector('.explorer-editor-name');
         if (nameLabel) {
@@ -7540,9 +8147,14 @@
             pane._explorerFileContent = '';
             pane._explorerFileLanguage = '';
             pane._explorerPreviewHtml = '';
+            pane._explorerGit = null;
+            pane._explorerGitContext = data.git || null;
+            pane._explorerDiffLoaded = false;
+            pane._explorerDiffContent = '';
             pane._explorerPath = data.path || '';
             pane._explorerParentPath = data.parent_path || '';
             document.getElementById(`ph-${index}`)?.remove();
+            updateExplorerGitSummary(index, data.git || null);
 
             const pathLabel = document.getElementById(`explorer-path-${index}`);
             const upButton = document.getElementById(`explorer-up-${index}`);
@@ -7567,15 +8179,18 @@
 
             list.innerHTML = entries.map(entry => {
                 const isDirectory = entry.type === 'directory';
-                const size = isDirectory ? 'Folder' : formatExplorerSize(entry.size);
+                const isDeleted = Boolean(entry.deleted);
+                const size = isDirectory ? 'Folder' : (isDeleted ? 'Deleted' : formatExplorerSize(entry.size));
                 const modified = formatExplorerDate(entry.modified);
                 return `
                     <button
                         type="button"
-                        class="explorer-row ${isDirectory ? 'directory' : 'file'}"
+                        class="explorer-row ${isDirectory ? 'directory' : 'file'}${isDeleted ? ' deleted' : ''}"
                         data-explorer-path="${escHtml(entry.path || '')}"
+                        ${isDeleted ? 'disabled' : ''}
                     >
                         ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
+                        ${explorerGitBadgeHtml(entry.git)}
                         <span class="explorer-name">${escHtml(entry.name || '')}</span>
                         <span class="explorer-meta">${escHtml(size)}</span>
                         <span class="explorer-meta">${escHtml(modified)}</span>
