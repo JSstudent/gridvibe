@@ -194,14 +194,16 @@
 
         /* ── Top bar ── */
         .topbar {
-            display: flex;
-            justify-content: space-between;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
             align-items: center;
+            column-gap: 12px;
             padding: 10px 18px;
             background: var(--t-topbar);
             border-bottom: 1px solid var(--t-border);
             flex-shrink: 0;
             height: 50px;
+            -webkit-app-region: drag;
         }
 
         .session-bar {
@@ -391,6 +393,7 @@
             align-items: center;
             gap: 10px;
             min-width: 0;
+            justify-self: start;
         }
 
         .topbar-icon {
@@ -469,7 +472,19 @@
         .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 700; }
         .topbar-sub   { font-size: .78rem; color: var(--t-text-muted); margin-left: 10px; }
 
-        .topbar-actions { display: flex; gap: 8px; align-items: center; }
+        .topbar-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            justify-self: center;
+            -webkit-app-region: no-drag;
+        }
+
+        .topbar button,
+        .topbar a,
+        .sessions-menu {
+            -webkit-app-region: no-drag;
+        }
 
         .btn {
             padding: 6px 14px;
@@ -1972,6 +1987,19 @@
         return preference === 'system' ? getSystemTheme() : preference;
     }
 
+    function syncNativeTheme(resolvedTheme) {
+        try {
+            const bridge = window.pywebview?.api;
+            if (bridge?.set_native_theme) {
+                bridge.set_native_theme(resolvedTheme).catch(error => {
+                    console.error('[GridVibe Sessions] native theme sync failed:', error);
+                });
+            }
+        } catch (error) {
+            console.error('[GridVibe Sessions] native theme sync failed:', error);
+        }
+    }
+
     function applyTheme(theme) {
         const preference = normalizeThemePreference(theme);
         const resolved = resolveTheme(preference);
@@ -1985,6 +2013,7 @@
                 : preference === 'dark' ? '🌙 Dark'
                 : '◐ System';
         }
+        syncNativeTheme(resolved);
         syncDefaultExplorerThemes();
     }
 
@@ -2003,6 +2032,9 @@
 
     (function initTheme() {
         applyTheme(getStoredTheme() || 'system');
+        window.addEventListener('pywebviewready', () => {
+            syncNativeTheme(document.documentElement.getAttribute('data-theme') || resolveTheme(getStoredTheme() || 'system'));
+        });
         const mediaQuery = window.matchMedia('(prefers-color-scheme: light)');
         const listener = () => {
             const themePreference = document.documentElement.getAttribute('data-theme-preference') || getStoredTheme() || 'system';

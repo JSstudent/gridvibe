@@ -6,6 +6,7 @@ back to the system browser if pywebview is missing.
 """
 
 import argparse
+import ctypes
 import logging
 import os
 import signal
@@ -27,6 +28,164 @@ except ImportError:  # pragma: no cover - optional dependency at runtime
     webview = None
 
 logger = logging.getLogger(__name__)
+
+
+_NATIVE_FRAME_THEMES = {
+    "dark": {
+        "caption": "#111827",
+        "text": "#f8fafc",
+        "border": "#1f2937",
+    },
+    "light": {
+        "caption": "#f8fafc",
+        "text": "#111827",
+        "border": "#cbd5e1",
+    },
+}
+
+
+def _hex_to_colorref(hex_color: str) -> int:
+    """Convert #rrggbb to the COLORREF integer DWM expects."""
+    value = str(hex_color or "").strip().lstrip("#")
+    if len(value) != 6:
+        raise ValueError(f"Invalid hex color: {hex_color!r}")
+    red = int(value[0:2], 16)
+    green = int(value[2:4], 16)
+    blue = int(value[4:6], 16)
+    return red | (green << 8) | (blue << 16)
+
+
+def _resolve_native_window_handle(window) -> int | None:
+    """Resolve a pywebview WinForms HWND if it is already available."""
+    native = getattr(window, "native", None)
+    handle = getattr(native, "Handle", None)
+    if handle is None:
+        return None
+    to_int = getattr(handle, "ToInt32", None)
+    if callable(to_int):
+        return int(to_int())
+    try:
+        return int(handle)
+    except (TypeError, ValueError):
+        return None
+
+
+def _run_on_native_ui_thread(window, callback):
+    """Run a native-window callback on the WinForms UI thread when possible."""
+    native = getattr(window, "native", None)
+    if native is None:
+        return callback()
+
+    try:
+        if getattr(native, "InvokeRequired", False):
+            from System import Action
+
+            result = {"value": None}
+
+            def _invoke_callback():
+                result["value"] = callback()
+
+            native.Invoke(Action(_invoke_callback))
+            return result["value"]
+    except Exception:
+        logger.debug("Native UI-thread invocation failed; running inline", exc_info=True)
+
+    return callback()
+
+
+def _set_dwm_window_attribute(hwnd: int, attribute: int, value: int) -> bool:
+    """Set one DWM window attribute when available."""
+    windll = getattr(ctypes, "windll", None)
+    dwmapi = getattr(windll, "dwmapi", None) if windll is not None else None
+    if dwmapi is None:
+        return False
+
+    try:
+        raw_value = ctypes.c_int(value)
+        result = dwmapi.DwmSetWindowAttribute(
+            ctypes.c_void_p(hwnd),
+            ctypes.c_uint(attribute),
+            ctypes.byref(raw_value),
+            ctypes.sizeof(raw_value),
+        )
+        return result == 0
+    except Exception:
+        logger.debug("DWM attribute %s update failed", attribute, exc_info=True)
+        return False
+
+
+def _refresh_windows_native_frame(hwnd: int) -> bool:
+    """Force Windows to repaint the non-client frame after DWM color changes."""
+    windll = getattr(ctypes, "windll", None)
+    user32 = getattr(windll, "user32", None) if windll is not None else None
+    if user32 is None:
+        return False
+
+    try:
+        swp_flags = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020
+        user32.SetWindowPos(ctypes.c_void_p(hwnd), ctypes.c_void_p(0), 0, 0, 0, 0, swp_flags)
+        redraw_flags = 0x0001 | 0x0400 | 0x0100
+        redraw_window = getattr(user32, "RedrawWindow", None)
+        if redraw_window is not None:
+            redraw_window(ctypes.c_void_p(hwnd), None, None, redraw_flags)
+        send_message = getattr(user32, "SendMessageW", None)
+        if send_message is not None:
+            send_message(ctypes.c_void_p(hwnd), 0x0086, 1, 0)
+            send_message(ctypes.c_void_p(hwnd), 0x0085, 1, 0)
+        dwmapi = getattr(windll, "dwmapi", None) if windll is not None else None
+        dwm_flush = getattr(dwmapi, "DwmFlush", None) if dwmapi is not None else None
+        if dwm_flush is not None:
+            dwm_flush()
+        return True
+    except Exception:
+        logger.debug("Windows native frame refresh failed", exc_info=True)
+        return False
+
+
+def _refresh_native_form(window) -> bool:
+    """Invalidate and update the WinForms native form itself."""
+    native = getattr(window, "native", None)
+    if native is None:
+        return False
+
+    refreshed = False
+    for method_name in ("Invalidate", "Update", "Refresh"):
+        method = getattr(native, method_name, None)
+        if callable(method):
+            try:
+                method()
+                refreshed = True
+            except Exception:
+                logger.debug("Native form %s failed", method_name, exc_info=True)
+    return refreshed
+
+
+def _apply_windows_native_frame_theme(window, theme: str) -> bool:
+    """Apply GridVibe theme colors to a normal Windows native title bar."""
+    if sys.platform != "win32":
+        return False
+
+    def _apply():
+        hwnd = _resolve_native_window_handle(window)
+        if not hwnd:
+            return False
+
+        normalized = "light" if theme == "light" else "dark"
+        colors = _NATIVE_FRAME_THEMES[normalized]
+        dark_mode = 0 if normalized == "light" else 1
+        applied = [
+            _set_dwm_window_attribute(hwnd, 20, dark_mode),
+            _set_dwm_window_attribute(hwnd, 35, _hex_to_colorref(colors["caption"])),
+            _set_dwm_window_attribute(hwnd, 36, _hex_to_colorref(colors["text"])),
+            _set_dwm_window_attribute(hwnd, 34, _hex_to_colorref(colors["border"])),
+        ]
+        changed = any(applied)
+        if changed:
+            _refresh_windows_native_frame(hwnd)
+            _refresh_native_form(window)
+        return changed
+
+    return _run_on_native_ui_thread(window, _apply)
 
 
 def _preferred_pywebview_gui():
@@ -247,6 +406,7 @@ class GridVibeApi:
         self._window_minimized = False
         self._session_window_minimized = False
         self._restarting = False
+        self._native_theme = "dark"
 
     def _attach_window(self, window):
         """Attach the created pywebview window instance."""
@@ -347,6 +507,28 @@ class GridVibeApi:
     def get_session_fullscreen_state(self):
         """Return the tracked native fullscreen state for the session window."""
         return {"ok": True, "is_fullscreen": self._session_is_fullscreen}
+
+    def _apply_native_frame_theme(self, window, window_name: str = "window") -> bool:
+        """Apply the current GridVibe theme to a native window frame."""
+        applied = _apply_windows_native_frame_theme(window, self._native_theme)
+        if applied:
+            logger.debug("Applied %s native frame theme to %s", self._native_theme, window_name)
+        return applied
+
+    def _apply_native_frame_theme_to_windows(self) -> bool:
+        """Apply the current native frame theme to all registered native windows."""
+        applied = False
+        if self._window is not None:
+            applied = self._apply_native_frame_theme(self._window, "launcher") or applied
+        if self._session_window is not None:
+            applied = self._apply_native_frame_theme(self._session_window, "session") or applied
+        return applied
+
+    def set_native_theme(self, theme: str):
+        """Set native window frame colors to match the resolved app theme."""
+        self._native_theme = "light" if theme == "light" else "dark"
+        applied = self._apply_native_frame_theme_to_windows()
+        return {"ok": True, "theme": self._native_theme, "applied": applied}
 
     def select_folder(self, initial_dir=""):
         """Open a native folder picker from the desktop shell."""
@@ -464,6 +646,10 @@ class GridVibeApi:
                 width=1600,
                 height=980,
                 min_size=(1180, 720),
+                resizable=True,
+                frameless=False,
+                easy_drag=False,
+                background_color="#0d0d0d",
                 text_select=True,
                 js_api=self,
             )
@@ -499,7 +685,7 @@ class GridVibeApi:
             return {"ok": False, "error": str(exc)}
 
     def close_session_window(self):
-        """Close the session window when the last session is removed."""
+        """Close the native session window."""
         if self._session_window is None:
             logger.warning("close_session_window called but no session window is registered")
             return {"ok": False, "error": "No session window open"}
@@ -788,7 +974,12 @@ def main():
         if restored_event is not None:
             restored_event += _handle_restored
 
+        shown_event = getattr(window.events, "shown", None)
+        if shown_event is not None:
+            shown_event += lambda *_args: api_bridge._apply_native_frame_theme(window, kind)
+
         window.events.closed += _handle_closed
+        api_bridge._apply_native_frame_theme(window, kind)
 
     api_bridge = GridVibeApi(base_url)
     api_bridge._set_register_window(register_window)
@@ -804,6 +995,10 @@ def main():
         width=1280,
         height=840,
         min_size=(1024, 700),
+        resizable=True,
+        frameless=False,
+        easy_drag=False,
+        background_color="#070b18",
         text_select=True,
         js_api=api_bridge,
     )

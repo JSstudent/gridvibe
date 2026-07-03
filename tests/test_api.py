@@ -298,6 +298,18 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('<option value="base">base</option>', html)
         self.assertIn('<option value="large-v3-turbo">large-v3-turbo</option>', html)
 
+    def test_launcher_page_uses_compact_centered_header(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('<h1>Launcher Setup</h1>', html)
+        self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
+        self.assertIn('<div class="app-titlebar-right">', html)
+        self.assertIn('<span>Session</span>', html)
+        self.assertIn('<span>Mode</span>', html)
+        self.assertNotIn("Configure your terminal workspace before launch.", html)
+
     def test_launcher_page_resets_terminal_setup_when_connection_target_changes(self):
         response = self.client.get("/")
 
@@ -924,6 +936,18 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("document.body.classList.toggle('topbar-collapsed', !shouldShow);", html)
         self.assertIn("path.setAttribute('d', visible ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6');", html)
         self.assertIn("applyTopbarVisibility(getStoredTopbarVisible());", html)
+
+    def test_terminals_page_centers_topbar_actions_without_custom_window_controls(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);", html)
+        self.assertIn("justify-self: center;", html)
+        self.assertIn('class="topbar-actions"', html)
+        self.assertNotIn('id="sessionWindowControls"', html)
+        self.assertNotIn("window.pywebview.api.minimize_session_window", html)
+        self.assertNotIn("window.pywebview.api.toggle_session_window_maximize", html)
 
     def test_terminals_page_buttons_use_session_color_frames(self):
         response = self.client.get("/terminals")
@@ -4368,6 +4392,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = response.get_data(as_text=True)
         light_selectors = [
             '[data-theme="light"] body',
+            '[data-theme="light"] .header-badge',
             '[data-theme="light"] .count-btn',
             '[data-theme="light"] .field input',
             '[data-theme="light"] .t-row',
@@ -4395,6 +4420,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const THEME_STORAGE_KEY", html)
         self.assertIn("function normalizeThemePreference(", html)
         self.assertIn("function applyTheme(", html)
+        self.assertIn("function syncNativeTheme(", html)
+        self.assertIn("bridge.set_native_theme(resolvedTheme)", html)
         self.assertIn("function cycleTheme()", html)
         self.assertIn("prefers-color-scheme", html)
 
@@ -4418,6 +4445,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const THEME_STORAGE_KEY", html)
         self.assertIn("function normalizeThemePreference(", html)
         self.assertIn("function applyTheme(", html)
+        self.assertIn("function syncNativeTheme(", html)
+        self.assertIn("bridge.set_native_theme(resolvedTheme)", html)
         self.assertIn("function cycleTheme()", html)
         self.assertIn("prefers-color-scheme", html)
 

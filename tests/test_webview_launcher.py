@@ -2,7 +2,7 @@ import os
 import signal
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from web import webview_launcher
 
@@ -11,6 +11,9 @@ class _ExplodingWindow:
     def __init__(self):
         self.show_calls = 0
         self.restore_calls = 0
+        self.minimize_calls = 0
+        self.maximize_calls = 0
+        self.destroy_calls = 0
         self.loaded_urls = []
         self.on_top = False
 
@@ -19,6 +22,15 @@ class _ExplodingWindow:
 
     def restore(self):
         self.restore_calls += 1
+
+    def minimize(self):
+        self.minimize_calls += 1
+
+    def maximize(self):
+        self.maximize_calls += 1
+
+    def destroy(self):
+        self.destroy_calls += 1
 
     def load_url(self, url):
         self.loaded_urls.append(url)
@@ -35,6 +47,38 @@ class _FakeThread:
 
     def join(self):
         self.joined = True
+
+
+class _FakeEvent:
+    def __init__(self):
+        self.handlers = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+
+class _FakeWindow:
+    def __init__(self):
+        self.events = Mock(
+            minimized=_FakeEvent(),
+            restored=_FakeEvent(),
+            shown=_FakeEvent(),
+            closed=_FakeEvent(),
+        )
+
+
+class _FakeHandle:
+    def __init__(self, hwnd=1234):
+        self.hwnd = hwnd
+
+    def ToInt32(self):
+        return self.hwnd
+
+
+class _FakeNative:
+    def __init__(self, hwnd=1234):
+        self.Handle = _FakeHandle(hwnd)
 
 
 class WebviewLauncherTestCase(unittest.TestCase):
@@ -162,6 +206,121 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertFalse(fake_thread.joined)
         browser_open.assert_not_called()
         os_exit.assert_called_once_with(1)
+
+    def test_native_launcher_window_uses_resizable_native_frame(self):
+        fake_thread = _FakeThread()
+        fake_webview = Mock()
+        fake_webview.create_window.return_value = _FakeWindow()
+
+        with patch.object(
+            webview_launcher.sys,
+            "argv",
+            ["webview_launcher.py", "--mode", "native"],
+        ), patch.object(
+            webview_launcher.os.path,
+            "exists",
+            return_value=False,
+        ), patch.object(
+            webview_launcher,
+            "setup_logging",
+        ), patch.object(
+            webview_launcher,
+            "_wait_for_server",
+            return_value=True,
+        ), patch.object(
+            webview_launcher.threading,
+            "Thread",
+            return_value=fake_thread,
+        ), patch.object(
+            webview_launcher,
+            "webview",
+            fake_webview,
+        ), patch.object(
+            webview_launcher,
+            "_preferred_pywebview_gui",
+            return_value=None,
+        ), patch.object(
+            webview_launcher,
+            "_set_linux_qtwebengine_env",
+        ):
+            webview_launcher.main()
+
+        fake_webview.create_window.assert_called_once()
+        self.assertTrue(fake_webview.create_window.call_args.kwargs["resizable"])
+        self.assertFalse(fake_webview.create_window.call_args.kwargs["frameless"])
+        self.assertFalse(fake_webview.create_window.call_args.kwargs["easy_drag"])
+        self.assertEqual(
+            fake_webview.create_window.call_args.kwargs["background_color"],
+            "#070b18",
+        )
+        fake_webview.start.assert_called_once()
+
+    def test_session_window_uses_resizable_native_frame(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        fake_webview = Mock()
+        fake_webview.create_window.return_value = _ExplodingWindow()
+
+        with patch.object(webview_launcher, "webview", fake_webview):
+            result = api_bridge.open_session_window("group-1")
+
+        self.assertEqual(result, {"ok": True, "reused": False})
+        fake_webview.create_window.assert_called_once()
+        self.assertTrue(fake_webview.create_window.call_args.kwargs["resizable"])
+        self.assertFalse(fake_webview.create_window.call_args.kwargs["frameless"])
+        self.assertFalse(fake_webview.create_window.call_args.kwargs["easy_drag"])
+        self.assertEqual(
+            fake_webview.create_window.call_args.kwargs["background_color"],
+            "#0d0d0d",
+        )
+
+    def test_hex_to_colorref_converts_rgb_to_windows_colorref(self):
+        self.assertEqual(webview_launcher._hex_to_colorref("#112233"), 0x332211)
+
+    def test_apply_windows_native_frame_theme_refreshes_frame_after_dwm_update(self):
+        window = _ExplodingWindow()
+
+        with patch.object(webview_launcher.sys, "platform", "win32"), patch.object(
+            webview_launcher,
+            "_resolve_native_window_handle",
+            return_value=1234,
+        ), patch.object(
+            webview_launcher,
+            "_set_dwm_window_attribute",
+            return_value=True,
+        ), patch.object(
+            webview_launcher,
+            "_refresh_windows_native_frame",
+            return_value=True,
+        ) as refresh:
+            result = webview_launcher._apply_windows_native_frame_theme(window, "dark")
+
+        self.assertTrue(result)
+        refresh.assert_called_once_with(1234)
+
+    def test_set_native_theme_applies_to_registered_windows(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        launcher_window = _ExplodingWindow()
+        session_window = _ExplodingWindow()
+        launcher_window.native = _FakeNative(111)
+        session_window.native = _FakeNative(222)
+        api_bridge._attach_window(launcher_window)
+        api_bridge._attach_session_window(session_window)
+
+        with patch.object(
+            webview_launcher,
+            "_apply_windows_native_frame_theme",
+            return_value=True,
+        ) as apply_theme:
+            result = api_bridge.set_native_theme("light")
+
+        self.assertEqual(result, {"ok": True, "theme": "light", "applied": True})
+        self.assertEqual(
+            apply_theme.call_args_list,
+            [
+                call(launcher_window, "light"),
+                call(session_window, "light"),
+            ],
+        )
 
     def test_last_window_close_exits_app(self):
         self.assertTrue(
