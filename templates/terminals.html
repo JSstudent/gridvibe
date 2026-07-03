@@ -386,6 +386,86 @@
             opacity: 1;
         }
 
+        .topbar-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+        }
+
+        .topbar-icon {
+            width: 28px;
+            height: 28px;
+            flex: 0 0 auto;
+        }
+
+        .sessions-menu {
+            position: relative;
+            display: inline-flex;
+            flex: 0 0 auto;
+        }
+
+        .sessions-menu-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            height: 32px;
+        }
+
+        .sessions-menu-toggle::after {
+            content: "";
+            width: 0;
+            height: 0;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid currentColor;
+        }
+
+        .sessions-menu-panel {
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 0;
+            z-index: 50;
+            display: none;
+            min-width: 190px;
+            padding: 6px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 6px;
+            background: var(--t-ctx-bg);
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.32);
+        }
+
+        .sessions-menu.open .sessions-menu-panel {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sessions-menu-item {
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: var(--t-text-secondary);
+            cursor: pointer;
+            font: inherit;
+            font-size: .82rem;
+            font-weight: 500;
+            padding: 8px 10px;
+            text-align: left;
+            white-space: nowrap;
+        }
+
+        .sessions-menu-item:hover,
+        .sessions-menu-item:focus {
+            background: var(--t-ctx-hover);
+            color: var(--t-text);
+            outline: none;
+        }
+
+        .sessions-menu-item:disabled {
+            cursor: wait;
+            opacity: 0.65;
+        }
+
         .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 700; }
         .topbar-sub   { font-size: .78rem; color: var(--t-text-muted); margin-left: 10px; }
 
@@ -808,8 +888,13 @@
             display: none;
         }
 
-        body.surface-max .topbar-title {
-            font-size: .88rem;
+        body.surface-max .topbar-icon {
+            width: 24px;
+            height: 24px;
+        }
+
+        body.surface-max .sessions-menu-toggle {
+            height: 28px;
         }
 
         body.surface-max .topbar-sub {
@@ -1174,7 +1259,8 @@
             padding: 5px 8px;
         }
 
-        .explorer-editor-tab[aria-selected="true"] {
+        .explorer-editor-tab[aria-selected="true"],
+        .explorer-editor-tab[aria-pressed="true"] {
             border-color: var(--t-accent);
             color: var(--t-accent);
             background: var(--explorer-row-active);
@@ -1734,8 +1820,46 @@
 
 <!-- Top bar -->
 <div class="topbar" id="terminalTopbar">
-    <div>
-        <span class="topbar-title">GridVibe</span>
+    <div class="topbar-brand">
+        <img
+            class="topbar-icon"
+            src="/docs/images/GridVibe_icon.ico"
+            alt="GridVibe"
+            width="28"
+            height="28"
+        >
+        <div class="sessions-menu" id="sessionsMenuRoot">
+            <button
+                type="button"
+                class="btn btn-neutral sessions-menu-toggle"
+                id="sessionsMenuBtn"
+                onclick="toggleSessionsMenu(event)"
+                aria-haspopup="true"
+                aria-expanded="false"
+            >Sessions...</button>
+            <div class="sessions-menu-panel" id="sessionsMenu" role="menu" aria-labelledby="sessionsMenuBtn">
+                <button
+                    type="button"
+                    class="sessions-menu-item"
+                    role="menuitem"
+                    onclick="closeSessionsMenu(); return goToSettings(event);"
+                >New Session ...</button>
+                <button
+                    type="button"
+                    class="sessions-menu-item"
+                    id="saveSessionMenuItem"
+                    role="menuitem"
+                    onclick="closeSessionsMenu(); saveActiveWorkspaceSession(this);"
+                >Save Session</button>
+                <button
+                    type="button"
+                    class="sessions-menu-item"
+                    id="saveSessionAsMenuItem"
+                    role="menuitem"
+                    onclick="closeSessionsMenu(); saveActiveWorkspaceSessionAs(this);"
+                >Save Session as ...</button>
+            </div>
+        </div>
         <span class="topbar-sub" id="sessionLabel">Loading…</span>
     </div>
     <div class="topbar-actions">
@@ -2129,6 +2253,7 @@
     let sessionGroups = [];
     let activeLoadToken = 0;
     let knownGroupIds = [];
+    let workspaceSaveTargets = new Map();
     let surfaceModeChangedManually = false;
     let surfaceModeAppliedGroups = new Map();
     let pendingSplitRestore = null;
@@ -2137,6 +2262,8 @@
     const MIN_SPLIT_COLS = 8;
     const MIN_SPLIT_ROWS = 8;
     const MIN_RESIZE_SURFACE_RATIO = 1 / 8;
+    const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';
+    const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';
     let splitSlotRects = null;
     let splitColumnWeights = null;
     let splitRowWeights = null;
@@ -2553,6 +2680,98 @@
         return value.startsWith(prefix) ? value.slice(prefix.length) : '';
     }
 
+    function getWorkspaceSaveTarget(groupId = activeGroupId) {
+        const override = workspaceSaveTargets.get(groupId);
+        if (override?.id) {
+            return override;
+        }
+
+        const savedSessionId = savedSessionIdFromGroupId(groupId);
+        const group = getGroupById(groupId);
+        return {
+            id: savedSessionId,
+            name: group?.name || ''
+        };
+    }
+
+    function rememberWorkspaceSaveTarget(groupId, savedSessionId, sessionName) {
+        const targetId = String(savedSessionId || '').trim();
+        const targetName = String(sessionName || '').trim();
+        if (!groupId || !targetId) {
+            return;
+        }
+
+        workspaceSaveTargets.set(groupId, {
+            id: targetId,
+            name: targetName
+        });
+
+        const group = getGroupById(groupId);
+        if (group && targetName) {
+            group.name = targetName;
+            renderSessionTabs();
+            updateSessionChrome(getWorkspacePanesInVisualOrder(groupId).length, groupId);
+        }
+    }
+
+    function notifySavedSessionUpdated(savedSession) {
+        const sessionId = String(savedSession?.id || '').trim();
+        if (!sessionId) {
+            return;
+        }
+
+        const payload = {
+            id: sessionId,
+            name: String(savedSession?.name || '').trim(),
+            updated_at: String(savedSession?.updated_at || '').trim(),
+            timestamp: Date.now(),
+            nonce: Math.random().toString(36).slice(2)
+        };
+
+        try {
+            const channel = new BroadcastChannel(SAVED_SESSION_BROADCAST_CHANNEL);
+            channel.postMessage(payload);
+            channel.close();
+        } catch (_error) {}
+
+        try {
+            localStorage.setItem(SAVED_SESSION_UPDATE_STORAGE_KEY, JSON.stringify(payload));
+        } catch (_error) {}
+    }
+
+    function closeSessionsMenu() {
+        const root = document.getElementById('sessionsMenuRoot');
+        const button = document.getElementById('sessionsMenuBtn');
+        root?.classList.remove('open');
+        button?.setAttribute('aria-expanded', 'false');
+    }
+
+    function toggleSessionsMenu(event) {
+        event?.preventDefault();
+        event?.stopPropagation();
+        const root = document.getElementById('sessionsMenuRoot');
+        const button = document.getElementById('sessionsMenuBtn');
+        if (!root || !button) {
+            return;
+        }
+
+        const shouldOpen = !root.classList.contains('open');
+        root.classList.toggle('open', shouldOpen);
+        button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+    }
+
+    document.addEventListener('click', event => {
+        if (!(event.target instanceof Element) || !event.target.closest('#sessionsMenuRoot')) {
+            closeSessionsMenu();
+        }
+    });
+
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            closeSessionsMenu();
+        }
+    });
+
     function setWorkspaceSaveMessage(message, type = '') {
         const label = document.getElementById('sessionLabel');
         if (!label || !message) {
@@ -2709,12 +2928,14 @@
         };
     }
 
-    async function saveActiveWorkspaceSession(button = null) {
+    async function saveActiveWorkspaceSession(button = null, options = {}) {
         if (!activeGroupId) {
             setWorkspaceSaveMessage('No active session group to save.', 'error');
             return;
         }
 
+        const promptForName = Boolean(options.promptForName);
+        const createNewSession = Boolean(options.createNewSession);
         const group = getGroupById(activeGroupId);
         const config = buildActiveWorkspaceSessionConfig();
         if (!config.terminals.length) {
@@ -2722,18 +2943,22 @@
             return;
         }
 
-        const suggestedName = group?.name || `Workspace ${new Date().toLocaleTimeString()}`;
-        const rawName = window.prompt('Session name', suggestedName);
-        if (rawName === null) {
-            return;
+        const saveTarget = getWorkspaceSaveTarget(activeGroupId);
+        const suggestedName = saveTarget.name || group?.name || `Workspace ${new Date().toLocaleTimeString()}`;
+        let sessionName = suggestedName;
+        if (promptForName) {
+            const rawName = window.prompt('Session name', suggestedName);
+            if (rawName === null) {
+                return;
+            }
+            sessionName = rawName.trim() || suggestedName;
         }
 
-        const sessionName = rawName.trim() || suggestedName;
-        const savedSessionId = savedSessionIdFromGroupId(activeGroupId);
+        const savedSessionId = createNewSession ? '' : saveTarget.id;
         const previousText = button?.textContent;
         if (button) {
             button.disabled = true;
-            button.textContent = 'Saving...';
+            button.textContent = promptForName ? 'Saving as...' : 'Saving...';
         }
 
         try {
@@ -2750,6 +2975,12 @@
             if (!response.ok) {
                 throw new Error(data.error || `Save failed with status ${response.status}`);
             }
+            rememberWorkspaceSaveTarget(
+                activeGroupId,
+                data.id || data.saved_session?.id || savedSessionId,
+                data.name || data.saved_session?.name || sessionName
+            );
+            notifySavedSessionUpdated(data.saved_session || data);
             setWorkspaceSaveMessage(`Saved session "${data.name || sessionName}".`, 'success');
         } catch (error) {
             console.error('[GridVibe Sessions] workspace save failed:', error);
@@ -2762,27 +2993,18 @@
         }
     }
 
+    function saveActiveWorkspaceSessionAs(button = null) {
+        return saveActiveWorkspaceSession(button, {
+            promptForName: true,
+            createNewSession: true
+        });
+    }
+
     function renderSessionTabs() {
         const container = document.getElementById('sessionTabs');
         if (!container) return;
 
-        const settingsButton = document.createElement('button');
-        settingsButton.className = 'session-tab settings';
-        settingsButton.type = 'button';
-        settingsButton.textContent = '+ New Session';
-        settingsButton.addEventListener('click', goToSettings);
-
-        const saveButton = document.createElement('button');
-        saveButton.className = 'session-tab save';
-        saveButton.type = 'button';
-        saveButton.textContent = 'Save Session';
-        saveButton.title = 'Save the active workspace as a launcher session';
-        saveButton.setAttribute('aria-label', 'Save active workspace session');
-        saveButton.addEventListener('click', () => saveActiveWorkspaceSession(saveButton));
-
         container.innerHTML = '';
-        container.appendChild(settingsButton);
-        container.appendChild(saveButton);
 
         sessionGroups.forEach((group, index) => {
             const tabNumber = index + 1;
@@ -8225,22 +8447,10 @@
 
     function setExplorerDiffSplit(index, open) {
         const pane = terminals[index];
-        const list = document.getElementById(`explorer-list-${index}`);
-        const body = list?.querySelector('.explorer-editor-body');
-        const panel = document.getElementById(`explorer-diff-panel-${index}`);
-        const toggle = list?.querySelector(`[data-explorer-diff-toggle="${index}"]`);
-        if (!pane || !body || !panel || !toggle) {
+        if (!pane) {
             return;
         }
-
-        const isOpen = Boolean(open);
-        pane._explorerDiffSplit = isOpen;
-        body.classList.toggle('split-diff', isOpen);
-        panel.hidden = !isOpen;
-        toggle.setAttribute('aria-pressed', isOpen ? 'true' : 'false');
-        if (isOpen) {
-            loadExplorerDiff(index);
-        }
+        setExplorerFileView(index, open ? 'diff' : (pane._explorerLastFileView || 'source'));
     }
 
     function toggleExplorerDiffSplit(index) {
@@ -8269,6 +8479,9 @@
             pane._explorerDiffLoaded = true;
             pane._explorerDiffContent = data.diff || '';
             renderExplorerDiff(index);
+            if (activeExplorerFileView(index) === 'diff') {
+                applyExplorerSearch(index);
+            }
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer Git diff failed:', error);
             code.innerHTML = `<span class="explorer-diff-empty">${escHtml(error.message || 'Failed to load Git diff.')}</span>`;
@@ -8276,20 +8489,51 @@
     }
 
     function setExplorerFileView(index, mode) {
-        const normalizedMode = mode === 'preview' ? 'preview' : 'source';
+        const normalizedMode =
+            mode === 'preview' ? 'preview'
+            : mode === 'diff' ? 'diff'
+            : 'source';
+        const pane = terminals[index];
         const list = document.getElementById(`explorer-list-${index}`);
         if (!list) {
             return;
         }
 
+        const body = list.querySelector('.explorer-editor-body');
+        const diffPanel = document.getElementById(`explorer-diff-panel-${index}`);
+        const selectedMode = normalizedMode === 'diff' && diffPanel ? 'diff' : normalizedMode;
+        const isDiffMode = selectedMode === 'diff';
+        if (pane) {
+            pane._explorerDiffSplit = isDiffMode;
+            if (selectedMode === 'source' || selectedMode === 'preview') {
+                pane._explorerLastFileView = selectedMode;
+            }
+        }
+        if (body) {
+            body.classList.toggle('split-diff', isDiffMode);
+        }
+        if (diffPanel) {
+            diffPanel.hidden = !isDiffMode;
+        }
         list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
-            const isSelected = button.dataset.explorerFileView === normalizedMode;
+            const isSelected = button.dataset.explorerFileView === selectedMode;
             button.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+            if (button.dataset.explorerDiffToggle) {
+                button.setAttribute('aria-pressed', isDiffMode ? 'true' : 'false');
+            }
         });
         list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
-            panel.hidden = panel.dataset.explorerFilePanel !== normalizedMode;
+            panel.hidden = panel.dataset.explorerFilePanel !== selectedMode;
         });
-        applyExplorerSearch(index);
+        if (isDiffMode) {
+            loadExplorerDiff(index);
+            const state = pane ? ensureExplorerSearchState(pane, 'file') : null;
+            if (state?.query) {
+                applyExplorerSearch(index);
+            }
+        } else {
+            applyExplorerSearch(index);
+        }
     }
 
     function isExplorerSearchablePane(pane) {
@@ -8736,6 +8980,9 @@
         } else if (query && view === 'preview') {
             cancelExplorerSearch(index);
             renderExplorerSource(index);
+            if (pane._explorerDiffLoaded) {
+                renderExplorerDiff(index);
+            }
             const preview = restoreExplorerPreview(index);
             if (!preview) {
                 state.activeIndex = 0;
@@ -8753,12 +9000,39 @@
                     mark.classList.toggle('active', markIndex === state.activeIndex);
                 });
             }
+        } else if (query && view === 'diff') {
+            cancelExplorerSearch(index);
+            renderExplorerSource(index);
+            restoreExplorerPreview(index);
+            if (pane._explorerDiffLoaded) {
+                renderExplorerDiff(index);
+            }
+            const diff = document.getElementById(`explorer-diff-code-${index}`);
+            if (!diff) {
+                state.activeIndex = 0;
+                state.matchCount = 0;
+                state.matchCapped = false;
+                updateExplorerSearchControls(index, query, 0, 0);
+                return;
+            }
+            const diffMarks = markExplorerSearchInElement(diff, query, state.activeIndex || 0);
+            matchCount = diffMarks.length;
+            capped = Boolean(diffMarks.capped);
+            state.activeIndex = matchCount ? Math.min(state.activeIndex || 0, matchCount - 1) : 0;
+            if (matchCount && !diffMarks[state.activeIndex]?.classList.contains('active')) {
+                diffMarks.forEach((mark, markIndex) => {
+                    mark.classList.toggle('active', markIndex === state.activeIndex);
+                });
+            }
         } else {
             cancelExplorerSearch(index);
             state.ranges = [];
             state.resultQuery = '';
             renderExplorerSource(index);
             restoreExplorerPreview(index);
+            if (pane._explorerDiffLoaded) {
+                renderExplorerDiff(index);
+            }
             state.activeIndex = 0;
         }
 
@@ -8958,6 +9232,7 @@
         const metaParts = explorerFileMetaParts(data, fileType);
         const previousPath = pane._explorerFilePath || '';
         const keepDiffSplit = previousPath === path && pane._explorerDiffSplit && hasGitDiff;
+        const initialFileView = keepDiffSplit ? 'diff' : 'source';
         const searchState = ensureExplorerSearchState(pane, 'file');
         if (previousPath && previousPath !== path) {
             cancelExplorerSearch(index);
@@ -8980,6 +9255,7 @@
         pane._explorerDiffLoaded = false;
         pane._explorerDiffContent = '';
         pane._explorerDiffSplit = keepDiffSplit;
+        pane._explorerLastFileView = pane._explorerLastFileView === 'preview' && hasPreview ? 'preview' : 'source';
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
         updateExplorerGitSummary(index, data.git_context || null);
@@ -9004,9 +9280,9 @@
                     </div>
                     ${(hasPreview || hasGitDiff) ? `
                         <div class="explorer-editor-tabs" role="tablist" aria-label="File view">
-                            <button type="button" class="explorer-editor-tab" data-explorer-file-view="source" role="tab" aria-selected="true">Source</button>
+                            <button type="button" class="explorer-editor-tab" data-explorer-file-view="source" role="tab" aria-selected="${initialFileView === 'source' ? 'true' : 'false'}">Source</button>
                             ${hasPreview ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="false">Preview</button>` : ''}
-                            ${hasGitDiff ? `<button type="button" class="explorer-editor-tab" data-explorer-diff-toggle="${index}" aria-pressed="${keepDiffSplit ? 'true' : 'false'}">Diff</button>` : ''}
+                            ${hasGitDiff ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="diff" data-explorer-diff-toggle="${index}" role="tab" aria-selected="${initialFileView === 'diff' ? 'true' : 'false'}" aria-pressed="${keepDiffSplit ? 'true' : 'false'}">Diff</button>` : ''}
                         </div>
                     ` : ''}
                     <div class="explorer-editor-zoom" aria-label="Editor font size controls">
@@ -9035,7 +9311,7 @@
                         <pre class="explorer-editor-content explorer-editor-panel" data-explorer-file-panel="source"><code id="explorer-code-${index}"></code></pre>
                         ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" hidden></div>` : ''}
                     </div>
-                    ${hasGitDiff ? `<aside class="explorer-diff-split" id="explorer-diff-panel-${index}" ${keepDiffSplit ? '' : 'hidden'}><div class="explorer-diff-content" id="explorer-diff-code-${index}"></div></aside>` : ''}
+                    ${hasGitDiff ? `<aside class="explorer-diff-split" id="explorer-diff-panel-${index}" data-explorer-file-panel="diff" ${keepDiffSplit ? '' : 'hidden'}><div class="explorer-diff-content" id="explorer-diff-code-${index}"></div></aside>` : ''}
                 </div>
             </div>
         `;
@@ -9054,11 +9330,12 @@
         }
         list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
             button.addEventListener('click', () => {
-                setExplorerFileView(index, button.dataset.explorerFileView || 'source');
+                if (button.dataset.explorerFileView === 'diff') {
+                    toggleExplorerDiffSplit(index);
+                } else {
+                    setExplorerFileView(index, button.dataset.explorerFileView || 'source');
+                }
             });
-        });
-        list.querySelector(`[data-explorer-diff-toggle="${index}"]`)?.addEventListener('click', () => {
-            toggleExplorerDiffSplit(index);
         });
         if (keepDiffSplit) {
             loadExplorerDiff(index);

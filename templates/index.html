@@ -2604,7 +2604,11 @@
     const agentPreflightRequestState = new WeakMap();
     const agentPreflightTimerState = new WeakMap();
     const ACTIVE_SAVED_SESSION_STORAGE_KEY = 'gridvibe.activeSavedSession';
+    const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';
+    const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';
     const DEFAULT_SESSION_ID = 'default-session';
+    let savedSessionUpdateChannel = null;
+    let lastSavedSessionUpdateToken = '';
 
     const SSH_FIELDS = `
         <div class="form-grid">
@@ -4364,6 +4368,72 @@
         if (typeof updateHeaderBadges === 'function') updateHeaderBadges();
     }
 
+    function savedSessionUpdateToken(payload) {
+        const sessionId = String(payload?.id || '').trim();
+        if (!sessionId) {
+            return '';
+        }
+        return [
+            sessionId,
+            String(payload?.updated_at || ''),
+            String(payload?.nonce || payload?.timestamp || '')
+        ].join(':');
+    }
+
+    async function refreshActiveSavedSessionFromUpdate(payload) {
+        const sessionId = String(payload?.id || '').trim();
+        if (!sessionId || sessionId !== activeSavedSessionId) {
+            return;
+        }
+
+        const updateToken = savedSessionUpdateToken(payload);
+        if (updateToken && updateToken === lastSavedSessionUpdateToken) {
+            return;
+        }
+        lastSavedSessionUpdateToken = updateToken;
+
+        try {
+            const response = await fetch(`/api/saved-sessions/${encodeURIComponent(sessionId)}`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to refresh saved session');
+            }
+
+            setActiveSavedSession(data);
+            applySessionConfig(data.config);
+            showMessage(`Refreshed active session "${data.name}".`, 'success');
+        } catch (error) {
+            showMessage(`Refresh failed: ${error.message}`, 'error');
+        }
+    }
+
+    function handleSavedSessionUpdateMessage(message) {
+        refreshActiveSavedSessionFromUpdate(message);
+    }
+
+    function setupSavedSessionUpdateListeners() {
+        if ('BroadcastChannel' in window) {
+            try {
+                savedSessionUpdateChannel = new BroadcastChannel(SAVED_SESSION_BROADCAST_CHANNEL);
+                savedSessionUpdateChannel.onmessage = event => {
+                    handleSavedSessionUpdateMessage(event.data || {});
+                };
+            } catch (_error) {
+                savedSessionUpdateChannel = null;
+            }
+        }
+
+        window.addEventListener('storage', event => {
+            if (event.key !== SAVED_SESSION_UPDATE_STORAGE_KEY || !event.newValue) {
+                return;
+            }
+
+            try {
+                handleSavedSessionUpdateMessage(JSON.parse(event.newValue));
+            } catch (_error) {}
+        });
+    }
+
     async function persistLastUsedConfig(savedSessionId = activeSavedSessionId) {
         const response = await fetch('/api/session-config', {
             method: 'POST',
@@ -4861,6 +4931,7 @@
     }
 
     restoreActiveSavedSessionMeta();
+    setupSavedSessionUpdateListeners();
     renderCountOptions();
     renderLayoutOptions();
     renderModeFields();

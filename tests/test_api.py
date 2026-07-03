@@ -318,19 +318,26 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
 
-    def test_terminals_page_exposes_active_workspace_save_session_button(self):
+    def test_terminals_page_exposes_session_menu_actions(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn("saveButton.textContent = 'Save Session';", html)
-        self.assertIn("container.appendChild(settingsButton);", html)
-        self.assertIn("container.appendChild(saveButton);", html)
-        self.assertLess(
-            html.index("container.appendChild(settingsButton);"),
-            html.index("container.appendChild(saveButton);"),
-        )
-        self.assertIn("async function saveActiveWorkspaceSession(button = null)", html)
+        self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
+        self.assertIn(">Sessions...</button>", html)
+        self.assertIn(">New Session ...</button>", html)
+        self.assertIn(">Save Session</button>", html)
+        self.assertIn(">Save Session as ...</button>", html)
+        self.assertIn("onclick=\"closeSessionsMenu(); saveActiveWorkspaceSession(this);\"", html)
+        self.assertIn("onclick=\"closeSessionsMenu(); saveActiveWorkspaceSessionAs(this);\"", html)
+        self.assertNotIn("container.appendChild(settingsButton);", html)
+        self.assertNotIn("container.appendChild(saveButton);", html)
+        self.assertIn("async function saveActiveWorkspaceSession(button = null, options = {})", html)
+        self.assertIn("function saveActiveWorkspaceSessionAs(button = null)", html)
+        self.assertIn("let workspaceSaveTargets = new Map();", html)
+        self.assertIn("function notifySavedSessionUpdated(savedSession)", html)
+        self.assertIn("const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';", html)
+        self.assertIn("notifySavedSessionUpdated(data.saved_session || data);", html)
         self.assertIn("function getWorkspacePanesInVisualOrder(groupId = activeGroupId)", html)
         self.assertIn("function buildActiveWorkspaceSessionConfig()", html)
         self.assertIn("function buildActiveWorkspaceLayoutSnapshot()", html)
@@ -359,6 +366,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("initial_command_mode: terminal.startup_mode === 'explorer'", html)
         self.assertIn("agent_selection: terminal.initial_command_mode === 'agent'", html)
 
+    def test_launcher_refreshes_active_saved_session_after_external_update(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';", html)
+        self.assertIn("const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';", html)
+        self.assertIn("async function refreshActiveSavedSessionFromUpdate(payload)", html)
+        self.assertIn("sessionId !== activeSavedSessionId", html)
+        self.assertIn("fetch(`/api/saved-sessions/${encodeURIComponent(sessionId)}`)", html)
+        self.assertIn("applySessionConfig(data.config);", html)
+        self.assertIn("setupSavedSessionUpdateListeners();", html)
+
     def test_terminals_page_preserves_fullscreen_for_native_new_session_focus(self):
         response = self.client.get("/terminals")
 
@@ -381,6 +401,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('class="btn btn-neutral btn-icon settings-window-btn"', html)
         self.assertIn('aria-label="Open settings"', html)
         self.assertIn('class="vibe-flow-icon"', html)
+
+    def test_docs_images_route_serves_gridvibe_icon(self):
+        response = self.client.get("/docs/images/GridVibe_icon.ico")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(len(response.get_data()), 0)
 
     def test_terminals_page_exposes_per_terminal_refresh_control(self):
         response = self.client.get("/terminals")
@@ -667,6 +693,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerGitSummaryText(git)", html)
         self.assertIn("function loadExplorerDiff(index)", html)
         self.assertIn("data-explorer-diff-toggle=\"${index}\"", html)
+        self.assertIn('data-explorer-file-view="diff"', html)
+        self.assertIn(".explorer-editor-tab[aria-pressed=\"true\"]", html)
+        self.assertIn("button.dataset.explorerFileView === 'diff'", html)
+        self.assertIn("setExplorerFileView(index, open ? 'diff' : (pane._explorerLastFileView || 'source'));", html)
         self.assertIn("function toggleExplorerDiffSplit(index)", html)
         self.assertIn("function renderExplorerSideBySideDiff(diff)", html)
         self.assertIn(".explorer-diff-cell.add", html)
@@ -675,6 +705,17 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("split-diff", html)
         self.assertIn("/git/diff?path=", html)
         self.assertIn("${explorerGitBadgeHtml(entry.git)}", html)
+
+    def test_terminals_page_explorer_diff_search_hooks_are_present(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("} else if (query && view === 'diff') {", html)
+        self.assertIn("const diffMarks = markExplorerSearchInElement(diff, query, state.activeIndex || 0);", html)
+        self.assertIn("renderExplorerDiff(index);", html)
+        self.assertIn("if (activeExplorerFileView(index) === 'diff')", html)
+        self.assertIn('data-explorer-file-panel="diff"', html)
 
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
@@ -815,9 +856,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("Close Session</button>", html)
         self.assertIn("closeButton.className = 'session-tab-close';", html)
         self.assertIn("closeSessionGroup(group.group_id);", html)
-        self.assertIn(".session-tab.settings {", html)
-        self.assertIn("border-color: #00c46e;", html)
-        self.assertIn("settingsButton.textContent = '+ New Session';", html)
+        self.assertIn(".sessions-menu-panel {", html)
+        self.assertIn(".sessions-menu-item {", html)
+        self.assertIn(">New Session ...</button>", html)
 
     def test_terminals_page_numbers_session_tabs_and_exposes_safe_shortcut(self):
         response = self.client.get("/terminals")

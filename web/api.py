@@ -23,7 +23,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from cryptography.fernet import Fernet
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit, join_room, leave_room
 
 from gridvibe_version import __version__
@@ -3973,6 +3973,12 @@ def terminals_page():
                            voice_engine=voice_engine,
                            voice_model=_active_voice_model_name(),
                            voice_language=voice_language)
+
+
+@app.route('/docs/images/<path:filename>')
+def docs_images(filename: str):
+    """Serve bundled documentation images used by the local UI."""
+    return send_from_directory(os.path.join(BASE_DIR, "docs", "images"), filename)
 
 
 # ==================== API Routes ====================

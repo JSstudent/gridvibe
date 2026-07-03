@@ -14,7 +14,7 @@ GridVibe is a browser-first workspace for launching and managing multiple SSH te
 
 ### Terminal Workspace
 
-![GridVibe terminal workspace showing a four-pane SSH session group](docs/images/screenshots/workspace.png)
+![GridVibe terminal workspace showing a four-pane SSH session group](docs/images/screenshots/workspace.png) a 
 
 ## Using the Workspace
 
