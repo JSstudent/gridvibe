@@ -1903,6 +1903,83 @@ def _send_connection_input(connection: Dict[str, Any], input_data: str):
     stdin_handle.flush()
 
 
+def _terminal_cwd_probe_command(connection: Dict[str, Any], marker_start: str, marker_end: str) -> str:
+    """Return a shell command that prints the current directory between markers."""
+    shell_kind = str(connection.get("shell_kind") or "").strip()
+    newline = "\r" if connection.get("pty_process") is not None and os.name == "nt" else "\n"
+
+    if shell_kind == "powershell":
+        return f'Write-Output "{marker_start}$((Get-Location).ProviderPath){marker_end}"{newline}'
+    if shell_kind == "cmd":
+        return f"echo {marker_start}%CD%{marker_end}{newline}"
+    if shell_kind == "wsl":
+        return (
+            f"printf '{marker_start}%s{marker_end}\\n' "
+            f'"$(wslpath -w "$PWD" 2>/dev/null || printf \'%s\' "$PWD")"{newline}'
+        )
+    return f"printf '{marker_start}%s{marker_end}\\n' \"$PWD\"{newline}"
+
+
+def _extract_terminal_cwd_from_buffer(buffer: str, marker_start: str, marker_end: str) -> Optional[str]:
+    """Extract the last cwd marker payload from a terminal output buffer."""
+    matches = re.findall(
+        f"{re.escape(marker_start)}(.*?){re.escape(marker_end)}",
+        buffer,
+        flags=re.DOTALL,
+    )
+    for raw_value in reversed(matches):
+        candidate = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", raw_value)
+        candidate = candidate.replace("\r", "").strip()
+        if candidate and "\n" not in candidate and marker_start not in candidate and marker_end not in candidate:
+            return candidate
+    return None
+
+
+def _normalize_probed_local_cwd(cwd: str, shell_kind: str) -> str:
+    """Translate a probed shell cwd into the local filesystem form explorer expects."""
+    if os.name == "nt" and shell_kind == "wsl":
+        mount_match = re.match(r"^/mnt/([A-Za-z])(?:/(.*))?$", cwd)
+        if mount_match:
+            drive = mount_match.group(1).upper()
+            remainder = (mount_match.group(2) or "").replace("/", "\\")
+            return f"{drive}:\\" + remainder if remainder else f"{drive}:\\"
+    return cwd
+
+
+def _resolve_live_terminal_cwd(session_id: str, session: Any, timeout: float = 0.75) -> Optional[str]:
+    """Probe an active terminal shell for its current working directory."""
+    with connection_lock:
+        connection = ssh_connections.get(session_id)
+
+    if not connection:
+        return None
+
+    marker = uuid.uuid4().hex
+    marker_start = f"__GRIDVIBE_CWD_{marker}_START__"
+    marker_end = f"__GRIDVIBE_CWD_{marker}_END__"
+    command = _terminal_cwd_probe_command(connection, marker_start, marker_end)
+
+    try:
+        _send_connection_input(connection, command)
+    except Exception as exc:
+        logger.debug("Unable to probe terminal cwd for %s: %s", session_id, exc)
+        return None
+
+    deadline = time.time() + max(0.05, timeout)
+    while time.time() < deadline:
+        with connection_lock:
+            buffer = session_output_buffers.get(session_id, "")
+        cwd = _extract_terminal_cwd_from_buffer(buffer, marker_start, marker_end)
+        if cwd:
+            shell_kind = str(connection.get("shell_kind") or "").strip()
+            if getattr(session, "mode", "") == "wsl":
+                return _normalize_probed_local_cwd(cwd, shell_kind)
+            return cwd
+        time.sleep(0.05)
+
+    return None
+
+
 def _resize_connection(connection: Dict[str, Any], cols: Any, rows: Any):
     """Resize an active remote or local terminal session."""
     cols = max(8, min(int(cols), 400))
@@ -2045,7 +2122,7 @@ def _stream_ssh_output(session_id: str):
     except Exception as e:
         session = session_manager.get_session(session_id)
         if session and _is_explorer_session(session):
-            logger.info("Ignoring stream shutdown for explorer session %s: %s", session_id, e)
+            logger.debug("Ignoring stream shutdown for explorer session %s: %s", session_id, e)
             return
 
         logger.error(f"Error streaming output for session {session_id}: {e}")
@@ -2144,7 +2221,7 @@ def _stream_local_output(session_id: str):
     except Exception as e:
         session = session_manager.get_session(session_id)
         if session and _is_explorer_session(session):
-            logger.info("Ignoring local stream shutdown for explorer session %s: %s", session_id, e)
+            logger.debug("Ignoring local stream shutdown for explorer session %s: %s", session_id, e)
             return
 
         logger.error(f"Error streaming local output for session {session_id}: {e}")
@@ -4537,6 +4614,8 @@ def change_session_mode(session_id: str):
 
     if target_mode == "explorer":
         requested_directory = data.get("directory")
+        if data.get("refresh_cwd"):
+            requested_directory = _resolve_live_terminal_cwd(session_id, session) or requested_directory
         next_directory = session.directory
         root_directory = ""
 

@@ -81,33 +81,6 @@ User report: the search function is extremely slow on large files and causes the
 ### Proposed solution:
 Make explorer file search bounded and asynchronous enough for large previews. In `templates/terminals.html`, debounce input, cancel stale searches, cap or progressively count matches, and avoid re-rendering the full file on every keystroke when possible. Consider chunked search with `requestIdleCallback`/`setTimeout`, a Web Worker for large content, or virtualized line rendering so highlighting only touches visible content plus nearby matches. Keep `web/api.py` preview truncation behavior intact unless a smaller preview or explicit large-file warning is chosen. Add regression tests in `tests/test_api.py` for the presence of debounce/cancellation or worker wiring, match-cap behavior, truncated-file messaging, and preservation of existing source/preview search controls.
 
-### Issue ID: ISSUE-2026-003
-- Title: Explorer mode reopens stale launch directory after shell cd
-- Priority: Medium
-- Status: Open
-- Area: `templates/terminals.html`, `web/api.py`, `sessions/manager.py`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `terminal`, `file-explorer`, `session`, `tests`
-- Reported: 2026-07-02
-
-Description:
-Explorer-mode terminals can lose the user's live shell location after the user switches back to terminal mode and changes directory outside the original launcher-selected directory. The practical impact is that switching back to explorer/browser mode opens the stale launcher directory instead of the directory where the terminal currently is, so the explorer no longer follows the active terminal workflow.
-
-Steps to reproduce:
-1. Launch a GridVibe terminal pane in explorer mode with a selected starting directory from the launcher.
-2. In explorer mode, navigate into a subdirectory, then switch to terminal mode and confirm the terminal starts in that subdirectory.
-3. Switch back to explorer mode and confirm the explorer still opens at the subdirectory.
-4. Switch back to terminal mode, run `cd ..` until the shell is outside the original launcher-selected directory, then switch back to explorer/browser mode.
-
-Expected behavior:
-Switching from terminal mode to explorer/browser mode should open the explorer at the terminal's current working directory. If that directory is outside the previous explorer root, the explorer root should move to the current working directory or another safe root that still displays the current location.
-
-Actual behavior / logs:
-User report: after leaving the original launcher-selected directory with `cd ..`, switching back to explorer/browser mode opens the original launcher directory instead of the terminal's current directory. Code inspection shows `switchSessionPaneMode()` in `templates/terminals.html` sends `terminal._session.directory` when switching from terminal to explorer, and that value is session metadata rather than the live shell cwd. The backend mode route in `web/api.py` can honor a supplied `directory` and reset `explorer_root_directory` when it is outside the old root, but it has no live terminal cwd to use when the client only sends stale metadata. Existing tests cover explorer-to-terminal selection and a round trip inside the original root, but do not cover shell `cd` changes outside that root.
-
-### Proposed solution:
-Add a reliable current-working-directory handoff before switching a terminal pane into explorer mode. Investigate whether GridVibe should track cwd continuously from terminal state, query the shell cwd on demand before the mode switch, or expose an explicit client/server route that resolves the active terminal cwd per session. Update `templates/terminals.html` so the mode-switch request sends the live cwd instead of cached `session.directory`, and keep the existing `web/api.py` root-reset behavior for directories outside the previous explorer root. Add regression coverage in `tests/test_api.py` and, if feasible, a client/template test proving the switch-to-explorer payload uses the refreshed cwd rather than stale launch metadata. Cover local repo/WSL behavior and SSH behavior separately because remote cwd resolution may need different probing or tracking.
-
 ### Issue ID: ISSUE-2026-002
 - Title: Add per-terminal close buttons with neighbor expansion
 - Priority: Medium
@@ -135,6 +108,34 @@ Code inspection confirms `templates/terminals.html` renders pane header controls
 Add an icon-only close button to each terminal pane header in `templates/terminals.html`, wire it to a new `closeTerminalPane(index)` client handler, and reuse `DELETE /api/sessions/<session_id>` for the backend close operation. Extend the client layout code so a closed pane is removed from `terminals`, `sessionIds`, cached group views, split geometry, resize observers, voice state, and session routes without tearing down unrelated panes. For layout compaction, compute adjacent candidate panes from the current grid/split rectangles, calculate each candidate's shared border length with the closed pane, and expand the candidate with the longest shared border into the vacated rectangle; define a deterministic tie-breaker such as visual order. Cover single-pane close, two-pane close, nested split close, and each supported terminal startup mode with focused tests in `tests/test_api.py` plus session-manager/API regression tests where group membership or final-pane cleanup changes.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-003
+- Title: Explorer mode reopens stale launch directory after shell cd
+- Priority: Medium
+- Status: Closed
+- Area: `templates/terminals.html`, `web/api.py`, `sessions/manager.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `terminal`, `file-explorer`, `session`, `tests`
+- Reported: 2026-07-02
+- Closed: 2026-07-03
+
+Description:
+Explorer-mode terminals could lose the user's live shell location after the user switched back to terminal mode and changed directory outside the original launcher-selected directory. The practical impact was that switching back to explorer/browser mode opened the stale launcher directory instead of the directory where the terminal currently was.
+
+Steps to reproduce:
+1. Launch a GridVibe terminal pane in explorer mode with a selected starting directory from the launcher.
+2. In explorer mode, navigate into a subdirectory, then switch to terminal mode and confirm the terminal starts in that subdirectory.
+3. Switch back to explorer mode and confirm the explorer still opens at the subdirectory.
+4. Switch back to terminal mode, run `cd ..` until the shell is outside the original launcher-selected directory, then switch back to explorer/browser mode.
+
+Expected behavior:
+Switching from terminal mode to explorer/browser mode should open the explorer at the terminal's current working directory. If that directory is outside the previous explorer root, the explorer root should move to the current working directory or another safe root that still displays the current location.
+
+Actual behavior / logs:
+User report: after leaving the original launcher-selected directory with `cd ..`, switching back to explorer/browser mode opened the original launcher directory instead of the terminal's current directory. Code inspection showed `switchSessionPaneMode()` in `templates/terminals.html` sent `terminal._session.directory` when switching from terminal to explorer, and that value was session metadata rather than the live shell cwd.
+
+Resolution:
+`templates/terminals.html` now sends a `refresh_cwd` hint instead of cached launch metadata when switching a terminal pane into explorer mode. `web/api.py` handles that hint by probing the active terminal shell for its current working directory before closing the connection, then reuses the existing explorer root reset behavior when the refreshed cwd sits outside the previous root. The probe supports SSH/POSIX shells, WSL/POSIX shells, PowerShell, and cmd-style local sessions, with stale session metadata as a fallback if the shell does not answer quickly. `tests/test_api.py` includes template, local, and SSH regression coverage.
 
 ### Issue ID: ISSUE-2026-001
 - Title: Terminal resize hover handle spans unrelated panes

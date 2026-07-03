@@ -356,6 +356,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('data-session-mode-toggle="${i}"', html)
         self.assertIn("async function switchSessionPaneMode(index)", html)
         self.assertIn("body.directory = getExplorerSelectedDirectory(index);", html)
+        self.assertIn("body.refresh_cwd = true;", html)
+        self.assertNotIn("body.directory = terminal._session.directory;", html)
         self.assertIn("`/api/sessions/${encodeURIComponent(sessionId)}/mode`", html)
         self.assertIn("hasMatchingSessionViews(sessionIds, terminals, data.sessions)", html)
         self.assertIn("pendingModeSwitchSessionIds.add(sessionId);", html)
@@ -794,6 +796,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("let sessionRouteMap = new Map();", html)
         self.assertIn("function resolveSessionTarget(sessionId)", html)
         self.assertIn("const target = resolveSessionTarget(session_id);", html)
+        self.assertIn("if (pendingModeSwitchSessionIds.has(session_id)) return;", html)
         self.assertIn("if (!target.active) {", html)
         self.assertIn("target.terminal.term.write(data);", html)
 
@@ -1756,6 +1759,42 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(updated.distribution, "Ubuntu")
         self.assertEqual(updated.status, api.SessionStatus.CONNECTED)
 
+    def test_switch_terminal_pane_to_explorer_refreshes_live_cwd_outside_previous_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        outside_dir = Path(self.temp_dir.name) / "outside"
+        outside_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Shell",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="terminal",
+            explorer_root_directory=str(repo_dir),
+        )
+
+        with patch.object(api, "_resolve_live_terminal_cwd", return_value=str(outside_dir)) as resolve_cwd, patch.object(
+            api,
+            "_close_ssh_connection",
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        resolve_cwd.assert_called_once_with(session.session_id, session)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(Path(updated.directory), outside_dir.resolve())
+        self.assertEqual(Path(updated.explorer_root_directory), outside_dir.resolve())
+        self.assertEqual(updated.startup_mode, "explorer")
+
     def test_switch_roundtrip_preserves_explorer_root_for_parent_navigation(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         selected_dir = repo_dir / "src"
@@ -1894,6 +1933,46 @@ class ApiRoutesTestCase(unittest.TestCase):
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(updated.directory, "/srv/app/src")
         self.assertEqual(updated.explorer_root_directory, "/srv/app/src")
+        self.assertEqual(updated.startup_mode, "explorer")
+
+    def test_switch_ssh_terminal_to_explorer_refreshes_live_remote_cwd_outside_previous_root(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            mode="ssh",
+            username="ubuntu",
+            startup_mode="terminal",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/opt/tools": {"type": "directory"},
+            }
+        )
+
+        with patch.object(api, "_resolve_live_terminal_cwd", return_value="/opt/tools") as resolve_cwd, patch.object(
+            api,
+            "_open_ssh_sftp",
+            return_value=(MagicMock(), fake_sftp),
+        ), patch.object(api, "_close_ssh_connection"):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        resolve_cwd.assert_called_once_with(session.session_id, session)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.directory, "/opt/tools")
+        self.assertEqual(updated.explorer_root_directory, "/opt/tools")
         self.assertEqual(updated.startup_mode, "explorer")
 
     def test_switch_ssh_explorer_pane_to_terminal_uses_selected_remote_directory(self):
@@ -3222,6 +3301,32 @@ class ApiRoutesTestCase(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             self.assertEqual(api._resolve_local_launch_cwd(temp_dir, "cmd"), temp_dir)
             self.assertIsNone(api._resolve_local_launch_cwd(temp_dir, "wsl"))
+
+    def test_terminal_cwd_probe_command_uses_wslpath_for_wsl_shell(self):
+        command = api._terminal_cwd_probe_command(
+            {"shell_kind": "wsl"},
+            "__START__",
+            "__END__",
+        )
+
+        self.assertIn("wslpath -w", command)
+        self.assertIn('"$PWD"', command)
+        self.assertIn("__START__", command)
+        self.assertIn("__END__", command)
+
+    def test_extract_terminal_cwd_from_buffer_uses_last_marker_payload(self):
+        marker_start = "__GRIDVIBE_CWD_START__"
+        marker_end = "__GRIDVIBE_CWD_END__"
+        buffer = (
+            f"printf '{marker_start}%s{marker_end}\\n' \"$PWD\"\r\n"
+            f"{marker_start}$PWD{marker_end}\r\n"
+            f"{marker_start}/srv/current{marker_end}\r\n"
+        )
+
+        self.assertEqual(
+            api._extract_terminal_cwd_from_buffer(buffer, marker_start, marker_end),
+            "/srv/current",
+        )
 
     def test_find_running_ubuntu_distribution_prefers_default_running_ubuntu(self):
         completed = SimpleNamespace(

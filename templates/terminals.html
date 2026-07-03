@@ -5039,8 +5039,8 @@
         const body = { startup_mode: targetMode };
         if (switchingToTerminal) {
             body.directory = getExplorerSelectedDirectory(index);
-        } else if (terminal._session.directory) {
-            body.directory = terminal._session.directory;
+        } else {
+            body.refresh_cwd = true;
         }
 
         updateModeToggleButton(button, switchingToTerminal, true);
@@ -8278,6 +8278,7 @@
         socket.on('terminal_output', ({ session_id, data }) => {
             const target = resolveSessionTarget(session_id);
             if (!target) return;
+            if (pendingModeSwitchSessionIds.has(session_id)) return;
             if (!target.terminal.term) return;
 
             if (!target.active) {
