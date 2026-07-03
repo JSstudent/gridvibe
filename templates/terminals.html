@@ -649,6 +649,19 @@
             cursor: not-allowed;
         }
 
+        .terminal-close-btn {
+            border-color: rgba(255, 92, 92, .7);
+            background: rgba(90, 24, 24, .28);
+            color: #ff9b9b;
+            min-width: 31px;
+        }
+
+        .terminal-close-btn:hover:not(:disabled) {
+            border-color: #ff6b6b;
+            background: rgba(170, 42, 42, .28);
+            color: #ffd0d0;
+        }
+
         .explorer-theme-btn {
             min-width: 32px;
         }
@@ -3684,6 +3697,284 @@
         return { sessionIdsToClose, rectsBySessionId, originalSplitSlotCount };
     }
 
+    function splitRectArea(rect) {
+        return Math.max(0, Number(rect?.w || 0)) * Math.max(0, Number(rect?.h || 0));
+    }
+
+    function splitRectUnion(left, right) {
+        const x1 = Math.min(left.x, right.x);
+        const y1 = Math.min(left.y, right.y);
+        const x2 = Math.max(left.x + left.w, right.x + right.w);
+        const y2 = Math.max(left.y + left.h, right.y + right.h);
+        return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+    }
+
+    function splitRectsOverlap(left, right) {
+        return left.x < right.x + right.w
+            && left.x + left.w > right.x
+            && left.y < right.y + right.h
+            && left.y + left.h > right.y;
+    }
+
+    function sharedBorderLength(left, right) {
+        if (!left || !right) {
+            return 0;
+        }
+
+        let longest = 0;
+        if (left.x + left.w === right.x || right.x + right.w === left.x) {
+            longest = Math.max(
+                longest,
+                Math.min(left.y + left.h, right.y + right.h) - Math.max(left.y, right.y)
+            );
+        }
+        if (left.y + left.h === right.y || right.y + right.h === left.y) {
+            longest = Math.max(
+                longest,
+                Math.min(left.x + left.w, right.x + right.w) - Math.max(left.x, right.x)
+            );
+        }
+        return Math.max(0, longest);
+    }
+
+    function canAbsorbClosedRect(candidateRect, closedRect, otherRects) {
+        const union = splitRectUnion(candidateRect, closedRect);
+        if (splitRectArea(union) !== splitRectArea(candidateRect) + splitRectArea(closedRect)) {
+            return false;
+        }
+        return !otherRects.some(rect => splitRectsOverlap(union, rect));
+    }
+
+    function coveredIntervalLength(intervals) {
+        const sorted = intervals
+            .map(interval => ({
+                start: Math.min(interval.start, interval.end),
+                end: Math.max(interval.start, interval.end),
+            }))
+            .filter(interval => interval.end > interval.start)
+            .sort((left, right) => left.start - right.start || left.end - right.end);
+        let covered = 0;
+        let cursor = null;
+        sorted.forEach(interval => {
+            if (!cursor || interval.start > cursor.end) {
+                covered += interval.end - interval.start;
+                cursor = { ...interval };
+                return;
+            }
+            if (interval.end > cursor.end) {
+                covered += interval.end - cursor.end;
+                cursor.end = interval.end;
+            }
+        });
+        return covered;
+    }
+
+    function terminalCloseContacts(closedRect, entry) {
+        const rect = entry.rect;
+        const contacts = [];
+        const yStart = Math.max(closedRect.y, rect.y);
+        const yEnd = Math.min(closedRect.y + closedRect.h, rect.y + rect.h);
+        const xStart = Math.max(closedRect.x, rect.x);
+        const xEnd = Math.min(closedRect.x + closedRect.w, rect.x + rect.w);
+        if (rect.x + rect.w === closedRect.x && yEnd > yStart) {
+            contacts.push({ ...entry, side: 'left', sharedBorder: yEnd - yStart, start: yStart, end: yEnd });
+        }
+        if (rect.x === closedRect.x + closedRect.w && yEnd > yStart) {
+            contacts.push({ ...entry, side: 'right', sharedBorder: yEnd - yStart, start: yStart, end: yEnd });
+        }
+        if (rect.y + rect.h === closedRect.y && xEnd > xStart) {
+            contacts.push({ ...entry, side: 'top', sharedBorder: xEnd - xStart, start: xStart, end: xEnd });
+        }
+        if (rect.y === closedRect.y + closedRect.h && xEnd > xStart) {
+            contacts.push({ ...entry, side: 'bottom', sharedBorder: xEnd - xStart, start: xStart, end: xEnd });
+        }
+        return contacts;
+    }
+
+    function findTerminalCloseNeighbor(closedRect, candidates) {
+        return candidates
+            .map(candidate => ({
+                ...candidate,
+                sharedBorder: sharedBorderLength(closedRect, candidate.rect),
+            }))
+            .filter(candidate => candidate.sharedBorder > 0)
+            .sort((left, right) => (
+                right.sharedBorder - left.sharedBorder
+                || left.visualIndex - right.visualIndex
+            ))[0] || null;
+    }
+
+    function terminalCloseSideGroups(closedRect, entries) {
+        const sideLengths = {
+            left: closedRect.h,
+            right: closedRect.h,
+            top: closedRect.w,
+            bottom: closedRect.w,
+        };
+        const groupsBySide = new Map();
+        entries.flatMap(entry => terminalCloseContacts(closedRect, entry)).forEach(contact => {
+            if (!groupsBySide.has(contact.side)) {
+                groupsBySide.set(contact.side, []);
+            }
+            groupsBySide.get(contact.side).push(contact);
+        });
+
+        return Array.from(groupsBySide.entries()).map(([side, contacts]) => {
+            const coverage = coveredIntervalLength(contacts);
+            return {
+                side,
+                entries: contacts,
+                coverage,
+                sideLength: sideLengths[side],
+                totalSharedBorder: contacts.reduce((total, contact) => total + contact.sharedBorder, 0),
+                firstVisualIndex: Math.min(...contacts.map(contact => contact.visualIndex)),
+            };
+        });
+    }
+
+    function expandRectIntoClosedSide(rect, closedRect, side) {
+        if (side === 'left') {
+            return { ...rect, w: (closedRect.x + closedRect.w) - rect.x, ancestors: [] };
+        }
+        if (side === 'right') {
+            return { ...rect, x: closedRect.x, w: (rect.x + rect.w) - closedRect.x, ancestors: [] };
+        }
+        if (side === 'top') {
+            return { ...rect, h: (closedRect.y + closedRect.h) - rect.y, ancestors: [] };
+        }
+        if (side === 'bottom') {
+            return { ...rect, y: closedRect.y, h: (rect.y + rect.h) - closedRect.y, ancestors: [] };
+        }
+        return rect;
+    }
+
+    function buildTerminalCloseRectsForSideGroup(plan, sideGroup) {
+        if (!sideGroup || sideGroup.coverage < sideGroup.sideLength) {
+            return null;
+        }
+
+        const expandingSessionIds = new Set(sideGroup.entries.map(entry => entry.sessionId));
+        const nextEntries = plan.remainingEntries.map(entry => {
+            const shouldExpand = expandingSessionIds.has(entry.sessionId);
+            return {
+                ...entry,
+                rect: shouldExpand
+                    ? expandRectIntoClosedSide(entry.rect, plan.closedRect, sideGroup.side)
+                    : entry.rect,
+            };
+        });
+        for (let leftIndex = 0; leftIndex < nextEntries.length; leftIndex += 1) {
+            for (let rightIndex = leftIndex + 1; rightIndex < nextEntries.length; rightIndex += 1) {
+                if (splitRectsOverlap(nextEntries[leftIndex].rect, nextEntries[rightIndex].rect)) {
+                    return null;
+                }
+            }
+        }
+
+        const previousArea = plan.remainingEntries.reduce((total, entry) => total + splitRectArea(entry.rect), 0);
+        const nextArea = nextEntries.reduce((total, entry) => total + splitRectArea(entry.rect), 0);
+        if (nextArea !== previousArea + splitRectArea(plan.closedRect)) {
+            return null;
+        }
+
+        const rectsBySessionId = {};
+        nextEntries.forEach(entry => {
+            rectsBySessionId[entry.sessionId] = cloneSplitSlotRects([entry.rect])[0];
+        });
+        return rectsBySessionId;
+    }
+
+    function buildTerminalCloseRectsBySessionId(plan) {
+        const neighbor = findTerminalCloseNeighbor(plan.closedRect, plan.remainingEntries);
+        if (neighbor) {
+            const otherRects = plan.remainingEntries
+                .filter(entry => entry.sessionId !== neighbor.sessionId)
+                .map(entry => entry.rect);
+            if (canAbsorbClosedRect(neighbor.rect, plan.closedRect, otherRects)) {
+                const rectsBySessionId = {};
+                plan.remainingEntries.forEach(entry => {
+                    const rect = entry.sessionId === neighbor.sessionId
+                        ? {
+                            ...entry.rect,
+                            ...splitRectUnion(entry.rect, plan.closedRect),
+                            ancestors: [],
+                        }
+                        : entry.rect;
+                    rectsBySessionId[entry.sessionId] = cloneSplitSlotRects([rect])[0];
+                });
+                return rectsBySessionId;
+            }
+        }
+
+        const sideGroups = terminalCloseSideGroups(plan.closedRect, plan.remainingEntries)
+            .map(sideGroup => ({
+                ...sideGroup,
+                rectsBySessionId: buildTerminalCloseRectsForSideGroup(plan, sideGroup),
+            }))
+            .filter(sideGroup => sideGroup.rectsBySessionId);
+        sideGroups.sort((left, right) => (
+            right.totalSharedBorder - left.totalSharedBorder
+            || left.entries.length - right.entries.length
+            || left.firstVisualIndex - right.firstVisualIndex
+        ));
+        return sideGroups[0]?.rectsBySessionId || null;
+    }
+
+    function buildCloseTerminalPlan(index) {
+        const grid = document.getElementById('terminalsGrid');
+        const card = document.getElementById(`tc-${index}`);
+        const sessionId = sessionIds[index];
+        if (!grid || !card || !sessionId) {
+            return null;
+        }
+
+        const cards = Array.from(grid.children);
+        const visualIndex = cards.indexOf(card);
+        if (visualIndex < 0) {
+            return null;
+        }
+
+        const activeSessionIds = sessionIds.filter(Boolean);
+        if (activeSessionIds.length <= 1) {
+            return { sessionId, closeLastPane: true };
+        }
+
+        const rects = cloneSplitSlotRects(ensureSplitSlotRects());
+        const closedRect = rects?.[visualIndex];
+        if (!closedRect) {
+            return null;
+        }
+
+        const remainingEntries = cards
+            .map((paneCard, paneVisualIndex) => {
+                const slotIndex = Number(paneCard.dataset.slot);
+                const paneSessionId = Number.isInteger(slotIndex) ? sessionIds[slotIndex] : '';
+                const rect = rects[paneVisualIndex];
+                if (!paneSessionId || paneSessionId === sessionId || !rect) {
+                    return null;
+                }
+                return {
+                    sessionId: paneSessionId,
+                    visualIndex: paneVisualIndex,
+                    slotIndex,
+                    rect,
+                };
+            })
+            .filter(Boolean);
+
+        if (remainingEntries.length === 0) {
+            return { sessionId, closeLastPane: true };
+        }
+
+        return {
+            sessionId,
+            closeLastPane: false,
+            closedRect,
+            remainingEntries,
+            originalSplitSlotCount,
+        };
+    }
+
     function updateSplitButtonState(index) {
         const button = document.getElementById(`tsplit-${index}`);
         if (!button) {
@@ -4397,6 +4688,16 @@
                             </button>
                         </div>
                         {% endif %}
+                        <button
+                            type="button"
+                            class="terminal-action-btn terminal-close-btn"
+                            id="tclose-${i}"
+                            data-terminal-close="${i}"
+                            title="Close this terminal pane"
+                            aria-label="Close this terminal pane"
+                        >
+                            ×
+                        </button>
                     </div>
                 </div>
                 <div class="terminal-wrapper" id="tw-${i}">
@@ -4498,6 +4799,19 @@
                     event.preventDefault();
                     event.stopPropagation();
                     clearTerminalDisplay(i);
+                });
+            }
+            const closeButton = card.querySelector(`[data-terminal-close="${i}"]`);
+            if (closeButton) {
+                closeButton.draggable = false;
+                closeButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                closeButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    closeTerminalPane(i);
                 });
             }
             const voiceButton= card.querySelector(`[data-terminal-voice="${i}"]`);
@@ -4653,6 +4967,16 @@
                 event.preventDefault();
                 event.stopPropagation();
                 clearTerminalDisplay(index);
+            });
+        }
+
+        const closeButton = card.querySelector(`[data-terminal-close="${index}"]`);
+        if (closeButton) {
+            stopHeaderButtonDrag(closeButton);
+            closeButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                closeTerminalPane(index);
             });
         }
 
@@ -5111,6 +5435,72 @@
         } finally {
             if (button) {
                 button.textContent = '⊟';
+            }
+            updateAllSplitButtonStates();
+        }
+    }
+
+    async function closeTerminalPane(index) {
+        const plan = buildCloseTerminalPlan(index);
+        if (!plan) {
+            return;
+        }
+        const restoreRectsBySessionId = plan.closeLastPane
+            ? null
+            : buildTerminalCloseRectsBySessionId(plan);
+        if (!plan.closeLastPane && !restoreRectsBySessionId) {
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = 'Close terminal failed: no neighboring pane can safely fill this layout';
+            }
+            return;
+        }
+
+        const button = document.getElementById(`tclose-${index}`);
+        if (button) {
+            button.disabled = true;
+            button.textContent = '...';
+        }
+
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(plan.sessionId)}`, {
+                method: 'DELETE',
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Close terminal failed with status ${response.status}`);
+            }
+
+            if (plan.closeLastPane) {
+                if (visibleGroupId === activeGroupId) {
+                    teardownCurrentGrid();
+                }
+                activeGroupId = '';
+                await loadSessionGroups();
+                if (sessionGroups.length === 0) {
+                    await _closeWindowAfterLastSession();
+                    return;
+                }
+                await initialLoad();
+                return;
+            }
+
+            pendingSplitRestore = {
+                groupId: activeGroupId,
+                rectsBySessionId: restoreRectsBySessionId,
+                originalSplitSlotCount: plan.originalSplitSlotCount,
+            };
+            await initialLoad();
+        } catch (error) {
+            console.error('[GridVibe Sessions] closeTerminalPane failed:', error);
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = `Close terminal failed: ${error.message}`;
+            }
+        } finally {
+            if (button) {
+                button.textContent = '×';
+                button.disabled = false;
             }
             updateAllSplitButtonStates();
         }

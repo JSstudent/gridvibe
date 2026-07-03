@@ -348,6 +348,30 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function setTerminalRefreshState(index, refreshing)", html)
         self.assertIn("async function refreshTerminalDisplay(index)", html)
 
+    def test_terminals_page_exposes_per_terminal_close_control(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('data-terminal-close="${i}"', html)
+        self.assertIn('aria-label="Close this terminal pane"', html)
+        self.assertIn(".terminal-close-btn", html)
+        self.assertIn("border-color: rgba(255, 92, 92, .7);", html)
+        self.assertIn("function buildCloseTerminalPlan(index)", html)
+        self.assertIn("function findTerminalCloseNeighbor(closedRect, candidates)", html)
+        self.assertIn("function terminalCloseSideGroups(closedRect, entries)", html)
+        self.assertIn("function buildTerminalCloseRectsForSideGroup(plan, sideGroup)", html)
+        self.assertIn("function sharedBorderLength(left, right)", html)
+        self.assertIn("async function closeTerminalPane(index)", html)
+        self.assertIn("closeTerminalPane(i);", html)
+        self.assertIn("closeTerminalPane(index);", html)
+        self.assertIn("rectsBySessionId: restoreRectsBySessionId", html)
+        self.assertIn("no neighboring pane can safely fill this layout", html)
+        self.assertIn("method: 'DELETE'", html)
+        close_plan_start = html.index("function buildTerminalCloseRectsBySessionId(plan)")
+        close_plan_end = html.index("function buildCloseTerminalPlan(index)", close_plan_start)
+        self.assertNotIn("fixedLayoutSlotRects(", html[close_plan_start:close_plan_end])
+
     def test_terminals_page_exposes_session_mode_switch_controls(self):
         response = self.client.get("/terminals")
 
@@ -638,8 +662,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = response.get_data(as_text=True)
         clear_index = html.index('data-terminal-clear="${i}"')
         voice_index = html.index('data-terminal-voice-control="${i}"')
+        close_index = html.index('data-terminal-close="${i}"')
 
         self.assertLess(clear_index, voice_index)
+        self.assertLess(voice_index, close_index)
 
     def test_terminals_page_refreshes_only_one_terminal_by_replaying_its_buffer(self):
         response = self.client.get("/terminals")
@@ -3645,6 +3671,32 @@ class ApiRoutesTestCase(unittest.TestCase):
             {"message": "Session closed successfully"},
         )
         self.assertIsNone(api.session_manager.get_session(session.session_id))
+
+    def test_delete_session_updates_remaining_group_count(self):
+        group = api.session_manager.create_group(
+            name="Manual",
+            connection_mode="ssh",
+            layout="vertical",
+            terminal_count=2,
+            group_id="group-manual",
+        )
+        first = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="10.0.0.12",
+            directory="/tmp/project",
+        )
+        second = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="10.0.0.13",
+            directory="/tmp/project",
+        )
+
+        response = self.client.delete(f"/api/sessions/{first.session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(api.session_manager.get_session(first.session_id))
+        self.assertIsNotNone(api.session_manager.get_session(second.session_id))
+        self.assertEqual(api.session_manager.get_group(group.group_id).terminal_count, 1)
 
     def test_join_session_replays_sanitized_buffered_output_to_new_client(self):
         api.session_manager.create_group(
