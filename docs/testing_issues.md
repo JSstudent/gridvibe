@@ -31,6 +31,36 @@ Investigate the Windows native-frame refresh path in `web/webview_launcher.py`, 
 
 ## Closed Issues
 
+### Issue ID: ISSUE-2026-010
+- Title: Voice setting changes did not reach open session windows
+- Priority: Medium
+- Status: Closed
+- Area: `templates/terminals.html`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `voice`, `settings`, `session`, `ui`, `tests`
+- Reported: 2026-07-04
+- Closed: 2026-07-04
+
+Description:
+Changing launcher voice settings while session windows remained open did not update the open terminal UI. The practical impact was that enabling voice input could leave existing or relaunched session windows without the microphone control until the user fully closed the session group and launched a fresh one.
+
+Steps to reproduce:
+1. Launch GridVibe sessions with voice input disabled in app settings.
+2. Leave the session window open, return to settings, and enable voice input.
+3. Relaunch or return to the existing session window and inspect the terminal pane header.
+
+Expected behavior:
+Open session windows should reflect the current voice setting after the setting is saved and the session window regains focus or refreshes its live voice status. Enabling voice should make the microphone control available without requiring the session group to be fully closed and recreated.
+
+Actual behavior / logs:
+User report: after changing voice settings, the microphone icon appeared only after a full session close and fresh launch; relaunching while sessions stayed open did not update the visible controls. Code inspection confirmed `web/api.py` refreshed runtime voice globals after `/api/app-config` saves and `/api/voice-status` exposed the live `enabled` state, but `templates/terminals.html` rendered the voice control inside a server-side `{% if voice_enabled %}` block. When a terminal document was first rendered with voice disabled, there was no client-side microphone control to reveal after `/api/voice-status` later reported voice enabled.
+
+### Proposed solution:
+Keep the voice control markup available in `templates/terminals.html` regardless of the initial server-rendered voice flag, then hide or disable it from client-side live voice status. Refresh `/api/voice-status` when the session window regains focus or is shown from page cache, and synchronize all existing terminal voice controls after the status payload changes. Add focused template regression coverage in `tests/test_api.py` for pages initially rendered with voice disabled.
+
+Resolution:
+`templates/terminals.html` now always emits the per-terminal voice control, hides it when `_voiceServiceStatus.enabled` is false, updates visibility and disabled state after live `/api/voice-status` refreshes, and refreshes voice status on window `focus` and `pageshow`. `tests/test_api.py` now verifies that the terminals page keeps voice controls available for live setting refresh even when the initial rendered voice setting is disabled.
+
 ### Issue ID: ISSUE-2026-007
 - Title: Opening binary files can freeze explorer mode
 - Priority: Medium

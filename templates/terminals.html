@@ -802,6 +802,9 @@
             position: relative;
             transition: border-color .18s, color .18s, box-shadow .3s;
         }
+        .voice-btn:disabled {
+            cursor: default;
+        }
         .voice-settings-btn {
             min-width: 42px;
             padding-left: 8px;
@@ -1968,6 +1971,8 @@
     const THEME_STORAGE_KEY = 'gridvibe.theme';
     const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';
     const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';
+    const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';
+    const APP_CONFIG_BROADCAST_CHANNEL = 'gridvibe.appConfig';
     const DEFAULT_SURFACE_MODE = {{ app_surface_mode|tojson }};
 
     function normalizeThemePreference(theme) {
@@ -2118,6 +2123,38 @@
         if (groupId) {
             surfaceModeAppliedGroups.set(groupId, applyKey);
         }
+    }
+
+    function applyAppConfigSurfaceMode(message) {
+        if (!message || typeof message !== 'object' || !message.workspace) {
+            return;
+        }
+
+        const mode = normalizeSurfaceMode(message.workspace.surface_mode);
+        surfaceModeChangedManually = true;
+        surfaceModeAppliedGroups.clear();
+        applySurfaceMode(mode === 'max', { persist: true, refit: true });
+    }
+
+    function setupAppConfigUpdateListeners() {
+        if ('BroadcastChannel' in window) {
+            try {
+                const channel = new BroadcastChannel(APP_CONFIG_BROADCAST_CHANNEL);
+                channel.onmessage = event => {
+                    applyAppConfigSurfaceMode(event.data || {});
+                };
+            } catch (_error) {}
+        }
+
+        window.addEventListener('storage', event => {
+            if (event.key !== APP_CONFIG_UPDATE_STORAGE_KEY || !event.newValue) {
+                return;
+            }
+
+            try {
+                applyAppConfigSurfaceMode(JSON.parse(event.newValue));
+            } catch (_error) {}
+        });
     }
 
     function getStoredTopbarVisible() {
@@ -5258,8 +5295,7 @@
                         >
                             🧹
                         </button>
-                        {% if voice_enabled %}
-                        <div class="voice-control" data-terminal-voice-control="${i}">
+                        <div class="voice-control" data-terminal-voice-control="${i}" ${_voiceServiceStatus.enabled ? '' : 'hidden'}>
                             <button
                                 type="button"
                                 class="terminal-action-btn voice-btn"
@@ -5270,7 +5306,6 @@
                                 🎤
                             </button>
                         </div>
-                        {% endif %}
                         <button
                             type="button"
                             class="terminal-action-btn terminal-close-btn"
@@ -6477,6 +6512,7 @@
         const elements = _getVoicePanelElements(index);
         if (!elements.control) return;
 
+        elements.control.hidden = _voiceServiceStatus.enabled === false;
         _updateVoiceMeta(index);
         _renderVoiceDiagnostics(
             index,
@@ -6491,6 +6527,13 @@
         _updateVoiceBtn(index, Boolean(_voiceState[index]?.recording));
     }
 
+    function _syncVoiceControlsAvailability() {
+        document.querySelectorAll('[data-terminal-voice-control]').forEach(control => {
+            control.hidden = _voiceServiceStatus.enabled === false;
+        });
+        _setVoiceBtnsDisabled(_voiceActiveIndex);
+    }
+
     async function _loadVoiceServiceStatus() {
         try {
             const response = await fetch('/api/voice-status');
@@ -6500,6 +6543,7 @@
                 ..._voiceServiceStatus,
                 ...payload
             };
+            _syncVoiceControlsAvailability();
             terminals.forEach((_, terminalIndex) => _updateVoiceMeta(terminalIndex));
         } catch (err) {
             console.warn('Voice status fetch failed:', err);
@@ -6597,6 +6641,11 @@
     function _setVoiceBtnsDisabled(activeIndex) {
         document.querySelectorAll('.voice-btn').forEach(btn => {
             const btnIdx = parseInt(btn.dataset.terminalVoice, 10);
+            if (_voiceServiceStatus.enabled === false) {
+                btn.disabled = true;
+                btn.title = 'Voice input is disabled in app settings';
+                return;
+            }
             if (activeIndex === -1) {
                 btn.disabled = false;
                 btn.title = 'Voice input (click to start recording)';
@@ -9685,12 +9734,19 @@
     window.addEventListener('pywebviewready', () => {
         syncNativeFullscreenState();
     });
+    window.addEventListener('focus', () => {
+        _loadVoiceServiceStatus();
+    });
+    window.addEventListener('pageshow', () => {
+        _loadVoiceServiceStatus();
+    });
     document.addEventListener('fullscreenchange', updateFullscreenButton);
     /* ─────────────────────────────────────────────
        Boot
     ───────────────────────────────────────────── */
     applySurfaceMode(normalizeSurfaceMode(DEFAULT_SURFACE_MODE) === 'max');
     applyTopbarVisibility(getStoredTopbarVisible());
+    setupAppConfigUpdateListeners();
     updateFullscreenButton();
     _loadVoicePrefsFromServer();
     _loadVoiceServiceStatus();

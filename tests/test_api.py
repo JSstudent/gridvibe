@@ -297,6 +297,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('<select id="appWhisperModel">', html)
         self.assertIn('<option value="base">base</option>', html)
         self.assertIn('<option value="large-v3-turbo">large-v3-turbo</option>', html)
+        self.assertIn("const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';", html)
+        self.assertIn("const APP_CONFIG_BROADCAST_CHANNEL = 'gridvibe.appConfig';", html)
+        self.assertIn("function notifyAppConfigUpdated(appSettings)", html)
+        self.assertIn("notifyAppConfigUpdated(data);", html)
 
     def test_launcher_page_uses_compact_centered_header(self):
         response = self.client.get("/")
@@ -811,6 +815,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn('id="tvoice-settings-${i}"', html)
         self.assertNotIn("settings: document.getElementById(`tvoice-settings-${index}`),", html)
 
+    def test_terminals_page_keeps_voice_toggle_available_for_live_setting_refresh(self):
+        with patch.object(api, "voice_enabled", False):
+            response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('data-voice-enabled="false"', html)
+        self.assertIn('data-terminal-voice-control="${i}"', html)
+        self.assertIn('data-terminal-voice="${i}"', html)
+        self.assertIn(".voice-btn:disabled", html)
+        self.assertIn("cursor: default;", html)
+        self.assertIn("elements.control.hidden = _voiceServiceStatus.enabled === false;", html)
+        self.assertIn("function _syncVoiceControlsAvailability()", html)
+        self.assertIn("_syncVoiceControlsAvailability();", html)
+        self.assertIn("window.addEventListener('focus'", html)
+
     def test_terminals_page_uses_global_push_to_talk_preferences(self):
         response = self.client.get("/terminals")
 
@@ -922,6 +942,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("applySurfaceMode(normalizeSurfaceMode(DEFAULT_SURFACE_MODE) === 'max');", html)
         self.assertIn("document.body.classList.toggle('surface-max', active);", html)
         self.assertIn("redrawAttachedTerminals(attachedIndices, { forceResize: true });", html)
+        self.assertIn("const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';", html)
+        self.assertIn("const APP_CONFIG_BROADCAST_CHANNEL = 'gridvibe.appConfig';", html)
+        self.assertIn("function applyAppConfigSurfaceMode(message)", html)
+        self.assertIn("surfaceModeChangedManually = true;", html)
+        self.assertIn("surfaceModeAppliedGroups.clear();", html)
+        self.assertIn("applySurfaceMode(mode === 'max', { persist: true, refit: true });", html)
+        self.assertIn("function setupAppConfigUpdateListeners()", html)
+        self.assertIn("setupAppConfigUpdateListeners();", html)
 
     def test_terminals_page_exposes_collapsible_topbar(self):
         response = self.client.get("/terminals")

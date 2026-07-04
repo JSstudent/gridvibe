@@ -2635,6 +2635,8 @@
     const ACTIVE_SAVED_SESSION_STORAGE_KEY = 'gridvibe.activeSavedSession';
     const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';
     const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';
+    const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';
+    const APP_CONFIG_BROADCAST_CHANNEL = 'gridvibe.appConfig';
     const DEFAULT_SESSION_ID = 'default-session';
     let savedSessionUpdateChannel = null;
     let lastSavedSessionUpdateToken = '';
@@ -3308,6 +3310,26 @@
         };
     }
 
+    function notifyAppConfigUpdated(appSettings) {
+        const payload = {
+            workspace: {
+                surface_mode: appSettings?.workspace?.surface_mode === 'max' ? 'max' : 'normal'
+            },
+            timestamp: Date.now(),
+            nonce: Math.random().toString(36).slice(2)
+        };
+
+        try {
+            const channel = new BroadcastChannel(APP_CONFIG_BROADCAST_CHANNEL);
+            channel.postMessage(payload);
+            channel.close();
+        } catch (_error) {}
+
+        try {
+            localStorage.setItem(APP_CONFIG_UPDATE_STORAGE_KEY, JSON.stringify(payload));
+        } catch (_error) {}
+    }
+
     async function loadAppSettings() {
         const response = await fetch('/api/app-config');
         const data = await response.json();
@@ -3359,6 +3381,7 @@
             }
 
             applyAppSettings(data);
+            notifyAppConfigUpdated(data);
             closeAppSettingsModal();
             setUpdateStatus('App settings saved.', 'success');
             showMessage('App settings saved.', 'success');
