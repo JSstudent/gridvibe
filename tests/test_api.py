@@ -224,7 +224,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertIn("const AGENT_OPTIONS = [", html)
         self.assertIn('class="startup-mode-select"', html)
+        self.assertIn('<option value="terminal"', html)
         self.assertIn('<option value="agent"', html)
+        self.assertIn('aria-label="Terminal ${index + 1} title"', html)
         self.assertIn("function normalizeTerminalCommandUi(terminal)", html)
         self.assertIn("Custom Agent", html)
 

@@ -178,6 +178,12 @@
             border-bottom-color: rgba(75, 85, 99, 0.22);
         }
 
+        [data-theme="light"] .t-title {
+            border-color: rgba(75, 85, 99, 0.34);
+            background: #ffffff;
+            color: #111827;
+        }
+
         [data-theme="light"] .t-badge {
             background: rgba(8, 145, 178, 0.12);
         }
@@ -1520,11 +1526,27 @@
             text-align: center;
         }
 
-        .t-name {
+        .t-title {
             flex: 1;
+            min-width: 0;
+            height: 28px;
+            border: 1px solid rgba(76, 201, 240, 0.14);
+            border-radius: 8px;
+            background: rgba(7, 12, 28, 0.88);
             color: var(--text);
+            padding: 0 10px;
             font-size: 0.82rem;
             font-weight: 600;
+            outline: none;
+        }
+
+        .t-title:focus {
+            border-color: rgba(76, 201, 240, 0.46);
+            box-shadow: 0 0 0 3px rgba(76, 201, 240, 0.12);
+        }
+
+        .t-title::placeholder {
+            color: #64748b;
         }
 
         .t-status-dot {
@@ -3406,11 +3428,15 @@
     }
 
     function normalizeTerminalCommandUi(terminal) {
-        const rawMode = String(terminal?.startup_mode || terminal?.initial_command_mode || '').trim();
-        const savedMode = rawMode === 'agent'
-            ? 'agent'
-            : (rawMode === 'explorer' ? 'explorer' : 'command');
+        const startupMode = String(terminal?.startup_mode || '').trim();
+        const initialCommandMode = String(terminal?.initial_command_mode || '').trim();
         const initialCommand = String(terminal?.initial_command || '').trim();
+        const rawMode = startupMode || initialCommandMode;
+        const savedMode = rawMode === 'agent' || initialCommandMode === 'agent'
+            ? 'agent'
+            : (rawMode === 'explorer' || initialCommandMode === 'explorer'
+                ? 'explorer'
+                : (initialCommand ? 'command' : 'terminal'));
         const knownAgents = getKnownAgentValues();
         let mode = savedMode;
         let agentSelection = String(terminal?.agent_selection || '').trim().toLowerCase();
@@ -3444,6 +3470,15 @@
         }
 
         if (mode === 'explorer') {
+            return {
+                mode,
+                commandValue: '',
+                agentSelection: '',
+                customAgent: ''
+            };
+        }
+
+        if (mode === 'terminal') {
             return {
                 mode,
                 commandValue: '',
@@ -3486,6 +3521,9 @@
 
     function getTerminalCommandMode(row) {
         const mode = row?.dataset?.commandMode;
+        if (mode === 'terminal') {
+            return 'terminal';
+        }
         if (mode === 'agent') {
             return 'agent';
         }
@@ -3496,7 +3534,7 @@
     }
 
     function buildTerminalInitialCommand(row) {
-        if (getTerminalCommandMode(row) === 'explorer') {
+        if (getTerminalCommandMode(row) === 'terminal' || getTerminalCommandMode(row) === 'explorer') {
             return '';
         }
         if (getTerminalCommandMode(row) === 'agent') {
@@ -3519,11 +3557,15 @@
         const drafts = rows.map((row, index) => {
             const commandMode = getTerminalCommandMode(row);
             return {
-                title: row.querySelector('.t-title').value.trim() || `Terminal ${index + 1}`,
+                title: row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`,
                 directory: row.querySelector('.t-dir').value.trim(),
                 initial_command: buildTerminalInitialCommand(row),
-                initial_command_mode: commandMode,
-                startup_mode: commandMode,
+                initial_command_mode: commandMode === 'agent'
+                    ? 'agent'
+                    : (commandMode === 'explorer' ? 'explorer' : 'command'),
+                startup_mode: commandMode === 'agent'
+                    ? 'agent'
+                    : (commandMode === 'explorer' ? 'explorer' : 'terminal'),
                 agent_selection: commandMode === 'agent'
                     ? (row.querySelector('.t-agent-select')?.value.trim() || '')
                     : '',
@@ -3965,16 +4007,18 @@
 
     function resetTerminalCommandOnModeChange(row, nextMode) {
         const previousMode = getTerminalCommandMode(row);
-        if (previousMode !== 'agent' || nextMode === 'agent') {
-            return;
-        }
-
         const commandInput = row.querySelector('.t-cmd');
         const agentSelect = row.querySelector('.t-agent-select');
         const customAgentInput = row.querySelector('.t-agent-custom');
-        if (commandInput) commandInput.value = '';
-        if (agentSelect) agentSelect.value = '';
-        if (customAgentInput) customAgentInput.value = '';
+
+        if (previousMode === 'command' && nextMode !== 'command' && commandInput) {
+            commandInput.value = '';
+        }
+
+        if (previousMode === 'agent' && nextMode !== 'agent') {
+            if (agentSelect) agentSelect.value = '';
+            if (customAgentInput) customAgentInput.value = '';
+        }
     }
 
     function _resetAgentOptionLabels(select) {
@@ -4267,15 +4311,11 @@
                 <div class="t-row" data-command-mode="${escHtml(commandUi.mode)}">
                     <div class="t-row-head">
                         <span class="t-badge">T${index + 1}</span>
-                        <span class="t-name">Terminal ${index + 1}</span>
+                        <input class="t-title" type="text" value="${escHtml(terminal.title || `Terminal ${index + 1}`)}" placeholder="Terminal ${index + 1}" aria-label="Terminal ${index + 1} title">
                         <span class="t-status-dot"></span>
                         <button type="button" class="t-menu-btn" title="Options">⋮</button>
                     </div>
                     <div class="t-fields">
-                        <div class="field">
-                            <label>Title</label>
-                            <input class="t-title" type="text" value="${escHtml(terminal.title || `Terminal ${index + 1}`)}" placeholder="Terminal ${index + 1}">
-                        </div>
                         <div class="field">
                             <label>Subdirectory</label>
                             <input class="t-dir" type="text" value="${escHtml(terminal.directory || '')}" placeholder="Optional path inside Step 2 default">
@@ -4283,6 +4323,7 @@
                         <div class="field">
                             <label>Startup Mode</label>
                             <select class="startup-mode-select">
+                                <option value="terminal" ${commandUi.mode === 'terminal' ? 'selected' : ''}>Terminal</option>
                                 <option value="command" ${commandUi.mode === 'command' ? 'selected' : ''}>Initial Command</option>
                                 <option value="agent" ${commandUi.mode === 'agent' ? 'selected' : ''}>Agent</option>
                                 <option value="explorer" ${commandUi.mode === 'explorer' ? 'selected' : ''}>File Explorer</option>
