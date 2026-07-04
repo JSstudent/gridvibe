@@ -14,7 +14,7 @@ GridVibe is a browser-first workspace for launching and managing multiple SSH te
 
 ### Terminal Workspace
 
-![GridVibe terminal workspace showing a four-pane SSH session group](docs/images/screenshots/workspace.png) a 
+![GridVibe terminal workspace showing a four-pane SSH session group](docs/images/screenshots/workspace.png)
 
 ## Using the Workspace
 
@@ -34,6 +34,7 @@ Session bar controls:
 
 - Session tabs show each active session group with a positional number. Drag tabs to reorder them; GridVibe persists the order for the running app state.
 - `Alt+1` through `Alt+9` switch to the matching numbered session tab when focus is not inside an editable field.
+- `Sessions...` opens the active-workspace session menu for importing saved sessions, saving the current workspace, or saving it as a new preset.
 - Each session tab has a close button for closing that session group.
 - The chevron next to the session tabs hides or shows the top bar. GridVibe remembers this top-bar visibility preference in the browser.
 
@@ -42,7 +43,7 @@ Per-terminal controls:
 - `↻` resets that terminal view and replays the recent output buffer. On file explorer panes, it manually reloads the current directory or the currently open file.
 - `📁` switches an SSH or Local Repo terminal pane into a file explorer; `>_` switches a file explorer pane into a terminal opened at the currently selected explorer directory. Explorer panes keep their original root so parent-folder navigation remains available after switching back and forth.
 - `⊞` splits a terminal pane by cloning its connection into a new pane in the same session group when the layout and session limit allow it.
-- `⊟` closes a split pane and expands the remaining split area. Explorer panes cannot be split.
+- The close control removes one pane and expands the remaining split area. Explorer panes cannot be split.
 - `🧹` clears the terminal display and purges its replay buffer.
 - `🎤` starts or stops voice input for that terminal when voice input is enabled.
 
@@ -50,6 +51,18 @@ Pane sizing:
 
 - Drag the visible divider between terminal panes to resize shared rows or columns. GridVibe refits xterm panes and resizes the backend PTY after the drag.
 - Pane resizing keeps every visible pane above the minimum usable surface and is disabled on narrow mobile-width layouts.
+
+### Saved Sessions
+
+Use `Save Session` and `Import Session` on the launcher to manage reusable session presets before launch. Saved sessions can include SSH, WSL, PowerShell, cmd, Local Repo, agent, and file explorer startup choices.
+
+From the terminal workspace, open `Sessions...` to:
+
+- Import another saved session without returning to the launcher.
+- Save the active workspace back to its current saved session.
+- Use `Save Session as...` to create a new saved session from the current workspace.
+
+Workspace saves preserve the current pane order, titles, startup modes, selected explorer directories, and split layout. Saved SSH passwords remain encrypted in `saved_sessions.json`.
 
 ### File Explorer Panes
 
@@ -60,13 +73,14 @@ File explorer panes are read-only repository views. Local Repo explorers read fr
 Explorer panes support:
 
 - Directory navigation with parent-folder navigation constrained to the selected root.
+- Search/filter in the current directory view.
 - Switching the pane into a regular terminal opened at the current explorer directory.
 - Manual refresh from the pane header without continuous auto-refresh flicker.
 - Folder/file icons, size and modified-time metadata, and per-pane light/dark explorer theme toggling.
 - Click-to-open text files in a read-only editor-style viewer with wrapped long lines and per-pane `-`/`+` font-size zoom controls.
-- Client-side find inside the open file view, including `Ctrl+F`/`Cmd+F` focus, match counts, previous/next controls, `Enter`/`Shift+Enter` navigation, and clear.
+- Client-side find inside source, preview, and diff views, including `Ctrl+F`/`Cmd+F` focus, match counts, previous/next controls, `Enter`/`Shift+Enter` navigation, and clear.
 - Markdown files with a source tab and sanitized rendered preview when Markdown rendering dependencies are installed.
-- Lightweight syntax coloring for common source files such as Python, C/C++, Go, JavaScript/TypeScript, Java, Rust, shell, PowerShell, HTML, CSS, JSON, YAML, TOML, SQL, and related formats.
+- Lightweight syntax coloring for common source, config, log, JSON Lines, Dockerfile, and environment files.
 - Size-limited previews. Binary files, directories, and paths outside the root are rejected.
 - Local Repo explorers add read-only Git awareness when `git` is available. SSH explorers use the remote host's `git` command when available. Both support branch/dirty summary, per-entry status badges, directory dirty markers, and a bounded internal old/new Diff panel with added and removed line highlighting for changed tracked files.
 
@@ -140,11 +154,11 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 - Multi-session launcher with 1, 2, 3, 4, 6, or 8 panes
 - SSH, WSL, PowerShell, cmd, and local repository modes
 - Per-pane startup modes for normal commands, agent CLIs, and file explorer panes
-- Saved launcher presets with encrypted SSH passwords
-- Session groups with numbered closable tabs, `Alt+1` through `Alt+9` tab switching, drag-to-reorder persistence, collapsible top bar, and max surface mode
+- Saved launcher and active-workspace presets with encrypted SSH passwords
+- Session groups with numbered closable tabs, `Alt+1` through `Alt+9` tab switching, import/save actions, drag-to-reorder persistence, collapsible top bar, and max surface mode
 - xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and drag-resizable dynamic split-pane support
-- Local and SSH read-only file explorer panes with directory navigation, text/Markdown preview, syntax highlighting, per-pane editor font zoom, client-side in-file search, and read-only Git status/diff awareness
-- Optional native desktop window through `pywebview`
+- Local and SSH read-only file explorer panes with directory search, text/Markdown preview, syntax highlighting, per-pane editor font zoom, client-side file/diff search, and read-only Git status/diff awareness
+- Optional resizable native desktop window through `pywebview`
 - Optional offline voice input through Vosk or faster-whisper
 - Theme support for system, light, and dark modes
 
@@ -333,6 +347,9 @@ A minimal local override can look like this:
   },
   "appearance": {
     "theme": "system"
+  },
+  "workspace": {
+    "surface_mode": "normal"
   },
   "voice_input": {
     "enabled": false,
