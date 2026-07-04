@@ -1664,7 +1664,7 @@ folder_dialog_lock = threading.Lock()
 
 # ==================== App Update Helpers ====================
 
-def _run_git_command(args: List[str]) -> subprocess.CompletedProcess[str]:
+def _run_self_update_git_command(args: List[str]) -> subprocess.CompletedProcess[str]:
     """Run one git command inside the project checkout."""
     git_path = shutil.which("git")
     if not git_path:
@@ -1688,14 +1688,14 @@ def _git_error_message(result: subprocess.CompletedProcess[str], fallback: str) 
 
 def perform_self_update() -> Dict[str, Any]:
     """Fetch and fast-forward the current git checkout when safe."""
-    repo_result = _run_git_command(["rev-parse", "--is-inside-work-tree"])
+    repo_result = _run_self_update_git_command(["rev-parse", "--is-inside-work-tree"])
     if repo_result.returncode != 0 or repo_result.stdout.strip().lower() != "true":
         raise AppUpdateError(
             "This installation is not running from a git checkout.",
             400,
         )
 
-    branch_result = _run_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
+    branch_result = _run_self_update_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
     if branch_result.returncode != 0:
         raise AppUpdateError(
             _git_error_message(branch_result, "Could not determine the current branch."),
@@ -1709,7 +1709,7 @@ def perform_self_update() -> Dict[str, Any]:
             409,
         )
 
-    status_result = _run_git_command(["status", "--porcelain"])
+    status_result = _run_self_update_git_command(["status", "--porcelain"])
     if status_result.returncode != 0:
         raise AppUpdateError(
             _git_error_message(status_result, "Could not inspect the git worktree."),
@@ -1722,7 +1722,7 @@ def perform_self_update() -> Dict[str, Any]:
             409,
         )
 
-    upstream_result = _run_git_command(
+    upstream_result = _run_self_update_git_command(
         ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]
     )
     if upstream_result.returncode != 0:
@@ -1733,14 +1733,14 @@ def perform_self_update() -> Dict[str, Any]:
 
     upstream = upstream_result.stdout.strip()
 
-    fetch_result = _run_git_command(["fetch", "--all", "--prune"])
+    fetch_result = _run_self_update_git_command(["fetch", "--all", "--prune"])
     if fetch_result.returncode != 0:
         raise AppUpdateError(
             f"Git fetch failed: {_git_error_message(fetch_result, 'Unable to contact the remote repository.')}",
             500,
         )
 
-    count_result = _run_git_command(["rev-list", "--left-right", "--count", "HEAD...@{u}"])
+    count_result = _run_self_update_git_command(["rev-list", "--left-right", "--count", "HEAD...@{u}"])
     if count_result.returncode != 0:
         raise AppUpdateError(
             _git_error_message(count_result, "Could not compare the local branch with its upstream."),
@@ -1785,7 +1785,7 @@ def perform_self_update() -> Dict[str, Any]:
             409,
         )
 
-    previous_commit_result = _run_git_command(["rev-parse", "HEAD"])
+    previous_commit_result = _run_self_update_git_command(["rev-parse", "HEAD"])
     if previous_commit_result.returncode != 0:
         raise AppUpdateError(
             _git_error_message(previous_commit_result, "Could not determine the current commit."),
@@ -1794,14 +1794,14 @@ def perform_self_update() -> Dict[str, Any]:
 
     previous_commit = previous_commit_result.stdout.strip()
 
-    pull_result = _run_git_command(["pull", "--ff-only"])
+    pull_result = _run_self_update_git_command(["pull", "--ff-only"])
     if pull_result.returncode != 0:
         raise AppUpdateError(
             f"Git pull failed: {_git_error_message(pull_result, 'The remote update could not be applied.')}",
             500,
         )
 
-    current_commit_result = _run_git_command(["rev-parse", "HEAD"])
+    current_commit_result = _run_self_update_git_command(["rev-parse", "HEAD"])
     if current_commit_result.returncode != 0:
         raise AppUpdateError(
             _git_error_message(current_commit_result, "Could not determine the updated commit."),

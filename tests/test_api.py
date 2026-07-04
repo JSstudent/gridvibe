@@ -1606,7 +1606,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout="0\t0\n", stderr=""),
         ]
 
-        with patch.object(api, "_run_git_command", side_effect=git_results) as mock_git:
+        with patch.object(api, "_run_self_update_git_command", side_effect=git_results) as mock_git:
             result = api.perform_self_update()
 
         self.assertFalse(result["updated"])
@@ -1630,7 +1630,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout="def987654321\n", stderr=""),
         ]
 
-        with patch.object(api, "_run_git_command", side_effect=git_results) as mock_git:
+        with patch.object(api, "_run_self_update_git_command", side_effect=git_results) as mock_git:
             result = api.perform_self_update()
 
         self.assertTrue(result["updated"])
@@ -1648,7 +1648,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout=" M web/api.py\n", stderr=""),
         ]
 
-        with patch.object(api, "_run_git_command", side_effect=git_results):
+        with patch.object(api, "_run_self_update_git_command", side_effect=git_results):
             with self.assertRaises(api.AppUpdateError) as context:
                 api.perform_self_update()
 
