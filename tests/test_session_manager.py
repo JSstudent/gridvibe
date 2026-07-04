@@ -105,6 +105,59 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(sessions[0].to_dict()["startup_mode"], "explorer")
         self.assertEqual(sessions[0].to_dict()["explorer_root_directory"], "C:\\repo")
 
+    def test_create_sessions_supports_agent_metadata(self):
+        sessions = self.manager.create_sessions(
+            [
+                {
+                    "mode": "ssh",
+                    "host": "127.0.0.1",
+                    "directory": "/repo",
+                    "initial_command": "claude-code",
+                    "initial_command_mode": "agent",
+                    "agent_selection": "other",
+                    "custom_agent": "claude-code",
+                }
+            ],
+            group_id="group-agent",
+        )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].initial_command_mode, "agent")
+        self.assertEqual(sessions[0].agent_selection, "other")
+        self.assertEqual(sessions[0].custom_agent, "claude-code")
+        self.assertEqual(sessions[0].to_dict()["initial_command_mode"], "agent")
+
+    def test_create_group_preserves_workspace_layout_metadata(self):
+        workspace_layout = {
+            "class_name": "layout-split-local",
+            "split_slot_rects": [
+                {"originSlot": 0, "x": 1, "y": 1, "w": 2, "h": 2},
+            ],
+        }
+
+        group = self.manager.create_group(
+            name="saved",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            workspace_layout=workspace_layout,
+        )
+
+        self.assertEqual(group.workspace_layout, workspace_layout)
+        self.assertEqual(group.to_dict()["workspace_layout"], workspace_layout)
+
+    def test_create_group_preserves_surface_mode_metadata(self):
+        group = self.manager.create_group(
+            name="maxed",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            surface_mode="max",
+        )
+
+        self.assertEqual(group.surface_mode, "max")
+        self.assertEqual(group.to_dict()["surface_mode"], "max")
+
     def test_update_session_status_marks_connected_and_notifies_callbacks(self):
         session = self.manager.create_session(
             group_id="group-b",

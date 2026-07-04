@@ -34,6 +34,9 @@ class TerminalSession:
     port: int = 22
     password: Optional[str] = field(default=None, repr=False)
     initial_command: Optional[str] = None
+    initial_command_mode: str = "command"
+    agent_selection: str = ""
+    custom_agent: str = ""
     title: Optional[str] = None
     mode: str = "ssh"
     distribution: Optional[str] = None
@@ -56,6 +59,9 @@ class TerminalSession:
             "username": self.username,
             "port": self.port,
             "initial_command": self.initial_command,
+            "initial_command_mode": self.initial_command_mode,
+            "agent_selection": self.agent_selection,
+            "custom_agent": self.custom_agent,
             "title": self.title,
             "mode": self.mode,
             "distribution": self.distribution,
@@ -79,6 +85,9 @@ class SessionGroup:
     layout: str
     terminal_count: int
     display_order: int = 0
+    saved_session_id: str = ""
+    workspace_layout: Optional[Dict[str, Any]] = None
+    surface_mode: str = "normal"
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -90,6 +99,9 @@ class SessionGroup:
             "layout": self.layout,
             "terminal_count": self.terminal_count,
             "display_order": self.display_order,
+            "saved_session_id": self.saved_session_id,
+            "workspace_layout": self.workspace_layout,
+            "surface_mode": self.surface_mode,
             "created_at": self.created_at,
         }
 
@@ -114,6 +126,9 @@ class SessionManager:
         layout: str,
         terminal_count: int,
         group_id: Optional[str] = None,
+        saved_session_id: str = "",
+        workspace_layout: Optional[Dict[str, Any]] = None,
+        surface_mode: str = "normal",
     ) -> SessionGroup:
         """Create one group of launched sessions."""
         resolved_group_id = str(group_id or uuid.uuid4().hex[:12])
@@ -133,6 +148,9 @@ class SessionManager:
             layout=layout,
             terminal_count=terminal_count,
             display_order=next_display_order,
+            saved_session_id=str(saved_session_id or "").strip(),
+            workspace_layout=workspace_layout,
+            surface_mode=surface_mode if surface_mode in {"normal", "max"} else "normal",
         )
 
         with self.lock:
@@ -149,6 +167,9 @@ class SessionManager:
         port: int = 22,
         password: Optional[str] = None,
         initial_command: Optional[str] = None,
+        initial_command_mode: str = "command",
+        agent_selection: str = "",
+        custom_agent: str = "",
         title: Optional[str] = None,
         mode: str = "ssh",
         distribution: Optional[str] = None,
@@ -187,6 +208,9 @@ class SessionManager:
             port=port,
             password=password,
             initial_command=initial_command,
+            initial_command_mode=initial_command_mode,
+            agent_selection=agent_selection,
+            custom_agent=custom_agent,
             title=title,
             mode=mode,
             distribution=distribution,
@@ -212,6 +236,9 @@ class SessionManager:
         port: int = 22,
         password: Optional[str] = None,
         initial_command: Optional[str] = None,
+        initial_command_mode: str = "command",
+        agent_selection: str = "",
+        custom_agent: str = "",
         title: Optional[str] = None,
         mode: str = "ssh",
         distribution: Optional[str] = None,
@@ -231,6 +258,9 @@ class SessionManager:
             port=port,
             password=password,
             initial_command=initial_command,
+            initial_command_mode=initial_command_mode,
+            agent_selection=agent_selection,
+            custom_agent=custom_agent,
             title=title,
             mode=mode,
             distribution=distribution,
@@ -284,6 +314,9 @@ class SessionManager:
                     port=config.get("port", 22),
                     password=config.get("password"),
                     initial_command=config.get("initial_command"),
+                    initial_command_mode=str(config.get("initial_command_mode") or "command"),
+                    agent_selection=str(config.get("agent_selection") or ""),
+                    custom_agent=str(config.get("custom_agent") or ""),
                     title=config.get("title"),
                     mode=mode,
                     distribution=config.get("distribution"),
@@ -313,6 +346,9 @@ class SessionManager:
             "port",
             "password",
             "initial_command",
+            "initial_command_mode",
+            "agent_selection",
+            "custom_agent",
             "title",
             "distribution",
             "use_wsl",
@@ -348,6 +384,24 @@ class SessionManager:
                 self.groups.values(),
                 key=lambda group: (group.display_order, group.created_at),
             )
+
+    def update_group_saved_session(
+        self,
+        group_id: str,
+        saved_session_id: str,
+        name: Optional[str] = None,
+    ) -> Optional[SessionGroup]:
+        """Update the saved-session target metadata for one launched group."""
+        with self.lock:
+            group = self.groups.get(group_id)
+            if not group:
+                return None
+
+            group.saved_session_id = str(saved_session_id or "").strip()
+            normalized_name = str(name or "").strip()
+            if normalized_name:
+                group.name = normalized_name
+            return group
 
     def reorder_groups(self, ordered_group_ids: List[str]) -> List[SessionGroup]:
         """Persist a new display order for known groups."""

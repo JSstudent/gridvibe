@@ -194,14 +194,16 @@
 
         /* ── Top bar ── */
         .topbar {
-            display: flex;
-            justify-content: space-between;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
             align-items: center;
+            column-gap: 12px;
             padding: 10px 18px;
             background: var(--t-topbar);
             border-bottom: 1px solid var(--t-border);
             flex-shrink: 0;
             height: 50px;
+            -webkit-app-region: drag;
         }
 
         .session-bar {
@@ -266,6 +268,23 @@
             color: #cffff0;
         }
 
+        .session-tab.save {
+            background: rgba(37, 99, 235, 0.16);
+            border-color: #3b82f6;
+            color: #bfdbfe;
+        }
+
+        .session-tab.save:hover {
+            background: rgba(37, 99, 235, 0.24);
+            border-color: #60a5fa;
+            color: #eff6ff;
+        }
+
+        .session-tab.save:disabled {
+            cursor: wait;
+            opacity: 0.65;
+        }
+
         [data-theme="light"] .session-tab {
             box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
         }
@@ -280,6 +299,18 @@
             background: #d1fae5;
             border-color: rgba(4, 120, 87, 0.75);
             color: #065f46;
+        }
+
+        [data-theme="light"] .session-tab.save {
+            background: #eff6ff;
+            border-color: rgba(37, 99, 235, 0.55);
+            color: #1d4ed8;
+        }
+
+        [data-theme="light"] .session-tab.save:hover {
+            background: #dbeafe;
+            border-color: rgba(37, 99, 235, 0.75);
+            color: #1e40af;
         }
 
         .session-tab.dragging {
@@ -357,10 +388,103 @@
             opacity: 1;
         }
 
+        .topbar-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+            justify-self: start;
+        }
+
+        .topbar-icon {
+            width: 28px;
+            height: 28px;
+            flex: 0 0 auto;
+        }
+
+        .sessions-menu {
+            position: relative;
+            display: inline-flex;
+            flex: 0 0 auto;
+        }
+
+        .sessions-menu-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            height: 32px;
+        }
+
+        .sessions-menu-toggle::after {
+            content: "";
+            width: 0;
+            height: 0;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 5px solid currentColor;
+        }
+
+        .sessions-menu-panel {
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 0;
+            z-index: 50;
+            display: none;
+            min-width: 190px;
+            padding: 6px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 6px;
+            background: var(--t-ctx-bg);
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.32);
+        }
+
+        .sessions-menu.open .sessions-menu-panel {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sessions-menu-item {
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: var(--t-text-secondary);
+            cursor: pointer;
+            font: inherit;
+            font-size: .82rem;
+            font-weight: 500;
+            padding: 8px 10px;
+            text-align: left;
+            white-space: nowrap;
+        }
+
+        .sessions-menu-item:hover,
+        .sessions-menu-item:focus {
+            background: var(--t-ctx-hover);
+            color: var(--t-text);
+            outline: none;
+        }
+
+        .sessions-menu-item:disabled {
+            cursor: wait;
+            opacity: 0.65;
+        }
+
         .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 700; }
         .topbar-sub   { font-size: .78rem; color: var(--t-text-muted); margin-left: 10px; }
 
-        .topbar-actions { display: flex; gap: 8px; align-items: center; }
+        .topbar-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            justify-self: center;
+            -webkit-app-region: no-drag;
+        }
+
+        .topbar button,
+        .topbar a,
+        .sessions-menu {
+            -webkit-app-region: no-drag;
+        }
 
         .btn {
             padding: 6px 14px;
@@ -392,6 +516,247 @@
             font-size: 1rem;
             line-height: 1;
         }
+
+        .modal-shell {
+            position: fixed;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: rgba(7, 11, 24, 0.8);
+            backdrop-filter: blur(12px);
+            pointer-events: auto;
+            z-index: 12000;
+        }
+
+        .modal-shell.visible {
+            display: flex;
+        }
+
+        .modal-card {
+            width: min(720px, 100%);
+            max-height: min(70vh, 760px);
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr) auto;
+            gap: 16px;
+            padding: 20px;
+            border: 1px solid rgba(76, 201, 240, 0.16);
+            border-radius: 18px;
+            background: linear-gradient(180deg, rgba(22, 28, 46, 0.98) 0%, rgba(17, 23, 39, 0.98) 100%);
+            box-shadow: 0 22px 60px rgba(0, 0, 0, 0.48);
+            backdrop-filter: blur(16px);
+            pointer-events: auto;
+        }
+
+        .modal-head,
+        .modal-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+
+        .modal-title {
+            color: var(--t-text);
+            font-size: 1rem;
+            font-weight: 700;
+        }
+
+        .modal-copy {
+            color: var(--t-text-muted);
+            font-size: 0.82rem;
+            line-height: 1.45;
+        }
+
+        .modal-form {
+            display: grid;
+            gap: 14px;
+        }
+
+        .modal-field {
+            display: grid;
+            gap: 7px;
+        }
+
+        .modal-field label,
+        .modal-check {
+            color: var(--t-text-secondary);
+            font-size: 0.82rem;
+            font-weight: 600;
+        }
+
+        .modal-input {
+            width: 100%;
+            border: 1px solid rgba(76, 201, 240, 0.18);
+            border-radius: 8px;
+            background: rgba(8, 13, 25, 0.9);
+            color: var(--t-text);
+            font: inherit;
+            font-size: 0.92rem;
+            padding: 10px 12px;
+            outline: none;
+        }
+
+        .modal-input:focus {
+            border-color: rgba(76, 201, 240, 0.62);
+            box-shadow: 0 0 0 3px rgba(76, 201, 240, 0.12);
+        }
+
+        .modal-check {
+            display: inline-flex;
+            align-items: center;
+            gap: 9px;
+        }
+
+        .modal-check input {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--t-accent);
+        }
+
+        .saved-session-list {
+            min-height: 0;
+            display: grid;
+            gap: 10px;
+            overflow: auto;
+            padding-right: 4px;
+        }
+
+        .saved-session-item {
+            width: 100%;
+            padding: 14px 16px;
+            display: grid;
+            gap: 6px;
+            text-align: left;
+            border: 1px solid rgba(76, 201, 240, 0.14);
+            border-radius: 14px;
+            background: rgba(12, 18, 32, 0.82);
+            color: var(--t-text);
+            cursor: pointer;
+            transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+        }
+
+        .saved-session-item:hover {
+            transform: translateY(-1px);
+            border-color: rgba(76, 201, 240, 0.5);
+            background: rgba(20, 30, 52, 0.94);
+        }
+
+        .saved-session-content {
+            min-width: 0;
+            display: grid;
+            gap: 6px;
+        }
+
+        .saved-session-topline,
+        .saved-session-tags {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .saved-session-topline {
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .saved-session-name {
+            color: var(--t-text);
+            font-size: 0.94rem;
+            font-weight: 700;
+        }
+
+        .saved-session-tag {
+            padding: 3px 8px;
+            border-radius: 999px;
+            border: 1px solid rgba(76, 201, 240, 0.14);
+            background: rgba(22, 32, 58, 0.72);
+            color: var(--t-text-muted);
+            font-size: 0.66rem;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .saved-session-tag.current {
+            border-color: rgba(76, 201, 240, 0.32);
+            background: rgba(76, 201, 240, 0.12);
+            color: var(--t-accent);
+        }
+
+        .saved-session-meta,
+        .saved-session-id {
+            color: var(--t-text-muted);
+            font-size: 0.76rem;
+            line-height: 1.4;
+        }
+
+        .modal-actions {
+            flex-wrap: wrap;
+        }
+
+        .modal-actions-buttons {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        [data-theme="light"] .modal-shell {
+            background: rgba(107, 114, 128, 0.35);
+        }
+
+        [data-theme="light"] .modal-card {
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.99) 0%, rgba(249, 250, 251, 0.99) 100%);
+            border-color: rgba(75, 85, 99, 0.30);
+            box-shadow: 0 22px 60px rgba(15, 23, 42, 0.22);
+        }
+
+        [data-theme="light"] .saved-session-item {
+            border-color: rgba(75, 85, 99, 0.34);
+            background: rgba(255, 255, 255, 0.99);
+            box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
+        }
+
+        [data-theme="light"] .saved-session-item:hover {
+            border-color: rgba(8, 145, 178, 0.54);
+            background: rgba(240, 247, 250, 0.96);
+        }
+
+        [data-theme="light"] .saved-session-name {
+            color: #111827;
+            font-weight: 800;
+        }
+
+        [data-theme="light"] .modal-input {
+            border-color: rgba(75, 85, 99, 0.38);
+            background: rgba(255, 255, 255, 0.99);
+            color: #111827;
+        }
+
+        [data-theme="light"] .modal-input:focus {
+            border-color: rgba(14, 116, 144, 0.5);
+            box-shadow: 0 0 0 3px rgba(14, 116, 144, 0.12);
+        }
+
+        [data-theme="light"] .saved-session-meta,
+        [data-theme="light"] .saved-session-id {
+            color: #374151;
+            font-weight: 600;
+        }
+
+        [data-theme="light"] .saved-session-tag {
+            border-color: rgba(75, 85, 99, 0.28);
+            background: rgba(241, 245, 249, 0.96);
+            color: #374151;
+        }
+
+        [data-theme="light"] .saved-session-tag.current {
+            border-color: rgba(8, 145, 178, 0.32);
+            background: rgba(8, 145, 178, 0.08);
+        }
+
         .settings-window-btn {
             width: 38px;
             height: 34px;
@@ -649,6 +1014,19 @@
             cursor: not-allowed;
         }
 
+        .terminal-close-btn {
+            border-color: rgba(255, 92, 92, .7);
+            background: rgba(90, 24, 24, .28);
+            color: #ff9b9b;
+            min-width: 31px;
+        }
+
+        .terminal-close-btn:hover:not(:disabled) {
+            border-color: #ff6b6b;
+            background: rgba(170, 42, 42, .28);
+            color: #ffd0d0;
+        }
+
         .explorer-theme-btn {
             min-width: 32px;
         }
@@ -664,6 +1042,9 @@
         .voice-btn {
             position: relative;
             transition: border-color .18s, color .18s, box-shadow .3s;
+        }
+        .voice-btn:disabled {
+            cursor: default;
         }
         .voice-settings-btn {
             min-width: 42px;
@@ -766,8 +1147,13 @@
             display: none;
         }
 
-        body.surface-max .topbar-title {
-            font-size: .88rem;
+        body.surface-max .topbar-icon {
+            width: 24px;
+            height: 24px;
+        }
+
+        body.surface-max .sessions-menu-toggle {
+            height: 28px;
         }
 
         body.surface-max .topbar-sub {
@@ -886,6 +1272,19 @@
             min-width: 0;
         }
 
+        .explorer-directory-search {
+            display: none;
+            align-items: center;
+            gap: 4px;
+            min-width: 170px;
+            flex: 0 1 280px;
+            margin-left: auto;
+        }
+
+        .explorer-directory-search.active {
+            display: inline-flex;
+        }
+
         .explorer-up {
             width: 32px;
             height: 28px;
@@ -912,6 +1311,17 @@
             font-family: Consolas, Monaco, 'Courier New', monospace;
         }
 
+        .explorer-git-summary {
+            max-width: 42%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--explorer-muted);
+            font-size: .72rem;
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+            flex: 0 1 auto;
+        }
+
         .explorer-list {
             min-height: 0;
             overflow: auto;
@@ -926,7 +1336,7 @@
 
         .explorer-row {
             display: grid;
-            grid-template-columns: 24px minmax(0, 1fr) minmax(52px, 72px) minmax(92px, 150px);
+            grid-template-columns: 24px 22px minmax(0, 1fr) minmax(52px, 72px) minmax(92px, 150px);
             gap: 10px;
             align-items: center;
             min-height: 34px;
@@ -991,6 +1401,40 @@
             color: var(--explorer-file);
         }
 
+        .explorer-git-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 18px;
+            height: 18px;
+            border: 1px solid var(--explorer-row-border);
+            border-radius: 4px;
+            color: var(--t-accent);
+            background: var(--explorer-bar-bg);
+            font-size: .68rem;
+            font-weight: 700;
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        .explorer-git-badge.clean {
+            visibility: hidden;
+        }
+
+        .explorer-git-badge.untracked,
+        .explorer-git-badge.ignored {
+            color: var(--explorer-muted);
+        }
+
+        .explorer-git-badge.conflicted,
+        .explorer-git-badge.deleted {
+            color: #b91c1c;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-git-badge.conflicted,
+        .explorer-pane[data-explorer-theme="dark"] .explorer-git-badge.deleted {
+            color: #fca5a5;
+        }
+
         .explorer-name {
             min-width: 0;
             overflow: hidden;
@@ -1014,6 +1458,15 @@
             padding: 14px;
             color: var(--explorer-muted);
             font-size: .78rem;
+        }
+
+        .explorer-file-open-error {
+            border-bottom: 1px solid var(--explorer-row-border);
+            color: #b45309;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-file-open-error {
+            color: #fbbf24;
         }
 
         .explorer-editor {
@@ -1065,7 +1518,8 @@
             padding: 5px 8px;
         }
 
-        .explorer-editor-tab[aria-selected="true"] {
+        .explorer-editor-tab[aria-selected="true"],
+        .explorer-editor-tab[aria-pressed="true"] {
             border-color: var(--t-accent);
             color: var(--t-accent);
             background: var(--explorer-row-active);
@@ -1183,6 +1637,21 @@
             display: grid;
         }
 
+        .explorer-editor-body.split-diff {
+            grid-template-columns: minmax(0, 1fr);
+        }
+
+        .explorer-editor-main {
+            min-width: 0;
+            min-height: 0;
+            overflow: hidden;
+            display: grid;
+        }
+
+        .explorer-editor-body.split-diff .explorer-editor-main {
+            display: none;
+        }
+
         .explorer-editor-panel {
             min-height: 0;
             overflow: auto;
@@ -1214,6 +1683,106 @@
             word-break: inherit;
         }
 
+        .explorer-diff-content {
+            color: var(--explorer-text);
+        }
+
+        .explorer-diff-split {
+            min-width: 0;
+            min-height: 0;
+            overflow: auto;
+            background: var(--explorer-bg);
+        }
+
+        .explorer-diff-split[hidden] {
+            display: none;
+        }
+
+        .explorer-side-by-side-diff {
+            min-width: 720px;
+            display: grid;
+            align-content: start;
+            color: var(--explorer-text);
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-size: var(--explorer-editor-font-size, .78rem);
+            line-height: 1.45;
+        }
+
+        .explorer-diff-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            min-height: 22px;
+            border-bottom: 1px solid rgba(127, 127, 127, .08);
+        }
+
+        .explorer-diff-cell {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: 54px minmax(0, 1fr);
+            border-right: 1px solid var(--explorer-row-border);
+        }
+
+        .explorer-diff-cell:last-child {
+            border-right: 0;
+        }
+
+        .explorer-diff-line-number {
+            padding: 2px 8px;
+            color: var(--explorer-muted);
+            text-align: right;
+            user-select: none;
+            border-right: 1px solid rgba(127, 127, 127, .12);
+        }
+
+        .explorer-diff-line-code {
+            min-width: 0;
+            padding: 2px 10px;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .explorer-diff-cell.add {
+            background: rgba(34, 197, 94, .18);
+        }
+
+        .explorer-diff-cell.delete {
+            background: rgba(239, 68, 68, .18);
+        }
+
+        .explorer-diff-cell.empty {
+            background:
+                repeating-linear-gradient(
+                    -45deg,
+                    rgba(127, 127, 127, .12),
+                    rgba(127, 127, 127, .12) 2px,
+                    transparent 2px,
+                    transparent 7px
+                );
+        }
+
+        .explorer-diff-cell.hunk {
+            grid-column: 1 / 3;
+            grid-template-columns: 1fr;
+            padding: 3px 10px;
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-right: 0;
+            font-weight: 700;
+        }
+
+        .explorer-diff-empty {
+            padding: 14px;
+            color: var(--explorer-muted);
+            font-size: .78rem;
+        }
+
+        @media (max-width: 900px) {
+            .explorer-side-by-side-diff {
+                min-width: 620px;
+            }
+        }
+
         .explorer-code-keyword {
             color: #7c3aed;
             font-weight: 700;
@@ -1235,6 +1804,32 @@
         .explorer-code-builtin {
             color: #0369a1;
             font-weight: 600;
+        }
+
+        .explorer-log-timestamp {
+            color: #64748b;
+            font-weight: 600;
+        }
+
+        .explorer-log-level {
+            font-weight: 700;
+        }
+
+        .explorer-log-level.trace,
+        .explorer-log-level.debug {
+            color: #64748b;
+        }
+
+        .explorer-log-level.info {
+            color: #0369a1;
+        }
+
+        .explorer-log-level.warn {
+            color: #b45309;
+        }
+
+        .explorer-log-level.error {
+            color: #b91c1c;
         }
 
         .explorer-search-match {
@@ -1264,6 +1859,24 @@
 
         .explorer-pane[data-explorer-theme="dark"] .explorer-code-builtin {
             color: #7dd3fc;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-log-timestamp,
+        .explorer-pane[data-explorer-theme="dark"] .explorer-log-level.trace,
+        .explorer-pane[data-explorer-theme="dark"] .explorer-log-level.debug {
+            color: #94a3b8;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-log-level.info {
+            color: #7dd3fc;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-log-level.warn {
+            color: #fbbf24;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-log-level.error {
+            color: #fca5a5;
         }
 
         .explorer-markdown-preview {
@@ -1466,8 +2079,46 @@
 
 <!-- Top bar -->
 <div class="topbar" id="terminalTopbar">
-    <div>
-        <span class="topbar-title">GridVibe</span>
+    <div class="topbar-brand">
+        <img
+            class="topbar-icon"
+            src="/docs/images/GridVibe_icon.ico"
+            alt="GridVibe"
+            width="28"
+            height="28"
+        >
+        <div class="sessions-menu" id="sessionsMenuRoot">
+            <button
+                type="button"
+                class="btn btn-neutral sessions-menu-toggle"
+                id="sessionsMenuBtn"
+                onclick="toggleSessionsMenu(event)"
+                aria-haspopup="true"
+                aria-expanded="false"
+            >Sessions...</button>
+            <div class="sessions-menu-panel" id="sessionsMenu" role="menu" aria-labelledby="sessionsMenuBtn">
+                <button
+                    type="button"
+                    class="sessions-menu-item"
+                    role="menuitem"
+                    onclick="closeSessionsMenu(); return openNewSessionSelector(event);"
+                >Import Session ...</button>
+                <button
+                    type="button"
+                    class="sessions-menu-item"
+                    id="saveSessionMenuItem"
+                    role="menuitem"
+                    onclick="closeSessionsMenu(); saveActiveWorkspaceSession(this);"
+                >Save Session</button>
+                <button
+                    type="button"
+                    class="sessions-menu-item"
+                    id="saveSessionAsMenuItem"
+                    role="menuitem"
+                    onclick="closeSessionsMenu(); saveActiveWorkspaceSessionAs(this);"
+                >Save Session as ...</button>
+            </div>
+        </div>
         <span class="topbar-sub" id="sessionLabel">Loading…</span>
     </div>
     <div class="topbar-actions">
@@ -1553,6 +2204,54 @@
     <a href="/" onclick="return goToSettings(event)">Launch terminals →</a>
 </div>
 
+<div id="savedSessionsModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="savedSessionsTitle">
+        <div class="modal-head">
+            <div>
+                <div id="savedSessionsTitle" class="modal-title">Import Saved Session</div>
+                <div class="modal-copy">Pick one saved launcher setup to launch as a new session.</div>
+            </div>
+            <button class="btn btn-neutral" type="button" onclick="closeSavedSessionModal()">Close</button>
+        </div>
+        <div id="savedSessionsList" class="saved-session-list"></div>
+        <div class="modal-actions">
+            <div id="savedSessionsFooterCopy" class="modal-copy"></div>
+            <div class="modal-actions-buttons">
+                <button class="btn btn-neutral" type="button" onclick="closeSavedSessionModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="saveSessionAsModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="saveSessionAsTitle">
+        <div class="modal-head">
+            <div>
+                <div id="saveSessionAsTitle" class="modal-title">Save Session As</div>
+                <div class="modal-copy">Create a saved session from the current workspace.</div>
+            </div>
+            <button class="btn btn-neutral" type="button" onclick="closeSaveSessionAsModal()">Close</button>
+        </div>
+        <form id="saveSessionAsForm" class="modal-form">
+            <div class="modal-field">
+                <label for="saveSessionAsName">Session name</label>
+                <input id="saveSessionAsName" class="modal-input" type="text" autocomplete="off">
+            </div>
+            <label class="modal-check" for="saveSessionAsOpenNow">
+                <input id="saveSessionAsOpenNow" type="checkbox">
+                <span>Open session now</span>
+            </label>
+        </form>
+        <div class="modal-actions">
+            <div id="saveSessionAsFooterCopy" class="modal-copy"></div>
+            <div class="modal-actions-buttons">
+                <button class="btn btn-neutral" type="button" onclick="closeSaveSessionAsModal()">Cancel</button>
+                <button class="btn btn-primary" type="submit" form="saveSessionAsForm">Save</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js"></script>
@@ -1561,6 +2260,10 @@
     const THEME_STORAGE_KEY = 'gridvibe.theme';
     const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';
     const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';
+    const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';
+    const APP_CONFIG_BROADCAST_CHANNEL = 'gridvibe.appConfig';
+    const DEFAULT_SURFACE_MODE = {{ app_surface_mode|tojson }};
+    const DEFAULT_SAVED_SESSION_ID = 'default-session';
 
     function normalizeThemePreference(theme) {
         return ['system', 'light', 'dark'].includes(theme) ? theme : 'system';
@@ -1579,6 +2282,19 @@
         return preference === 'system' ? getSystemTheme() : preference;
     }
 
+    function syncNativeTheme(resolvedTheme) {
+        try {
+            const bridge = window.pywebview?.api;
+            if (bridge?.set_native_theme) {
+                bridge.set_native_theme(resolvedTheme).catch(error => {
+                    console.error('[GridVibe Sessions] native theme sync failed:', error);
+                });
+            }
+        } catch (error) {
+            console.error('[GridVibe Sessions] native theme sync failed:', error);
+        }
+    }
+
     function applyTheme(theme) {
         const preference = normalizeThemePreference(theme);
         const resolved = resolveTheme(preference);
@@ -1592,6 +2308,7 @@
                 : preference === 'dark' ? '🌙 Dark'
                 : '◐ System';
         }
+        syncNativeTheme(resolved);
         syncDefaultExplorerThemes();
     }
 
@@ -1610,6 +2327,9 @@
 
     (function initTheme() {
         applyTheme(getStoredTheme() || 'system');
+        window.addEventListener('pywebviewready', () => {
+            syncNativeTheme(document.documentElement.getAttribute('data-theme') || resolveTheme(getStoredTheme() || 'system'));
+        });
         const mediaQuery = window.matchMedia('(prefers-color-scheme: light)');
         const listener = () => {
             const themePreference = document.documentElement.getAttribute('data-theme-preference') || getStoredTheme() || 'system';
@@ -1623,6 +2343,10 @@
             mediaQuery.addListener(listener);
         }
     })();
+
+    function normalizeSurfaceMode(mode) {
+        return mode === 'max' ? 'max' : 'normal';
+    }
 
     function getStoredSurfaceMode() {
         try {
@@ -1666,9 +2390,60 @@
     }
 
     function toggleSurfaceMode() {
+        surfaceModeChangedManually = true;
         applySurfaceMode(!document.body.classList.contains('surface-max'), {
             persist: true,
             refit: true
+        });
+    }
+
+    function applyConfiguredSurfaceMode(data, { refit = false } = {}) {
+        if (surfaceModeChangedManually) {
+            return;
+        }
+
+        const groupId = data?.group?.group_id || activeGroupId || '';
+        const mode = normalizeSurfaceMode(data?.surface_mode || DEFAULT_SURFACE_MODE);
+        const applyKey = `${data?.group?.created_at || ''}:${mode}`;
+        if (groupId && surfaceModeAppliedGroups.get(groupId) === applyKey) {
+            return;
+        }
+
+        applySurfaceMode(mode === 'max', { refit });
+        if (groupId) {
+            surfaceModeAppliedGroups.set(groupId, applyKey);
+        }
+    }
+
+    function applyAppConfigSurfaceMode(message) {
+        if (!message || typeof message !== 'object' || !message.workspace) {
+            return;
+        }
+
+        const mode = normalizeSurfaceMode(message.workspace.surface_mode);
+        surfaceModeChangedManually = true;
+        surfaceModeAppliedGroups.clear();
+        applySurfaceMode(mode === 'max', { persist: true, refit: true });
+    }
+
+    function setupAppConfigUpdateListeners() {
+        if ('BroadcastChannel' in window) {
+            try {
+                const channel = new BroadcastChannel(APP_CONFIG_BROADCAST_CHANNEL);
+                channel.onmessage = event => {
+                    applyAppConfigSurfaceMode(event.data || {});
+                };
+            } catch (_error) {}
+        }
+
+        window.addEventListener('storage', event => {
+            if (event.key !== APP_CONFIG_UPDATE_STORAGE_KEY || !event.newValue) {
+                return;
+            }
+
+            try {
+                applyAppConfigSurfaceMode(JSON.parse(event.newValue));
+            } catch (_error) {}
         });
     }
 
@@ -1837,12 +2612,19 @@
     let sessionGroups = [];
     let activeLoadToken = 0;
     let knownGroupIds = [];
+    let workspaceSaveTargets = new Map();
+    let surfaceModeChangedManually = false;
+    let surfaceModeAppliedGroups = new Map();
     let pendingSplitRestore = null;
     let pendingModeSwitchSessionIds = new Set();
+    let savedSessionResolver = null;
+    let saveSessionAsResolver = null;
     const MAX_SPLIT_TERMINALS = Math.min(8, Number({{ max_sessions | tojson }} || 8));
     const MIN_SPLIT_COLS = 8;
     const MIN_SPLIT_ROWS = 8;
     const MIN_RESIZE_SURFACE_RATIO = 1 / 8;
+    const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';
+    const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';
     let splitSlotRects = null;
     let splitColumnWeights = null;
     let splitRowWeights = null;
@@ -1875,6 +2657,11 @@
 
     function getGroupById(groupId) {
         return sessionGroups.find(group => group.group_id === groupId) || null;
+    }
+
+    function getActiveWorkspaceGroupId() {
+        const activeTabGroupId = document.querySelector('.session-tab.active[data-group-id]')?.dataset.groupId || '';
+        return activeTabGroupId || activeGroupId || '';
     }
 
     function setSessionRoute(sessionId, groupId, index) {
@@ -2253,18 +3040,789 @@
         button.style.borderColor = hexToRgba(colour, 0.4);
     }
 
+    function savedSessionIdFromGroupId(groupId) {
+        const prefix = 'saved-session-';
+        const value = String(groupId || '');
+        return value.startsWith(prefix) ? value.slice(prefix.length) : '';
+    }
+
+    function getWorkspaceSaveTarget(groupId = activeGroupId) {
+        const group = getGroupById(groupId);
+        const groupSavedSessionId = String(group?.saved_session_id || '').trim();
+        if (groupSavedSessionId) {
+            return {
+                id: groupSavedSessionId,
+                name: group?.name || ''
+            };
+        }
+
+        const override = workspaceSaveTargets.get(groupId);
+        if (override?.id) {
+            return override;
+        }
+
+        const savedSessionId = savedSessionIdFromGroupId(groupId);
+        return {
+            id: savedSessionId,
+            name: group?.name || ''
+        };
+    }
+
+    function rememberWorkspaceSaveTarget(groupId, savedSessionId, sessionName) {
+        const targetId = String(savedSessionId || '').trim();
+        const targetName = String(sessionName || '').trim();
+        if (!groupId || !targetId) {
+            return;
+        }
+
+        workspaceSaveTargets.set(groupId, {
+            id: targetId,
+            name: targetName
+        });
+
+        const group = getGroupById(groupId);
+        if (group) {
+            group.saved_session_id = targetId;
+            if (targetName) {
+                group.name = targetName;
+            }
+            renderSessionTabs();
+            updateSessionChrome(getWorkspacePanesInVisualOrder(groupId).length, groupId);
+        }
+    }
+
+    function notifySavedSessionUpdated(savedSession, options = {}) {
+        const sessionId = String(savedSession?.id || '').trim();
+        if (!sessionId) {
+            return;
+        }
+
+        const payload = {
+            id: sessionId,
+            name: String(savedSession?.name || '').trim(),
+            updated_at: String(savedSession?.updated_at || '').trim(),
+            activate: Boolean(options.activate),
+            timestamp: Date.now(),
+            nonce: Math.random().toString(36).slice(2)
+        };
+
+        try {
+            const channel = new BroadcastChannel(SAVED_SESSION_BROADCAST_CHANNEL);
+            channel.postMessage(payload);
+            channel.close();
+        } catch (_error) {}
+
+        try {
+            localStorage.setItem(SAVED_SESSION_UPDATE_STORAGE_KEY, JSON.stringify(payload));
+        } catch (_error) {}
+    }
+
+    function closeSessionsMenu() {
+        const root = document.getElementById('sessionsMenuRoot');
+        const button = document.getElementById('sessionsMenuBtn');
+        root?.classList.remove('open');
+        button?.setAttribute('aria-expanded', 'false');
+    }
+
+    function toggleSessionsMenu(event) {
+        event?.preventDefault();
+        event?.stopPropagation();
+        const root = document.getElementById('sessionsMenuRoot');
+        const button = document.getElementById('sessionsMenuBtn');
+        if (!root || !button) {
+            return;
+        }
+
+        const shouldOpen = !root.classList.contains('open');
+        root.classList.toggle('open', shouldOpen);
+        button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+    }
+
+    function getConnectionModeLabel(mode) {
+        return mode === 'wsl' ? 'Local Repo' : 'SSH';
+    }
+
+    function getStep2DefaultDirectory(config) {
+        return config?.connection_mode === 'wsl'
+            ? String(config?.wsl?.default_dir || '').trim()
+            : String(config?.ssh?.default_dir || '').trim();
+    }
+
+    function isAbsoluteDirectory(path, mode) {
+        const trimmed = String(path || '').trim();
+        if (!trimmed) {
+            return false;
+        }
+        if (/^[A-Za-z]:[\\/]/.test(trimmed)) {
+            return true;
+        }
+        if (trimmed.startsWith('\\\\')) {
+            return true;
+        }
+        if (trimmed.startsWith('/') || trimmed.startsWith('~')) {
+            return true;
+        }
+        return mode === 'wsl' && trimmed.startsWith('\\');
+    }
+
+    function normalizeComparableDirectory(path, mode) {
+        const trimmed = String(path || '').trim();
+        if (!trimmed) {
+            return '';
+        }
+
+        let normalized = trimmed.replace(/\\/g, '/');
+        if (normalized !== '/') {
+            normalized = normalized.replace(/\/+$/, '');
+        }
+        if (!normalized && trimmed.startsWith('/')) {
+            normalized = '/';
+        }
+        if (mode === 'wsl') {
+            normalized = normalized.toLowerCase();
+        }
+        return normalized;
+    }
+
+    function joinDirectories(baseDir, childDir, mode) {
+        const rawBase = String(baseDir || '').trim();
+        const base = rawBase === '/' ? '/' : rawBase.replace(/[\\/]+$/, '');
+        const child = String(childDir || '').trim().replace(/^[\\/]+/, '');
+        if (!base) {
+            return child;
+        }
+        if (!child) {
+            return base;
+        }
+
+        const separator = mode === 'wsl' && base.includes('\\') && !base.includes('/') ? '\\' : '/';
+        const normalizedChild = child.replace(/[\\/]+/g, separator);
+        return `${base}${separator}${normalizedChild}`;
+    }
+
+    function resolveTerminalDirectory(defaultDir, terminalDir, mode) {
+        const baseDirectory = String(defaultDir || '').trim();
+        const rawDirectory = String(terminalDir || '').trim();
+        if (!rawDirectory) {
+            return baseDirectory;
+        }
+        if (!baseDirectory || !isAbsoluteDirectory(rawDirectory, mode)) {
+            return rawDirectory;
+        }
+
+        const normalizedDirectory = normalizeComparableDirectory(rawDirectory, mode);
+        const normalizedBase = normalizeComparableDirectory(baseDirectory, mode);
+        if (
+            normalizedDirectory === normalizedBase
+            || normalizedBase === '/'
+            || normalizedDirectory.startsWith(`${normalizedBase}/`)
+        ) {
+            return rawDirectory;
+        }
+
+        throw new Error('Step 3 directories must stay inside the Step 2 default working directory.');
+    }
+
+    function buildLaunchDirectory(defaultDir, terminalDir, mode) {
+        const baseDirectory = String(defaultDir || '').trim();
+        const rawDirectory = String(terminalDir || '').trim();
+        if (!rawDirectory) {
+            return baseDirectory;
+        }
+        if (!baseDirectory) {
+            return rawDirectory;
+        }
+        if (!isAbsoluteDirectory(rawDirectory, mode)) {
+            return joinDirectories(baseDirectory, rawDirectory, mode);
+        }
+        return resolveTerminalDirectory(baseDirectory, rawDirectory, mode);
+    }
+
+    function getDirectoryName(path) {
+        const trimmed = String(path || '').trim().replace(/[\\/]+$/, '');
+        if (!trimmed) {
+            return '';
+        }
+
+        const parts = trimmed.split(/[\\/]/).filter(Boolean);
+        return parts[parts.length - 1] || trimmed;
+    }
+
+    function buildSavedSessionLaunchName(savedSession, config) {
+        const sessionId = String(savedSession?.id || '').trim();
+        const sessionName = String(savedSession?.name || '').trim();
+        if (sessionId && sessionId !== DEFAULT_SAVED_SESSION_ID && sessionName) {
+            return sessionName;
+        }
+
+        const sshHost = String(config?.ssh?.host || '').trim();
+        if (config?.connection_mode === 'ssh' && sshHost) {
+            return sshHost;
+        }
+
+        const defaultDir = getStep2DefaultDirectory(config);
+        const firstTerminalDir = Array.isArray(config?.terminals)
+            ? String(config.terminals.find(terminal => terminal?.directory)?.directory || '').trim()
+            : '';
+        const directoryName = getDirectoryName(defaultDir || firstTerminalDir);
+        if (directoryName) {
+            return directoryName;
+        }
+
+        return `Session ${new Date().toLocaleTimeString()}`;
+    }
+
+    function buildSavedSessionTags(session) {
+        const tags = [];
+        const sessionId = String(session?.id || '').trim();
+        if (session?.is_default) {
+            tags.push('<span class="saved-session-tag">Default</span>');
+        }
+        if (sessionId && savedSessionIdFromGroupId(activeGroupId) === sessionId) {
+            tags.push('<span class="saved-session-tag current">Current</span>');
+        }
+        return tags.join('');
+    }
+
+    function buildSavedSessionCard(session) {
+        return `
+            <button type="button" class="saved-session-item" data-session-id="${escHtml(session.id)}">
+                <span class="saved-session-content">
+                    <span class="saved-session-topline">
+                        <span class="saved-session-name">${escHtml(session.name)}</span>
+                        <span class="saved-session-tags">${buildSavedSessionTags(session)}</span>
+                    </span>
+                    <span class="saved-session-meta">
+                        ${escHtml(getConnectionModeLabel(session.connection_mode))} &bull; ${escHtml(String(session.terminal_count))} terminal${session.terminal_count === 1 ? '' : 's'} &bull; ${escHtml(session.layout)}
+                    </span>
+                    <span class="saved-session-id">Updated ${escHtml(session.updated_at)} &bull; ${escHtml(session.id)}</span>
+                </span>
+            </button>
+        `;
+    }
+
+    function closeSavedSessionModal(result = null) {
+        const modal = document.getElementById('savedSessionsModal');
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+        document.getElementById('savedSessionsList').innerHTML = '';
+        document.getElementById('savedSessionsFooterCopy').textContent = '';
+
+        if (savedSessionResolver) {
+            const resolver = savedSessionResolver;
+            savedSessionResolver = null;
+            resolver(result);
+        }
+    }
+
+    function openSavedSessionModal(sessions) {
+        const modal = document.getElementById('savedSessionsModal');
+        const list = document.getElementById('savedSessionsList');
+        const footerCopy = document.getElementById('savedSessionsFooterCopy');
+        list.innerHTML = sessions.map(session => buildSavedSessionCard(session)).join('');
+        footerCopy.textContent = sessions.length
+            ? ''
+            : 'No saved sessions found.';
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        return new Promise(resolve => {
+            savedSessionResolver = resolve;
+            list.querySelectorAll('.saved-session-item').forEach(button => {
+                button.addEventListener('click', () => closeSavedSessionModal({ id: button.dataset.sessionId }));
+            });
+        });
+    }
+
+    function closeSaveSessionAsModal(result = null) {
+        const modal = document.getElementById('saveSessionAsModal');
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+        document.getElementById('saveSessionAsFooterCopy').textContent = '';
+
+        if (saveSessionAsResolver) {
+            const resolver = saveSessionAsResolver;
+            saveSessionAsResolver = null;
+            resolver(result);
+        }
+    }
+
+    function openSaveSessionAsModal(suggestedName) {
+        const modal = document.getElementById('saveSessionAsModal');
+        const nameInput = document.getElementById('saveSessionAsName');
+        const openNowInput = document.getElementById('saveSessionAsOpenNow');
+        nameInput.value = suggestedName || '';
+        openNowInput.checked = false;
+        document.getElementById('saveSessionAsFooterCopy').textContent = '';
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            nameInput.focus();
+            nameInput.select();
+        }, 0);
+
+        return new Promise(resolve => {
+            saveSessionAsResolver = resolve;
+        });
+    }
+
+    function buildSavedSessionLaunchPayload(savedSession) {
+        const config = savedSession?.config || {};
+        const sshConfig = config.ssh || {};
+        const wslConfig = config.wsl || {};
+        const connectionMode = config.connection_mode === 'wsl' ? 'wsl' : 'ssh';
+        const configuredCount = Number(config.terminal_count);
+        const terminalCount = Math.max(
+            1,
+            Math.min(
+                MAX_SPLIT_TERMINALS,
+                Number.isFinite(configuredCount) ? configuredCount : 1
+            )
+        );
+        const terminalConfigs = Array.isArray(config.terminals) ? config.terminals : [];
+        const configuredDefaultDir = getStep2DefaultDirectory(config);
+        const launchDefaultDir = configuredDefaultDir || (connectionMode === 'ssh' ? '/' : '');
+        const sessions = [];
+
+        if (connectionMode === 'ssh' && !String(sshConfig.host || '').trim()) {
+            throw new Error('Saved SSH sessions need a host before they can be launched.');
+        }
+        if (connectionMode === 'wsl' && !String(wslConfig.default_dir || '').trim()) {
+            throw new Error('Saved Local Repo sessions need a repository folder before they can be launched.');
+        }
+
+        Array.from({ length: terminalCount }, (_, index) => terminalConfigs[index] || {}).forEach((terminal, index) => {
+            const startupMode = terminal?.startup_mode === 'explorer'
+                ? 'explorer'
+                : (terminal?.initial_command_mode === 'agent' || terminal?.startup_mode === 'agent' ? 'agent' : 'terminal');
+            const resolvedDirectory = buildLaunchDirectory(
+                configuredDefaultDir,
+                terminal?.directory,
+                connectionMode
+            ) || launchDefaultDir;
+            const common = {
+                title: terminal?.title || `Terminal ${index + 1}`,
+                directory: resolvedDirectory,
+                initial_command: startupMode === 'explorer' ? null : (terminal?.initial_command || null),
+                initial_command_mode: startupMode === 'explorer'
+                    ? 'explorer'
+                    : (startupMode === 'agent' ? 'agent' : 'command'),
+                agent_selection: startupMode === 'agent' ? (terminal?.agent_selection || '') : '',
+                custom_agent: startupMode === 'agent' ? (terminal?.custom_agent || '') : '',
+                startup_mode: startupMode
+            };
+
+            if (connectionMode === 'ssh') {
+                sessions.push({
+                    ...common,
+                    host: sshConfig.host,
+                    username: sshConfig.username || 'ubuntu',
+                    password: sshConfig.password || null,
+                    port: sshConfig.port || 22
+                });
+                return;
+            }
+
+            sessions.push({
+                ...common,
+                distribution: terminal?.distribution || wslConfig.distribution || '',
+                username: wslConfig.username || '',
+                use_wsl: startupMode === 'explorer' ? false : Boolean(terminal?.use_wsl),
+                use_powershell: startupMode === 'explorer' ? false : Boolean(terminal?.use_powershell)
+            });
+        });
+
+        if (!sessions.length) {
+            throw new Error('Selected saved session does not contain any terminals.');
+        }
+
+        return {
+            connection_mode: connectionMode,
+            layout: config.layout || (terminalCount >= 4 ? 'grid' : (terminalCount <= 1 ? 'single' : 'vertical')),
+            workspace_layout: config.workspace_layout || null,
+            surface_mode: normalizeSurfaceMode(DEFAULT_SURFACE_MODE),
+            saved_session_id: savedSession.id,
+            session_name: buildSavedSessionLaunchName(savedSession, config),
+            sessions
+        };
+    }
+
+    async function launchSavedSession(savedSession) {
+        const payload = buildSavedSessionLaunchPayload(savedSession);
+        const response = await fetch('/api/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(data.error || `Launch failed with status ${response.status}`);
+        }
+
+        const groupId = data.group_id;
+        if (groupId) {
+            dropCachedGroupView(groupId);
+            if (visibleGroupId === groupId) {
+                teardownCurrentGrid();
+            }
+            activeGroupId = groupId;
+            syncLocationToGroup(activeGroupId);
+            await loadSessionGroups();
+            renderSessionTabs();
+            await initialLoad();
+        }
+
+        const warnings = Array.isArray(data.warnings)
+            ? data.warnings.filter(item => String(item || '').trim())
+            : [];
+        setWorkspaceSaveMessage(
+            warnings.length
+                ? `Launched "${payload.session_name}". ${warnings.length === 1 ? warnings[0] : `${warnings.length} startup commands were cleared after preflight failed.`}`
+                : `Launched "${payload.session_name}".`,
+            warnings.length ? 'warning' : 'success'
+        );
+    }
+
+    async function openNewSessionSelector(event) {
+        if (event) {
+            event.preventDefault();
+        }
+
+        try {
+            const listResponse = await fetch('/api/saved-sessions');
+            const listData = await listResponse.json().catch(() => ({}));
+            if (!listResponse.ok) {
+                throw new Error(listData.error || 'Failed to load saved sessions');
+            }
+
+            const importableSessions = [
+                ...(listData.default_session ? [listData.default_session] : []),
+                ...(Array.isArray(listData.sessions) ? listData.sessions : [])
+            ];
+            const selected = await openSavedSessionModal(importableSessions);
+            const selectedId = selected?.id;
+            if (!selectedId) {
+                return false;
+            }
+
+            setWorkspaceSaveMessage('Launching saved session...', '');
+            const response = await fetch(`/api/saved-sessions/${encodeURIComponent(selectedId)}`);
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load saved session');
+            }
+            await launchSavedSession(data);
+        } catch (error) {
+            console.error('[GridVibe Sessions] saved session launch failed:', error);
+            setWorkspaceSaveMessage(`Launch failed: ${error.message}`, 'error');
+        }
+
+        return false;
+    }
+
+    document.addEventListener('click', event => {
+        if (!(event.target instanceof Element) || !event.target.closest('#sessionsMenuRoot')) {
+            closeSessionsMenu();
+        }
+    });
+
+    document.getElementById('savedSessionsModal').addEventListener('click', event => {
+        if (event.target.id === 'savedSessionsModal') {
+            closeSavedSessionModal();
+        }
+    });
+
+    document.getElementById('saveSessionAsModal').addEventListener('click', event => {
+        if (event.target.id === 'saveSessionAsModal') {
+            closeSaveSessionAsModal();
+        }
+    });
+
+    document.getElementById('saveSessionAsForm').addEventListener('submit', event => {
+        event.preventDefault();
+        const suggestedName = document.getElementById('saveSessionAsName').value.trim();
+        if (!suggestedName) {
+            document.getElementById('saveSessionAsFooterCopy').textContent = 'Session name is required.';
+            document.getElementById('saveSessionAsName').focus();
+            return;
+        }
+
+        closeSaveSessionAsModal({
+            name: suggestedName,
+            openNow: document.getElementById('saveSessionAsOpenNow').checked
+        });
+    });
+
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            closeSessionsMenu();
+            if (document.getElementById('savedSessionsModal').classList.contains('visible')) {
+                closeSavedSessionModal();
+            }
+            if (document.getElementById('saveSessionAsModal').classList.contains('visible')) {
+                closeSaveSessionAsModal();
+            }
+        }
+    });
+
+    function setWorkspaceSaveMessage(message, type = '') {
+        const label = document.getElementById('sessionLabel');
+        if (!label || !message) {
+            return;
+        }
+        label.textContent = message;
+        label.dataset.workspaceSaveStatus = type;
+    }
+
+    function buildWorkspaceLayoutSnapshotFromState(count, className, rects, columnWeights, rowWeights, baseCount) {
+        if (!count || !Array.isArray(rects) || rects.length !== count) {
+            return null;
+        }
+
+        return {
+            class_name: 'layout-split-local',
+            split_slot_rects: rects.map((rect, index) => ({
+                originSlot: Number.isInteger(Number(rect.originSlot)) ? Number(rect.originSlot) : index,
+                x: Math.max(1, Number(rect.x) || 1),
+                y: Math.max(1, Number(rect.y) || 1),
+                w: Math.max(1, Number(rect.w) || 1),
+                h: Math.max(1, Number(rect.h) || 1)
+            })),
+            split_column_weights: cloneSplitTrackWeights(columnWeights),
+            split_row_weights: cloneSplitTrackWeights(rowWeights),
+            original_split_slot_count: Math.max(1, Number(baseCount || count) || count)
+        };
+    }
+
+    function buildActiveWorkspaceLayoutSnapshot(groupId = activeGroupId) {
+        if (!groupId) {
+            return null;
+        }
+
+        if (visibleGroupId === groupId && gridBuilt) {
+            const grid = document.getElementById('terminalsGrid');
+            const rects = cloneSplitSlotRects(
+                grid?.className === 'layout-split-local'
+                    ? ensureSplitSlotRects()
+                    : fixedLayoutSlotRects(terminals.length, grid?.className || '')
+            );
+            const size = getSplitGridSize(rects);
+            return buildWorkspaceLayoutSnapshotFromState(
+                terminals.length,
+                grid?.className || '',
+                rects,
+                normalizeSplitTrackWeights(splitColumnWeights, size.columns),
+                normalizeSplitTrackWeights(splitRowWeights, size.rows),
+                originalSplitSlotCount || terminals.length
+            );
+        }
+
+        const cached = cachedGroupViews.get(groupId);
+        if (!cached) {
+            return null;
+        }
+
+        return buildWorkspaceLayoutSnapshotFromState(
+            cached.terminals?.length || 0,
+            cached.className || '',
+            cached.splitSlotRects,
+            cached.splitColumnWeights,
+            cached.splitRowWeights,
+            cached.originalSplitSlotCount || cached.terminals?.length || 0
+        );
+    }
+
+    function getWorkspacePanesInVisualOrder(groupId = activeGroupId) {
+        if (!groupId) {
+            return [];
+        }
+
+        if (visibleGroupId === groupId && gridBuilt) {
+            const grid = document.getElementById('terminalsGrid');
+            const cards = Array.from(grid?.children || []);
+            if (cards.length) {
+                return cards
+                    .map(card => terminals[Number(card.dataset.slot)])
+                    .filter(Boolean);
+            }
+            return terminals.filter(Boolean);
+        }
+
+        const cached = cachedGroupViews.get(groupId);
+        if (!cached) {
+            return [];
+        }
+
+        const cachedTerminals = cached.terminals || [];
+        const cachedCards = Array.from(cached.fragment?.children || []);
+        if (cachedCards.length) {
+            return cachedCards
+                .map(card => cachedTerminals[Number(card.dataset.slot)])
+                .filter(Boolean);
+        }
+        return cachedTerminals.filter(Boolean);
+    }
+
+    function buildWorkspaceTerminalEntry(terminal, index, connectionMode) {
+        const session = terminal?._session || {};
+        const rawStartupMode = String(session.startup_mode || '').trim();
+        const startupMode = isExplorerPaneInstance(terminal) || isExplorerSession(session)
+            ? 'explorer'
+            : (rawStartupMode === 'agent' ? 'agent' : 'terminal');
+        const commandMode = startupMode === 'agent'
+            ? 'agent'
+            : (startupMode === 'explorer' ? 'explorer' : 'command');
+        const selectedDirectory = startupMode === 'explorer'
+            ? (terminal?._explorerPath || session.directory || session.explorer_root_directory || '')
+            : (session.directory || '');
+
+        return {
+            title: session.title || `Terminal ${index + 1}`,
+            directory: selectedDirectory,
+            initial_command: startupMode === 'explorer' ? '' : (session.initial_command || ''),
+            initial_command_mode: commandMode,
+            startup_mode: startupMode,
+            agent_selection: commandMode === 'agent' ? (session.agent_selection || '') : '',
+            custom_agent: commandMode === 'agent' ? (session.custom_agent || '') : '',
+            distribution: connectionMode === 'wsl' ? (session.distribution || '') : '',
+            use_wsl: connectionMode === 'wsl' ? Boolean(session.use_wsl) : false,
+            use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false
+        };
+    }
+
+    function buildActiveWorkspaceSessionConfig(groupId = activeGroupId) {
+        const group = getGroupById(groupId);
+        const groupTerminals = getWorkspacePanesInVisualOrder(groupId);
+        const connectionMode = group?.connection_mode === 'wsl' ? 'wsl' : 'ssh';
+        const terminalEntries = groupTerminals.map((terminal, index) => (
+            buildWorkspaceTerminalEntry(terminal, index, connectionMode)
+        ));
+        const firstSession = groupTerminals.find(terminal => terminal?._session)?._session || {};
+        const firstDirectory = terminalEntries.find(entry => entry.directory)?.directory || '';
+
+        return {
+            connection_mode: connectionMode,
+            terminal_count: terminalEntries.length,
+            layout: group?.layout || 'single',
+            ssh: {
+                host: connectionMode === 'ssh' ? (firstSession.host || '') : '',
+                username: connectionMode === 'ssh' ? (firstSession.username || 'ubuntu') : 'ubuntu',
+                password: '',
+                port: connectionMode === 'ssh' ? (Number(firstSession.port) || 22) : 22,
+                default_dir: connectionMode === 'ssh' ? firstDirectory : ''
+            },
+            wsl: {
+                distribution: connectionMode === 'wsl' ? (firstSession.distribution || '') : '',
+                username: connectionMode === 'wsl' ? (firstSession.username || '') : '',
+                default_dir: connectionMode === 'wsl' ? firstDirectory : ''
+            },
+            terminals: terminalEntries,
+            workspace_layout: buildActiveWorkspaceLayoutSnapshot(groupId)
+        };
+    }
+
+    async function saveActiveWorkspaceSession(button = null, options = {}) {
+        const targetGroupId = getActiveWorkspaceGroupId();
+        if (!targetGroupId) {
+            setWorkspaceSaveMessage('No active session group to save.', 'error');
+            return;
+        }
+
+        const promptForName = Boolean(options.promptForName);
+        const createNewSession = Boolean(options.createNewSession);
+        const group = getGroupById(targetGroupId);
+        const config = buildActiveWorkspaceSessionConfig(targetGroupId);
+        if (!config.terminals.length) {
+            setWorkspaceSaveMessage('No active terminals to save.', 'error');
+            return;
+        }
+
+        const saveTarget = getWorkspaceSaveTarget(targetGroupId);
+        const suggestedName = saveTarget.name || group?.name || `Workspace ${new Date().toLocaleTimeString()}`;
+        let sessionName = suggestedName;
+        let openSavedSessionNow = false;
+        if (promptForName) {
+            const result = await openSaveSessionAsModal(suggestedName);
+            if (!result) {
+                return;
+            }
+            sessionName = result.name;
+            openSavedSessionNow = Boolean(result.openNow);
+        }
+
+        const savedSessionId = createNewSession ? '' : saveTarget.id;
+        const shouldUpdateSourceGroup = !createNewSession;
+        const shouldActivateSavedSession = !createNewSession || openSavedSessionNow;
+        const previousText = button?.textContent;
+        if (button) {
+            button.disabled = true;
+            button.textContent = promptForName ? 'Saving as...' : 'Saving...';
+        }
+
+        try {
+            const savePayload = {
+                id: savedSessionId || undefined,
+                name: sessionName,
+                config,
+                activate: shouldActivateSavedSession
+            };
+            if (shouldUpdateSourceGroup) {
+                savePayload.group_id = targetGroupId;
+            }
+
+            const response = await fetch('/api/saved-sessions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(savePayload)
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Save failed with status ${response.status}`);
+            }
+            if (shouldUpdateSourceGroup && data.group?.group_id) {
+                const savedGroup = getGroupById(data.group.group_id);
+                if (savedGroup) {
+                    Object.assign(savedGroup, data.group);
+                }
+            }
+            if (shouldUpdateSourceGroup) {
+                rememberWorkspaceSaveTarget(
+                    targetGroupId,
+                    data.id || data.saved_session?.id || savedSessionId,
+                    data.name || data.saved_session?.name || sessionName
+                );
+            }
+            notifySavedSessionUpdated(data, { activate: openSavedSessionNow });
+            if (createNewSession && openSavedSessionNow) {
+                setWorkspaceSaveMessage(`Saved session "${data.name || sessionName}". Opening...`, 'success');
+                await launchSavedSession(data);
+            } else {
+                setWorkspaceSaveMessage(`Saved session "${data.name || sessionName}".`, 'success');
+            }
+        } catch (error) {
+            console.error('[GridVibe Sessions] workspace save failed:', error);
+            setWorkspaceSaveMessage(`Save failed: ${error.message}`, 'error');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = previousText || 'Save Session';
+            }
+        }
+    }
+
+    function saveActiveWorkspaceSessionAs(button = null) {
+        return saveActiveWorkspaceSession(button, {
+            promptForName: true,
+            createNewSession: true
+        });
+    }
+
     function renderSessionTabs() {
         const container = document.getElementById('sessionTabs');
         if (!container) return;
 
-        const settingsButton = document.createElement('button');
-        settingsButton.className = 'session-tab settings';
-        settingsButton.type = 'button';
-        settingsButton.textContent = '+ New Session';
-        settingsButton.addEventListener('click', goToSettings);
-
         container.innerHTML = '';
-        container.appendChild(settingsButton);
 
         sessionGroups.forEach((group, index) => {
             const tabNumber = index + 1;
@@ -2708,6 +4266,10 @@
     }
 
     function hasSharedGridEdge(rects, axis, lineIndex) {
+        return getSharedGridEdgeSegments(rects, axis, lineIndex).length > 0;
+    }
+
+    function getSharedGridEdgeSegments(rects, axis, lineIndex) {
         const before = rects.filter(rect => (
             axis === 'vertical'
                 ? rect.x + rect.w - 1 === lineIndex
@@ -2718,12 +4280,52 @@
                 ? rect.x === lineIndex + 1
                 : rect.y === lineIndex + 1
         ));
-        return before.some(left => after.some(right => {
-            if (axis === 'vertical') {
-                return Math.max(left.y, right.y) < Math.min(left.y + left.h, right.y + right.h);
+        const segments = [];
+        before.forEach(left => {
+            after.forEach(right => {
+                const start = axis === 'vertical'
+                    ? Math.max(left.y, right.y)
+                    : Math.max(left.x, right.x);
+                const end = axis === 'vertical'
+                    ? Math.min(left.y + left.h, right.y + right.h)
+                    : Math.min(left.x + left.w, right.x + right.w);
+                if (start < end) {
+                    segments.push({ start, end });
+                }
+            });
+        });
+        segments.sort((a, b) => a.start - b.start || a.end - b.end);
+        return segments.reduce((merged, segment) => {
+            const previous = merged[merged.length - 1];
+            if (previous && segment.start <= previous.end) {
+                previous.end = Math.max(previous.end, segment.end);
+            } else {
+                merged.push({ ...segment });
             }
-            return Math.max(left.x, right.x) < Math.min(left.x + left.w, right.x + right.w);
-        }));
+            return merged;
+        }, []);
+    }
+
+    function getSharedGridEdgeSegmentStyle(axis, segment, metrics) {
+        if (axis === 'vertical') {
+            const startIndex = segment.start - 1;
+            const span = segment.end - segment.start;
+            return {
+                top: metrics.bounds.top + metrics.paddingTop + trackStartOffset(metrics.rowSizes, metrics.rowGap, startIndex),
+                size: sumTrackSpan(metrics.rowSizes, startIndex, span, metrics.rowGap),
+            };
+        }
+        const startIndex = segment.start - 1;
+        const span = segment.end - segment.start;
+        return {
+            left: metrics.bounds.left + metrics.paddingLeft + trackStartOffset(metrics.columnSizes, metrics.columnGap, startIndex),
+            size: sumTrackSpan(metrics.columnSizes, startIndex, span, metrics.columnGap),
+        };
+    }
+
+    function trackStartOffset(sizes, gap, startIndex) {
+        const trackTotal = sizes.slice(0, startIndex).reduce((sum, value) => sum + value, 0);
+        return trackTotal + Math.max(0, startIndex) * gap;
     }
 
     function lineOffset(sizes, gap, lineIndex) {
@@ -2820,37 +4422,45 @@
         }
 
         for (let lineIndex = 1; lineIndex < size.columns; lineIndex++) {
-            if (!hasSharedGridEdge(rects, 'vertical', lineIndex)) {
+            const segments = getSharedGridEdgeSegments(rects, 'vertical', lineIndex);
+            if (segments.length === 0) {
                 continue;
             }
-            const handle = document.createElement('button');
-            handle.type = 'button';
-            handle.className = 'terminal-resize-handle vertical';
-            handle.dataset.resizeAxis = 'vertical';
-            handle.dataset.resizeLine = String(lineIndex);
-            handle.setAttribute('aria-label', 'Resize terminal columns');
-            handle.style.left = `${metrics.bounds.left + metrics.paddingLeft + lineOffset(metrics.columnSizes, metrics.columnGap, lineIndex)}px`;
-            handle.style.top = `${metrics.bounds.top + metrics.paddingTop}px`;
-            handle.style.height = `${metrics.gridContentHeight}px`;
-            handle.addEventListener('pointerdown', startGridResize);
-            overlay.appendChild(handle);
+            segments.forEach(segment => {
+                const segmentStyle = getSharedGridEdgeSegmentStyle('vertical', segment, metrics);
+                const handle = document.createElement('button');
+                handle.type = 'button';
+                handle.className = 'terminal-resize-handle vertical';
+                handle.dataset.resizeAxis = 'vertical';
+                handle.dataset.resizeLine = String(lineIndex);
+                handle.setAttribute('aria-label', 'Resize terminal columns');
+                handle.style.left = `${metrics.bounds.left + metrics.paddingLeft + lineOffset(metrics.columnSizes, metrics.columnGap, lineIndex)}px`;
+                handle.style.top = `${segmentStyle.top}px`;
+                handle.style.height = `${segmentStyle.size}px`;
+                handle.addEventListener('pointerdown', startGridResize);
+                overlay.appendChild(handle);
+            });
         }
 
         for (let lineIndex = 1; lineIndex < size.rows; lineIndex++) {
-            if (!hasSharedGridEdge(rects, 'horizontal', lineIndex)) {
+            const segments = getSharedGridEdgeSegments(rects, 'horizontal', lineIndex);
+            if (segments.length === 0) {
                 continue;
             }
-            const handle = document.createElement('button');
-            handle.type = 'button';
-            handle.className = 'terminal-resize-handle horizontal';
-            handle.dataset.resizeAxis = 'horizontal';
-            handle.dataset.resizeLine = String(lineIndex);
-            handle.setAttribute('aria-label', 'Resize terminal rows');
-            handle.style.left = `${metrics.bounds.left + metrics.paddingLeft}px`;
-            handle.style.top = `${metrics.bounds.top + metrics.paddingTop + lineOffset(metrics.rowSizes, metrics.rowGap, lineIndex)}px`;
-            handle.style.width = `${metrics.gridContentWidth}px`;
-            handle.addEventListener('pointerdown', startGridResize);
-            overlay.appendChild(handle);
+            segments.forEach(segment => {
+                const segmentStyle = getSharedGridEdgeSegmentStyle('horizontal', segment, metrics);
+                const handle = document.createElement('button');
+                handle.type = 'button';
+                handle.className = 'terminal-resize-handle horizontal';
+                handle.dataset.resizeAxis = 'horizontal';
+                handle.dataset.resizeLine = String(lineIndex);
+                handle.setAttribute('aria-label', 'Resize terminal rows');
+                handle.style.left = `${segmentStyle.left}px`;
+                handle.style.top = `${metrics.bounds.top + metrics.paddingTop + lineOffset(metrics.rowSizes, metrics.rowGap, lineIndex)}px`;
+                handle.style.width = `${segmentStyle.size}px`;
+                handle.addEventListener('pointerdown', startGridResize);
+                overlay.appendChild(handle);
+            });
         }
     }
 
@@ -3195,6 +4805,34 @@
         return true;
     }
 
+    function applyWorkspaceLayoutSnapshot(snapshot, expectedCount) {
+        if (
+            !snapshot
+            || !Array.isArray(snapshot.split_slot_rects)
+            || snapshot.split_slot_rects.length !== expectedCount
+        ) {
+            return false;
+        }
+
+        const rects = snapshot.split_slot_rects.map((rect, index) => normalizeSplitRectMetadata({
+            id: makeSplitRectId(),
+            originSlot: Number.isInteger(Number(rect.originSlot)) ? Number(rect.originSlot) : index,
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h
+        }));
+        const size = getSplitGridSize(rects);
+        originalSplitSlotCount = Math.max(
+            1,
+            Number(snapshot.original_split_slot_count || expectedCount) || expectedCount
+        );
+        splitSlotRects = cloneSplitSlotRects(rects);
+        splitColumnWeights = normalizeSplitTrackWeights(snapshot.split_column_weights, size.columns);
+        splitRowWeights = normalizeSplitTrackWeights(snapshot.split_row_weights, size.rows);
+        return applySplitSlotGeometry({ fit: false });
+    }
+
     function estimatePaneCharacters(index, axis = '') {
         const terminal = terminals[index];
         const term = terminal?.term;
@@ -3426,6 +5064,284 @@
         }
 
         return { sessionIdsToClose, rectsBySessionId, originalSplitSlotCount };
+    }
+
+    function splitRectArea(rect) {
+        return Math.max(0, Number(rect?.w || 0)) * Math.max(0, Number(rect?.h || 0));
+    }
+
+    function splitRectUnion(left, right) {
+        const x1 = Math.min(left.x, right.x);
+        const y1 = Math.min(left.y, right.y);
+        const x2 = Math.max(left.x + left.w, right.x + right.w);
+        const y2 = Math.max(left.y + left.h, right.y + right.h);
+        return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+    }
+
+    function splitRectsOverlap(left, right) {
+        return left.x < right.x + right.w
+            && left.x + left.w > right.x
+            && left.y < right.y + right.h
+            && left.y + left.h > right.y;
+    }
+
+    function sharedBorderLength(left, right) {
+        if (!left || !right) {
+            return 0;
+        }
+
+        let longest = 0;
+        if (left.x + left.w === right.x || right.x + right.w === left.x) {
+            longest = Math.max(
+                longest,
+                Math.min(left.y + left.h, right.y + right.h) - Math.max(left.y, right.y)
+            );
+        }
+        if (left.y + left.h === right.y || right.y + right.h === left.y) {
+            longest = Math.max(
+                longest,
+                Math.min(left.x + left.w, right.x + right.w) - Math.max(left.x, right.x)
+            );
+        }
+        return Math.max(0, longest);
+    }
+
+    function canAbsorbClosedRect(candidateRect, closedRect, otherRects) {
+        const union = splitRectUnion(candidateRect, closedRect);
+        if (splitRectArea(union) !== splitRectArea(candidateRect) + splitRectArea(closedRect)) {
+            return false;
+        }
+        return !otherRects.some(rect => splitRectsOverlap(union, rect));
+    }
+
+    function coveredIntervalLength(intervals) {
+        const sorted = intervals
+            .map(interval => ({
+                start: Math.min(interval.start, interval.end),
+                end: Math.max(interval.start, interval.end),
+            }))
+            .filter(interval => interval.end > interval.start)
+            .sort((left, right) => left.start - right.start || left.end - right.end);
+        let covered = 0;
+        let cursor = null;
+        sorted.forEach(interval => {
+            if (!cursor || interval.start > cursor.end) {
+                covered += interval.end - interval.start;
+                cursor = { ...interval };
+                return;
+            }
+            if (interval.end > cursor.end) {
+                covered += interval.end - cursor.end;
+                cursor.end = interval.end;
+            }
+        });
+        return covered;
+    }
+
+    function terminalCloseContacts(closedRect, entry) {
+        const rect = entry.rect;
+        const contacts = [];
+        const yStart = Math.max(closedRect.y, rect.y);
+        const yEnd = Math.min(closedRect.y + closedRect.h, rect.y + rect.h);
+        const xStart = Math.max(closedRect.x, rect.x);
+        const xEnd = Math.min(closedRect.x + closedRect.w, rect.x + rect.w);
+        if (rect.x + rect.w === closedRect.x && yEnd > yStart) {
+            contacts.push({ ...entry, side: 'left', sharedBorder: yEnd - yStart, start: yStart, end: yEnd });
+        }
+        if (rect.x === closedRect.x + closedRect.w && yEnd > yStart) {
+            contacts.push({ ...entry, side: 'right', sharedBorder: yEnd - yStart, start: yStart, end: yEnd });
+        }
+        if (rect.y + rect.h === closedRect.y && xEnd > xStart) {
+            contacts.push({ ...entry, side: 'top', sharedBorder: xEnd - xStart, start: xStart, end: xEnd });
+        }
+        if (rect.y === closedRect.y + closedRect.h && xEnd > xStart) {
+            contacts.push({ ...entry, side: 'bottom', sharedBorder: xEnd - xStart, start: xStart, end: xEnd });
+        }
+        return contacts;
+    }
+
+    function findTerminalCloseNeighbor(closedRect, candidates) {
+        return candidates
+            .map(candidate => ({
+                ...candidate,
+                sharedBorder: sharedBorderLength(closedRect, candidate.rect),
+            }))
+            .filter(candidate => candidate.sharedBorder > 0)
+            .sort((left, right) => (
+                right.sharedBorder - left.sharedBorder
+                || left.visualIndex - right.visualIndex
+            ))[0] || null;
+    }
+
+    function terminalCloseSideGroups(closedRect, entries) {
+        const sideLengths = {
+            left: closedRect.h,
+            right: closedRect.h,
+            top: closedRect.w,
+            bottom: closedRect.w,
+        };
+        const groupsBySide = new Map();
+        entries.flatMap(entry => terminalCloseContacts(closedRect, entry)).forEach(contact => {
+            if (!groupsBySide.has(contact.side)) {
+                groupsBySide.set(contact.side, []);
+            }
+            groupsBySide.get(contact.side).push(contact);
+        });
+
+        return Array.from(groupsBySide.entries()).map(([side, contacts]) => {
+            const coverage = coveredIntervalLength(contacts);
+            return {
+                side,
+                entries: contacts,
+                coverage,
+                sideLength: sideLengths[side],
+                totalSharedBorder: contacts.reduce((total, contact) => total + contact.sharedBorder, 0),
+                firstVisualIndex: Math.min(...contacts.map(contact => contact.visualIndex)),
+            };
+        });
+    }
+
+    function expandRectIntoClosedSide(rect, closedRect, side) {
+        if (side === 'left') {
+            return { ...rect, w: (closedRect.x + closedRect.w) - rect.x, ancestors: [] };
+        }
+        if (side === 'right') {
+            return { ...rect, x: closedRect.x, w: (rect.x + rect.w) - closedRect.x, ancestors: [] };
+        }
+        if (side === 'top') {
+            return { ...rect, h: (closedRect.y + closedRect.h) - rect.y, ancestors: [] };
+        }
+        if (side === 'bottom') {
+            return { ...rect, y: closedRect.y, h: (rect.y + rect.h) - closedRect.y, ancestors: [] };
+        }
+        return rect;
+    }
+
+    function buildTerminalCloseRectsForSideGroup(plan, sideGroup) {
+        if (!sideGroup || sideGroup.coverage < sideGroup.sideLength) {
+            return null;
+        }
+
+        const expandingSessionIds = new Set(sideGroup.entries.map(entry => entry.sessionId));
+        const nextEntries = plan.remainingEntries.map(entry => {
+            const shouldExpand = expandingSessionIds.has(entry.sessionId);
+            return {
+                ...entry,
+                rect: shouldExpand
+                    ? expandRectIntoClosedSide(entry.rect, plan.closedRect, sideGroup.side)
+                    : entry.rect,
+            };
+        });
+        for (let leftIndex = 0; leftIndex < nextEntries.length; leftIndex += 1) {
+            for (let rightIndex = leftIndex + 1; rightIndex < nextEntries.length; rightIndex += 1) {
+                if (splitRectsOverlap(nextEntries[leftIndex].rect, nextEntries[rightIndex].rect)) {
+                    return null;
+                }
+            }
+        }
+
+        const previousArea = plan.remainingEntries.reduce((total, entry) => total + splitRectArea(entry.rect), 0);
+        const nextArea = nextEntries.reduce((total, entry) => total + splitRectArea(entry.rect), 0);
+        if (nextArea !== previousArea + splitRectArea(plan.closedRect)) {
+            return null;
+        }
+
+        const rectsBySessionId = {};
+        nextEntries.forEach(entry => {
+            rectsBySessionId[entry.sessionId] = cloneSplitSlotRects([entry.rect])[0];
+        });
+        return rectsBySessionId;
+    }
+
+    function buildTerminalCloseRectsBySessionId(plan) {
+        const neighbor = findTerminalCloseNeighbor(plan.closedRect, plan.remainingEntries);
+        if (neighbor) {
+            const otherRects = plan.remainingEntries
+                .filter(entry => entry.sessionId !== neighbor.sessionId)
+                .map(entry => entry.rect);
+            if (canAbsorbClosedRect(neighbor.rect, plan.closedRect, otherRects)) {
+                const rectsBySessionId = {};
+                plan.remainingEntries.forEach(entry => {
+                    const rect = entry.sessionId === neighbor.sessionId
+                        ? {
+                            ...entry.rect,
+                            ...splitRectUnion(entry.rect, plan.closedRect),
+                            ancestors: [],
+                        }
+                        : entry.rect;
+                    rectsBySessionId[entry.sessionId] = cloneSplitSlotRects([rect])[0];
+                });
+                return rectsBySessionId;
+            }
+        }
+
+        const sideGroups = terminalCloseSideGroups(plan.closedRect, plan.remainingEntries)
+            .map(sideGroup => ({
+                ...sideGroup,
+                rectsBySessionId: buildTerminalCloseRectsForSideGroup(plan, sideGroup),
+            }))
+            .filter(sideGroup => sideGroup.rectsBySessionId);
+        sideGroups.sort((left, right) => (
+            right.totalSharedBorder - left.totalSharedBorder
+            || left.entries.length - right.entries.length
+            || left.firstVisualIndex - right.firstVisualIndex
+        ));
+        return sideGroups[0]?.rectsBySessionId || null;
+    }
+
+    function buildCloseTerminalPlan(index) {
+        const grid = document.getElementById('terminalsGrid');
+        const card = document.getElementById(`tc-${index}`);
+        const sessionId = sessionIds[index];
+        if (!grid || !card || !sessionId) {
+            return null;
+        }
+
+        const cards = Array.from(grid.children);
+        const visualIndex = cards.indexOf(card);
+        if (visualIndex < 0) {
+            return null;
+        }
+
+        const activeSessionIds = sessionIds.filter(Boolean);
+        if (activeSessionIds.length <= 1) {
+            return { sessionId, closeLastPane: true };
+        }
+
+        const rects = cloneSplitSlotRects(ensureSplitSlotRects());
+        const closedRect = rects?.[visualIndex];
+        if (!closedRect) {
+            return null;
+        }
+
+        const remainingEntries = cards
+            .map((paneCard, paneVisualIndex) => {
+                const slotIndex = Number(paneCard.dataset.slot);
+                const paneSessionId = Number.isInteger(slotIndex) ? sessionIds[slotIndex] : '';
+                const rect = rects[paneVisualIndex];
+                if (!paneSessionId || paneSessionId === sessionId || !rect) {
+                    return null;
+                }
+                return {
+                    sessionId: paneSessionId,
+                    visualIndex: paneVisualIndex,
+                    slotIndex,
+                    rect,
+                };
+            })
+            .filter(Boolean);
+
+        if (remainingEntries.length === 0) {
+            return { sessionId, closeLastPane: true };
+        }
+
+        return {
+            sessionId,
+            closeLastPane: false,
+            closedRect,
+            remainingEntries,
+            originalSplitSlotCount,
+        };
     }
 
     function updateSplitButtonState(index) {
@@ -4128,8 +6044,7 @@
                         >
                             🧹
                         </button>
-                        {% if voice_enabled %}
-                        <div class="voice-control" data-terminal-voice-control="${i}">
+                        <div class="voice-control" data-terminal-voice-control="${i}" ${_voiceServiceStatus.enabled ? '' : 'hidden'}>
                             <button
                                 type="button"
                                 class="terminal-action-btn voice-btn"
@@ -4140,7 +6055,16 @@
                                 🎤
                             </button>
                         </div>
-                        {% endif %}
+                        <button
+                            type="button"
+                            class="terminal-action-btn terminal-close-btn"
+                            id="tclose-${i}"
+                            data-terminal-close="${i}"
+                            title="Close this terminal pane"
+                            aria-label="Close this terminal pane"
+                        >
+                            ×
+                        </button>
                     </div>
                 </div>
                 <div class="terminal-wrapper" id="tw-${i}">
@@ -4150,6 +6074,8 @@
                                 <div class="explorer-bar">
                                     <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
                                     <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
+                                    <div class="explorer-git-summary" id="explorer-git-${i}" aria-live="polite"></div>
+                                    <div class="explorer-directory-search" id="explorer-directory-search-${i}"></div>
                                 </div>
                                 <div class="explorer-list" id="explorer-list-${i}">
                                     <div class="explorer-message">Loading directory...</div>
@@ -4241,6 +6167,19 @@
                     event.preventDefault();
                     event.stopPropagation();
                     clearTerminalDisplay(i);
+                });
+            }
+            const closeButton = card.querySelector(`[data-terminal-close="${i}"]`);
+            if (closeButton) {
+                closeButton.draggable = false;
+                closeButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                closeButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    closeTerminalPane(i);
                 });
             }
             const voiceButton= card.querySelector(`[data-terminal-voice="${i}"]`);
@@ -4396,6 +6335,16 @@
                 event.preventDefault();
                 event.stopPropagation();
                 clearTerminalDisplay(index);
+            });
+        }
+
+        const closeButton = card.querySelector(`[data-terminal-close="${index}"]`);
+        if (closeButton) {
+            stopHeaderButtonDrag(closeButton);
+            closeButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                closeTerminalPane(index);
             });
         }
 
@@ -4691,6 +6640,8 @@
                     <div class="explorer-bar">
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
                         <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
+                        <div class="explorer-git-summary" id="explorer-git-${index}" aria-live="polite"></div>
+                        <div class="explorer-directory-search" id="explorer-directory-search-${index}"></div>
                     </div>
                     <div class="explorer-list" id="explorer-list-${index}">
                         <div class="explorer-message">Loading directory...</div>
@@ -4781,8 +6732,8 @@
         const body = { startup_mode: targetMode };
         if (switchingToTerminal) {
             body.directory = getExplorerSelectedDirectory(index);
-        } else if (terminal._session.directory) {
-            body.directory = terminal._session.directory;
+        } else {
+            body.refresh_cwd = true;
         }
 
         updateModeToggleButton(button, switchingToTerminal, true);
@@ -4853,6 +6804,72 @@
         } finally {
             if (button) {
                 button.textContent = '⊟';
+            }
+            updateAllSplitButtonStates();
+        }
+    }
+
+    async function closeTerminalPane(index) {
+        const plan = buildCloseTerminalPlan(index);
+        if (!plan) {
+            return;
+        }
+        const restoreRectsBySessionId = plan.closeLastPane
+            ? null
+            : buildTerminalCloseRectsBySessionId(plan);
+        if (!plan.closeLastPane && !restoreRectsBySessionId) {
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = 'Close terminal failed: no neighboring pane can safely fill this layout';
+            }
+            return;
+        }
+
+        const button = document.getElementById(`tclose-${index}`);
+        if (button) {
+            button.disabled = true;
+            button.textContent = '...';
+        }
+
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(plan.sessionId)}`, {
+                method: 'DELETE',
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Close terminal failed with status ${response.status}`);
+            }
+
+            if (plan.closeLastPane) {
+                if (visibleGroupId === activeGroupId) {
+                    teardownCurrentGrid();
+                }
+                activeGroupId = '';
+                await loadSessionGroups();
+                if (sessionGroups.length === 0) {
+                    await _closeWindowAfterLastSession();
+                    return;
+                }
+                await initialLoad();
+                return;
+            }
+
+            pendingSplitRestore = {
+                groupId: activeGroupId,
+                rectsBySessionId: restoreRectsBySessionId,
+                originalSplitSlotCount: plan.originalSplitSlotCount,
+            };
+            await initialLoad();
+        } catch (error) {
+            console.error('[GridVibe Sessions] closeTerminalPane failed:', error);
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = `Close terminal failed: ${error.message}`;
+            }
+        } finally {
+            if (button) {
+                button.textContent = '×';
+                button.disabled = false;
             }
             updateAllSplitButtonStates();
         }
@@ -5244,6 +7261,7 @@
         const elements = _getVoicePanelElements(index);
         if (!elements.control) return;
 
+        elements.control.hidden = _voiceServiceStatus.enabled === false;
         _updateVoiceMeta(index);
         _renderVoiceDiagnostics(
             index,
@@ -5258,6 +7276,13 @@
         _updateVoiceBtn(index, Boolean(_voiceState[index]?.recording));
     }
 
+    function _syncVoiceControlsAvailability() {
+        document.querySelectorAll('[data-terminal-voice-control]').forEach(control => {
+            control.hidden = _voiceServiceStatus.enabled === false;
+        });
+        _setVoiceBtnsDisabled(_voiceActiveIndex);
+    }
+
     async function _loadVoiceServiceStatus() {
         try {
             const response = await fetch('/api/voice-status');
@@ -5267,6 +7292,7 @@
                 ..._voiceServiceStatus,
                 ...payload
             };
+            _syncVoiceControlsAvailability();
             terminals.forEach((_, terminalIndex) => _updateVoiceMeta(terminalIndex));
         } catch (err) {
             console.warn('Voice status fetch failed:', err);
@@ -5364,6 +7390,11 @@
     function _setVoiceBtnsDisabled(activeIndex) {
         document.querySelectorAll('.voice-btn').forEach(btn => {
             const btnIdx = parseInt(btn.dataset.terminalVoice, 10);
+            if (_voiceServiceStatus.enabled === false) {
+                btn.disabled = true;
+                btn.title = 'Voice input is disabled in app settings';
+                return;
+            }
             if (activeIndex === -1) {
                 btn.disabled = false;
                 btn.title = 'Voice input (click to start recording)';
@@ -5804,17 +7835,17 @@
         const activeCard = document.activeElement?.closest?.('.explorer-pane');
         const activeSlot = activeCard ? Number(activeCard.dataset.slot) : -1;
         if (Number.isInteger(activeSlot)
-            && terminals[activeSlot]?._explorerMode === 'file') {
+            && isExplorerSearchablePane(terminals[activeSlot])) {
             return activeSlot;
         }
 
         if (_focusedTerminalIndex !== -1
-            && terminals[_focusedTerminalIndex]?._explorerMode === 'file') {
+            && isExplorerSearchablePane(terminals[_focusedTerminalIndex])) {
             return _focusedTerminalIndex;
         }
 
         for (let i = 0; i < terminals.length; i++) {
-            if (terminals[i]?._explorerMode === 'file') {
+            if (isExplorerSearchablePane(terminals[i])) {
                 return i;
             }
         }
@@ -6033,6 +8064,7 @@
                 return;
             }
 
+            applyConfiguredSurfaceMode(data, { refit: gridBuilt });
             const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
             const usingCurrentView = (
                 gridBuilt
@@ -6066,6 +8098,7 @@
             grid.style.display = '';   // make sure it’s visible
             if (!usingCurrentView && !restoredFromCache) {
                 buildGrid(data.sessions, data.layout);
+                applyWorkspaceLayoutSnapshot(data.workspace_layout, data.sessions.length);
             }
 
             const attachedIndices = [];
@@ -6522,21 +8555,33 @@
 
     const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({
         '.bash': 'shell',
+        '.bat': 'batch',
         '.c': 'c',
         '.cc': 'cpp',
+        '.cfg': 'config',
+        '.cmd': 'batch',
+        '.conf': 'config',
         '.cpp': 'cpp',
         '.cs': 'csharp',
         '.css': 'css',
+        '.env': 'dotenv',
+        '.example': 'config',
         '.go': 'go',
+        '.gitattributes': 'config',
+        '.gitignore': 'gitignore',
+        '.gitkeep': 'text',
         '.h': 'c',
         '.hpp': 'cpp',
         '.html': 'html',
+        '.ini': 'ini',
         '.java': 'java',
         '.js': 'javascript',
         '.jsx': 'javascript',
         '.json': 'json',
+        '.jsonl': 'jsonl',
         '.kt': 'kotlin',
         '.kts': 'kotlin',
+        '.log': 'log',
         '.lua': 'lua',
         '.md': 'markdown',
         '.markdown': 'markdown',
@@ -6547,7 +8592,9 @@
         '.rs': 'rust',
         '.sh': 'shell',
         '.sql': 'sql',
+        '.spec': 'python',
         '.swift': 'swift',
+        '.txt': 'text',
         '.toml': 'toml',
         '.ts': 'typescript',
         '.tsx': 'typescript',
@@ -6556,18 +8603,38 @@
         '.yml': 'yaml'
     });
 
+    const EXPLORER_LANGUAGE_BY_FILENAME = Object.freeze({
+        '.editorconfig': 'ini',
+        '.env': 'dotenv',
+        '.gitattributes': 'config',
+        '.gitignore': 'gitignore',
+        '.gitkeep': 'text',
+        '.python-version': 'text',
+        'dockerfile': 'dockerfile',
+        'makefile': 'makefile'
+    });
+
     const EXPLORER_LANGUAGE_LABELS = Object.freeze({
+        batch: 'Batch source',
         c: 'C source',
+        config: 'Config file',
         cpp: 'C++ source',
         csharp: 'C# source',
         css: 'CSS source',
+        dockerfile: 'Dockerfile',
+        dotenv: 'Environment file',
+        gitignore: 'Git ignore file',
         go: 'Go source',
         html: 'HTML source',
+        ini: 'INI config',
         java: 'Java source',
         javascript: 'JavaScript source',
         json: 'JSON source',
+        jsonl: 'JSON Lines source',
         kotlin: 'Kotlin source',
+        log: 'Log file',
         lua: 'Lua source',
+        makefile: 'Makefile',
         markdown: 'Markdown source',
         php: 'PHP source',
         powershell: 'PowerShell source',
@@ -6577,6 +8644,7 @@
         shell: 'Shell source',
         sql: 'SQL source',
         swift: 'Swift source',
+        text: 'Text file',
         toml: 'TOML source',
         typescript: 'TypeScript source',
         xml: 'XML source',
@@ -6584,15 +8652,21 @@
     });
 
     const EXPLORER_CODE_KEYWORDS = Object.freeze({
+        batch: ['call', 'do', 'echo', 'else', 'errorlevel', 'exist', 'exit', 'for', 'goto', 'if', 'in', 'not', 'pause', 'rem', 'set', 'shift'],
         c: ['auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if', 'inline', 'int', 'long', 'register', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'union', 'unsigned', 'void', 'volatile', 'while'],
+        config: ['false', 'no', 'null', 'off', 'on', 'true', 'yes'],
         cpp: ['alignas', 'alignof', 'auto', 'bool', 'break', 'case', 'catch', 'class', 'const', 'constexpr', 'continue', 'decltype', 'default', 'delete', 'do', 'double', 'else', 'enum', 'explicit', 'export', 'extern', 'false', 'float', 'for', 'friend', 'if', 'inline', 'int', 'long', 'namespace', 'new', 'noexcept', 'nullptr', 'operator', 'private', 'protected', 'public', 'return', 'short', 'signed', 'sizeof', 'static', 'struct', 'switch', 'template', 'this', 'throw', 'true', 'try', 'typedef', 'typename', 'union', 'unsigned', 'using', 'virtual', 'void', 'volatile', 'while'],
         csharp: ['abstract', 'as', 'base', 'bool', 'break', 'case', 'catch', 'class', 'const', 'continue', 'decimal', 'default', 'delegate', 'do', 'double', 'else', 'enum', 'event', 'false', 'finally', 'fixed', 'float', 'for', 'foreach', 'if', 'in', 'int', 'interface', 'internal', 'is', 'lock', 'namespace', 'new', 'null', 'object', 'out', 'override', 'private', 'protected', 'public', 'readonly', 'ref', 'return', 'sealed', 'static', 'string', 'struct', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'using', 'var', 'virtual', 'void', 'while'],
         css: ['align-items', 'background', 'border', 'color', 'display', 'flex', 'font-family', 'font-size', 'grid', 'height', 'margin', 'padding', 'position', 'width'],
+        dockerfile: ['ADD', 'ARG', 'CMD', 'COPY', 'ENTRYPOINT', 'ENV', 'EXPOSE', 'FROM', 'HEALTHCHECK', 'LABEL', 'RUN', 'USER', 'VOLUME', 'WORKDIR'],
+        dotenv: ['false', 'no', 'off', 'on', 'true', 'yes'],
+        gitignore: ['false', 'true'],
         go: ['break', 'case', 'chan', 'const', 'continue', 'default', 'defer', 'else', 'fallthrough', 'for', 'func', 'go', 'goto', 'if', 'import', 'interface', 'map', 'nil', 'package', 'range', 'return', 'select', 'struct', 'switch', 'type', 'var'],
         html: ['DOCTYPE', 'a', 'body', 'button', 'div', 'head', 'html', 'input', 'link', 'meta', 'script', 'span', 'style', 'template'],
         java: ['abstract', 'assert', 'boolean', 'break', 'case', 'catch', 'class', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'false', 'final', 'finally', 'float', 'for', 'if', 'implements', 'import', 'instanceof', 'int', 'interface', 'long', 'native', 'new', 'null', 'package', 'private', 'protected', 'public', 'return', 'short', 'static', 'strictfp', 'super', 'switch', 'synchronized', 'this', 'throw', 'throws', 'true', 'try', 'void', 'volatile', 'while'],
         javascript: ['async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'export', 'extends', 'false', 'finally', 'for', 'from', 'function', 'if', 'import', 'in', 'instanceof', 'let', 'new', 'null', 'of', 'return', 'static', 'super', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'undefined', 'var', 'void', 'while', 'yield'],
         json: ['false', 'null', 'true'],
+        jsonl: ['false', 'null', 'true'],
         kotlin: ['as', 'break', 'class', 'continue', 'data', 'do', 'else', 'false', 'for', 'fun', 'if', 'in', 'interface', 'is', 'null', 'object', 'package', 'return', 'super', 'this', 'throw', 'true', 'try', 'typealias', 'val', 'var', 'when', 'while'],
         lua: ['and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for', 'function', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat', 'return', 'then', 'true', 'until', 'while'],
         php: ['abstract', 'and', 'array', 'as', 'break', 'case', 'catch', 'class', 'clone', 'const', 'continue', 'declare', 'default', 'do', 'echo', 'else', 'elseif', 'extends', 'false', 'final', 'finally', 'for', 'foreach', 'function', 'global', 'if', 'implements', 'include', 'instanceof', 'interface', 'namespace', 'new', 'null', 'or', 'private', 'protected', 'public', 'require', 'return', 'static', 'switch', 'this', 'throw', 'trait', 'true', 'try', 'use', 'var', 'while'],
@@ -6618,11 +8692,26 @@
     });
 
     const EXPLORER_C_LIKE_LANGUAGES = new Set(['c', 'cpp', 'csharp', 'css', 'go', 'java', 'javascript', 'kotlin', 'php', 'rust', 'swift', 'typescript']);
-    const EXPLORER_HASH_COMMENT_LANGUAGES = new Set(['python', 'ruby', 'shell', 'powershell', 'yaml', 'toml']);
+    const EXPLORER_HASH_COMMENT_LANGUAGES = new Set(['config', 'dockerfile', 'dotenv', 'gitignore', 'ini', 'makefile', 'python', 'ruby', 'shell', 'powershell', 'yaml', 'toml']);
+    const EXPLORER_LOG_LEVELS = new Set(['TRACE', 'DEBUG', 'INFO', 'WARN', 'WARNING', 'ERROR', 'CRITICAL', 'FATAL']);
     const EXPLORER_EDITOR_FONT_MIN = 10;
     const EXPLORER_EDITOR_FONT_MAX = 24;
     const EXPLORER_EDITOR_FONT_DEFAULT = 13;
     const EXPLORER_EDITOR_FONT_STEP = 1;
+    const EXPLORER_SEARCH_DEBOUNCE_MS = 160;
+    const EXPLORER_SEARCH_MAX_MATCHES = 1000;
+    const EXPLORER_SEARCH_CHUNK_SIZE = 65536;
+    const EXPLORER_SEARCH_YIELD_MS = 8;
+    const EXPLORER_GIT_STATUS_LABELS = Object.freeze({
+        modified: 'M',
+        added: 'A',
+        deleted: 'D',
+        renamed: 'R',
+        conflicted: 'U',
+        untracked: '?',
+        ignored: '!',
+        clean: ''
+    });
 
     function explorerPathExtension(path) {
         const name = String(path || '').toLowerCase();
@@ -6630,8 +8719,14 @@
         return dotIndex >= 0 ? name.slice(dotIndex) : '';
     }
 
+    function explorerPathFilename(path) {
+        const parts = String(path || '').toLowerCase().split(/[\\/]/);
+        return parts[parts.length - 1] || '';
+    }
+
     function normalizeExplorerLanguage(language) {
         const normalized = String(language || '').toLowerCase().replace(/[^a-z0-9+#-]/g, '');
+        if (normalized === 'bat' || normalized === 'cmd') return 'batch';
         if (normalized === 'js') return 'javascript';
         if (normalized === 'ts') return 'typescript';
         if (normalized === 'py') return 'python';
@@ -6644,6 +8739,13 @@
     }
 
     function explorerCodeLanguage(path) {
+        const filename = explorerPathFilename(path);
+        if (filename && EXPLORER_LANGUAGE_BY_FILENAME[filename]) {
+            return EXPLORER_LANGUAGE_BY_FILENAME[filename];
+        }
+        if (filename.startsWith('.env.')) {
+            return 'dotenv';
+        }
         return EXPLORER_LANGUAGE_BY_EXTENSION[explorerPathExtension(path)] || '';
     }
 
@@ -6672,7 +8774,7 @@
         return metaParts;
     }
 
-    function explorerFindRanges(content, query) {
+    function explorerFindRanges(content, query, maxMatches = EXPLORER_SEARCH_MAX_MATCHES) {
         const source = String(content || '');
         const needle = String(query || '');
         if (!source || !needle) {
@@ -6680,18 +8782,73 @@
         }
 
         const ranges = [];
-        const normalizedSource = source.toLowerCase();
         const normalizedNeedle = needle.toLowerCase();
-        let cursor = 0;
-        while (cursor < normalizedSource.length) {
-            const matchIndex = normalizedSource.indexOf(normalizedNeedle, cursor);
-            if (matchIndex === -1) {
-                break;
+        const stride = Math.max(EXPLORER_SEARCH_CHUNK_SIZE, normalizedNeedle.length);
+        for (let offset = 0; offset < source.length && ranges.length < maxMatches; offset += stride) {
+            const chunkEnd = Math.min(source.length, offset + stride + normalizedNeedle.length - 1);
+            const normalizedChunk = source.slice(offset, chunkEnd).toLowerCase();
+            let localCursor = 0;
+            while (localCursor < normalizedChunk.length && ranges.length < maxMatches) {
+                const matchIndex = normalizedChunk.indexOf(normalizedNeedle, localCursor);
+                if (matchIndex === -1) {
+                    break;
+                }
+                const absoluteIndex = offset + matchIndex;
+                if (absoluteIndex >= offset + stride && chunkEnd < source.length) {
+                    break;
+                }
+                ranges.push({ start: absoluteIndex, end: absoluteIndex + needle.length });
+                localCursor = matchIndex + Math.max(needle.length, 1);
             }
-            ranges.push({ start: matchIndex, end: matchIndex + needle.length });
-            cursor = matchIndex + Math.max(needle.length, 1);
         }
+        ranges.capped = ranges.length >= maxMatches;
         return ranges;
+    }
+
+    async function explorerFindRangesAsync(content, query, token, maxMatches = EXPLORER_SEARCH_MAX_MATCHES) {
+        const source = String(content || '');
+        const needle = String(query || '');
+        if (!source || !needle) {
+            return { ranges: [], capped: false, cancelled: Boolean(token?.cancelled) };
+        }
+
+        const ranges = [];
+        const normalizedNeedle = needle.toLowerCase();
+        const stride = Math.max(EXPLORER_SEARCH_CHUNK_SIZE, normalizedNeedle.length);
+        let lastYield = performance.now();
+
+        for (let offset = 0; offset < source.length && ranges.length < maxMatches; offset += stride) {
+            if (token?.cancelled) {
+                return { ranges, capped: false, cancelled: true };
+            }
+
+            const chunkEnd = Math.min(source.length, offset + stride + normalizedNeedle.length - 1);
+            const normalizedChunk = source.slice(offset, chunkEnd).toLowerCase();
+            let localCursor = 0;
+            while (localCursor < normalizedChunk.length && ranges.length < maxMatches) {
+                const matchIndex = normalizedChunk.indexOf(normalizedNeedle, localCursor);
+                if (matchIndex === -1) {
+                    break;
+                }
+                const absoluteIndex = offset + matchIndex;
+                if (absoluteIndex >= offset + stride && chunkEnd < source.length) {
+                    break;
+                }
+                ranges.push({ start: absoluteIndex, end: absoluteIndex + needle.length });
+                localCursor = matchIndex + Math.max(needle.length, 1);
+            }
+
+            if (performance.now() - lastYield >= EXPLORER_SEARCH_YIELD_MS) {
+                await new Promise(resolve => window.setTimeout(resolve, 0));
+                lastYield = performance.now();
+            }
+        }
+
+        return {
+            ranges,
+            capped: ranges.length >= maxMatches,
+            cancelled: Boolean(token?.cancelled)
+        };
     }
 
     function explorerMarkedEscHtml(text, absoluteStart = 0, searchRanges = []) {
@@ -6754,10 +8911,80 @@
         return content.slice(start, index);
     }
 
+    function explorerLogLevelClass(level) {
+        const normalized = String(level || '').toUpperCase();
+        if (normalized === 'TRACE' || normalized === 'DEBUG') {
+            return normalized.toLowerCase();
+        }
+        if (normalized === 'WARN' || normalized === 'WARNING') {
+            return 'warn';
+        }
+        if (normalized === 'ERROR' || normalized === 'CRITICAL' || normalized === 'FATAL') {
+            return 'error';
+        }
+        return 'info';
+    }
+
+    function highlightExplorerLogLine(line, absoluteStart, searchRanges = []) {
+        const timestampPattern = /^(\s*(?:\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\d{2}:\d{2}:\d{2}(?:[.,]\d+)?|\[[^\]\n]*(?:\d{4}-\d{2}-\d{2}|\d{2}:\d{2}:\d{2})[^\]\n]*\]))/;
+        const levelPattern = /\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL|FATAL)\b/i;
+        const timestampMatch = line.match(timestampPattern);
+        let output = '';
+        let cursor = 0;
+
+        if (timestampMatch) {
+            const token = timestampMatch[1];
+            output += explorerCodeSpan('explorer-log-timestamp', token, absoluteStart, searchRanges);
+            cursor = token.length;
+        }
+
+        const levelMatch = line.slice(cursor).match(levelPattern);
+        if (levelMatch && EXPLORER_LOG_LEVELS.has(levelMatch[1].toUpperCase())) {
+            const levelStart = cursor + Number(levelMatch.index || 0);
+            if (levelStart > cursor) {
+                output += explorerMarkedEscHtml(line.slice(cursor, levelStart), absoluteStart + cursor, searchRanges);
+            }
+            const level = levelMatch[1];
+            output += explorerCodeSpan(
+                `explorer-log-level ${explorerLogLevelClass(level)}`,
+                level,
+                absoluteStart + levelStart,
+                searchRanges
+            );
+            cursor = levelStart + level.length;
+        }
+
+        if (cursor < line.length) {
+            output += explorerMarkedEscHtml(line.slice(cursor), absoluteStart + cursor, searchRanges);
+        }
+        return output;
+    }
+
+    function highlightExplorerLog(content, searchRanges = []) {
+        const source = String(content || '');
+        let output = '';
+        let index = 0;
+        while (index < source.length) {
+            const newlineIndex = source.indexOf('\n', index);
+            const lineEnd = newlineIndex === -1 ? source.length : newlineIndex;
+            output += highlightExplorerLogLine(source.slice(index, lineEnd), index, searchRanges);
+            if (newlineIndex === -1) {
+                break;
+            }
+            output += explorerMarkedEscHtml('\n', lineEnd, searchRanges);
+            index = lineEnd + 1;
+        }
+        return output;
+    }
+
     function highlightExplorerCode(content, language, searchRanges = []) {
         const normalizedLanguage = normalizeExplorerLanguage(language);
         if (!normalizedLanguage) {
             return explorerMarkedEscHtml(content, 0, searchRanges);
+        }
+
+        if (normalizedLanguage === 'log') {
+            return highlightExplorerLog(content, searchRanges);
         }
 
         const keywords = new Set(EXPLORER_CODE_KEYWORDS[normalizedLanguage] || []);
@@ -6802,7 +9029,7 @@
                 continue;
             }
 
-            if (current === '"' || current === "'" || (current === '`' && !['json', 'yaml', 'toml'].includes(normalizedLanguage))) {
+            if (current === '"' || current === "'" || (current === '`' && !['json', 'jsonl', 'yaml', 'toml'].includes(normalizedLanguage))) {
                 const token = explorerReadStringToken(content, index);
                 output += explorerCodeSpan('explorer-code-string', token, index, searchRanges);
                 index += token.length;
@@ -6850,28 +9077,305 @@
         }
     }
 
+    function renderExplorerDirectoryOpenError(index, message) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!pane || !list || pane._explorerMode !== 'directory') {
+            renderExplorerMessage(index, message);
+            return;
+        }
+        renderExplorerDirectorySearchControls(index);
+        renderExplorerDirectoryRows(index);
+        const notice = document.createElement('div');
+        notice.className = 'explorer-message explorer-file-open-error';
+        notice.textContent = message;
+        list.prepend(notice);
+    }
+
+    function explorerGitStatusLabel(git) {
+        if (!git || typeof git !== 'object') {
+            return '';
+        }
+        const status = git.status || 'clean';
+        if (status === 'clean' && git.has_descendant_changes) {
+            return '*';
+        }
+        return EXPLORER_GIT_STATUS_LABELS[status] || '';
+    }
+
+    function explorerGitStatusTitle(git) {
+        if (!git || typeof git !== 'object') {
+            return 'Git status unavailable';
+        }
+        const status = git.status || 'clean';
+        if (git.has_descendant_changes && git.descendant_status) {
+            return `Directory contains ${git.descendant_status} Git changes`;
+        }
+        if (status === 'clean' && git.has_descendant_changes) {
+            return 'Directory contains Git changes';
+        }
+        return `Git status: ${status}`;
+    }
+
+    function explorerGitBadgeHtml(git) {
+        const label = explorerGitStatusLabel(git);
+        const status = git?.status || 'clean';
+        const className = label ? status : 'clean';
+        return `<span class="explorer-git-badge ${escHtml(className)}" title="${escHtml(explorerGitStatusTitle(git))}">${escHtml(label)}</span>`;
+    }
+
+    function explorerHasGitDiff(git) {
+        if (!git || typeof git !== 'object') {
+            return false;
+        }
+        return ['modified', 'added', 'deleted', 'renamed', 'conflicted'].includes(git.status || '');
+    }
+
+    function explorerGitSummaryText(git) {
+        if (!git || typeof git !== 'object') {
+            return '';
+        }
+        if (!git.available) {
+            return git.error ? 'Git unavailable' : 'No Git repo';
+        }
+        const parts = [git.branch || (git.head ? git.head.slice(0, 7) : 'Git')];
+        if (Number(git.ahead || 0) > 0) {
+            parts.push(`↑${git.ahead}`);
+        }
+        if (Number(git.behind || 0) > 0) {
+            parts.push(`↓${git.behind}`);
+        }
+        if (git.dirty) {
+            parts.push('*');
+        }
+        return parts.join(' ');
+    }
+
+    function updateExplorerGitSummary(index, git) {
+        const summary = document.getElementById(`explorer-git-${index}`);
+        if (!summary) {
+            return;
+        }
+        const text = explorerGitSummaryText(git);
+        summary.textContent = text;
+        summary.title = git?.error || (git?.repo_root || text);
+    }
+
+    function renderExplorerDiff(index) {
+        const pane = terminals[index];
+        const code = document.getElementById(`explorer-diff-code-${index}`);
+        if (!pane || !code) {
+            return;
+        }
+        const diff = pane._explorerDiffContent || '';
+        if (!diff) {
+            code.innerHTML = '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
+            return;
+        }
+        code.innerHTML = renderExplorerSideBySideDiff(diff);
+    }
+
+    function explorerDiffCellHtml(cell, side) {
+        if (!cell) {
+            return `
+                <div class="explorer-diff-cell empty ${side}">
+                    <span class="explorer-diff-line-number"></span>
+                    <span class="explorer-diff-line-code"></span>
+                </div>
+            `;
+        }
+        return `
+            <div class="explorer-diff-cell ${escHtml(cell.type || 'context')} ${side}">
+                <span class="explorer-diff-line-number">${cell.number ? escHtml(String(cell.number)) : ''}</span>
+                <span class="explorer-diff-line-code">${escHtml(cell.text || '')}</span>
+            </div>
+        `;
+    }
+
+    function explorerDiffRowHtml(left, right) {
+        if (left?.type === 'hunk') {
+            return `
+                <div class="explorer-diff-row">
+                    <div class="explorer-diff-cell hunk">${escHtml(left.text || '')}</div>
+                </div>
+            `;
+        }
+        return `
+            <div class="explorer-diff-row">
+                ${explorerDiffCellHtml(left, 'old')}
+                ${explorerDiffCellHtml(right, 'new')}
+            </div>
+        `;
+    }
+
+    function renderExplorerSideBySideDiff(diff) {
+        const source = String(diff || '');
+        if (!source.trim()) {
+            return '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
+        }
+
+        const lines = source.split(/\r?\n/);
+        const rows = [];
+        let oldLine = 0;
+        let newLine = 0;
+        const pendingDeletes = [];
+
+        const flushDeletes = () => {
+            while (pendingDeletes.length) {
+                rows.push(explorerDiffRowHtml(pendingDeletes.shift(), null));
+            }
+        };
+
+        lines.forEach(line => {
+            const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
+            if (hunk) {
+                flushDeletes();
+                oldLine = Number(hunk[1]);
+                newLine = Number(hunk[2]);
+                rows.push(explorerDiffRowHtml({ type: 'hunk', text: line }, null));
+                return;
+            }
+            if (!oldLine && !newLine) {
+                return;
+            }
+            if (line.startsWith('\\ No newline')) {
+                return;
+            }
+            if (line.startsWith('-') && !line.startsWith('---')) {
+                pendingDeletes.push({
+                    type: 'delete',
+                    number: oldLine,
+                    text: line.slice(1)
+                });
+                oldLine += 1;
+                return;
+            }
+            if (line.startsWith('+') && !line.startsWith('+++')) {
+                const right = {
+                    type: 'add',
+                    number: newLine,
+                    text: line.slice(1)
+                };
+                newLine += 1;
+                rows.push(explorerDiffRowHtml(pendingDeletes.shift() || null, right));
+                return;
+            }
+            if (line.startsWith(' ')) {
+                flushDeletes();
+                rows.push(explorerDiffRowHtml(
+                    { type: 'context', number: oldLine, text: line.slice(1) },
+                    { type: 'context', number: newLine, text: line.slice(1) }
+                ));
+                oldLine += 1;
+                newLine += 1;
+            }
+        });
+
+        flushDeletes();
+        return `<div class="explorer-side-by-side-diff">${rows.join('')}</div>`;
+    }
+
+    function setExplorerDiffSplit(index, open) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        setExplorerFileView(index, open ? 'diff' : (pane._explorerLastFileView || 'source'));
+    }
+
+    function toggleExplorerDiffSplit(index) {
+        const pane = terminals[index];
+        setExplorerDiffSplit(index, !pane?._explorerDiffSplit);
+    }
+
+    async function loadExplorerDiff(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        const code = document.getElementById(`explorer-diff-code-${index}`);
+        if (!pane || !sessionId || !pane._explorerFilePath || !code || pane._explorerDiffLoaded) {
+            renderExplorerDiff(index);
+            return;
+        }
+
+        code.textContent = 'Loading diff...';
+        try {
+            const response = await fetch(
+                `/api/explorer/${encodeURIComponent(sessionId)}/git/diff?path=${encodeURIComponent(pane._explorerFilePath)}&mode=head`
+            );
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load Git diff');
+            }
+            pane._explorerDiffLoaded = true;
+            pane._explorerDiffContent = data.diff || '';
+            renderExplorerDiff(index);
+            if (activeExplorerFileView(index) === 'diff') {
+                applyExplorerSearch(index);
+            }
+        } catch (error) {
+            console.error('[GridVibe Sessions] Explorer Git diff failed:', error);
+            code.innerHTML = `<span class="explorer-diff-empty">${escHtml(error.message || 'Failed to load Git diff.')}</span>`;
+        }
+    }
+
     function setExplorerFileView(index, mode) {
-        const normalizedMode = mode === 'preview' ? 'preview' : 'source';
+        const normalizedMode =
+            mode === 'preview' ? 'preview'
+            : mode === 'diff' ? 'diff'
+            : 'source';
+        const pane = terminals[index];
         const list = document.getElementById(`explorer-list-${index}`);
         if (!list) {
             return;
         }
 
+        const body = list.querySelector('.explorer-editor-body');
+        const diffPanel = document.getElementById(`explorer-diff-panel-${index}`);
+        const selectedMode = normalizedMode === 'diff' && diffPanel ? 'diff' : normalizedMode;
+        const isDiffMode = selectedMode === 'diff';
+        if (pane) {
+            pane._explorerDiffSplit = isDiffMode;
+            if (selectedMode === 'source' || selectedMode === 'preview') {
+                pane._explorerLastFileView = selectedMode;
+            }
+        }
+        if (body) {
+            body.classList.toggle('split-diff', isDiffMode);
+        }
+        if (diffPanel) {
+            diffPanel.hidden = !isDiffMode;
+        }
         list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
-            const isSelected = button.dataset.explorerFileView === normalizedMode;
+            const isSelected = button.dataset.explorerFileView === selectedMode;
             button.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+            if (button.dataset.explorerDiffToggle) {
+                button.setAttribute('aria-pressed', isDiffMode ? 'true' : 'false');
+            }
         });
         list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
-            panel.hidden = panel.dataset.explorerFilePanel !== normalizedMode;
+            panel.hidden = panel.dataset.explorerFilePanel !== selectedMode;
         });
-        applyExplorerSearch(index);
+        if (isDiffMode) {
+            loadExplorerDiff(index);
+            const state = pane ? ensureExplorerSearchState(pane, 'file') : null;
+            if (state?.query) {
+                applyExplorerSearch(index);
+            }
+        } else {
+            applyExplorerSearch(index);
+        }
     }
 
-    function ensureExplorerSearchState(pane) {
-        if (!pane._explorerSearch) {
-            pane._explorerSearch = { query: '', activeIndex: 0, matchCount: 0 };
+    function isExplorerSearchablePane(pane) {
+        return pane?._explorerMode === 'file' || pane?._explorerMode === 'directory';
+    }
+
+    function ensureExplorerSearchState(pane, mode = pane?._explorerMode) {
+        const key = mode === 'directory' ? '_explorerDirectorySearch' : '_explorerSearch';
+        if (!pane[key]) {
+            pane[key] = { query: '', activeIndex: 0, matchCount: 0, matchCapped: false, ranges: [], resultQuery: '' };
         }
-        return pane._explorerSearch;
+        return pane[key];
     }
 
     function clampExplorerEditorFontSize(value) {
@@ -6992,7 +9496,7 @@
         return preview;
     }
 
-    function markExplorerSearchInElement(root, query, activeIndex = 0) {
+    function markExplorerSearchInElement(root, query, activeIndex = 0, maxMatches = EXPLORER_SEARCH_MAX_MATCHES) {
         if (!root || !query) {
             return [];
         }
@@ -7019,12 +9523,17 @@
 
         const marks = [];
         const normalizedQuery = query.toLowerCase();
+        let capped = false;
         textNodes.forEach(node => {
+            if (marks.length >= maxMatches) {
+                capped = true;
+                return;
+            }
             const value = node.nodeValue || '';
             const normalizedValue = value.toLowerCase();
             const localMatches = [];
             let cursor = 0;
-            while (cursor < normalizedValue.length) {
+            while (cursor < normalizedValue.length && marks.length + localMatches.length < maxMatches) {
                 const matchIndex = normalizedValue.indexOf(normalizedQuery, cursor);
                 if (matchIndex === -1) {
                     break;
@@ -7035,6 +9544,7 @@
                 });
                 cursor = matchIndex + Math.max(query.length, 1);
             }
+            capped = capped || marks.length + localMatches.length >= maxMatches;
             if (!localMatches.length) {
                 return;
             }
@@ -7060,10 +9570,138 @@
             node.replaceWith(fragment);
         });
 
+        marks.capped = capped;
         return marks;
     }
 
-    function updateExplorerSearchControls(index, query, activeIndex, matchCount) {
+    function renderExplorerDirectorySearchControls(index) {
+        const container = document.getElementById(`explorer-directory-search-${index}`);
+        if (!container) {
+            return;
+        }
+
+        container.classList.add('active');
+        container.innerHTML = `
+            <input
+                type="search"
+                class="explorer-search-input"
+                data-explorer-search-input="${index}"
+                placeholder="Find file"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Find files and folders"
+            >
+            <span class="explorer-search-count" data-explorer-search-count="${index}"></span>
+            <button type="button" class="explorer-search-btn" data-explorer-search-prev="${index}" title="Previous match" aria-label="Previous match">↑</button>
+            <button type="button" class="explorer-search-btn" data-explorer-search-next="${index}" title="Next match" aria-label="Next match">↓</button>
+            <button type="button" class="explorer-search-btn" data-explorer-search-clear="${index}" title="Clear search" aria-label="Clear search">×</button>
+        `;
+    }
+
+    function clearExplorerDirectorySearchControls(index) {
+        const container = document.getElementById(`explorer-directory-search-${index}`);
+        if (!container) {
+            return;
+        }
+        container.classList.remove('active');
+        container.innerHTML = '';
+    }
+
+    function resetExplorerDirectorySearch(pane) {
+        const state = ensureExplorerSearchState(pane, 'directory');
+        state.query = '';
+        state.activeIndex = 0;
+        state.matchCount = 0;
+        state.matchCapped = false;
+    }
+
+    function explorerDirectoryRowHtml(entry, query = '', active = false) {
+        const isDirectory = entry.type === 'directory';
+        const isDeleted = Boolean(entry.deleted);
+        const size = isDirectory ? 'Folder' : (isDeleted ? 'Deleted' : formatExplorerSize(entry.size));
+        const modified = formatExplorerDate(entry.modified);
+        const name = entry.name || '';
+        const normalizedName = name.toLowerCase();
+        const normalizedQuery = String(query || '').toLowerCase();
+        const matchIndex = normalizedQuery ? normalizedName.indexOf(normalizedQuery) : -1;
+        const nameRanges = matchIndex === -1 ? [] : [{
+            start: matchIndex,
+            end: matchIndex + String(query).length,
+            active
+        }];
+
+        return `
+            <button
+                type="button"
+                class="explorer-row ${isDirectory ? 'directory' : 'file'}${isDeleted ? ' deleted' : ''}"
+                data-explorer-path="${escHtml(entry.path || '')}"
+                ${isDeleted ? 'disabled' : ''}
+            >
+                ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
+                ${explorerGitBadgeHtml(entry.git)}
+                <span class="explorer-name">${explorerMarkedEscHtml(name, 0, nameRanges)}</span>
+                <span class="explorer-meta">${escHtml(size)}</span>
+                <span class="explorer-meta">${escHtml(modified)}</span>
+            </button>
+        `;
+    }
+
+    function wireExplorerDirectoryRows(index) {
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!list) {
+            return;
+        }
+
+        list.querySelectorAll('.explorer-row.directory').forEach(button => {
+            button.addEventListener('click', () => {
+                loadExplorerPane(index, button.dataset.explorerPath || '');
+            });
+        });
+        list.querySelectorAll('.explorer-row.file').forEach(button => {
+            button.addEventListener('click', () => {
+                openExplorerFile(index, button.dataset.explorerPath || '');
+            });
+        });
+    }
+
+    function renderExplorerDirectoryRows(index) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!pane || !list) {
+            return;
+        }
+
+        const entries = Array.isArray(pane._explorerEntries) ? pane._explorerEntries : [];
+        const state = ensureExplorerSearchState(pane, 'directory');
+        const query = state.query || '';
+        const normalizedQuery = String(query).toLowerCase();
+        let visibleEntries = entries;
+        if (normalizedQuery) {
+            visibleEntries = entries.filter(entry => String(entry.name || '').toLowerCase().includes(normalizedQuery));
+        }
+
+        const matchCount = normalizedQuery ? visibleEntries.length : 0;
+        state.matchCount = matchCount;
+        state.activeIndex = matchCount ? Math.min(Number(state.activeIndex || 0), matchCount - 1) : 0;
+
+        if (!entries.length && !query) {
+            list.innerHTML = '<div class="explorer-message">Directory is empty.</div>';
+        } else if (!visibleEntries.length) {
+            list.innerHTML = `<div class="explorer-message">No files or folders match "${escHtml(query)}".</div>`;
+        } else {
+            list.innerHTML = visibleEntries
+                .map((entry, entryIndex) => explorerDirectoryRowHtml(entry, query, Boolean(normalizedQuery) && entryIndex === state.activeIndex))
+                .join('');
+            wireExplorerDirectoryRows(index);
+        }
+
+        updateExplorerSearchControls(index, query, state.activeIndex || 0, matchCount);
+        if (normalizedQuery && matchCount) {
+            scrollExplorerSearchMatch(index);
+        }
+    }
+
+    function updateExplorerSearchControls(index, query, activeIndex, matchCount, capped = false) {
         const input = document.querySelector(`[data-explorer-search-input="${index}"]`);
         const count = document.querySelector(`[data-explorer-search-count="${index}"]`);
         const buttons = document.querySelectorAll(
@@ -7073,7 +9711,8 @@
             input.value = query;
         }
         if (count) {
-            count.textContent = query ? `${matchCount ? activeIndex + 1 : 0}/${matchCount}` : '';
+            count.textContent = query ? `${matchCount ? activeIndex + 1 : 0}/${matchCount}${capped ? '+' : ''}` : '';
+            count.title = capped ? `Showing first ${matchCount} matches` : '';
         }
         buttons.forEach(button => {
             button.disabled = matchCount === 0;
@@ -7092,9 +9731,41 @@
         });
     }
 
-    function applyExplorerSearch(index, { resetActive = false } = {}) {
+    function cancelExplorerSearch(index) {
         const pane = terminals[index];
-        if (!pane || pane._explorerMode !== 'file') {
+        if (!pane) {
+            return;
+        }
+        if (pane._explorerSearchTimer) {
+            window.clearTimeout(pane._explorerSearchTimer);
+            pane._explorerSearchTimer = null;
+        }
+        if (pane._explorerSearchToken) {
+            pane._explorerSearchToken.cancelled = true;
+            pane._explorerSearchToken = null;
+        }
+    }
+
+    function scheduleExplorerSearch(index, { resetActive = false, delay = EXPLORER_SEARCH_DEBOUNCE_MS } = {}) {
+        const pane = terminals[index];
+        if (!pane || !isExplorerSearchablePane(pane)) {
+            return;
+        }
+        if (pane._explorerMode === 'directory') {
+            applyExplorerSearch(index, { resetActive });
+            return;
+        }
+
+        cancelExplorerSearch(index);
+        pane._explorerSearchTimer = window.setTimeout(() => {
+            pane._explorerSearchTimer = null;
+            applyExplorerSearch(index, { resetActive });
+        }, delay);
+    }
+
+    async function applyExplorerSearch(index, { resetActive = false } = {}) {
+        const pane = terminals[index];
+        if (!pane || !isExplorerSearchablePane(pane)) {
             return;
         }
 
@@ -7103,32 +9774,101 @@
             state.activeIndex = 0;
         }
 
+        if (pane._explorerMode === 'directory') {
+            renderExplorerDirectoryRows(index);
+            return;
+        }
+
         const query = state.query || '';
         const view = activeExplorerFileView(index);
-        renderExplorerSource(index);
-        const preview = restoreExplorerPreview(index);
-
         let matchCount = 0;
+        let capped = false;
         if (query && view === 'source') {
-            const ranges = explorerFindRanges(pane._explorerFileContent || '', query);
+            const cachedRanges = state.resultQuery === query && Array.isArray(state.ranges)
+                ? state.ranges
+                : null;
+            const ranges = cachedRanges || [];
+            if (!cachedRanges) {
+                cancelExplorerSearch(index);
+                const token = { cancelled: false };
+                pane._explorerSearchToken = token;
+                updateExplorerSearchControls(index, query, 0, 0);
+                const result = await explorerFindRangesAsync(pane._explorerFileContent || '', query, token);
+                if (token.cancelled || pane._explorerSearchToken !== token) {
+                    return;
+                }
+                pane._explorerSearchToken = null;
+                ranges.splice(0, ranges.length, ...result.ranges);
+                ranges.capped = result.capped;
+                state.ranges = ranges;
+                state.resultQuery = query;
+            }
             matchCount = ranges.length;
+            capped = Boolean(ranges.capped);
             state.activeIndex = matchCount ? Math.min(state.activeIndex || 0, matchCount - 1) : 0;
             renderExplorerSource(index, decorateExplorerSearchRanges(ranges, state.activeIndex));
-        } else if (query && view === 'preview' && preview) {
+        } else if (query && view === 'preview') {
+            cancelExplorerSearch(index);
+            renderExplorerSource(index);
+            if (pane._explorerDiffLoaded) {
+                renderExplorerDiff(index);
+            }
+            const preview = restoreExplorerPreview(index);
+            if (!preview) {
+                state.activeIndex = 0;
+                state.matchCount = 0;
+                state.matchCapped = false;
+                updateExplorerSearchControls(index, query, 0, 0);
+                return;
+            }
             const previewMarks = markExplorerSearchInElement(preview, query, state.activeIndex || 0);
             matchCount = previewMarks.length;
+            capped = Boolean(previewMarks.capped);
             state.activeIndex = matchCount ? Math.min(state.activeIndex || 0, matchCount - 1) : 0;
             if (matchCount && !previewMarks[state.activeIndex]?.classList.contains('active')) {
                 previewMarks.forEach((mark, markIndex) => {
                     mark.classList.toggle('active', markIndex === state.activeIndex);
                 });
             }
+        } else if (query && view === 'diff') {
+            cancelExplorerSearch(index);
+            renderExplorerSource(index);
+            restoreExplorerPreview(index);
+            if (pane._explorerDiffLoaded) {
+                renderExplorerDiff(index);
+            }
+            const diff = document.getElementById(`explorer-diff-code-${index}`);
+            if (!diff) {
+                state.activeIndex = 0;
+                state.matchCount = 0;
+                state.matchCapped = false;
+                updateExplorerSearchControls(index, query, 0, 0);
+                return;
+            }
+            const diffMarks = markExplorerSearchInElement(diff, query, state.activeIndex || 0);
+            matchCount = diffMarks.length;
+            capped = Boolean(diffMarks.capped);
+            state.activeIndex = matchCount ? Math.min(state.activeIndex || 0, matchCount - 1) : 0;
+            if (matchCount && !diffMarks[state.activeIndex]?.classList.contains('active')) {
+                diffMarks.forEach((mark, markIndex) => {
+                    mark.classList.toggle('active', markIndex === state.activeIndex);
+                });
+            }
         } else {
+            cancelExplorerSearch(index);
+            state.ranges = [];
+            state.resultQuery = '';
+            renderExplorerSource(index);
+            restoreExplorerPreview(index);
+            if (pane._explorerDiffLoaded) {
+                renderExplorerDiff(index);
+            }
             state.activeIndex = 0;
         }
 
         state.matchCount = matchCount;
-        updateExplorerSearchControls(index, query, state.activeIndex || 0, matchCount);
+        state.matchCapped = capped;
+        updateExplorerSearchControls(index, query, state.activeIndex || 0, matchCount, capped);
         if (query && matchCount) {
             scrollExplorerSearchMatch(index);
         }
@@ -7157,13 +9897,16 @@
         state.query = '';
         state.activeIndex = 0;
         state.matchCount = 0;
+        state.matchCapped = false;
+        state.ranges = [];
+        state.resultQuery = '';
         applyExplorerSearch(index);
         document.querySelector(`[data-explorer-search-input="${index}"]`)?.focus();
     }
 
     function focusExplorerSearch(index) {
         const pane = terminals[index];
-        if (!pane || pane._explorerMode !== 'file') {
+        if (!pane || !isExplorerSearchablePane(pane)) {
             return false;
         }
         const input = document.querySelector(`[data-explorer-search-input="${index}"]`);
@@ -7189,7 +9932,10 @@
             const nextState = ensureExplorerSearchState(pane);
             nextState.query = input.value;
             nextState.activeIndex = 0;
-            applyExplorerSearch(index, { resetActive: true });
+            nextState.ranges = [];
+            nextState.resultQuery = '';
+            nextState.matchCapped = false;
+            scheduleExplorerSearch(index, { resetActive: true });
         });
         input.addEventListener('keydown', event => {
             if (event.key === 'Enter') {
@@ -7312,13 +10058,21 @@
         const codeLanguage = normalizeExplorerLanguage(data.language) || explorerCodeLanguage(path || fileName);
         const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
         const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
+        const hasGitDiff = explorerHasGitDiff(data.git);
         const metaParts = explorerFileMetaParts(data, fileType);
         const previousPath = pane._explorerFilePath || '';
-        const searchState = ensureExplorerSearchState(pane);
+        const keepDiffSplit = previousPath === path && pane._explorerDiffSplit && hasGitDiff;
+        const initialFileView = keepDiffSplit ? 'diff' : 'source';
+        const searchState = ensureExplorerSearchState(pane, 'file');
         if (previousPath && previousPath !== path) {
+            cancelExplorerSearch(index);
             searchState.activeIndex = 0;
             searchState.matchCount = 0;
+            searchState.matchCapped = false;
+            searchState.ranges = [];
+            searchState.resultQuery = '';
         }
+        clearExplorerDirectorySearchControls(index);
 
         pane._attached = true;
         pane._explorerMode = 'file';
@@ -7326,8 +10080,15 @@
         pane._explorerFileContent = data.content || '';
         pane._explorerFileLanguage = codeLanguage;
         pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
+        pane._explorerGit = data.git || null;
+        pane._explorerGitContext = data.git_context || null;
+        pane._explorerDiffLoaded = false;
+        pane._explorerDiffContent = '';
+        pane._explorerDiffSplit = keepDiffSplit;
+        pane._explorerLastFileView = pane._explorerLastFileView === 'preview' && hasPreview ? 'preview' : 'source';
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
+        updateExplorerGitSummary(index, data.git_context || null);
 
         const pathLabel = document.getElementById(`explorer-path-${index}`);
         const upButton = document.getElementById(`explorer-up-${index}`);
@@ -7347,10 +10108,11 @@
                         <div class="explorer-editor-name" title="${escHtml(path || fileName)}">${escHtml(fileName)}</div>
                         <div class="explorer-editor-meta">${escHtml(metaParts.join(' - '))}</div>
                     </div>
-                    ${hasPreview ? `
-                        <div class="explorer-editor-tabs" role="tablist" aria-label="Markdown file view">
-                            <button type="button" class="explorer-editor-tab" data-explorer-file-view="source" role="tab" aria-selected="true">Source</button>
-                            <button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="false">Preview</button>
+                    ${(hasPreview || hasGitDiff) ? `
+                        <div class="explorer-editor-tabs" role="tablist" aria-label="File view">
+                            <button type="button" class="explorer-editor-tab" data-explorer-file-view="source" role="tab" aria-selected="${initialFileView === 'source' ? 'true' : 'false'}">Source</button>
+                            ${hasPreview ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="false">Preview</button>` : ''}
+                            ${hasGitDiff ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="diff" data-explorer-diff-toggle="${index}" role="tab" aria-selected="${initialFileView === 'diff' ? 'true' : 'false'}" aria-pressed="${keepDiffSplit ? 'true' : 'false'}">Diff</button>` : ''}
                         </div>
                     ` : ''}
                     <div class="explorer-editor-zoom" aria-label="Editor font size controls">
@@ -7374,9 +10136,12 @@
                         <button type="button" class="explorer-search-btn" data-explorer-search-clear="${index}" title="Clear search" aria-label="Clear search">×</button>
                     </div>
                 </div>
-                <div class="explorer-editor-body">
-                    <pre class="explorer-editor-content explorer-editor-panel" data-explorer-file-panel="source"><code id="explorer-code-${index}"></code></pre>
-                    ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" hidden></div>` : ''}
+                <div class="explorer-editor-body${keepDiffSplit ? ' split-diff' : ''}">
+                    <div class="explorer-editor-main">
+                        <pre class="explorer-editor-content explorer-editor-panel" data-explorer-file-panel="source"><code id="explorer-code-${index}"></code></pre>
+                        ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" hidden></div>` : ''}
+                    </div>
+                    ${hasGitDiff ? `<aside class="explorer-diff-split" id="explorer-diff-panel-${index}" data-explorer-file-panel="diff" ${keepDiffSplit ? '' : 'hidden'}><div class="explorer-diff-content" id="explorer-diff-code-${index}"></div></aside>` : ''}
                 </div>
             </div>
         `;
@@ -7395,9 +10160,16 @@
         }
         list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
             button.addEventListener('click', () => {
-                setExplorerFileView(index, button.dataset.explorerFileView || 'source');
+                if (button.dataset.explorerFileView === 'diff') {
+                    toggleExplorerDiffSplit(index);
+                } else {
+                    setExplorerFileView(index, button.dataset.explorerFileView || 'source');
+                }
             });
         });
+        if (keepDiffSplit) {
+            loadExplorerDiff(index);
+        }
         wireExplorerEditorZoomControls(index);
         wireExplorerSearchControls(index);
         applyExplorerSearch(index);
@@ -7419,22 +10191,40 @@
         }
 
         const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
+        const hasGitDiff = explorerHasGitDiff(data.git);
         const preview = document.getElementById(`explorer-preview-${index}`);
-        if (hasPreview !== Boolean(preview)) {
+        const diffPanel = document.getElementById(`explorer-diff-code-${index}`);
+        if (hasPreview !== Boolean(preview) || hasGitDiff !== Boolean(diffPanel)) {
             return false;
         }
 
         const fileName = data.name || path || 'File';
         const codeLanguage = normalizeExplorerLanguage(data.language) || explorerCodeLanguage(path || fileName);
         const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
+        cancelExplorerSearch(index);
+        const searchState = ensureExplorerSearchState(pane, 'file');
+        searchState.ranges = [];
+        searchState.resultQuery = '';
+        searchState.matchCapped = false;
         pane._explorerFileContent = data.content || '';
         pane._explorerFileLanguage = codeLanguage;
         pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
+        pane._explorerGit = data.git || null;
+        pane._explorerGitContext = data.git_context || null;
+        pane._explorerDiffLoaded = false;
+        pane._explorerDiffContent = '';
         renderExplorerSource(index);
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
         }
+        if (diffPanel && hasGitDiff) {
+            renderExplorerDiff(index);
+            if (pane._explorerDiffSplit) {
+                loadExplorerDiff(index);
+            }
+        }
         applyExplorerEditorFontSize(index);
+        updateExplorerGitSummary(index, data.git_context || null);
 
         const nameLabel = list.querySelector('.explorer-editor-name');
         if (nameLabel) {
@@ -7465,8 +10255,9 @@
             return false;
         }
 
+        const wasDirectoryOpen = pane._explorerMode === 'directory';
         const scrollState = preserveScroll ? captureExplorerFileScroll(index) : null;
-        if (showLoading) {
+        if (showLoading && !wasDirectoryOpen) {
             renderExplorerMessage(index, 'Opening file...');
         }
         try {
@@ -7486,7 +10277,7 @@
             return renderExplorerFile(index, data, { scrollState });
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer file open failed:', error);
-            renderExplorerMessage(index, error.message || 'Failed to open file.');
+            renderExplorerDirectoryOpenError(index, error.message || 'Failed to open file.');
             return false;
         }
     }
@@ -7540,9 +10331,20 @@
             pane._explorerFileContent = '';
             pane._explorerFileLanguage = '';
             pane._explorerPreviewHtml = '';
+            pane._explorerGit = null;
+            pane._explorerGitContext = data.git || null;
+            pane._explorerDiffLoaded = false;
+            pane._explorerDiffContent = '';
             pane._explorerPath = data.path || '';
             pane._explorerParentPath = data.parent_path || '';
+            pane._explorerEntries = Array.isArray(data.entries) ? data.entries : [];
+            cancelExplorerSearch(index);
+            if (isNavigation) {
+                resetExplorerDirectorySearch(pane);
+            }
             document.getElementById(`ph-${index}`)?.remove();
+            updateExplorerGitSummary(index, data.git || null);
+            renderExplorerDirectorySearchControls(index);
 
             const pathLabel = document.getElementById(`explorer-path-${index}`);
             const upButton = document.getElementById(`explorer-up-${index}`);
@@ -7558,41 +10360,8 @@
                 return true;
             }
             list.classList.remove('file-view');
-
-            const entries = Array.isArray(data.entries) ? data.entries : [];
-            if (!entries.length) {
-                list.innerHTML = '<div class="explorer-message">Directory is empty.</div>';
-                return true;
-            }
-
-            list.innerHTML = entries.map(entry => {
-                const isDirectory = entry.type === 'directory';
-                const size = isDirectory ? 'Folder' : formatExplorerSize(entry.size);
-                const modified = formatExplorerDate(entry.modified);
-                return `
-                    <button
-                        type="button"
-                        class="explorer-row ${isDirectory ? 'directory' : 'file'}"
-                        data-explorer-path="${escHtml(entry.path || '')}"
-                    >
-                        ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
-                        <span class="explorer-name">${escHtml(entry.name || '')}</span>
-                        <span class="explorer-meta">${escHtml(size)}</span>
-                        <span class="explorer-meta">${escHtml(modified)}</span>
-                    </button>
-                `;
-            }).join('');
-
-            list.querySelectorAll('.explorer-row.directory').forEach(button => {
-                button.addEventListener('click', () => {
-                    loadExplorerPane(index, button.dataset.explorerPath || '');
-                });
-            });
-            list.querySelectorAll('.explorer-row.file').forEach(button => {
-                button.addEventListener('click', () => {
-                    openExplorerFile(index, button.dataset.explorerPath || '');
-                });
-            });
+            wireExplorerSearchControls(index);
+            applyExplorerSearch(index, { resetActive: true });
             return true;
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer load failed:', error);
@@ -7611,6 +10380,7 @@
         socket.on('terminal_output', ({ session_id, data }) => {
             const target = resolveSessionTarget(session_id);
             if (!target) return;
+            if (pendingModeSwitchSessionIds.has(session_id)) return;
             if (!target.terminal.term) return;
 
             if (!target.active) {
@@ -7713,12 +10483,19 @@
     window.addEventListener('pywebviewready', () => {
         syncNativeFullscreenState();
     });
+    window.addEventListener('focus', () => {
+        _loadVoiceServiceStatus();
+    });
+    window.addEventListener('pageshow', () => {
+        _loadVoiceServiceStatus();
+    });
     document.addEventListener('fullscreenchange', updateFullscreenButton);
     /* ─────────────────────────────────────────────
        Boot
     ───────────────────────────────────────────── */
-    applySurfaceMode(getStoredSurfaceMode());
+    applySurfaceMode(normalizeSurfaceMode(DEFAULT_SURFACE_MODE) === 'max');
     applyTopbarVisibility(getStoredTopbarVisible());
+    setupAppConfigUpdateListeners();
     updateFullscreenButton();
     _loadVoicePrefsFromServer();
     _loadVoiceServiceStatus();

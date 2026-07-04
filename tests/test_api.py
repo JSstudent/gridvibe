@@ -1,6 +1,8 @@
 import io
 import json
+import shutil
 import stat
+import subprocess
 import threading
 import unittest
 from pathlib import Path
@@ -66,6 +68,36 @@ class FakeSftp:
         self.closed = True
 
 
+class FakeSshStream:
+    def __init__(self, data=b"", returncode=0):
+        self._data = data
+        self.channel = SimpleNamespace(recv_exit_status=lambda: returncode)
+
+    def read(self):
+        return self._data
+
+
+class FakeSshExecClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.commands = []
+        self.closed = False
+
+    def exec_command(self, command, timeout=None):
+        self.commands.append((command, timeout))
+        if not self.responses:
+            raise OSError("Unexpected SSH command")
+        returncode, stdout, stderr = self.responses.pop(0)
+        return (
+            None,
+            FakeSshStream(stdout, returncode),
+            FakeSshStream(stderr, returncode),
+        )
+
+    def close(self):
+        self.closed = True
+
+
 class ApiRoutesTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
@@ -126,6 +158,17 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json()["sessions"][0]["session_id"]
 
+    def _run_git(self, repo_dir: Path, *args: str) -> subprocess.CompletedProcess:
+        if shutil.which("git") is None:
+            self.skipTest("git executable is not available")
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+
     def tearDown(self):
         api.session_manager.reset_sessions()
         api.active_launch_options.update(
@@ -180,7 +223,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn("const AGENT_OPTIONS = [", html)
-        self.assertIn('data-command-mode="agent"', html)
+        self.assertIn('class="startup-mode-select"', html)
+        self.assertIn('<option value="terminal"', html)
+        self.assertIn('<option value="agent"', html)
+        self.assertIn('aria-label="Terminal ${index + 1} title"', html)
         self.assertIn("function normalizeTerminalCommandUi(terminal)", html)
         self.assertIn("Custom Agent", html)
 
@@ -240,6 +286,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="appSettingsModal"', html)
         self.assertIn('/api/app-config', html)
         self.assertIn('id="appTheme"', html)
+        self.assertIn('id="appSurfaceMode"', html)
+        self.assertIn('Session Window', html)
         self.assertIn('id="appVoiceEngine"', html)
         self.assertIn('id="appWhisperDevice"', html)
         self.assertIn('id="appVoiceProfile"', html)
@@ -251,6 +299,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('<select id="appWhisperModel">', html)
         self.assertIn('<option value="base">base</option>', html)
         self.assertIn('<option value="large-v3-turbo">large-v3-turbo</option>', html)
+        self.assertIn("const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';", html)
+        self.assertIn("const APP_CONFIG_BROADCAST_CHANNEL = 'gridvibe.appConfig';", html)
+        self.assertIn("function notifyAppConfigUpdated(appSettings)", html)
+        self.assertIn("notifyAppConfigUpdated(data);", html)
+
+    def test_launcher_page_uses_compact_centered_header(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('<h1>Launcher Setup</h1>', html)
+        self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
+        self.assertIn('<div class="app-titlebar-right">', html)
+        self.assertIn('<span>Session</span>', html)
+        self.assertIn('<span>Mode</span>', html)
+        self.assertNotIn("Configure your terminal workspace before launch.", html)
 
     def test_launcher_page_resets_terminal_setup_when_connection_target_changes(self):
         response = self.client.get("/")
@@ -272,19 +336,121 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
 
-    def test_terminals_page_preserves_fullscreen_for_native_new_session_focus(self):
+    def test_terminals_page_exposes_session_menu_actions(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        go_to_settings_start = html.index("async function goToSettings(event)")
-        open_launcher_index = html.index(
-            "window.pywebview?.api?.open_launcher_window",
-            go_to_settings_start,
+        self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
+        self.assertIn(">Sessions...</button>", html)
+        self.assertIn(">Import Session ...</button>", html)
+        self.assertIn(">Save Session</button>", html)
+        self.assertIn(">Save Session as ...</button>", html)
+        self.assertIn("onclick=\"closeSessionsMenu(); return openNewSessionSelector(event);\"", html)
+        self.assertIn("onclick=\"closeSessionsMenu(); saveActiveWorkspaceSession(this);\"", html)
+        self.assertIn("onclick=\"closeSessionsMenu(); saveActiveWorkspaceSessionAs(this);\"", html)
+        self.assertIn('<div id="savedSessionsModal" class="modal-shell" aria-hidden="true">', html)
+        self.assertIn('<div id="saveSessionAsModal" class="modal-shell" aria-hidden="true">', html)
+        self.assertIn('<input id="saveSessionAsOpenNow" type="checkbox">', html)
+        self.assertIn("<span>Open session now</span>", html)
+        self.assertIn("function openNewSessionSelector(event)", html)
+        self.assertIn("function buildSavedSessionLaunchPayload(savedSession)", html)
+        self.assertIn("await launchSavedSession(data);", html)
+        self.assertNotIn("container.appendChild(settingsButton);", html)
+        self.assertNotIn("container.appendChild(saveButton);", html)
+        self.assertIn("async function saveActiveWorkspaceSession(button = null, options = {})", html)
+        self.assertIn("function saveActiveWorkspaceSessionAs(button = null)", html)
+        self.assertIn("let workspaceSaveTargets = new Map();", html)
+        self.assertIn("function notifySavedSessionUpdated(savedSession, options = {})", html)
+        self.assertIn("const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';", html)
+        self.assertIn("notifySavedSessionUpdated(data, { activate: openSavedSessionNow });", html)
+        self.assertIn("function getWorkspacePanesInVisualOrder(groupId = activeGroupId)", html)
+        self.assertIn("function getActiveWorkspaceGroupId()", html)
+        self.assertIn("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)", html)
+        self.assertIn("function buildActiveWorkspaceLayoutSnapshot(groupId = activeGroupId)", html)
+        self.assertIn("function applyWorkspaceLayoutSnapshot(snapshot, expectedCount)", html)
+        self.assertIn("workspace_layout: buildActiveWorkspaceLayoutSnapshot(groupId)", html)
+        self.assertIn("applyWorkspaceLayoutSnapshot(data.workspace_layout, data.sessions.length);", html)
+        save_config_start = html.index("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)")
+        save_config_end = html.index("async function saveActiveWorkspaceSession", save_config_start)
+        save_config_html = html[save_config_start:save_config_end]
+        self.assertIn("const groupTerminals = getWorkspacePanesInVisualOrder(groupId);", save_config_html)
+        self.assertNotIn("? terminals", save_config_html)
+        save_handler_start = html.index("async function saveActiveWorkspaceSession")
+        save_handler_end = html.index("function saveActiveWorkspaceSessionAs", save_handler_start)
+        save_handler_html = html[save_handler_start:save_handler_end]
+        self.assertIn("const targetGroupId = getActiveWorkspaceGroupId();", save_handler_html)
+        self.assertIn("const config = buildActiveWorkspaceSessionConfig(targetGroupId);", save_handler_html)
+        self.assertIn("const saveTarget = getWorkspaceSaveTarget(targetGroupId);", save_handler_html)
+        self.assertIn("const result = await openSaveSessionAsModal(suggestedName);", save_handler_html)
+        self.assertIn("activate: shouldActivateSavedSession", save_handler_html)
+        self.assertIn("savePayload.group_id = targetGroupId;", save_handler_html)
+        self.assertIn("data.group?.group_id", save_handler_html)
+        self.assertIn("if (createNewSession && openSavedSessionNow)", save_handler_html)
+        self.assertIn("targetGroupId,", save_handler_html)
+        save_target_start = html.index("function getWorkspaceSaveTarget")
+        save_target_end = html.index("function rememberWorkspaceSaveTarget", save_target_start)
+        save_target_html = html[save_target_start:save_target_end]
+        self.assertIn("const groupSavedSessionId = String(group?.saved_session_id || '').trim();", save_target_html)
+        self.assertLess(
+            save_target_html.index("groupSavedSessionId"),
+            save_target_html.index("workspaceSaveTargets.get(groupId)"),
         )
-        reset_index = html.index("await resetFullscreenState();", go_to_settings_start)
+        entry_start = html.index("function buildWorkspaceTerminalEntry")
+        entry_end = html.index("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)", entry_start)
+        self.assertIn("terminal?._explorerPath || session.directory", html[entry_start:entry_end])
 
-        self.assertLess(open_launcher_index, reset_index)
+    def test_launcher_forwards_saved_workspace_layout_and_agent_metadata(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("let activeWorkspaceLayout = null;", html)
+        self.assertIn("function clearActiveWorkspaceLayoutOverride()", html)
+        self.assertIn("workspace_layout: workspaceLayout", html)
+        self.assertIn("activeWorkspaceLayout = normalized.workspace_layout || null;", html)
+        self.assertIn("workspace_layout: config.workspace_layout", html)
+        self.assertIn("surface_mode: appSettings.workspace?.surface_mode === 'max' ? 'max' : 'normal'", html)
+        self.assertIn("initial_command_mode: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("agent_selection: terminal.initial_command_mode === 'agent'", html)
+        layout_change_start = html.index("container.querySelectorAll('.layout-btn').forEach")
+        layout_change_end = html.index("function renderModeFields", layout_change_start)
+        layout_change_html = html[layout_change_start:layout_change_end]
+        self.assertIn("clearActiveWorkspaceLayoutOverride();", layout_change_html)
+        self.assertLess(
+            layout_change_html.index("clearActiveWorkspaceLayoutOverride();"),
+            layout_change_html.index("selectedLayout = nextLayout"),
+        )
+
+    def test_launcher_refreshes_active_saved_session_after_external_update(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';", html)
+        self.assertIn("const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';", html)
+        self.assertIn("async function refreshActiveSavedSessionFromUpdate(payload)", html)
+        self.assertIn("const shouldActivate = Boolean(payload?.activate);", html)
+        self.assertIn("(!shouldActivate && sessionId !== activeSavedSessionId)", html)
+        self.assertIn("fetch(`/api/saved-sessions/${encodeURIComponent(sessionId)}`)", html)
+        self.assertIn("applySessionConfig(data.config);", html)
+        self.assertIn("setupSavedSessionUpdateListeners();", html)
+
+    def test_terminals_page_new_session_opens_saved_session_selector_without_launcher(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+
+        menu_start = html.index('>Import Session ...</button>')
+        go_to_settings_start = html.index("async function goToSettings(event)")
+        open_selector_start = html.index("async function openNewSessionSelector(event)")
+
+        self.assertIn("openNewSessionSelector(event)", html[:menu_start])
+        self.assertNotIn(
+            "window.pywebview?.api?.open_launcher_window",
+            html[open_selector_start:go_to_settings_start],
+        )
 
     def test_terminals_page_uses_icon_only_settings_button(self):
         response = self.client.get("/terminals")
@@ -295,6 +461,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('aria-label="Open settings"', html)
         self.assertIn('class="vibe-flow-icon"', html)
 
+    def test_docs_images_route_serves_gridvibe_icon(self):
+        response = self.client.get("/docs/images/GridVibe_icon.ico")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(len(response.get_data()), 0)
+
     def test_terminals_page_exposes_per_terminal_refresh_control(self):
         response = self.client.get("/terminals")
 
@@ -304,6 +476,30 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function setTerminalRefreshState(index, refreshing)", html)
         self.assertIn("async function refreshTerminalDisplay(index)", html)
 
+    def test_terminals_page_exposes_per_terminal_close_control(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('data-terminal-close="${i}"', html)
+        self.assertIn('aria-label="Close this terminal pane"', html)
+        self.assertIn(".terminal-close-btn", html)
+        self.assertIn("border-color: rgba(255, 92, 92, .7);", html)
+        self.assertIn("function buildCloseTerminalPlan(index)", html)
+        self.assertIn("function findTerminalCloseNeighbor(closedRect, candidates)", html)
+        self.assertIn("function terminalCloseSideGroups(closedRect, entries)", html)
+        self.assertIn("function buildTerminalCloseRectsForSideGroup(plan, sideGroup)", html)
+        self.assertIn("function sharedBorderLength(left, right)", html)
+        self.assertIn("async function closeTerminalPane(index)", html)
+        self.assertIn("closeTerminalPane(i);", html)
+        self.assertIn("closeTerminalPane(index);", html)
+        self.assertIn("rectsBySessionId: restoreRectsBySessionId", html)
+        self.assertIn("no neighboring pane can safely fill this layout", html)
+        self.assertIn("method: 'DELETE'", html)
+        close_plan_start = html.index("function buildTerminalCloseRectsBySessionId(plan)")
+        close_plan_end = html.index("function buildCloseTerminalPlan(index)", close_plan_start)
+        self.assertNotIn("fixedLayoutSlotRects(", html[close_plan_start:close_plan_end])
+
     def test_terminals_page_exposes_session_mode_switch_controls(self):
         response = self.client.get("/terminals")
 
@@ -312,6 +508,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('data-session-mode-toggle="${i}"', html)
         self.assertIn("async function switchSessionPaneMode(index)", html)
         self.assertIn("body.directory = getExplorerSelectedDirectory(index);", html)
+        self.assertIn("body.refresh_cwd = true;", html)
+        self.assertNotIn("body.directory = terminal._session.directory;", html)
         self.assertIn("`/api/sessions/${encodeURIComponent(sessionId)}/mode`", html)
         self.assertIn("hasMatchingSessionViews(sessionIds, terminals, data.sessions)", html)
         self.assertIn("pendingModeSwitchSessionIds.add(sessionId);", html)
@@ -406,6 +604,28 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("'.py': 'python'", html)
         self.assertIn("'.go': 'go'", html)
         self.assertIn("'.c': 'c'", html)
+        self.assertIn("'.jsonl': 'jsonl'", html)
+        self.assertIn("'.log': 'log'", html)
+        self.assertIn("'.txt': 'text'", html)
+        self.assertIn("'.bat': 'batch'", html)
+        self.assertIn("const EXPLORER_LANGUAGE_BY_FILENAME = Object.freeze({", html)
+        self.assertIn("'.gitignore': 'gitignore'", html)
+        self.assertIn("'dockerfile': 'dockerfile'", html)
+
+    def test_terminals_page_explorer_formats_common_operational_text_files(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("jsonl: 'JSON Lines source'", html)
+        self.assertIn("log: 'Log file'", html)
+        self.assertIn("dotenv: 'Environment file'", html)
+        self.assertIn("batch: 'Batch source'", html)
+        self.assertIn("function highlightExplorerLog(content, searchRanges = [])", html)
+        self.assertIn("function highlightExplorerLogLine(line, absoluteStart, searchRanges = [])", html)
+        self.assertIn("const EXPLORER_LOG_LEVELS = new Set", html)
+        self.assertIn("explorer-log-timestamp", html)
+        self.assertIn("explorer-log-level", html)
 
     def test_terminals_page_explorer_editor_has_font_zoom_controls(self):
         response = self.client.get("/terminals")
@@ -429,15 +649,132 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn('data-explorer-search-input="${index}"', html)
-        self.assertIn("function explorerFindRanges(content, query)", html)
+        self.assertIn("function explorerFindRanges(content, query, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
         self.assertIn("function explorerMarkedEscHtml(text, absoluteStart = 0, searchRanges = [])", html)
-        self.assertIn("function markExplorerSearchInElement(root, query, activeIndex = 0)", html)
+        self.assertIn("function markExplorerSearchInElement(root, query, activeIndex = 0, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
         self.assertIn("document.createTreeWalker(", html)
         self.assertIn("node.replaceWith(fragment);", html)
         self.assertIn("code.innerHTML = highlightExplorerCode(", html)
         self.assertIn("function findExplorerSearchTargetIndex()", html)
         self.assertIn("event.code !== 'KeyF'", html)
         self.assertNotIn("/api/explorer-search", html)
+
+    def test_terminals_page_explorer_file_search_is_bounded_and_debounced(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("const EXPLORER_SEARCH_DEBOUNCE_MS = 160;", html)
+        self.assertIn("const EXPLORER_SEARCH_MAX_MATCHES = 1000;", html)
+        self.assertIn("const EXPLORER_SEARCH_CHUNK_SIZE = 65536;", html)
+        self.assertIn("async function explorerFindRangesAsync(content, query, token, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
+        self.assertIn("await new Promise(resolve => window.setTimeout(resolve, 0));", html)
+        self.assertIn("function cancelExplorerSearch(index)", html)
+        self.assertIn("window.clearTimeout(pane._explorerSearchTimer);", html)
+        self.assertIn("pane._explorerSearchToken.cancelled = true;", html)
+        self.assertIn("function scheduleExplorerSearch(index, { resetActive = false, delay = EXPLORER_SEARCH_DEBOUNCE_MS } = {})", html)
+        self.assertIn("scheduleExplorerSearch(index, { resetActive: true });", html)
+        self.assertIn("ranges.capped = ranges.length >= maxMatches;", html)
+        self.assertIn("count.title = capped ? `Showing first ${matchCount} matches` : '';", html)
+        self.assertIn("state.resultQuery === query && Array.isArray(state.ranges)", html)
+        self.assertIn("state.matchCapped = capped;", html)
+
+    def test_terminals_page_explorer_directory_search_filters_current_entries(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("explorer-directory-search", html)
+        self.assertIn('id="explorer-directory-search-${i}"', html)
+        self.assertIn('id="explorer-directory-search-${index}"', html)
+        self.assertIn("function renderExplorerDirectorySearchControls(index)", html)
+        self.assertIn('aria-label="Find files and folders"', html)
+        self.assertIn("pane._explorerEntries = Array.isArray(data.entries) ? data.entries : [];", html)
+        self.assertIn("function renderExplorerDirectoryRows(index)", html)
+        self.assertIn("visibleEntries = entries.filter(entry => String(entry.name || '').toLowerCase().includes(normalizedQuery));", html)
+        self.assertIn("No files or folders match", html)
+        self.assertIn("explorerMarkedEscHtml(name, 0, nameRanges)", html)
+        self.assertIn("wireExplorerDirectoryRows(index);", html)
+        self.assertIn("wireExplorerSearchControls(index);", html)
+        self.assertIn("applyExplorerSearch(index, { resetActive: true });", html)
+
+    def test_terminals_page_explorer_directory_search_is_keyboard_target(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("function isExplorerSearchablePane(pane)", html)
+        self.assertIn("pane?._explorerMode === 'file' || pane?._explorerMode === 'directory'", html)
+        self.assertIn("isExplorerSearchablePane(terminals[activeSlot])", html)
+        self.assertIn("isExplorerSearchablePane(terminals[_focusedTerminalIndex])", html)
+        self.assertIn("!pane || !isExplorerSearchablePane(pane)", html)
+        self.assertNotIn("!pane || pane._explorerMode !== 'file'", html)
+
+    def test_terminals_page_explorer_directory_search_preserves_file_search_state(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("const key = mode === 'directory' ? '_explorerDirectorySearch' : '_explorerSearch';", html)
+        self.assertIn("const searchState = ensureExplorerSearchState(pane, 'file');", html)
+        self.assertIn("const state = ensureExplorerSearchState(pane, 'directory');", html)
+        self.assertIn("clearExplorerDirectorySearchControls(index);", html)
+
+    def test_terminals_page_explorer_file_open_failures_keep_directory_usable(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("function renderExplorerDirectoryOpenError(index, message)", html)
+        self.assertIn("renderExplorerDirectoryRows(index);", html)
+        self.assertIn("list.prepend(notice);", html)
+        self.assertIn("const wasDirectoryOpen = pane._explorerMode === 'directory';", html)
+        self.assertIn("if (showLoading && !wasDirectoryOpen)", html)
+        self.assertIn("renderExplorerDirectoryOpenError(index, error.message || 'Failed to open file.');", html)
+
+    def test_terminals_page_explorer_directory_search_clears_on_navigation(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("function resetExplorerDirectorySearch(pane)", html)
+        self.assertIn("if (isNavigation) {\n                resetExplorerDirectorySearch(pane);\n            }", html)
+        self.assertIn("state.query = '';", html)
+        self.assertIn("state.matchCount = 0;", html)
+
+    def test_terminals_page_explorer_git_hooks_are_present(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("explorer-git-summary", html)
+        self.assertIn("function explorerGitBadgeHtml(git)", html)
+        self.assertIn("function explorerGitSummaryText(git)", html)
+        self.assertIn("function loadExplorerDiff(index)", html)
+        self.assertIn("data-explorer-diff-toggle=\"${index}\"", html)
+        self.assertIn('data-explorer-file-view="diff"', html)
+        self.assertIn(".explorer-editor-tab[aria-pressed=\"true\"]", html)
+        self.assertIn("button.dataset.explorerFileView === 'diff'", html)
+        self.assertIn("setExplorerFileView(index, open ? 'diff' : (pane._explorerLastFileView || 'source'));", html)
+        self.assertIn("function toggleExplorerDiffSplit(index)", html)
+        self.assertIn("function renderExplorerSideBySideDiff(diff)", html)
+        self.assertIn(".explorer-diff-cell.add", html)
+        self.assertIn(".explorer-diff-cell.delete", html)
+        self.assertIn("explorer-diff-split", html)
+        self.assertIn("split-diff", html)
+        self.assertIn("/git/diff?path=", html)
+        self.assertIn("${explorerGitBadgeHtml(entry.git)}", html)
+
+    def test_terminals_page_explorer_diff_search_hooks_are_present(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("} else if (query && view === 'diff') {", html)
+        self.assertIn("const diffMarks = markExplorerSearchInElement(diff, query, state.activeIndex || 0);", html)
+        self.assertIn("renderExplorerDiff(index);", html)
+        self.assertIn("if (activeExplorerFileView(index) === 'diff')", html)
+        self.assertIn('data-explorer-file-panel="diff"', html)
 
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
@@ -521,6 +858,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn('id="tvoice-settings-${i}"', html)
         self.assertNotIn("settings: document.getElementById(`tvoice-settings-${index}`),", html)
 
+    def test_terminals_page_keeps_voice_toggle_available_for_live_setting_refresh(self):
+        with patch.object(api, "voice_enabled", False):
+            response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('data-voice-enabled="false"', html)
+        self.assertIn('data-terminal-voice-control="${i}"', html)
+        self.assertIn('data-terminal-voice="${i}"', html)
+        self.assertIn(".voice-btn:disabled", html)
+        self.assertIn("cursor: default;", html)
+        self.assertIn("elements.control.hidden = _voiceServiceStatus.enabled === false;", html)
+        self.assertIn("function _syncVoiceControlsAvailability()", html)
+        self.assertIn("_syncVoiceControlsAvailability();", html)
+        self.assertIn("window.addEventListener('focus'", html)
+
     def test_terminals_page_uses_global_push_to_talk_preferences(self):
         response = self.client.get("/terminals")
 
@@ -551,8 +904,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = response.get_data(as_text=True)
         clear_index = html.index('data-terminal-clear="${i}"')
         voice_index = html.index('data-terminal-voice-control="${i}"')
+        close_index = html.index('data-terminal-close="${i}"')
 
         self.assertLess(clear_index, voice_index)
+        self.assertLess(voice_index, close_index)
 
     def test_terminals_page_refreshes_only_one_terminal_by_replaying_its_buffer(self):
         response = self.client.get("/terminals")
@@ -576,9 +931,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("Close Session</button>", html)
         self.assertIn("closeButton.className = 'session-tab-close';", html)
         self.assertIn("closeSessionGroup(group.group_id);", html)
-        self.assertIn(".session-tab.settings {", html)
-        self.assertIn("border-color: #00c46e;", html)
-        self.assertIn("settingsButton.textContent = '+ New Session';", html)
+        self.assertIn(".sessions-menu-panel {", html)
+        self.assertIn(".sessions-menu-item {", html)
+        self.assertIn(">Import Session ...</button>", html)
 
     def test_terminals_page_numbers_session_tabs_and_exposes_safe_shortcut(self):
         response = self.client.get("/terminals")
@@ -625,8 +980,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('aria-label="Max surface"', html)
         self.assertIn('<rect x="4" y="4" width="16" height="16" rx="2.5"', html)
         self.assertIn("const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';", html)
+        self.assertIn("const DEFAULT_SURFACE_MODE =", html)
+        self.assertIn("applyConfiguredSurfaceMode(data, { refit: gridBuilt });", html)
+        self.assertIn("applySurfaceMode(normalizeSurfaceMode(DEFAULT_SURFACE_MODE) === 'max');", html)
         self.assertIn("document.body.classList.toggle('surface-max', active);", html)
         self.assertIn("redrawAttachedTerminals(attachedIndices, { forceResize: true });", html)
+        self.assertIn("const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';", html)
+        self.assertIn("const APP_CONFIG_BROADCAST_CHANNEL = 'gridvibe.appConfig';", html)
+        self.assertIn("function applyAppConfigSurfaceMode(message)", html)
+        self.assertIn("surfaceModeChangedManually = true;", html)
+        self.assertIn("surfaceModeAppliedGroups.clear();", html)
+        self.assertIn("applySurfaceMode(mode === 'max', { persist: true, refit: true });", html)
+        self.assertIn("function setupAppConfigUpdateListeners()", html)
+        self.assertIn("setupAppConfigUpdateListeners();", html)
 
     def test_terminals_page_exposes_collapsible_topbar(self):
         response = self.client.get("/terminals")
@@ -641,6 +1007,18 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("document.body.classList.toggle('topbar-collapsed', !shouldShow);", html)
         self.assertIn("path.setAttribute('d', visible ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6');", html)
         self.assertIn("applyTopbarVisibility(getStoredTopbarVisible());", html)
+
+    def test_terminals_page_centers_topbar_actions_without_custom_window_controls(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);", html)
+        self.assertIn("justify-self: center;", html)
+        self.assertIn('class="topbar-actions"', html)
+        self.assertNotIn('id="sessionWindowControls"', html)
+        self.assertNotIn("window.pywebview.api.minimize_session_window", html)
+        self.assertNotIn("window.pywebview.api.toggle_session_window_maximize", html)
 
     def test_terminals_page_buttons_use_session_color_frames(self):
         response = self.client.get("/terminals")
@@ -709,6 +1087,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("let sessionRouteMap = new Map();", html)
         self.assertIn("function resolveSessionTarget(sessionId)", html)
         self.assertIn("const target = resolveSessionTarget(session_id);", html)
+        self.assertIn("if (pendingModeSwitchSessionIds.has(session_id)) return;", html)
         self.assertIn("if (!target.active) {", html)
         self.assertIn("target.terminal.term.write(data);", html)
 
@@ -786,6 +1165,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         payload = response.get_json()
         self.assertIn("appearance", payload)
         self.assertIn("theme", payload["appearance"])
+        self.assertIn("workspace", payload)
+        self.assertIn("surface_mode", payload["workspace"])
         self.assertIn("voice_input", payload)
         self.assertIn("engine", payload["voice_input"])
         self.assertIn("whisper_model", payload["voice_input"])
@@ -796,6 +1177,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             json={
                 "appearance": {
                     "theme": "light",
+                },
+                "workspace": {
+                    "surface_mode": "max",
                 },
                 "voice_input": {
                     "engine": "vosk",
@@ -811,11 +1195,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["appearance"]["theme"], "light")
+        self.assertEqual(payload["workspace"]["surface_mode"], "max")
         self.assertEqual(payload["voice_input"]["engine"], "vosk")
         self.assertEqual(payload["voice_input"]["vosk_model"], "vosk-model-small-en-us-0.15")
         self.assertEqual(payload["voice_input"]["language"], "en-GB")
         cfg = api.load_config()
         self.assertEqual(cfg["appearance"]["theme"], "light")
+        self.assertEqual(cfg["workspace"]["surface_mode"], "max")
         self.assertEqual(cfg["voice_input"]["engine"], "vosk")
         self.assertEqual(cfg["voice_input"]["vosk_model"], "vosk-model-small-en-us-0.15")
 
@@ -1359,6 +1745,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         original_session_id = initial_body["sessions"][0]["session_id"]
         original_group_id = initial_body["group_id"]
         self.assertEqual(original_group_id, "saved-session-session-dev-grid")
+        self.assertEqual(initial_body["group"]["saved_session_id"], "session-dev-grid")
         self.assertEqual(initial_start_task.call_count, 1)
 
         with api.connection_lock:
@@ -1395,6 +1782,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(replacement_response.status_code, 201)
         replacement_body = replacement_response.get_json()
         self.assertEqual(replacement_body["group_id"], original_group_id)
+        self.assertEqual(replacement_body["group"]["saved_session_id"], "session-dev-grid")
         self.assertEqual(replacement_body["layout"], "vertical")
         self.assertEqual(replacement_start_task.call_count, 2)
         self.assertEqual(len(api.session_manager.get_all_groups()), 1)
@@ -1671,6 +2059,42 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(updated.distribution, "Ubuntu")
         self.assertEqual(updated.status, api.SessionStatus.CONNECTED)
 
+    def test_switch_terminal_pane_to_explorer_refreshes_live_cwd_outside_previous_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        outside_dir = Path(self.temp_dir.name) / "outside"
+        outside_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Shell",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="terminal",
+            explorer_root_directory=str(repo_dir),
+        )
+
+        with patch.object(api, "_resolve_live_terminal_cwd", return_value=str(outside_dir)) as resolve_cwd, patch.object(
+            api,
+            "_close_ssh_connection",
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        resolve_cwd.assert_called_once_with(session.session_id, session)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(Path(updated.directory), outside_dir.resolve())
+        self.assertEqual(Path(updated.explorer_root_directory), outside_dir.resolve())
+        self.assertEqual(updated.startup_mode, "explorer")
+
     def test_switch_roundtrip_preserves_explorer_root_for_parent_navigation(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         selected_dir = repo_dir / "src"
@@ -1811,6 +2235,46 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(updated.explorer_root_directory, "/srv/app/src")
         self.assertEqual(updated.startup_mode, "explorer")
 
+    def test_switch_ssh_terminal_to_explorer_refreshes_live_remote_cwd_outside_previous_root(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            mode="ssh",
+            username="ubuntu",
+            startup_mode="terminal",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/opt/tools": {"type": "directory"},
+            }
+        )
+
+        with patch.object(api, "_resolve_live_terminal_cwd", return_value="/opt/tools") as resolve_cwd, patch.object(
+            api,
+            "_open_ssh_sftp",
+            return_value=(MagicMock(), fake_sftp),
+        ), patch.object(api, "_close_ssh_connection"):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        resolve_cwd.assert_called_once_with(session.session_id, session)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.directory, "/opt/tools")
+        self.assertEqual(updated.explorer_root_directory, "/opt/tools")
+        self.assertEqual(updated.startup_mode, "explorer")
+
     def test_switch_ssh_explorer_pane_to_terminal_uses_selected_remote_directory(self):
         group = api.session_manager.create_group(
             name="SSH",
@@ -1883,6 +2347,123 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual([entry["name"] for entry in payload["entries"]], ["src", "README.md"])
         self.assertEqual(payload["entries"][0]["type"], "directory")
         self.assertEqual(payload["entries"][1]["type"], "file")
+        self.assertIn("git", payload)
+        self.assertFalse(payload["git"]["available"])
+        self.assertEqual(payload["entries"][1]["git"]["status"], "clean")
+
+    def test_parse_git_porcelain_v2_status_fixture(self):
+        raw_status = (
+            b"# branch.oid abcdef1234567890\0"
+            b"# branch.head main\0"
+            b"# branch.ab +2 -1\0"
+            b"1 M. N... 100644 100644 100644 old new src/app.py\0"
+            b"1 .D N... 100644 100644 100644 old new deleted.txt\0"
+            b"2 R. N... 100644 100644 100644 old new R100 new_name.py\0old_name.py\0"
+            b"u UU N... 100644 100644 100644 100644 a b c d conflict.txt\0"
+            b"? notes.txt\0"
+            b"! ignored.log\0"
+        )
+
+        branch, statuses = api._parse_git_status_porcelain_v2(raw_status)
+
+        self.assertEqual(branch["branch"], "main")
+        self.assertEqual(branch["head"], "abcdef123456")
+        self.assertEqual(branch["ahead"], 2)
+        self.assertEqual(branch["behind"], 1)
+        self.assertEqual(statuses["src/app.py"]["status"], "modified")
+        self.assertEqual(statuses["deleted.txt"]["status"], "deleted")
+        self.assertEqual(statuses["new_name.py"]["status"], "renamed")
+        self.assertEqual(statuses["new_name.py"]["original_path"], "old_name.py")
+        self.assertEqual(statuses["conflict.txt"]["status"], "conflicted")
+        self.assertEqual(statuses["notes.txt"]["status"], "untracked")
+        self.assertEqual(statuses["ignored.log"]["status"], "ignored")
+
+    def test_explorer_entries_returns_git_metadata_for_local_repo(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        src_dir = repo_dir / "src"
+        src_dir.mkdir(parents=True)
+        readme = repo_dir / "README.md"
+        app_file = src_dir / "app.py"
+        obsolete_file = repo_dir / "obsolete.txt"
+        readme.write_text("# Project\n", encoding="utf-8")
+        app_file.write_text("print('v1')\n", encoding="utf-8")
+        obsolete_file.write_text("remove me\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        readme.write_text("# Project\n\nchanged\n", encoding="utf-8")
+        app_file.write_text("print('v2')\n", encoding="utf-8")
+        added_file = repo_dir / "added.py"
+        added_file.write_text("print('new')\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "added.py")
+        obsolete_file.unlink()
+        (repo_dir / "notes.txt").write_text("untracked\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        entries_response = self.client.get(f"/api/explorer/{session_id}/entries")
+
+        self.assertEqual(entries_response.status_code, 200)
+        payload = entries_response.get_json()
+        entries = {entry["name"]: entry for entry in payload["entries"]}
+        self.assertTrue(payload["git"]["available"])
+        self.assertTrue(payload["git"]["dirty"])
+        self.assertIsNotNone(payload["git"]["repo_root"])
+        self.assertEqual(entries["README.md"]["git"]["status"], "modified")
+        self.assertEqual(entries["added.py"]["git"]["status"], "added")
+        self.assertEqual(entries["obsolete.txt"]["git"]["status"], "deleted")
+        self.assertTrue(entries["obsolete.txt"]["deleted"])
+        self.assertEqual(entries["notes.txt"]["git"]["status"], "untracked")
+        self.assertEqual(entries["src"]["git"]["status"], "modified")
+        self.assertTrue(entries["src"]["git"]["has_descendant_changes"])
+
+    def test_explorer_git_diff_returns_bounded_local_file_diff(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        readme.write_text("# Project\n\nchanged\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        diff_response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "head"},
+        )
+
+        self.assertEqual(diff_response.status_code, 200)
+        payload = diff_response.get_json()
+        self.assertEqual(payload["path"], "README.md")
+        self.assertEqual(payload["mode"], "head")
+        self.assertIn("+changed", payload["diff"])
+        self.assertFalse(payload["truncated"])
+
+    def test_explorer_git_diff_rejects_invalid_mode_and_outside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project\n", encoding="utf-8")
+        outside_file = Path(self.temp_dir.name) / "outside.txt"
+        outside_file.write_text("secret\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        invalid_mode_response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "bad"},
+        )
+        outside_response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": str(outside_file), "mode": "head"},
+        )
+
+        self.assertEqual(invalid_mode_response.status_code, 400)
+        self.assertIn("Invalid Git diff mode", invalid_mode_response.get_json()["error"])
+        self.assertEqual(outside_response.status_code, 400)
+        self.assertIn("inside the configured root", outside_response.get_json()["error"])
 
     def test_explorer_entries_lists_ssh_directory_inside_root(self):
         group = api.session_manager.create_group(
@@ -1918,6 +2499,60 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["path"], "")
         self.assertEqual(payload["parent_path"], "")
         self.assertEqual([entry["name"] for entry in payload["entries"]], ["src", "README.md"])
+
+    def test_explorer_entries_returns_git_metadata_for_ssh_repo(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/src": {"type": "directory"},
+                "/srv/app/README.md": {"type": "file", "content": b"# Project\n"},
+                "/srv/app/src/main.py": {"type": "file", "content": b"print('ok')\n"},
+            }
+        )
+        raw_status = (
+            b"# branch.oid abcdef1234567890\0"
+            b"# branch.head main\0"
+            b"1 .M N... 100644 100644 100644 old new README.md\0"
+            b"1 .M N... 100644 100644 100644 old new src/main.py\0"
+            b"1 .D N... 100644 100644 100644 old new obsolete.txt\0"
+            b"? notes.txt\0"
+        )
+        fake_client = FakeSshExecClient(
+            [
+                (0, b"/srv/app\ntrue\n", b""),
+                (0, raw_status, b""),
+            ]
+        )
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
+            entries_response = self.client.get(f"/api/explorer/{session.session_id}/entries")
+
+        self.assertEqual(entries_response.status_code, 200)
+        payload = entries_response.get_json()
+        entries = {entry["name"]: entry for entry in payload["entries"]}
+        self.assertTrue(payload["git"]["available"])
+        self.assertTrue(payload["git"]["dirty"])
+        self.assertEqual(payload["git"]["branch"], "main")
+        self.assertEqual(entries["README.md"]["git"]["status"], "modified")
+        self.assertEqual(entries["src"]["git"]["status"], "modified")
+        self.assertTrue(entries["src"]["git"]["has_descendant_changes"])
+        self.assertEqual(entries["obsolete.txt"]["git"]["status"], "deleted")
+        self.assertTrue(entries["obsolete.txt"]["deleted"])
 
     def test_explorer_entries_rejects_path_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -2041,6 +2676,97 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["content"], "hello\n")
         self.assertFalse(payload["truncated"])
 
+    def test_explorer_file_returns_ssh_git_metadata(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/notes.txt": {"type": "file", "content": b"hello\n"},
+            }
+        )
+        fake_client = FakeSshExecClient(
+            [
+                (0, b"/srv/app\ntrue\n", b""),
+                (
+                    0,
+                    b"# branch.oid abcdef1234567890\0"
+                    b"# branch.head main\0"
+                    b"1 .M N... 100644 100644 100644 old new notes.txt\0",
+                    b"",
+                ),
+            ]
+        )
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "notes.txt"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["git_context"]["available"])
+        self.assertEqual(payload["git_context"]["branch"], "main")
+        self.assertEqual(payload["git"]["status"], "modified")
+
+    def test_explorer_git_diff_returns_bounded_ssh_file_diff(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/README.md": {"type": "file", "content": b"# Project\n"},
+            }
+        )
+        fake_client = FakeSshExecClient(
+            [
+                (0, b"/srv/app\ntrue\n", b""),
+                (0, b"# branch.oid abcdef1234567890\0# branch.head main\0", b""),
+                (0, b"diff --git a/README.md b/README.md\n+changed\n", b""),
+            ]
+        )
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/git/diff",
+                query_string={"path": "README.md", "mode": "head"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["path"], "README.md")
+        self.assertEqual(payload["mode"], "head")
+        self.assertIn("+changed", payload["diff"])
+        self.assertFalse(payload["truncated"])
+        self.assertIn("git -C /srv/app diff HEAD", fake_client.commands[-1][0])
+
     def test_explorer_file_returns_sanitized_markdown_preview(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -2083,7 +2809,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         payload = file_response.get_json()
         self.assertIsNone(payload["preview_type"])
         self.assertIsNone(payload["preview_html"])
-        self.assertIsNone(payload["language"])
+        self.assertEqual(payload["language"], "text")
 
     def test_explorer_file_returns_code_language_for_common_source_files(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -2101,6 +2827,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["preview_type"], None)
         self.assertIsNone(payload["preview_html"])
         self.assertEqual(payload["language"], "python")
+
+    def test_explorer_code_language_covers_common_workspace_text_files(self):
+        cases = {
+            "events.jsonl": "jsonl",
+            "system.log": "log",
+            "notes.txt": "text",
+            "setup.bat": "batch",
+            "run.cmd": "batch",
+            ".env": "dotenv",
+            ".env.local": "dotenv",
+            ".gitignore": "gitignore",
+            "settings.example": "config",
+            "app.conf": "config",
+            "build.spec": "python",
+            "Dockerfile": "dockerfile",
+            "Makefile": "makefile",
+        }
+        for path, expected_language in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(api._explorer_code_language(path), expected_language)
 
     def test_explorer_file_rejects_path_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -2155,16 +2901,76 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_explorer_file_rejects_binary_content(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
-        (repo_dir / "image.bin").write_bytes(b"abc\x00def")
+        (repo_dir / "image.log").write_bytes(b"abc\x00def")
         session_id = self._create_explorer_session(repo_dir)
 
         file_response = self.client.get(
             f"/api/explorer/{session_id}/file",
-            query_string={"path": "image.bin"},
+            query_string={"path": "image.log"},
         )
 
         self.assertEqual(file_response.status_code, 400)
         self.assertIn("binary", file_response.get_json()["error"])
+
+    def test_explorer_file_rejects_non_utf8_binary_content_in_known_format(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "events.log").write_bytes(b"\xff\xfe\xfd\xfc" * 64)
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "events.log"},
+        )
+
+        self.assertEqual(file_response.status_code, 400)
+        self.assertIn("binary", file_response.get_json()["error"])
+
+    def test_explorer_file_rejects_unsupported_editor_format(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "archive.bin").write_bytes(b"plain bytes without nul")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "archive.bin"},
+        )
+
+        self.assertEqual(file_response.status_code, 400)
+        self.assertIn("format is not supported", file_response.get_json()["error"])
+
+    def test_explorer_file_rejects_unsupported_remote_editor_format(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/archive.bin": {"type": "file", "content": b"plain bytes"},
+            }
+        )
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "archive.bin"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("format is not supported", response.get_json()["error"])
 
     def test_create_sessions_uses_cmd_label_for_local_repo_cmd_panes(self):
         sessions_payload = {
@@ -2343,6 +3149,120 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(get_response.status_code, 200)
         self.assertEqual(get_response.get_json()["config"]["ssh"]["host"], "10.0.0.20")
 
+    def test_save_as_updates_only_the_requesting_session_group_target(self):
+        original_group = api.session_manager.create_group(
+            name="GridVibe",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-original",
+            saved_session_id="gridvibe",
+        )
+        version_group = api.session_manager.create_group(
+            name="GridVibe copy",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-version-2",
+            saved_session_id="gridvibe",
+        )
+        payload = {
+            "name": "GridVibe version 2",
+            "group_id": version_group.group_id,
+            "config": {
+                "connection_mode": "ssh",
+                "terminal_count": 1,
+                "layout": "single",
+                "ssh": {
+                    "host": "10.0.0.20",
+                    "username": "ubuntu",
+                    "password": "",
+                    "port": 22,
+                    "default_dir": "/srv/dev",
+                },
+                "wsl": {
+                    "distribution": "",
+                    "username": "",
+                    "default_dir": "~",
+                },
+                "terminals": [
+                    {"title": "Shell", "directory": "/srv/dev", "initial_command": ""},
+                ],
+            },
+        }
+
+        response = self.client.post("/api/saved-sessions", json=payload)
+
+        self.assertEqual(response.status_code, 201)
+        created = response.get_json()
+        self.assertEqual(created["name"], "GridVibe version 2")
+        self.assertEqual(created["group"]["group_id"], version_group.group_id)
+        self.assertEqual(created["group"]["saved_session_id"], created["id"])
+        self.assertEqual(
+            api.session_manager.get_group(original_group.group_id).saved_session_id,
+            "gridvibe",
+        )
+        self.assertEqual(
+            api.session_manager.get_group(version_group.group_id).saved_session_id,
+            created["id"],
+        )
+
+    def test_save_as_without_activation_preserves_live_group_and_launcher_selection(self):
+        active_payload = {
+            "name": "GridVibe",
+            "config": {
+                "connection_mode": "ssh",
+                "terminal_count": 1,
+                "layout": "single",
+                "ssh": {
+                    "host": "10.0.0.10",
+                    "username": "ubuntu",
+                    "password": "",
+                    "port": 22,
+                    "default_dir": "/srv/gridvibe",
+                },
+                "wsl": {
+                    "distribution": "",
+                    "username": "",
+                    "default_dir": "~",
+                },
+                "terminals": [
+                    {"title": "Shell", "directory": "/srv/gridvibe", "initial_command": ""},
+                ],
+            },
+        }
+        active_saved = self.client.post("/api/saved-sessions", json=active_payload).get_json()
+        group = api.session_manager.create_group(
+            name="GridVibe",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-original",
+            saved_session_id=active_saved["id"],
+        )
+        save_as_payload = {
+            **active_payload,
+            "name": "GridVibe version 2",
+            "activate": False,
+        }
+
+        response = self.client.post("/api/saved-sessions", json=save_as_payload)
+
+        self.assertEqual(response.status_code, 201)
+        created = response.get_json()
+        self.assertEqual(created["name"], "GridVibe version 2")
+        self.assertFalse(created["activated"])
+        self.assertEqual(created["last_session"], active_saved["id"])
+        self.assertEqual(created["saved_session"], {"id": active_saved["id"], "name": "GridVibe"})
+        self.assertIsNone(created["group"])
+        self.assertEqual(
+            api.session_manager.get_group(group.group_id).saved_session_id,
+            active_saved["id"],
+        )
+        saved_state = json.loads(self.saved_sessions_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved_state["last_session"], active_saved["id"])
+        self.assertEqual(len(saved_state["sessions"]), 2)
+
     def test_saved_sessions_roundtrip_preserves_agent_startup_metadata(self):
         payload = {
             "name": "agent-preset",
@@ -2391,6 +3311,113 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(fetched_terminal["initial_command_mode"], "agent")
         self.assertEqual(fetched_terminal["agent_selection"], "other")
         self.assertEqual(fetched_terminal["custom_agent"], "claude-code")
+
+    def test_saved_sessions_roundtrip_preserves_workspace_layout_geometry(self):
+        payload = {
+            "name": "split-workspace",
+            "config": {
+                "connection_mode": "ssh",
+                "terminal_count": 2,
+                "layout": "vertical",
+                "ssh": {
+                    "host": "10.0.0.20",
+                    "username": "ubuntu",
+                    "password": "",
+                    "port": 22,
+                    "default_dir": "/srv/dev",
+                },
+                "wsl": {
+                    "distribution": "",
+                    "username": "",
+                    "default_dir": "",
+                },
+                "terminals": [
+                    {"title": "Left", "directory": "/srv/dev", "initial_command": ""},
+                    {"title": "Right", "directory": "/srv/dev", "initial_command": "htop"},
+                ],
+                "workspace_layout": {
+                    "class_name": "layout-split-local",
+                    "split_slot_rects": [
+                        {"originSlot": 0, "x": 1, "y": 1, "w": 3, "h": 2},
+                        {"originSlot": 1, "x": 4, "y": 1, "w": 1, "h": 2},
+                    ],
+                    "split_column_weights": [2, 2, 2, 1],
+                    "split_row_weights": [1, 1],
+                    "original_split_slot_count": 2,
+                },
+            },
+        }
+
+        created = self.client.post("/api/saved-sessions", json=payload)
+
+        self.assertEqual(created.status_code, 201)
+        layout = created.get_json()["config"]["workspace_layout"]
+        self.assertEqual(layout["class_name"], "layout-split-local")
+        self.assertEqual(layout["split_slot_rects"][0]["w"], 3)
+        self.assertEqual(layout["split_column_weights"], [2.0, 2.0, 2.0, 1.0])
+
+        fetched = self.client.get(f"/api/saved-sessions/{created.get_json()['id']}")
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(
+            fetched.get_json()["config"]["workspace_layout"]["split_row_weights"],
+            [1.0, 1.0],
+        )
+
+    def test_create_sessions_returns_workspace_layout_and_agent_metadata(self):
+        sessions_payload = {
+            "connection_mode": "ssh",
+            "layout": "vertical",
+            "surface_mode": "max",
+            "workspace_layout": {
+                "class_name": "layout-split-local",
+                "split_slot_rects": [
+                    {"originSlot": 0, "x": 1, "y": 1, "w": 2, "h": 2},
+                    {"originSlot": 1, "x": 3, "y": 1, "w": 2, "h": 2},
+                ],
+                "split_column_weights": [3, 1, 1, 3],
+                "split_row_weights": [1, 1],
+                "original_split_slot_count": 2,
+            },
+            "sessions": [
+                {
+                    "host": "10.0.0.20",
+                    "directory": "/srv/dev",
+                    "username": "ubuntu",
+                    "title": "Agent",
+                    "initial_command": "claude-code",
+                    "initial_command_mode": "agent",
+                    "startup_mode": "agent",
+                    "agent_selection": "other",
+                    "custom_agent": "claude-code",
+                },
+                {
+                    "host": "10.0.0.20",
+                    "directory": "/srv/dev",
+                    "username": "ubuntu",
+                    "title": "Shell",
+                },
+            ],
+        }
+
+        with patch.object(api.socketio, "start_background_task"):
+            created = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(created.status_code, 201)
+        data = created.get_json()
+        self.assertEqual(data["workspace_layout"]["split_column_weights"], [3.0, 1.0, 1.0, 3.0])
+        self.assertEqual(data["surface_mode"], "max")
+        self.assertEqual(data["group"]["surface_mode"], "max")
+        self.assertEqual(data["sessions"][0]["initial_command_mode"], "agent")
+        self.assertEqual(data["sessions"][0]["agent_selection"], "other")
+        self.assertEqual(data["sessions"][0]["custom_agent"], "claude-code")
+
+        listed = self.client.get(f"/api/sessions?group={data['group_id']}")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.get_json()["surface_mode"], "max")
+        self.assertEqual(
+            listed.get_json()["workspace_layout"]["split_slot_rects"][1]["x"],
+            3,
+        )
 
     def test_get_saved_session_returns_virtual_default_session(self):
         response = self.client.get(f"/api/saved-sessions/{api.DEFAULT_SAVED_SESSION_ID}")
@@ -2856,6 +3883,32 @@ class ApiRoutesTestCase(unittest.TestCase):
             self.assertEqual(api._resolve_local_launch_cwd(temp_dir, "cmd"), temp_dir)
             self.assertIsNone(api._resolve_local_launch_cwd(temp_dir, "wsl"))
 
+    def test_terminal_cwd_probe_command_uses_wslpath_for_wsl_shell(self):
+        command = api._terminal_cwd_probe_command(
+            {"shell_kind": "wsl"},
+            "__START__",
+            "__END__",
+        )
+
+        self.assertIn("wslpath -w", command)
+        self.assertIn('"$PWD"', command)
+        self.assertIn("__START__", command)
+        self.assertIn("__END__", command)
+
+    def test_extract_terminal_cwd_from_buffer_uses_last_marker_payload(self):
+        marker_start = "__GRIDVIBE_CWD_START__"
+        marker_end = "__GRIDVIBE_CWD_END__"
+        buffer = (
+            f"printf '{marker_start}%s{marker_end}\\n' \"$PWD\"\r\n"
+            f"{marker_start}$PWD{marker_end}\r\n"
+            f"{marker_start}/srv/current{marker_end}\r\n"
+        )
+
+        self.assertEqual(
+            api._extract_terminal_cwd_from_buffer(buffer, marker_start, marker_end),
+            "/srv/current",
+        )
+
     def test_find_running_ubuntu_distribution_prefers_default_running_ubuntu(self):
         completed = SimpleNamespace(
             stdout=(
@@ -3173,6 +4226,32 @@ class ApiRoutesTestCase(unittest.TestCase):
             {"message": "Session closed successfully"},
         )
         self.assertIsNone(api.session_manager.get_session(session.session_id))
+
+    def test_delete_session_updates_remaining_group_count(self):
+        group = api.session_manager.create_group(
+            name="Manual",
+            connection_mode="ssh",
+            layout="vertical",
+            terminal_count=2,
+            group_id="group-manual",
+        )
+        first = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="10.0.0.12",
+            directory="/tmp/project",
+        )
+        second = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="10.0.0.13",
+            directory="/tmp/project",
+        )
+
+        response = self.client.delete(f"/api/sessions/{first.session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(api.session_manager.get_session(first.session_id))
+        self.assertIsNotNone(api.session_manager.get_session(second.session_id))
+        self.assertEqual(api.session_manager.get_group(group.group_id).terminal_count, 1)
 
     def test_join_session_replays_sanitized_buffered_output_to_new_client(self):
         api.session_manager.create_group(
@@ -3500,11 +4579,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = response.get_data(as_text=True)
         light_selectors = [
             '[data-theme="light"] body',
+            '[data-theme="light"] .header-badge',
             '[data-theme="light"] .count-btn',
             '[data-theme="light"] .field input',
             '[data-theme="light"] .t-row',
             '[data-theme="light"] .t-agent-select',
-            '[data-theme="light"] .command-mode-btn',
+            '[data-theme="light"] .startup-mode-select',
             '[data-theme="light"] .check-field',
             '[data-theme="light"] .modal-card',
             '[data-theme="light"] .saved-session-item',
@@ -3527,6 +4607,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const THEME_STORAGE_KEY", html)
         self.assertIn("function normalizeThemePreference(", html)
         self.assertIn("function applyTheme(", html)
+        self.assertIn("function syncNativeTheme(", html)
+        self.assertIn("bridge.set_native_theme(resolvedTheme)", html)
         self.assertIn("function cycleTheme()", html)
         self.assertIn("prefers-color-scheme", html)
 
@@ -3537,6 +4619,20 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("--t-bg:", html)
         self.assertIn("--t-accent:", html)
         self.assertIn("--t-topbar:", html)
+        self.assertIn('[data-theme="light"] .modal-shell', html)
+        self.assertIn('[data-theme="light"] .modal-card', html)
+        self.assertIn('[data-theme="light"] .saved-session-item', html)
+        self.assertIn('[data-theme="light"] .saved-session-name', html)
+
+    def test_terminals_page_saved_session_modal_covers_resize_overlay(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        modal_css = html[html.index(".modal-shell {"):html.index(".settings-window-btn {")]
+        resize_css = html[html.index("#terminalResizeOverlay {"):html.index(".terminal-resize-handle {")]
+
+        self.assertIn("z-index: 12000;", modal_css)
+        self.assertIn("pointer-events: auto;", modal_css)
+        self.assertIn("z-index: 60;", resize_css)
 
     def test_terminals_page_includes_theme_toggle_control(self):
         response = self.client.get("/terminals")
@@ -3550,6 +4646,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const THEME_STORAGE_KEY", html)
         self.assertIn("function normalizeThemePreference(", html)
         self.assertIn("function applyTheme(", html)
+        self.assertIn("function syncNativeTheme(", html)
+        self.assertIn("bridge.set_native_theme(resolvedTheme)", html)
         self.assertIn("function cycleTheme()", html)
         self.assertIn("prefers-color-scheme", html)
 
@@ -3581,6 +4679,23 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("let activeGridResize = null;", html)
         self.assertIn("function ensureResizableSplitLayout()", html)
         self.assertIn("function renderResizeHandles()", html)
+
+    def test_terminals_page_bounds_resize_handles_to_shared_edges(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        self.assertIn("function getSharedGridEdgeSegments(rects, axis, lineIndex)", html)
+        self.assertIn("function getSharedGridEdgeSegmentStyle(axis, segment, metrics)", html)
+        self.assertIn("segments.forEach(segment => {", html)
+        self.assertIn("handle.style.top = `${segmentStyle.top}px`;", html)
+        self.assertIn("handle.style.height = `${segmentStyle.size}px`;", html)
+        self.assertIn("handle.style.left = `${segmentStyle.left}px`;", html)
+        self.assertIn("handle.style.width = `${segmentStyle.size}px`;", html)
+        self.assertIn(
+            "return getSharedGridEdgeSegments(rects, axis, lineIndex).length > 0;",
+            html,
+        )
+        self.assertNotIn("handle.style.height = `${metrics.gridContentHeight}px`;", html)
+        self.assertNotIn("handle.style.width = `${metrics.gridContentWidth}px`;", html)
 
     def test_terminals_page_resize_validation_enforces_minimums(self):
         response = self.client.get("/terminals")

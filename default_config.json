@@ -25,6 +25,9 @@
   "appearance": {
     "theme": "system"
   },
+  "workspace": {
+    "surface_mode": "normal"
+  },
   "voice_input": {
     "enabled": true,
     "engine": "whisper",

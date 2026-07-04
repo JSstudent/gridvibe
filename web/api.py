@@ -23,7 +23,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from cryptography.fernet import Fernet
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit, join_room, leave_room
 
 from gridvibe_version import __version__
@@ -88,6 +88,8 @@ SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
 AGENT_REGISTRY_PATH = os.path.join(BASE_DIR, "agent_registry.json")
 DEFAULT_SAVED_SESSION_ID = "default-session"
 EXPLORER_FILE_PREVIEW_MAX_BYTES = 1024 * 1024
+EXPLORER_GIT_DIFF_MAX_BYTES = 256 * 1024
+EXPLORER_GIT_DIFF_MAX_LINES = 4000
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
 WINDOWS_DEVICE_ATTRIBUTES_RESPONSE = "\x1b[?1;2c"
 SELF_UPDATE_REPO_DIR = BASE_DIR
@@ -177,6 +179,7 @@ app_config: Dict[str, Any] = {}
 ssh_config: Dict[str, Any] = {}
 max_sessions = 4
 app_theme = "system"
+app_surface_mode = "normal"
 voice_enabled = True
 voice_engine = "vosk"
 vosk_service_url = "ws://localhost:2700"
@@ -209,12 +212,21 @@ WHISPER_MODEL_OPTIONS = {
 }
 
 
+def _normalize_surface_mode(value: Any, default: str = "normal") -> str:
+    """Normalize workspace chrome density for terminal session windows."""
+    normalized = str(value or "").strip().lower()
+    if normalized in {"normal", "max"}:
+        return normalized
+    return default if default in {"normal", "max"} else "normal"
+
+
 def _refresh_runtime_config():
     """Reload runtime config-backed globals from disk."""
     global app_config
     global ssh_config
     global max_sessions
     global app_theme
+    global app_surface_mode
     global voice_enabled
     global voice_engine
     global vosk_service_url
@@ -232,6 +244,9 @@ def _refresh_runtime_config():
     app_theme = str(appearance_config.get("theme", "system")).strip().lower()
     if app_theme not in {"system", "light", "dark"}:
         app_theme = "system"
+
+    workspace_config = app_config.get("workspace", {})
+    app_surface_mode = _normalize_surface_mode(workspace_config.get("surface_mode"))
 
     voice_config = app_config.get("voice_input", {})
     voice_enabled = voice_config.get("enabled", True)
@@ -269,6 +284,9 @@ def _public_app_config() -> Dict[str, Any]:
         "appearance": {
             "theme": app_theme,
         },
+        "workspace": {
+            "surface_mode": app_surface_mode,
+        },
         "voice_input": {
             "enabled": voice_enabled,
             "engine": voice_engine,
@@ -290,6 +308,11 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     theme = str(appearance.get("theme", app_theme)).strip().lower()
     if theme not in {"system", "light", "dark"}:
         theme = app_theme
+
+    workspace = payload.get("workspace")
+    if not isinstance(workspace, dict):
+        workspace = {}
+    surface_mode = _normalize_surface_mode(workspace.get("surface_mode"), app_surface_mode)
 
     voice_input = payload.get("voice_input")
     if not isinstance(voice_input, dict):
@@ -314,6 +337,9 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     return {
         "appearance": {
             "theme": theme,
+        },
+        "workspace": {
+            "surface_mode": surface_mode,
         },
         "voice_input": {
             "enabled": bool(voice_input.get("enabled", voice_enabled)),
@@ -386,6 +412,72 @@ def _normalize_startup_mode(value: Any, connection_mode: str = "ssh") -> str:
     return "terminal"
 
 
+def _normalize_workspace_layout(data: Any, terminal_count: int) -> Optional[Dict[str, Any]]:
+    """Normalize optional runtime workspace geometry stored with a saved preset."""
+    if not isinstance(data, dict):
+        return None
+
+    raw_rects = data.get("split_slot_rects")
+    if not isinstance(raw_rects, list) or len(raw_rects) != terminal_count:
+        return None
+
+    rects = []
+    max_grid_line = max(2, max_sessions * 4)
+    for index, raw_rect in enumerate(raw_rects):
+        if not isinstance(raw_rect, dict):
+            return None
+        try:
+            x = int(raw_rect.get("x", 1))
+            y = int(raw_rect.get("y", 1))
+            w = int(raw_rect.get("w", 1))
+            h = int(raw_rect.get("h", 1))
+            origin_slot = int(raw_rect.get("originSlot", index))
+        except (TypeError, ValueError):
+            return None
+
+        if x < 1 or y < 1 or w < 1 or h < 1:
+            return None
+        if x + w - 1 > max_grid_line or y + h - 1 > max_grid_line:
+            return None
+
+        rects.append(
+            {
+                "originSlot": max(0, min(max_sessions - 1, origin_slot)),
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+            }
+        )
+
+    def normalize_weights(values: Any, target_length: int) -> List[float]:
+        if not isinstance(values, list):
+            return [1.0 for _ in range(target_length)]
+        normalized = []
+        for index in range(target_length):
+            try:
+                value = float(values[index])
+            except (IndexError, TypeError, ValueError):
+                value = 1.0
+            normalized.append(max(0.01, min(value, 100.0)))
+        return normalized
+
+    column_count = max(rect["x"] + rect["w"] - 1 for rect in rects)
+    row_count = max(rect["y"] + rect["h"] - 1 for rect in rects)
+    try:
+        original_count = int(data.get("original_split_slot_count", terminal_count))
+    except (TypeError, ValueError):
+        original_count = terminal_count
+
+    return {
+        "class_name": "layout-split-local",
+        "split_slot_rects": rects,
+        "split_column_weights": normalize_weights(data.get("split_column_weights"), column_count),
+        "split_row_weights": normalize_weights(data.get("split_row_weights"), row_count),
+        "original_split_slot_count": max(1, min(max_sessions, original_count)),
+    }
+
+
 def _default_session_config() -> Dict[str, Any]:
     """Default saved setup used by the launcher form."""
     default_count = min(4, max_sessions)
@@ -406,6 +498,7 @@ def _default_session_config() -> Dict[str, Any]:
             "default_dir": "",
         },
         "terminals": _default_terminal_entries(),
+        "workspace_layout": None,
     }
 
 
@@ -490,6 +583,7 @@ def _normalize_session_config(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "default_dir": str(wsl_data.get("default_dir") or default_config["wsl"]["default_dir"]),# type: ignore
         },
         "terminals": _normalize_terminal_entries(data.get("terminals"), connection_mode),
+        "workspace_layout": _normalize_workspace_layout(data.get("workspace_layout"), terminal_count),
     }
 
 
@@ -705,6 +799,7 @@ def upsert_saved_session(
     config: Dict[str, Any],
     name: Optional[str] = None,
     session_id: Optional[str] = None,
+    set_last_session: bool = True,
 ) -> Dict[str, Any]:
     """Create or update one named saved session preset."""
     normalized_config = _normalize_session_config(config)
@@ -721,7 +816,10 @@ def upsert_saved_session(
                 entry["name"] = normalized_name or entry["name"]
                 entry["updated_at"] = now
                 entry["config"] = normalized_config
-                save_saved_sessions(saved_sessions, last_session=entry["id"])
+                save_saved_sessions(
+                    saved_sessions,
+                    last_session=entry["id"] if set_last_session else state["last_session"],
+                )
                 return entry
 
     entry_id = session_id or _generate_saved_session_id()
@@ -733,7 +831,10 @@ def upsert_saved_session(
         "config": normalized_config,
     }
     saved_sessions.append(entry)
-    save_saved_sessions(saved_sessions, last_session=entry_id)
+    save_saved_sessions(
+        saved_sessions,
+        last_session=entry_id if set_last_session else state["last_session"],
+    )
     return entry
 
 
@@ -1749,6 +1850,8 @@ def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
             "layout": active_launch_options["layout"],
             "connection_mode": active_launch_options["connection_mode"],
             "terminal_count": 0,
+            "workspace_layout": None,
+            "surface_mode": app_surface_mode,
         }
 
     return {
@@ -1756,6 +1859,8 @@ def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
         "layout": group.layout,
         "connection_mode": group.connection_mode,
         "terminal_count": group.terminal_count,
+        "workspace_layout": group.workspace_layout,
+        "surface_mode": group.surface_mode,
     }
 
 
@@ -1901,6 +2006,83 @@ def _send_connection_input(connection: Dict[str, Any], input_data: str):
     stdin_handle.flush()
 
 
+def _terminal_cwd_probe_command(connection: Dict[str, Any], marker_start: str, marker_end: str) -> str:
+    """Return a shell command that prints the current directory between markers."""
+    shell_kind = str(connection.get("shell_kind") or "").strip()
+    newline = "\r" if connection.get("pty_process") is not None and os.name == "nt" else "\n"
+
+    if shell_kind == "powershell":
+        return f'Write-Output "{marker_start}$((Get-Location).ProviderPath){marker_end}"{newline}'
+    if shell_kind == "cmd":
+        return f"echo {marker_start}%CD%{marker_end}{newline}"
+    if shell_kind == "wsl":
+        return (
+            f"printf '{marker_start}%s{marker_end}\\n' "
+            f'"$(wslpath -w "$PWD" 2>/dev/null || printf \'%s\' "$PWD")"{newline}'
+        )
+    return f"printf '{marker_start}%s{marker_end}\\n' \"$PWD\"{newline}"
+
+
+def _extract_terminal_cwd_from_buffer(buffer: str, marker_start: str, marker_end: str) -> Optional[str]:
+    """Extract the last cwd marker payload from a terminal output buffer."""
+    matches = re.findall(
+        f"{re.escape(marker_start)}(.*?){re.escape(marker_end)}",
+        buffer,
+        flags=re.DOTALL,
+    )
+    for raw_value in reversed(matches):
+        candidate = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", raw_value)
+        candidate = candidate.replace("\r", "").strip()
+        if candidate and "\n" not in candidate and marker_start not in candidate and marker_end not in candidate:
+            return candidate
+    return None
+
+
+def _normalize_probed_local_cwd(cwd: str, shell_kind: str) -> str:
+    """Translate a probed shell cwd into the local filesystem form explorer expects."""
+    if os.name == "nt" and shell_kind == "wsl":
+        mount_match = re.match(r"^/mnt/([A-Za-z])(?:/(.*))?$", cwd)
+        if mount_match:
+            drive = mount_match.group(1).upper()
+            remainder = (mount_match.group(2) or "").replace("/", "\\")
+            return f"{drive}:\\" + remainder if remainder else f"{drive}:\\"
+    return cwd
+
+
+def _resolve_live_terminal_cwd(session_id: str, session: Any, timeout: float = 0.75) -> Optional[str]:
+    """Probe an active terminal shell for its current working directory."""
+    with connection_lock:
+        connection = ssh_connections.get(session_id)
+
+    if not connection:
+        return None
+
+    marker = uuid.uuid4().hex
+    marker_start = f"__GRIDVIBE_CWD_{marker}_START__"
+    marker_end = f"__GRIDVIBE_CWD_{marker}_END__"
+    command = _terminal_cwd_probe_command(connection, marker_start, marker_end)
+
+    try:
+        _send_connection_input(connection, command)
+    except Exception as exc:
+        logger.debug("Unable to probe terminal cwd for %s: %s", session_id, exc)
+        return None
+
+    deadline = time.time() + max(0.05, timeout)
+    while time.time() < deadline:
+        with connection_lock:
+            buffer = session_output_buffers.get(session_id, "")
+        cwd = _extract_terminal_cwd_from_buffer(buffer, marker_start, marker_end)
+        if cwd:
+            shell_kind = str(connection.get("shell_kind") or "").strip()
+            if getattr(session, "mode", "") == "wsl":
+                return _normalize_probed_local_cwd(cwd, shell_kind)
+            return cwd
+        time.sleep(0.05)
+
+    return None
+
+
 def _resize_connection(connection: Dict[str, Any], cols: Any, rows: Any):
     """Resize an active remote or local terminal session."""
     cols = max(8, min(int(cols), 400))
@@ -2043,7 +2225,7 @@ def _stream_ssh_output(session_id: str):
     except Exception as e:
         session = session_manager.get_session(session_id)
         if session and _is_explorer_session(session):
-            logger.info("Ignoring stream shutdown for explorer session %s: %s", session_id, e)
+            logger.debug("Ignoring stream shutdown for explorer session %s: %s", session_id, e)
             return
 
         logger.error(f"Error streaming output for session {session_id}: {e}")
@@ -2142,7 +2324,7 @@ def _stream_local_output(session_id: str):
     except Exception as e:
         session = session_manager.get_session(session_id)
         if session and _is_explorer_session(session):
-            logger.info("Ignoring local stream shutdown for explorer session %s: %s", session_id, e)
+            logger.debug("Ignoring local stream shutdown for explorer session %s: %s", session_id, e)
             return
 
         logger.error(f"Error streaming local output for session {session_id}: {e}")
@@ -2328,21 +2510,30 @@ def _default_explorer_candidate_path(session: Any, root_path: str) -> str:
 MARKDOWN_PREVIEW_EXTENSIONS = {".md", ".markdown"}
 CODE_PREVIEW_LANGUAGES = {
     ".bash": "shell",
+    ".bat": "batch",
     ".c": "c",
     ".cc": "cpp",
+    ".cfg": "config",
+    ".cmd": "batch",
+    ".conf": "config",
     ".cpp": "cpp",
     ".cs": "csharp",
     ".css": "css",
+    ".env": "dotenv",
+    ".example": "config",
     ".go": "go",
     ".h": "c",
     ".hpp": "cpp",
     ".html": "html",
+    ".ini": "ini",
     ".java": "java",
     ".js": "javascript",
     ".jsx": "javascript",
     ".json": "json",
+    ".jsonl": "jsonl",
     ".kt": "kotlin",
     ".kts": "kotlin",
+    ".log": "log",
     ".lua": "lua",
     ".php": "php",
     ".ps1": "powershell",
@@ -2351,7 +2542,9 @@ CODE_PREVIEW_LANGUAGES = {
     ".rs": "rust",
     ".sh": "shell",
     ".sql": "sql",
+    ".spec": "python",
     ".swift": "swift",
+    ".txt": "text",
     ".toml": "toml",
     ".ts": "typescript",
     ".tsx": "typescript",
@@ -2359,6 +2552,18 @@ CODE_PREVIEW_LANGUAGES = {
     ".yaml": "yaml",
     ".yml": "yaml",
 }
+CODE_PREVIEW_FILENAMES = {
+    ".editorconfig": "ini",
+    ".env": "dotenv",
+    ".gitattributes": "config",
+    ".gitignore": "gitignore",
+    ".gitkeep": "text",
+    ".python-version": "text",
+    "dockerfile": "dockerfile",
+    "makefile": "makefile",
+}
+EXPLORER_BINARY_SAMPLE_BYTES = 4096
+EXPLORER_TEXT_CONTROL_BYTES = {7, 8, 9, 10, 12, 13, 27}
 MARKDOWN_ALLOWED_TAGS = {
     "a",
     "abbr",
@@ -2419,10 +2624,42 @@ def _is_markdown_file(path: str) -> bool:
 
 def _explorer_code_language(path: str) -> Optional[str]:
     """Return the source language for code files shown in explorer previews."""
+    filename = os.path.basename(path).lower()
+    if filename in CODE_PREVIEW_FILENAMES:
+        return CODE_PREVIEW_FILENAMES[filename]
+    if filename.startswith(".env."):
+        return "dotenv"
     _, extension = os.path.splitext(path.lower())
     if extension in MARKDOWN_PREVIEW_EXTENSIONS:
         return "markdown"
     return CODE_PREVIEW_LANGUAGES.get(extension)
+
+
+def _explorer_editor_language(path: str) -> str:
+    """Return the editor language or reject unsupported explorer formats."""
+    language = _explorer_code_language(path)
+    if language is None:
+        raise ValueError("Explorer file format is not supported for editor preview")
+    return language
+
+
+def _explorer_content_looks_binary(raw_content: bytes) -> bool:
+    """Return whether a preview sample should be treated as binary content."""
+    sample = raw_content[:EXPLORER_BINARY_SAMPLE_BYTES]
+    if not sample:
+        return False
+    if b"\x00" in sample:
+        return True
+    try:
+        sample.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    control_count = sum(
+        1
+        for byte in sample
+        if byte < 32 and byte not in EXPLORER_TEXT_CONTROL_BYTES
+    )
+    return control_count / len(sample) > 0.30
 
 
 def _render_markdown_preview(content: str) -> Optional[str]:
@@ -2533,6 +2770,663 @@ def _explorer_entry_payload(root_path: str, entry: os.DirEntry) -> Dict[str, Any
         "type": "directory" if is_dir else "file",
         "size": None if is_dir or stat_result is None else stat_result.st_size,
         "modified": None if stat_result is None else stat_result.st_mtime,
+    }
+
+
+def _empty_explorer_git_context(error: Optional[str] = None) -> Dict[str, Any]:
+    """Return a non-fatal empty Git metadata payload for explorer responses."""
+    return {
+        "available": False,
+        "repo_root": None,
+        "branch": None,
+        "head": None,
+        "ahead": None,
+        "behind": None,
+        "dirty": False,
+        "error": error,
+    }
+
+
+def _clean_git_path(path: str) -> str:
+    """Normalize Git path output to slash-separated relative paths."""
+    return str(path or "").strip().replace("\\", "/").strip("/")
+
+
+def _run_git_command(
+    args: List[str],
+    *,
+    cwd: str,
+    timeout: float = 2.0,
+) -> subprocess.CompletedProcess:
+    """Run a read-only Git command with predictable process settings."""
+    env = os.environ.copy()
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _decode_git_output(raw_output: bytes) -> str:
+    """Decode Git command output without raising on repository filename bytes."""
+    return raw_output.decode("utf-8", errors="replace").strip()
+
+
+def _parse_git_ahead_behind(value: str) -> Tuple[Optional[int], Optional[int]]:
+    """Parse a porcelain v2 branch.ab header value."""
+    ahead = None
+    behind = None
+    for part in value.split():
+        if part.startswith("+"):
+            try:
+                ahead = int(part[1:])
+            except ValueError:
+                ahead = None
+        elif part.startswith("-"):
+            try:
+                behind = int(part[1:])
+            except ValueError:
+                behind = None
+    return ahead, behind
+
+
+def _git_status_name(index_status: str, worktree_status: str, record_type: str) -> str:
+    """Map porcelain status codes to the compact explorer status set."""
+    if record_type == "?":
+        return "untracked"
+    if record_type == "!":
+        return "ignored"
+    status_code = f"{index_status}{worktree_status}"
+    if record_type == "u" or "U" in status_code:
+        return "conflicted"
+    if "R" in status_code:
+        return "renamed"
+    if "A" in status_code:
+        return "added"
+    if "D" in status_code:
+        return "deleted"
+    if any(code in status_code for code in ("M", "T")):
+        return "modified"
+    return "clean"
+
+
+def _clean_git_entry_status() -> Dict[str, Any]:
+    """Return the default Git status metadata for an explorer entry."""
+    return {
+        "status": "clean",
+        "index_status": " ",
+        "worktree_status": " ",
+        "has_descendant_changes": False,
+        "descendant_status": None,
+    }
+
+
+def _git_status_payload(
+    path: str,
+    index_status: str,
+    worktree_status: str,
+    record_type: str,
+    original_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build per-path Git status metadata from one porcelain record."""
+    status = _git_status_name(index_status, worktree_status, record_type)
+    payload: Dict[str, Any] = {
+        "path": path,
+        "status": status,
+        "index_status": index_status or " ",
+        "worktree_status": worktree_status or " ",
+        "has_descendant_changes": status != "clean",
+    }
+    if original_path:
+        payload["original_path"] = original_path
+    return payload
+
+
+def _parse_git_status_porcelain_v2(raw_output: bytes) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    """Parse NUL-delimited `git status --porcelain=v2 -z --branch` output."""
+    branch: Dict[str, Any] = {
+        "branch": None,
+        "head": None,
+        "ahead": None,
+        "behind": None,
+    }
+    statuses: Dict[str, Dict[str, Any]] = {}
+    records = raw_output.decode("utf-8", errors="replace").split("\0")
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if not record:
+            continue
+        if record.startswith("# "):
+            header = record[2:]
+            key, _, value = header.partition(" ")
+            if key == "branch.head" and value != "(detached)":
+                branch["branch"] = value or None
+            elif key == "branch.oid":
+                branch["head"] = None if value == "(initial)" else value[:12]
+            elif key == "branch.ab":
+                branch["ahead"], branch["behind"] = _parse_git_ahead_behind(value)
+            continue
+
+        record_type = record[0]
+        if record_type in ("?", "!"):
+            path = _clean_git_path(record[2:])
+            if path:
+                statuses[path] = _git_status_payload(path, "?", "?", record_type)
+            continue
+        if record_type == "1":
+            parts = record.split(" ", 8)
+            if len(parts) >= 9:
+                index_status, worktree_status = parts[1][0], parts[1][1]
+                path = _clean_git_path(parts[8])
+                if path:
+                    statuses[path] = _git_status_payload(path, index_status, worktree_status, record_type)
+            continue
+        if record_type == "2":
+            parts = record.split(" ", 9)
+            original_path = records[index] if index < len(records) else ""
+            if index < len(records):
+                index += 1
+            if len(parts) >= 10:
+                index_status, worktree_status = parts[1][0], parts[1][1]
+                path = _clean_git_path(parts[9])
+                if path:
+                    statuses[path] = _git_status_payload(
+                        path,
+                        index_status,
+                        worktree_status,
+                        record_type,
+                        _clean_git_path(original_path),
+                    )
+            continue
+        if record_type == "u":
+            parts = record.split(" ", 11)
+            if len(parts) >= 12:
+                index_status, worktree_status = parts[1][0], parts[1][1]
+                path = _clean_git_path(parts[11])
+                if path:
+                    statuses[path] = _git_status_payload(path, index_status, worktree_status, record_type)
+
+    return branch, statuses
+
+
+def _repo_relative_git_path(repo_root: str, path: str) -> str:
+    """Return a slash-separated path relative to a Git repository root."""
+    relative = os.path.relpath(path, repo_root)
+    return "" if relative == "." else relative.replace(os.sep, "/")
+
+
+def _repo_relative_remote_git_path(repo_root: str, path: str) -> str:
+    """Return a slash-separated remote path relative to a Git repository root."""
+    repo_clean = _remote_path_clean(repo_root).rstrip("/") or "/"
+    path_clean = _remote_path_clean(path).rstrip("/") or "/"
+    relative = posixpath.relpath(path_clean, repo_clean)
+    return "" if relative == "." else relative.replace("\\", "/")
+
+
+def _git_pathspec(repo_root: str, scope_path: str) -> str:
+    """Return a Git pathspec for a validated absolute path."""
+    repo_relative = _repo_relative_git_path(repo_root, scope_path)
+    return repo_relative or "."
+
+
+def _remote_git_pathspec(repo_root: str, scope_path: str) -> str:
+    """Return a Git pathspec for a validated remote path."""
+    repo_relative = _repo_relative_remote_git_path(repo_root, scope_path)
+    return repo_relative or "."
+
+
+def _git_status_for_entry(
+    repo_root: str,
+    entry_path: str,
+    statuses: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Return exact or descendant Git status metadata for one explorer entry."""
+    repo_relative = _clean_git_path(_repo_relative_git_path(repo_root, entry_path))
+    status = dict(statuses.get(repo_relative, _clean_git_entry_status()))
+    descendant_prefix = f"{repo_relative}/" if repo_relative else ""
+    if descendant_prefix:
+        descendant_status = _aggregate_git_status(
+            item.get("status", "clean")
+            for path, item in statuses.items()
+            if path.startswith(descendant_prefix)
+        )
+        if descendant_status:
+            status["has_descendant_changes"] = True
+            status["descendant_status"] = descendant_status
+            if status.get("status") == "clean":
+                status["status"] = descendant_status
+    return status
+
+
+def _remote_git_status_for_entry(
+    repo_root: str,
+    entry_path: str,
+    statuses: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Return exact or descendant Git status metadata for one remote explorer entry."""
+    repo_relative = _clean_git_path(_repo_relative_remote_git_path(repo_root, entry_path))
+    status = dict(statuses.get(repo_relative, _clean_git_entry_status()))
+    descendant_prefix = f"{repo_relative}/" if repo_relative else ""
+    if descendant_prefix:
+        descendant_status = _aggregate_git_status(
+            item.get("status", "clean")
+            for path, item in statuses.items()
+            if path.startswith(descendant_prefix)
+        )
+        if descendant_status:
+            status["has_descendant_changes"] = True
+            status["descendant_status"] = descendant_status
+            if status.get("status") == "clean":
+                status["status"] = descendant_status
+    return status
+
+
+def _aggregate_git_status(statuses: Any) -> Optional[str]:
+    """Return the most useful status badge for a collection of descendant changes."""
+    priority = (
+        "conflicted",
+        "modified",
+        "added",
+        "deleted",
+        "renamed",
+        "untracked",
+        "ignored",
+    )
+    status_set = {status for status in statuses if status and status != "clean"}
+    for status in priority:
+        if status in status_set:
+            return status
+    return None
+
+
+def _get_git_context(root_path: str, current_path: str) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    """Return repository metadata and path statuses for a local explorer directory."""
+    try:
+        rev_parse = _run_git_command(
+            ["rev-parse", "--show-toplevel", "--is-inside-work-tree"],
+            cwd=current_path,
+            timeout=2.0,
+        )
+    except FileNotFoundError:
+        return _empty_explorer_git_context("Git executable was not found"), {}
+    except subprocess.TimeoutExpired:
+        return _empty_explorer_git_context("Git repository detection timed out"), {}
+    except OSError as exc:
+        return _empty_explorer_git_context(str(exc)), {}
+
+    if rev_parse.returncode != 0:
+        return _empty_explorer_git_context(), {}
+
+    rev_lines = _decode_git_output(rev_parse.stdout).splitlines()
+    if len(rev_lines) < 2 or rev_lines[1].lower() != "true":
+        return _empty_explorer_git_context(), {}
+
+    repo_root = os.path.realpath(os.path.abspath(rev_lines[0]))
+    try:
+        os.path.commonpath([repo_root, root_path])
+        os.path.commonpath([repo_root, current_path])
+    except ValueError:
+        return _empty_explorer_git_context("Git repository path could not be compared"), {}
+
+    status_args = [
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--branch",
+        "--",
+        _git_pathspec(repo_root, current_path),
+    ]
+    try:
+        status_result = _run_git_command(status_args, cwd=repo_root, timeout=2.0)
+    except subprocess.TimeoutExpired:
+        context = _empty_explorer_git_context("Git status timed out")
+        context["repo_root"] = repo_root
+        return context, {}
+    except OSError as exc:
+        context = _empty_explorer_git_context(str(exc))
+        context["repo_root"] = repo_root
+        return context, {}
+
+    if status_result.returncode != 0:
+        error = _decode_git_output(status_result.stderr) or "Git status failed"
+        context = _empty_explorer_git_context(error)
+        context["repo_root"] = repo_root
+        return context, {}
+
+    branch, statuses = _parse_git_status_porcelain_v2(status_result.stdout)
+    context = {
+        "available": True,
+        "repo_root": repo_root,
+        "branch": branch.get("branch"),
+        "head": branch.get("head"),
+        "ahead": branch.get("ahead"),
+        "behind": branch.get("behind"),
+        "dirty": any(item.get("status") != "clean" for item in statuses.values()),
+        "error": None,
+    }
+    return context, statuses
+
+
+def _remote_git_shell_command(args: List[str], cwd: str) -> str:
+    """Build a read-only Git command for a remote POSIX-compatible SSH shell."""
+    quoted_args = " ".join(shlex.quote(part) for part in args)
+    return f"GIT_OPTIONAL_LOCKS=0 git -C {shlex.quote(cwd)} {quoted_args}"
+
+
+def _run_remote_git_command(
+    client: Any,
+    args: List[str],
+    *,
+    cwd: str,
+    timeout: float = 2.0,
+) -> Any:
+    """Run a read-only Git command over SSH and return a subprocess-like result."""
+    command = _remote_git_shell_command(args, cwd)
+    _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    stdout_data = stdout.read()
+    stderr_data = stderr.read()
+    if isinstance(stdout_data, str):
+        stdout_data = stdout_data.encode("utf-8", errors="replace")
+    if isinstance(stderr_data, str):
+        stderr_data = stderr_data.encode("utf-8", errors="replace")
+    return subprocess.CompletedProcess(
+        args=command,
+        returncode=stdout.channel.recv_exit_status(),
+        stdout=stdout_data,
+        stderr=stderr_data,
+    )
+
+
+def _get_remote_git_context(
+    client: Any,
+    root_path: str,
+    current_path: str,
+) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    """Return repository metadata and path statuses for a remote explorer directory."""
+    try:
+        rev_parse = _run_remote_git_command(
+            client,
+            ["rev-parse", "--show-toplevel", "--is-inside-work-tree"],
+            cwd=current_path,
+            timeout=2.0,
+        )
+    except TimeoutError:
+        return _empty_explorer_git_context("Git repository detection timed out"), {}
+    except Exception as exc:
+        return _empty_explorer_git_context(str(exc)), {}
+
+    if rev_parse.returncode != 0:
+        return _empty_explorer_git_context(), {}
+
+    rev_lines = _decode_git_output(rev_parse.stdout).splitlines()
+    if len(rev_lines) < 2 or rev_lines[1].lower() != "true":
+        return _empty_explorer_git_context(), {}
+
+    repo_root = _remote_path_clean(rev_lines[0]).rstrip("/") or "/"
+    if not _remote_path_inside(repo_root, current_path):
+        return _empty_explorer_git_context("Git repository path could not be compared"), {}
+
+    status_args = [
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--branch",
+        "--",
+        _remote_git_pathspec(repo_root, current_path),
+    ]
+    try:
+        status_result = _run_remote_git_command(client, status_args, cwd=repo_root, timeout=2.0)
+    except TimeoutError:
+        context = _empty_explorer_git_context("Git status timed out")
+        context["repo_root"] = repo_root
+        return context, {}
+    except Exception as exc:
+        context = _empty_explorer_git_context(str(exc))
+        context["repo_root"] = repo_root
+        return context, {}
+
+    if status_result.returncode != 0:
+        error = _decode_git_output(status_result.stderr) or "Git status failed"
+        context = _empty_explorer_git_context(error)
+        context["repo_root"] = repo_root
+        return context, {}
+
+    branch, statuses = _parse_git_status_porcelain_v2(status_result.stdout)
+    context = {
+        "available": True,
+        "repo_root": repo_root,
+        "branch": branch.get("branch"),
+        "head": branch.get("head"),
+        "ahead": branch.get("ahead"),
+        "behind": branch.get("behind"),
+        "dirty": any(item.get("status") != "clean" for item in statuses.values()),
+        "error": None,
+    }
+    return context, statuses
+
+
+def _attach_git_status_to_entries(
+    root_path: str,
+    git_context: Dict[str, Any],
+    statuses: Dict[str, Dict[str, Any]],
+    entries: List[Dict[str, Any]],
+) -> None:
+    """Attach per-entry Git metadata to local explorer entries."""
+    if not git_context.get("available"):
+        for entry in entries:
+            entry["git"] = _clean_git_entry_status()
+        return
+
+    repo_root = str(git_context.get("repo_root") or "")
+    for entry in entries:
+        entry_path = os.path.realpath(os.path.abspath(os.path.join(root_path, entry.get("path") or "")))
+        entry["git"] = _git_status_for_entry(repo_root, entry_path, statuses)
+
+
+def _attach_remote_git_status_to_entries(
+    root_path: str,
+    git_context: Dict[str, Any],
+    statuses: Dict[str, Dict[str, Any]],
+    entries: List[Dict[str, Any]],
+) -> None:
+    """Attach per-entry Git metadata to remote explorer entries."""
+    if not git_context.get("available"):
+        for entry in entries:
+            entry["git"] = _clean_git_entry_status()
+        return
+
+    repo_root = str(git_context.get("repo_root") or "")
+    for entry in entries:
+        entry_path = _remote_path_join(root_path, entry.get("path") or "")
+        entry["git"] = _remote_git_status_for_entry(repo_root, entry_path, statuses)
+
+
+def _append_deleted_git_entries(
+    root_path: str,
+    current_path: str,
+    git_context: Dict[str, Any],
+    statuses: Dict[str, Dict[str, Any]],
+    entries: List[Dict[str, Any]],
+) -> None:
+    """Add read-only placeholder rows for deleted tracked files in the current directory."""
+    if not git_context.get("available"):
+        return
+
+    repo_root = str(git_context.get("repo_root") or "")
+    current_repo_relative = _clean_git_path(_repo_relative_git_path(repo_root, current_path))
+    existing_paths = {entry.get("path") for entry in entries}
+    for status_path, status in statuses.items():
+        if status.get("status") != "deleted":
+            continue
+        if current_repo_relative:
+            prefix = f"{current_repo_relative}/"
+            if not status_path.startswith(prefix):
+                continue
+            current_relative = status_path[len(prefix):]
+        else:
+            current_relative = status_path
+        if not current_relative or "/" in current_relative:
+            continue
+
+        deleted_abs_path = os.path.abspath(os.path.join(repo_root, status_path.replace("/", os.sep)))
+        deleted_explorer_path = _relative_explorer_path(root_path, deleted_abs_path)
+        if deleted_explorer_path in existing_paths:
+            continue
+        entries.append(
+            {
+                "name": current_relative,
+                "path": deleted_explorer_path,
+                "type": "file",
+                "size": None,
+                "modified": None,
+                "git": dict(status),
+                "deleted": True,
+            }
+        )
+        existing_paths.add(deleted_explorer_path)
+
+
+def _append_deleted_remote_git_entries(
+    root_path: str,
+    current_path: str,
+    git_context: Dict[str, Any],
+    statuses: Dict[str, Dict[str, Any]],
+    entries: List[Dict[str, Any]],
+) -> None:
+    """Add read-only placeholder rows for deleted tracked files in the current remote directory."""
+    if not git_context.get("available"):
+        return
+
+    repo_root = str(git_context.get("repo_root") or "")
+    current_repo_relative = _clean_git_path(_repo_relative_remote_git_path(repo_root, current_path))
+    existing_paths = {entry.get("path") for entry in entries}
+    for status_path, status in statuses.items():
+        if status.get("status") != "deleted":
+            continue
+        if current_repo_relative:
+            prefix = f"{current_repo_relative}/"
+            if not status_path.startswith(prefix):
+                continue
+            current_relative = status_path[len(prefix):]
+        else:
+            current_relative = status_path
+        if not current_relative or "/" in current_relative:
+            continue
+
+        deleted_abs_path = _remote_path_join(repo_root, status_path)
+        deleted_explorer_path = _relative_remote_explorer_path(root_path, deleted_abs_path)
+        if deleted_explorer_path in existing_paths:
+            continue
+        entries.append(
+            {
+                "name": current_relative,
+                "path": deleted_explorer_path,
+                "type": "file",
+                "size": None,
+                "modified": None,
+                "git": dict(status),
+                "deleted": True,
+            }
+        )
+        existing_paths.add(deleted_explorer_path)
+
+
+def _bounded_git_diff(repo_root: str, args: List[str]) -> Tuple[str, bool, int]:
+    """Run Git diff and return bounded UTF-8 text output."""
+    result = _run_git_command(args, cwd=repo_root, timeout=3.0)
+    if result.returncode != 0:
+        error = _decode_git_output(result.stderr) or "Git diff failed"
+        raise ValueError(error)
+    if b"\x00" in result.stdout:
+        raise ValueError("Git diff appears to contain binary data")
+
+    truncated = len(result.stdout) > EXPLORER_GIT_DIFF_MAX_BYTES
+    diff_bytes = result.stdout[:EXPLORER_GIT_DIFF_MAX_BYTES]
+    diff_text = diff_bytes.decode("utf-8", errors="replace")
+    lines = diff_text.splitlines(keepends=True)
+    if len(lines) > EXPLORER_GIT_DIFF_MAX_LINES:
+        diff_text = "".join(lines[:EXPLORER_GIT_DIFF_MAX_LINES])
+        truncated = True
+    return diff_text, truncated, len(result.stdout)
+
+
+def _get_git_diff(root_path: str, file_path: str, mode: str) -> Dict[str, Any]:
+    """Return a bounded read-only Git diff for a local explorer file."""
+    if mode not in {"worktree", "staged", "head"}:
+        raise ValueError("Invalid Git diff mode")
+
+    git_context, _statuses = _get_git_context(root_path, os.path.dirname(file_path))
+    if not git_context.get("available"):
+        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
+
+    repo_root = str(git_context["repo_root"])
+    pathspec = _git_pathspec(repo_root, file_path)
+    diff_args_by_mode = {
+        "worktree": ["diff", "--no-ext-diff", "--no-color", "--", pathspec],
+        "staged": ["diff", "--cached", "--no-ext-diff", "--no-color", "--", pathspec],
+        "head": ["diff", "HEAD", "--no-ext-diff", "--no-color", "--", pathspec],
+    }
+    try:
+        diff_text, truncated, raw_bytes = _bounded_git_diff(repo_root, diff_args_by_mode[mode])
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git diff timed out") from exc
+    return {
+        "git": git_context,
+        "diff": diff_text,
+        "truncated": truncated,
+        "byte_count": raw_bytes,
+        "line_count": len(diff_text.splitlines()),
+    }
+
+
+def _bounded_remote_git_diff(client: Any, repo_root: str, args: List[str]) -> Tuple[str, bool, int]:
+    """Run remote Git diff and return bounded UTF-8 text output."""
+    result = _run_remote_git_command(client, args, cwd=repo_root, timeout=3.0)
+    if result.returncode != 0:
+        error = _decode_git_output(result.stderr) or "Git diff failed"
+        raise ValueError(error)
+    if b"\x00" in result.stdout:
+        raise ValueError("Git diff appears to contain binary data")
+
+    truncated = len(result.stdout) > EXPLORER_GIT_DIFF_MAX_BYTES
+    diff_bytes = result.stdout[:EXPLORER_GIT_DIFF_MAX_BYTES]
+    diff_text = diff_bytes.decode("utf-8", errors="replace")
+    lines = diff_text.splitlines(keepends=True)
+    if len(lines) > EXPLORER_GIT_DIFF_MAX_LINES:
+        diff_text = "".join(lines[:EXPLORER_GIT_DIFF_MAX_LINES])
+        truncated = True
+    return diff_text, truncated, len(result.stdout)
+
+
+def _get_remote_git_diff(client: Any, root_path: str, file_path: str, mode: str) -> Dict[str, Any]:
+    """Return a bounded read-only Git diff for a remote explorer file."""
+    if mode not in {"worktree", "staged", "head"}:
+        raise ValueError("Invalid Git diff mode")
+
+    git_context, _statuses = _get_remote_git_context(client, root_path, _remote_path_dirname(file_path))
+    if not git_context.get("available"):
+        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
+
+    repo_root = str(git_context["repo_root"])
+    pathspec = _remote_git_pathspec(repo_root, file_path)
+    diff_args_by_mode = {
+        "worktree": ["diff", "--no-ext-diff", "--no-color", "--", pathspec],
+        "staged": ["diff", "--cached", "--no-ext-diff", "--no-color", "--", pathspec],
+        "head": ["diff", "HEAD", "--no-ext-diff", "--no-color", "--", pathspec],
+    }
+    diff_text, truncated, raw_bytes = _bounded_remote_git_diff(client, repo_root, diff_args_by_mode[mode])
+    return {
+        "git": git_context,
+        "diff": diff_text,
+        "truncated": truncated,
+        "raw_bytes": raw_bytes,
     }
 
 
@@ -3081,10 +3975,17 @@ def terminals_page():
     """Page showing active terminal instances."""
     logger.info("GET /terminals")
     return render_template('terminals.html', max_sessions=max_sessions,
+                           app_surface_mode=app_surface_mode,
                            voice_enabled=voice_enabled,
                            voice_engine=voice_engine,
                            voice_model=_active_voice_model_name(),
                            voice_language=voice_language)
+
+
+@app.route('/docs/images/<path:filename>')
+def docs_images(filename: str):
+    """Serve bundled documentation images used by the local UI."""
+    return send_from_directory(os.path.join(BASE_DIR, "docs", "images"), filename)
 
 
 # ==================== API Routes ====================
@@ -3166,6 +4067,8 @@ def get_sessions():
                 "layout": active_launch_options["layout"],
                 "connection_mode": active_launch_options["connection_mode"],
                 "terminal_count": active_launch_options["terminal_count"],
+                "workspace_layout": None,
+                "surface_mode": app_surface_mode,
             }
         )
     return jsonify(payload)
@@ -3192,6 +4095,9 @@ def get_explorer_entries(session_id: str):
                 _remote_explorer_entry_payload(root_path, current_path, entry)
                 for entry in sftp.listdir_attr(current_path)
             ]
+            git_context, git_statuses = _get_remote_git_context(client, root_path, current_path)
+            _attach_remote_git_status_to_entries(root_path, git_context, git_statuses, entries)
+            _append_deleted_remote_git_entries(root_path, current_path, git_context, git_statuses, entries)
             entries.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
 
             parent_path = ""
@@ -3204,6 +4110,7 @@ def get_explorer_entries(session_id: str):
                     "root": root_path,
                     "path": _relative_remote_explorer_path(root_path, current_path),
                     "parent_path": parent_path,
+                    "git": git_context,
                     "entries": entries,
                 }
             )
@@ -3224,6 +4131,9 @@ def get_explorer_entries(session_id: str):
         with os.scandir(current_path) as iterator:
             for entry in iterator:
                 entries.append(_explorer_entry_payload(root_path, entry))
+        git_context, git_statuses = _get_git_context(root_path, current_path)
+        _attach_git_status_to_entries(root_path, git_context, git_statuses, entries)
+        _append_deleted_git_entries(root_path, current_path, git_context, git_statuses, entries)
         entries.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
 
         parent_path = ""
@@ -3233,12 +4143,13 @@ def get_explorer_entries(session_id: str):
         return jsonify(
             {
                 "session_id": session.session_id,
-                "root": root_path,
-                "path": _relative_explorer_path(root_path, current_path),
-                "parent_path": parent_path,
-                "entries": entries,
-            }
-        )
+                    "root": root_path,
+                    "path": _relative_explorer_path(root_path, current_path),
+                    "parent_path": parent_path,
+                    "git": git_context,
+                    "entries": entries,
+                }
+            )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except OSError as exc:
@@ -3263,17 +4174,23 @@ def get_explorer_file(session_id: str):
                 request.args.get("path", ""),
             )
             stat_result = sftp.stat(file_path)
+            code_language = _explorer_editor_language(file_path)
             with sftp.open(file_path, "rb") as file_handle:
                 raw_content = file_handle.read(EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)
 
-            if b"\x00" in raw_content:
+            if _explorer_content_looks_binary(raw_content):
                 raise ValueError("Explorer file appears to be binary")
 
             truncated = len(raw_content) > EXPLORER_FILE_PREVIEW_MAX_BYTES
             preview_bytes = raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]
             content = preview_bytes.decode("utf-8", errors="replace")
             preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
-            code_language = _explorer_code_language(file_path)
+            git_context, git_statuses = _get_remote_git_context(client, root_path, _remote_path_dirname(file_path))
+            file_git = (
+                _remote_git_status_for_entry(str(git_context["repo_root"]), file_path, git_statuses)
+                if git_context.get("available")
+                else _clean_git_entry_status()
+            )
 
             return jsonify(
                 {
@@ -3289,6 +4206,8 @@ def get_explorer_file(session_id: str):
                     "preview_type": "markdown" if preview_html is not None else None,
                     "preview_html": preview_html,
                     "language": code_language,
+                    "git": file_git,
+                    "git_context": git_context,
                 }
             )
         except ValueError as exc:
@@ -3305,17 +4224,23 @@ def get_explorer_file(session_id: str):
             request.args.get("path", ""),
         )
         stat_result = os.stat(file_path, follow_symlinks=False)
+        code_language = _explorer_editor_language(file_path)
         with open(file_path, "rb") as file_handle:
             raw_content = file_handle.read(EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)
 
-        if b"\x00" in raw_content:
+        if _explorer_content_looks_binary(raw_content):
             raise ValueError("Explorer file appears to be binary")
 
         truncated = len(raw_content) > EXPLORER_FILE_PREVIEW_MAX_BYTES
         preview_bytes = raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]
         content = preview_bytes.decode("utf-8", errors="replace")
         preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
-        code_language = _explorer_code_language(file_path)
+        git_context, git_statuses = _get_git_context(root_path, os.path.dirname(file_path))
+        file_git = (
+            _git_status_for_entry(str(git_context["repo_root"]), file_path, git_statuses)
+            if git_context.get("available")
+            else _clean_git_entry_status()
+        )
 
         return jsonify(
             {
@@ -3331,6 +4256,65 @@ def get_explorer_file(session_id: str):
                 "preview_type": "markdown" if preview_html is not None else None,
                 "preview_html": preview_html,
                 "language": code_language,
+                "git": file_git,
+                "git_context": git_context,
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route('/api/explorer/<session_id>/git/diff', methods=['GET'])
+def get_explorer_git_diff(session_id: str):
+    """Return a bounded read-only Git diff for one explorer file."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if _is_remote_explorer_session(session):
+        client = None
+        sftp = None
+        mode = request.args.get("mode", "worktree")
+        try:
+            client, sftp = _open_ssh_sftp(session)
+            root_path, file_path = _resolve_remote_explorer_file_path(
+                sftp,
+                session,
+                request.args.get("path", ""),
+            )
+            diff_payload = _get_remote_git_diff(client, root_path, file_path, mode)
+            return jsonify(
+                {
+                    "session_id": session.session_id,
+                    "root": root_path,
+                    "path": _relative_remote_explorer_path(root_path, file_path),
+                    "mode": mode,
+                    **diff_payload,
+                }
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": str(exc)}), 500
+        finally:
+            if client is not None and sftp is not None:
+                _close_sftp_client(client, sftp)
+
+    mode = request.args.get("mode", "worktree")
+    try:
+        root_path, file_path = _resolve_explorer_file_path(
+            session,
+            request.args.get("path", ""),
+        )
+        diff_payload = _get_git_diff(root_path, file_path, mode)
+        return jsonify(
+            {
+                "session_id": session.session_id,
+                "root": root_path,
+                "path": _relative_explorer_path(root_path, file_path),
+                "mode": mode,
+                **diff_payload,
             }
         )
     except ValueError as exc:
@@ -3357,6 +4341,7 @@ def get_active_sessions():
             "layout": active_launch_options["layout"],
             "connection_mode": active_launch_options["connection_mode"],
             "terminal_count": active_launch_options["terminal_count"],
+            "workspace_layout": None,
         }
     return jsonify({
         "sessions": [s.to_dict() for s in sessions],
@@ -3466,16 +4451,32 @@ def create_saved_session():
     """Persist one named saved launcher preset."""
     data = request.get_json(silent=True) or {}
     config = _normalize_session_config(data.get("config"))
+    group_id = str(data.get("group_id") or "").strip()
+    activate_saved_session = data.get("activate", True) is not False
     saved_entry = upsert_saved_session(
         config=config,
         name=data.get("name"),
         session_id=data.get("id"),
+        set_last_session=activate_saved_session,
     )
+    group = (
+        session_manager.update_group_saved_session(
+            group_id,
+            saved_entry["id"],
+            saved_entry["name"],
+        )
+        if group_id
+        else None
+    )
+    state = _load_saved_sessions_payload()
+    last_entry = _find_saved_session_entry(state["sessions"], state["last_session"])
     return jsonify(
         {
             **_saved_session_response(saved_entry, include_config=True),
-            "last_session": saved_entry["id"],
-            "saved_session": _saved_session_meta(saved_entry),
+            "last_session": state["last_session"],
+            "saved_session": _saved_session_meta(last_entry),
+            "activated": activate_saved_session,
+            "group": group.to_dict() if group else None,
         }
     ), 201
 
@@ -3556,6 +4557,8 @@ def create_sessions():
 
         connection_mode = _normalize_connection_mode(data.get("connection_mode"))
         layout = _normalize_layout(data.get("layout"), len(sessions_config))
+        workspace_layout = _normalize_workspace_layout(data.get("workspace_layout"), len(sessions_config))
+        surface_mode = _normalize_surface_mode(data.get("surface_mode"), app_surface_mode)
         session_name = str(data.get("session_name") or "").strip()
         saved_session_id = _normalize_launch_session_id(data.get("saved_session_id"))
         stable_group_id = _build_launch_group_id(saved_session_id) or None
@@ -3620,6 +4623,9 @@ def create_sessions():
             layout=layout,
             terminal_count=len(prepared_sessions),
             group_id=stable_group_id,
+            saved_session_id=saved_session_id,
+            workspace_layout=workspace_layout,
+            surface_mode=surface_mode,
         )
         logger.info(
             "Created session group group_id=%s saved_session_id=%r name=%r mode=%s layout=%s terminal_count=%d",
@@ -3678,6 +4684,8 @@ def create_sessions():
             "layout": layout,
             "connection_mode": connection_mode,
             "terminal_count": len(created_sessions),
+            "workspace_layout": workspace_layout,
+            "surface_mode": surface_mode,
             "launch_target": "web",
             "warnings": launch_warnings,
         }), 201
@@ -3725,6 +4733,9 @@ def split_session(session_id: str):
         port=source.port,
         password=source.password,
         initial_command=None,
+        initial_command_mode="command",
+        agent_selection="",
+        custom_agent="",
         title=title,
         mode=source.mode,
         distribution=source.distribution,
@@ -3771,6 +4782,8 @@ def change_session_mode(session_id: str):
 
     if target_mode == "explorer":
         requested_directory = data.get("directory")
+        if data.get("refresh_cwd"):
+            requested_directory = _resolve_live_terminal_cwd(session_id, session) or requested_directory
         next_directory = session.directory
         root_directory = ""
 
