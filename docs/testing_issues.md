@@ -1,7 +1,35 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-03
+Last updated: 2026-07-04
 
 ## Open Issues
+
+### Issue ID: ISSUE-2026-009
+- Title: Native title bar theme waits for refocus to repaint
+- Priority: Cosmetic
+- Status: Open
+- Area: `web/webview_launcher.py`, `templates/index.html`, `templates/terminals.html`, `tests/test_webview_launcher.py`
+- Assignee: Unassigned
+- Tags: `launcher`, `session`, `windows`, `ui`, `theme`, `tests`
+- Reported: 2026-07-04
+
+Description:
+In native pywebview mode, the resizable Windows title bar on both the launcher and session windows can lag behind GridVibe's light/dark theme switch. The app content and title text update to the selected theme, but the native frame background can remain in the previous black or white color until the user clicks away from the window or refocuses it. The practical impact is a visibly mismatched title bar during normal theme toggling, with a manual blur/refocus workaround.
+
+Steps to reproduce:
+1. Start GridVibe in native pywebview mode on Windows so the launcher or session window uses the resizable native frame.
+2. Toggle GridVibe between light and dark display modes from the launcher window or the sessions window.
+3. Observe the native top bar while the window remains focused, then click away from the window or refocus it.
+
+Expected behavior:
+The native window title bar background, border, and title text should repaint immediately to match the resolved GridVibe light or dark theme while the launcher or session window remains focused.
+
+Actual behavior / logs:
+User report: switching light/dark mode updates the window title area text color, but the native frame top-bar background stays in the previous black or white box until blur/refocus. Code inspection confirms both `templates/index.html` and `templates/terminals.html` call `bridge.set_native_theme(resolvedTheme)` during theme changes, and `web/webview_launcher.py` stores `_native_theme` before applying Windows DWM caption, text, and border attributes to the registered launcher and session windows. Existing `tests/test_webview_launcher.py` coverage verifies that `_apply_windows_native_frame_theme()` calls the frame refresh helper and that `set_native_theme()` targets both windows, but it does not cover the active-window repaint/refocus behavior reported here.
+
+### Proposed solution:
+Investigate the Windows native-frame refresh path in `web/webview_launcher.py`, especially `_refresh_windows_native_frame()`, `_refresh_native_form()`, and `_run_on_native_ui_thread()`, to determine why active resizable frames do not repaint immediately after `DwmSetWindowAttribute`. Consider adding or adjusting non-client-area invalidation calls, ordering the DWM dark-mode and color updates differently, refreshing after the pywebview/WebView2 window is shown and active, or briefly forcing a native frame redraw without stealing focus. Keep launcher and session window handling shared through `GridVibeApi.set_native_theme()`. Add focused unit coverage around any new refresh helper behavior in `tests/test_webview_launcher.py`, and manually verify both `templates/index.html` and `templates/terminals.html` in native Windows mode because the final repaint symptom depends on the OS window manager.
+
+## Closed Issues
 
 ### Issue ID: ISSUE-2026-007
 - Title: Opening binary files can freeze explorer mode
@@ -32,8 +60,6 @@ Harden binary preview handling in both `web/api.py` and `templates/terminals.htm
 
 Resolution:
 Explorer file editor mode now only accepts known preview/source formats from the existing language and filename maps. Unsupported extensions are rejected before preview decoding, known formats are checked for NUL bytes, invalid UTF-8, and excessive control bytes, and SSH/local paths share the same validation. The frontend keeps the directory listing active on failed opens and prepends a non-blocking error notice instead of leaving the pane stuck on an opening message. Tests cover unsupported local and remote formats, non-NUL binary-like content, and the directory-preserving client path.
-
-## Closed Issues
 
 ### Issue ID: ISSUE-2026-005
 - Title: Explorer file find blocks terminal UI on large previews
