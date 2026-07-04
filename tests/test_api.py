@@ -348,6 +348,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("onclick=\"closeSessionsMenu(); saveActiveWorkspaceSession(this);\"", html)
         self.assertIn("onclick=\"closeSessionsMenu(); saveActiveWorkspaceSessionAs(this);\"", html)
         self.assertIn('<div id="savedSessionsModal" class="modal-shell" aria-hidden="true">', html)
+        self.assertIn('<div id="saveSessionAsModal" class="modal-shell" aria-hidden="true">', html)
+        self.assertIn('<input id="saveSessionAsOpenNow" type="checkbox">', html)
+        self.assertIn("<span>Open session now</span>", html)
         self.assertIn("function openNewSessionSelector(event)", html)
         self.assertIn("function buildSavedSessionLaunchPayload(savedSession)", html)
         self.assertIn("await launchSavedSession(data);", html)
@@ -356,22 +359,43 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("async function saveActiveWorkspaceSession(button = null, options = {})", html)
         self.assertIn("function saveActiveWorkspaceSessionAs(button = null)", html)
         self.assertIn("let workspaceSaveTargets = new Map();", html)
-        self.assertIn("function notifySavedSessionUpdated(savedSession)", html)
+        self.assertIn("function notifySavedSessionUpdated(savedSession, options = {})", html)
         self.assertIn("const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';", html)
-        self.assertIn("notifySavedSessionUpdated(data.saved_session || data);", html)
+        self.assertIn("notifySavedSessionUpdated(data, { activate: openSavedSessionNow });", html)
         self.assertIn("function getWorkspacePanesInVisualOrder(groupId = activeGroupId)", html)
-        self.assertIn("function buildActiveWorkspaceSessionConfig()", html)
-        self.assertIn("function buildActiveWorkspaceLayoutSnapshot()", html)
+        self.assertIn("function getActiveWorkspaceGroupId()", html)
+        self.assertIn("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)", html)
+        self.assertIn("function buildActiveWorkspaceLayoutSnapshot(groupId = activeGroupId)", html)
         self.assertIn("function applyWorkspaceLayoutSnapshot(snapshot, expectedCount)", html)
-        self.assertIn("workspace_layout: buildActiveWorkspaceLayoutSnapshot()", html)
+        self.assertIn("workspace_layout: buildActiveWorkspaceLayoutSnapshot(groupId)", html)
         self.assertIn("applyWorkspaceLayoutSnapshot(data.workspace_layout, data.sessions.length);", html)
-        save_config_start = html.index("function buildActiveWorkspaceSessionConfig()")
+        save_config_start = html.index("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)")
         save_config_end = html.index("async function saveActiveWorkspaceSession", save_config_start)
         save_config_html = html[save_config_start:save_config_end]
-        self.assertIn("const groupTerminals = getWorkspacePanesInVisualOrder(activeGroupId);", save_config_html)
+        self.assertIn("const groupTerminals = getWorkspacePanesInVisualOrder(groupId);", save_config_html)
         self.assertNotIn("? terminals", save_config_html)
+        save_handler_start = html.index("async function saveActiveWorkspaceSession")
+        save_handler_end = html.index("function saveActiveWorkspaceSessionAs", save_handler_start)
+        save_handler_html = html[save_handler_start:save_handler_end]
+        self.assertIn("const targetGroupId = getActiveWorkspaceGroupId();", save_handler_html)
+        self.assertIn("const config = buildActiveWorkspaceSessionConfig(targetGroupId);", save_handler_html)
+        self.assertIn("const saveTarget = getWorkspaceSaveTarget(targetGroupId);", save_handler_html)
+        self.assertIn("const result = await openSaveSessionAsModal(suggestedName);", save_handler_html)
+        self.assertIn("activate: shouldActivateSavedSession", save_handler_html)
+        self.assertIn("savePayload.group_id = targetGroupId;", save_handler_html)
+        self.assertIn("data.group?.group_id", save_handler_html)
+        self.assertIn("if (createNewSession && openSavedSessionNow)", save_handler_html)
+        self.assertIn("targetGroupId,", save_handler_html)
+        save_target_start = html.index("function getWorkspaceSaveTarget")
+        save_target_end = html.index("function rememberWorkspaceSaveTarget", save_target_start)
+        save_target_html = html[save_target_start:save_target_end]
+        self.assertIn("const groupSavedSessionId = String(group?.saved_session_id || '').trim();", save_target_html)
+        self.assertLess(
+            save_target_html.index("groupSavedSessionId"),
+            save_target_html.index("workspaceSaveTargets.get(groupId)"),
+        )
         entry_start = html.index("function buildWorkspaceTerminalEntry")
-        entry_end = html.index("function buildActiveWorkspaceSessionConfig()", entry_start)
+        entry_end = html.index("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)", entry_start)
         self.assertIn("terminal?._explorerPath || session.directory", html[entry_start:entry_end])
 
     def test_launcher_forwards_saved_workspace_layout_and_agent_metadata(self):
@@ -380,12 +404,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn("let activeWorkspaceLayout = null;", html)
+        self.assertIn("function clearActiveWorkspaceLayoutOverride()", html)
         self.assertIn("workspace_layout: workspaceLayout", html)
         self.assertIn("activeWorkspaceLayout = normalized.workspace_layout || null;", html)
         self.assertIn("workspace_layout: config.workspace_layout", html)
         self.assertIn("surface_mode: appSettings.workspace?.surface_mode === 'max' ? 'max' : 'normal'", html)
         self.assertIn("initial_command_mode: terminal.startup_mode === 'explorer'", html)
         self.assertIn("agent_selection: terminal.initial_command_mode === 'agent'", html)
+        layout_change_start = html.index("container.querySelectorAll('.layout-btn').forEach")
+        layout_change_end = html.index("function renderModeFields", layout_change_start)
+        layout_change_html = html[layout_change_start:layout_change_end]
+        self.assertIn("clearActiveWorkspaceLayoutOverride();", layout_change_html)
+        self.assertLess(
+            layout_change_html.index("clearActiveWorkspaceLayoutOverride();"),
+            layout_change_html.index("selectedLayout = nextLayout"),
+        )
 
     def test_launcher_refreshes_active_saved_session_after_external_update(self):
         response = self.client.get("/")
@@ -395,7 +428,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';", html)
         self.assertIn("const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';", html)
         self.assertIn("async function refreshActiveSavedSessionFromUpdate(payload)", html)
-        self.assertIn("sessionId !== activeSavedSessionId", html)
+        self.assertIn("const shouldActivate = Boolean(payload?.activate);", html)
+        self.assertIn("(!shouldActivate && sessionId !== activeSavedSessionId)", html)
         self.assertIn("fetch(`/api/saved-sessions/${encodeURIComponent(sessionId)}`)", html)
         self.assertIn("applySessionConfig(data.config);", html)
         self.assertIn("setupSavedSessionUpdateListeners();", html)
@@ -1709,6 +1743,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         original_session_id = initial_body["sessions"][0]["session_id"]
         original_group_id = initial_body["group_id"]
         self.assertEqual(original_group_id, "saved-session-session-dev-grid")
+        self.assertEqual(initial_body["group"]["saved_session_id"], "session-dev-grid")
         self.assertEqual(initial_start_task.call_count, 1)
 
         with api.connection_lock:
@@ -1745,6 +1780,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(replacement_response.status_code, 201)
         replacement_body = replacement_response.get_json()
         self.assertEqual(replacement_body["group_id"], original_group_id)
+        self.assertEqual(replacement_body["group"]["saved_session_id"], "session-dev-grid")
         self.assertEqual(replacement_body["layout"], "vertical")
         self.assertEqual(replacement_start_task.call_count, 2)
         self.assertEqual(len(api.session_manager.get_all_groups()), 1)
@@ -3110,6 +3146,120 @@ class ApiRoutesTestCase(unittest.TestCase):
         get_response = self.client.get(f"/api/saved-sessions/{created['id']}")
         self.assertEqual(get_response.status_code, 200)
         self.assertEqual(get_response.get_json()["config"]["ssh"]["host"], "10.0.0.20")
+
+    def test_save_as_updates_only_the_requesting_session_group_target(self):
+        original_group = api.session_manager.create_group(
+            name="GridVibe",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-original",
+            saved_session_id="gridvibe",
+        )
+        version_group = api.session_manager.create_group(
+            name="GridVibe copy",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-version-2",
+            saved_session_id="gridvibe",
+        )
+        payload = {
+            "name": "GridVibe version 2",
+            "group_id": version_group.group_id,
+            "config": {
+                "connection_mode": "ssh",
+                "terminal_count": 1,
+                "layout": "single",
+                "ssh": {
+                    "host": "10.0.0.20",
+                    "username": "ubuntu",
+                    "password": "",
+                    "port": 22,
+                    "default_dir": "/srv/dev",
+                },
+                "wsl": {
+                    "distribution": "",
+                    "username": "",
+                    "default_dir": "~",
+                },
+                "terminals": [
+                    {"title": "Shell", "directory": "/srv/dev", "initial_command": ""},
+                ],
+            },
+        }
+
+        response = self.client.post("/api/saved-sessions", json=payload)
+
+        self.assertEqual(response.status_code, 201)
+        created = response.get_json()
+        self.assertEqual(created["name"], "GridVibe version 2")
+        self.assertEqual(created["group"]["group_id"], version_group.group_id)
+        self.assertEqual(created["group"]["saved_session_id"], created["id"])
+        self.assertEqual(
+            api.session_manager.get_group(original_group.group_id).saved_session_id,
+            "gridvibe",
+        )
+        self.assertEqual(
+            api.session_manager.get_group(version_group.group_id).saved_session_id,
+            created["id"],
+        )
+
+    def test_save_as_without_activation_preserves_live_group_and_launcher_selection(self):
+        active_payload = {
+            "name": "GridVibe",
+            "config": {
+                "connection_mode": "ssh",
+                "terminal_count": 1,
+                "layout": "single",
+                "ssh": {
+                    "host": "10.0.0.10",
+                    "username": "ubuntu",
+                    "password": "",
+                    "port": 22,
+                    "default_dir": "/srv/gridvibe",
+                },
+                "wsl": {
+                    "distribution": "",
+                    "username": "",
+                    "default_dir": "~",
+                },
+                "terminals": [
+                    {"title": "Shell", "directory": "/srv/gridvibe", "initial_command": ""},
+                ],
+            },
+        }
+        active_saved = self.client.post("/api/saved-sessions", json=active_payload).get_json()
+        group = api.session_manager.create_group(
+            name="GridVibe",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-original",
+            saved_session_id=active_saved["id"],
+        )
+        save_as_payload = {
+            **active_payload,
+            "name": "GridVibe version 2",
+            "activate": False,
+        }
+
+        response = self.client.post("/api/saved-sessions", json=save_as_payload)
+
+        self.assertEqual(response.status_code, 201)
+        created = response.get_json()
+        self.assertEqual(created["name"], "GridVibe version 2")
+        self.assertFalse(created["activated"])
+        self.assertEqual(created["last_session"], active_saved["id"])
+        self.assertEqual(created["saved_session"], {"id": active_saved["id"], "name": "GridVibe"})
+        self.assertIsNone(created["group"])
+        self.assertEqual(
+            api.session_manager.get_group(group.group_id).saved_session_id,
+            active_saved["id"],
+        )
+        saved_state = json.loads(self.saved_sessions_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved_state["last_session"], active_saved["id"])
+        self.assertEqual(len(saved_state["sessions"]), 2)
 
     def test_saved_sessions_roundtrip_preserves_agent_startup_metadata(self):
         payload = {

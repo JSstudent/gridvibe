@@ -85,6 +85,7 @@ class SessionGroup:
     layout: str
     terminal_count: int
     display_order: int = 0
+    saved_session_id: str = ""
     workspace_layout: Optional[Dict[str, Any]] = None
     surface_mode: str = "normal"
     created_at: float = field(default_factory=time.time)
@@ -98,6 +99,7 @@ class SessionGroup:
             "layout": self.layout,
             "terminal_count": self.terminal_count,
             "display_order": self.display_order,
+            "saved_session_id": self.saved_session_id,
             "workspace_layout": self.workspace_layout,
             "surface_mode": self.surface_mode,
             "created_at": self.created_at,
@@ -124,6 +126,7 @@ class SessionManager:
         layout: str,
         terminal_count: int,
         group_id: Optional[str] = None,
+        saved_session_id: str = "",
         workspace_layout: Optional[Dict[str, Any]] = None,
         surface_mode: str = "normal",
     ) -> SessionGroup:
@@ -145,6 +148,7 @@ class SessionManager:
             layout=layout,
             terminal_count=terminal_count,
             display_order=next_display_order,
+            saved_session_id=str(saved_session_id or "").strip(),
             workspace_layout=workspace_layout,
             surface_mode=surface_mode if surface_mode in {"normal", "max"} else "normal",
         )
@@ -380,6 +384,24 @@ class SessionManager:
                 self.groups.values(),
                 key=lambda group: (group.display_order, group.created_at),
             )
+
+    def update_group_saved_session(
+        self,
+        group_id: str,
+        saved_session_id: str,
+        name: Optional[str] = None,
+    ) -> Optional[SessionGroup]:
+        """Update the saved-session target metadata for one launched group."""
+        with self.lock:
+            group = self.groups.get(group_id)
+            if not group:
+                return None
+
+            group.saved_session_id = str(saved_session_id or "").strip()
+            normalized_name = str(name or "").strip()
+            if normalized_name:
+                group.name = normalized_name
+            return group
 
     def reorder_groups(self, ordered_group_ids: List[str]) -> List[SessionGroup]:
         """Persist a new display order for known groups."""

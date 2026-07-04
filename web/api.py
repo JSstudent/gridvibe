@@ -799,6 +799,7 @@ def upsert_saved_session(
     config: Dict[str, Any],
     name: Optional[str] = None,
     session_id: Optional[str] = None,
+    set_last_session: bool = True,
 ) -> Dict[str, Any]:
     """Create or update one named saved session preset."""
     normalized_config = _normalize_session_config(config)
@@ -815,7 +816,10 @@ def upsert_saved_session(
                 entry["name"] = normalized_name or entry["name"]
                 entry["updated_at"] = now
                 entry["config"] = normalized_config
-                save_saved_sessions(saved_sessions, last_session=entry["id"])
+                save_saved_sessions(
+                    saved_sessions,
+                    last_session=entry["id"] if set_last_session else state["last_session"],
+                )
                 return entry
 
     entry_id = session_id or _generate_saved_session_id()
@@ -827,7 +831,10 @@ def upsert_saved_session(
         "config": normalized_config,
     }
     saved_sessions.append(entry)
-    save_saved_sessions(saved_sessions, last_session=entry_id)
+    save_saved_sessions(
+        saved_sessions,
+        last_session=entry_id if set_last_session else state["last_session"],
+    )
     return entry
 
 
@@ -4444,16 +4451,32 @@ def create_saved_session():
     """Persist one named saved launcher preset."""
     data = request.get_json(silent=True) or {}
     config = _normalize_session_config(data.get("config"))
+    group_id = str(data.get("group_id") or "").strip()
+    activate_saved_session = data.get("activate", True) is not False
     saved_entry = upsert_saved_session(
         config=config,
         name=data.get("name"),
         session_id=data.get("id"),
+        set_last_session=activate_saved_session,
     )
+    group = (
+        session_manager.update_group_saved_session(
+            group_id,
+            saved_entry["id"],
+            saved_entry["name"],
+        )
+        if group_id
+        else None
+    )
+    state = _load_saved_sessions_payload()
+    last_entry = _find_saved_session_entry(state["sessions"], state["last_session"])
     return jsonify(
         {
             **_saved_session_response(saved_entry, include_config=True),
-            "last_session": saved_entry["id"],
-            "saved_session": _saved_session_meta(saved_entry),
+            "last_session": state["last_session"],
+            "saved_session": _saved_session_meta(last_entry),
+            "activated": activate_saved_session,
+            "group": group.to_dict() if group else None,
         }
     ), 201
 
@@ -4600,6 +4623,7 @@ def create_sessions():
             layout=layout,
             terminal_count=len(prepared_sessions),
             group_id=stable_group_id,
+            saved_session_id=saved_session_id,
             workspace_layout=workspace_layout,
             surface_mode=surface_mode,
         )

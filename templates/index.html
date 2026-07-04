@@ -2780,6 +2780,10 @@
         buildTerminalRows(selectedCount, buildDefaultTerminalDrafts());
     }
 
+    function clearActiveWorkspaceLayoutOverride() {
+        activeWorkspaceLayout = null;
+    }
+
     function resetTerminalSetupIfTargetChanged(mode = connectionMode, values = collectModeInputs()) {
         const nextSignature = buildConnectionTargetSignature(mode, values);
         if (!lastTerminalSetupTargetSignature) {
@@ -3588,6 +3592,7 @@
                 const drafts = collectTerminalDrafts();
                 selectedCount = nextCount;
                 selectedLayout = defaultLayoutForCount(nextCount);
+                clearActiveWorkspaceLayoutOverride();
                 layoutChooserOpen = false;
                 renderCountOptions();
                 renderLayoutOptions();
@@ -3603,6 +3608,7 @@
                 if (nextCount !== selectedCount) {
                     selectedCount = nextCount;
                     selectedLayout = defaultLayoutForCount(nextCount);
+                    clearActiveWorkspaceLayoutOverride();
                     buildTerminalRows(selectedCount, drafts);
                 }
 
@@ -3652,7 +3658,9 @@
 
         container.querySelectorAll('.layout-btn').forEach(button => {
             button.addEventListener('click', () => {
-                selectedLayout = button.dataset.layout;
+                const nextLayout = button.dataset.layout;
+                clearActiveWorkspaceLayoutOverride();
+                selectedLayout = nextLayout;
                 layoutChooserOpen = false;
                 renderCountOptions();
                 renderLayoutOptions();
@@ -4434,7 +4442,8 @@
 
     async function refreshActiveSavedSessionFromUpdate(payload) {
         const sessionId = String(payload?.id || '').trim();
-        if (!sessionId || sessionId !== activeSavedSessionId) {
+        const shouldActivate = Boolean(payload?.activate);
+        if (!sessionId || (!shouldActivate && sessionId !== activeSavedSessionId)) {
             return;
         }
 

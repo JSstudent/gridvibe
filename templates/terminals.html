@@ -569,6 +569,52 @@
             line-height: 1.45;
         }
 
+        .modal-form {
+            display: grid;
+            gap: 14px;
+        }
+
+        .modal-field {
+            display: grid;
+            gap: 7px;
+        }
+
+        .modal-field label,
+        .modal-check {
+            color: var(--t-text-secondary);
+            font-size: 0.82rem;
+            font-weight: 600;
+        }
+
+        .modal-input {
+            width: 100%;
+            border: 1px solid rgba(76, 201, 240, 0.18);
+            border-radius: 8px;
+            background: rgba(8, 13, 25, 0.9);
+            color: var(--t-text);
+            font: inherit;
+            font-size: 0.92rem;
+            padding: 10px 12px;
+            outline: none;
+        }
+
+        .modal-input:focus {
+            border-color: rgba(76, 201, 240, 0.62);
+            box-shadow: 0 0 0 3px rgba(76, 201, 240, 0.12);
+        }
+
+        .modal-check {
+            display: inline-flex;
+            align-items: center;
+            gap: 9px;
+        }
+
+        .modal-check input {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--t-accent);
+        }
+
         .saved-session-list {
             min-height: 0;
             display: grid;
@@ -681,6 +727,17 @@
         [data-theme="light"] .saved-session-name {
             color: #111827;
             font-weight: 800;
+        }
+
+        [data-theme="light"] .modal-input {
+            border-color: rgba(75, 85, 99, 0.38);
+            background: rgba(255, 255, 255, 0.99);
+            color: #111827;
+        }
+
+        [data-theme="light"] .modal-input:focus {
+            border-color: rgba(14, 116, 144, 0.5);
+            box-shadow: 0 0 0 3px rgba(14, 116, 144, 0.12);
         }
 
         [data-theme="light"] .saved-session-meta,
@@ -2166,6 +2223,35 @@
     </div>
 </div>
 
+<div id="saveSessionAsModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="saveSessionAsTitle">
+        <div class="modal-head">
+            <div>
+                <div id="saveSessionAsTitle" class="modal-title">Save Session As</div>
+                <div class="modal-copy">Create a saved session from the current workspace.</div>
+            </div>
+            <button class="btn btn-neutral" type="button" onclick="closeSaveSessionAsModal()">Close</button>
+        </div>
+        <form id="saveSessionAsForm" class="modal-form">
+            <div class="modal-field">
+                <label for="saveSessionAsName">Session name</label>
+                <input id="saveSessionAsName" class="modal-input" type="text" autocomplete="off">
+            </div>
+            <label class="modal-check" for="saveSessionAsOpenNow">
+                <input id="saveSessionAsOpenNow" type="checkbox">
+                <span>Open session now</span>
+            </label>
+        </form>
+        <div class="modal-actions">
+            <div id="saveSessionAsFooterCopy" class="modal-copy"></div>
+            <div class="modal-actions-buttons">
+                <button class="btn btn-neutral" type="button" onclick="closeSaveSessionAsModal()">Cancel</button>
+                <button class="btn btn-primary" type="submit" form="saveSessionAsForm">Save</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js"></script>
@@ -2532,6 +2618,7 @@
     let pendingSplitRestore = null;
     let pendingModeSwitchSessionIds = new Set();
     let savedSessionResolver = null;
+    let saveSessionAsResolver = null;
     const MAX_SPLIT_TERMINALS = Math.min(8, Number({{ max_sessions | tojson }} || 8));
     const MIN_SPLIT_COLS = 8;
     const MIN_SPLIT_ROWS = 8;
@@ -2570,6 +2657,11 @@
 
     function getGroupById(groupId) {
         return sessionGroups.find(group => group.group_id === groupId) || null;
+    }
+
+    function getActiveWorkspaceGroupId() {
+        const activeTabGroupId = document.querySelector('.session-tab.active[data-group-id]')?.dataset.groupId || '';
+        return activeTabGroupId || activeGroupId || '';
     }
 
     function setSessionRoute(sessionId, groupId, index) {
@@ -2955,13 +3047,21 @@
     }
 
     function getWorkspaceSaveTarget(groupId = activeGroupId) {
+        const group = getGroupById(groupId);
+        const groupSavedSessionId = String(group?.saved_session_id || '').trim();
+        if (groupSavedSessionId) {
+            return {
+                id: groupSavedSessionId,
+                name: group?.name || ''
+            };
+        }
+
         const override = workspaceSaveTargets.get(groupId);
         if (override?.id) {
             return override;
         }
 
         const savedSessionId = savedSessionIdFromGroupId(groupId);
-        const group = getGroupById(groupId);
         return {
             id: savedSessionId,
             name: group?.name || ''
@@ -2981,14 +3081,17 @@
         });
 
         const group = getGroupById(groupId);
-        if (group && targetName) {
-            group.name = targetName;
+        if (group) {
+            group.saved_session_id = targetId;
+            if (targetName) {
+                group.name = targetName;
+            }
             renderSessionTabs();
             updateSessionChrome(getWorkspacePanesInVisualOrder(groupId).length, groupId);
         }
     }
 
-    function notifySavedSessionUpdated(savedSession) {
+    function notifySavedSessionUpdated(savedSession, options = {}) {
         const sessionId = String(savedSession?.id || '').trim();
         if (!sessionId) {
             return;
@@ -2998,6 +3101,7 @@
             id: sessionId,
             name: String(savedSession?.name || '').trim(),
             updated_at: String(savedSession?.updated_at || '').trim(),
+            activate: Boolean(options.activate),
             timestamp: Date.now(),
             nonce: Math.random().toString(36).slice(2)
         };
@@ -3230,6 +3334,39 @@
         });
     }
 
+    function closeSaveSessionAsModal(result = null) {
+        const modal = document.getElementById('saveSessionAsModal');
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+        document.getElementById('saveSessionAsFooterCopy').textContent = '';
+
+        if (saveSessionAsResolver) {
+            const resolver = saveSessionAsResolver;
+            saveSessionAsResolver = null;
+            resolver(result);
+        }
+    }
+
+    function openSaveSessionAsModal(suggestedName) {
+        const modal = document.getElementById('saveSessionAsModal');
+        const nameInput = document.getElementById('saveSessionAsName');
+        const openNowInput = document.getElementById('saveSessionAsOpenNow');
+        nameInput.value = suggestedName || '';
+        openNowInput.checked = false;
+        document.getElementById('saveSessionAsFooterCopy').textContent = '';
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            nameInput.focus();
+            nameInput.select();
+        }, 0);
+
+        return new Promise(resolve => {
+            saveSessionAsResolver = resolve;
+        });
+    }
+
     function buildSavedSessionLaunchPayload(savedSession) {
         const config = savedSession?.config || {};
         const sshConfig = config.ssh || {};
@@ -3396,11 +3533,35 @@
         }
     });
 
+    document.getElementById('saveSessionAsModal').addEventListener('click', event => {
+        if (event.target.id === 'saveSessionAsModal') {
+            closeSaveSessionAsModal();
+        }
+    });
+
+    document.getElementById('saveSessionAsForm').addEventListener('submit', event => {
+        event.preventDefault();
+        const suggestedName = document.getElementById('saveSessionAsName').value.trim();
+        if (!suggestedName) {
+            document.getElementById('saveSessionAsFooterCopy').textContent = 'Session name is required.';
+            document.getElementById('saveSessionAsName').focus();
+            return;
+        }
+
+        closeSaveSessionAsModal({
+            name: suggestedName,
+            openNow: document.getElementById('saveSessionAsOpenNow').checked
+        });
+    });
+
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             closeSessionsMenu();
             if (document.getElementById('savedSessionsModal').classList.contains('visible')) {
                 closeSavedSessionModal();
+            }
+            if (document.getElementById('saveSessionAsModal').classList.contains('visible')) {
+                closeSaveSessionAsModal();
             }
         }
     });
@@ -3434,12 +3595,12 @@
         };
     }
 
-    function buildActiveWorkspaceLayoutSnapshot() {
-        if (!activeGroupId) {
+    function buildActiveWorkspaceLayoutSnapshot(groupId = activeGroupId) {
+        if (!groupId) {
             return null;
         }
 
-        if (visibleGroupId === activeGroupId && gridBuilt) {
+        if (visibleGroupId === groupId && gridBuilt) {
             const grid = document.getElementById('terminalsGrid');
             const rects = cloneSplitSlotRects(
                 grid?.className === 'layout-split-local'
@@ -3457,7 +3618,7 @@
             );
         }
 
-        const cached = cachedGroupViews.get(activeGroupId);
+        const cached = cachedGroupViews.get(groupId);
         if (!cached) {
             return null;
         }
@@ -3530,9 +3691,9 @@
         };
     }
 
-    function buildActiveWorkspaceSessionConfig() {
-        const group = getGroupById(activeGroupId);
-        const groupTerminals = getWorkspacePanesInVisualOrder(activeGroupId);
+    function buildActiveWorkspaceSessionConfig(groupId = activeGroupId) {
+        const group = getGroupById(groupId);
+        const groupTerminals = getWorkspacePanesInVisualOrder(groupId);
         const connectionMode = group?.connection_mode === 'wsl' ? 'wsl' : 'ssh';
         const terminalEntries = groupTerminals.map((terminal, index) => (
             buildWorkspaceTerminalEntry(terminal, index, connectionMode)
@@ -3557,37 +3718,42 @@
                 default_dir: connectionMode === 'wsl' ? firstDirectory : ''
             },
             terminals: terminalEntries,
-            workspace_layout: buildActiveWorkspaceLayoutSnapshot()
+            workspace_layout: buildActiveWorkspaceLayoutSnapshot(groupId)
         };
     }
 
     async function saveActiveWorkspaceSession(button = null, options = {}) {
-        if (!activeGroupId) {
+        const targetGroupId = getActiveWorkspaceGroupId();
+        if (!targetGroupId) {
             setWorkspaceSaveMessage('No active session group to save.', 'error');
             return;
         }
 
         const promptForName = Boolean(options.promptForName);
         const createNewSession = Boolean(options.createNewSession);
-        const group = getGroupById(activeGroupId);
-        const config = buildActiveWorkspaceSessionConfig();
+        const group = getGroupById(targetGroupId);
+        const config = buildActiveWorkspaceSessionConfig(targetGroupId);
         if (!config.terminals.length) {
             setWorkspaceSaveMessage('No active terminals to save.', 'error');
             return;
         }
 
-        const saveTarget = getWorkspaceSaveTarget(activeGroupId);
+        const saveTarget = getWorkspaceSaveTarget(targetGroupId);
         const suggestedName = saveTarget.name || group?.name || `Workspace ${new Date().toLocaleTimeString()}`;
         let sessionName = suggestedName;
+        let openSavedSessionNow = false;
         if (promptForName) {
-            const rawName = window.prompt('Session name', suggestedName);
-            if (rawName === null) {
+            const result = await openSaveSessionAsModal(suggestedName);
+            if (!result) {
                 return;
             }
-            sessionName = rawName.trim() || suggestedName;
+            sessionName = result.name;
+            openSavedSessionNow = Boolean(result.openNow);
         }
 
         const savedSessionId = createNewSession ? '' : saveTarget.id;
+        const shouldUpdateSourceGroup = !createNewSession;
+        const shouldActivateSavedSession = !createNewSession || openSavedSessionNow;
         const previousText = button?.textContent;
         if (button) {
             button.disabled = true;
@@ -3595,26 +3761,45 @@
         }
 
         try {
+            const savePayload = {
+                id: savedSessionId || undefined,
+                name: sessionName,
+                config,
+                activate: shouldActivateSavedSession
+            };
+            if (shouldUpdateSourceGroup) {
+                savePayload.group_id = targetGroupId;
+            }
+
             const response = await fetch('/api/saved-sessions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    id: savedSessionId || undefined,
-                    name: sessionName,
-                    config
-                })
+                body: JSON.stringify(savePayload)
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
                 throw new Error(data.error || `Save failed with status ${response.status}`);
             }
-            rememberWorkspaceSaveTarget(
-                activeGroupId,
-                data.id || data.saved_session?.id || savedSessionId,
-                data.name || data.saved_session?.name || sessionName
-            );
-            notifySavedSessionUpdated(data.saved_session || data);
-            setWorkspaceSaveMessage(`Saved session "${data.name || sessionName}".`, 'success');
+            if (shouldUpdateSourceGroup && data.group?.group_id) {
+                const savedGroup = getGroupById(data.group.group_id);
+                if (savedGroup) {
+                    Object.assign(savedGroup, data.group);
+                }
+            }
+            if (shouldUpdateSourceGroup) {
+                rememberWorkspaceSaveTarget(
+                    targetGroupId,
+                    data.id || data.saved_session?.id || savedSessionId,
+                    data.name || data.saved_session?.name || sessionName
+                );
+            }
+            notifySavedSessionUpdated(data, { activate: openSavedSessionNow });
+            if (createNewSession && openSavedSessionNow) {
+                setWorkspaceSaveMessage(`Saved session "${data.name || sessionName}". Opening...`, 'success');
+                await launchSavedSession(data);
+            } else {
+                setWorkspaceSaveMessage(`Saved session "${data.name || sessionName}".`, 'success');
+            }
         } catch (error) {
             console.error('[GridVibe Sessions] workspace save failed:', error);
             setWorkspaceSaveMessage(`Save failed: ${error.message}`, 'error');
