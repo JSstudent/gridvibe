@@ -341,7 +341,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
         self.assertIn(">Sessions...</button>", html)
-        self.assertIn(">New Session ...</button>", html)
+        self.assertIn(">Import Session ...</button>", html)
         self.assertIn(">Save Session</button>", html)
         self.assertIn(">Save Session as ...</button>", html)
         self.assertIn("onclick=\"closeSessionsMenu(); return openNewSessionSelector(event);\"", html)
@@ -440,7 +440,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
 
-        menu_start = html.index('>New Session ...</button>')
+        menu_start = html.index('>Import Session ...</button>')
         go_to_settings_start = html.index("async function goToSettings(event)")
         open_selector_start = html.index("async function openNewSessionSelector(event)")
 
@@ -931,7 +931,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("closeSessionGroup(group.group_id);", html)
         self.assertIn(".sessions-menu-panel {", html)
         self.assertIn(".sessions-menu-item {", html)
-        self.assertIn(">New Session ...</button>", html)
+        self.assertIn(">Import Session ...</button>", html)
 
     def test_terminals_page_numbers_session_tabs_and_exposes_safe_shortcut(self):
         response = self.client.get("/terminals")
