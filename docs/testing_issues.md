@@ -3,14 +3,17 @@ Last updated: 2026-07-04
 
 ## Open Issues
 
+## Closed Issues
+
 ### Issue ID: ISSUE-2026-009
 - Title: Native title bar theme waits for refocus to repaint
 - Priority: Cosmetic
-- Status: Open
+- Status: Closed
 - Area: `web/webview_launcher.py`, `templates/index.html`, `templates/terminals.html`, `tests/test_webview_launcher.py`
 - Assignee: Unassigned
 - Tags: `launcher`, `session`, `windows`, `ui`, `theme`, `tests`
 - Reported: 2026-07-04
+- Closed: 2026-07-04
 
 Description:
 In native pywebview mode, the resizable Windows title bar on both the launcher and session windows can lag behind GridVibe's light/dark theme switch. The app content and title text update to the selected theme, but the native frame background can remain in the previous black or white color until the user clicks away from the window or refocuses it. The practical impact is a visibly mismatched title bar during normal theme toggling, with a manual blur/refocus workaround.
@@ -21,15 +24,16 @@ Steps to reproduce:
 3. Observe the native top bar while the window remains focused, then click away from the window or refocus it.
 
 Expected behavior:
-The native window title bar background, border, and title text should repaint immediately to match the resolved GridVibe light or dark theme while the launcher or session window remains focused.
+The native window title bar background, border, and title text should remain dark regardless of the resolved GridVibe content theme.
 
 Actual behavior / logs:
-User report: switching light/dark mode updates the window title area text color, but the native frame top-bar background stays in the previous black or white box until blur/refocus. Code inspection confirms both `templates/index.html` and `templates/terminals.html` call `bridge.set_native_theme(resolvedTheme)` during theme changes, and `web/webview_launcher.py` stores `_native_theme` before applying Windows DWM caption, text, and border attributes to the registered launcher and session windows. Existing `tests/test_webview_launcher.py` coverage verifies that `_apply_windows_native_frame_theme()` calls the frame refresh helper and that `set_native_theme()` targets both windows, but it does not cover the active-window repaint/refocus behavior reported here.
+User report: switching light/dark mode updates the window title area text color, but the native frame top-bar background stays in the previous black or white box until blur/refocus. Code inspection confirmed both `templates/index.html` and `templates/terminals.html` call `bridge.set_native_theme(resolvedTheme)` during theme changes, and `web/webview_launcher.py` stored `_native_theme` before applying Windows DWM caption, text, and border attributes to the registered launcher and session windows.
 
 ### Proposed solution:
-Investigate the Windows native-frame refresh path in `web/webview_launcher.py`, especially `_refresh_windows_native_frame()`, `_refresh_native_form()`, and `_run_on_native_ui_thread()`, to determine why active resizable frames do not repaint immediately after `DwmSetWindowAttribute`. Consider adding or adjusting non-client-area invalidation calls, ordering the DWM dark-mode and color updates differently, refreshing after the pywebview/WebView2 window is shown and active, or briefly forcing a native frame redraw without stealing focus. Keep launcher and session window handling shared through `GridVibeApi.set_native_theme()`. Add focused unit coverage around any new refresh helper behavior in `tests/test_webview_launcher.py`, and manually verify both `templates/index.html` and `templates/terminals.html` in native Windows mode because the final repaint symptom depends on the OS window manager.
+Keep launcher and session window handling shared through `GridVibeApi.set_native_theme()`, but permanently resolve native frame requests to the dark Windows frame theme instead of swapping DWM attributes for light mode.
 
-## Closed Issues
+Resolution:
+`web/webview_launcher.py` now keeps `_native_theme` as `dark` for all `set_native_theme()` calls, patches pywebview's WinForms title-bar theme hook to stay dark during form construction and OS theme-change events, and applies the dark DWM frame attributes again before each native window is shown. `tests/test_webview_launcher.py` verifies that light-mode requests still apply the dark native frame to both registered windows.
 
 ### Issue ID: ISSUE-2026-010
 - Title: Voice setting changes did not reach open session windows

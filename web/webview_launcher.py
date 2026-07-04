@@ -30,18 +30,28 @@ except ImportError:  # pragma: no cover - optional dependency at runtime
 logger = logging.getLogger(__name__)
 
 
+_NATIVE_FRAME_THEME = "dark"
 _NATIVE_FRAME_THEMES = {
-    "dark": {
+    _NATIVE_FRAME_THEME: {
         "caption": "#111827",
         "text": "#f8fafc",
         "border": "#1f2937",
     },
-    "light": {
-        "caption": "#f8fafc",
-        "text": "#111827",
-        "border": "#cbd5e1",
-    },
 }
+
+
+def _apply_windows_dark_frame_attributes(hwnd: int) -> bool:
+    """Apply the complete dark DWM frame attribute set to a Windows HWND."""
+    colors = _NATIVE_FRAME_THEMES[_NATIVE_FRAME_THEME]
+    applied = [
+        _set_dwm_window_attribute(hwnd, 19, 1),
+        _set_dwm_window_attribute(hwnd, 20, 1),
+        _set_dwm_window_attribute(hwnd, 38, 2),
+        _set_dwm_window_attribute(hwnd, 35, _hex_to_colorref(colors["caption"])),
+        _set_dwm_window_attribute(hwnd, 36, _hex_to_colorref(colors["text"])),
+        _set_dwm_window_attribute(hwnd, 34, _hex_to_colorref(colors["border"])),
+    ]
+    return any(applied)
 
 
 def _hex_to_colorref(hex_color: str) -> int:
@@ -161,7 +171,7 @@ def _refresh_native_form(window) -> bool:
 
 
 def _apply_windows_native_frame_theme(window, theme: str) -> bool:
-    """Apply GridVibe theme colors to a normal Windows native title bar."""
+    """Apply GridVibe's permanent dark colors to a normal Windows native title bar."""
     if sys.platform != "win32":
         return False
 
@@ -170,22 +180,43 @@ def _apply_windows_native_frame_theme(window, theme: str) -> bool:
         if not hwnd:
             return False
 
-        normalized = "light" if theme == "light" else "dark"
-        colors = _NATIVE_FRAME_THEMES[normalized]
-        dark_mode = 0 if normalized == "light" else 1
-        applied = [
-            _set_dwm_window_attribute(hwnd, 20, dark_mode),
-            _set_dwm_window_attribute(hwnd, 35, _hex_to_colorref(colors["caption"])),
-            _set_dwm_window_attribute(hwnd, 36, _hex_to_colorref(colors["text"])),
-            _set_dwm_window_attribute(hwnd, 34, _hex_to_colorref(colors["border"])),
-        ]
-        changed = any(applied)
+        changed = _apply_windows_dark_frame_attributes(hwnd)
         if changed:
             _refresh_windows_native_frame(hwnd)
             _refresh_native_form(window)
         return changed
 
     return _run_on_native_ui_thread(window, _apply)
+
+
+def _patch_winforms_dark_title_bar() -> bool:
+    """Keep pywebview's WinForms title-bar theme hook permanently dark."""
+    if sys.platform != "win32" or webview is None:
+        return False
+
+    try:
+        from webview.platforms import winforms
+    except Exception:
+        logger.debug("WinForms title-bar dark patch unavailable", exc_info=True)
+        return False
+
+    browser_form = getattr(getattr(winforms, "BrowserView", None), "BrowserForm", None)
+    if browser_form is None:
+        return False
+    if getattr(browser_form, "_gridvibe_dark_title_bar_patched", False):
+        return True
+
+    def _gridvibe_update_title_bar_theme(self):
+        handle = getattr(self, "Handle", None)
+        to_int = getattr(handle, "ToInt32", None)
+        if not callable(to_int):
+            return
+        hwnd = int(to_int())
+        _apply_windows_dark_frame_attributes(hwnd)
+
+    browser_form.update_title_bar_theme = _gridvibe_update_title_bar_theme
+    browser_form._gridvibe_dark_title_bar_patched = True
+    return True
 
 
 def _preferred_pywebview_gui():
@@ -509,7 +540,7 @@ class GridVibeApi:
         return {"ok": True, "is_fullscreen": self._session_is_fullscreen}
 
     def _apply_native_frame_theme(self, window, window_name: str = "window") -> bool:
-        """Apply the current GridVibe theme to a native window frame."""
+        """Apply the current native frame theme to a native window frame."""
         applied = _apply_windows_native_frame_theme(window, self._native_theme)
         if applied:
             logger.debug("Applied %s native frame theme to %s", self._native_theme, window_name)
@@ -525,8 +556,8 @@ class GridVibeApi:
         return applied
 
     def set_native_theme(self, theme: str):
-        """Set native window frame colors to match the resolved app theme."""
-        self._native_theme = "light" if theme == "light" else "dark"
+        """Accept app theme updates while keeping the native window frame dark."""
+        self._native_theme = _NATIVE_FRAME_THEME
         applied = self._apply_native_frame_theme_to_windows()
         return {"ok": True, "theme": self._native_theme, "applied": applied}
 
@@ -640,6 +671,7 @@ class GridVibeApi:
                 resolved_group_id or "all",
                 url,
             )
+            _patch_winforms_dark_title_bar()
             window = webview.create_window(
                 "GridVibe Sessions",
                 url,
@@ -974,6 +1006,10 @@ def main():
         if restored_event is not None:
             restored_event += _handle_restored
 
+        before_show_event = getattr(window.events, "before_show", None)
+        if before_show_event is not None:
+            before_show_event += lambda *_args: api_bridge._apply_native_frame_theme(window, kind)
+
         shown_event = getattr(window.events, "shown", None)
         if shown_event is not None:
             shown_event += lambda *_args: api_bridge._apply_native_frame_theme(window, kind)
@@ -989,6 +1025,7 @@ def main():
     if preferred_gui == "edgechromium":
         _set_webview2_media_env()
         _patch_webview2_permissions()
+    _patch_winforms_dark_title_bar()
     window = webview.create_window(
         "GridVibe",
         base_url,

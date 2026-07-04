@@ -516,6 +516,190 @@
             font-size: 1rem;
             line-height: 1;
         }
+
+        .modal-shell {
+            position: fixed;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: rgba(7, 11, 24, 0.8);
+            backdrop-filter: blur(12px);
+            pointer-events: auto;
+            z-index: 12000;
+        }
+
+        .modal-shell.visible {
+            display: flex;
+        }
+
+        .modal-card {
+            width: min(720px, 100%);
+            max-height: min(70vh, 760px);
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr) auto;
+            gap: 16px;
+            padding: 20px;
+            border: 1px solid rgba(76, 201, 240, 0.16);
+            border-radius: 18px;
+            background: linear-gradient(180deg, rgba(22, 28, 46, 0.98) 0%, rgba(17, 23, 39, 0.98) 100%);
+            box-shadow: 0 22px 60px rgba(0, 0, 0, 0.48);
+            backdrop-filter: blur(16px);
+            pointer-events: auto;
+        }
+
+        .modal-head,
+        .modal-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+
+        .modal-title {
+            color: var(--t-text);
+            font-size: 1rem;
+            font-weight: 700;
+        }
+
+        .modal-copy {
+            color: var(--t-text-muted);
+            font-size: 0.82rem;
+            line-height: 1.45;
+        }
+
+        .saved-session-list {
+            min-height: 0;
+            display: grid;
+            gap: 10px;
+            overflow: auto;
+            padding-right: 4px;
+        }
+
+        .saved-session-item {
+            width: 100%;
+            padding: 14px 16px;
+            display: grid;
+            gap: 6px;
+            text-align: left;
+            border: 1px solid rgba(76, 201, 240, 0.14);
+            border-radius: 14px;
+            background: rgba(12, 18, 32, 0.82);
+            color: var(--t-text);
+            cursor: pointer;
+            transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+        }
+
+        .saved-session-item:hover {
+            transform: translateY(-1px);
+            border-color: rgba(76, 201, 240, 0.5);
+            background: rgba(20, 30, 52, 0.94);
+        }
+
+        .saved-session-content {
+            min-width: 0;
+            display: grid;
+            gap: 6px;
+        }
+
+        .saved-session-topline,
+        .saved-session-tags {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .saved-session-topline {
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .saved-session-name {
+            color: var(--t-text);
+            font-size: 0.94rem;
+            font-weight: 700;
+        }
+
+        .saved-session-tag {
+            padding: 3px 8px;
+            border-radius: 999px;
+            border: 1px solid rgba(76, 201, 240, 0.14);
+            background: rgba(22, 32, 58, 0.72);
+            color: var(--t-text-muted);
+            font-size: 0.66rem;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .saved-session-tag.current {
+            border-color: rgba(76, 201, 240, 0.32);
+            background: rgba(76, 201, 240, 0.12);
+            color: var(--t-accent);
+        }
+
+        .saved-session-meta,
+        .saved-session-id {
+            color: var(--t-text-muted);
+            font-size: 0.76rem;
+            line-height: 1.4;
+        }
+
+        .modal-actions {
+            flex-wrap: wrap;
+        }
+
+        .modal-actions-buttons {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        [data-theme="light"] .modal-shell {
+            background: rgba(107, 114, 128, 0.35);
+        }
+
+        [data-theme="light"] .modal-card {
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.99) 0%, rgba(249, 250, 251, 0.99) 100%);
+            border-color: rgba(75, 85, 99, 0.30);
+            box-shadow: 0 22px 60px rgba(15, 23, 42, 0.22);
+        }
+
+        [data-theme="light"] .saved-session-item {
+            border-color: rgba(75, 85, 99, 0.34);
+            background: rgba(255, 255, 255, 0.99);
+            box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
+        }
+
+        [data-theme="light"] .saved-session-item:hover {
+            border-color: rgba(8, 145, 178, 0.54);
+            background: rgba(240, 247, 250, 0.96);
+        }
+
+        [data-theme="light"] .saved-session-name {
+            color: #111827;
+            font-weight: 800;
+        }
+
+        [data-theme="light"] .saved-session-meta,
+        [data-theme="light"] .saved-session-id {
+            color: #374151;
+            font-weight: 600;
+        }
+
+        [data-theme="light"] .saved-session-tag {
+            border-color: rgba(75, 85, 99, 0.28);
+            background: rgba(241, 245, 249, 0.96);
+            color: #374151;
+        }
+
+        [data-theme="light"] .saved-session-tag.current {
+            border-color: rgba(8, 145, 178, 0.32);
+            background: rgba(8, 145, 178, 0.08);
+        }
+
         .settings-window-btn {
             width: 38px;
             height: 34px;
@@ -1860,7 +2044,7 @@
                     type="button"
                     class="sessions-menu-item"
                     role="menuitem"
-                    onclick="closeSessionsMenu(); return goToSettings(event);"
+                    onclick="closeSessionsMenu(); return openNewSessionSelector(event);"
                 >New Session ...</button>
                 <button
                     type="button"
@@ -1963,6 +2147,25 @@
     <a href="/" onclick="return goToSettings(event)">Launch terminals →</a>
 </div>
 
+<div id="savedSessionsModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="savedSessionsTitle">
+        <div class="modal-head">
+            <div>
+                <div id="savedSessionsTitle" class="modal-title">Import Saved Session</div>
+                <div class="modal-copy">Pick one saved launcher setup to launch as a new session.</div>
+            </div>
+            <button class="btn btn-neutral" type="button" onclick="closeSavedSessionModal()">Close</button>
+        </div>
+        <div id="savedSessionsList" class="saved-session-list"></div>
+        <div class="modal-actions">
+            <div id="savedSessionsFooterCopy" class="modal-copy"></div>
+            <div class="modal-actions-buttons">
+                <button class="btn btn-neutral" type="button" onclick="closeSavedSessionModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js"></script>
@@ -1974,6 +2177,7 @@
     const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';
     const APP_CONFIG_BROADCAST_CHANNEL = 'gridvibe.appConfig';
     const DEFAULT_SURFACE_MODE = {{ app_surface_mode|tojson }};
+    const DEFAULT_SAVED_SESSION_ID = 'default-session';
 
     function normalizeThemePreference(theme) {
         return ['system', 'light', 'dark'].includes(theme) ? theme : 'system';
@@ -2327,6 +2531,7 @@
     let surfaceModeAppliedGroups = new Map();
     let pendingSplitRestore = null;
     let pendingModeSwitchSessionIds = new Set();
+    let savedSessionResolver = null;
     const MAX_SPLIT_TERMINALS = Math.min(8, Number({{ max_sessions | tojson }} || 8));
     const MIN_SPLIT_COLS = 8;
     const MIN_SPLIT_ROWS = 8;
@@ -2829,15 +3034,374 @@
         button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
     }
 
+    function getConnectionModeLabel(mode) {
+        return mode === 'wsl' ? 'Local Repo' : 'SSH';
+    }
+
+    function getStep2DefaultDirectory(config) {
+        return config?.connection_mode === 'wsl'
+            ? String(config?.wsl?.default_dir || '').trim()
+            : String(config?.ssh?.default_dir || '').trim();
+    }
+
+    function isAbsoluteDirectory(path, mode) {
+        const trimmed = String(path || '').trim();
+        if (!trimmed) {
+            return false;
+        }
+        if (/^[A-Za-z]:[\\/]/.test(trimmed)) {
+            return true;
+        }
+        if (trimmed.startsWith('\\\\')) {
+            return true;
+        }
+        if (trimmed.startsWith('/') || trimmed.startsWith('~')) {
+            return true;
+        }
+        return mode === 'wsl' && trimmed.startsWith('\\');
+    }
+
+    function normalizeComparableDirectory(path, mode) {
+        const trimmed = String(path || '').trim();
+        if (!trimmed) {
+            return '';
+        }
+
+        let normalized = trimmed.replace(/\\/g, '/');
+        if (normalized !== '/') {
+            normalized = normalized.replace(/\/+$/, '');
+        }
+        if (!normalized && trimmed.startsWith('/')) {
+            normalized = '/';
+        }
+        if (mode === 'wsl') {
+            normalized = normalized.toLowerCase();
+        }
+        return normalized;
+    }
+
+    function joinDirectories(baseDir, childDir, mode) {
+        const rawBase = String(baseDir || '').trim();
+        const base = rawBase === '/' ? '/' : rawBase.replace(/[\\/]+$/, '');
+        const child = String(childDir || '').trim().replace(/^[\\/]+/, '');
+        if (!base) {
+            return child;
+        }
+        if (!child) {
+            return base;
+        }
+
+        const separator = mode === 'wsl' && base.includes('\\') && !base.includes('/') ? '\\' : '/';
+        const normalizedChild = child.replace(/[\\/]+/g, separator);
+        return `${base}${separator}${normalizedChild}`;
+    }
+
+    function resolveTerminalDirectory(defaultDir, terminalDir, mode) {
+        const baseDirectory = String(defaultDir || '').trim();
+        const rawDirectory = String(terminalDir || '').trim();
+        if (!rawDirectory) {
+            return baseDirectory;
+        }
+        if (!baseDirectory || !isAbsoluteDirectory(rawDirectory, mode)) {
+            return rawDirectory;
+        }
+
+        const normalizedDirectory = normalizeComparableDirectory(rawDirectory, mode);
+        const normalizedBase = normalizeComparableDirectory(baseDirectory, mode);
+        if (
+            normalizedDirectory === normalizedBase
+            || normalizedBase === '/'
+            || normalizedDirectory.startsWith(`${normalizedBase}/`)
+        ) {
+            return rawDirectory;
+        }
+
+        throw new Error('Step 3 directories must stay inside the Step 2 default working directory.');
+    }
+
+    function buildLaunchDirectory(defaultDir, terminalDir, mode) {
+        const baseDirectory = String(defaultDir || '').trim();
+        const rawDirectory = String(terminalDir || '').trim();
+        if (!rawDirectory) {
+            return baseDirectory;
+        }
+        if (!baseDirectory) {
+            return rawDirectory;
+        }
+        if (!isAbsoluteDirectory(rawDirectory, mode)) {
+            return joinDirectories(baseDirectory, rawDirectory, mode);
+        }
+        return resolveTerminalDirectory(baseDirectory, rawDirectory, mode);
+    }
+
+    function getDirectoryName(path) {
+        const trimmed = String(path || '').trim().replace(/[\\/]+$/, '');
+        if (!trimmed) {
+            return '';
+        }
+
+        const parts = trimmed.split(/[\\/]/).filter(Boolean);
+        return parts[parts.length - 1] || trimmed;
+    }
+
+    function buildSavedSessionLaunchName(savedSession, config) {
+        const sessionId = String(savedSession?.id || '').trim();
+        const sessionName = String(savedSession?.name || '').trim();
+        if (sessionId && sessionId !== DEFAULT_SAVED_SESSION_ID && sessionName) {
+            return sessionName;
+        }
+
+        const sshHost = String(config?.ssh?.host || '').trim();
+        if (config?.connection_mode === 'ssh' && sshHost) {
+            return sshHost;
+        }
+
+        const defaultDir = getStep2DefaultDirectory(config);
+        const firstTerminalDir = Array.isArray(config?.terminals)
+            ? String(config.terminals.find(terminal => terminal?.directory)?.directory || '').trim()
+            : '';
+        const directoryName = getDirectoryName(defaultDir || firstTerminalDir);
+        if (directoryName) {
+            return directoryName;
+        }
+
+        return `Session ${new Date().toLocaleTimeString()}`;
+    }
+
+    function buildSavedSessionTags(session) {
+        const tags = [];
+        const sessionId = String(session?.id || '').trim();
+        if (session?.is_default) {
+            tags.push('<span class="saved-session-tag">Default</span>');
+        }
+        if (sessionId && savedSessionIdFromGroupId(activeGroupId) === sessionId) {
+            tags.push('<span class="saved-session-tag current">Current</span>');
+        }
+        return tags.join('');
+    }
+
+    function buildSavedSessionCard(session) {
+        return `
+            <button type="button" class="saved-session-item" data-session-id="${escHtml(session.id)}">
+                <span class="saved-session-content">
+                    <span class="saved-session-topline">
+                        <span class="saved-session-name">${escHtml(session.name)}</span>
+                        <span class="saved-session-tags">${buildSavedSessionTags(session)}</span>
+                    </span>
+                    <span class="saved-session-meta">
+                        ${escHtml(getConnectionModeLabel(session.connection_mode))} &bull; ${escHtml(String(session.terminal_count))} terminal${session.terminal_count === 1 ? '' : 's'} &bull; ${escHtml(session.layout)}
+                    </span>
+                    <span class="saved-session-id">Updated ${escHtml(session.updated_at)} &bull; ${escHtml(session.id)}</span>
+                </span>
+            </button>
+        `;
+    }
+
+    function closeSavedSessionModal(result = null) {
+        const modal = document.getElementById('savedSessionsModal');
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+        document.getElementById('savedSessionsList').innerHTML = '';
+        document.getElementById('savedSessionsFooterCopy').textContent = '';
+
+        if (savedSessionResolver) {
+            const resolver = savedSessionResolver;
+            savedSessionResolver = null;
+            resolver(result);
+        }
+    }
+
+    function openSavedSessionModal(sessions) {
+        const modal = document.getElementById('savedSessionsModal');
+        const list = document.getElementById('savedSessionsList');
+        const footerCopy = document.getElementById('savedSessionsFooterCopy');
+        list.innerHTML = sessions.map(session => buildSavedSessionCard(session)).join('');
+        footerCopy.textContent = sessions.length
+            ? ''
+            : 'No saved sessions found.';
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        return new Promise(resolve => {
+            savedSessionResolver = resolve;
+            list.querySelectorAll('.saved-session-item').forEach(button => {
+                button.addEventListener('click', () => closeSavedSessionModal({ id: button.dataset.sessionId }));
+            });
+        });
+    }
+
+    function buildSavedSessionLaunchPayload(savedSession) {
+        const config = savedSession?.config || {};
+        const sshConfig = config.ssh || {};
+        const wslConfig = config.wsl || {};
+        const connectionMode = config.connection_mode === 'wsl' ? 'wsl' : 'ssh';
+        const configuredCount = Number(config.terminal_count);
+        const terminalCount = Math.max(
+            1,
+            Math.min(
+                MAX_SPLIT_TERMINALS,
+                Number.isFinite(configuredCount) ? configuredCount : 1
+            )
+        );
+        const terminalConfigs = Array.isArray(config.terminals) ? config.terminals : [];
+        const configuredDefaultDir = getStep2DefaultDirectory(config);
+        const launchDefaultDir = configuredDefaultDir || (connectionMode === 'ssh' ? '/' : '');
+        const sessions = [];
+
+        if (connectionMode === 'ssh' && !String(sshConfig.host || '').trim()) {
+            throw new Error('Saved SSH sessions need a host before they can be launched.');
+        }
+        if (connectionMode === 'wsl' && !String(wslConfig.default_dir || '').trim()) {
+            throw new Error('Saved Local Repo sessions need a repository folder before they can be launched.');
+        }
+
+        Array.from({ length: terminalCount }, (_, index) => terminalConfigs[index] || {}).forEach((terminal, index) => {
+            const startupMode = terminal?.startup_mode === 'explorer'
+                ? 'explorer'
+                : (terminal?.initial_command_mode === 'agent' || terminal?.startup_mode === 'agent' ? 'agent' : 'terminal');
+            const resolvedDirectory = buildLaunchDirectory(
+                configuredDefaultDir,
+                terminal?.directory,
+                connectionMode
+            ) || launchDefaultDir;
+            const common = {
+                title: terminal?.title || `Terminal ${index + 1}`,
+                directory: resolvedDirectory,
+                initial_command: startupMode === 'explorer' ? null : (terminal?.initial_command || null),
+                initial_command_mode: startupMode === 'explorer'
+                    ? 'explorer'
+                    : (startupMode === 'agent' ? 'agent' : 'command'),
+                agent_selection: startupMode === 'agent' ? (terminal?.agent_selection || '') : '',
+                custom_agent: startupMode === 'agent' ? (terminal?.custom_agent || '') : '',
+                startup_mode: startupMode
+            };
+
+            if (connectionMode === 'ssh') {
+                sessions.push({
+                    ...common,
+                    host: sshConfig.host,
+                    username: sshConfig.username || 'ubuntu',
+                    password: sshConfig.password || null,
+                    port: sshConfig.port || 22
+                });
+                return;
+            }
+
+            sessions.push({
+                ...common,
+                distribution: terminal?.distribution || wslConfig.distribution || '',
+                username: wslConfig.username || '',
+                use_wsl: startupMode === 'explorer' ? false : Boolean(terminal?.use_wsl),
+                use_powershell: startupMode === 'explorer' ? false : Boolean(terminal?.use_powershell)
+            });
+        });
+
+        if (!sessions.length) {
+            throw new Error('Selected saved session does not contain any terminals.');
+        }
+
+        return {
+            connection_mode: connectionMode,
+            layout: config.layout || (terminalCount >= 4 ? 'grid' : (terminalCount <= 1 ? 'single' : 'vertical')),
+            workspace_layout: config.workspace_layout || null,
+            surface_mode: normalizeSurfaceMode(DEFAULT_SURFACE_MODE),
+            saved_session_id: savedSession.id,
+            session_name: buildSavedSessionLaunchName(savedSession, config),
+            sessions
+        };
+    }
+
+    async function launchSavedSession(savedSession) {
+        const payload = buildSavedSessionLaunchPayload(savedSession);
+        const response = await fetch('/api/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(data.error || `Launch failed with status ${response.status}`);
+        }
+
+        const groupId = data.group_id;
+        if (groupId) {
+            dropCachedGroupView(groupId);
+            if (visibleGroupId === groupId) {
+                teardownCurrentGrid();
+            }
+            activeGroupId = groupId;
+            syncLocationToGroup(activeGroupId);
+            await loadSessionGroups();
+            renderSessionTabs();
+            await initialLoad();
+        }
+
+        const warnings = Array.isArray(data.warnings)
+            ? data.warnings.filter(item => String(item || '').trim())
+            : [];
+        setWorkspaceSaveMessage(
+            warnings.length
+                ? `Launched "${payload.session_name}". ${warnings.length === 1 ? warnings[0] : `${warnings.length} startup commands were cleared after preflight failed.`}`
+                : `Launched "${payload.session_name}".`,
+            warnings.length ? 'warning' : 'success'
+        );
+    }
+
+    async function openNewSessionSelector(event) {
+        if (event) {
+            event.preventDefault();
+        }
+
+        try {
+            const listResponse = await fetch('/api/saved-sessions');
+            const listData = await listResponse.json().catch(() => ({}));
+            if (!listResponse.ok) {
+                throw new Error(listData.error || 'Failed to load saved sessions');
+            }
+
+            const importableSessions = [
+                ...(listData.default_session ? [listData.default_session] : []),
+                ...(Array.isArray(listData.sessions) ? listData.sessions : [])
+            ];
+            const selected = await openSavedSessionModal(importableSessions);
+            const selectedId = selected?.id;
+            if (!selectedId) {
+                return false;
+            }
+
+            setWorkspaceSaveMessage('Launching saved session...', '');
+            const response = await fetch(`/api/saved-sessions/${encodeURIComponent(selectedId)}`);
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load saved session');
+            }
+            await launchSavedSession(data);
+        } catch (error) {
+            console.error('[GridVibe Sessions] saved session launch failed:', error);
+            setWorkspaceSaveMessage(`Launch failed: ${error.message}`, 'error');
+        }
+
+        return false;
+    }
+
     document.addEventListener('click', event => {
         if (!(event.target instanceof Element) || !event.target.closest('#sessionsMenuRoot')) {
             closeSessionsMenu();
         }
     });
 
+    document.getElementById('savedSessionsModal').addEventListener('click', event => {
+        if (event.target.id === 'savedSessionsModal') {
+            closeSavedSessionModal();
+        }
+    });
+
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             closeSessionsMenu();
+            if (document.getElementById('savedSessionsModal').classList.contains('visible')) {
+                closeSavedSessionModal();
+            }
         }
     });
 

@@ -63,6 +63,7 @@ class _FakeWindow:
         self.events = Mock(
             minimized=_FakeEvent(),
             restored=_FakeEvent(),
+            before_show=_FakeEvent(),
             shown=_FakeEvent(),
             closed=_FakeEvent(),
         )
@@ -254,6 +255,8 @@ class WebviewLauncherTestCase(unittest.TestCase):
             "#070b18",
         )
         fake_webview.start.assert_called_once()
+        self.assertEqual(len(fake_webview.create_window.return_value.events.before_show.handlers), 1)
+        self.assertEqual(len(fake_webview.create_window.return_value.events.shown.handlers), 1)
 
     def test_session_window_uses_resizable_native_frame(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
@@ -276,7 +279,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
     def test_hex_to_colorref_converts_rgb_to_windows_colorref(self):
         self.assertEqual(webview_launcher._hex_to_colorref("#112233"), 0x332211)
 
-    def test_apply_windows_native_frame_theme_refreshes_frame_after_dwm_update(self):
+    def test_apply_windows_native_frame_theme_enforces_dark_frame(self):
         window = _ExplodingWindow()
 
         with patch.object(webview_launcher.sys, "platform", "win32"), patch.object(
@@ -287,17 +290,24 @@ class WebviewLauncherTestCase(unittest.TestCase):
             webview_launcher,
             "_set_dwm_window_attribute",
             return_value=True,
-        ), patch.object(
+        ) as set_dwm, patch.object(
             webview_launcher,
             "_refresh_windows_native_frame",
             return_value=True,
         ) as refresh:
-            result = webview_launcher._apply_windows_native_frame_theme(window, "dark")
+            result = webview_launcher._apply_windows_native_frame_theme(window, "light")
 
         self.assertTrue(result)
+        self.assertIn(call(1234, 19, 1), set_dwm.call_args_list)
+        self.assertIn(call(1234, 20, 1), set_dwm.call_args_list)
+        self.assertIn(call(1234, 38, 2), set_dwm.call_args_list)
+        self.assertIn(
+            call(1234, 35, webview_launcher._hex_to_colorref("#111827")),
+            set_dwm.call_args_list,
+        )
         refresh.assert_called_once_with(1234)
 
-    def test_set_native_theme_applies_to_registered_windows(self):
+    def test_set_native_theme_keeps_registered_windows_dark(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
         launcher_window = _ExplodingWindow()
         session_window = _ExplodingWindow()
@@ -313,12 +323,12 @@ class WebviewLauncherTestCase(unittest.TestCase):
         ) as apply_theme:
             result = api_bridge.set_native_theme("light")
 
-        self.assertEqual(result, {"ok": True, "theme": "light", "applied": True})
+        self.assertEqual(result, {"ok": True, "theme": "dark", "applied": True})
         self.assertEqual(
             apply_theme.call_args_list,
             [
-                call(launcher_window, "light"),
-                call(session_window, "light"),
+                call(launcher_window, "dark"),
+                call(session_window, "dark"),
             ],
         )
 

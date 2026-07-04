@@ -344,8 +344,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(">New Session ...</button>", html)
         self.assertIn(">Save Session</button>", html)
         self.assertIn(">Save Session as ...</button>", html)
+        self.assertIn("onclick=\"closeSessionsMenu(); return openNewSessionSelector(event);\"", html)
         self.assertIn("onclick=\"closeSessionsMenu(); saveActiveWorkspaceSession(this);\"", html)
         self.assertIn("onclick=\"closeSessionsMenu(); saveActiveWorkspaceSessionAs(this);\"", html)
+        self.assertIn('<div id="savedSessionsModal" class="modal-shell" aria-hidden="true">', html)
+        self.assertIn("function openNewSessionSelector(event)", html)
+        self.assertIn("function buildSavedSessionLaunchPayload(savedSession)", html)
+        self.assertIn("await launchSavedSession(data);", html)
         self.assertNotIn("container.appendChild(settingsButton);", html)
         self.assertNotIn("container.appendChild(saveButton);", html)
         self.assertIn("async function saveActiveWorkspaceSession(button = null, options = {})", html)
@@ -395,19 +400,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("applySessionConfig(data.config);", html)
         self.assertIn("setupSavedSessionUpdateListeners();", html)
 
-    def test_terminals_page_preserves_fullscreen_for_native_new_session_focus(self):
+    def test_terminals_page_new_session_opens_saved_session_selector_without_launcher(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        go_to_settings_start = html.index("async function goToSettings(event)")
-        open_launcher_index = html.index(
-            "window.pywebview?.api?.open_launcher_window",
-            go_to_settings_start,
-        )
-        reset_index = html.index("await resetFullscreenState();", go_to_settings_start)
 
-        self.assertLess(open_launcher_index, reset_index)
+        menu_start = html.index('>New Session ...</button>')
+        go_to_settings_start = html.index("async function goToSettings(event)")
+        open_selector_start = html.index("async function openNewSessionSelector(event)")
+
+        self.assertIn("openNewSessionSelector(event)", html[:menu_start])
+        self.assertNotIn(
+            "window.pywebview?.api?.open_launcher_window",
+            html[open_selector_start:go_to_settings_start],
+        )
 
     def test_terminals_page_uses_icon_only_settings_button(self):
         response = self.client.get("/terminals")
@@ -4460,6 +4467,20 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("--t-bg:", html)
         self.assertIn("--t-accent:", html)
         self.assertIn("--t-topbar:", html)
+        self.assertIn('[data-theme="light"] .modal-shell', html)
+        self.assertIn('[data-theme="light"] .modal-card', html)
+        self.assertIn('[data-theme="light"] .saved-session-item', html)
+        self.assertIn('[data-theme="light"] .saved-session-name', html)
+
+    def test_terminals_page_saved_session_modal_covers_resize_overlay(self):
+        response = self.client.get("/terminals")
+        html = response.get_data(as_text=True)
+        modal_css = html[html.index(".modal-shell {"):html.index(".settings-window-btn {")]
+        resize_css = html[html.index("#terminalResizeOverlay {"):html.index(".terminal-resize-handle {")]
+
+        self.assertIn("z-index: 12000;", modal_css)
+        self.assertIn("pointer-events: auto;", modal_css)
+        self.assertIn("z-index: 60;", resize_css)
 
     def test_terminals_page_includes_theme_toggle_control(self):
         response = self.client.get("/terminals")
