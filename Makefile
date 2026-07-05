@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 MAKEFLAGS += --no-print-directory
 
-.PHONY: help venv dev-deps check lint fix test test-clean run clean clear-logs cleanup
+.PHONY: help venv dev-deps deps-update deps-update-dev check lint fix test test-clean run clean clear-logs cleanup
 
 VENV_DIR ?= .venv
 ifeq ($(OS),Windows_NT)
@@ -14,9 +14,11 @@ BOOTSTRAP_PYTHON ?= python
 PYTHON ?= $(or $(VENV_PYTHON),$(BOOTSTRAP_PYTHON))
 DEV_DEPS_STAMP = $(VENV_DIR)/.dev-deps.stamp
 TEST_RUNNER = tests/run_tests.py
+UPDATE_REQ_FILES ?= requirements-dev.txt requirements-desktop.txt requirements-voice.txt
+PIP_REQUIREMENTS = $(foreach req,$(UPDATE_REQ_FILES),-r $(req))
 
 help: ## Show available make targets.
-	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "%-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@$(PYTHON) -c "from pathlib import Path; import re; [print(f'{m.group(1):<14} {m.group(2)}') for line in Path('Makefile').read_text(encoding='utf-8').splitlines() if (m := re.match(r'^([a-zA-Z0-9_.-]+):.*## (.*)', line))]"
 
 venv: dev-deps ## Create .venv, install development dependencies, and print activation commands.
 	$(info Activate .venv using the command for your shell:)
@@ -34,6 +36,17 @@ $(DEV_DEPS_STAMP): requirements-dev.txt requirements.txt
 	@$(PYTHON) -c "from pathlib import Path; Path('$(DEV_DEPS_STAMP)').touch()"
 
 check: dev-deps lint test ## Install dev dependencies, then run lint and tests.
+
+deps-update: dev-deps ## Report outdated packages, upgrade requirement sets, run pip check, then make check.
+	@$(PYTHON) -m pip install --upgrade pip
+	@$(PYTHON) -m pip list --outdated
+	@$(PYTHON) -m pip install --upgrade $(PIP_REQUIREMENTS)
+	@$(PYTHON) -m pip check
+	@$(PYTHON) -c "from pathlib import Path; Path('$(DEV_DEPS_STAMP)').touch()"
+	@$(MAKE) check
+
+deps-update-dev: ## Upgrade development dependencies only, then run make check.
+	@$(MAKE) deps-update UPDATE_REQ_FILES="requirements-dev.txt"
 
 test-clean: clear-logs test ## Clear logs and run tests.
 
