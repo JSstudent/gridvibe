@@ -3424,6 +3424,8 @@ def _parse_git_graph_log(raw_output: bytes) -> List[Dict[str, Any]]:
         if not line:
             continue
         match = re.match(r"^(?P<graph>[\s*|\\/._-]*?)(?P<hash>[0-9a-fA-F]{7,40})\s+(?P<subject>.*)$", line)
+        if not match:
+            continue
         commit_hash = match.group("hash") if match else ""
         commits.append(
             {

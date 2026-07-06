@@ -556,10 +556,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         refresh_html = html[refresh_start:refresh_end]
 
         self.assertIn(
-            "return openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });",
+            "refreshed = await openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });",
             explorer_refresh_html,
         )
-        self.assertIn("return loadExplorerPane(index, null, { force: true });", explorer_refresh_html)
+        self.assertIn("refreshed = await loadExplorerPane(index, null, { force: true });", explorer_refresh_html)
+        self.assertIn("const refreshGitSidebar = Boolean(pane?._explorerGitSidebarOpen);", explorer_refresh_html)
+        self.assertIn("invalidateExplorerGitRepo(index);", explorer_refresh_html)
+        self.assertIn("await loadExplorerGitRepo(index);", explorer_refresh_html)
+        self.assertIn("return refreshed;", explorer_refresh_html)
         self.assertIn("await refreshExplorerPane(index);", refresh_html)
         self.assertIn("function captureExplorerFileScroll(index)", html)
         self.assertIn("function restoreExplorerFileScroll(index, state)", html)
@@ -753,9 +757,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorer-git-summary", html)
         self.assertIn("data-explorer-git-toggle", html)
         self.assertIn("explorer-git-panel", html)
+        self.assertIn("data-explorer-git-resizer", html)
         self.assertIn("function toggleExplorerGitSidebar(index)", html)
+        self.assertIn("function wireExplorerGitSidebarResize(index)", html)
+        self.assertIn("function applyExplorerGitSidebarWidth(index)", html)
         self.assertIn("const explorerGitToggle = card.querySelector(`[data-explorer-git-toggle=\"${i}\"]`);", html)
         self.assertIn("data-explorer-git-open-folder", html)
+        self.assertIn("data-explorer-git-open-commit-diff", html)
+        self.assertIn("function explorerGitOpenCommitDiff(index, path, commit)", html)
+        self.assertIn("function renderExplorerCommitDiffFile(index, path, commit)", html)
         self.assertIn("function explorerGitBadgeHtml(git)", html)
         self.assertIn("function explorerGitSummaryText(git)", html)
         self.assertIn("function loadExplorerDiff(index)", html)
@@ -786,7 +796,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorer-diff-split", html)
         self.assertIn("split-diff", html)
         self.assertIn("new URLSearchParams({", html)
-        self.assertIn("mode: 'head'", html)
+        self.assertIn("mode: commit ? 'commit' : 'head'", html)
+        self.assertIn("params.set('commit', commit);", html)
         self.assertIn("${explorerGitBadgeHtml(entry.git)}", html)
 
     def test_terminals_page_explorer_diff_search_hooks_are_present(self):
@@ -2561,6 +2572,17 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("initial", payload["commits"][0]["line"])
         self.assertEqual(payload["commits"][0]["files"][0]["path"], "README.md")
         self.assertEqual(payload["commits"][0]["files"][0]["git"]["status"], "added")
+
+    def test_parse_git_graph_log_skips_connector_only_lines(self):
+        commits = api._parse_git_graph_log(
+            b"* a1b2c3d initial\n"
+            b"|\\\n"
+            b"| * b2c3d4e branch work\n"
+            b"|/\n"
+        )
+
+        self.assertEqual([commit["hash"] for commit in commits], ["a1b2c3d", "b2c3d4e"])
+        self.assertEqual([commit["subject"] for commit in commits], ["initial", "branch work"])
 
     def test_explorer_git_diff_rejects_invalid_mode_and_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
