@@ -790,6 +790,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".explorer-diff-cell.add", html)
         self.assertIn(".explorer-diff-cell.delete", html)
         self.assertIn(".explorer-diff-line-code", html)
+        self.assertIn(".explorer-diff-content", html)
+        self.assertIn("overflow: scroll;", html)
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
         self.assertIn("tab-size: 4;", html)
