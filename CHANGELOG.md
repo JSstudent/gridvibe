@@ -11,6 +11,7 @@ All notable changes to GridVibe will be documented in this file.
 - Added numbered session tabs with `Alt+1` through `Alt+9` switching based on the current tab order, while ignoring editable fields.
 - Added drag-resizable terminal pane dividers with xterm refits, backend PTY resize propagation, session-local resize weight caching, and minimum pane-size guards.
 - Added per-pane `-`/`+` font-size zoom controls to the read-only file editor view, covering source and Markdown preview panels.
+- Added source line numbers to read-only explorer file previews and Markdown source-gutter chevrons for collapsing heading sections.
 - Added a global App Settings option for normal vs. max session-window surface mode while keeping the in-session surface toggle available.
 
 ## 1.1.0 - 2026-06-28

@@ -599,7 +599,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
+        self.assertIn(".explorer-source-line-number", html)
+        self.assertIn("function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set())", html)
         self.assertIn("function highlightExplorerCode(content, language, searchRanges = [])", html)
+        self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
         self.assertIn("const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({", html)
         self.assertIn("'.py': 'python'", html)
         self.assertIn("'.go': 'go'", html)
@@ -654,7 +657,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function markExplorerSearchInElement(root, query, activeIndex = 0, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
         self.assertIn("document.createTreeWalker(", html)
         self.assertIn("node.replaceWith(fragment);", html)
-        self.assertIn("code.innerHTML = highlightExplorerCode(", html)
+        self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
         self.assertIn("function findExplorerSearchTargetIndex()", html)
         self.assertIn("event.code !== 'KeyF'", html)
         self.assertNotIn("/api/explorer-search", html)
@@ -775,6 +778,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("renderExplorerDiff(index);", html)
         self.assertIn("if (activeExplorerFileView(index) === 'diff')", html)
         self.assertIn('data-explorer-file-panel="diff"', html)
+
+    def test_terminals_page_explorer_markdown_source_sections_can_be_collapsed(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("function explorerMarkdownHeadingLevel(line)", html)
+        self.assertIn("function explorerMarkdownHeadingLevels(records)", html)
+        self.assertIn("data-explorer-markdown-section", html)
+        self.assertIn("function toggleExplorerMarkdownSection(index, lineNumber)", html)
+        self.assertIn("function wireExplorerMarkdownSectionControls(index)", html)
+        self.assertIn("pane._explorerMarkdownCollapsedLines = new Set();", html)
+        self.assertIn("wireExplorerMarkdownSectionControls(index);", html)
+        self.assertNotIn('data-explorer-source-toggle="${index}"', html)
+        self.assertNotIn("function setExplorerMarkdownSourceCollapsed", html)
+        self.assertNotIn("pane._explorerSourceCollapsed", html)
 
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
