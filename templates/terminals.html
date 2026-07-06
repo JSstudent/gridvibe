@@ -1300,6 +1300,24 @@
             cursor: default;
         }
 
+        .explorer-git-toggle {
+            height: 28px;
+            min-width: 34px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            cursor: pointer;
+            font-size: .72rem;
+            font-weight: 700;
+        }
+
+        .explorer-git-toggle[aria-pressed="true"] {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--explorer-row-active);
+        }
+
         .explorer-path {
             min-width: 0;
             flex: 1;
@@ -1320,6 +1338,29 @@
             font-size: .72rem;
             font-family: Consolas, Monaco, 'Courier New', monospace;
             flex: 0 1 auto;
+        }
+
+        .explorer-main {
+            min-height: 0;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+        }
+
+        .explorer-main.git-open {
+            grid-template-columns: minmax(190px, 260px) minmax(0, 1fr);
+        }
+
+        .explorer-git-panel {
+            min-width: 0;
+            min-height: 0;
+            overflow: auto;
+            border-right: 1px solid var(--explorer-row-border);
+            background: var(--explorer-bar-bg);
+            color: var(--explorer-text);
+        }
+
+        .explorer-git-panel[hidden] {
+            display: none;
         }
 
         .explorer-list {
@@ -1772,36 +1813,6 @@
             display: none;
         }
 
-        .explorer-diff-workspace {
-            height: 100%;
-            min-height: 0;
-            display: grid;
-            grid-template-columns: var(--explorer-diff-sidebar-width, 260px) 6px minmax(0, 1fr);
-        }
-
-        .explorer-diff-sidebar {
-            min-width: 0;
-            min-height: 0;
-            overflow: auto;
-            background: var(--explorer-bar-bg);
-            color: var(--explorer-text);
-        }
-
-        .explorer-diff-resizer {
-            width: 6px;
-            min-width: 6px;
-            border: 0;
-            border-left: 1px solid var(--explorer-row-border);
-            border-right: 1px solid var(--explorer-row-border);
-            background: var(--explorer-bar-bg);
-            cursor: col-resize;
-        }
-
-        .explorer-diff-resizer:hover,
-        .explorer-diff-resizer.dragging {
-            background: var(--t-accent);
-        }
-
         .explorer-diff-sidebar-section {
             padding: 8px 0;
             border-bottom: 1px solid var(--explorer-row-border);
@@ -1905,12 +1916,31 @@
 
         .explorer-diff-commit-file {
             display: grid;
-            grid-template-columns: 22px minmax(0, 1fr);
+            grid-template-columns: 22px minmax(0, 1fr) auto;
             align-items: center;
             gap: 6px;
             padding: 4px 10px 4px 7px;
             font: inherit;
             font-size: .7rem;
+        }
+
+        button.explorer-diff-commit-file {
+            grid-template-columns: 22px minmax(0, 1fr);
+        }
+
+        button.explorer-diff-commit-file-path {
+            border: 0;
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+            font: inherit;
+            text-align: left;
+        }
+
+        button.explorer-diff-commit-file-path:hover,
+        button.explorer-diff-commit-file-path:focus {
+            color: var(--t-accent);
+            outline: none;
         }
 
         .explorer-side-by-side-diff {
@@ -1996,10 +2026,6 @@
         }
 
         @media (max-width: 900px) {
-            .explorer-diff-workspace {
-                grid-template-columns: var(--explorer-diff-sidebar-width, 210px) 6px minmax(0, 1fr);
-            }
-
             .explorer-side-by-side-diff {
                 min-width: 620px;
             }
@@ -6294,15 +6320,19 @@
                         ${isExplorer ? `
                             <div class="explorer-surface" id="explorer-${i}">
                                 <div class="explorer-bar">
-                                    <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
-                                    <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
-                                    <div class="explorer-git-summary" id="explorer-git-${i}" aria-live="polite"></div>
-                                    <div class="explorer-directory-search" id="explorer-directory-search-${i}"></div>
-                                </div>
-                                <div class="explorer-list" id="explorer-list-${i}">
-                                    <div class="explorer-message">Loading directory...</div>
-                                </div>
-                            </div>
+                                     <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
+                                     <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
+                                     <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">Git</button>
+                                     <div class="explorer-git-summary" id="explorer-git-${i}" aria-live="polite"></div>
+                                     <div class="explorer-directory-search" id="explorer-directory-search-${i}"></div>
+                                 </div>
+                                 <div class="explorer-main" id="explorer-main-${i}">
+                                     <aside class="explorer-git-panel" id="explorer-git-panel-${i}" hidden></aside>
+                                     <div class="explorer-list" id="explorer-list-${i}">
+                                         <div class="explorer-message">Loading directory...</div>
+                                     </div>
+                                 </div>
+                             </div>
                         ` : `<div class="terminal-canvas" id="tcanvas-${i}"></div>`}
                     </div>
                     <div class="placeholder" id="ph-${i}">
@@ -6440,6 +6470,19 @@
                         ? (pane._explorerPath || '')
                         : (pane?._explorerParentPath || '');
                     loadExplorerPane(i, targetPath);
+                });
+            }
+            const explorerGitToggle = card.querySelector(`[data-explorer-git-toggle="${i}"]`);
+            if (explorerGitToggle) {
+                explorerGitToggle.draggable = false;
+                explorerGitToggle.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                explorerGitToggle.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleExplorerGitSidebar(i);
                 });
             }
             grid.appendChild(card);
@@ -6730,6 +6773,21 @@
                 loadExplorerPane(index, targetPath);
             });
         }
+
+        const explorerGitToggle = card.querySelector(`[data-explorer-git-toggle="${index}"]`);
+        if (explorerGitToggle && !explorerGitToggle.dataset.bound) {
+            explorerGitToggle.dataset.bound = 'true';
+            explorerGitToggle.draggable = false;
+            explorerGitToggle.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            explorerGitToggle.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleExplorerGitSidebar(index);
+            });
+        }
     }
 
     function ensureExplorerThemeButton(card, index) {
@@ -6862,11 +6920,15 @@
                     <div class="explorer-bar">
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
                         <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
+                        <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">Git</button>
                         <div class="explorer-git-summary" id="explorer-git-${index}" aria-live="polite"></div>
                         <div class="explorer-directory-search" id="explorer-directory-search-${index}"></div>
                     </div>
-                    <div class="explorer-list" id="explorer-list-${index}">
-                        <div class="explorer-message">Loading directory...</div>
+                    <div class="explorer-main" id="explorer-main-${index}">
+                        <aside class="explorer-git-panel" id="explorer-git-panel-${index}" hidden></aside>
+                        <div class="explorer-list" id="explorer-list-${index}">
+                            <div class="explorer-message">Loading directory...</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -9385,16 +9447,149 @@
         summary.title = git?.error || (git?.repo_root || text);
     }
 
-    function explorerDiffSelectedPath(pane) {
-        return pane?._explorerDiffSelectedPath || pane?._explorerFilePath || '';
-    }
-
     function explorerDiffCacheKey(path, commit) {
         return `${String(path || '')}\n${String(commit || '')}`;
     }
 
     function explorerDiffSidebarStatusHtml(git) {
         return explorerGitBadgeHtml(git || { status: 'clean' });
+    }
+
+    function explorerParentDirectory(path) {
+        const cleaned = String(path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+        const slashIndex = cleaned.lastIndexOf('/');
+        return slashIndex > 0 ? cleaned.slice(0, slashIndex) : '';
+    }
+
+    function explorerGitOpenFile(index, path) {
+        if (!path) {
+            return;
+        }
+        openExplorerFile(index, path);
+    }
+
+    function explorerGitOpenFolder(index, path) {
+        loadExplorerPane(index, explorerParentDirectory(path));
+    }
+
+    function renderExplorerGitFileRows(index, files, options = {}) {
+        const entries = Array.isArray(files) ? files : [];
+        if (!entries.length) {
+            return `<div class="explorer-diff-sidebar-empty">${escHtml(options.emptyText || 'No files.')}</div>`;
+        }
+        return entries.map(file => {
+            const path = file.path || file.repo_path || '';
+            return `
+                <div class="explorer-diff-commit-file" title="${escHtml(path)}">
+                    ${explorerDiffSidebarStatusHtml(file.git)}
+                    <button type="button" class="explorer-diff-commit-file-path" data-explorer-git-open-file="${escHtml(path)}">${escHtml(path || file.name || 'Changed file')}</button>
+                    <button type="button" class="explorer-search-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">↪</button>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function renderExplorerGitPanel(index) {
+        const pane = terminals[index];
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        if (!pane || !panel) {
+            return;
+        }
+        if (pane._explorerGitRepoLoading) {
+            panel.innerHTML = '<div class="explorer-diff-sidebar-empty">Loading repository...</div>';
+            return;
+        }
+        if (pane._explorerGitRepoError) {
+            panel.innerHTML = `<div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>`;
+            return;
+        }
+
+        const repo = pane._explorerGitRepo || {};
+        const changes = Array.isArray(repo.changes) ? repo.changes : [];
+        const commits = Array.isArray(repo.commits) ? repo.commits : [];
+        const expandedCommits = ensureExplorerDiffExpandedCommits(pane);
+        const commitRows = commits.length
+            ? commits.map(commit => {
+                const hash = commit.hash || '';
+                const expanded = hash && expandedCommits.has(`explorer:${hash}`);
+                return `
+                    <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
+                        <span class="explorer-diff-commit-graph">${escHtml(commit.graph || '*')}</span>
+                        <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
+                        <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${escHtml(commit.subject || commit.line || '')}</span>
+                    </button>
+                    ${expanded ? `<div class="explorer-diff-commit-files">${renderExplorerGitFileRows(index, commit.files, { emptyText: 'No files recorded for this commit.' })}</div>` : ''}
+                `;
+            }).join('')
+            : '<div class="explorer-diff-sidebar-empty">No commits in this scope.</div>';
+
+        panel.innerHTML = `
+            <div class="explorer-diff-sidebar-section">
+                <div class="explorer-diff-sidebar-title">Changes</div>
+                <div class="explorer-diff-commit-files">
+                    ${renderExplorerGitFileRows(index, changes, { emptyText: 'No uncommitted changes.' })}
+                </div>
+            </div>
+            <div class="explorer-diff-sidebar-section">
+                <div class="explorer-diff-sidebar-title">Graph</div>
+                ${commitRows}
+            </div>
+        `;
+        panel.querySelectorAll('[data-explorer-git-open-file]').forEach(button => {
+            button.addEventListener('click', () => {
+                explorerGitOpenFile(index, button.dataset.explorerGitOpenFile || '');
+            });
+        });
+        panel.querySelectorAll('[data-explorer-git-open-folder]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                explorerGitOpenFolder(index, button.dataset.explorerGitOpenFolder || '');
+            });
+        });
+        panel.querySelectorAll('[data-explorer-git-commit-toggle]').forEach(button => {
+            button.addEventListener('click', () => {
+                const commit = button.dataset.explorerGitCommitToggle || '';
+                if (!commit) {
+                    return;
+                }
+                const expanded = ensureExplorerDiffExpandedCommits(pane);
+                const key = `explorer:${commit}`;
+                if (expanded.has(key)) {
+                    expanded.delete(key);
+                } else {
+                    expanded.add(key);
+                }
+                renderExplorerGitPanel(index);
+            });
+        });
+    }
+
+    function renderExplorerGitPanels(index) {
+        renderExplorerGitPanel(index);
+    }
+
+    function setExplorerGitSidebarOpen(index, open) {
+        const pane = terminals[index];
+        const main = document.getElementById(`explorer-main-${index}`);
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        const button = document.getElementById(`explorer-git-toggle-${index}`);
+        if (!pane || !main || !panel) {
+            return;
+        }
+        pane._explorerGitSidebarOpen = Boolean(open);
+        main.classList.toggle('git-open', pane._explorerGitSidebarOpen);
+        panel.hidden = !pane._explorerGitSidebarOpen;
+        if (button) {
+            button.setAttribute('aria-pressed', pane._explorerGitSidebarOpen ? 'true' : 'false');
+        }
+        if (pane._explorerGitSidebarOpen) {
+            loadExplorerGitRepo(index);
+        }
+    }
+
+    function toggleExplorerGitSidebar(index) {
+        const pane = terminals[index];
+        setExplorerGitSidebarOpen(index, !pane?._explorerGitSidebarOpen);
     }
 
     function ensureExplorerDiffExpandedCommits(pane) {
@@ -9404,148 +9599,17 @@
         return pane._explorerDiffExpandedCommits;
     }
 
-    function explorerDiffCommitFileRows(index, commit) {
-        const pane = terminals[index];
-        const files = Array.isArray(commit.files) ? commit.files : [];
-        if (!files.length) {
-            return '<div class="explorer-diff-sidebar-empty">No files recorded for this commit.</div>';
-        }
-        const selectedPath = explorerDiffSelectedPath(pane);
-        const selectedCommit = pane?._explorerDiffSelectedCommit || '';
-        const commitHash = commit.hash || '';
-        return `
-            <div class="explorer-diff-commit-files">
-                ${files.map(file => {
-                    const path = file.path || file.repo_path || '';
-                    const active = path === selectedPath && commitHash === selectedCommit ? ' active' : '';
-                    return `
-                        <button type="button" class="explorer-diff-commit-file${active}" data-explorer-diff-commit-file="${escHtml(path)}" data-explorer-diff-commit="${escHtml(commitHash)}" title="${escHtml(path)}">
-                            ${explorerDiffSidebarStatusHtml(file.git)}
-                            <span class="explorer-diff-commit-file-path">${escHtml(path || file.name || 'Changed file')}</span>
-                        </button>
-                    `;
-                }).join('')}
-            </div>
-        `;
-    }
-
-    function renderExplorerDiffSidebar(index) {
-        const pane = terminals[index];
-        const sidebar = document.getElementById(`explorer-diff-sidebar-${index}`);
-        if (!pane || !sidebar) {
-            return;
-        }
-
-        if (pane._explorerGitRepoLoading) {
-            sidebar.innerHTML = '<div class="explorer-diff-sidebar-empty">Loading repository...</div>';
-            return;
-        }
-        if (pane._explorerGitRepoError) {
-            sidebar.innerHTML = `<div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>`;
-            return;
-        }
-
-        const repo = pane._explorerGitRepo || {};
-        const changes = Array.isArray(repo.changes) ? repo.changes : [];
-        const commits = Array.isArray(repo.commits) ? repo.commits : [];
-        const selectedPath = explorerDiffSelectedPath(pane);
-        const selectedCommit = pane._explorerDiffSelectedCommit || '';
-        const expandedCommits = ensureExplorerDiffExpandedCommits(pane);
-        const changeRows = changes.length
-            ? changes.map(change => {
-                const path = change.path || change.repo_path || '';
-                const active = path === selectedPath && !selectedCommit ? ' active' : '';
-                return `
-                    <button type="button" class="explorer-diff-file${active}" data-explorer-diff-file="${escHtml(path)}" title="${escHtml(path)}">
-                        ${explorerDiffSidebarStatusHtml(change.git)}
-                        <span class="explorer-diff-file-path">${escHtml(path || change.name || 'Changed file')}</span>
-                    </button>
-                `;
-            }).join('')
-            : '<div class="explorer-diff-sidebar-empty">No uncommitted changes.</div>';
-        const commitRows = commits.length
-            ? commits.map(commit => {
-                const hash = commit.hash || '';
-                const active = hash && hash === selectedCommit ? ' active' : '';
-                const expanded = hash && expandedCommits.has(hash);
-                return `
-                    <button type="button" class="explorer-diff-commit${active}" data-explorer-diff-commit-toggle="${escHtml(hash)}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
-                        <span class="explorer-diff-commit-graph">${escHtml(commit.graph || '*')}</span>
-                        <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
-                        <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${escHtml(commit.subject || commit.line || '')}</span>
-                    </button>
-                    ${expanded ? explorerDiffCommitFileRows(index, commit) : ''}
-                `;
-            }).join('')
-            : '<div class="explorer-diff-sidebar-empty">No commits in this scope.</div>';
-
-        sidebar.innerHTML = `
-            <div class="explorer-diff-sidebar-section">
-                <div class="explorer-diff-sidebar-title">Changes</div>
-                ${changeRows}
-            </div>
-            <div class="explorer-diff-sidebar-section">
-                <div class="explorer-diff-sidebar-title">Graph</div>
-                ${commitRows}
-            </div>
-        `;
-        sidebar.querySelectorAll('[data-explorer-diff-file]').forEach(button => {
-            button.addEventListener('click', () => {
-                const path = button.dataset.explorerDiffFile || '';
-                if (!path) {
-                    return;
-                }
-                pane._explorerDiffSelectedPath = path;
-                pane._explorerDiffSelectedCommit = '';
-                pane._explorerDiffLoaded = false;
-                pane._explorerDiffContent = '';
-                renderExplorerDiffSidebar(index);
-                loadExplorerDiff(index);
-            });
-        });
-        sidebar.querySelectorAll('[data-explorer-diff-commit-toggle]').forEach(button => {
-            button.addEventListener('click', () => {
-                const commit = button.dataset.explorerDiffCommitToggle || '';
-                if (!commit) {
-                    return;
-                }
-                const expanded = ensureExplorerDiffExpandedCommits(pane);
-                if (expanded.has(commit)) {
-                    expanded.delete(commit);
-                } else {
-                    expanded.add(commit);
-                }
-                renderExplorerDiffSidebar(index);
-            });
-        });
-        sidebar.querySelectorAll('[data-explorer-diff-commit-file]').forEach(button => {
-            button.addEventListener('click', () => {
-                const path = button.dataset.explorerDiffCommitFile || '';
-                const commit = button.dataset.explorerDiffCommit || '';
-                if (!path || !commit) {
-                    return;
-                }
-                pane._explorerDiffSelectedPath = path;
-                pane._explorerDiffSelectedCommit = commit;
-                pane._explorerDiffLoaded = false;
-                pane._explorerDiffContent = '';
-                renderExplorerDiffSidebar(index);
-                loadExplorerDiff(index);
-            });
-        });
-    }
-
     async function loadExplorerGitRepo(index) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !sessionId || pane._explorerGitRepoLoaded || pane._explorerGitRepoLoading) {
-            renderExplorerDiffSidebar(index);
+            renderExplorerGitPanels(index);
             return;
         }
 
         pane._explorerGitRepoLoading = true;
         pane._explorerGitRepoError = '';
-        renderExplorerDiffSidebar(index);
+        renderExplorerGitPanels(index);
         try {
             const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/git/repo`);
             const data = await response.json();
@@ -9559,54 +9623,8 @@
             pane._explorerGitRepoError = error.message || 'Failed to load Git repository.';
         } finally {
             pane._explorerGitRepoLoading = false;
-            renderExplorerDiffSidebar(index);
+            renderExplorerGitPanels(index);
         }
-    }
-
-    function applyExplorerDiffSidebarWidth(index) {
-        const pane = terminals[index];
-        const workspace = document.getElementById(`explorer-diff-workspace-${index}`);
-        if (!pane || !workspace) {
-            return;
-        }
-        const width = Math.max(160, Math.min(Number(pane._explorerDiffSidebarWidth || 260), 440));
-        pane._explorerDiffSidebarWidth = width;
-        workspace.style.setProperty('--explorer-diff-sidebar-width', `${width}px`);
-    }
-
-    function wireExplorerDiffSidebarResize(index) {
-        const pane = terminals[index];
-        const workspace = document.getElementById(`explorer-diff-workspace-${index}`);
-        const handle = document.getElementById(`explorer-diff-resizer-${index}`);
-        if (!pane || !workspace || !handle || handle.dataset.bound) {
-            applyExplorerDiffSidebarWidth(index);
-            return;
-        }
-
-        handle.dataset.bound = 'true';
-        applyExplorerDiffSidebarWidth(index);
-        handle.addEventListener('pointerdown', event => {
-            event.preventDefault();
-            handle.classList.add('dragging');
-            handle.setPointerCapture?.(event.pointerId);
-            const onMove = moveEvent => {
-                const rect = workspace.getBoundingClientRect();
-                const maxWidth = Math.min(440, Math.max(160, rect.width - 360));
-                const nextWidth = Math.max(160, Math.min(Math.round(moveEvent.clientX - rect.left), maxWidth));
-                pane._explorerDiffSidebarWidth = nextWidth;
-                workspace.style.setProperty('--explorer-diff-sidebar-width', `${nextWidth}px`);
-            };
-            const onEnd = endEvent => {
-                handle.classList.remove('dragging');
-                handle.releasePointerCapture?.(endEvent.pointerId);
-                window.removeEventListener('pointermove', onMove);
-                window.removeEventListener('pointerup', onEnd);
-                window.removeEventListener('pointercancel', onEnd);
-            };
-            window.addEventListener('pointermove', onMove);
-            window.addEventListener('pointerup', onEnd, { once: true });
-            window.addEventListener('pointercancel', onEnd, { once: true });
-        });
     }
 
     function renderExplorerDiff(index) {
@@ -9625,11 +9643,8 @@
 
     function explorerDiffLanguage(index) {
         const pane = terminals[index];
-        const selectedPath = explorerDiffSelectedPath(pane);
-        if (selectedPath && selectedPath !== pane?._explorerFilePath) {
-            return explorerCodeLanguage(selectedPath);
-        }
-        return normalizeExplorerLanguage(pane?._explorerFileLanguage || '') || explorerCodeLanguage(selectedPath);
+        const filePath = pane?._explorerFilePath || '';
+        return normalizeExplorerLanguage(pane?._explorerFileLanguage || '') || explorerCodeLanguage(filePath);
     }
 
     function explorerDiffLineCodeHtml(index, text) {
@@ -9749,36 +9764,12 @@
         setExplorerDiffSplit(index, !pane?._explorerDiffSplit);
     }
 
-    async function loadExplorerDiffSelectedFileForView(index, targetView) {
-        const pane = terminals[index];
-        const sessionId = sessionIds[index];
-        const selectedPath = explorerDiffSelectedPath(pane);
-        if (!pane || !sessionId || !selectedPath || selectedPath === pane._explorerFilePath) {
-            setExplorerFileView(index, targetView);
-            return;
-        }
-
-        try {
-            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(selectedPath)}`);
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || 'Failed to open file');
-            }
-            if (renderExplorerFile(index, data)) {
-                setExplorerFileView(index, targetView);
-            }
-        } catch (error) {
-            console.error('[GridVibe Sessions] Explorer diff selected file open failed:', error);
-            setExplorerFileView(index, targetView);
-        }
-    }
-
     async function loadExplorerDiff(index) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         const code = document.getElementById(`explorer-diff-code-${index}`);
-        const diffPath = explorerDiffSelectedPath(pane);
-        const commit = pane?._explorerDiffSelectedCommit || '';
+        const diffPath = pane?._explorerFilePath || '';
+        const commit = '';
         const cacheKey = explorerDiffCacheKey(diffPath, commit);
         if (!pane || !sessionId || !diffPath || !code) {
             renderExplorerDiff(index);
@@ -9793,11 +9784,8 @@
         try {
             const params = new URLSearchParams({
                 path: diffPath,
-                mode: commit ? 'commit' : 'head'
+                mode: 'head'
             });
-            if (commit) {
-                params.set('commit', commit);
-            }
             const response = await fetch(
                 `/api/explorer/${encodeURIComponent(sessionId)}/git/diff?${params.toString()}`
             );
@@ -9856,8 +9844,6 @@
             panel.hidden = panel.dataset.explorerFilePanel !== selectedMode;
         });
         if (isDiffMode) {
-            wireExplorerDiffSidebarResize(index);
-            loadExplorerGitRepo(index);
             loadExplorerDiff(index);
             const state = pane ? ensureExplorerSearchState(pane, 'file') : null;
             if (state?.query) {
@@ -10757,8 +10743,6 @@
         pane._explorerDiffCacheKey = '';
         pane._explorerDiffContent = '';
         pane._explorerDiffSplit = keepDiffSplit;
-        pane._explorerDiffSelectedPath = path;
-        pane._explorerDiffSelectedCommit = '';
         pane._explorerGitRepoLoaded = false;
         pane._explorerGitRepoLoading = false;
         pane._explorerGitRepoError = '';
@@ -10820,7 +10804,7 @@
                         <div class="explorer-source-view explorer-editor-panel" id="explorer-code-${index}" data-explorer-file-panel="source" ${initialFileView === 'source' ? '' : 'hidden'}></div>
                         ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" ${initialFileView === 'preview' ? '' : 'hidden'}></div>` : ''}
                     </div>
-                    ${hasGitDiff ? `<aside class="explorer-diff-split" id="explorer-diff-panel-${index}" data-explorer-file-panel="diff" ${keepDiffSplit ? '' : 'hidden'}><div class="explorer-diff-workspace" id="explorer-diff-workspace-${index}"><div class="explorer-diff-sidebar" id="explorer-diff-sidebar-${index}"></div><button type="button" class="explorer-diff-resizer" id="explorer-diff-resizer-${index}" aria-label="Resize diff sidebar"></button><div class="explorer-diff-content" id="explorer-diff-code-${index}"></div></div></aside>` : ''}
+                    ${hasGitDiff ? `<aside class="explorer-diff-split" id="explorer-diff-panel-${index}" data-explorer-file-panel="diff" ${keepDiffSplit ? '' : 'hidden'}><div class="explorer-diff-content" id="explorer-diff-code-${index}"></div></aside>` : ''}
                 </div>
             </div>
         `;
@@ -10838,20 +10822,15 @@
             });
         }
         list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
-            button.addEventListener('click', async () => {
+            button.addEventListener('click', () => {
                 if (button.dataset.explorerFileView === 'diff') {
                     toggleExplorerDiffSplit(index);
                 } else {
-                    await loadExplorerDiffSelectedFileForView(
-                        index,
-                        button.dataset.explorerFileView || 'source',
-                    );
+                    setExplorerFileView(index, button.dataset.explorerFileView || 'source');
                 }
             });
         });
         if (keepDiffSplit) {
-            wireExplorerDiffSidebarResize(index);
-            loadExplorerGitRepo(index);
             loadExplorerDiff(index);
         }
         wireExplorerEditorZoomControls(index);
@@ -10898,8 +10877,6 @@
         pane._explorerDiffLoaded = false;
         pane._explorerDiffCacheKey = '';
         pane._explorerDiffContent = '';
-        pane._explorerDiffSelectedPath = path;
-        pane._explorerDiffSelectedCommit = '';
         pane._explorerGitRepoLoaded = false;
         pane._explorerGitRepoLoading = false;
         pane._explorerGitRepoError = '';
@@ -10912,8 +10889,6 @@
         if (diffPanel && hasGitDiff) {
             renderExplorerDiff(index);
             if (pane._explorerDiffSplit) {
-                wireExplorerDiffSidebarResize(index);
-                loadExplorerGitRepo(index);
                 loadExplorerDiff(index);
             }
         }
