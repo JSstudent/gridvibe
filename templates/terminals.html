@@ -10432,6 +10432,10 @@
             }
         });
 
+        socket.on('app_config_updated', (message) => {
+            applyAppConfigSurfaceMode(message || {});
+        });
+
         /* ── Voice transcription results ── */
         socket.on('voice_result', ({ session_id, text, final: isFinal }) => {
             const index = _voiceIndexForSession(session_id);

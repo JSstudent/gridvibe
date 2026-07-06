@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import api
 from gridvibe_version import __version__
@@ -993,6 +993,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("applySurfaceMode(mode === 'max', { persist: true, refit: true });", html)
         self.assertIn("function setupAppConfigUpdateListeners()", html)
         self.assertIn("setupAppConfigUpdateListeners();", html)
+        self.assertIn("socket.on('app_config_updated'", html)
+        self.assertIn("applyAppConfigSurfaceMode(message || {});", html)
 
     def test_terminals_page_exposes_collapsible_topbar(self):
         response = self.client.get("/terminals")
@@ -1172,25 +1174,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("whisper_model", payload["voice_input"])
 
     def test_app_config_endpoint_persists_theme_and_voice_settings(self):
-        response = self.client.post(
-            "/api/app-config",
-            json={
-                "appearance": {
-                    "theme": "light",
+        with patch.object(api.socketio, "emit") as emit:
+            response = self.client.post(
+                "/api/app-config",
+                json={
+                    "appearance": {
+                        "theme": "light",
+                    },
+                    "workspace": {
+                        "surface_mode": "max",
+                    },
+                    "voice_input": {
+                        "engine": "vosk",
+                        "vosk_model": "vosk-model-small-en-us-0.15",
+                        "language": "en-GB",
+                        "whisper_model": "base",
+                        "whisper_device": "cpu",
+                        "whisper_compute_type": "int8",
+                    }
                 },
-                "workspace": {
-                    "surface_mode": "max",
-                },
-                "voice_input": {
-                    "engine": "vosk",
-                    "vosk_model": "vosk-model-small-en-us-0.15",
-                    "language": "en-GB",
-                    "whisper_model": "base",
-                    "whisper_device": "cpu",
-                    "whisper_compute_type": "int8",
-                }
-            },
-        )
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
@@ -1204,6 +1207,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(cfg["workspace"]["surface_mode"], "max")
         self.assertEqual(cfg["voice_input"]["engine"], "vosk")
         self.assertEqual(cfg["voice_input"]["vosk_model"], "vosk-model-small-en-us-0.15")
+        emit.assert_called_with(
+            "app_config_updated",
+            {
+                "workspace": {
+                    "surface_mode": "max",
+                },
+                "timestamp": ANY,
+            },
+        )
 
     def test_app_config_endpoint_rejects_unknown_whisper_model(self):
         response = self.client.post(
@@ -1532,6 +1544,20 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(cfg["voice_input"]["engine"], "whisper")
         self.assertEqual(cfg["voice_input"]["whisper_model"], "base")
+
+    def test_load_config_falls_back_to_default_config_when_local_config_is_invalid(self):
+        default_path = Path(self.temp_dir.name) / "default_config.json"
+        default_path.write_text(
+            json.dumps({"appearance": {"theme": "system"}}),
+            encoding="utf-8",
+        )
+        broken_path = Path(self.temp_dir.name) / "config.json"
+        broken_path.write_text('{"appearance": {"theme": "dark"}}\n}', encoding="utf-8")
+
+        with patch.object(api, "DEFAULT_CONFIG_PATH", str(default_path)):
+            cfg = api.load_config(str(broken_path))
+
+        self.assertEqual(cfg["appearance"]["theme"], "system")
 
     def test_voice_prefs_get_returns_defaults(self):
         response = self.client.get("/api/voice-prefs")

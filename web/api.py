@@ -86,6 +86,7 @@ DEFAULT_CONFIG_PATH = os.path.join(BASE_DIR, "default_config.json")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
 AGENT_REGISTRY_PATH = os.path.join(BASE_DIR, "agent_registry.json")
+_config_lock = threading.RLock()
 DEFAULT_SAVED_SESSION_ID = "default-session"
 EXPLORER_FILE_PREVIEW_MAX_BYTES = 1024 * 1024
 EXPLORER_GIT_DIFF_MAX_BYTES = 256 * 1024
@@ -157,22 +158,45 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """Load configuration from file, falling back to default_config.json."""
     target_path = config_path or CONFIG_PATH
 
-    default_config: Dict[str, Any] = {}
-    if target_path != DEFAULT_CONFIG_PATH and os.path.exists(DEFAULT_CONFIG_PATH):
-        default_config = _load_json_file(DEFAULT_CONFIG_PATH)
+    with _config_lock:
+        default_config: Dict[str, Any] = {}
+        if target_path != DEFAULT_CONFIG_PATH and os.path.exists(DEFAULT_CONFIG_PATH):
+            try:
+                default_config = _load_json_file(DEFAULT_CONFIG_PATH)
+            except (OSError, json.JSONDecodeError):
+                logger.exception("Failed to load default configuration from %s", DEFAULT_CONFIG_PATH)
 
-    if os.path.exists(target_path):
-        loaded = _load_json_file(target_path)
-        return _merge_dicts(default_config, loaded) if default_config else loaded
+        if os.path.exists(target_path):
+            try:
+                loaded = _load_json_file(target_path)
+            except (OSError, json.JSONDecodeError):
+                logger.exception(
+                    "Failed to load configuration from %s; using default configuration",
+                    target_path,
+                )
+                return default_config
+            return _merge_dicts(default_config, loaded) if default_config else loaded
 
-    return default_config
+        return default_config
 
 
 def save_config(config: Dict[str, Any], config_path: Optional[str] = None):
     """Save configuration to file."""
     target_path = config_path or CONFIG_PATH
-    with open(target_path, 'w', encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
+    target_dir = os.path.dirname(os.path.abspath(target_path)) or "."
+    temp_path = os.path.join(target_dir, f".{os.path.basename(target_path)}.{uuid.uuid4().hex}.tmp")
+    with _config_lock:
+        try:
+            with open(temp_path, 'w', encoding="utf-8") as f:
+                json.dump(config, f, indent=2)
+                f.write("\n")
+            os.replace(temp_path, target_path)
+        except Exception:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+            raise
 
 
 app_config: Dict[str, Any] = {}
@@ -297,6 +321,19 @@ def _public_app_config() -> Dict[str, Any]:
             "language": voice_language,
         }
     }
+
+
+def _broadcast_app_config_update():
+    """Notify open app windows that launcher-editable settings changed."""
+    socketio.emit(
+        "app_config_updated",
+        {
+            "workspace": {
+                "surface_mode": app_surface_mode,
+            },
+            "timestamp": int(time.time() * 1000),
+        },
+    )
 
 
 def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
@@ -4034,10 +4071,12 @@ def set_app_config():
     if not isinstance(data, dict):
         return jsonify({"error": "Invalid payload"}), 400
 
-    current = load_config()
-    current = _merge_dicts(current, _normalize_app_config_update(data))
-    save_config(current)
+    with _config_lock:
+        current = load_config()
+        current = _merge_dicts(current, _normalize_app_config_update(data))
+        save_config(current)
     _refresh_runtime_config()
+    _broadcast_app_config_update()
     return jsonify(_public_app_config())
 
 
@@ -5398,9 +5437,10 @@ def _load_voice_prefs() -> Dict[str, Any]:
 
 
 def _save_voice_prefs(prefs: Dict[str, Any]):
-    cfg = load_config()
-    cfg['voice_prefs'] = prefs
-    save_config(cfg)
+    with _config_lock:
+        cfg = load_config()
+        cfg['voice_prefs'] = prefs
+        save_config(cfg)
 
 
 @app.route('/api/voice-prefs', methods=['GET'])
