@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import api
 from gridvibe_version import __version__
@@ -599,7 +599,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
+        self.assertIn(".explorer-source-line-number", html)
+        self.assertIn("function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set())", html)
         self.assertIn("function highlightExplorerCode(content, language, searchRanges = [])", html)
+        self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
         self.assertIn("const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({", html)
         self.assertIn("'.py': 'python'", html)
         self.assertIn("'.go': 'go'", html)
@@ -654,7 +657,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function markExplorerSearchInElement(root, query, activeIndex = 0, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
         self.assertIn("document.createTreeWalker(", html)
         self.assertIn("node.replaceWith(fragment);", html)
-        self.assertIn("code.innerHTML = highlightExplorerCode(", html)
+        self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
         self.assertIn("function findExplorerSearchTargetIndex()", html)
         self.assertIn("event.code !== 'KeyF'", html)
         self.assertNotIn("/api/explorer-search", html)
@@ -775,6 +778,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("renderExplorerDiff(index);", html)
         self.assertIn("if (activeExplorerFileView(index) === 'diff')", html)
         self.assertIn('data-explorer-file-panel="diff"', html)
+
+    def test_terminals_page_explorer_markdown_source_sections_can_be_collapsed(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("function explorerMarkdownHeadingLevel(line)", html)
+        self.assertIn("function explorerMarkdownHeadingLevels(records)", html)
+        self.assertIn("data-explorer-markdown-section", html)
+        self.assertIn("function toggleExplorerMarkdownSection(index, lineNumber)", html)
+        self.assertIn("function wireExplorerMarkdownSectionControls(index)", html)
+        self.assertIn("pane._explorerMarkdownCollapsedLines = new Set();", html)
+        self.assertIn("wireExplorerMarkdownSectionControls(index);", html)
+        self.assertNotIn('data-explorer-source-toggle="${index}"', html)
+        self.assertNotIn("function setExplorerMarkdownSourceCollapsed", html)
+        self.assertNotIn("pane._explorerSourceCollapsed", html)
 
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
@@ -993,6 +1012,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("applySurfaceMode(mode === 'max', { persist: true, refit: true });", html)
         self.assertIn("function setupAppConfigUpdateListeners()", html)
         self.assertIn("setupAppConfigUpdateListeners();", html)
+        self.assertIn("socket.on('app_config_updated'", html)
+        self.assertIn("applyAppConfigSurfaceMode(message || {});", html)
 
     def test_terminals_page_exposes_collapsible_topbar(self):
         response = self.client.get("/terminals")
@@ -1172,25 +1193,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("whisper_model", payload["voice_input"])
 
     def test_app_config_endpoint_persists_theme_and_voice_settings(self):
-        response = self.client.post(
-            "/api/app-config",
-            json={
-                "appearance": {
-                    "theme": "light",
+        with patch.object(api.socketio, "emit") as emit:
+            response = self.client.post(
+                "/api/app-config",
+                json={
+                    "appearance": {
+                        "theme": "light",
+                    },
+                    "workspace": {
+                        "surface_mode": "max",
+                    },
+                    "voice_input": {
+                        "engine": "vosk",
+                        "vosk_model": "vosk-model-small-en-us-0.15",
+                        "language": "en-GB",
+                        "whisper_model": "base",
+                        "whisper_device": "cpu",
+                        "whisper_compute_type": "int8",
+                    }
                 },
-                "workspace": {
-                    "surface_mode": "max",
-                },
-                "voice_input": {
-                    "engine": "vosk",
-                    "vosk_model": "vosk-model-small-en-us-0.15",
-                    "language": "en-GB",
-                    "whisper_model": "base",
-                    "whisper_device": "cpu",
-                    "whisper_compute_type": "int8",
-                }
-            },
-        )
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
@@ -1204,6 +1226,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(cfg["workspace"]["surface_mode"], "max")
         self.assertEqual(cfg["voice_input"]["engine"], "vosk")
         self.assertEqual(cfg["voice_input"]["vosk_model"], "vosk-model-small-en-us-0.15")
+        emit.assert_called_with(
+            "app_config_updated",
+            {
+                "workspace": {
+                    "surface_mode": "max",
+                },
+                "timestamp": ANY,
+            },
+        )
 
     def test_app_config_endpoint_rejects_unknown_whisper_model(self):
         response = self.client.post(
@@ -1532,6 +1563,20 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(cfg["voice_input"]["engine"], "whisper")
         self.assertEqual(cfg["voice_input"]["whisper_model"], "base")
+
+    def test_load_config_falls_back_to_default_config_when_local_config_is_invalid(self):
+        default_path = Path(self.temp_dir.name) / "default_config.json"
+        default_path.write_text(
+            json.dumps({"appearance": {"theme": "system"}}),
+            encoding="utf-8",
+        )
+        broken_path = Path(self.temp_dir.name) / "config.json"
+        broken_path.write_text('{"appearance": {"theme": "dark"}}\n}', encoding="utf-8")
+
+        with patch.object(api, "DEFAULT_CONFIG_PATH", str(default_path)):
+            cfg = api.load_config(str(broken_path))
+
+        self.assertEqual(cfg["appearance"]["theme"], "system")
 
     def test_voice_prefs_get_returns_defaults(self):
         response = self.client.get("/api/voice-prefs")

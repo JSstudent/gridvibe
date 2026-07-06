@@ -77,9 +77,9 @@ Explorer panes support:
 - Switching the pane into a regular terminal opened at the current explorer directory.
 - Manual refresh from the pane header without continuous auto-refresh flicker.
 - Folder/file icons, size and modified-time metadata, and per-pane light/dark explorer theme toggling.
-- Click-to-open text files in a read-only editor-style viewer with wrapped long lines and per-pane `-`/`+` font-size zoom controls.
+- Click-to-open text files in a read-only editor-style viewer with line numbers, wrapped long lines, and per-pane `-`/`+` font-size zoom controls.
 - Client-side find inside source, preview, and diff views, including `Ctrl+F`/`Cmd+F` focus, match counts, previous/next controls, `Enter`/`Shift+Enter` navigation, and clear.
-- Markdown files with a source tab and sanitized rendered preview when Markdown rendering dependencies are installed.
+- Markdown files with source-gutter chevrons for collapsing heading sections and sanitized rendered preview when Markdown rendering dependencies are installed.
 - Lightweight syntax coloring for common source, config, log, JSON Lines, Dockerfile, and environment files.
 - Size-limited previews. Binary files, directories, and paths outside the root are rejected.
 - Local Repo explorers add read-only Git awareness when `git` is available. SSH explorers use the remote host's `git` command when available. Both support branch/dirty summary, per-entry status badges, directory dirty markers, and a bounded internal old/new Diff panel with added and removed line highlighting for changed tracked files.

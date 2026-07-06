@@ -1677,6 +1677,77 @@
             tab-size: 4;
         }
 
+        .explorer-source-view {
+            min-height: 0;
+            margin: 0;
+            padding: 0;
+            overflow: auto;
+            color: var(--explorer-text);
+            background: var(--explorer-bg);
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-size: var(--explorer-editor-font-size, .78rem);
+            line-height: 1.45;
+            tab-size: 4;
+        }
+
+        .explorer-source-lines {
+            min-width: max-content;
+        }
+
+        .explorer-source-line {
+            display: grid;
+            grid-template-columns: minmax(42px, auto) minmax(0, 1fr);
+            align-items: stretch;
+            min-height: 1.45em;
+        }
+
+        .explorer-source-line-number {
+            padding: 0 9px;
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-right: 1px solid var(--explorer-row-border);
+            text-align: right;
+            user-select: none;
+        }
+
+        button.explorer-source-line-number {
+            display: inline-flex;
+            align-items: flex-start;
+            justify-content: flex-end;
+            gap: 5px;
+            width: 100%;
+            border-top: 0;
+            border-bottom: 0;
+            border-left: 0;
+            font: inherit;
+            line-height: inherit;
+            cursor: pointer;
+        }
+
+        button.explorer-source-line-number:hover,
+        button.explorer-source-line-number:focus {
+            color: var(--explorer-text);
+            outline: none;
+        }
+
+        button.explorer-source-line-number:focus-visible {
+            box-shadow: inset 0 0 0 2px var(--t-accent);
+        }
+
+        .explorer-source-chevron {
+            width: 10px;
+            text-align: center;
+            color: var(--t-accent);
+        }
+
+        .explorer-source-line-code {
+            min-width: 0;
+            padding: 0 14px;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
         .explorer-editor-content code {
             white-space: inherit;
             overflow-wrap: inherit;
@@ -8962,16 +9033,17 @@
 
     function highlightExplorerLog(content, searchRanges = []) {
         const source = String(content || '');
+        const absoluteStart = Number(arguments[2] || 0);
         let output = '';
         let index = 0;
         while (index < source.length) {
             const newlineIndex = source.indexOf('\n', index);
             const lineEnd = newlineIndex === -1 ? source.length : newlineIndex;
-            output += highlightExplorerLogLine(source.slice(index, lineEnd), index, searchRanges);
+            output += highlightExplorerLogLine(source.slice(index, lineEnd), absoluteStart + index, searchRanges);
             if (newlineIndex === -1) {
                 break;
             }
-            output += explorerMarkedEscHtml('\n', lineEnd, searchRanges);
+            output += explorerMarkedEscHtml('\n', absoluteStart + lineEnd, searchRanges);
             index = lineEnd + 1;
         }
         return output;
@@ -8979,12 +9051,13 @@
 
     function highlightExplorerCode(content, language, searchRanges = []) {
         const normalizedLanguage = normalizeExplorerLanguage(language);
+        const absoluteStart = Number(arguments[3] || 0);
         if (!normalizedLanguage) {
-            return explorerMarkedEscHtml(content, 0, searchRanges);
+            return explorerMarkedEscHtml(content, absoluteStart, searchRanges);
         }
 
         if (normalizedLanguage === 'log') {
-            return highlightExplorerLog(content, searchRanges);
+            return highlightExplorerLog(content, searchRanges, absoluteStart);
         }
 
         const keywords = new Set(EXPLORER_CODE_KEYWORDS[normalizedLanguage] || []);
@@ -9000,7 +9073,7 @@
             if ((normalizedLanguage === 'html' || normalizedLanguage === 'xml') && content.startsWith('<!--', index)) {
                 const endIndex = content.indexOf('-->', index + 4);
                 const token = content.slice(index, endIndex === -1 ? content.length : endIndex + 3);
-                output += explorerCodeSpan('explorer-code-comment', token, index, searchRanges);
+                output += explorerCodeSpan('explorer-code-comment', token, absoluteStart + index, searchRanges);
                 index += token.length;
                 continue;
             }
@@ -9008,7 +9081,7 @@
             if (EXPLORER_C_LIKE_LANGUAGES.has(normalizedLanguage) && current === '/' && next === '/') {
                 const endIndex = content.indexOf('\n', index + 2);
                 const token = content.slice(index, endIndex === -1 ? content.length : endIndex);
-                output += explorerCodeSpan('explorer-code-comment', token, index, searchRanges);
+                output += explorerCodeSpan('explorer-code-comment', token, absoluteStart + index, searchRanges);
                 index += token.length;
                 continue;
             }
@@ -9016,7 +9089,7 @@
             if (EXPLORER_C_LIKE_LANGUAGES.has(normalizedLanguage) && current === '/' && next === '*') {
                 const endIndex = content.indexOf('*/', index + 2);
                 const token = content.slice(index, endIndex === -1 ? content.length : endIndex + 2);
-                output += explorerCodeSpan('explorer-code-comment', token, index, searchRanges);
+                output += explorerCodeSpan('explorer-code-comment', token, absoluteStart + index, searchRanges);
                 index += token.length;
                 continue;
             }
@@ -9024,14 +9097,14 @@
             if (EXPLORER_HASH_COMMENT_LANGUAGES.has(normalizedLanguage) && current === '#') {
                 const endIndex = content.indexOf('\n', index + 1);
                 const token = content.slice(index, endIndex === -1 ? content.length : endIndex);
-                output += explorerCodeSpan('explorer-code-comment', token, index, searchRanges);
+                output += explorerCodeSpan('explorer-code-comment', token, absoluteStart + index, searchRanges);
                 index += token.length;
                 continue;
             }
 
             if (current === '"' || current === "'" || (current === '`' && !['json', 'jsonl', 'yaml', 'toml'].includes(normalizedLanguage))) {
                 const token = explorerReadStringToken(content, index);
-                output += explorerCodeSpan('explorer-code-string', token, index, searchRanges);
+                output += explorerCodeSpan('explorer-code-string', token, absoluteStart + index, searchRanges);
                 index += token.length;
                 continue;
             }
@@ -9039,7 +9112,7 @@
             if (/[0-9]/.test(current)) {
                 const match = content.slice(index).match(/^(0x[\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/);
                 if (match) {
-                    output += explorerCodeSpan('explorer-code-number', match[0], index, searchRanges);
+                    output += explorerCodeSpan('explorer-code-number', match[0], absoluteStart + index, searchRanges);
                     index += match[0].length;
                     continue;
                 }
@@ -9051,18 +9124,18 @@
                     const token = match[0];
                     const keywordToken = caseInsensitiveKeywords ? token.toUpperCase() : token;
                     if (keywords.has(keywordToken)) {
-                        output += explorerCodeSpan('explorer-code-keyword', token, index, searchRanges);
+                        output += explorerCodeSpan('explorer-code-keyword', token, absoluteStart + index, searchRanges);
                     } else if (builtins.has(token)) {
-                        output += explorerCodeSpan('explorer-code-builtin', token, index, searchRanges);
+                        output += explorerCodeSpan('explorer-code-builtin', token, absoluteStart + index, searchRanges);
                     } else {
-                        output += explorerMarkedEscHtml(token, index, searchRanges);
+                        output += explorerMarkedEscHtml(token, absoluteStart + index, searchRanges);
                     }
                     index += token.length;
                     continue;
                 }
             }
 
-            output += explorerMarkedEscHtml(current, index, searchRanges);
+            output += explorerMarkedEscHtml(current, absoluteStart + index, searchRanges);
             index += 1;
         }
 
@@ -9470,6 +9543,172 @@
         }));
     }
 
+    function ensureExplorerMarkdownCollapsedLines(pane) {
+        if (!pane) {
+            return new Set();
+        }
+        if (!(pane._explorerMarkdownCollapsedLines instanceof Set)) {
+            pane._explorerMarkdownCollapsedLines = new Set();
+        }
+        return pane._explorerMarkdownCollapsedLines;
+    }
+
+    function explorerMarkdownHeadingLevel(line) {
+        const match = String(line || '').match(/^(#{1,6})(?:\s+|$)/);
+        return match ? match[1].length : 0;
+    }
+
+    function explorerMarkdownFenceMarker(line) {
+        const match = String(line || '').match(/^ {0,3}(`{3,}|~{3,})/);
+        if (!match) {
+            return null;
+        }
+        return {
+            char: match[1][0],
+            length: match[1].length
+        };
+    }
+
+    function explorerSourceLineRecords(content) {
+        const source = String(content || '');
+        const records = [];
+        let lineNumber = 1;
+        let index = 0;
+
+        while (index <= source.length) {
+            const newlineIndex = source.indexOf('\n', index);
+            const lineEnd = newlineIndex === -1 ? source.length : newlineIndex;
+            const rawLine = source.slice(index, lineEnd);
+            records.push({
+                number: lineNumber,
+                start: index,
+                text: rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+            });
+            if (newlineIndex === -1) {
+                break;
+            }
+            lineNumber += 1;
+            index = newlineIndex + 1;
+        }
+
+        return records;
+    }
+
+    function explorerMarkdownHeadingLevels(records) {
+        const levels = new Map();
+        let fence = null;
+        records.forEach(record => {
+            const marker = explorerMarkdownFenceMarker(record.text);
+            if (marker) {
+                if (fence && marker.char === fence.char && marker.length >= fence.length) {
+                    fence = null;
+                } else if (!fence) {
+                    fence = marker;
+                }
+                return;
+            }
+            if (fence) {
+                return;
+            }
+            const level = explorerMarkdownHeadingLevel(record.text);
+            if (level) {
+                levels.set(record.number, level);
+            }
+        });
+        return levels;
+    }
+
+    function explorerSourceLineNumberHtml(record, headingLevel, collapsed) {
+        if (!headingLevel) {
+            return `<span class="explorer-source-line-number">${record.number}</span>`;
+        }
+        return `
+            <button
+                type="button"
+                class="explorer-source-line-number"
+                data-explorer-markdown-section="${record.number}"
+                aria-expanded="${collapsed ? 'false' : 'true'}"
+                title="${collapsed ? 'Expand Markdown section' : 'Collapse Markdown section'}"
+            >
+                <span class="explorer-source-chevron" aria-hidden="true">${collapsed ? '▸' : '▾'}</span>
+                <span>${record.number}</span>
+            </button>
+        `;
+    }
+
+    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set()) {
+        const normalizedLanguage = normalizeExplorerLanguage(language);
+        const records = explorerSourceLineRecords(content);
+        const languageClass = explorerLanguageClass(language);
+        const codeClass = languageClass ? ` language-${languageClass}` : '';
+        const markdownHeadings = normalizedLanguage === 'markdown'
+            ? explorerMarkdownHeadingLevels(records)
+            : new Map();
+        const allowMarkdownCollapse = normalizedLanguage === 'markdown' && !searchRanges.length;
+        const rows = [];
+        let hiddenUntilHeadingLevel = 0;
+
+        records.forEach(record => {
+            const headingLevel = markdownHeadings.get(record.number) || 0;
+            if (allowMarkdownCollapse && hiddenUntilHeadingLevel) {
+                if (!headingLevel || headingLevel > hiddenUntilHeadingLevel) {
+                    return;
+                }
+                hiddenUntilHeadingLevel = 0;
+            }
+
+            const collapsed = allowMarkdownCollapse && headingLevel && collapsedLines.has(record.number);
+            const lineHtml = highlightExplorerCode(record.text, language, searchRanges, record.start);
+            rows.push(`
+                <div class="explorer-source-line">
+                    ${explorerSourceLineNumberHtml(record, headingLevel, collapsed)}
+                    <code class="explorer-source-line-code${codeClass}">${lineHtml || '&nbsp;'}</code>
+                </div>
+            `);
+
+            if (collapsed) {
+                hiddenUntilHeadingLevel = headingLevel;
+            }
+        });
+
+        return `<div class="explorer-source-lines">${rows.join('')}</div>`;
+    }
+
+    function toggleExplorerMarkdownSection(index, lineNumber) {
+        const pane = terminals[index];
+        if (!pane || normalizeExplorerLanguage(pane._explorerFileLanguage || '') !== 'markdown') {
+            return;
+        }
+        const collapsedLines = ensureExplorerMarkdownCollapsedLines(pane);
+        if (collapsedLines.has(lineNumber)) {
+            collapsedLines.delete(lineNumber);
+        } else {
+            collapsedLines.add(lineNumber);
+        }
+        const state = ensureExplorerSearchState(pane, 'file');
+        if (state.query && activeExplorerFileView(index) === 'source') {
+            applyExplorerSearch(index);
+        } else {
+            renderExplorerSource(index);
+        }
+    }
+
+    function wireExplorerMarkdownSectionControls(index) {
+        const code = document.getElementById(`explorer-code-${index}`);
+        if (!code) {
+            return;
+        }
+        code.querySelectorAll('[data-explorer-markdown-section]').forEach(button => {
+            if (button.dataset.bound) {
+                return;
+            }
+            button.dataset.bound = 'true';
+            button.addEventListener('click', () => {
+                toggleExplorerMarkdownSection(index, Number(button.dataset.explorerMarkdownSection || 0));
+            });
+        });
+    }
+
     function renderExplorerSource(index, searchRanges = []) {
         const pane = terminals[index];
         const code = document.getElementById(`explorer-code-${index}`);
@@ -9478,13 +9717,13 @@
         }
 
         const language = pane._explorerFileLanguage || '';
-        const languageClass = explorerLanguageClass(language);
-        code.className = languageClass ? `language-${languageClass}` : '';
-        code.innerHTML = highlightExplorerCode(
+        code.innerHTML = renderExplorerSourceLines(
             pane._explorerFileContent || '',
             language,
-            searchRanges
+            searchRanges,
+            ensureExplorerMarkdownCollapsedLines(pane)
         );
+        wireExplorerMarkdownSectionControls(index);
     }
 
     function restoreExplorerPreview(index) {
@@ -10064,6 +10303,9 @@
         const keepDiffSplit = previousPath === path && pane._explorerDiffSplit && hasGitDiff;
         const initialFileView = keepDiffSplit ? 'diff' : 'source';
         const searchState = ensureExplorerSearchState(pane, 'file');
+        if (previousPath !== path) {
+            pane._explorerMarkdownCollapsedLines = new Set();
+        }
         if (previousPath && previousPath !== path) {
             cancelExplorerSearch(index);
             searchState.activeIndex = 0;
@@ -10111,7 +10353,7 @@
                     ${(hasPreview || hasGitDiff) ? `
                         <div class="explorer-editor-tabs" role="tablist" aria-label="File view">
                             <button type="button" class="explorer-editor-tab" data-explorer-file-view="source" role="tab" aria-selected="${initialFileView === 'source' ? 'true' : 'false'}">Source</button>
-                            ${hasPreview ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="false">Preview</button>` : ''}
+                            ${hasPreview ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="${initialFileView === 'preview' ? 'true' : 'false'}">Preview</button>` : ''}
                             ${hasGitDiff ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="diff" data-explorer-diff-toggle="${index}" role="tab" aria-selected="${initialFileView === 'diff' ? 'true' : 'false'}" aria-pressed="${keepDiffSplit ? 'true' : 'false'}">Diff</button>` : ''}
                         </div>
                     ` : ''}
@@ -10138,8 +10380,8 @@
                 </div>
                 <div class="explorer-editor-body${keepDiffSplit ? ' split-diff' : ''}">
                     <div class="explorer-editor-main">
-                        <pre class="explorer-editor-content explorer-editor-panel" data-explorer-file-panel="source"><code id="explorer-code-${index}"></code></pre>
-                        ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" hidden></div>` : ''}
+                        <div class="explorer-source-view explorer-editor-panel" id="explorer-code-${index}" data-explorer-file-panel="source" ${initialFileView === 'source' ? '' : 'hidden'}></div>
+                        ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" ${initialFileView === 'preview' ? '' : 'hidden'}></div>` : ''}
                     </div>
                     ${hasGitDiff ? `<aside class="explorer-diff-split" id="explorer-diff-panel-${index}" data-explorer-file-panel="diff" ${keepDiffSplit ? '' : 'hidden'}><div class="explorer-diff-content" id="explorer-diff-code-${index}"></div></aside>` : ''}
                 </div>
@@ -10430,6 +10672,10 @@
             } else if (session.status === 'error') {
                 showPlaceholderError(index, session.error_message || 'Connection failed');
             }
+        });
+
+        socket.on('app_config_updated', (message) => {
+            applyAppConfigSurfaceMode(message || {});
         });
 
         /* ── Voice transcription results ── */
