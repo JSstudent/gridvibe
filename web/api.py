@@ -91,6 +91,7 @@ DEFAULT_SAVED_SESSION_ID = "default-session"
 EXPLORER_FILE_PREVIEW_MAX_BYTES = 1024 * 1024
 EXPLORER_GIT_DIFF_MAX_BYTES = 256 * 1024
 EXPLORER_GIT_DIFF_MAX_LINES = 4000
+EXPLORER_GIT_LOG_MAX_COMMITS = 60
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
 WINDOWS_DEVICE_ATTRIBUTES_RESPONSE = "\x1b[?1;2c"
 SELF_UPDATE_REPO_DIR = BASE_DIR
@@ -3394,10 +3395,218 @@ def _bounded_git_diff(repo_root: str, args: List[str]) -> Tuple[str, bool, int]:
     return diff_text, truncated, len(result.stdout)
 
 
-def _get_git_diff(root_path: str, file_path: str, mode: str) -> Dict[str, Any]:
+def _validated_git_commit_ref(value: Any) -> str:
+    """Return a short/full Git object id suitable for read-only diff commands."""
+    commit = str(value or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", commit):
+        raise ValueError("Invalid Git commit")
+    return commit
+
+
+def _git_diff_args_for_mode(mode: str, pathspec: str, commit: Optional[str] = None) -> List[str]:
+    """Return read-only Git diff arguments for an explorer file."""
+    if mode == "worktree":
+        return ["diff", "--no-ext-diff", "--no-color", "--", pathspec]
+    if mode == "staged":
+        return ["diff", "--cached", "--no-ext-diff", "--no-color", "--", pathspec]
+    if mode == "head":
+        return ["diff", "HEAD", "--no-ext-diff", "--no-color", "--", pathspec]
+    if mode == "commit":
+        return ["show", "--format=", "--no-ext-diff", "--no-color", commit or "", "--", pathspec]
+    raise ValueError("Invalid Git diff mode")
+
+
+def _parse_git_graph_log(raw_output: bytes) -> List[Dict[str, Any]]:
+    """Parse bounded `git log --graph --oneline` output for the diff sidebar."""
+    commits: List[Dict[str, Any]] = []
+    for raw_line in raw_output.decode("utf-8", errors="replace").split("\n"):
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        match = re.match(r"^(?P<graph>[\s*|\\/._-]*?)(?P<hash>[0-9a-fA-F]{7,40})\s+(?P<subject>.*)$", line)
+        commit_hash = match.group("hash") if match else ""
+        commits.append(
+            {
+                "line": line,
+                "graph": match.group("graph").rstrip() if match else "",
+                "hash": commit_hash,
+                "subject": match.group("subject") if match else line,
+            }
+        )
+    return commits[:EXPLORER_GIT_LOG_MAX_COMMITS]
+
+
+def _parse_git_name_status_log(raw_output: bytes) -> Dict[str, List[Dict[str, Any]]]:
+    """Parse `git log --name-status` output grouped by short commit hash."""
+    files_by_commit: Dict[str, List[Dict[str, Any]]] = {}
+    current_hash = ""
+    for raw_line in raw_output.decode("utf-8", errors="replace").split("\n"):
+        line = raw_line.strip("\r")
+        if not line:
+            continue
+        if line.startswith("\x1e"):
+            current_hash = line[1:].strip()
+            if current_hash:
+                files_by_commit.setdefault(current_hash, [])
+            continue
+        if not current_hash:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status_code = parts[0]
+        path = _clean_git_path(parts[-1])
+        if not path:
+            continue
+        entry: Dict[str, Any] = {
+            "repo_path": path,
+            "status_code": status_code,
+            "git": _git_status_payload(path, status_code[:1] or " ", " ", "1"),
+        }
+        if status_code.startswith("R") and len(parts) >= 3:
+            entry["original_path"] = _clean_git_path(parts[1])
+            entry["git"]["original_path"] = entry["original_path"]
+        files_by_commit.setdefault(current_hash, []).append(entry)
+    return files_by_commit
+
+
+def _git_commit_files_log(repo_root: str, pathspec: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Return changed files for each displayed local commit."""
+    result = _run_git_command(
+        [
+            "log",
+            f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
+            "--format=%x1e%h",
+            "--name-status",
+            "--",
+            pathspec,
+        ],
+        cwd=repo_root,
+        timeout=3.0,
+    )
+    if result.returncode != 0:
+        return {}
+    return _parse_git_name_status_log(result.stdout)
+
+
+def _local_commit_file_payload(
+    root_path: str,
+    repo_root: str,
+    file_entry: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Convert one repo-relative commit file to an explorer-visible payload."""
+    repo_path = str(file_entry.get("repo_path") or "")
+    absolute_path = os.path.realpath(os.path.abspath(os.path.join(repo_root, repo_path.replace("/", os.sep))))
+    root_real = os.path.realpath(os.path.abspath(root_path))
+    try:
+        common_path = os.path.commonpath([root_real, absolute_path])
+    except ValueError:
+        return None
+    if os.path.normcase(common_path) != os.path.normcase(root_real):
+        return None
+    payload = dict(file_entry)
+    payload["path"] = _relative_explorer_path(root_real, absolute_path)
+    payload["name"] = os.path.basename(repo_path)
+    return payload
+
+
+def _attach_commit_files(
+    commits: List[Dict[str, Any]],
+    files_by_commit: Dict[str, List[Dict[str, Any]]],
+    convert_file: Any,
+) -> List[Dict[str, Any]]:
+    """Attach file lists to graph commits without changing commit order."""
+    for commit in commits:
+        commit_hash = str(commit.get("hash") or "")
+        files = files_by_commit.get(commit_hash, [])
+        if not files:
+            files = next(
+                (items for key, items in files_by_commit.items() if commit_hash and key.startswith(commit_hash)),
+                [],
+            )
+        visible_files = [converted for item in files if (converted := convert_file(item))]
+        commit["files"] = visible_files
+    return commits
+
+
+def _bounded_git_graph_log(repo_root: str, pathspec: str) -> List[Dict[str, Any]]:
+    """Return a bounded commit graph for the explorer root scope."""
+    result = _run_git_command(
+        [
+            "log",
+            "--graph",
+            "--decorate",
+            "--oneline",
+            "--date-order",
+            f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
+            "--",
+            pathspec,
+        ],
+        cwd=repo_root,
+        timeout=3.0,
+    )
+    if result.returncode != 0:
+        return []
+    return _parse_git_graph_log(result.stdout)
+
+
+def _explorer_git_changed_files(
+    root_path: str,
+    repo_root: str,
+    statuses: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return changed Git files visible inside the local explorer root."""
+    changes: List[Dict[str, Any]] = []
+    root_real = os.path.realpath(os.path.abspath(root_path))
+    for repo_path, status in sorted(statuses.items()):
+        if status.get("status") == "clean":
+            continue
+        absolute_path = os.path.realpath(os.path.abspath(os.path.join(repo_root, repo_path.replace("/", os.sep))))
+        try:
+            common_path = os.path.commonpath([root_real, absolute_path])
+        except ValueError:
+            continue
+        if os.path.normcase(common_path) != os.path.normcase(root_real):
+            continue
+        explorer_path = _relative_explorer_path(root_real, absolute_path)
+        changes.append(
+            {
+                "path": explorer_path,
+                "repo_path": repo_path,
+                "name": os.path.basename(repo_path),
+                "git": dict(status),
+            }
+        )
+    return changes
+
+
+def _get_git_repo_summary(root_path: str) -> Dict[str, Any]:
+    """Return changed files and a bounded commit graph for a local explorer root."""
+    git_context, statuses = _get_git_context(root_path, root_path)
+    if not git_context.get("available"):
+        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
+
+    repo_root = str(git_context["repo_root"])
+    root_pathspec = _git_pathspec(repo_root, root_path)
+    commits = _bounded_git_graph_log(repo_root, root_pathspec)
+    commit_files = _git_commit_files_log(repo_root, root_pathspec)
+    return {
+        "git": git_context,
+        "changes": _explorer_git_changed_files(root_path, repo_root, statuses),
+        "commits": _attach_commit_files(
+            commits,
+            commit_files,
+            lambda item: _local_commit_file_payload(root_path, repo_root, item),
+        ),
+    }
+
+
+def _get_git_diff(root_path: str, file_path: str, mode: str, commit: Optional[str] = None) -> Dict[str, Any]:
     """Return a bounded read-only Git diff for a local explorer file."""
-    if mode not in {"worktree", "staged", "head"}:
+    if mode not in {"worktree", "staged", "head", "commit"}:
         raise ValueError("Invalid Git diff mode")
+    if mode == "commit":
+        commit = _validated_git_commit_ref(commit)
 
     git_context, _statuses = _get_git_context(root_path, os.path.dirname(file_path))
     if not git_context.get("available"):
@@ -3405,13 +3614,11 @@ def _get_git_diff(root_path: str, file_path: str, mode: str) -> Dict[str, Any]:
 
     repo_root = str(git_context["repo_root"])
     pathspec = _git_pathspec(repo_root, file_path)
-    diff_args_by_mode = {
-        "worktree": ["diff", "--no-ext-diff", "--no-color", "--", pathspec],
-        "staged": ["diff", "--cached", "--no-ext-diff", "--no-color", "--", pathspec],
-        "head": ["diff", "HEAD", "--no-ext-diff", "--no-color", "--", pathspec],
-    }
     try:
-        diff_text, truncated, raw_bytes = _bounded_git_diff(repo_root, diff_args_by_mode[mode])
+        diff_text, truncated, raw_bytes = _bounded_git_diff(
+            repo_root,
+            _git_diff_args_for_mode(mode, pathspec, commit),
+        )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git diff timed out") from exc
     return {
@@ -3442,10 +3649,122 @@ def _bounded_remote_git_diff(client: Any, repo_root: str, args: List[str]) -> Tu
     return diff_text, truncated, len(result.stdout)
 
 
-def _get_remote_git_diff(client: Any, root_path: str, file_path: str, mode: str) -> Dict[str, Any]:
+def _bounded_remote_git_graph_log(client: Any, repo_root: str, pathspec: str) -> List[Dict[str, Any]]:
+    """Return a bounded remote commit graph for the explorer root scope."""
+    result = _run_remote_git_command(
+        client,
+        [
+            "log",
+            "--graph",
+            "--decorate",
+            "--oneline",
+            "--date-order",
+            f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
+            "--",
+            pathspec,
+        ],
+        cwd=repo_root,
+        timeout=3.0,
+    )
+    if result.returncode != 0:
+        return []
+    return _parse_git_graph_log(result.stdout)
+
+
+def _remote_git_commit_files_log(client: Any, repo_root: str, pathspec: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Return changed files for each displayed remote commit."""
+    result = _run_remote_git_command(
+        client,
+        [
+            "log",
+            f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
+            "--format=%x1e%h",
+            "--name-status",
+            "--",
+            pathspec,
+        ],
+        cwd=repo_root,
+        timeout=3.0,
+    )
+    if result.returncode != 0:
+        return {}
+    return _parse_git_name_status_log(result.stdout)
+
+
+def _remote_commit_file_payload(
+    root_path: str,
+    repo_root: str,
+    file_entry: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Convert one repo-relative remote commit file to an explorer-visible payload."""
+    repo_path = str(file_entry.get("repo_path") or "")
+    absolute_path = _remote_path_join(repo_root, repo_path)
+    if not _remote_path_inside(root_path, absolute_path):
+        return None
+    payload = dict(file_entry)
+    payload["path"] = _relative_remote_explorer_path(root_path, absolute_path)
+    payload["name"] = posixpath.basename(repo_path)
+    return payload
+
+
+def _remote_explorer_git_changed_files(
+    root_path: str,
+    repo_root: str,
+    statuses: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return changed Git files visible inside the remote explorer root."""
+    changes: List[Dict[str, Any]] = []
+    for repo_path, status in sorted(statuses.items()):
+        if status.get("status") == "clean":
+            continue
+        absolute_path = _remote_path_join(repo_root, repo_path)
+        if not _remote_path_inside(root_path, absolute_path):
+            continue
+        explorer_path = _relative_remote_explorer_path(root_path, absolute_path)
+        changes.append(
+            {
+                "path": explorer_path,
+                "repo_path": repo_path,
+                "name": posixpath.basename(repo_path),
+                "git": dict(status),
+            }
+        )
+    return changes
+
+
+def _get_remote_git_repo_summary(client: Any, root_path: str) -> Dict[str, Any]:
+    """Return changed files and a bounded commit graph for a remote explorer root."""
+    git_context, statuses = _get_remote_git_context(client, root_path, root_path)
+    if not git_context.get("available"):
+        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
+
+    repo_root = str(git_context["repo_root"])
+    root_pathspec = _remote_git_pathspec(repo_root, root_path)
+    commits = _bounded_remote_git_graph_log(client, repo_root, root_pathspec)
+    commit_files = _remote_git_commit_files_log(client, repo_root, root_pathspec)
+    return {
+        "git": git_context,
+        "changes": _remote_explorer_git_changed_files(root_path, repo_root, statuses),
+        "commits": _attach_commit_files(
+            commits,
+            commit_files,
+            lambda item: _remote_commit_file_payload(root_path, repo_root, item),
+        ),
+    }
+
+
+def _get_remote_git_diff(
+    client: Any,
+    root_path: str,
+    file_path: str,
+    mode: str,
+    commit: Optional[str] = None,
+) -> Dict[str, Any]:
     """Return a bounded read-only Git diff for a remote explorer file."""
-    if mode not in {"worktree", "staged", "head"}:
+    if mode not in {"worktree", "staged", "head", "commit"}:
         raise ValueError("Invalid Git diff mode")
+    if mode == "commit":
+        commit = _validated_git_commit_ref(commit)
 
     git_context, _statuses = _get_remote_git_context(client, root_path, _remote_path_dirname(file_path))
     if not git_context.get("available"):
@@ -3453,12 +3772,11 @@ def _get_remote_git_diff(client: Any, root_path: str, file_path: str, mode: str)
 
     repo_root = str(git_context["repo_root"])
     pathspec = _remote_git_pathspec(repo_root, file_path)
-    diff_args_by_mode = {
-        "worktree": ["diff", "--no-ext-diff", "--no-color", "--", pathspec],
-        "staged": ["diff", "--cached", "--no-ext-diff", "--no-color", "--", pathspec],
-        "head": ["diff", "HEAD", "--no-ext-diff", "--no-color", "--", pathspec],
-    }
-    diff_text, truncated, raw_bytes = _bounded_remote_git_diff(client, repo_root, diff_args_by_mode[mode])
+    diff_text, truncated, raw_bytes = _bounded_remote_git_diff(
+        client,
+        repo_root,
+        _git_diff_args_for_mode(mode, pathspec, commit),
+    )
     return {
         "git": git_context,
         "diff": diff_text,
@@ -4315,6 +4633,7 @@ def get_explorer_git_diff(session_id: str):
         client = None
         sftp = None
         mode = request.args.get("mode", "worktree")
+        commit = request.args.get("commit")
         try:
             client, sftp = _open_ssh_sftp(session)
             root_path, file_path = _resolve_remote_explorer_file_path(
@@ -4322,7 +4641,7 @@ def get_explorer_git_diff(session_id: str):
                 session,
                 request.args.get("path", ""),
             )
-            diff_payload = _get_remote_git_diff(client, root_path, file_path, mode)
+            diff_payload = _get_remote_git_diff(client, root_path, file_path, mode, commit)
             return jsonify(
                 {
                     "session_id": session.session_id,
@@ -4341,12 +4660,16 @@ def get_explorer_git_diff(session_id: str):
                 _close_sftp_client(client, sftp)
 
     mode = request.args.get("mode", "worktree")
+    commit = request.args.get("commit")
     try:
-        root_path, file_path = _resolve_explorer_file_path(
+        root_path, file_path = _resolve_explorer_candidate_path(
             session,
             request.args.get("path", ""),
+            allow_empty_root=False,
         )
-        diff_payload = _get_git_diff(root_path, file_path, mode)
+        if os.path.isdir(file_path):
+            raise ValueError("Explorer path is a directory")
+        diff_payload = _get_git_diff(root_path, file_path, mode, commit)
         return jsonify(
             {
                 "session_id": session.session_id,
@@ -4354,6 +4677,53 @@ def get_explorer_git_diff(session_id: str):
                 "path": _relative_explorer_path(root_path, file_path),
                 "mode": mode,
                 **diff_payload,
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route('/api/explorer/<session_id>/git/repo', methods=['GET'])
+def get_explorer_git_repo(session_id: str):
+    """Return bounded read-only Git repository metadata for the diff sidebar."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if _is_remote_explorer_session(session):
+        client = None
+        sftp = None
+        try:
+            client, sftp = _open_ssh_sftp(session)
+            root_path = _remote_explorer_root_directory(session)
+            if not root_path:
+                raise ValueError("Explorer root directory is not configured")
+            root_path = sftp.normalize(root_path)
+            summary = _get_remote_git_repo_summary(client, root_path)
+            return jsonify(
+                {
+                    "session_id": session.session_id,
+                    "root": root_path,
+                    **summary,
+                }
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": str(exc)}), 500
+        finally:
+            if client is not None and sftp is not None:
+                _close_sftp_client(client, sftp)
+
+    try:
+        root_path = _explorer_root_directory(session)
+        summary = _get_git_repo_summary(root_path)
+        return jsonify(
+            {
+                "session_id": session.session_id,
+                "root": root_path,
+                **summary,
             }
         )
     except ValueError as exc:

@@ -760,12 +760,27 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("button.dataset.explorerFileView === 'diff'", html)
         self.assertIn("setExplorerFileView(index, open ? 'diff' : (pane._explorerLastFileView || 'source'));", html)
         self.assertIn("function toggleExplorerDiffSplit(index)", html)
-        self.assertIn("function renderExplorerSideBySideDiff(diff)", html)
+        self.assertIn("function renderExplorerSideBySideDiff(index, diff)", html)
+        self.assertIn("function loadExplorerGitRepo(index)", html)
+        self.assertIn("function loadExplorerDiffSelectedFileForView(index, targetView)", html)
+        self.assertIn("await loadExplorerDiffSelectedFileForView(", html)
+        self.assertIn("explorer-diff-sidebar", html)
+        self.assertIn("explorer-diff-resizer", html)
+        self.assertIn("data-explorer-diff-file", html)
+        self.assertIn("data-explorer-diff-commit-toggle", html)
+        self.assertIn("data-explorer-diff-commit-file", html)
+        self.assertIn("data-explorer-diff-commit", html)
+        self.assertIn("/git/repo", html)
         self.assertIn(".explorer-diff-cell.add", html)
         self.assertIn(".explorer-diff-cell.delete", html)
+        self.assertIn(".explorer-diff-line-code", html)
+        self.assertIn("white-space: pre-wrap;", html)
+        self.assertIn("overflow-wrap: anywhere;", html)
+        self.assertIn("tab-size: 4;", html)
         self.assertIn("explorer-diff-split", html)
         self.assertIn("split-diff", html)
-        self.assertIn("/git/diff?path=", html)
+        self.assertIn("new URLSearchParams({", html)
+        self.assertIn("mode: commit ? 'commit' : 'head'", html)
         self.assertIn("${explorerGitBadgeHtml(entry.git)}", html)
 
     def test_terminals_page_explorer_diff_search_hooks_are_present(self):
@@ -2487,6 +2502,59 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["mode"], "head")
         self.assertIn("+changed", payload["diff"])
         self.assertFalse(payload["truncated"])
+
+    def test_explorer_git_diff_returns_commit_file_diff(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        readme.write_text("# Project\n\nsecond\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "second")
+        commit = self._run_git(repo_dir, "rev-parse", "--short=12", "HEAD").stdout.decode().strip()
+        session_id = self._create_explorer_session(repo_dir)
+
+        diff_response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "commit", "commit": commit},
+        )
+
+        self.assertEqual(diff_response.status_code, 200)
+        payload = diff_response.get_json()
+        self.assertEqual(payload["mode"], "commit")
+        self.assertIn("+second", payload["diff"])
+
+    def test_explorer_git_repo_returns_changes_and_graph(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        readme.write_text("# Project\n\nchanged\n", encoding="utf-8")
+        (repo_dir / "notes.txt").write_text("new\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        repo_response = self.client.get(f"/api/explorer/{session_id}/git/repo")
+
+        self.assertEqual(repo_response.status_code, 200)
+        payload = repo_response.get_json()
+        self.assertTrue(payload["git"]["available"])
+        changes = {change["path"]: change for change in payload["changes"]}
+        self.assertEqual(changes["README.md"]["git"]["status"], "modified")
+        self.assertEqual(changes["notes.txt"]["git"]["status"], "untracked")
+        self.assertTrue(payload["commits"])
+        self.assertIn("initial", payload["commits"][0]["line"])
+        self.assertEqual(payload["commits"][0]["files"][0]["path"], "README.md")
+        self.assertEqual(payload["commits"][0]["files"][0]["git"]["status"], "added")
 
     def test_explorer_git_diff_rejects_invalid_mode_and_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"

@@ -83,6 +83,7 @@ Explorer panes support:
 - Lightweight syntax coloring for common source, config, log, JSON Lines, Dockerfile, and environment files.
 - Size-limited previews. Binary files, directories, and paths outside the root are rejected.
 - Local Repo explorers add read-only Git awareness when `git` is available. SSH explorers use the remote host's `git` command when available. Both support branch/dirty summary, per-entry status badges, directory dirty markers, and a bounded internal old/new Diff panel with added and removed line highlighting for changed tracked files.
+- The Diff panel includes a resizable repository sidebar with uncommitted changed files and a collapsible commit graph. Commit rows can expand to show the files changed in that commit, and clicking a file shows that file's read-only commit diff while preserving whitespace and syntax coloring in the side-by-side diff view.
 
 File moving, editing, deleting, upload, staging, restoring, checkout, commit, pull, and push actions are not part of the current file explorer implementation.
 
@@ -157,7 +158,7 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 - Saved launcher and active-workspace presets with encrypted SSH passwords
 - Session groups with numbered closable tabs, `Alt+1` through `Alt+9` tab switching, import/save actions, drag-to-reorder persistence, collapsible top bar, and max surface mode
 - xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and drag-resizable dynamic split-pane support
-- Local and SSH read-only file explorer panes with directory search, text/Markdown preview, syntax highlighting, per-pane editor font zoom, client-side file/diff search, and read-only Git status/diff awareness
+- Local and SSH read-only file explorer panes with directory search, text/Markdown preview, syntax highlighting, per-pane editor font zoom, client-side file/diff search, and read-only Git status/diff awareness with a resizable changed-file and commit-graph sidebar
 - Optional resizable native desktop window through `pywebview`
 - Optional offline voice input through Vosk or faster-whisper
 - Theme support for system, light, and dark modes
