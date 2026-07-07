@@ -1247,8 +1247,86 @@
         }
 
         .explorer-pane [data-terminal-clear],
-        .explorer-pane .voice-control {
+        .explorer-pane .voice-control,
+        .browser-pane [data-terminal-clear],
+        .browser-pane .voice-control {
             display: none;
+        }
+
+        .browser-surface {
+            height: 100%;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+            color: var(--explorer-text);
+            background: var(--explorer-bg);
+            border: 1px solid var(--explorer-border);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .browser-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px;
+            border-bottom: 1px solid var(--explorer-border);
+            background: var(--explorer-bar-bg);
+            min-width: 0;
+        }
+
+        .browser-url {
+            min-width: 0;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--explorer-muted);
+            font-size: .78rem;
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        .browser-url-input {
+            min-width: 0;
+            flex: 1;
+            height: 28px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-terminal-bg);
+            color: var(--explorer-text);
+            font: .78rem Consolas, Monaco, 'Courier New', monospace;
+            padding: 0 9px;
+            outline: none;
+        }
+
+        .browser-url-input:focus {
+            border-color: var(--t-accent);
+            box-shadow: 0 0 0 2px rgba(0, 217, 255, .12);
+        }
+
+        .browser-open-btn {
+            height: 28px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            cursor: pointer;
+            font-size: .72rem;
+            font-weight: 700;
+            padding: 0 10px;
+            white-space: nowrap;
+        }
+
+        .browser-open-btn:hover {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--t-btn-hover-bg);
+        }
+
+        .browser-frame {
+            width: 100%;
+            height: 100%;
+            border: 0;
+            background: #fff;
         }
 
         .explorer-surface {
@@ -2917,6 +2995,35 @@
         return terminal?._paneType === 'explorer';
     }
 
+    function isBrowserSession(session) {
+        return session?.mode === 'wsl' && session?.startup_mode === 'browser';
+    }
+
+    function isBrowserPaneInstance(terminal) {
+        return terminal?._paneType === 'browser';
+    }
+
+    function getBrowserSessionUrl(session) {
+        const rawUrl = String(session?.initial_command || '').trim();
+        if (!rawUrl) {
+            return 'http://127.0.0.1:3000';
+        }
+        return rawUrl.includes('://') ? rawUrl : `http://${rawUrl}`;
+    }
+
+    function normalizeBrowserUrlInput(value) {
+        const rawValue = String(value || '').trim();
+        if (!rawValue) {
+            throw new Error('Enter a browser URL.');
+        }
+        const candidate = rawValue.includes('://') ? rawValue : `http://${rawValue}`;
+        const parsed = new URL(candidate);
+        if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.host) {
+            throw new Error('Browser panes only support http:// and https:// URLs.');
+        }
+        return parsed.href;
+    }
+
     function getSessionApiPath(groupId = activeGroupId) {
         return groupId
             ? `/api/sessions?group=${encodeURIComponent(groupId)}`
@@ -3937,10 +4044,12 @@
         const rawStartupMode = String(session.startup_mode || '').trim();
         const startupMode = isExplorerPaneInstance(terminal) || isExplorerSession(session)
             ? 'explorer'
-            : (rawStartupMode === 'agent' ? 'agent' : 'terminal');
+            : (isBrowserPaneInstance(terminal) || isBrowserSession(session)
+                ? 'browser'
+                : (rawStartupMode === 'agent' ? 'agent' : 'terminal'));
         const commandMode = startupMode === 'agent'
             ? 'agent'
-            : (startupMode === 'explorer' ? 'explorer' : 'command');
+            : (startupMode === 'explorer' || startupMode === 'browser' ? startupMode : 'command');
         const selectedDirectory = startupMode === 'explorer'
             ? (terminal?._explorerPath || session.directory || session.explorer_root_directory || '')
             : (session.directory || '');
@@ -5688,6 +5797,7 @@
 
         return sessions.every((session, index) => (
             isExplorerPaneInstance(existingTerminals[index]) === isExplorerSession(session)
+            && isBrowserPaneInstance(existingTerminals[index]) === isBrowserSession(session)
         ));
     }
 
@@ -5973,6 +6083,10 @@
 
         setTerminalRefreshState(index, true);
         try {
+            if (isBrowserSession(terminal._session)) {
+                reloadBrowserPane(index);
+                return false;
+            }
             if (isExplorerSession(terminal._session)) {
                 await refreshExplorerPane(index);
                 return false;
@@ -6014,11 +6128,33 @@
         return false;
     }
 
+    function reloadBrowserPane(index) {
+        const frame = document.getElementById(`browser-frame-${index}`);
+        if (!frame) {
+            return false;
+        }
+        frame.src = getBrowserSessionUrl(terminals[index]?._session);
+        return true;
+    }
+
+    function openBrowserPaneExternally(index) {
+        const url = getBrowserSessionUrl(terminals[index]?._session);
+        if (!url || url === 'about:blank') {
+            return false;
+        }
+        window.open(url, '_blank', 'noopener');
+        return true;
+    }
+
     async function clearTerminalDisplay(index) {
         const terminal = terminals[index];
         const sessionId = sessionIds[index];
         if (!terminal) {
             return false;
+        }
+
+        if (isBrowserSession(terminal._session)) {
+            return refreshTerminalDisplay(index);
         }
 
         if (isExplorerSession(terminal._session)) {
@@ -6208,17 +6344,20 @@
 
         sessions.forEach((session, i) => {
             const isExplorer = isExplorerSession(session);
+            const isBrowser = isBrowserSession(session);
             /* create pane instance */
             const t = isExplorer
                 ? { _session: session, _paneType: 'explorer', _attached: false }
-                : makeTerminal();
+                : (isBrowser
+                    ? { _session: session, _paneType: 'browser', _attached: false }
+                    : makeTerminal());
             t._session = session;
             terminals.push(t);
             sessionIds.push(null);
 
             /* card HTML */
             const card = document.createElement('div');
-            card.className = `terminal-container ${isExplorer ? 'explorer-pane' : ''}`;
+            card.className = `terminal-container ${isExplorer ? 'explorer-pane' : ''} ${isBrowser ? 'browser-pane' : ''}`.trim();
             card.id = `tc-${i}`;
             card.dataset.slot = String(i);
             const explorerThemeKey = session.session_id || `${activeGroupId || 'group'}:${i}`;
@@ -6253,10 +6392,11 @@
                             class="terminal-action-btn"
                             id="trefresh-${i}"
                             data-terminal-refresh="${i}"
-                            title="Reset this terminal view and replay recent output"
+                            title="${isBrowser ? 'Reload browser pane' : 'Reset this terminal view and replay recent output'}"
                         >
                             ↻
                         </button>
+                        ${!isBrowser ? `
                         <button
                             type="button"
                             class="terminal-action-btn terminal-mode-toggle-btn"
@@ -6267,7 +6407,20 @@
                         >
                             ${isExplorer ? '&gt;_' : '📁'}
                         </button>
-                        ${!isExplorer ? `
+                        ` : ''}
+                        ${session.mode === 'wsl' && !isExplorer ? `
+                            <button
+                                type="button"
+                                class="terminal-action-btn terminal-browser-toggle-btn"
+                                id="tbrowsermode-${i}"
+                                data-session-browser-toggle="${i}"
+                                title="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
+                                aria-label="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
+                            >
+                                ${isBrowser ? '&gt;_' : '🌐'}
+                            </button>
+                        ` : ''}
+                        ${!isExplorer && !isBrowser ? `
                             <button
                                 type="button"
                                 class="terminal-action-btn terminal-split-btn"
@@ -6337,7 +6490,21 @@
                 </div>
                 <div class="terminal-wrapper" id="tw-${i}">
                     <div class="terminal-surface">
-                        ${isExplorer ? `
+                        ${isBrowser ? `
+                            <div class="browser-surface" id="browser-${i}">
+                                <div class="browser-bar">
+                                    <input class="browser-url-input" id="browser-url-${i}" data-browser-url="${i}" type="url" value="${escHtml(getBrowserSessionUrl(session))}" title="${escHtml(getBrowserSessionUrl(session))}" aria-label="Browser URL">
+                                    <button type="button" class="browser-open-btn" id="browser-open-${i}" data-browser-open="${i}" title="Open this URL in an external browser tab">Open</button>
+                                </div>
+                                <iframe
+                                    class="browser-frame"
+                                    id="browser-frame-${i}"
+                                    title="${escHtml(session.title || `Browser ${i + 1}`)}"
+                                    src="${escHtml(getBrowserSessionUrl(session))}"
+                                    sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
+                                ></iframe>
+                            </div>
+                        ` : (isExplorer ? `
                             <div class="explorer-surface" id="explorer-${i}">
                                 <div class="explorer-bar">
                                      <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
@@ -6354,11 +6521,11 @@
                                      </div>
                                  </div>
                              </div>
-                        ` : `<div class="terminal-canvas" id="tcanvas-${i}"></div>`}
+                        ` : `<div class="terminal-canvas" id="tcanvas-${i}"></div>`)}
                     </div>
                     <div class="placeholder" id="ph-${i}">
                         <div class="spinner"></div>
-                        <span style="font-size:.78rem">${isExplorer ? 'Loading explorer…' : 'Connecting…'}</span>
+                        <span style="font-size:.78rem">${isBrowser ? 'Loading browser…' : (isExplorer ? 'Loading explorer…' : 'Connecting…')}</span>
                     </div>
                 </div>
             `;
@@ -6374,6 +6541,52 @@
                     event.preventDefault();
                     event.stopPropagation();
                     refreshTerminalDisplay(i);
+                });
+            }
+            const browserOpenButton = card.querySelector(`[data-browser-open="${i}"]`);
+            if (browserOpenButton) {
+                browserOpenButton.draggable = false;
+                browserOpenButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                browserOpenButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openBrowserPaneExternally(i);
+                });
+            }
+            const browserUrlInput = card.querySelector(`[data-browser-url="${i}"]`);
+            if (browserUrlInput) {
+                browserUrlInput.addEventListener('keydown', event => {
+                    if (event.key !== 'Enter') {
+                        return;
+                    }
+                    event.preventDefault();
+                    event.stopPropagation();
+                    navigateBrowserPane(i, browserUrlInput.value);
+                });
+                browserUrlInput.addEventListener('blur', () => {
+                    navigateBrowserPane(i, browserUrlInput.value);
+                });
+            }
+            const browserFrame = card.querySelector(`#browser-frame-${i}`);
+            if (browserFrame) {
+                browserFrame.addEventListener('load', () => {
+                    document.getElementById(`ph-${i}`)?.remove();
+                });
+            }
+            const browserModeButton = card.querySelector(`[data-session-browser-toggle="${i}"]`);
+            if (browserModeButton) {
+                browserModeButton.draggable = false;
+                browserModeButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                browserModeButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    switchSessionBrowserMode(i);
                 });
             }
             const modeToggleButton = card.querySelector(`[data-session-mode-toggle="${i}"]`);
@@ -6594,6 +6807,16 @@
             });
         }
 
+        const browserModeButton = card.querySelector(`[data-session-browser-toggle="${index}"]`);
+        if (browserModeButton) {
+            stopHeaderButtonDrag(browserModeButton);
+            browserModeButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                switchSessionBrowserMode(index);
+            });
+        }
+
         const splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
         if (splitButton) {
             stopHeaderButtonDrag(splitButton);
@@ -6649,7 +6872,7 @@
 
     function createSplitTerminalCard(sourceCard, session, sourceIndex, targetIndex) {
         const card = sourceCard.cloneNode(true);
-        card.classList.remove('dragging', 'drag-target', 'explorer-pane');
+        card.classList.remove('dragging', 'drag-target', 'explorer-pane', 'browser-pane');
         card.id = `tc-${targetIndex}`;
         card.dataset.slot = String(targetIndex);
         delete card.dataset.explorerThemeKey;
@@ -6750,6 +6973,18 @@
         button.setAttribute('aria-label', label);
     }
 
+    function updateBrowserModeToggleButton(button, isBrowser, loading = false) {
+        if (!button) {
+            return;
+        }
+
+        const label = isBrowser ? 'Return to terminal' : 'Open browser preview';
+        button.disabled = loading;
+        button.textContent = loading ? '...' : (isBrowser ? '>_' : '🌐');
+        button.title = label;
+        button.setAttribute('aria-label', label);
+    }
+
     function setTerminalOnlyControlsVisible(card, visible) {
         ['data-terminal-split', 'data-terminal-unsplit'].forEach(attribute => {
             const button = card.querySelector(`[${attribute}]`);
@@ -6757,6 +6992,112 @@
                 button.hidden = !visible;
             }
         });
+    }
+
+    function ensureBrowserModeButton(card, index, session, isBrowser = false) {
+        let button = card.querySelector(`[data-session-browser-toggle="${index}"]`);
+        if (session?.mode !== 'wsl') {
+            if (button) {
+                button.remove();
+            }
+            return null;
+        }
+        if (button) {
+            button.hidden = false;
+            updateBrowserModeToggleButton(button, isBrowser);
+            return button;
+        }
+
+        const modeButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
+        const insertTarget = modeButton || card.querySelector(`[data-terminal-refresh="${index}"]`);
+        if (!insertTarget) {
+            return null;
+        }
+
+        insertTarget.insertAdjacentHTML('afterend', `
+            <button
+                type="button"
+                class="terminal-action-btn terminal-browser-toggle-btn"
+                id="tbrowsermode-${index}"
+                data-session-browser-toggle="${index}"
+                title="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
+                aria-label="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
+            >
+                ${isBrowser ? '&gt;_' : '🌐'}
+            </button>
+        `);
+        button = card.querySelector(`[data-session-browser-toggle="${index}"]`);
+        if (button) {
+            stopHeaderButtonDrag(button);
+            button.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                switchSessionBrowserMode(index);
+            });
+        }
+        return button;
+    }
+
+    function renderBrowserSurface(index, session) {
+        const url = getBrowserSessionUrl(session);
+        return `
+            <div class="terminal-surface">
+                <div class="browser-surface" id="browser-${index}">
+                    <div class="browser-bar">
+                        <input class="browser-url-input" id="browser-url-${index}" data-browser-url="${index}" type="url" value="${escHtml(url)}" title="${escHtml(url)}" aria-label="Browser URL">
+                        <button type="button" class="browser-open-btn" id="browser-open-${index}" data-browser-open="${index}" title="Open this URL in an external browser tab">Open</button>
+                    </div>
+                    <iframe
+                        class="browser-frame"
+                        id="browser-frame-${index}"
+                        title="${escHtml(session.title || `Browser ${index + 1}`)}"
+                        src="${escHtml(url)}"
+                        sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
+                    ></iframe>
+                </div>
+            </div>
+            <div class="placeholder" id="ph-${index}">
+                <div class="spinner"></div>
+                <span style="font-size:.78rem">Loading browser...</span>
+            </div>
+        `;
+    }
+
+    function wireBrowserOnlyControls(card, index) {
+        const browserOpenButton = card.querySelector(`[data-browser-open="${index}"]`);
+        if (browserOpenButton && !browserOpenButton.dataset.bound) {
+            browserOpenButton.dataset.bound = 'true';
+            stopHeaderButtonDrag(browserOpenButton);
+            browserOpenButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                openBrowserPaneExternally(index);
+            });
+        }
+
+        const browserUrlInput = card.querySelector(`[data-browser-url="${index}"]`);
+        if (browserUrlInput && !browserUrlInput.dataset.bound) {
+            browserUrlInput.dataset.bound = 'true';
+            browserUrlInput.addEventListener('keydown', event => {
+                if (event.key !== 'Enter') {
+                    return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                navigateBrowserPane(index, browserUrlInput.value);
+            });
+            browserUrlInput.addEventListener('blur', () => {
+                navigateBrowserPane(index, browserUrlInput.value);
+            });
+        }
+
+        const browserFrame = card.querySelector(`#browser-frame-${index}`);
+        if (browserFrame && !browserFrame.dataset.bound) {
+            browserFrame.dataset.bound = 'true';
+            browserFrame.addEventListener('load', () => {
+                document.getElementById(`ph-${index}`)?.remove();
+            });
+        }
     }
 
     function wireExplorerOnlyControls(card, index) {
@@ -6920,10 +7261,15 @@
         setSessionRoute(session.session_id, activeGroupId, index);
 
         card.classList.add('explorer-pane');
+        card.classList.remove('browser-pane');
         card.dataset.explorerThemeKey = explorerThemeKey;
         card.dataset.explorerThemeSource = hasExplorerThemeOverride(explorerThemeKey) ? 'override' : 'default';
         card.dataset.explorerTheme = initialExplorerTheme;
         setTerminalOnlyControlsVisible(card, false);
+        const browserModeButton = card.querySelector(`[data-session-browser-toggle="${index}"]`);
+        if (browserModeButton) {
+            browserModeButton.remove();
+        }
         ensureExplorerThemeButton(card, index);
         applyExplorerThemeToCard(card, initialExplorerTheme);
         const nameLabel = document.getElementById(`tname-${index}`);
@@ -6966,6 +7312,57 @@
         return true;
     }
 
+    function replacePaneWithBrowser(index, session) {
+        const card = document.getElementById(`tc-${index}`);
+        const wrapper = document.getElementById(`tw-${index}`);
+        if (!card || !wrapper) {
+            return false;
+        }
+
+        const previousTerminal = terminals[index];
+        if (previousTerminal?.term) {
+            try { previousTerminal.term.dispose(); } catch (_) {}
+        }
+        disconnectTerminalObserver(index);
+        if (socket && sessionIds[index]) {
+            socket.emit('leave_session', { session_id: sessionIds[index] });
+        }
+
+        terminals[index] = { _session: session, _paneType: 'browser', _attached: false };
+        sessionIds[index] = session.session_id;
+        setSessionRoute(session.session_id, activeGroupId, index);
+
+        card.classList.add('browser-pane');
+        card.classList.remove('explorer-pane', 'browser-pane');
+        delete card.dataset.explorerThemeKey;
+        delete card.dataset.explorerThemeSource;
+        delete card.dataset.explorerTheme;
+        const explorerThemeButton = card.querySelector(`[data-explorer-theme-toggle="${index}"]`);
+        if (explorerThemeButton) {
+            explorerThemeButton.remove();
+        }
+        const modeButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
+        if (modeButton) {
+            modeButton.hidden = true;
+        }
+        setTerminalOnlyControlsVisible(card, false);
+        const browserButton = ensureBrowserModeButton(card, index, session, true);
+        updateBrowserModeToggleButton(browserButton, true);
+        const nameLabel = document.getElementById(`tname-${index}`);
+        const hostLabel = document.getElementById(`thost-${index}`);
+        if (nameLabel) {
+            nameLabel.textContent = session.title || `Terminal ${index + 1}`;
+        }
+        if (hostLabel) {
+            hostLabel.textContent = session.host || '';
+        }
+        wrapper.innerHTML = renderBrowserSurface(index, session);
+        wireBrowserOnlyControls(card, index);
+        setStatus(index, session.status);
+        updateAllSplitButtonStates();
+        return true;
+    }
+
     function replacePaneWithTerminal(index, session) {
         const card = document.getElementById(`tc-${index}`);
         const wrapper = document.getElementById(`tw-${index}`);
@@ -6988,6 +7385,12 @@
             explorerThemeButton.remove();
         }
         ensureSplitControls(card, index);
+        const modeButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
+        if (modeButton) {
+            modeButton.hidden = false;
+        }
+        const browserButton = ensureBrowserModeButton(card, index, session, false);
+        updateBrowserModeToggleButton(browserButton, false);
         const nameLabel = document.getElementById(`tname-${index}`);
         const hostLabel = document.getElementById(`thost-${index}`);
         if (nameLabel) {
@@ -7019,6 +7422,9 @@
     }
 
     function replaceSessionPaneMode(index, session) {
+        if (isBrowserSession(session)) {
+            return replacePaneWithBrowser(index, session);
+        }
         if (isExplorerSession(session)) {
             return replacePaneWithExplorer(index, session);
         }
@@ -7068,6 +7474,115 @@
             updateModeToggleButton(button, switchingToTerminal);
         } finally {
             pendingModeSwitchSessionIds.delete(sessionId);
+        }
+    }
+
+    async function switchSessionBrowserMode(index) {
+        const sessionId = sessionIds[index];
+        const terminal = terminals[index];
+        const button = document.getElementById(`tbrowsermode-${index}`);
+        if (!sessionId || !terminal?._session) {
+            return;
+        }
+
+        const switchingToTerminal = isBrowserSession(terminal._session);
+        const targetMode = switchingToTerminal ? 'terminal' : 'browser';
+        const body = { startup_mode: targetMode };
+        if (!switchingToTerminal) {
+            body.url = 'http://127.0.0.1:3000';
+        }
+
+        updateBrowserModeToggleButton(button, switchingToTerminal, true);
+        pendingModeSwitchSessionIds.add(sessionId);
+
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/mode`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Browser mode switch failed with status ${response.status}`);
+            }
+
+            if (!replaceSessionPaneMode(index, data)) {
+                await initialLoad();
+            }
+        } catch (error) {
+            console.error('[GridVibe Sessions] switchSessionBrowserMode failed:', error);
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = `Browser mode switch failed: ${error.message}`;
+            }
+            updateBrowserModeToggleButton(button, switchingToTerminal);
+        } finally {
+            pendingModeSwitchSessionIds.delete(sessionId);
+        }
+    }
+
+    async function navigateBrowserPane(index, value) {
+        const terminal = terminals[index];
+        const sessionId = sessionIds[index];
+        const input = document.getElementById(`browser-url-${index}`);
+        const frame = document.getElementById(`browser-frame-${index}`);
+        if (!terminal?._session || !sessionId || !isBrowserSession(terminal._session)) {
+            return false;
+        }
+
+        let nextUrl;
+        try {
+            nextUrl = normalizeBrowserUrlInput(value);
+        } catch (error) {
+            if (input) {
+                input.value = getBrowserSessionUrl(terminal._session);
+            }
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = `Browser URL rejected: ${error.message}`;
+            }
+            return false;
+        }
+
+        if (nextUrl === getBrowserSessionUrl(terminal._session)) {
+            if (input) {
+                input.value = nextUrl;
+                input.title = nextUrl;
+            }
+            return true;
+        }
+
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/mode`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ startup_mode: 'browser', url: nextUrl })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Browser navigation failed with status ${response.status}`);
+            }
+            terminal._session = data;
+            if (input) {
+                input.value = getBrowserSessionUrl(data);
+                input.title = getBrowserSessionUrl(data);
+            }
+            if (frame) {
+                frame.src = getBrowserSessionUrl(data);
+            }
+            setStatus(index, data.status);
+            return true;
+        } catch (error) {
+            console.error('[GridVibe Sessions] navigateBrowserPane failed:', error);
+            if (input) {
+                input.value = getBrowserSessionUrl(terminal._session);
+                input.title = getBrowserSessionUrl(terminal._session);
+            }
+            const label = document.getElementById('sessionLabel');
+            if (label) {
+                label.textContent = `Browser navigation failed: ${error.message}`;
+            }
+            return false;
         }
     }
 
@@ -8417,7 +8932,9 @@
                 sessionIds[i] = session.session_id;
                 setSessionRoute(session.session_id, requestedGroupId, i);
 
-                if (session.status === 'connected' && isExplorerSession(session)) {
+                if (session.status === 'connected' && isBrowserSession(session)) {
+                    document.getElementById(`ph-${i}`)?.remove();
+                } else if (session.status === 'connected' && isExplorerSession(session)) {
                     loadExplorerPane(i);
                 } else if (session.status === 'connected') {
                     if (!terminals[i]._attached) {
@@ -8460,7 +8977,7 @@
 
             if (!usingCurrentView && !restoredFromCache && socket) {
                 data.sessions.forEach(session => {
-                    if (isExplorerSession(session)) {
+                    if (isExplorerSession(session) || isBrowserSession(session)) {
                         return;
                     }
                     socket.emit('join_session', { session_id: session.session_id });
@@ -8736,7 +9253,9 @@
                 setStatus(i, session.status);
                 sessionIds[i] = session.session_id;
                 setSessionRoute(session.session_id, activeGroupId, i);
-                if (session.status === 'connected' && isExplorerSession(session)) {
+                if (session.status === 'connected' && isBrowserSession(session)) {
+                    document.getElementById(`ph-${i}`)?.remove();
+                } else if (session.status === 'connected' && isExplorerSession(session)) {
                     syncExplorerPane(i);
                 } else if (session.status === 'connected' && !terminals[i]?._attached) {
                     attachTerminal(i);
@@ -11296,14 +11815,19 @@
 
             const { index, terminal } = target;
             setStatus(index, session.status);
-            if (isExplorerPaneInstance(terminal) !== isExplorerSession(session)) {
+            if (
+                isExplorerPaneInstance(terminal) !== isExplorerSession(session)
+                || isBrowserPaneInstance(terminal) !== isBrowserSession(session)
+            ) {
                 if (pendingModeSwitchSessionIds.has(session.session_id)) {
                     return;
                 }
                 initialLoad();
                 return;
             }
-            if (session.status === 'connected' && isExplorerSession(session)) {
+            if (session.status === 'connected' && isBrowserSession(session)) {
+                document.getElementById(`ph-${index}`)?.remove();
+            } else if (session.status === 'connected' && isExplorerSession(session)) {
                 syncExplorerPane(index);
             } else if (session.status === 'connected' && !terminal._attached) {
                 attachTerminal(index);

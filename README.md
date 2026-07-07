@@ -1,6 +1,6 @@
 # GridVibe
 
-GridVibe is a browser-first workspace for launching and managing multiple SSH terminals, local shell panes, agent panes, and SSH/SFTP or local repository file explorer panes from one control surface. It runs in a normal browser or, when `pywebview` is installed, in a native desktop window on Windows and Linux.
+GridVibe is a browser-first workspace for launching and managing multiple SSH terminals, local shell panes, agent panes, local browser preview panes, and SSH/SFTP or local repository file explorer panes from one control surface. It runs in a normal browser or, when `pywebview` is installed, in a native desktop window on Windows and Linux.
 
 [![CI](https://github.com/JSstudent/gridvibe/actions/workflows/ci.yml/badge.svg)](https://github.com/JSstudent/gridvibe/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -40,8 +40,9 @@ Session bar controls:
 
 Per-terminal controls:
 
-- `↻` resets that terminal view and replays the recent output buffer. On file explorer panes, it manually reloads the current directory or the currently open file.
+- `↻` resets that terminal view and replays the recent output buffer. On file explorer panes, it manually reloads the current directory or the currently open file. On browser panes, it reloads the iframe.
 - `📁` switches an SSH or Local Repo terminal pane into a file explorer; `>_` switches a file explorer pane into a terminal opened at the currently selected explorer directory. Explorer panes keep their original root so parent-folder navigation remains available after switching back and forth.
+- `🌐` switches a Local Repo terminal pane into a browser preview at `http://127.0.0.1:3000`; `>_` on a browser pane switches it back to a terminal.
 - `⊞` splits a terminal pane by cloning its connection into a new pane in the same session group when the layout and session limit allow it.
 - The close control removes one pane and expands the remaining split area. Explorer panes cannot be split.
 - `🧹` clears the terminal display and purges its replay buffer.
@@ -54,7 +55,7 @@ Pane sizing:
 
 ### Saved Sessions
 
-Use `Save Session` and `Import Session` on the launcher to manage reusable session presets before launch. Saved sessions can include SSH, WSL, PowerShell, cmd, Local Repo, agent, and file explorer startup choices.
+Use `Save Session` and `Import Session` on the launcher to manage reusable session presets before launch. Saved sessions can include SSH, WSL, PowerShell, cmd, Local Repo, agent, browser, and file explorer startup choices.
 
 From the terminal workspace, open `Sessions...` to:
 
@@ -66,7 +67,7 @@ Workspace saves preserve the current pane order, titles, startup modes, selected
 
 ### File Explorer Panes
 
-In SSH and Local Repo modes, each pane can start as `Initial Command`, `Agent`, or `File Explorer`.
+In SSH and Local Repo modes, each pane can start as `Initial Command`, `Agent`, or `File Explorer`. Local Repo mode also supports `Browser` panes for HTTP app previews.
 
 File explorer panes are read-only repository views. Local Repo explorers read from the GridVibe machine; SSH explorers browse the remote host over SFTP. They do not start a PTY, WSL shell, PowerShell process, or interactive SSH terminal. GridVibe validates every requested path against the selected root folder before listing or reading files.
 
@@ -86,6 +87,12 @@ Explorer panes support:
 - The explorer `Git` button opens a resizable repository sidebar with uncommitted changed files and a collapsible commit graph. Uncommitted file rows open the current file, commit file rows open that historical read-only diff, folder buttons jump to containing folders, and the file Diff tab preserves whitespace and syntax coloring.
 
 File moving, editing, deleting, upload, staging, restoring, checkout, commit, pull, and push actions are not part of the current file explorer implementation.
+
+### Browser Panes
+
+In Local Repo mode, each pane can start as `Browser` with an explicit HTTP(S) URL such as `http://127.0.0.1:3000`. Local Repo terminal panes can also switch into browser mode from the workspace header. Browser panes render the URL in a sandboxed iframe inside the workspace, do not start a PTY, and include an editable address input plus an `Open` button for apps or sites that block iframe embedding.
+
+Browser panes only accept `http://` and `https://` URLs. GridVibe does not proxy pages through Flask or bypass `X-Frame-Options`, CSP `frame-ancestors`, authentication, mixed-content, cookie, or service-worker restrictions.
 
 ### Voice and Sound Settings
 
@@ -154,7 +161,7 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 
 - Multi-session launcher with 1, 2, 3, 4, 6, or 8 panes
 - SSH, WSL, PowerShell, cmd, and local repository modes
-- Per-pane startup modes for normal commands, agent CLIs, and file explorer panes
+- Per-pane startup modes for normal commands, agent CLIs, local browser previews, and file explorer panes
 - Saved launcher and active-workspace presets with encrypted SSH passwords
 - Session groups with numbered closable tabs, `Alt+1` through `Alt+9` tab switching, import/save actions, drag-to-reorder persistence, collapsible top bar, and max surface mode
 - xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and drag-resizable dynamic split-pane support

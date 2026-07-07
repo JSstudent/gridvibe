@@ -3472,9 +3472,11 @@
         const rawMode = startupMode || initialCommandMode;
         const savedMode = rawMode === 'agent' || initialCommandMode === 'agent'
             ? 'agent'
-            : (rawMode === 'explorer' || initialCommandMode === 'explorer'
-                ? 'explorer'
-                : (initialCommand ? 'command' : 'terminal'));
+            : (rawMode === 'browser' || initialCommandMode === 'browser'
+                ? 'browser'
+                : (rawMode === 'explorer' || initialCommandMode === 'explorer'
+                    ? 'explorer'
+                    : (initialCommand ? 'command' : 'terminal')));
         const knownAgents = getKnownAgentValues();
         let mode = savedMode;
         let agentSelection = String(terminal?.agent_selection || '').trim().toLowerCase();
@@ -3511,6 +3513,15 @@
             return {
                 mode,
                 commandValue: '',
+                agentSelection: '',
+                customAgent: ''
+            };
+        }
+
+        if (mode === 'browser') {
+            return {
+                mode,
+                commandValue: initialCommand || 'http://127.0.0.1:3000',
                 agentSelection: '',
                 customAgent: ''
             };
@@ -3568,14 +3579,21 @@
         if (mode === 'explorer') {
             return 'explorer';
         }
+        if (mode === 'browser') {
+            return 'browser';
+        }
         return 'command';
     }
 
     function buildTerminalInitialCommand(row) {
-        if (getTerminalCommandMode(row) === 'terminal' || getTerminalCommandMode(row) === 'explorer') {
+        const commandMode = getTerminalCommandMode(row);
+        if (commandMode === 'terminal' || commandMode === 'explorer') {
             return '';
         }
-        if (getTerminalCommandMode(row) === 'agent') {
+        if (commandMode === 'browser') {
+            return normalizeBrowserPaneUrl(row.querySelector('.t-browser-url')?.value || '');
+        }
+        if (commandMode === 'agent') {
             const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
             if (selectedAgent === 'other') {
                 return row.querySelector('.t-agent-custom')?.value.trim() || '';
@@ -3584,6 +3602,27 @@
         }
 
         return row.querySelector('.t-cmd')?.value.trim() || '';
+    }
+
+    function normalizeBrowserPaneUrl(value) {
+        const rawValue = String(value || '').trim();
+        if (!rawValue) {
+            throw new Error('Enter a browser URL before launching.');
+        }
+
+        const candidate = rawValue.includes('://') ? rawValue : `http://${rawValue}`;
+        let parsed;
+        try {
+            parsed = new URL(candidate);
+        } catch {
+            throw new Error('Enter a valid HTTP or HTTPS URL for each browser pane.');
+        }
+
+        if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.host) {
+            throw new Error('Browser panes only support http:// and https:// URLs.');
+        }
+
+        return parsed.href;
     }
 
     function collectTerminalDrafts() {
@@ -3600,10 +3639,10 @@
                 initial_command: buildTerminalInitialCommand(row),
                 initial_command_mode: commandMode === 'agent'
                     ? 'agent'
-                    : (commandMode === 'explorer' ? 'explorer' : 'command'),
+                    : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'command'),
                 startup_mode: commandMode === 'agent'
                     ? 'agent'
-                    : (commandMode === 'explorer' ? 'explorer' : 'terminal'),
+                    : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'terminal'),
                 agent_selection: commandMode === 'agent'
                     ? (row.querySelector('.t-agent-select')?.value.trim() || '')
                     : '',
@@ -3611,10 +3650,10 @@
                     ? (row.querySelector('.t-agent-custom')?.value.trim() || '')
                     : '',
                 distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
-                use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer'
+                use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
                     ? Boolean(row.querySelector('.t-use-wsl')?.checked)
                     : false,
-                use_powershell: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer'
+                use_powershell: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
                     ? Boolean(row.querySelector('.t-use-powershell')?.checked)
                     : false
             };
@@ -4052,7 +4091,7 @@
     function syncTerminalWslState(row) {
         const commandMode = getTerminalCommandMode(row);
         const shellField = row.querySelector('.t-shell-field');
-        const shellDisabled = commandMode === 'explorer';
+        const shellDisabled = commandMode === 'explorer' || commandMode === 'browser';
         const shouldShowDistribution = connectionMode === 'wsl'
             && !shellDisabled
             && Boolean(row.querySelector('.t-use-wsl')?.checked);
@@ -4074,6 +4113,7 @@
         const commandField = row.querySelector('.t-command-field');
         const agentField = row.querySelector('.t-agent-field');
         const customAgentField = row.querySelector('.t-agent-custom-field');
+        const browserField = row.querySelector('.t-browser-field');
         const startupModeSelect = row.querySelector('.startup-mode-select');
         const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
 
@@ -4084,10 +4124,11 @@
         commandField?.classList.toggle('hidden', commandMode !== 'command');
         agentField?.classList.toggle('hidden', commandMode !== 'agent');
         customAgentField?.classList.toggle('hidden', !(commandMode === 'agent' && selectedAgent === 'other'));
+        browserField?.classList.toggle('hidden', commandMode !== 'browser');
         if (commandMode !== 'agent') {
             clearAgentPreflight(row);
         }
-        if (commandMode === 'explorer') {
+        if (commandMode === 'explorer' || commandMode === 'browser') {
             const wslCheckbox = row.querySelector('.t-use-wsl');
             const powershellCheckbox = row.querySelector('.t-use-powershell');
             if (wslCheckbox) wslCheckbox.checked = false;
@@ -4398,6 +4439,10 @@
         container.innerHTML = Array.from({ length: count }, (_, index) => {
             const terminal = usableDrafts[index] || DEFAULT_TERMINALS[index];
             const commandUi = normalizeTerminalCommandUi(terminal);
+            if (connectionMode !== 'wsl' && commandUi.mode === 'browser') {
+                commandUi.mode = 'terminal';
+                commandUi.commandValue = '';
+            }
             return `
                 <div class="t-row" data-command-mode="${escHtml(commandUi.mode)}">
                     <div class="t-row-head">
@@ -4418,11 +4463,16 @@
                                 <option value="command" ${commandUi.mode === 'command' ? 'selected' : ''}>Initial Command</option>
                                 <option value="agent" ${commandUi.mode === 'agent' ? 'selected' : ''}>Agent</option>
                                 <option value="explorer" ${commandUi.mode === 'explorer' ? 'selected' : ''}>File Explorer</option>
+                                <option value="browser" ${commandUi.mode === 'browser' ? 'selected' : ''} ${connectionMode === 'wsl' ? '' : 'disabled'}>Browser</option>
                             </select>
                         </div>
                         <div class="field t-command-field ${commandUi.mode === 'command' ? '' : 'hidden'}">
                             <label>Initial Command</label>
                             <input class="t-cmd" type="text" value="${escHtml(commandUi.commandValue)}" placeholder="Blank = shell only">
+                        </div>
+                        <div class="field t-browser-field ${commandUi.mode === 'browser' ? '' : 'hidden'}">
+                            <label>Browser URL</label>
+                            <input class="t-browser-url" type="url" value="${escHtml(commandUi.commandValue || 'http://127.0.0.1:3000')}" placeholder="http://127.0.0.1:3000">
                         </div>
                         <div class="field t-agent-field ${commandUi.mode === 'agent' ? '' : 'hidden'}">
                             <label>Agent</label>
@@ -4441,7 +4491,7 @@
                             <input class="t-agent-custom" type="text" value="${escHtml(commandUi.customAgent)}" placeholder="Enter agent command">
                         </div>
                         {% if local_windows_shells_available %}
-                        <div class="field t-shell-field ${connectionMode === 'wsl' && commandUi.mode !== 'explorer' ? '' : 'hidden'}">
+                        <div class="field t-shell-field ${connectionMode === 'wsl' && commandUi.mode !== 'explorer' && commandUi.mode !== 'browser' ? '' : 'hidden'}">
                             <div class="field-label-row">
                                 <label>Shell</label>
                                 <button
@@ -5024,8 +5074,8 @@
                     title: terminal.title || `Terminal ${index + 1}`,
                     directory: resolvedDirectory,
                     initial_command: terminal.startup_mode === 'explorer' ? null : (terminal.initial_command || null),
-                    initial_command_mode: terminal.startup_mode === 'explorer'
-                        ? 'explorer'
+                    initial_command_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
+                        ? terminal.startup_mode
                         : (terminal.initial_command_mode === 'agent' ? 'agent' : 'command'),
                     agent_selection: terminal.initial_command_mode === 'agent'
                         ? (terminal.agent_selection || '')
@@ -5033,8 +5083,8 @@
                     custom_agent: terminal.initial_command_mode === 'agent'
                         ? (terminal.custom_agent || '')
                         : '',
-                    startup_mode: terminal.startup_mode === 'explorer'
-                        ? 'explorer'
+                    startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
+                        ? terminal.startup_mode
                         : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
                 };
 
@@ -5053,8 +5103,8 @@
                     ...common,
                     distribution: terminal.distribution || config.wsl.distribution || '',
                     username: config.wsl.username || '',
-                    use_wsl: common.startup_mode === 'explorer' ? false : Boolean(terminal.use_wsl),
-                    use_powershell: common.startup_mode === 'explorer' ? false : Boolean(terminal.use_powershell)
+                    use_wsl: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_wsl),
+                    use_powershell: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_powershell)
                 });
             });
         } catch (error) {

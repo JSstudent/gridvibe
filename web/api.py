@@ -22,6 +22,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 from flask import Flask, jsonify, render_template, request, send_from_directory
@@ -446,9 +447,31 @@ def _normalize_startup_mode(value: Any, connection_mode: str = "ssh") -> str:
     normalized = str(value or "").strip().lower()
     if normalized == "agent":
         return "agent"
+    if normalized == "browser" and connection_mode == "wsl":
+        return "browser"
     if normalized == "explorer" and connection_mode in {"ssh", "wsl"}:
         return "explorer"
     return "terminal"
+
+
+def _normalize_browser_url(value: Any) -> str:
+    """Return a browser-pane URL with only HTTP(S) schemes allowed."""
+    raw_value = str(value or DEFAULT_BROWSER_URL).strip()
+    if not raw_value:
+        raise ValueError("Browser panes require an HTTP or HTTPS URL")
+
+    candidate = raw_value
+    if "://" not in candidate:
+        candidate = f"http://{candidate}"
+
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Browser panes only support http:// and https:// URLs")
+
+    return candidate
+
+
+DEFAULT_BROWSER_URL = "http://127.0.0.1:3000"
 
 
 def _normalize_workspace_layout(data: Any, terminal_count: int) -> Optional[Dict[str, Any]]:
@@ -570,7 +593,7 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
                 "title": str(entry.get("title") or f"Terminal {index + 1}"),
                 "directory": str(entry.get("directory") or ""),
                 "initial_command": str(entry.get("initial_command") or ""),
-                "initial_command_mode": startup_mode if startup_mode in {"agent", "explorer"} else "command",
+                "initial_command_mode": startup_mode if startup_mode in {"agent", "explorer", "browser"} else "command",
                 "startup_mode": startup_mode,
                 "agent_selection": str(entry.get("agent_selection") or ""),
                 "custom_agent": str(entry.get("custom_agent") or ""),
@@ -2617,6 +2640,14 @@ def _is_explorer_session(session: Any) -> bool:
     return (
         getattr(session, "mode", "") in {"ssh", "wsl"}
         and getattr(session, "startup_mode", "") == "explorer"
+    )
+
+
+def _is_browser_session(session: Any) -> bool:
+    """Return whether a session should render as a browser pane."""
+    return (
+        getattr(session, "mode", "") == "wsl"
+        and getattr(session, "startup_mode", "") == "browser"
     )
 
 
@@ -5111,7 +5142,17 @@ def create_sessions():
                 prepared["explorer_root_directory"] = prepared.get("directory") or ""
 
             if connection_mode == "wsl":
-                if startup_mode == "explorer":
+                if startup_mode == "browser":
+                    use_powershell = False
+                    use_wsl = False
+                    prepared["initial_command"] = _normalize_browser_url(
+                        prepared.get("initial_command")
+                    )
+                    prepared["initial_command_mode"] = "browser"
+                    prepared["explorer_root_directory"] = None
+                    prepared["distribution"] = ""
+                    prepared["username"] = ""
+                elif startup_mode == "explorer":
                     use_powershell = False
                     use_wsl = False
                     prepared["initial_command"] = ""
@@ -5124,12 +5165,16 @@ def create_sessions():
                 prepared["password"] = None
                 prepared["port"] = 22
                 prepared["host"] = (
-                    "File Explorer"
-                    if startup_mode == "explorer"
-                    else _local_shell_display_name(
-                        use_wsl=use_wsl,
-                        use_powershell=use_powershell,
-                        distribution=prepared.get("distribution"),
+                    "Browser"
+                    if startup_mode == "browser"
+                    else (
+                        "File Explorer"
+                        if startup_mode == "explorer"
+                        else _local_shell_display_name(
+                            use_wsl=use_wsl,
+                            use_powershell=use_powershell,
+                            distribution=prepared.get("distribution"),
+                        )
                     )
                 )
                 prepared["use_wsl"] = use_wsl
@@ -5196,7 +5241,7 @@ def create_sessions():
         )
 
         for session in created_sessions:
-            if _is_explorer_session(session):
+            if _is_explorer_session(session) or _is_browser_session(session):
                 session_manager.update_session_status(session.session_id, SessionStatus.CONNECTED)
                 _broadcast_session_status(session.session_id)
                 continue
@@ -5223,6 +5268,9 @@ def create_sessions():
             "warnings": launch_warnings,
         }), 201
 
+    except ValueError as e:
+        logger.warning("Invalid session launch request: %s", e)
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error creating sessions: {e}")
         return jsonify({"error": str(e)}), 500
@@ -5246,8 +5294,8 @@ def split_session(session_id: str):
     if not source:
         return jsonify({"error": "Session not found"}), 404
 
-    if _is_explorer_session(source):
-        return jsonify({"error": "Explorer panes cannot be split"}), 400
+    if _is_explorer_session(source) or _is_browser_session(source):
+        return jsonify({"error": "Explorer and browser panes cannot be split"}), 400
 
     group = session_manager.get_group(source.group_id)
     if not group:
@@ -5300,18 +5348,46 @@ def split_session(session_id: str):
 
 @app.route('/api/sessions/<session_id>/mode', methods=['POST'])
 def change_session_mode(session_id: str):
-    """Switch one terminal pane between terminal and file explorer mode."""
+    """Switch one pane between terminal, file explorer, and browser modes."""
     session = session_manager.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
 
     if session.mode not in {"ssh", "wsl"}:
-        return jsonify({"error": "File explorer mode is only available for SSH and Local Repo sessions"}), 400
+        return jsonify({"error": "Pane mode switching is only available for SSH and Local Repo sessions"}), 400
 
     data = request.get_json(silent=True) or {}
     target_mode = _normalize_startup_mode(data.get("startup_mode"), session.mode)
-    if target_mode not in {"terminal", "explorer"}:
-        return jsonify({"error": "startup_mode must be 'terminal' or 'explorer'"}), 400
+    if target_mode not in {"terminal", "explorer", "browser"}:
+        return jsonify({"error": "startup_mode must be 'terminal', 'explorer', or 'browser'"}), 400
+
+    if target_mode == "browser":
+        if session.mode != "wsl":
+            return jsonify({"error": "Browser mode is only available for Local Repo sessions"}), 400
+        try:
+            browser_url = _normalize_browser_url(
+                data.get("url")
+                or data.get("initial_command")
+                or session.initial_command
+                or DEFAULT_BROWSER_URL
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        session_manager.update_session_metadata(
+            session_id,
+            host="Browser",
+            username="",
+            port=22,
+            password=None,
+            initial_command=browser_url,
+            initial_command_mode="browser",
+            startup_mode="browser",
+        )
+        session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
+        _close_ssh_connection(session_id, clear_buffer=True)
+        _broadcast_session_status(session_id)
+        return jsonify(session_manager.get_session(session_id).to_dict())
 
     if target_mode == "explorer":
         requested_directory = data.get("directory")
@@ -5390,12 +5466,14 @@ def change_session_mode(session_id: str):
         _broadcast_session_status(session_id)
         return jsonify(session_manager.get_session(session_id).to_dict())
 
-    if not _is_explorer_session(session):
+    if not (_is_explorer_session(session) or _is_browser_session(session)):
         return jsonify(session.to_dict())
 
     next_directory = session.directory
     root_path = _explorer_root_directory(session)
-    if _is_remote_explorer_session(session):
+    if _is_browser_session(session):
+        next_directory = session.directory
+    elif _is_remote_explorer_session(session):
         client = None
         sftp = None
         try:
@@ -5429,6 +5507,7 @@ def change_session_mode(session_id: str):
         "directory": next_directory,
         "explorer_root_directory": root_path,
         "initial_command": "",
+        "initial_command_mode": "command",
         "startup_mode": "terminal",
     }
     if session.mode == "wsl":
