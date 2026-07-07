@@ -20,7 +20,9 @@ import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 from flask import Flask, jsonify, render_template, request, send_from_directory
@@ -91,6 +93,7 @@ DEFAULT_SAVED_SESSION_ID = "default-session"
 EXPLORER_FILE_PREVIEW_MAX_BYTES = 1024 * 1024
 EXPLORER_GIT_DIFF_MAX_BYTES = 256 * 1024
 EXPLORER_GIT_DIFF_MAX_LINES = 4000
+EXPLORER_GIT_LOG_MAX_COMMITS = 60
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
 WINDOWS_DEVICE_ATTRIBUTES_RESPONSE = "\x1b[?1;2c"
 SELF_UPDATE_REPO_DIR = BASE_DIR
@@ -163,17 +166,24 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         if target_path != DEFAULT_CONFIG_PATH and os.path.exists(DEFAULT_CONFIG_PATH):
             try:
                 default_config = _load_json_file(DEFAULT_CONFIG_PATH)
-            except (OSError, json.JSONDecodeError):
-                logger.exception("Failed to load default configuration from %s", DEFAULT_CONFIG_PATH)
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning(
+                    "Failed to load default configuration from %s: %s",
+                    DEFAULT_CONFIG_PATH,
+                    exc,
+                )
+                logger.debug("Default configuration load failure details", exc_info=True)
 
         if os.path.exists(target_path):
             try:
                 loaded = _load_json_file(target_path)
-            except (OSError, json.JSONDecodeError):
-                logger.exception(
-                    "Failed to load configuration from %s; using default configuration",
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning(
+                    "Failed to load configuration from %s: %s; using default configuration",
                     target_path,
+                    exc,
                 )
+                logger.debug("Configuration load failure details", exc_info=True)
                 return default_config
             return _merge_dicts(default_config, loaded) if default_config else loaded
 
@@ -444,9 +454,31 @@ def _normalize_startup_mode(value: Any, connection_mode: str = "ssh") -> str:
     normalized = str(value or "").strip().lower()
     if normalized == "agent":
         return "agent"
+    if normalized == "browser" and connection_mode == "wsl":
+        return "browser"
     if normalized == "explorer" and connection_mode in {"ssh", "wsl"}:
         return "explorer"
     return "terminal"
+
+
+def _normalize_browser_url(value: Any) -> str:
+    """Return a browser-pane URL with only HTTP(S) schemes allowed."""
+    raw_value = str(value or DEFAULT_BROWSER_URL).strip()
+    if not raw_value:
+        raise ValueError("Browser panes require an HTTP or HTTPS URL")
+
+    candidate = raw_value
+    if "://" not in candidate:
+        candidate = f"http://{candidate}"
+
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Browser panes only support http:// and https:// URLs")
+
+    return candidate
+
+
+DEFAULT_BROWSER_URL = "http://127.0.0.1:3000"
 
 
 def _normalize_workspace_layout(data: Any, terminal_count: int) -> Optional[Dict[str, Any]]:
@@ -568,7 +600,7 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
                 "title": str(entry.get("title") or f"Terminal {index + 1}"),
                 "directory": str(entry.get("directory") or ""),
                 "initial_command": str(entry.get("initial_command") or ""),
-                "initial_command_mode": startup_mode if startup_mode in {"agent", "explorer"} else "command",
+                "initial_command_mode": startup_mode if startup_mode in {"agent", "explorer", "browser"} else "command",
                 "startup_mode": startup_mode,
                 "agent_selection": str(entry.get("agent_selection") or ""),
                 "custom_agent": str(entry.get("custom_agent") or ""),
@@ -957,6 +989,115 @@ def _normalize_port_number(value: Any, default: int = 22) -> int:
     except (TypeError, ValueError):
         port = default
     return max(1, min(65535, port))
+
+
+def _normalize_ping_target(value: Any) -> str:
+    """Return a host/IP value safe to pass as one subprocess argument."""
+    target = str(value or "").strip()
+    if not target:
+        raise ValueError("Enter an SSH host or IP address before pinging.")
+    if len(target) > 253:
+        raise ValueError("SSH host is too long.")
+    if any(character.isspace() for character in target):
+        raise ValueError("SSH host cannot contain spaces.")
+    if not re.fullmatch(r"[A-Za-z0-9._:-]+", target):
+        raise ValueError("SSH host contains unsupported characters.")
+    return target
+
+
+def _ping_command(target: str) -> List[str]:
+    """Build the local OS ping command for a single quick probe."""
+    if os.name == "nt":
+        return ["ping", "-n", "1", "-w", "3000", target]
+    return ["ping", "-c", "1", "-W", "3", target]
+
+
+def _parse_ping_latency_ms(output: str) -> Optional[float]:
+    """Extract a representative ping latency from common ping output."""
+    match = re.search(r"time[=<]\s*([0-9]+(?:\.[0-9]+)?)\s*ms", output, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return round(float(match.group(1)), 2)
+    except ValueError:
+        return None
+
+
+def _tcp_probe_target(target: str, port: int, timeout: float = 3.0) -> Dict[str, Any]:
+    """Check whether the SSH TCP port accepts a connection."""
+    start = time.monotonic()
+    try:
+        with socket.create_connection((target, port), timeout=timeout):
+            latency_ms = round((time.monotonic() - start) * 1000, 2)
+            return {
+                "reachable": True,
+                "method": "tcp",
+                "latency_ms": latency_ms,
+                "message": f"Reached {target}:{port} over TCP in {latency_ms:.0f} ms.",
+            }
+    except OSError as exc:
+        return {
+            "reachable": False,
+            "method": "tcp",
+            "latency_ms": None,
+            "message": f"Could not reach {target}:{port}: {exc}",
+        }
+
+
+def _ping_ssh_target(target: Any, port: Any = 22) -> Dict[str, Any]:
+    """Ping a launcher SSH target, falling back to a TCP SSH-port probe."""
+    normalized_target = _normalize_ping_target(target)
+    normalized_port = _normalize_port_number(port, 22)
+    ping_executable = shutil.which("ping")
+
+    if ping_executable:
+        command = [ping_executable, *_ping_command(normalized_target)[1:]]
+        try:
+            start = time.monotonic()
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=5,
+                check=False,
+            )
+            elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+            output = f"{result.stdout}\n{result.stderr}".strip()
+            latency_ms = _parse_ping_latency_ms(output) or elapsed_ms
+            if result.returncode == 0:
+                return {
+                    "reachable": True,
+                    "method": "icmp",
+                    "target": normalized_target,
+                    "port": normalized_port,
+                    "latency_ms": latency_ms,
+                    "message": f"Ping reached {normalized_target} in {latency_ms:.0f} ms.",
+                }
+            tcp_result = _tcp_probe_target(normalized_target, normalized_port)
+            return {
+                **tcp_result,
+                "target": normalized_target,
+                "port": normalized_port,
+                "ping_error": output,
+            }
+        except (OSError, subprocess.SubprocessError) as exc:
+            tcp_result = _tcp_probe_target(normalized_target, normalized_port)
+            return {
+                **tcp_result,
+                "target": normalized_target,
+                "port": normalized_port,
+                "ping_error": str(exc),
+            }
+
+    tcp_result = _tcp_probe_target(normalized_target, normalized_port)
+    return {
+        **tcp_result,
+        "target": normalized_target,
+        "port": normalized_port,
+        "ping_error": "Local ping command is unavailable.",
+    }
 
 
 def _powershell_single_quote(value: Any) -> str:
@@ -2509,6 +2650,14 @@ def _is_explorer_session(session: Any) -> bool:
     )
 
 
+def _is_browser_session(session: Any) -> bool:
+    """Return whether a session should render as a browser pane."""
+    return (
+        getattr(session, "mode", "") == "wsl"
+        and getattr(session, "startup_mode", "") == "browser"
+    )
+
+
 def _is_remote_explorer_session(session: Any) -> bool:
     """Return whether explorer requests should browse over SSH/SFTP."""
     return getattr(session, "mode", "") == "ssh" and _is_explorer_session(session)
@@ -2995,7 +3144,9 @@ def _parse_git_status_porcelain_v2(raw_output: bytes) -> Tuple[Dict[str, Any], D
 
 def _repo_relative_git_path(repo_root: str, path: str) -> str:
     """Return a slash-separated path relative to a Git repository root."""
-    relative = os.path.relpath(path, repo_root)
+    canonical_repo_root = str(Path(repo_root).expanduser().resolve(strict=False))
+    canonical_path = str(Path(path).expanduser().resolve(strict=False))
+    relative = os.path.relpath(canonical_path, canonical_repo_root)
     return "" if relative == "." else relative.replace(os.sep, "/")
 
 
@@ -3394,10 +3545,220 @@ def _bounded_git_diff(repo_root: str, args: List[str]) -> Tuple[str, bool, int]:
     return diff_text, truncated, len(result.stdout)
 
 
-def _get_git_diff(root_path: str, file_path: str, mode: str) -> Dict[str, Any]:
+def _validated_git_commit_ref(value: Any) -> str:
+    """Return a short/full Git object id suitable for read-only diff commands."""
+    commit = str(value or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", commit):
+        raise ValueError("Invalid Git commit")
+    return commit
+
+
+def _git_diff_args_for_mode(mode: str, pathspec: str, commit: Optional[str] = None) -> List[str]:
+    """Return read-only Git diff arguments for an explorer file."""
+    if mode == "worktree":
+        return ["diff", "--no-ext-diff", "--no-color", "--", pathspec]
+    if mode == "staged":
+        return ["diff", "--cached", "--no-ext-diff", "--no-color", "--", pathspec]
+    if mode == "head":
+        return ["diff", "HEAD", "--no-ext-diff", "--no-color", "--", pathspec]
+    if mode == "commit":
+        return ["show", "--format=", "--no-ext-diff", "--no-color", commit or "", "--", pathspec]
+    raise ValueError("Invalid Git diff mode")
+
+
+def _parse_git_graph_log(raw_output: bytes) -> List[Dict[str, Any]]:
+    """Parse bounded `git log --graph --oneline` output for the diff sidebar."""
+    commits: List[Dict[str, Any]] = []
+    for raw_line in raw_output.decode("utf-8", errors="replace").split("\n"):
+        line = raw_line.rstrip()
+        if not line:
+            continue
+        match = re.match(r"^(?P<graph>[\s*|\\/._-]*?)(?P<hash>[0-9a-fA-F]{7,40})\s+(?P<subject>.*)$", line)
+        if not match:
+            continue
+        commit_hash = match.group("hash") if match else ""
+        commits.append(
+            {
+                "line": line,
+                "graph": match.group("graph").rstrip() if match else "",
+                "hash": commit_hash,
+                "subject": match.group("subject") if match else line,
+            }
+        )
+    return commits[:EXPLORER_GIT_LOG_MAX_COMMITS]
+
+
+def _parse_git_name_status_log(raw_output: bytes) -> Dict[str, List[Dict[str, Any]]]:
+    """Parse `git log --name-status` output grouped by short commit hash."""
+    files_by_commit: Dict[str, List[Dict[str, Any]]] = {}
+    current_hash = ""
+    for raw_line in raw_output.decode("utf-8", errors="replace").split("\n"):
+        line = raw_line.strip("\r")
+        if not line:
+            continue
+        if line.startswith("\x1e"):
+            current_hash = line[1:].strip()
+            if current_hash:
+                files_by_commit.setdefault(current_hash, [])
+            continue
+        if not current_hash:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status_code = parts[0]
+        path = _clean_git_path(parts[-1])
+        if not path:
+            continue
+        entry: Dict[str, Any] = {
+            "repo_path": path,
+            "status_code": status_code,
+            "git": _git_status_payload(path, status_code[:1] or " ", " ", "1"),
+        }
+        if status_code.startswith("R") and len(parts) >= 3:
+            entry["original_path"] = _clean_git_path(parts[1])
+            entry["git"]["original_path"] = entry["original_path"]
+        files_by_commit.setdefault(current_hash, []).append(entry)
+    return files_by_commit
+
+
+def _git_commit_files_log(repo_root: str, pathspec: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Return changed files for each displayed local commit."""
+    result = _run_git_command(
+        [
+            "log",
+            f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
+            "--format=%x1e%h",
+            "--name-status",
+            "--",
+            pathspec,
+        ],
+        cwd=repo_root,
+        timeout=3.0,
+    )
+    if result.returncode != 0:
+        return {}
+    return _parse_git_name_status_log(result.stdout)
+
+
+def _local_commit_file_payload(
+    root_path: str,
+    repo_root: str,
+    file_entry: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Convert one repo-relative commit file to an explorer-visible payload."""
+    repo_path = str(file_entry.get("repo_path") or "")
+    absolute_path = os.path.realpath(os.path.abspath(os.path.join(repo_root, repo_path.replace("/", os.sep))))
+    root_real = os.path.realpath(os.path.abspath(root_path))
+    try:
+        common_path = os.path.commonpath([root_real, absolute_path])
+    except ValueError:
+        return None
+    if os.path.normcase(common_path) != os.path.normcase(root_real):
+        return None
+    payload = dict(file_entry)
+    payload["path"] = _relative_explorer_path(root_real, absolute_path)
+    payload["name"] = os.path.basename(repo_path)
+    return payload
+
+
+def _attach_commit_files(
+    commits: List[Dict[str, Any]],
+    files_by_commit: Dict[str, List[Dict[str, Any]]],
+    convert_file: Any,
+) -> List[Dict[str, Any]]:
+    """Attach file lists to graph commits without changing commit order."""
+    for commit in commits:
+        commit_hash = str(commit.get("hash") or "")
+        files = files_by_commit.get(commit_hash, [])
+        if not files:
+            files = next(
+                (items for key, items in files_by_commit.items() if commit_hash and key.startswith(commit_hash)),
+                [],
+            )
+        visible_files = [converted for item in files if (converted := convert_file(item))]
+        commit["files"] = visible_files
+    return commits
+
+
+def _bounded_git_graph_log(repo_root: str, pathspec: str) -> List[Dict[str, Any]]:
+    """Return a bounded commit graph for the explorer root scope."""
+    result = _run_git_command(
+        [
+            "log",
+            "--graph",
+            "--decorate",
+            "--oneline",
+            "--date-order",
+            f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
+            "--",
+            pathspec,
+        ],
+        cwd=repo_root,
+        timeout=3.0,
+    )
+    if result.returncode != 0:
+        return []
+    return _parse_git_graph_log(result.stdout)
+
+
+def _explorer_git_changed_files(
+    root_path: str,
+    repo_root: str,
+    statuses: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return changed Git files visible inside the local explorer root."""
+    changes: List[Dict[str, Any]] = []
+    root_real = os.path.realpath(os.path.abspath(root_path))
+    for repo_path, status in sorted(statuses.items()):
+        if status.get("status") == "clean":
+            continue
+        absolute_path = os.path.realpath(os.path.abspath(os.path.join(repo_root, repo_path.replace("/", os.sep))))
+        try:
+            common_path = os.path.commonpath([root_real, absolute_path])
+        except ValueError:
+            continue
+        if os.path.normcase(common_path) != os.path.normcase(root_real):
+            continue
+        explorer_path = _relative_explorer_path(root_real, absolute_path)
+        changes.append(
+            {
+                "path": explorer_path,
+                "repo_path": repo_path,
+                "name": os.path.basename(repo_path),
+                "git": dict(status),
+            }
+        )
+    return changes
+
+
+def _get_git_repo_summary(root_path: str) -> Dict[str, Any]:
+    """Return changed files and a bounded commit graph for a local explorer root."""
+    git_context, statuses = _get_git_context(root_path, root_path)
+    if not git_context.get("available"):
+        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
+
+    repo_root = str(git_context["repo_root"])
+    root_pathspec = _git_pathspec(repo_root, root_path)
+    commits = _bounded_git_graph_log(repo_root, root_pathspec)
+    commit_files = _git_commit_files_log(repo_root, root_pathspec)
+    return {
+        "git": git_context,
+        "changes": _explorer_git_changed_files(root_path, repo_root, statuses),
+        "commits": _attach_commit_files(
+            commits,
+            commit_files,
+            lambda item: _local_commit_file_payload(root_path, repo_root, item),
+        ),
+    }
+
+
+def _get_git_diff(root_path: str, file_path: str, mode: str, commit: Optional[str] = None) -> Dict[str, Any]:
     """Return a bounded read-only Git diff for a local explorer file."""
-    if mode not in {"worktree", "staged", "head"}:
+    if mode not in {"worktree", "staged", "head", "commit"}:
         raise ValueError("Invalid Git diff mode")
+    if mode == "commit":
+        commit = _validated_git_commit_ref(commit)
 
     git_context, _statuses = _get_git_context(root_path, os.path.dirname(file_path))
     if not git_context.get("available"):
@@ -3405,13 +3766,11 @@ def _get_git_diff(root_path: str, file_path: str, mode: str) -> Dict[str, Any]:
 
     repo_root = str(git_context["repo_root"])
     pathspec = _git_pathspec(repo_root, file_path)
-    diff_args_by_mode = {
-        "worktree": ["diff", "--no-ext-diff", "--no-color", "--", pathspec],
-        "staged": ["diff", "--cached", "--no-ext-diff", "--no-color", "--", pathspec],
-        "head": ["diff", "HEAD", "--no-ext-diff", "--no-color", "--", pathspec],
-    }
     try:
-        diff_text, truncated, raw_bytes = _bounded_git_diff(repo_root, diff_args_by_mode[mode])
+        diff_text, truncated, raw_bytes = _bounded_git_diff(
+            repo_root,
+            _git_diff_args_for_mode(mode, pathspec, commit),
+        )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git diff timed out") from exc
     return {
@@ -3442,10 +3801,122 @@ def _bounded_remote_git_diff(client: Any, repo_root: str, args: List[str]) -> Tu
     return diff_text, truncated, len(result.stdout)
 
 
-def _get_remote_git_diff(client: Any, root_path: str, file_path: str, mode: str) -> Dict[str, Any]:
+def _bounded_remote_git_graph_log(client: Any, repo_root: str, pathspec: str) -> List[Dict[str, Any]]:
+    """Return a bounded remote commit graph for the explorer root scope."""
+    result = _run_remote_git_command(
+        client,
+        [
+            "log",
+            "--graph",
+            "--decorate",
+            "--oneline",
+            "--date-order",
+            f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
+            "--",
+            pathspec,
+        ],
+        cwd=repo_root,
+        timeout=3.0,
+    )
+    if result.returncode != 0:
+        return []
+    return _parse_git_graph_log(result.stdout)
+
+
+def _remote_git_commit_files_log(client: Any, repo_root: str, pathspec: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Return changed files for each displayed remote commit."""
+    result = _run_remote_git_command(
+        client,
+        [
+            "log",
+            f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
+            "--format=%x1e%h",
+            "--name-status",
+            "--",
+            pathspec,
+        ],
+        cwd=repo_root,
+        timeout=3.0,
+    )
+    if result.returncode != 0:
+        return {}
+    return _parse_git_name_status_log(result.stdout)
+
+
+def _remote_commit_file_payload(
+    root_path: str,
+    repo_root: str,
+    file_entry: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Convert one repo-relative remote commit file to an explorer-visible payload."""
+    repo_path = str(file_entry.get("repo_path") or "")
+    absolute_path = _remote_path_join(repo_root, repo_path)
+    if not _remote_path_inside(root_path, absolute_path):
+        return None
+    payload = dict(file_entry)
+    payload["path"] = _relative_remote_explorer_path(root_path, absolute_path)
+    payload["name"] = posixpath.basename(repo_path)
+    return payload
+
+
+def _remote_explorer_git_changed_files(
+    root_path: str,
+    repo_root: str,
+    statuses: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return changed Git files visible inside the remote explorer root."""
+    changes: List[Dict[str, Any]] = []
+    for repo_path, status in sorted(statuses.items()):
+        if status.get("status") == "clean":
+            continue
+        absolute_path = _remote_path_join(repo_root, repo_path)
+        if not _remote_path_inside(root_path, absolute_path):
+            continue
+        explorer_path = _relative_remote_explorer_path(root_path, absolute_path)
+        changes.append(
+            {
+                "path": explorer_path,
+                "repo_path": repo_path,
+                "name": posixpath.basename(repo_path),
+                "git": dict(status),
+            }
+        )
+    return changes
+
+
+def _get_remote_git_repo_summary(client: Any, root_path: str) -> Dict[str, Any]:
+    """Return changed files and a bounded commit graph for a remote explorer root."""
+    git_context, statuses = _get_remote_git_context(client, root_path, root_path)
+    if not git_context.get("available"):
+        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
+
+    repo_root = str(git_context["repo_root"])
+    root_pathspec = _remote_git_pathspec(repo_root, root_path)
+    commits = _bounded_remote_git_graph_log(client, repo_root, root_pathspec)
+    commit_files = _remote_git_commit_files_log(client, repo_root, root_pathspec)
+    return {
+        "git": git_context,
+        "changes": _remote_explorer_git_changed_files(root_path, repo_root, statuses),
+        "commits": _attach_commit_files(
+            commits,
+            commit_files,
+            lambda item: _remote_commit_file_payload(root_path, repo_root, item),
+        ),
+    }
+
+
+def _get_remote_git_diff(
+    client: Any,
+    root_path: str,
+    file_path: str,
+    mode: str,
+    commit: Optional[str] = None,
+) -> Dict[str, Any]:
     """Return a bounded read-only Git diff for a remote explorer file."""
-    if mode not in {"worktree", "staged", "head"}:
+    if mode not in {"worktree", "staged", "head", "commit"}:
         raise ValueError("Invalid Git diff mode")
+    if mode == "commit":
+        commit = _validated_git_commit_ref(commit)
 
     git_context, _statuses = _get_remote_git_context(client, root_path, _remote_path_dirname(file_path))
     if not git_context.get("available"):
@@ -3453,12 +3924,11 @@ def _get_remote_git_diff(client: Any, root_path: str, file_path: str, mode: str)
 
     repo_root = str(git_context["repo_root"])
     pathspec = _remote_git_pathspec(repo_root, file_path)
-    diff_args_by_mode = {
-        "worktree": ["diff", "--no-ext-diff", "--no-color", "--", pathspec],
-        "staged": ["diff", "--cached", "--no-ext-diff", "--no-color", "--", pathspec],
-        "head": ["diff", "HEAD", "--no-ext-diff", "--no-color", "--", pathspec],
-    }
-    diff_text, truncated, raw_bytes = _bounded_remote_git_diff(client, repo_root, diff_args_by_mode[mode])
+    diff_text, truncated, raw_bytes = _bounded_remote_git_diff(
+        client,
+        repo_root,
+        _git_diff_args_for_mode(mode, pathspec, commit),
+    )
     return {
         "git": git_context,
         "diff": diff_text,
@@ -4315,6 +4785,7 @@ def get_explorer_git_diff(session_id: str):
         client = None
         sftp = None
         mode = request.args.get("mode", "worktree")
+        commit = request.args.get("commit")
         try:
             client, sftp = _open_ssh_sftp(session)
             root_path, file_path = _resolve_remote_explorer_file_path(
@@ -4322,7 +4793,7 @@ def get_explorer_git_diff(session_id: str):
                 session,
                 request.args.get("path", ""),
             )
-            diff_payload = _get_remote_git_diff(client, root_path, file_path, mode)
+            diff_payload = _get_remote_git_diff(client, root_path, file_path, mode, commit)
             return jsonify(
                 {
                     "session_id": session.session_id,
@@ -4341,12 +4812,16 @@ def get_explorer_git_diff(session_id: str):
                 _close_sftp_client(client, sftp)
 
     mode = request.args.get("mode", "worktree")
+    commit = request.args.get("commit")
     try:
-        root_path, file_path = _resolve_explorer_file_path(
+        root_path, file_path = _resolve_explorer_candidate_path(
             session,
             request.args.get("path", ""),
+            allow_empty_root=False,
         )
-        diff_payload = _get_git_diff(root_path, file_path, mode)
+        if os.path.isdir(file_path):
+            raise ValueError("Explorer path is a directory")
+        diff_payload = _get_git_diff(root_path, file_path, mode, commit)
         return jsonify(
             {
                 "session_id": session.session_id,
@@ -4354,6 +4829,53 @@ def get_explorer_git_diff(session_id: str):
                 "path": _relative_explorer_path(root_path, file_path),
                 "mode": mode,
                 **diff_payload,
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route('/api/explorer/<session_id>/git/repo', methods=['GET'])
+def get_explorer_git_repo(session_id: str):
+    """Return bounded read-only Git repository metadata for the diff sidebar."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if _is_remote_explorer_session(session):
+        client = None
+        sftp = None
+        try:
+            client, sftp = _open_ssh_sftp(session)
+            root_path = _remote_explorer_root_directory(session)
+            if not root_path:
+                raise ValueError("Explorer root directory is not configured")
+            root_path = sftp.normalize(root_path)
+            summary = _get_remote_git_repo_summary(client, root_path)
+            return jsonify(
+                {
+                    "session_id": session.session_id,
+                    "root": root_path,
+                    **summary,
+                }
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": str(exc)}), 500
+        finally:
+            if client is not None and sftp is not None:
+                _close_sftp_client(client, sftp)
+
+    try:
+        root_path = _explorer_root_directory(session)
+        summary = _get_git_repo_summary(root_path)
+        return jsonify(
+            {
+                "session_id": session.session_id,
+                "root": root_path,
+                **summary,
             }
         )
     except ValueError as exc:
@@ -4452,6 +4974,16 @@ def get_wsl_distros():
     """Return the locally available WSL distros from `wsl -l -v`."""
     snapshot = _inspect_wsl_distributions()
     return jsonify(snapshot)
+
+
+@app.route('/api/ssh-ping', methods=['POST'])
+def ssh_ping():
+    """Ping the launcher SSH target from the local machine."""
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(_ping_ssh_target(data.get("host"), data.get("port", 22)))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route('/api/agent-preflight', methods=['POST'])
@@ -4617,7 +5149,17 @@ def create_sessions():
                 prepared["explorer_root_directory"] = prepared.get("directory") or ""
 
             if connection_mode == "wsl":
-                if startup_mode == "explorer":
+                if startup_mode == "browser":
+                    use_powershell = False
+                    use_wsl = False
+                    prepared["initial_command"] = _normalize_browser_url(
+                        prepared.get("initial_command")
+                    )
+                    prepared["initial_command_mode"] = "browser"
+                    prepared["explorer_root_directory"] = None
+                    prepared["distribution"] = ""
+                    prepared["username"] = ""
+                elif startup_mode == "explorer":
                     use_powershell = False
                     use_wsl = False
                     prepared["initial_command"] = ""
@@ -4630,12 +5172,16 @@ def create_sessions():
                 prepared["password"] = None
                 prepared["port"] = 22
                 prepared["host"] = (
-                    "File Explorer"
-                    if startup_mode == "explorer"
-                    else _local_shell_display_name(
-                        use_wsl=use_wsl,
-                        use_powershell=use_powershell,
-                        distribution=prepared.get("distribution"),
+                    "Browser"
+                    if startup_mode == "browser"
+                    else (
+                        "File Explorer"
+                        if startup_mode == "explorer"
+                        else _local_shell_display_name(
+                            use_wsl=use_wsl,
+                            use_powershell=use_powershell,
+                            distribution=prepared.get("distribution"),
+                        )
                     )
                 )
                 prepared["use_wsl"] = use_wsl
@@ -4702,7 +5248,7 @@ def create_sessions():
         )
 
         for session in created_sessions:
-            if _is_explorer_session(session):
+            if _is_explorer_session(session) or _is_browser_session(session):
                 session_manager.update_session_status(session.session_id, SessionStatus.CONNECTED)
                 _broadcast_session_status(session.session_id)
                 continue
@@ -4729,6 +5275,9 @@ def create_sessions():
             "warnings": launch_warnings,
         }), 201
 
+    except ValueError as e:
+        logger.warning("Invalid session launch request: %s", e)
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Error creating sessions: {e}")
         return jsonify({"error": str(e)}), 500
@@ -4752,8 +5301,8 @@ def split_session(session_id: str):
     if not source:
         return jsonify({"error": "Session not found"}), 404
 
-    if _is_explorer_session(source):
-        return jsonify({"error": "Explorer panes cannot be split"}), 400
+    if _is_explorer_session(source) or _is_browser_session(source):
+        return jsonify({"error": "Explorer and browser panes cannot be split"}), 400
 
     group = session_manager.get_group(source.group_id)
     if not group:
@@ -4806,18 +5355,46 @@ def split_session(session_id: str):
 
 @app.route('/api/sessions/<session_id>/mode', methods=['POST'])
 def change_session_mode(session_id: str):
-    """Switch one terminal pane between terminal and file explorer mode."""
+    """Switch one pane between terminal, file explorer, and browser modes."""
     session = session_manager.get_session(session_id)
     if not session:
         return jsonify({"error": "Session not found"}), 404
 
     if session.mode not in {"ssh", "wsl"}:
-        return jsonify({"error": "File explorer mode is only available for SSH and Local Repo sessions"}), 400
+        return jsonify({"error": "Pane mode switching is only available for SSH and Local Repo sessions"}), 400
 
     data = request.get_json(silent=True) or {}
     target_mode = _normalize_startup_mode(data.get("startup_mode"), session.mode)
-    if target_mode not in {"terminal", "explorer"}:
-        return jsonify({"error": "startup_mode must be 'terminal' or 'explorer'"}), 400
+    if target_mode not in {"terminal", "explorer", "browser"}:
+        return jsonify({"error": "startup_mode must be 'terminal', 'explorer', or 'browser'"}), 400
+
+    if target_mode == "browser":
+        if session.mode != "wsl":
+            return jsonify({"error": "Browser mode is only available for Local Repo sessions"}), 400
+        try:
+            browser_url = _normalize_browser_url(
+                data.get("url")
+                or data.get("initial_command")
+                or session.initial_command
+                or DEFAULT_BROWSER_URL
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        session_manager.update_session_metadata(
+            session_id,
+            host="Browser",
+            username="",
+            port=22,
+            password=None,
+            initial_command=browser_url,
+            initial_command_mode="browser",
+            startup_mode="browser",
+        )
+        session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
+        _close_ssh_connection(session_id, clear_buffer=True)
+        _broadcast_session_status(session_id)
+        return jsonify(session_manager.get_session(session_id).to_dict())
 
     if target_mode == "explorer":
         requested_directory = data.get("directory")
@@ -4896,12 +5473,14 @@ def change_session_mode(session_id: str):
         _broadcast_session_status(session_id)
         return jsonify(session_manager.get_session(session_id).to_dict())
 
-    if not _is_explorer_session(session):
+    if not (_is_explorer_session(session) or _is_browser_session(session)):
         return jsonify(session.to_dict())
 
     next_directory = session.directory
     root_path = _explorer_root_directory(session)
-    if _is_remote_explorer_session(session):
+    if _is_browser_session(session):
+        next_directory = session.directory
+    elif _is_remote_explorer_session(session):
         client = None
         sftp = None
         try:
@@ -4935,6 +5514,7 @@ def change_session_mode(session_id: str):
         "directory": next_directory,
         "explorer_root_directory": root_path,
         "initial_command": "",
+        "initial_command_mode": "command",
         "startup_mode": "terminal",
     }
     if session.mode == "wsl":

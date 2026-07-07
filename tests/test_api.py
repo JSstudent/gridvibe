@@ -264,6 +264,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('status-installed', html)
         self.assertIn('\"value\": \"claude\"', html)
 
+    def test_launcher_page_exposes_ssh_ping_controls(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('id="sshPingBtn"', html)
+        self.assertIn('id="sshPingStatus"', html)
+        self.assertIn("function initSshPingButton()", html)
+        self.assertIn("/api/ssh-ping", html)
+
     def test_launcher_page_exposes_check_for_updates_controls(self):
         response = self.client.get("/")
 
@@ -413,6 +423,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("surface_mode: appSettings.workspace?.surface_mode === 'max' ? 'max' : 'normal'", html)
         self.assertIn("initial_command_mode: terminal.startup_mode === 'explorer'", html)
         self.assertIn("agent_selection: terminal.initial_command_mode === 'agent'", html)
+        self.assertIn('<option value="browser"', html)
+        self.assertIn('class="field t-browser-field', html)
+        self.assertIn("function normalizeBrowserPaneUrl(value)", html)
+        self.assertIn("terminal.startup_mode === 'browser'", html)
         layout_change_start = html.index("container.querySelectorAll('.layout-btn').forEach")
         layout_change_end = html.index("function renderModeFields", layout_change_start)
         layout_change_html = html[layout_change_start:layout_change_end]
@@ -523,6 +537,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         switch_end = html.index("async function closeSplitPane(index)", switch_start)
         self.assertNotIn("teardownCurrentGrid();", html[switch_start:switch_end])
 
+    def test_terminals_page_exposes_browser_pane_rendering_hooks(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("function isBrowserSession(session)", html)
+        self.assertIn("function isBrowserPaneInstance(terminal)", html)
+        self.assertIn("function getBrowserSessionUrl(session)", html)
+        self.assertIn("function normalizeBrowserUrlInput(value)", html)
+        self.assertIn("class=\"browser-surface\"", html)
+        self.assertIn("class=\"browser-frame\"", html)
+        self.assertIn("class=\"browser-url-input\"", html)
+        self.assertIn("data-browser-open=\"${i}\"", html)
+        self.assertIn("data-session-browser-toggle=\"${i}\"", html)
+        self.assertIn("function reloadBrowserPane(index)", html)
+        self.assertIn("function openBrowserPaneExternally(index)", html)
+        self.assertIn("async function switchSessionBrowserMode(index)", html)
+        self.assertIn("async function navigateBrowserPane(index, value)", html)
+        self.assertIn("sandbox=\"allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts\"", html)
+
     def test_terminals_page_explorer_refresh_requires_initial_navigation_or_force(self):
         response = self.client.get("/terminals")
 
@@ -556,10 +590,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         refresh_html = html[refresh_start:refresh_end]
 
         self.assertIn(
-            "return openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });",
+            "refreshed = await openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });",
             explorer_refresh_html,
         )
-        self.assertIn("return loadExplorerPane(index, null, { force: true });", explorer_refresh_html)
+        self.assertIn("refreshed = await loadExplorerPane(index, null, { force: true });", explorer_refresh_html)
+        self.assertIn("const refreshGitSidebar = Boolean(pane?._explorerGitSidebarOpen);", explorer_refresh_html)
+        self.assertIn("invalidateExplorerGitRepo(index);", explorer_refresh_html)
+        self.assertIn("await loadExplorerGitRepo(index);", explorer_refresh_html)
+        self.assertIn("return refreshed;", explorer_refresh_html)
         self.assertIn("await refreshExplorerPane(index);", refresh_html)
         self.assertIn("function captureExplorerFileScroll(index)", html)
         self.assertIn("function restoreExplorerFileScroll(index, state)", html)
@@ -751,6 +789,17 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn("explorer-git-summary", html)
+        self.assertIn("data-explorer-git-toggle", html)
+        self.assertIn("explorer-git-panel", html)
+        self.assertIn("data-explorer-git-resizer", html)
+        self.assertIn("function toggleExplorerGitSidebar(index)", html)
+        self.assertIn("function wireExplorerGitSidebarResize(index)", html)
+        self.assertIn("function applyExplorerGitSidebarWidth(index)", html)
+        self.assertIn("const explorerGitToggle = card.querySelector(`[data-explorer-git-toggle=\"${i}\"]`);", html)
+        self.assertIn("data-explorer-git-open-folder", html)
+        self.assertIn("data-explorer-git-open-commit-diff", html)
+        self.assertIn("function explorerGitOpenCommitDiff(index, path, commit)", html)
+        self.assertIn("function renderExplorerCommitDiffFile(index, path, commit)", html)
         self.assertIn("function explorerGitBadgeHtml(git)", html)
         self.assertIn("function explorerGitSummaryText(git)", html)
         self.assertIn("function loadExplorerDiff(index)", html)
@@ -760,12 +809,31 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("button.dataset.explorerFileView === 'diff'", html)
         self.assertIn("setExplorerFileView(index, open ? 'diff' : (pane._explorerLastFileView || 'source'));", html)
         self.assertIn("function toggleExplorerDiffSplit(index)", html)
-        self.assertIn("function renderExplorerSideBySideDiff(diff)", html)
+        self.assertIn("function renderExplorerSideBySideDiff(index, diff)", html)
+        self.assertIn("function loadExplorerGitRepo(index)", html)
+        self.assertIn("setExplorerFileView(index, button.dataset.explorerFileView || 'source');", html)
+        self.assertNotIn("function loadExplorerDiffSelectedFileForView(index, targetView)", html)
+        self.assertNotIn("await loadExplorerDiffSelectedFileForView(", html)
+        self.assertNotIn('id="explorer-diff-sidebar-${index}"', html)
+        self.assertNotIn('id="explorer-diff-resizer-${index}"', html)
+        self.assertNotIn("data-explorer-diff-file", html)
+        self.assertNotIn("data-explorer-diff-commit-toggle", html)
+        self.assertNotIn("data-explorer-diff-commit-file", html)
+        self.assertNotIn("data-explorer-diff-commit", html)
+        self.assertIn("/git/repo", html)
         self.assertIn(".explorer-diff-cell.add", html)
         self.assertIn(".explorer-diff-cell.delete", html)
+        self.assertIn(".explorer-diff-line-code", html)
+        self.assertIn(".explorer-diff-content", html)
+        self.assertIn("overflow: scroll;", html)
+        self.assertIn("white-space: pre-wrap;", html)
+        self.assertIn("overflow-wrap: anywhere;", html)
+        self.assertIn("tab-size: 4;", html)
         self.assertIn("explorer-diff-split", html)
         self.assertIn("split-diff", html)
-        self.assertIn("/git/diff?path=", html)
+        self.assertIn("new URLSearchParams({", html)
+        self.assertIn("mode: commit ? 'commit' : 'head'", html)
+        self.assertIn("params.set('commit', commit);", html)
         self.assertIn("${explorerGitBadgeHtml(entry.git)}", html)
 
     def test_terminals_page_explorer_diff_search_hooks_are_present(self):
@@ -1550,6 +1618,50 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json(), {"error": "Unknown agent selection"})
 
+    def test_ssh_ping_endpoint_returns_icmp_success(self):
+        completed = SimpleNamespace(returncode=0, stdout="Reply from 10.0.0.20: time=12.3 ms", stderr="")
+
+        with patch.object(api.shutil, "which", return_value="/bin/ping"), patch.object(
+            api.subprocess,
+            "run",
+            return_value=completed,
+        ) as run_command:
+            response = self.client.post("/api/ssh-ping", json={"host": "10.0.0.20", "port": 2222})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["reachable"])
+        self.assertEqual(body["method"], "icmp")
+        self.assertEqual(body["target"], "10.0.0.20")
+        self.assertEqual(body["port"], 2222)
+        self.assertEqual(body["latency_ms"], 12.3)
+        run_command.assert_called_once()
+
+    def test_ssh_ping_endpoint_rejects_blank_host(self):
+        response = self.client.post("/api/ssh-ping", json={"host": "  "})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {"error": "Enter an SSH host or IP address before pinging."})
+
+    def test_ssh_ping_falls_back_to_tcp_when_ping_is_unavailable(self):
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.__exit__.return_value = False
+
+        with patch.object(api.shutil, "which", return_value=None), patch.object(
+            api.socket,
+            "create_connection",
+            return_value=connection,
+        ) as create_connection:
+            response = self.client.post("/api/ssh-ping", json={"host": "example.com", "port": 22})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["reachable"])
+        self.assertEqual(body["method"], "tcp")
+        self.assertEqual(body["target"], "example.com")
+        create_connection.assert_called_once_with(("example.com", 22), timeout=3.0)
+
     def test_load_config_falls_back_to_default_config_when_local_config_missing(self):
         default_path = Path(self.temp_dir.name) / "default_config.json"
         default_path.write_text(
@@ -1570,13 +1682,18 @@ class ApiRoutesTestCase(unittest.TestCase):
             json.dumps({"appearance": {"theme": "system"}}),
             encoding="utf-8",
         )
-        broken_path = Path(self.temp_dir.name) / "config.json"
+        broken_path = Path(self.temp_dir.name) / "broken-config.json"
         broken_path.write_text('{"appearance": {"theme": "dark"}}\n}', encoding="utf-8")
 
         with patch.object(api, "DEFAULT_CONFIG_PATH", str(default_path)):
-            cfg = api.load_config(str(broken_path))
+            with self.assertLogs(api.logger, level="WARNING") as logs:
+                cfg = api.load_config(str(broken_path))
 
         self.assertEqual(cfg["appearance"]["theme"], "system")
+        self.assertTrue(
+            any("using default configuration" in message for message in logs.output),
+            logs.output,
+        )
 
     def test_voice_prefs_get_returns_defaults(self):
         response = self.client.get("/api/voice-prefs")
@@ -2012,6 +2129,62 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertFalse(session.use_powershell)
         self.assertEqual(session.status, api.SessionStatus.CONNECTED)
 
+    def test_create_sessions_accepts_local_repo_browser_mode(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        sessions_payload = {
+            "connection_mode": "wsl",
+            "layout": "horizontal",
+            "sessions": [
+                {
+                    "directory": str(repo_dir),
+                    "title": "Preview",
+                    "initial_command": "localhost:5173",
+                    "startup_mode": "browser",
+                    "use_wsl": True,
+                    "use_powershell": True,
+                }
+            ],
+        }
+
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        start_task.assert_not_called()
+
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertEqual(session.mode, "wsl")
+        self.assertEqual(session.host, "Browser")
+        self.assertEqual(session.startup_mode, "browser")
+        self.assertEqual(session.initial_command_mode, "browser")
+        self.assertEqual(session.initial_command, "http://localhost:5173")
+        self.assertFalse(session.use_wsl)
+        self.assertFalse(session.use_powershell)
+        self.assertEqual(session.status, api.SessionStatus.CONNECTED)
+
+    def test_create_sessions_rejects_browser_mode_with_invalid_url(self):
+        sessions_payload = {
+            "connection_mode": "wsl",
+            "sessions": [
+                {
+                    "directory": self.temp_dir.name,
+                    "title": "Preview",
+                    "initial_command": "file:///tmp/index.html",
+                    "startup_mode": "browser",
+                }
+            ],
+        }
+
+        response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("http:// and https://", response.get_json()["error"])
+
+    def test_normalize_startup_mode_allows_browser_only_for_local_repo(self):
+        self.assertEqual(api._normalize_startup_mode("browser", "wsl"), "browser")
+        self.assertEqual(api._normalize_startup_mode("browser", "ssh"), "terminal")
+
     def test_create_sessions_accepts_ssh_file_explorer_mode(self):
         sessions_payload = {
             "connection_mode": "ssh",
@@ -2139,6 +2312,108 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(Path(updated.directory), outside_dir.resolve())
         self.assertEqual(Path(updated.explorer_root_directory), outside_dir.resolve())
         self.assertEqual(updated.startup_mode, "explorer")
+
+    def test_switch_local_terminal_pane_to_browser_uses_default_url(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Shell",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="terminal",
+            use_wsl=True,
+        )
+        api.session_manager.update_session_status(session.session_id, api.SessionStatus.CONNECTED)
+
+        with patch.object(api, "_close_ssh_connection") as close_connection:
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "browser"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        close_connection.assert_called_once_with(session.session_id, clear_buffer=True)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.host, "Browser")
+        self.assertEqual(updated.startup_mode, "browser")
+        self.assertEqual(updated.initial_command_mode, "browser")
+        self.assertEqual(updated.initial_command, "http://127.0.0.1:3000")
+        self.assertTrue(updated.use_wsl)
+        self.assertEqual(updated.status, api.SessionStatus.CONNECTED)
+
+    def test_switch_browser_pane_updates_url(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:3000",
+            initial_command_mode="browser",
+        )
+
+        with patch.object(api, "_close_ssh_connection") as close_connection:
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "browser", "url": "localhost:5173"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        close_connection.assert_called_once_with(session.session_id, clear_buffer=True)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "browser")
+        self.assertEqual(updated.initial_command, "http://localhost:5173")
+        self.assertEqual(updated.status, api.SessionStatus.CONNECTED)
+
+    def test_switch_browser_pane_to_terminal_restarts_local_terminal(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:3000",
+            initial_command_mode="browser",
+            use_powershell=True,
+        )
+
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "terminal"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        start_task.assert_called_once_with(api._connect_session, session.session_id)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.host, "PowerShell")
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertEqual(updated.initial_command_mode, "command")
+        self.assertEqual(updated.initial_command, "")
+        self.assertEqual(updated.status, api.SessionStatus.PENDING)
 
     def test_switch_roundtrip_preserves_explorer_root_for_parent_navigation(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -2487,6 +2762,70 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["mode"], "head")
         self.assertIn("+changed", payload["diff"])
         self.assertFalse(payload["truncated"])
+
+    def test_explorer_git_diff_returns_commit_file_diff(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        readme.write_text("# Project\n\nsecond\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "second")
+        commit = self._run_git(repo_dir, "rev-parse", "--short=12", "HEAD").stdout.decode().strip()
+        session_id = self._create_explorer_session(repo_dir)
+
+        diff_response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "commit", "commit": commit},
+        )
+
+        self.assertEqual(diff_response.status_code, 200)
+        payload = diff_response.get_json()
+        self.assertEqual(payload["mode"], "commit")
+        self.assertIn("+second", payload["diff"])
+
+    def test_explorer_git_repo_returns_changes_and_graph(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        readme.write_text("# Project\n\nchanged\n", encoding="utf-8")
+        (repo_dir / "notes.txt").write_text("new\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        repo_response = self.client.get(f"/api/explorer/{session_id}/git/repo")
+
+        self.assertEqual(repo_response.status_code, 200)
+        payload = repo_response.get_json()
+        self.assertTrue(payload["git"]["available"])
+        changes = {change["path"]: change for change in payload["changes"]}
+        self.assertEqual(changes["README.md"]["git"]["status"], "modified")
+        self.assertEqual(changes["notes.txt"]["git"]["status"], "untracked")
+        self.assertTrue(payload["commits"])
+        self.assertIn("initial", payload["commits"][0]["line"])
+        self.assertEqual(payload["commits"][0]["files"][0]["path"], "README.md")
+        self.assertEqual(payload["commits"][0]["files"][0]["git"]["status"], "added")
+
+    def test_parse_git_graph_log_skips_connector_only_lines(self):
+        commits = api._parse_git_graph_log(
+            b"* a1b2c3d initial\n"
+            b"|\\\n"
+            b"| * b2c3d4e branch work\n"
+            b"|/\n"
+        )
+
+        self.assertEqual([commit["hash"] for commit in commits], ["a1b2c3d", "b2c3d4e"])
+        self.assertEqual([commit["subject"] for commit in commits], ["initial", "branch work"])
 
     def test_explorer_git_diff_rejects_invalid_mode_and_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -3357,6 +3696,51 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(fetched_terminal["agent_selection"], "other")
         self.assertEqual(fetched_terminal["custom_agent"], "claude-code")
 
+    def test_saved_sessions_roundtrip_preserves_browser_startup_metadata(self):
+        payload = {
+            "name": "browser-preset",
+            "config": {
+                "connection_mode": "wsl",
+                "terminal_count": 1,
+                "layout": "single",
+                "ssh": {
+                    "host": "",
+                    "username": "ubuntu",
+                    "password": "",
+                    "port": 22,
+                    "default_dir": "",
+                },
+                "wsl": {
+                    "distribution": "",
+                    "username": "",
+                    "default_dir": self.temp_dir.name,
+                },
+                "terminals": [
+                    {
+                        "title": "Preview",
+                        "directory": "",
+                        "initial_command": "http://127.0.0.1:3000",
+                        "initial_command_mode": "browser",
+                        "startup_mode": "browser",
+                    }
+                ],
+            },
+        }
+
+        created = self.client.post("/api/saved-sessions", json=payload)
+
+        self.assertEqual(created.status_code, 201)
+        terminal = created.get_json()["config"]["terminals"][0]
+        self.assertEqual(terminal["initial_command"], "http://127.0.0.1:3000")
+        self.assertEqual(terminal["initial_command_mode"], "browser")
+        self.assertEqual(terminal["startup_mode"], "browser")
+
+        fetched = self.client.get(f"/api/saved-sessions/{created.get_json()['id']}")
+        self.assertEqual(fetched.status_code, 200)
+        fetched_terminal = fetched.get_json()["config"]["terminals"][0]
+        self.assertEqual(fetched_terminal["initial_command_mode"], "browser")
+        self.assertEqual(fetched_terminal["startup_mode"], "browser")
+
     def test_saved_sessions_roundtrip_preserves_workspace_layout_geometry(self):
         payload = {
             "name": "split-workspace",
@@ -4203,26 +4587,38 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIsNone(stored.initial_command)
         start_task.assert_called_once_with(api._connect_session, created["session_id"])
 
-    def test_split_session_rejects_explorer_pane(self):
+    def test_split_session_rejects_explorer_and_browser_panes(self):
         api.session_manager.create_group(
             name="Explorer",
             connection_mode="wsl",
             layout="single",
-            terminal_count=1,
+            terminal_count=2,
             group_id="group-explorer",
         )
-        source = api.session_manager.create_session(
+        explorer = api.session_manager.create_session(
             group_id="group-explorer",
             host="File Explorer",
             directory="/tmp/project",
             mode="wsl",
             startup_mode="explorer",
         )
+        browser = api.session_manager.create_session(
+            group_id="group-explorer",
+            host="Browser",
+            directory="/tmp/project",
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:3000",
+            initial_command_mode="browser",
+        )
 
-        response = self.client.post(f"/api/sessions/{source.session_id}/split")
+        response = self.client.post(f"/api/sessions/{explorer.session_id}/split")
+        browser_response = self.client.post(f"/api/sessions/{browser.session_id}/split")
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.get_json(), {"error": "Explorer panes cannot be split"})
+        self.assertEqual(browser_response.status_code, 400)
+        self.assertEqual(response.get_json(), {"error": "Explorer and browser panes cannot be split"})
+        self.assertEqual(browser_response.get_json(), {"error": "Explorer and browser panes cannot be split"})
 
     def test_split_session_rejects_group_at_max_sessions(self):
         api.session_manager.create_group(
