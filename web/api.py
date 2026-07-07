@@ -166,17 +166,24 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         if target_path != DEFAULT_CONFIG_PATH and os.path.exists(DEFAULT_CONFIG_PATH):
             try:
                 default_config = _load_json_file(DEFAULT_CONFIG_PATH)
-            except (OSError, json.JSONDecodeError):
-                logger.exception("Failed to load default configuration from %s", DEFAULT_CONFIG_PATH)
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning(
+                    "Failed to load default configuration from %s: %s",
+                    DEFAULT_CONFIG_PATH,
+                    exc,
+                )
+                logger.debug("Default configuration load failure details", exc_info=True)
 
         if os.path.exists(target_path):
             try:
                 loaded = _load_json_file(target_path)
-            except (OSError, json.JSONDecodeError):
-                logger.exception(
-                    "Failed to load configuration from %s; using default configuration",
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning(
+                    "Failed to load configuration from %s: %s; using default configuration",
                     target_path,
+                    exc,
                 )
+                logger.debug("Configuration load failure details", exc_info=True)
                 return default_config
             return _merge_dicts(default_config, loaded) if default_config else loaded
 

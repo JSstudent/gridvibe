@@ -1682,13 +1682,18 @@ class ApiRoutesTestCase(unittest.TestCase):
             json.dumps({"appearance": {"theme": "system"}}),
             encoding="utf-8",
         )
-        broken_path = Path(self.temp_dir.name) / "config.json"
+        broken_path = Path(self.temp_dir.name) / "broken-config.json"
         broken_path.write_text('{"appearance": {"theme": "dark"}}\n}', encoding="utf-8")
 
         with patch.object(api, "DEFAULT_CONFIG_PATH", str(default_path)):
-            cfg = api.load_config(str(broken_path))
+            with self.assertLogs(api.logger, level="WARNING") as logs:
+                cfg = api.load_config(str(broken_path))
 
         self.assertEqual(cfg["appearance"]["theme"], "system")
+        self.assertTrue(
+            any("using default configuration" in message for message in logs.output),
+            logs.output,
+        )
 
     def test_voice_prefs_get_returns_defaults(self):
         response = self.client.get("/api/voice-prefs")
