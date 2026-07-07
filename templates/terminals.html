@@ -5727,7 +5727,7 @@
             return;
         }
 
-        if (isExplorerSession(terminals[index]?._session)) {
+        if (isExplorerSession(terminals[index]?._session) || isBrowserSession(terminals[index]?._session)) {
             button.hidden = true;
             button.disabled = true;
             return;
@@ -5758,7 +5758,7 @@
             return;
         }
 
-        if (isExplorerSession(terminals[index]?._session)) {
+        if (isExplorerSession(terminals[index]?._session) || isBrowserSession(terminals[index]?._session)) {
             button.hidden = true;
             button.disabled = true;
             return;
@@ -7181,6 +7181,42 @@
         return button;
     }
 
+    function ensureModeToggleButton(card, index) {
+        let button = card.querySelector(`[data-session-mode-toggle="${index}"]`);
+        if (button) {
+            button.hidden = false;
+            return button;
+        }
+
+        const refreshButton = card.querySelector(`[data-terminal-refresh="${index}"]`);
+        if (!refreshButton) {
+            return null;
+        }
+
+        refreshButton.insertAdjacentHTML('afterend', `
+            <button
+                type="button"
+                class="terminal-action-btn terminal-mode-toggle-btn"
+                id="tmode-${index}"
+                data-session-mode-toggle="${index}"
+                title="Open file explorer for this terminal directory"
+                aria-label="Open file explorer for this terminal directory"
+            >
+                📁
+            </button>
+        `);
+        button = card.querySelector(`[data-session-mode-toggle="${index}"]`);
+        if (button) {
+            stopHeaderButtonDrag(button);
+            button.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                switchSessionPaneMode(index);
+            });
+        }
+        return button;
+    }
+
     function ensureSplitControls(card, index) {
         let splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
         if (splitButton) {
@@ -7333,7 +7369,7 @@
         setSessionRoute(session.session_id, activeGroupId, index);
 
         card.classList.add('browser-pane');
-        card.classList.remove('explorer-pane', 'browser-pane');
+        card.classList.remove('explorer-pane');
         delete card.dataset.explorerThemeKey;
         delete card.dataset.explorerThemeSource;
         delete card.dataset.explorerTheme;
@@ -7376,7 +7412,7 @@
         sessionIds[index] = session.session_id;
         setSessionRoute(session.session_id, activeGroupId, index);
 
-        card.classList.remove('explorer-pane');
+        card.classList.remove('explorer-pane', 'browser-pane');
         delete card.dataset.explorerThemeKey;
         delete card.dataset.explorerThemeSource;
         delete card.dataset.explorerTheme;
@@ -7384,6 +7420,7 @@
         if (explorerThemeButton) {
             explorerThemeButton.remove();
         }
+        ensureModeToggleButton(card, index);
         ensureSplitControls(card, index);
         const modeButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
         if (modeButton) {
