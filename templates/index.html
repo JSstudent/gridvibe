@@ -1435,6 +1435,40 @@
             align-items: center;
         }
 
+        .host-ping-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .ssh-ping-btn {
+            min-height: 41px;
+            padding: 10px 14px;
+            white-space: nowrap;
+        }
+
+        .ssh-ping-btn:disabled {
+            cursor: wait;
+            opacity: 0.72;
+            transform: none;
+        }
+
+        .ssh-ping-status {
+            min-height: 1rem;
+            color: var(--muted);
+            font-size: 0.72rem;
+            line-height: 1.35;
+        }
+
+        .ssh-ping-status.success {
+            color: var(--success);
+        }
+
+        .ssh-ping-status.error {
+            color: var(--danger);
+        }
+
         .picker-display {
             min-height: 41px;
             padding: 11px 13px;
@@ -2667,7 +2701,11 @@
         <div class="form-grid">
             <div class="field span-2">
                 <label>Host — IP Address or Hostname</label>
-                <input type="text" id="ssh_host" placeholder="192.168.1.100 or myserver.local" autocomplete="off">
+                <div class="host-ping-row">
+                    <input type="text" id="ssh_host" placeholder="192.168.1.100 or myserver.local" autocomplete="off">
+                    <button type="button" class="ghost-btn ssh-ping-btn" id="sshPingBtn">Ping</button>
+                </div>
+                <div class="ssh-ping-status" id="sshPingStatus" role="status" aria-live="polite"></div>
             </div>
             <div class="field">
                 <label>Username</label>
@@ -3716,6 +3754,7 @@
         container.innerHTML = connectionMode === 'ssh' ? SSH_FIELDS : WSL_FIELDS;
         applyModeInputs(previous);
         initShowPasswordButton();
+        initSshPingButton();
         bindModeFieldInteractions();
     }
 
@@ -3734,6 +3773,58 @@
 
         showButton.addEventListener('touchstart', (e) => { e.preventDefault(); togglePassword(true); });
         showButton.addEventListener('touchend', (e) => { e.preventDefault(); togglePassword(false); });
+    }
+
+    function setSshPingStatus(text, type = '') {
+        const status = document.getElementById('sshPingStatus');
+        if (!status) {
+            return;
+        }
+        status.textContent = text;
+        status.className = `ssh-ping-status ${type}`.trim();
+    }
+
+    function initSshPingButton() {
+        const button = document.getElementById('sshPingBtn');
+        const hostInput = document.getElementById('ssh_host');
+        const portInput = document.getElementById('ssh_port');
+        if (!button || !hostInput) {
+            return;
+        }
+
+        hostInput.addEventListener('input', () => setSshPingStatus(''));
+        portInput?.addEventListener('input', () => setSshPingStatus(''));
+
+        button.addEventListener('click', async () => {
+            const host = hostInput.value.trim();
+            const port = Number(portInput?.value) || 22;
+            if (!host) {
+                setSshPingStatus('Enter a host or IP address before pinging.', 'error');
+                hostInput.focus();
+                return;
+            }
+
+            button.disabled = true;
+            button.textContent = 'Pinging...';
+            setSshPingStatus(`Checking ${host}...`);
+            try {
+                const response = await fetch('/api/ssh-ping', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ host, port })
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || 'Ping failed.');
+                }
+                setSshPingStatus(data.message || (data.reachable ? 'Target is reachable.' : 'Target is not reachable.'), data.reachable ? 'success' : 'error');
+            } catch (error) {
+                setSshPingStatus(error.message || 'Ping failed.', 'error');
+            } finally {
+                button.disabled = false;
+                button.textContent = 'Ping';
+            }
+        });
     }
 
     function collectModeInputs() {

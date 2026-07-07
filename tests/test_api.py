@@ -264,6 +264,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('status-installed', html)
         self.assertIn('\"value\": \"claude\"', html)
 
+    def test_launcher_page_exposes_ssh_ping_controls(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('id="sshPingBtn"', html)
+        self.assertIn('id="sshPingStatus"', html)
+        self.assertIn("function initSshPingButton()", html)
+        self.assertIn("/api/ssh-ping", html)
+
     def test_launcher_page_exposes_check_for_updates_controls(self):
         response = self.client.get("/")
 
@@ -1583,6 +1593,50 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json(), {"error": "Unknown agent selection"})
+
+    def test_ssh_ping_endpoint_returns_icmp_success(self):
+        completed = SimpleNamespace(returncode=0, stdout="Reply from 10.0.0.20: time=12.3 ms", stderr="")
+
+        with patch.object(api.shutil, "which", return_value="/bin/ping"), patch.object(
+            api.subprocess,
+            "run",
+            return_value=completed,
+        ) as run_command:
+            response = self.client.post("/api/ssh-ping", json={"host": "10.0.0.20", "port": 2222})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["reachable"])
+        self.assertEqual(body["method"], "icmp")
+        self.assertEqual(body["target"], "10.0.0.20")
+        self.assertEqual(body["port"], 2222)
+        self.assertEqual(body["latency_ms"], 12.3)
+        run_command.assert_called_once()
+
+    def test_ssh_ping_endpoint_rejects_blank_host(self):
+        response = self.client.post("/api/ssh-ping", json={"host": "  "})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {"error": "Enter an SSH host or IP address before pinging."})
+
+    def test_ssh_ping_falls_back_to_tcp_when_ping_is_unavailable(self):
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.__exit__.return_value = False
+
+        with patch.object(api.shutil, "which", return_value=None), patch.object(
+            api.socket,
+            "create_connection",
+            return_value=connection,
+        ) as create_connection:
+            response = self.client.post("/api/ssh-ping", json={"host": "example.com", "port": 22})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["reachable"])
+        self.assertEqual(body["method"], "tcp")
+        self.assertEqual(body["target"], "example.com")
+        create_connection.assert_called_once_with(("example.com", 22), timeout=3.0)
 
     def test_load_config_falls_back_to_default_config_when_local_config_missing(self):
         default_path = Path(self.temp_dir.name) / "default_config.json"

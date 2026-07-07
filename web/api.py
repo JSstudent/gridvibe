@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from cryptography.fernet import Fernet
@@ -958,6 +959,115 @@ def _normalize_port_number(value: Any, default: int = 22) -> int:
     except (TypeError, ValueError):
         port = default
     return max(1, min(65535, port))
+
+
+def _normalize_ping_target(value: Any) -> str:
+    """Return a host/IP value safe to pass as one subprocess argument."""
+    target = str(value or "").strip()
+    if not target:
+        raise ValueError("Enter an SSH host or IP address before pinging.")
+    if len(target) > 253:
+        raise ValueError("SSH host is too long.")
+    if any(character.isspace() for character in target):
+        raise ValueError("SSH host cannot contain spaces.")
+    if not re.fullmatch(r"[A-Za-z0-9._:-]+", target):
+        raise ValueError("SSH host contains unsupported characters.")
+    return target
+
+
+def _ping_command(target: str) -> List[str]:
+    """Build the local OS ping command for a single quick probe."""
+    if os.name == "nt":
+        return ["ping", "-n", "1", "-w", "3000", target]
+    return ["ping", "-c", "1", "-W", "3", target]
+
+
+def _parse_ping_latency_ms(output: str) -> Optional[float]:
+    """Extract a representative ping latency from common ping output."""
+    match = re.search(r"time[=<]\s*([0-9]+(?:\.[0-9]+)?)\s*ms", output, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return round(float(match.group(1)), 2)
+    except ValueError:
+        return None
+
+
+def _tcp_probe_target(target: str, port: int, timeout: float = 3.0) -> Dict[str, Any]:
+    """Check whether the SSH TCP port accepts a connection."""
+    start = time.monotonic()
+    try:
+        with socket.create_connection((target, port), timeout=timeout):
+            latency_ms = round((time.monotonic() - start) * 1000, 2)
+            return {
+                "reachable": True,
+                "method": "tcp",
+                "latency_ms": latency_ms,
+                "message": f"Reached {target}:{port} over TCP in {latency_ms:.0f} ms.",
+            }
+    except OSError as exc:
+        return {
+            "reachable": False,
+            "method": "tcp",
+            "latency_ms": None,
+            "message": f"Could not reach {target}:{port}: {exc}",
+        }
+
+
+def _ping_ssh_target(target: Any, port: Any = 22) -> Dict[str, Any]:
+    """Ping a launcher SSH target, falling back to a TCP SSH-port probe."""
+    normalized_target = _normalize_ping_target(target)
+    normalized_port = _normalize_port_number(port, 22)
+    ping_executable = shutil.which("ping")
+
+    if ping_executable:
+        command = [ping_executable, *_ping_command(normalized_target)[1:]]
+        try:
+            start = time.monotonic()
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=5,
+                check=False,
+            )
+            elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+            output = f"{result.stdout}\n{result.stderr}".strip()
+            latency_ms = _parse_ping_latency_ms(output) or elapsed_ms
+            if result.returncode == 0:
+                return {
+                    "reachable": True,
+                    "method": "icmp",
+                    "target": normalized_target,
+                    "port": normalized_port,
+                    "latency_ms": latency_ms,
+                    "message": f"Ping reached {normalized_target} in {latency_ms:.0f} ms.",
+                }
+            tcp_result = _tcp_probe_target(normalized_target, normalized_port)
+            return {
+                **tcp_result,
+                "target": normalized_target,
+                "port": normalized_port,
+                "ping_error": output,
+            }
+        except (OSError, subprocess.SubprocessError) as exc:
+            tcp_result = _tcp_probe_target(normalized_target, normalized_port)
+            return {
+                **tcp_result,
+                "target": normalized_target,
+                "port": normalized_port,
+                "ping_error": str(exc),
+            }
+
+    tcp_result = _tcp_probe_target(normalized_target, normalized_port)
+    return {
+        **tcp_result,
+        "target": normalized_target,
+        "port": normalized_port,
+        "ping_error": "Local ping command is unavailable.",
+    }
 
 
 def _powershell_single_quote(value: Any) -> str:
@@ -2996,7 +3106,9 @@ def _parse_git_status_porcelain_v2(raw_output: bytes) -> Tuple[Dict[str, Any], D
 
 def _repo_relative_git_path(repo_root: str, path: str) -> str:
     """Return a slash-separated path relative to a Git repository root."""
-    relative = os.path.relpath(path, repo_root)
+    canonical_repo_root = str(Path(repo_root).expanduser().resolve(strict=False))
+    canonical_path = str(Path(path).expanduser().resolve(strict=False))
+    relative = os.path.relpath(canonical_path, canonical_repo_root)
     return "" if relative == "." else relative.replace(os.sep, "/")
 
 
@@ -4824,6 +4936,16 @@ def get_wsl_distros():
     """Return the locally available WSL distros from `wsl -l -v`."""
     snapshot = _inspect_wsl_distributions()
     return jsonify(snapshot)
+
+
+@app.route('/api/ssh-ping', methods=['POST'])
+def ssh_ping():
+    """Ping the launcher SSH target from the local machine."""
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(_ping_ssh_target(data.get("host"), data.get("port", 22)))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route('/api/agent-preflight', methods=['POST'])
