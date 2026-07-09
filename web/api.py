@@ -2849,15 +2849,25 @@ def _explorer_content_looks_binary(raw_content: bytes) -> bool:
 
 
 def _render_markdown_preview(content: str) -> Optional[str]:
-    """Render Markdown to sanitized HTML for explorer previews."""
+    """Render Markdown to sanitized HTML without interpreting raw HTML input."""
     if markdown is None or bleach is None:
         return None
 
-    html = markdown.markdown(
-        content,
-        extensions=["extra", "sane_lists", "tables"],
+    renderer = markdown.Markdown(
+        extensions=[
+            "fenced_code",
+            "footnotes",
+            "attr_list",
+            "def_list",
+            "tables",
+            "abbr",
+            "sane_lists",
+        ],
         output_format="html",
     )
+    renderer.preprocessors.deregister("html_block")
+    renderer.inlinePatterns.deregister("html")
+    html = renderer.convert(content)
     return bleach.clean(
         html,
         tags=MARKDOWN_ALLOWED_TAGS,

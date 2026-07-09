@@ -3216,6 +3216,30 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("<script", payload["preview_html"])
         self.assertNotIn("javascript:", payload["preview_html"])
 
+    def test_explorer_markdown_preview_treats_raw_html_as_literal_text(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "README.md"
+        file_path.write_text(
+            "The feed ends at <img> before this text.\n\n"
+            "![Markdown image](https://example.com/image.png)\n",
+            encoding="utf-8",
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        preview_html = file_response.get_json()["preview_html"]
+        self.assertIn("The feed ends at &lt;img&gt; before this text.", preview_html)
+        self.assertIn(
+            '<img alt="Markdown image" src="https://example.com/image.png">',
+            preview_html,
+        )
+
     def test_explorer_file_does_not_preview_non_markdown_text(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
