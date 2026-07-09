@@ -10680,7 +10680,11 @@
         renderExplorerTreePanel(index);
         try {
             const entriesUrl = `/api/explorer/${encodeURIComponent(sessionId)}/entries`;
-            const response = await fetch(key ? `${entriesUrl}?path=${encodeURIComponent(key)}` : entriesUrl);
+            // Always send an explicit path (empty === the explorer root) so the tree stays
+            // anchored to the configured root. Omitting it makes the backend fall back to the
+            // session's current directory, which strands the tree on a subdirectory after the
+            // pane re-enters explorer mode from a deeper terminal cwd.
+            const response = await fetch(`${entriesUrl}?path=${encodeURIComponent(key)}`);
             const data = await response.json();
             if (!response.ok) {
                 throw new Error(data.error || 'Failed to load directory');
