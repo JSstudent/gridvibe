@@ -791,10 +791,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorer-git-summary", html)
         self.assertIn("data-explorer-git-toggle", html)
         self.assertIn("explorer-git-panel", html)
-        self.assertIn("data-explorer-git-resizer", html)
+        self.assertIn("data-explorer-sidebar-resizer", html)
         self.assertIn("function toggleExplorerGitSidebar(index)", html)
-        self.assertIn("function wireExplorerGitSidebarResize(index)", html)
-        self.assertIn("function applyExplorerGitSidebarWidth(index)", html)
+        self.assertIn("function wireExplorerSidebarResize(index)", html)
+        self.assertIn("function applyExplorerSidebarWidth(index)", html)
         self.assertIn("const explorerGitToggle = card.querySelector(`[data-explorer-git-toggle=\"${i}\"]`);", html)
         self.assertIn("data-explorer-git-open-folder", html)
         self.assertIn("data-explorer-git-open-commit-diff", html)
@@ -835,6 +835,44 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("mode: commit ? 'commit' : 'head'", html)
         self.assertIn("params.set('commit', commit);", html)
         self.assertIn("${explorerGitBadgeHtml(entry.git)}", html)
+
+    def test_terminals_page_explorer_file_tree_hooks_are_present(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("data-explorer-tree-toggle", html)
+        self.assertIn("explorer-tree-panel", html)
+        self.assertIn("data-explorer-tree-dir", html)
+        self.assertIn("data-explorer-tree-file", html)
+        self.assertIn("data-explorer-tree-open-folder", html)
+        self.assertIn("function toggleExplorerTreeSidebar(index)", html)
+        self.assertIn("function toggleExplorerTreeDirectory(index, path)", html)
+        self.assertIn("function renderExplorerTreePanel(index)", html)
+        self.assertIn("function loadExplorerTreeChildren(index, path)", html)
+        self.assertIn("function revealExplorerTreePath(index)", html)
+        self.assertIn("function reloadExplorerTree(index)", html)
+        self.assertIn("const explorerTreeToggle = card.querySelector(`[data-explorer-tree-toggle=\"${i}\"]`);", html)
+        self.assertIn(".filter(entry => !entry.deleted)", html)
+
+    def test_terminals_page_explorer_sidebar_supports_tree_and_git_together(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("explorer-sidebar-splitter", html)
+        self.assertIn("data-explorer-sidebar-splitter", html)
+        self.assertIn("function syncExplorerSidebar(index)", html)
+        self.assertIn("function applyExplorerSidebarSplit(index)", html)
+        self.assertIn("function wireExplorerSidebarSplitter(index)", html)
+        self.assertIn("sidebar.classList.toggle('split', treeOpen && gitOpen);", html)
+        self.assertIn("main.classList.toggle('tree-open', treeOpen);", html)
+        self.assertIn("main.classList.toggle('git-open', gitOpen);", html)
+        self.assertIn(
+            ".explorer-sidebar.split {\n            grid-template-rows:"
+            " var(--explorer-sidebar-tree-height, minmax(0, 1fr)) 6px minmax(0, 1fr);",
+            html,
+        )
 
     def test_terminals_page_explorer_diff_search_hooks_are_present(self):
         response = self.client.get("/terminals")

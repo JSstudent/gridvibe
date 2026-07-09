@@ -1378,7 +1378,8 @@
             cursor: default;
         }
 
-        .explorer-git-toggle {
+        .explorer-git-toggle,
+        .explorer-tree-toggle {
             height: 28px;
             min-width: 34px;
             border: 1px solid var(--t-border-tab);
@@ -1390,7 +1391,8 @@
             font-weight: 700;
         }
 
-        .explorer-git-toggle[aria-pressed="true"] {
+        .explorer-git-toggle[aria-pressed="true"],
+        .explorer-tree-toggle[aria-pressed="true"] {
             border-color: var(--t-accent);
             color: var(--t-accent);
             background: var(--explorer-row-active);
@@ -1424,11 +1426,30 @@
             grid-template-columns: minmax(0, 1fr);
         }
 
-        .explorer-main.git-open {
-            grid-template-columns: var(--explorer-git-sidebar-width, 260px) 6px minmax(0, 1fr);
+        .explorer-main.git-open,
+        .explorer-main.tree-open {
+            grid-template-columns: var(--explorer-sidebar-width, 260px) 6px minmax(0, 1fr);
         }
 
-        .explorer-git-panel {
+        .explorer-sidebar {
+            min-width: 0;
+            min-height: 0;
+            display: grid;
+            grid-template-rows: minmax(0, 1fr);
+            overflow: hidden;
+            background: var(--explorer-bar-bg);
+        }
+
+        .explorer-sidebar.split {
+            grid-template-rows: var(--explorer-sidebar-tree-height, minmax(0, 1fr)) 6px minmax(0, 1fr);
+        }
+
+        .explorer-sidebar[hidden] {
+            display: none;
+        }
+
+        .explorer-git-panel,
+        .explorer-tree-panel {
             min-width: 0;
             min-height: 0;
             overflow: auto;
@@ -1436,11 +1457,32 @@
             color: var(--explorer-text);
         }
 
-        .explorer-git-panel[hidden] {
+        .explorer-git-panel[hidden],
+        .explorer-tree-panel[hidden] {
             display: none;
         }
 
-        .explorer-git-resizer {
+        .explorer-sidebar-splitter {
+            height: 6px;
+            min-height: 6px;
+            width: 100%;
+            border: 0;
+            border-top: 1px solid var(--explorer-row-border);
+            border-bottom: 1px solid var(--explorer-row-border);
+            background: var(--explorer-bar-bg);
+            cursor: row-resize;
+        }
+
+        .explorer-sidebar-splitter:hover,
+        .explorer-sidebar-splitter.dragging {
+            background: var(--t-accent);
+        }
+
+        .explorer-sidebar-splitter[hidden] {
+            display: none;
+        }
+
+        .explorer-sidebar-resizer {
             width: 6px;
             min-width: 6px;
             border: 0;
@@ -1450,13 +1492,115 @@
             cursor: col-resize;
         }
 
-        .explorer-git-resizer:hover,
-        .explorer-git-resizer.dragging {
+        .explorer-sidebar-resizer:hover,
+        .explorer-sidebar-resizer.dragging {
             background: var(--t-accent);
         }
 
-        .explorer-git-resizer[hidden] {
+        .explorer-sidebar-resizer[hidden] {
             display: none;
+        }
+
+        .explorer-tree-section {
+            padding: 8px 0;
+        }
+
+        .explorer-tree-title {
+            padding: 0 10px 6px;
+            color: var(--explorer-muted);
+            font-size: .7rem;
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+
+        .explorer-tree-children {
+            display: grid;
+            align-content: start;
+        }
+
+        .explorer-tree-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto auto;
+            align-items: center;
+            gap: 4px;
+            min-width: 0;
+            padding-right: 6px;
+            border-left: 3px solid transparent;
+        }
+
+        .explorer-tree-row:hover {
+            background: var(--explorer-row-hover);
+        }
+
+        .explorer-tree-row.active {
+            border-left-color: var(--t-accent);
+            background: var(--explorer-row-active);
+        }
+
+        .explorer-tree-main {
+            display: grid;
+            grid-template-columns: 14px 20px minmax(0, 1fr);
+            align-items: center;
+            gap: 4px;
+            min-width: 0;
+            padding: 3px 4px 3px 7px;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+            font: inherit;
+            font-size: .74rem;
+            text-align: left;
+        }
+
+        .explorer-tree-main:focus-visible {
+            outline: 2px solid var(--t-accent);
+            outline-offset: -2px;
+        }
+
+        .explorer-tree-chevron {
+            color: var(--explorer-muted);
+            font-size: .68rem;
+            text-align: center;
+        }
+
+        .explorer-tree-name {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .explorer-tree-row .explorer-icon {
+            width: 20px;
+            height: 20px;
+        }
+
+        .explorer-tree-row .explorer-icon svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        .explorer-tree-open {
+            width: 22px;
+            height: 22px;
+            font-size: .68rem;
+        }
+
+        .explorer-tree-empty,
+        .explorer-tree-loading,
+        .explorer-tree-error {
+            padding: 3px 10px;
+            color: var(--explorer-muted);
+            font-size: .7rem;
+        }
+
+        .explorer-tree-error {
+            color: #b45309;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-tree-error {
+            color: #fbbf24;
         }
 
         .explorer-list {
@@ -6509,13 +6653,18 @@
                                 <div class="explorer-bar">
                                      <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
                                      <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
+                                     <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${i}" data-explorer-tree-toggle="${i}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">Tree</button>
                                      <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">Git</button>
                                      <div class="explorer-git-summary" id="explorer-git-${i}" aria-live="polite"></div>
                                      <div class="explorer-directory-search" id="explorer-directory-search-${i}"></div>
                                  </div>
                                  <div class="explorer-main" id="explorer-main-${i}">
-                                     <aside class="explorer-git-panel" id="explorer-git-panel-${i}" hidden></aside>
-                                     <button type="button" class="explorer-git-resizer" id="explorer-git-resizer-${i}" data-explorer-git-resizer="${i}" aria-label="Resize Git sidebar" hidden></button>
+                                     <aside class="explorer-sidebar" id="explorer-sidebar-${i}" hidden>
+                                         <div class="explorer-tree-panel" id="explorer-tree-panel-${i}" hidden></div>
+                                         <button type="button" class="explorer-sidebar-splitter" id="explorer-sidebar-splitter-${i}" data-explorer-sidebar-splitter="${i}" aria-label="Resize file tree and Git panels" hidden></button>
+                                         <div class="explorer-git-panel" id="explorer-git-panel-${i}" hidden></div>
+                                     </aside>
+                                     <button type="button" class="explorer-sidebar-resizer" id="explorer-sidebar-resizer-${i}" data-explorer-sidebar-resizer="${i}" aria-label="Resize explorer sidebar" hidden></button>
                                      <div class="explorer-list" id="explorer-list-${i}">
                                          <div class="explorer-message">Loading directory...</div>
                                      </div>
@@ -6717,6 +6866,19 @@
                     event.preventDefault();
                     event.stopPropagation();
                     toggleExplorerGitSidebar(i);
+                });
+            }
+            const explorerTreeToggle = card.querySelector(`[data-explorer-tree-toggle="${i}"]`);
+            if (explorerTreeToggle) {
+                explorerTreeToggle.draggable = false;
+                explorerTreeToggle.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                explorerTreeToggle.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleExplorerTreeSidebar(i);
                 });
             }
             grid.appendChild(card);
@@ -7150,6 +7312,21 @@
                 toggleExplorerGitSidebar(index);
             });
         }
+
+        const explorerTreeToggle = card.querySelector(`[data-explorer-tree-toggle="${index}"]`);
+        if (explorerTreeToggle && !explorerTreeToggle.dataset.bound) {
+            explorerTreeToggle.dataset.bound = 'true';
+            explorerTreeToggle.draggable = false;
+            explorerTreeToggle.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            explorerTreeToggle.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleExplorerTreeSidebar(index);
+            });
+        }
     }
 
     function ensureExplorerThemeButton(card, index) {
@@ -7323,13 +7500,18 @@
                     <div class="explorer-bar">
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
                         <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
+                        <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${index}" data-explorer-tree-toggle="${index}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">Tree</button>
                         <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">Git</button>
                         <div class="explorer-git-summary" id="explorer-git-${index}" aria-live="polite"></div>
                         <div class="explorer-directory-search" id="explorer-directory-search-${index}"></div>
                     </div>
                     <div class="explorer-main" id="explorer-main-${index}">
-                        <aside class="explorer-git-panel" id="explorer-git-panel-${index}" hidden></aside>
-                        <button type="button" class="explorer-git-resizer" id="explorer-git-resizer-${index}" data-explorer-git-resizer="${index}" aria-label="Resize Git sidebar" hidden></button>
+                        <aside class="explorer-sidebar" id="explorer-sidebar-${index}" hidden>
+                            <div class="explorer-tree-panel" id="explorer-tree-panel-${index}" hidden></div>
+                            <button type="button" class="explorer-sidebar-splitter" id="explorer-sidebar-splitter-${index}" data-explorer-sidebar-splitter="${index}" aria-label="Resize file tree and Git panels" hidden></button>
+                            <div class="explorer-git-panel" id="explorer-git-panel-${index}" hidden></div>
+                        </aside>
+                        <button type="button" class="explorer-sidebar-resizer" id="explorer-sidebar-resizer-${index}" data-explorer-sidebar-resizer="${index}" aria-label="Resize explorer sidebar" hidden></button>
                         <div class="explorer-list" id="explorer-list-${index}">
                             <div class="explorer-message">Loading directory...</div>
                         </div>
@@ -9564,6 +9746,9 @@
     const EXPLORER_SEARCH_MAX_MATCHES = 1000;
     const EXPLORER_SEARCH_CHUNK_SIZE = 65536;
     const EXPLORER_SEARCH_YIELD_MS = 8;
+    const EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT = 64;
+    const EXPLORER_TREE_INDENT_PX = 12;
+
     const EXPLORER_GIT_STATUS_LABELS = Object.freeze({
         modified: 'M',
         added: 'A',
@@ -10185,27 +10370,65 @@
         renderExplorerGitPanels(index);
     }
 
-    function setExplorerGitSidebarOpen(index, open) {
+    function syncExplorerSidebar(index) {
         const pane = terminals[index];
         const main = document.getElementById(`explorer-main-${index}`);
-        const panel = document.getElementById(`explorer-git-panel-${index}`);
-        const handle = document.getElementById(`explorer-git-resizer-${index}`);
-        const button = document.getElementById(`explorer-git-toggle-${index}`);
-        if (!pane || !main || !panel) {
+        const sidebar = document.getElementById(`explorer-sidebar-${index}`);
+        if (!pane || !main || !sidebar) {
+            return;
+        }
+
+        const treeOpen = Boolean(pane._explorerTreeSidebarOpen);
+        const gitOpen = Boolean(pane._explorerGitSidebarOpen);
+        const anyOpen = treeOpen || gitOpen;
+        const treePanel = document.getElementById(`explorer-tree-panel-${index}`);
+        const gitPanel = document.getElementById(`explorer-git-panel-${index}`);
+        const splitter = document.getElementById(`explorer-sidebar-splitter-${index}`);
+        const handle = document.getElementById(`explorer-sidebar-resizer-${index}`);
+        const treeButton = document.getElementById(`explorer-tree-toggle-${index}`);
+        const gitButton = document.getElementById(`explorer-git-toggle-${index}`);
+
+        main.classList.toggle('tree-open', treeOpen);
+        main.classList.toggle('git-open', gitOpen);
+        sidebar.hidden = !anyOpen;
+        sidebar.classList.toggle('split', treeOpen && gitOpen);
+        if (treePanel) {
+            treePanel.hidden = !treeOpen;
+        }
+        if (gitPanel) {
+            gitPanel.hidden = !gitOpen;
+        }
+        if (splitter) {
+            splitter.hidden = !(treeOpen && gitOpen);
+        }
+        if (handle) {
+            handle.hidden = !anyOpen;
+        }
+        if (treeButton) {
+            treeButton.setAttribute('aria-pressed', treeOpen ? 'true' : 'false');
+        }
+        if (gitButton) {
+            gitButton.setAttribute('aria-pressed', gitOpen ? 'true' : 'false');
+        }
+
+        if (anyOpen) {
+            applyExplorerSidebarWidth(index);
+            wireExplorerSidebarResize(index);
+        }
+        if (treeOpen && gitOpen) {
+            applyExplorerSidebarSplit(index);
+            wireExplorerSidebarSplitter(index);
+        }
+    }
+
+    function setExplorerGitSidebarOpen(index, open) {
+        const pane = terminals[index];
+        if (!pane) {
             return;
         }
         pane._explorerGitSidebarOpen = Boolean(open);
-        main.classList.toggle('git-open', pane._explorerGitSidebarOpen);
-        panel.hidden = !pane._explorerGitSidebarOpen;
-        if (handle) {
-            handle.hidden = !pane._explorerGitSidebarOpen;
-        }
-        if (button) {
-            button.setAttribute('aria-pressed', pane._explorerGitSidebarOpen ? 'true' : 'false');
-        }
+        syncExplorerSidebar(index);
         if (pane._explorerGitSidebarOpen) {
-            applyExplorerGitSidebarWidth(index);
-            wireExplorerGitSidebarResize(index);
             loadExplorerGitRepo(index);
         }
     }
@@ -10215,25 +10438,42 @@
         setExplorerGitSidebarOpen(index, !pane?._explorerGitSidebarOpen);
     }
 
-    function applyExplorerGitSidebarWidth(index) {
+    function setExplorerTreeSidebarOpen(index, open) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        pane._explorerTreeSidebarOpen = Boolean(open);
+        syncExplorerSidebar(index);
+        if (pane._explorerTreeSidebarOpen) {
+            loadExplorerTree(index);
+        }
+    }
+
+    function toggleExplorerTreeSidebar(index) {
+        const pane = terminals[index];
+        setExplorerTreeSidebarOpen(index, !pane?._explorerTreeSidebarOpen);
+    }
+
+    function applyExplorerSidebarWidth(index) {
         const pane = terminals[index];
         const main = document.getElementById(`explorer-main-${index}`);
         if (!pane || !main) {
             return;
         }
-        const width = Math.max(180, Math.min(Number(pane._explorerGitSidebarWidth || 260), 520));
-        pane._explorerGitSidebarWidth = width;
-        main.style.setProperty('--explorer-git-sidebar-width', `${width}px`);
+        const width = Math.max(180, Math.min(Number(pane._explorerSidebarWidth || 260), 520));
+        pane._explorerSidebarWidth = width;
+        main.style.setProperty('--explorer-sidebar-width', `${width}px`);
     }
 
-    function wireExplorerGitSidebarResize(index) {
+    function wireExplorerSidebarResize(index) {
         const pane = terminals[index];
         const main = document.getElementById(`explorer-main-${index}`);
-        const handle = document.getElementById(`explorer-git-resizer-${index}`);
+        const handle = document.getElementById(`explorer-sidebar-resizer-${index}`);
         if (!pane || !main || !handle) {
             return;
         }
-        applyExplorerGitSidebarWidth(index);
+        applyExplorerSidebarWidth(index);
         if (handle.dataset.bound) {
             return;
         }
@@ -10247,8 +10487,8 @@
                 const rect = main.getBoundingClientRect();
                 const maxWidth = Math.min(520, Math.max(180, rect.width - 280));
                 const nextWidth = Math.max(180, Math.min(Math.round(moveEvent.clientX - rect.left), maxWidth));
-                pane._explorerGitSidebarWidth = nextWidth;
-                main.style.setProperty('--explorer-git-sidebar-width', `${nextWidth}px`);
+                pane._explorerSidebarWidth = nextWidth;
+                main.style.setProperty('--explorer-sidebar-width', `${nextWidth}px`);
             };
             const onEnd = endEvent => {
                 handle.classList.remove('dragging');
@@ -10261,6 +10501,290 @@
             window.addEventListener('pointerup', onEnd, { once: true });
             window.addEventListener('pointercancel', onEnd, { once: true });
         });
+    }
+
+    /* Unset tree height means the two stacked panels share the sidebar evenly. */
+    function applyExplorerSidebarSplit(index) {
+        const pane = terminals[index];
+        const sidebar = document.getElementById(`explorer-sidebar-${index}`);
+        if (!pane || !sidebar) {
+            return;
+        }
+        const stored = Number(pane._explorerSidebarTreeHeight || 0);
+        if (!stored) {
+            sidebar.style.removeProperty('--explorer-sidebar-tree-height');
+            return;
+        }
+        const height = sidebar.getBoundingClientRect().height;
+        const maxTop = Math.max(EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT, height - EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT - 6);
+        const top = Math.max(EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT, Math.min(stored, maxTop));
+        pane._explorerSidebarTreeHeight = top;
+        sidebar.style.setProperty('--explorer-sidebar-tree-height', `${top}px`);
+    }
+
+    function wireExplorerSidebarSplitter(index) {
+        const pane = terminals[index];
+        const sidebar = document.getElementById(`explorer-sidebar-${index}`);
+        const splitter = document.getElementById(`explorer-sidebar-splitter-${index}`);
+        if (!pane || !sidebar || !splitter || splitter.dataset.bound) {
+            return;
+        }
+
+        splitter.dataset.bound = 'true';
+        splitter.addEventListener('pointerdown', event => {
+            event.preventDefault();
+            splitter.classList.add('dragging');
+            splitter.setPointerCapture?.(event.pointerId);
+            const onMove = moveEvent => {
+                const rect = sidebar.getBoundingClientRect();
+                const maxTop = Math.max(
+                    EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT,
+                    rect.height - EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT - 6
+                );
+                const nextTop = Math.max(
+                    EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT,
+                    Math.min(Math.round(moveEvent.clientY - rect.top), maxTop)
+                );
+                pane._explorerSidebarTreeHeight = nextTop;
+                sidebar.style.setProperty('--explorer-sidebar-tree-height', `${nextTop}px`);
+            };
+            const onEnd = endEvent => {
+                splitter.classList.remove('dragging');
+                splitter.releasePointerCapture?.(endEvent.pointerId);
+                window.removeEventListener('pointermove', onMove);
+                window.removeEventListener('pointerup', onEnd);
+                window.removeEventListener('pointercancel', onEnd);
+            };
+            window.addEventListener('pointermove', onMove);
+            window.addEventListener('pointerup', onEnd, { once: true });
+            window.addEventListener('pointercancel', onEnd, { once: true });
+        });
+    }
+
+    function ensureExplorerTreeState(pane) {
+        if (!(pane._explorerTreeExpanded instanceof Set)) {
+            pane._explorerTreeExpanded = new Set();
+        }
+        if (!(pane._explorerTreeChildren instanceof Map)) {
+            pane._explorerTreeChildren = new Map();
+        }
+        if (!(pane._explorerTreeErrors instanceof Map)) {
+            pane._explorerTreeErrors = new Map();
+        }
+        if (!(pane._explorerTreeLoading instanceof Set)) {
+            pane._explorerTreeLoading = new Set();
+        }
+        return pane;
+    }
+
+    async function loadExplorerTreeChildren(index, path) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId) {
+            return [];
+        }
+
+        ensureExplorerTreeState(pane);
+        const key = String(path || '');
+        if (pane._explorerTreeChildren.has(key)) {
+            return pane._explorerTreeChildren.get(key);
+        }
+        if (pane._explorerTreeLoading.has(key)) {
+            return [];
+        }
+
+        pane._explorerTreeLoading.add(key);
+        pane._explorerTreeErrors.delete(key);
+        renderExplorerTreePanel(index);
+        try {
+            const entriesUrl = `/api/explorer/${encodeURIComponent(sessionId)}/entries`;
+            const response = await fetch(key ? `${entriesUrl}?path=${encodeURIComponent(key)}` : entriesUrl);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load directory');
+            }
+            const entries = (Array.isArray(data.entries) ? data.entries : []).filter(entry => !entry.deleted);
+            pane._explorerTreeChildren.set(key, entries);
+            return entries;
+        } catch (error) {
+            console.error('[GridVibe Sessions] Explorer tree load failed:', error);
+            pane._explorerTreeErrors.set(key, error.message || 'Failed to load directory.');
+            return [];
+        } finally {
+            pane._explorerTreeLoading.delete(key);
+            renderExplorerTreePanel(index);
+        }
+    }
+
+    function explorerTreeRowIsActive(pane, entry) {
+        const path = entry.path || '';
+        if (entry.type === 'directory') {
+            return pane._explorerMode !== 'file' && (pane._explorerPath || '') === path;
+        }
+        return pane._explorerMode === 'file' && (pane._explorerFilePath || '') === path;
+    }
+
+    function explorerTreeRowHtml(pane, entry, depth) {
+        const isDirectory = entry.type === 'directory';
+        const path = entry.path || '';
+        const expanded = isDirectory && pane._explorerTreeExpanded.has(path);
+        const active = explorerTreeRowIsActive(pane, entry);
+        const action = isDirectory
+            ? `data-explorer-tree-dir="${escHtml(path)}" aria-expanded="${expanded ? 'true' : 'false'}"`
+            : `data-explorer-tree-file="${escHtml(path)}"`;
+        const chevron = isDirectory ? (expanded ? '▾' : '▸') : '';
+        const badge = explorerGitStatusLabel(entry.git) ? explorerGitBadgeHtml(entry.git) : '';
+        const openFolder = isDirectory
+            ? `<button type="button" class="explorer-search-btn explorer-tree-open" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">↪</button>`
+            : '';
+
+        return `
+            <div class="explorer-tree-row${active ? ' active' : ''}">
+                <button type="button" class="explorer-tree-main" ${action} style="padding-left:${7 + depth * EXPLORER_TREE_INDENT_PX}px" title="${escHtml(path)}">
+                    <span class="explorer-tree-chevron" aria-hidden="true">${chevron}</span>
+                    ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
+                    <span class="explorer-tree-name">${escHtml(entry.name || path)}</span>
+                </button>
+                ${badge}
+                ${openFolder}
+            </div>
+        `;
+    }
+
+    function renderExplorerTreeNodes(pane, path, depth) {
+        const indent = `style="padding-left:${10 + depth * EXPLORER_TREE_INDENT_PX}px"`;
+        const error = pane._explorerTreeErrors.get(path);
+        if (error) {
+            return `<div class="explorer-tree-error" ${indent}>${escHtml(error)}</div>`;
+        }
+        if (pane._explorerTreeLoading.has(path)) {
+            return `<div class="explorer-tree-loading" ${indent}>Loading...</div>`;
+        }
+
+        const entries = pane._explorerTreeChildren.get(path);
+        if (!entries) {
+            return '';
+        }
+        if (!entries.length) {
+            return `<div class="explorer-tree-empty" ${indent}>Empty folder.</div>`;
+        }
+
+        return entries.map(entry => {
+            const row = explorerTreeRowHtml(pane, entry, depth);
+            if (entry.type !== 'directory' || !pane._explorerTreeExpanded.has(entry.path || '')) {
+                return row;
+            }
+            const children = renderExplorerTreeNodes(pane, entry.path || '', depth + 1);
+            return `${row}<div class="explorer-tree-children">${children}</div>`;
+        }).join('');
+    }
+
+    function renderExplorerTreePanel(index) {
+        const pane = terminals[index];
+        const panel = document.getElementById(`explorer-tree-panel-${index}`);
+        if (!pane || !panel) {
+            return;
+        }
+
+        ensureExplorerTreeState(pane);
+        panel.innerHTML = `
+            <div class="explorer-tree-section">
+                <div class="explorer-tree-title">Files</div>
+                <div class="explorer-tree-children">${renderExplorerTreeNodes(pane, '', 0)}</div>
+            </div>
+        `;
+        panel.querySelectorAll('[data-explorer-tree-dir]').forEach(button => {
+            button.addEventListener('click', () => {
+                toggleExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');
+            });
+        });
+        panel.querySelectorAll('[data-explorer-tree-file]').forEach(button => {
+            button.addEventListener('click', () => {
+                openExplorerFile(index, button.dataset.explorerTreeFile || '');
+            });
+        });
+        panel.querySelectorAll('[data-explorer-tree-open-folder]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                loadExplorerPane(index, button.dataset.explorerTreeOpenFolder || '');
+            });
+        });
+    }
+
+    async function toggleExplorerTreeDirectory(index, path) {
+        const pane = terminals[index];
+        if (!pane || !path) {
+            return;
+        }
+
+        ensureExplorerTreeState(pane);
+        if (pane._explorerTreeExpanded.has(path)) {
+            pane._explorerTreeExpanded.delete(path);
+            renderExplorerTreePanel(index);
+            return;
+        }
+
+        pane._explorerTreeExpanded.add(path);
+        pane._explorerTreeErrors.delete(path);
+        renderExplorerTreePanel(index);
+        await loadExplorerTreeChildren(index, path);
+    }
+
+    /* Expand every ancestor of the pane's current directory or open file. */
+    async function revealExplorerTreePath(index) {
+        const pane = terminals[index];
+        if (!pane?._explorerTreeSidebarOpen) {
+            return;
+        }
+
+        ensureExplorerTreeState(pane);
+        const target = pane._explorerMode === 'file'
+            ? (pane._explorerFilePath || '')
+            : (pane._explorerPath || '');
+        const segments = String(target).split('/').filter(Boolean);
+        if (pane._explorerMode === 'file') {
+            segments.pop();
+        }
+
+        await loadExplorerTreeChildren(index, '');
+        let current = '';
+        for (const segment of segments) {
+            current = current ? `${current}/${segment}` : segment;
+            pane._explorerTreeExpanded.add(current);
+            await loadExplorerTreeChildren(index, current);
+        }
+        renderExplorerTreePanel(index);
+    }
+
+    async function loadExplorerTree(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        ensureExplorerTreeState(pane);
+        renderExplorerTreePanel(index);
+        await revealExplorerTreePath(index);
+    }
+
+    /* Drop cached children but keep expansion state, then refetch what is visible. */
+    async function reloadExplorerTree(index) {
+        const pane = terminals[index];
+        if (!pane?._explorerTreeSidebarOpen) {
+            return;
+        }
+
+        ensureExplorerTreeState(pane);
+        pane._explorerTreeChildren.clear();
+        pane._explorerTreeErrors.clear();
+        renderExplorerTreePanel(index);
+
+        const expanded = [...pane._explorerTreeExpanded]
+            .sort((left, right) => left.split('/').length - right.split('/').length);
+        await loadExplorerTreeChildren(index, '');
+        for (const path of expanded) {
+            await loadExplorerTreeChildren(index, path);
+        }
+        renderExplorerTreePanel(index);
     }
 
     function ensureExplorerDiffExpandedCommits(pane) {
@@ -11703,7 +12227,11 @@
             ) {
                 return true;
             }
-            return renderExplorerFile(index, data, { scrollState, openDiff, diffCommit });
+            const rendered = renderExplorerFile(index, data, { scrollState, openDiff, diffCommit });
+            if (rendered) {
+                revealExplorerTreePath(index);
+            }
+            return rendered;
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer file open failed:', error);
             renderExplorerDirectoryOpenError(index, error.message || 'Failed to open file.');
@@ -11714,6 +12242,7 @@
     async function refreshExplorerPane(index) {
         const pane = terminals[index];
         const refreshGitSidebar = Boolean(pane?._explorerGitSidebarOpen);
+        const refreshTreeSidebar = Boolean(pane?._explorerTreeSidebarOpen);
         if (refreshGitSidebar) {
             invalidateExplorerGitRepo(index);
         }
@@ -11725,6 +12254,9 @@
         }
         if (refreshGitSidebar) {
             await loadExplorerGitRepo(index);
+        }
+        if (refreshTreeSidebar) {
+            await reloadExplorerTree(index);
         }
         return refreshed;
     }
@@ -11784,6 +12316,7 @@
             document.getElementById(`ph-${index}`)?.remove();
             updateExplorerGitSummary(index, data.git || null);
             renderExplorerDirectorySearchControls(index);
+            revealExplorerTreePath(index);
 
             const pathLabel = document.getElementById(`explorer-path-${index}`);
             const upButton = document.getElementById(`explorer-up-${index}`);

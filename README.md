@@ -85,6 +85,8 @@ Explorer panes support:
 - Size-limited previews. Binary files, directories, and paths outside the root are rejected.
 - Local Repo explorers add read-only Git awareness when `git` is available. SSH explorers use the remote host's `git` command when available. Both support branch/dirty summary, per-entry status badges, directory dirty markers, and a bounded internal old/new Diff panel with added and removed line highlighting for changed tracked files.
 - The explorer `Git` button opens a resizable repository sidebar with uncommitted changed files and a collapsible commit graph. Uncommitted file rows open the current file, commit file rows open that historical read-only diff, folder buttons jump to containing folders, and the file Diff tab preserves whitespace and syntax coloring.
+- The explorer `Tree` button opens a lazily loaded file tree sidebar for faster navigation. Folder rows expand and collapse in place, folder buttons jump the explorer list to that folder, file rows open the read-only preview, and rows carry the same Git status badges. The tree follows the pane, expanding the ancestors of the current directory or open file.
+- `Tree` and `Git` are independent. Opening both stacks the file tree above the Git sidebar in one shared sidebar, split evenly by a draggable horizontal divider.
 
 File moving, editing, deleting, upload, staging, restoring, checkout, commit, pull, and push actions are not part of the current file explorer implementation.
 
@@ -165,7 +167,7 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 - Saved launcher and active-workspace presets with encrypted SSH passwords
 - Session groups with numbered closable tabs, `Alt+1` through `Alt+9` tab switching, import/save actions, drag-to-reorder persistence, collapsible top bar, and max surface mode
 - xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and drag-resizable dynamic split-pane support
-- Local and SSH read-only file explorer panes with directory search, text/Markdown preview, syntax highlighting, per-pane editor font zoom, client-side file/diff search, and read-only Git status/diff awareness with a resizable changed-file and commit-graph sidebar
+- Local and SSH read-only file explorer panes with directory search, a lazily loaded file tree sidebar, text/Markdown preview, syntax highlighting, per-pane editor font zoom, client-side file/diff search, and read-only Git status/diff awareness with a resizable changed-file and commit-graph sidebar
 - Optional resizable native desktop window through `pywebview`
 - Optional offline voice input through Vosk or faster-whisper
 - Theme support for system, light, and dark modes

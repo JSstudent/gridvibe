@@ -9,6 +9,7 @@ All notable changes to GridVibe will be documented in this file.
 - Enabled read-only File Explorer panes for SSH sessions using SFTP with root-bound remote path validation and terminal/explorer mode switching.
 - Added read-only Git awareness to Local Repo and SSH file explorer panes, including branch/dirty summaries, per-entry status badges, directory dirty markers, and bounded internal old/new diff previews with added/removed line highlighting.
 - Added a resizable Git sidebar for Local Repo and SSH file explorer panes, showing uncommitted changed files plus a collapsible commit graph with per-commit changed files, folder navigation, and read-only historical diffs from commit file rows.
+- Added a `Tree` file tree sidebar to Local Repo and SSH file explorer panes with lazy per-directory loading, in-place expand/collapse, Git status badges, folder jump buttons, and automatic reveal of the current directory or open file. The tree and Git sidebars can be open at the same time, stacked in one shared sidebar with a draggable horizontal divider.
 - Added numbered session tabs with `Alt+1` through `Alt+9` switching based on the current tab order, while ignoring editable fields.
 - Added drag-resizable terminal pane dividers with xterm refits, backend PTY resize propagation, session-local resize weight caching, and minimum pane-size guards.
 - Added per-pane `-`/`+` font-size zoom controls to the read-only file editor view, covering source and Markdown preview panels.
