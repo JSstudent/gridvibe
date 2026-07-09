@@ -179,6 +179,35 @@
             --explorer-file: #9fb2c8;
         }
 
+        :root,
+        [data-theme="dark"],
+        .explorer-pane[data-explorer-theme="dark"] {
+            --git-lane-0: #58a6ff;
+            --git-lane-1: #7ee787;
+            --git-lane-2: #d2a8ff;
+            --git-lane-3: #f0883e;
+            --git-lane-4: #f778ba;
+            --git-lane-5: #56d4dd;
+            --explorer-open-folder-text: #7cc4ff;
+            --explorer-open-folder-bg: #10283d;
+            --explorer-open-folder-border: #2a5b83;
+            --explorer-open-folder-hover-bg: #17456b;
+        }
+
+        [data-theme="light"],
+        .explorer-pane[data-explorer-theme="light"] {
+            --git-lane-0: #0969da;
+            --git-lane-1: #1a7f37;
+            --git-lane-2: #8250df;
+            --git-lane-3: #bc4c00;
+            --git-lane-4: #bf3989;
+            --git-lane-5: #0f7c8a;
+            --explorer-open-folder-text: #0b5fa8;
+            --explorer-open-folder-bg: #e5f2ff;
+            --explorer-open-folder-border: #9dc9ee;
+            --explorer-open-folder-hover-bg: #cee6fb;
+        }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
@@ -1380,15 +1409,24 @@
 
         .explorer-git-toggle,
         .explorer-tree-toggle {
+            width: 30px;
             height: 28px;
-            min-width: 34px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 auto;
             border: 1px solid var(--t-border-tab);
             border-radius: 5px;
             background: var(--t-btn-bg);
             color: var(--t-btn-text);
             cursor: pointer;
-            font-size: .72rem;
-            font-weight: 700;
+        }
+
+        .explorer-toggle-icon {
+            width: 17px;
+            height: 17px;
+            display: block;
+            pointer-events: none;
         }
 
         .explorer-git-toggle[aria-pressed="true"],
@@ -1410,7 +1448,7 @@
         }
 
         .explorer-git-summary {
-            max-width: 42%;
+            max-width: 30%;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -1418,6 +1456,10 @@
             font-size: .72rem;
             font-family: Consolas, Monaco, 'Courier New', monospace;
             flex: 0 1 auto;
+        }
+
+        .explorer-git-summary:empty {
+            display: none;
         }
 
         .explorer-main {
@@ -1579,12 +1621,6 @@
         .explorer-tree-row .explorer-icon svg {
             width: 16px;
             height: 16px;
-        }
-
-        .explorer-tree-open {
-            width: 22px;
-            height: 22px;
-            font-size: .68rem;
         }
 
         .explorer-tree-empty,
@@ -1866,6 +1902,21 @@
             cursor: default;
         }
 
+        .explorer-open-folder-btn {
+            width: 22px;
+            height: 22px;
+            font-size: .68rem;
+            border-color: var(--explorer-open-folder-border);
+            background: var(--explorer-open-folder-bg);
+            color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-open-folder-btn:hover,
+        .explorer-open-folder-btn:focus-visible {
+            background: var(--explorer-open-folder-hover-bg);
+            outline: none;
+        }
+
         .explorer-zoom-btn {
             width: 28px;
             height: 28px;
@@ -2139,6 +2190,17 @@
         .explorer-diff-commit-graph {
             color: var(--explorer-muted);
             white-space: pre;
+        }
+
+        .explorer-diff-commit-graph-lane[data-git-lane="0"] { color: var(--git-lane-0); }
+        .explorer-diff-commit-graph-lane[data-git-lane="1"] { color: var(--git-lane-1); }
+        .explorer-diff-commit-graph-lane[data-git-lane="2"] { color: var(--git-lane-2); }
+        .explorer-diff-commit-graph-lane[data-git-lane="3"] { color: var(--git-lane-3); }
+        .explorer-diff-commit-graph-lane[data-git-lane="4"] { color: var(--git-lane-4); }
+        .explorer-diff-commit-graph-lane[data-git-lane="5"] { color: var(--git-lane-5); }
+
+        .explorer-diff-commit-graph-lane.node {
+            font-weight: 700;
         }
 
         .explorer-diff-commit-toggle {
@@ -6652,10 +6714,10 @@
                             <div class="explorer-surface" id="explorer-${i}">
                                 <div class="explorer-bar">
                                      <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
-                                     <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
-                                     <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${i}" data-explorer-tree-toggle="${i}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">Tree</button>
-                                     <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">Git</button>
+                                     <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${i}" data-explorer-tree-toggle="${i}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
+                                     <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
                                      <div class="explorer-git-summary" id="explorer-git-${i}" aria-live="polite"></div>
+                                     <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
                                      <div class="explorer-directory-search" id="explorer-directory-search-${i}"></div>
                                  </div>
                                  <div class="explorer-main" id="explorer-main-${i}">
@@ -7499,10 +7561,10 @@
                 <div class="explorer-surface" id="explorer-${index}">
                     <div class="explorer-bar">
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
-                        <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
-                        <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${index}" data-explorer-tree-toggle="${index}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">Tree</button>
-                        <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">Git</button>
+                        <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${index}" data-explorer-tree-toggle="${index}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
+                        <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
                         <div class="explorer-git-summary" id="explorer-git-${index}" aria-live="polite"></div>
+                        <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
                         <div class="explorer-directory-search" id="explorer-directory-search-${index}"></div>
                     </div>
                     <div class="explorer-main" id="explorer-main-${index}">
@@ -9748,6 +9810,7 @@
     const EXPLORER_SEARCH_YIELD_MS = 8;
     const EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT = 64;
     const EXPLORER_TREE_INDENT_PX = 12;
+    const EXPLORER_GIT_GRAPH_LANE_COUNT = 6;
 
     const EXPLORER_GIT_STATUS_LABELS = Object.freeze({
         modified: 'M',
@@ -10249,6 +10312,25 @@
         loadExplorerPane(index, explorerParentDirectory(path));
     }
 
+    function explorerGitGraphLane(character, position) {
+        // `git log --graph` gives each branch a two-character column, and a diagonal
+        // always belongs to the column it is reaching towards, not the one it starts in.
+        const column = character === '/' || character === '\\' ? (position + 1) / 2 : position / 2;
+        return Math.floor(column) % EXPLORER_GIT_GRAPH_LANE_COUNT;
+    }
+
+    function explorerGitGraphHtml(graph) {
+        const characters = Array.from(typeof graph === 'string' && graph ? graph : '*');
+        return characters.map((character, position) => {
+            if (character === ' ') {
+                return ' ';
+            }
+            const lane = explorerGitGraphLane(character, position);
+            const nodeClass = character === '*' ? ' node' : '';
+            return `<span class="explorer-diff-commit-graph-lane${nodeClass}" data-git-lane="${lane}">${escHtml(character)}</span>`;
+        }).join('');
+    }
+
     function renderExplorerGitFileRows(index, files, options = {}) {
         const entries = Array.isArray(files) ? files : [];
         if (!entries.length) {
@@ -10264,7 +10346,7 @@
                 <div class="explorer-diff-commit-file" title="${escHtml(path)}">
                     ${explorerDiffSidebarStatusHtml(file.git)}
                     <button type="button" class="explorer-diff-commit-file-path" ${pathAction}>${escHtml(path || file.name || 'Changed file')}</button>
-                    <button type="button" class="explorer-search-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">↪</button>
+                    <button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">↪</button>
                 </div>
             `;
         }).join('');
@@ -10295,7 +10377,7 @@
                 const expanded = hash && expandedCommits.has(`explorer:${hash}`);
                 return `
                     <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
-                        <span class="explorer-diff-commit-graph">${escHtml(commit.graph || '*')}</span>
+                        <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
                         <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
                         <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${escHtml(commit.subject || commit.line || '')}</span>
                     </button>
@@ -10635,7 +10717,7 @@
         const chevron = isDirectory ? (expanded ? '▾' : '▸') : '';
         const badge = explorerGitStatusLabel(entry.git) ? explorerGitBadgeHtml(entry.git) : '';
         const openFolder = isDirectory
-            ? `<button type="button" class="explorer-search-btn explorer-tree-open" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">↪</button>`
+            ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">↪</button>`
             : '';
 
         return `
@@ -11896,6 +11978,29 @@
                 <path fill="currentColor" d="M6.75 3A2.75 2.75 0 0 0 4 5.75v12.5A2.75 2.75 0 0 0 6.75 21h10.5A2.75 2.75 0 0 0 20 18.25V8.62a2.75 2.75 0 0 0-.8-1.94L16.32 3.8A2.75 2.75 0 0 0 14.38 3H6.75ZM5.5 5.75c0-.69.56-1.25 1.25-1.25H14V8c0 1.1.9 2 2 2h2.5v8.25c0 .69-.56 1.25-1.25 1.25H6.75c-.69 0-1.25-.56-1.25-1.25V5.75Zm10 0 1.94 1.94c.23.23.4.5.49.81H16a.5.5 0 0 1-.5-.5V5.75Z"/>
             </svg>
         </span>
+    `;
+
+    const EXPLORER_TREE_TOGGLE_ICON = `
+        <svg class="explorer-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+            fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="5" rx="1.5"/>
+            <rect x="14" y="9.5" width="7" height="5" rx="1.5"/>
+            <rect x="14" y="16.5" width="7" height="5" rx="1.5"/>
+            <path d="M6.5 8v11"/>
+            <path d="M6.5 12h7.5"/>
+            <path d="M6.5 19h7.5"/>
+        </svg>
+    `;
+
+    const EXPLORER_GIT_TOGGLE_ICON = `
+        <svg class="explorer-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+            fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="5.5" cy="5" r="2.25"/>
+            <circle cx="5.5" cy="19" r="2.25"/>
+            <circle cx="18.5" cy="5" r="2.25"/>
+            <path d="M5.5 7.25v9.5"/>
+            <path d="M18.5 7.25v1.5a4 4 0 0 1-4 4h-5a4 4 0 0 0-4 4"/>
+        </svg>
     `;
 
     function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '' } = {}) {

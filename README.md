@@ -84,9 +84,10 @@ Explorer panes support:
 - Lightweight syntax coloring for common source, config, log, JSON Lines, Dockerfile, and environment files.
 - Size-limited previews. Binary files, directories, and paths outside the root are rejected.
 - Local Repo explorers add read-only Git awareness when `git` is available. SSH explorers use the remote host's `git` command when available. Both support branch/dirty summary, per-entry status badges, directory dirty markers, and a bounded internal old/new Diff panel with added and removed line highlighting for changed tracked files.
-- The explorer `Git` button opens a resizable repository sidebar with uncommitted changed files and a collapsible commit graph. Uncommitted file rows open the current file, commit file rows open that historical read-only diff, folder buttons jump to containing folders, and the file Diff tab preserves whitespace and syntax coloring.
-- The explorer `Tree` button opens a lazily loaded file tree sidebar for faster navigation. Folder rows expand and collapse in place, folder buttons jump the explorer list to that folder, file rows open the read-only preview, and rows carry the same Git status badges. The tree follows the pane, expanding the ancestors of the current directory or open file.
-- `Tree` and `Git` are independent. Opening both stacks the file tree above the Git sidebar in one shared sidebar, split evenly by a draggable horizontal divider.
+- The explorer tree and Git sidebar toggles sit at the left of the explorer bar, next to the Git branch summary, and are labelled with a file-hierarchy icon and a Git-branch icon.
+- The Git toggle opens a resizable repository sidebar with uncommitted changed files and a collapsible commit graph whose branch lanes are colour-coded. Uncommitted file rows open the current file, commit file rows open that historical read-only diff, folder buttons jump to containing folders, and the file Diff tab preserves whitespace and syntax coloring.
+- The tree toggle opens a lazily loaded file tree sidebar for faster navigation. Folder rows expand and collapse in place, folder buttons jump the explorer list to that folder, file rows open the read-only preview, and rows carry the same Git status badges. The tree follows the pane, expanding the ancestors of the current directory or open file.
+- The tree and Git sidebars are independent. Opening both stacks the file tree above the Git sidebar in one shared sidebar, split evenly by a draggable horizontal divider.
 
 File moving, editing, deleting, upload, staging, restoring, checkout, commit, pull, and push actions are not part of the current file explorer implementation.
 

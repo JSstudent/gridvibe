@@ -15,6 +15,8 @@ All notable changes to GridVibe will be documented in this file.
 - Added per-pane `-`/`+` font-size zoom controls to the read-only file editor view, covering source and Markdown preview panels.
 - Added source line numbers to read-only explorer file previews and Markdown source-gutter chevrons for collapsing heading sections.
 - Added a global App Settings option for normal vs. max session-window surface mode while keeping the in-session surface toggle available.
+- Improved Git sidebar readability by colouring each commit graph lane separately, so mainline and branch commits are distinguishable, and gave the folder jump buttons in the Git and Tree sidebars a shared light-blue style that adapts to the light and dark explorer themes.
+- Moved the file explorer `Tree` and `Git` sidebar toggles, along with the Git branch summary, to the left of the directory path, and replaced the toggle labels with file-hierarchy and Git-branch icons.
 
 ## 1.1.0 - 2026-06-28
 
