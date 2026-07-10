@@ -166,6 +166,9 @@ def _decrypt_password(encrypted: str) -> str:
 ```
 The launcher then shows an empty password field instead of a broken one.
 
+> **✅ Implemented (2026-07-10).** `_decrypt_password` in `web/api.py` now logs a warning and
+> returns `""` on decryption failure instead of returning the ciphertext.
+
 ### 1.4 `AutoAddPolicy` for all SSH host keys — **Low** (posture, documented)
 
 **Location:** `web/api.py` — `_connect_ssh_session`, `_open_ssh_sftp`, `_detect_ssh_command`
@@ -209,6 +212,10 @@ with self.lock:
     self.groups[resolved_group_id] = group
 return group
 ```
+
+> **✅ Implemented (2026-07-10).** `create_group` in `sessions/manager.py` now computes
+> `next_display_order`, builds the `SessionGroup`, and inserts it under a single `self.lock`
+> hold, so concurrent launches can no longer observe the same max order.
 
 ### 2.2 `clear_disconnected_sessions` can delete a group that is mid-launch — **Medium**
 
@@ -347,6 +354,11 @@ with _whisper_model_lock:
         _whisper_model_params = wanted
     return _whisper_model_instance
 ```
+
+> **✅ Implemented (2026-07-10).** `_ensure_whisper_model` in `web/api.py` now records the
+> `(model, device, compute_type)` tuple it built the instance with in a new
+> `_whisper_model_params` global and rebuilds the `WhisperModel` under `_whisper_model_lock`
+> whenever the current config no longer matches; the old instance is released to GC.
 
 ### 2.8 8-character session IDs stored without collision check — **Low**
 
@@ -549,6 +561,10 @@ elif shell_kind == "powershell":
 ```
 Note `C:\Program Files` paths are common on the exact platform (Windows) this branch targets.
 
+> **✅ Implemented (2026-07-10).** The `powershell` branch of `_run_startup_sequence` now quotes
+> the target directory with the existing `_powershell_single_quote` helper instead of
+> `shlex.quote`.
+
 ### 4.2 xterm theme uses the removed `selection` key — **Low**
 
 **Location:** `templates/terminals.html:6139-6144` (`makeTerminal`)
@@ -566,6 +582,10 @@ theme: {
     selectionBackground: 'rgba(0,217,255,.25)'
 }
 ```
+
+> **✅ Implemented (2026-07-10).** `makeTerminal()` in `templates/terminals.html` now sets
+> `selectionBackground` instead of the removed `selection` theme key, restoring the cyan
+> selection tint.
 
 ### 4.3 Launch button renames itself after the first launch — **Low**
 
@@ -602,6 +622,14 @@ mirroring `saveSessionAsModal` from `terminals.html` (title "Save Session", pre-
 modal + `openSaveSessionAsModal()` logic can be lifted verbatim into the shared file and reused
 by both pages.
 
+> **✅ Implemented (2026-07-10).** `templates/index.html` gained a `saveSessionNameModal`
+> (mirroring the terminals page's `saveSessionAsModal` pattern: promise-based
+> `openSaveSessionNameModal()` / `closeSaveSessionNameModal()`, pre-filled with
+> `buildDefaultSessionName()`, Enter submits, Escape/backdrop cancels), and
+> `saveCurrentConfig` awaits it instead of calling `window.prompt`. Implemented directly in
+> `index.html` since the shared-JS extraction (6.4) hasn't landed yet — lift it into
+> `shared.js` when that refactor happens.
+
 ### 4.5 `info` and `warning` message types are used but unstyled — **Low**
 
 **Location:** `templates/index.html` — CSS defines only `.message.success/.message.error`
@@ -619,6 +647,11 @@ idle hint text.
 ```
 (Consider adding `--warning: #f59e0b` to the token set — there is currently no warning colour
 variable in either palette, which is why this hole appeared.)
+
+> **✅ Implemented (2026-07-10).** `templates/index.html` now defines a `--warning` token
+> (`#f59e0b` dark, `#b45309` light for contrast) and `.info` / `.warning` rules for all three
+> status classes (`.message`, `.toolbar-status`, `.inline-status`), with info mapped to
+> `var(--accent)`.
 
 ### 4.6 `setLocalRepoPath` updates a DOM node that no longer exists — **Low**
 
@@ -1150,6 +1183,12 @@ if intentional or session is None or session.status == SessionStatus.DISCONNECTE
 logger.error(...)
 ```
 
+> **✅ Implemented (2026-07-10).** Both `_stream_ssh_output` and `_stream_local_output` now
+> check (under `connection_lock`) whether the connection was already removed from
+> `ssh_connections`, or the session is gone / already `DISCONNECTED`, and log at DEBUG and
+> skip the ERROR-status transition in that case. The existing explorer-session special case
+> is preserved.
+
 ### 9.2 ANSI colour escape codes are written into the log file — **Low**
 
 **Evidence.** Entries like `"[35m[1mPOST /api/app-update HTTP/1.1[0m" 500` — werkzeug's
@@ -1197,6 +1236,12 @@ keepalive = int(ssh_config.get("keepalive_interval", 60))
 if keepalive > 0:
     client.get_transport().set_keepalive(keepalive)
 ```
+
+> **✅ Implemented (2026-07-10).** `_connect_ssh_session` in `web/api.py` now applies
+> `transport.set_keepalive(...)` right after a successful connect, reading
+> `ssh.keepalive_interval` (default 60; `0` or negative disables; `None` transport guarded).
+> Not applied to `_open_ssh_sftp` — those connections are short-lived until the SFTP pool
+> (3.1) lands.
 
 ### 10.2 Wire `terminal.font_size` / `font_family` into xterm
 
@@ -1302,7 +1347,7 @@ posture paragraph.
 ## Suggested sequencing
 
 1. **Quick wins (small, high value):** 1.3, 2.1, 2.7, 4.1, 4.2, 4.4, 4.5, 9.1, 10.1 — each is
-   under ~30 lines.
+   under ~30 lines. ✅ **All nine implemented 2026-07-10** (see the per-finding notes above).
 2. **Security defaults:** 1.1 + 1.2 together (one PR, changelog entry).
 3. **Perf pass:** 3.1 (SFTP pool) then 3.2/3.4; 3.6 (vendor assets) can ship independently.
 4. **Structural:** 6.1 (explorer backend) → 6.2 (module split) → 3.5/6.4 (template extraction),

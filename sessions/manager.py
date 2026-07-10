@@ -141,19 +141,17 @@ class SessionManager:
                 else max((group.display_order for group in self.groups.values()), default=-1) + 1
             )
 
-        group = SessionGroup(
-            group_id=resolved_group_id,
-            name=name or resolved_group_id,
-            connection_mode=connection_mode,
-            layout=layout,
-            terminal_count=terminal_count,
-            display_order=next_display_order,
-            saved_session_id=str(saved_session_id or "").strip(),
-            workspace_layout=workspace_layout,
-            surface_mode=surface_mode if surface_mode in {"normal", "max"} else "normal",
-        )
-
-        with self.lock:
+            group = SessionGroup(
+                group_id=resolved_group_id,
+                name=name or resolved_group_id,
+                connection_mode=connection_mode,
+                layout=layout,
+                terminal_count=terminal_count,
+                display_order=next_display_order,
+                saved_session_id=str(saved_session_id or "").strip(),
+                workspace_layout=workspace_layout,
+                surface_mode=surface_mode if surface_mode in {"normal", "max"} else "normal",
+            )
             self.groups[resolved_group_id] = group
 
         return group

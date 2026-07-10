@@ -20,6 +20,7 @@
             --accent-soft: rgba(76, 201, 240, 0.12);
             --danger: #ef4444;
             --success: #22c55e;
+            --warning: #f59e0b;
             --shadow: 0 24px 60px rgba(4, 8, 20, 0.52);
             --bg-card: rgba(22, 32, 58, 0.82);
             --bg-card-hover: rgba(30, 44, 78, 0.95);
@@ -44,6 +45,7 @@
             --accent-soft: rgba(8, 145, 178, 0.14);
             --danger: #dc2626;
             --success: #047857;
+            --warning: #b45309;
             --shadow: 0 18px 46px rgba(15, 23, 42, 0.13);
             --bg-card: rgba(255, 255, 255, 0.95);
             --bg-card-hover: rgba(248, 250, 252, 0.98);
@@ -494,6 +496,8 @@
 
         .message.success { color: var(--success); }
         .message.error { color: var(--danger); }
+        .message.info { color: var(--accent); }
+        .message.warning { color: var(--warning); }
 
         .terminal-layout-card .message {
             margin-bottom: 10px;
@@ -777,6 +781,8 @@
 
         .toolbar-status.success { color: var(--success); }
         .toolbar-status.error { color: var(--danger); }
+        .toolbar-status.info { color: var(--accent); }
+        .toolbar-status.warning { color: var(--warning); }
 
         .ghost-btn {
             padding: 9px 14px;
@@ -831,6 +837,8 @@
 
         .inline-status.success { color: var(--success); }
         .inline-status.error { color: var(--danger); }
+        .inline-status.info { color: var(--accent); }
+        .inline-status.warning { color: var(--warning); }
 
         .app-footer {
             display: flex;
@@ -2381,6 +2389,31 @@
     </div>
 </div>
 
+<div id="saveSessionNameModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="saveSessionNameTitle">
+        <div class="modal-head">
+            <div>
+                <div id="saveSessionNameTitle" class="modal-title">Save Session</div>
+                <div class="modal-copy">Save the current launcher setup as a reusable session.</div>
+            </div>
+            <button class="ghost-btn" type="button" onclick="closeSaveSessionNameModal()">Close</button>
+        </div>
+        <form id="saveSessionNameForm">
+            <div class="field">
+                <label for="saveSessionNameInput">Session name</label>
+                <input id="saveSessionNameInput" type="text" autocomplete="off">
+            </div>
+        </form>
+        <div class="modal-actions">
+            <div class="modal-copy"></div>
+            <div class="modal-actions-buttons">
+                <button class="ghost-btn" type="button" onclick="closeSaveSessionNameModal()">Cancel</button>
+                <button class="ghost-btn" type="submit" form="saveSessionNameForm">Save</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div id="appSettingsModal" class="modal-shell" aria-hidden="true">
     <div class="modal-card app-settings-card" role="dialog" aria-modal="true" aria-labelledby="appSettingsTitle">
         <div class="modal-head">
@@ -2744,6 +2777,7 @@
     let layoutChooserOpen = false;
     let connectionMode = 'ssh';
     let savedSessionResolver = null;
+    let saveSessionNameResolver = null;
     let savedSessionModalMode = 'import';
     let activeSavedSessionId = '';
     let activeSavedSessionName = '';
@@ -4766,12 +4800,12 @@
         try {
             const payload = collectFormConfig();
             const suggestedName = buildDefaultSessionName();
-            const rawName = window.prompt('Session name', suggestedName);
-            if (rawName === null) {
+            const result = await openSaveSessionNameModal(suggestedName);
+            if (result === null) {
                 return;
             }
 
-            const sessionName = rawName.trim() || suggestedName;
+            const sessionName = String(result.name || '').trim() || suggestedName;
             const shouldOverwriteActiveSession = Boolean(activeSavedSessionId) && (
                 sessionName === activeSavedSessionName || sessionName === activeSavedSessionId
             );
@@ -4816,6 +4850,37 @@
                 showMessage(`Import failed: ${error.message}`, 'error');
             }
         }
+    }
+
+    function closeSaveSessionNameModal(result = null) {
+        const modal = document.getElementById('saveSessionNameModal');
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+
+        if (saveSessionNameResolver) {
+            const resolver = saveSessionNameResolver;
+            saveSessionNameResolver = null;
+            resolver(result);
+        }
+    }
+
+    // window.prompt() is a no-op under pywebview's WebView2 backend, so session
+    // naming has to go through this modal instead.
+    function openSaveSessionNameModal(suggestedName) {
+        const modal = document.getElementById('saveSessionNameModal');
+        const nameInput = document.getElementById('saveSessionNameInput');
+        nameInput.value = suggestedName || '';
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            nameInput.focus();
+            nameInput.select();
+        }, 0);
+
+        return new Promise(resolve => {
+            saveSessionNameResolver = resolve;
+        });
     }
 
     function closeSavedSessionModal(result = null) {
@@ -5332,12 +5397,26 @@
         }
     });
 
+    document.getElementById('saveSessionNameModal').addEventListener('click', event => {
+        if (event.target.id === 'saveSessionNameModal') {
+            closeSaveSessionNameModal();
+        }
+    });
+
+    document.getElementById('saveSessionNameForm').addEventListener('submit', event => {
+        event.preventDefault();
+        closeSaveSessionNameModal({ name: document.getElementById('saveSessionNameInput').value });
+    });
+
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape' && document.getElementById('savedSessionsModal').classList.contains('visible')) {
             closeSavedSessionModal();
         }
         if (event.key === 'Escape' && document.getElementById('appSettingsModal').classList.contains('visible')) {
             closeAppSettingsModal();
+        }
+        if (event.key === 'Escape' && document.getElementById('saveSessionNameModal').classList.contains('visible')) {
+            closeSaveSessionNameModal();
         }
     });
 </script>

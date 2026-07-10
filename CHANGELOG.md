@@ -4,6 +4,12 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- Added SSH keepalive for terminal sessions: the existing `ssh.keepalive_interval` config key (default 60 seconds, `0` disables) is now applied to SSH connections so idle panes behind NAT/firewalls stay alive.
+- Fixed the launcher's `💾 Save Session` button doing nothing in the native desktop window: the session-name prompt is now an in-page modal instead of `window.prompt`, which WebView2 blocks.
+- Fixed stored SSH passwords being sent as raw ciphertext when the encryption key changed; undecryptable passwords are now ignored with a warning in the log.
+- Fixed PowerShell startup-directory quoting so paths with spaces (for example under `C:\Program Files`) change directory correctly.
+- Fixed the terminal selection highlight colour, changing the whisper model/device in App Settings now taking effect without a restart, a duplicate-tab-order race when launching sessions concurrently, and unstyled info/warning launcher status messages.
+- Reduced log noise: normal pane closures on Windows are now logged at debug level instead of ERROR.
 - Added basic Git staging to the file explorer Git sidebar: unstaged change rows show a `+` stage button and staged rows show a `-` unstage button, with a separate `Staged Changes` section above the working `Changes` list. Available for Local Repo and SSH explorer panes.
 - Added a commit message box with a `Commit` button that commits the staged changes, and a `Publish branch` button that pushes the current branch (setting the upstream to `origin` when none exists). Mutating Git commands never prompt for credentials, so publishing fails fast instead of hanging when authentication is required.
 - Added a Windows console launch prompt with Desktop, Browser, and Quit choices; Desktop uses native-first startup with browser fallback, while Browser skips optional desktop dependency setup.

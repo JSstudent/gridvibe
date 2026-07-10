@@ -144,7 +144,10 @@ def _decrypt_password(encrypted: str) -> str:
     try:
         return _cipher.decrypt(encrypted.encode()).decode()
     except Exception:
-        return encrypted
+        logger.warning(
+            "Stored SSH password could not be decrypted (encryption key changed?); ignoring it."
+        )
+        return ""
 
 
 # ==================== Configuration ====================
@@ -2359,7 +2362,7 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
         elif shell_kind == "powershell":
             _send_connection_input(
                 connection,
-                f"Set-Location -LiteralPath {shlex.quote(target_directory)}{newline}",
+                f"Set-Location -LiteralPath {_powershell_single_quote(target_directory)}{newline}",
             )
         else:
             _send_connection_input(connection, f"cd {shlex.quote(target_directory)}{newline}")
@@ -2414,6 +2417,12 @@ def _stream_ssh_output(session_id: str):
         session = session_manager.get_session(session_id)
         if session and _is_explorer_session(session):
             logger.debug("Ignoring stream shutdown for explorer session %s: %s", session_id, e)
+            return
+
+        with connection_lock:
+            intentional_close = session_id not in ssh_connections
+        if intentional_close or session is None or session.status == SessionStatus.DISCONNECTED:
+            logger.debug("Stream ended for closed session %s: %s", session_id, e)
             return
 
         logger.error(f"Error streaming output for session {session_id}: {e}")
@@ -2513,6 +2522,12 @@ def _stream_local_output(session_id: str):
         session = session_manager.get_session(session_id)
         if session and _is_explorer_session(session):
             logger.debug("Ignoring local stream shutdown for explorer session %s: %s", session_id, e)
+            return
+
+        with connection_lock:
+            intentional_close = session_id not in ssh_connections
+        if intentional_close or session is None or session.status == SessionStatus.DISCONNECTED:
+            logger.debug("Local stream ended for closed session %s: %s", session_id, e)
             return
 
         logger.error(f"Error streaming local output for session {session_id}: {e}")
@@ -4559,6 +4574,12 @@ def _connect_ssh_session(session_id: str, session: Any):
         )
         logger.info(f"[{session_id}] SSH connected successfully")
 
+        keepalive_interval = int(ssh_config.get("keepalive_interval", 60) or 0)
+        if keepalive_interval > 0:
+            transport = client.get_transport()
+            if transport is not None:
+                transport.set_keepalive(keepalive_interval)
+
         channel = client.invoke_shell(term='xterm', width=120, height=30)
 
         connection = {
@@ -6197,6 +6218,7 @@ _vosk_lock = threading.Lock()
 _vosk_session_locks: Dict[str, threading.Lock] = {}
 _vosk_process_lock = threading.Lock()
 _whisper_model_instance = None
+_whisper_model_params = None
 _whisper_model_lock = threading.Lock()
 _whisper_audio_buffers: Dict[str, bytearray] = {}
 _whisper_audio_lock = threading.Lock()
@@ -6234,8 +6256,9 @@ def _voice_engine_unavailable_message(engine: Optional[str] = None) -> str:
 
 
 def _ensure_whisper_model():
-    """Load the configured faster-whisper model lazily."""
+    """Load the configured faster-whisper model lazily, rebuilding it when settings change."""
     global _whisper_model_instance
+    global _whisper_model_params
 
     if WhisperModel is None:
         raise RuntimeError(
@@ -6247,7 +6270,8 @@ def _ensure_whisper_model():
         )
 
     with _whisper_model_lock:
-        if _whisper_model_instance is None:
+        wanted_params = (whisper_model, whisper_device, whisper_compute_type)
+        if _whisper_model_instance is None or _whisper_model_params != wanted_params:
             logger.info(
                 "Loading faster-whisper model %s on %s (%s)",
                 whisper_model,
@@ -6259,6 +6283,7 @@ def _ensure_whisper_model():
                 device=whisper_device,
                 compute_type=whisper_compute_type,
             )
+            _whisper_model_params = wanted_params
         return _whisper_model_instance
 
 
