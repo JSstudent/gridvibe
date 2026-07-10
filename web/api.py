@@ -97,6 +97,8 @@ EXPLORER_GIT_LOG_MAX_COMMITS = 60
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
 WINDOWS_DEVICE_ATTRIBUTES_RESPONSE = "\x1b[?1;2c"
 SELF_UPDATE_REPO_DIR = BASE_DIR
+_browser_shutdown_lock = threading.RLock()
+_browser_shutdown_token = ""
 
 
 class AppUpdateError(RuntimeError):
@@ -105,6 +107,14 @@ class AppUpdateError(RuntimeError):
     def __init__(self, message: str, status_code: int = 400):
         super().__init__(message)
         self.status_code = status_code
+
+
+def configure_browser_shutdown(enabled: bool) -> str:
+    """Enable process shutdown controls only for explicit browser launch mode."""
+    global _browser_shutdown_token
+    with _browser_shutdown_lock:
+        _browser_shutdown_token = uuid.uuid4().hex if enabled else ""
+        return _browser_shutdown_token
 
 ENCRYPTION_KEY_PATH = os.path.join(BASE_DIR, ".encryption_key")
 
@@ -4488,11 +4498,15 @@ def _connect_session(session_id: str):
 def index():
     """Main page with terminal interface."""
     logger.info("GET /")
+    with _browser_shutdown_lock:
+        browser_shutdown_token = _browser_shutdown_token
     return render_template(
         'index.html',
         max_sessions=max_sessions,
         agent_options=_agent_options(),
         local_windows_shells_available=os.name == "nt",
+        browser_shutdown_enabled=bool(browser_shutdown_token),
+        browser_shutdown_token=browser_shutdown_token,
     )
 
 
@@ -4524,6 +4538,43 @@ def health_check():
         "service": "GridVibe",
         "version": __version__
     })
+
+
+def _shutdown_browser_process():
+    """Allow the HTTP response to flush, then close sessions and exit."""
+    time.sleep(0.2)
+    logger.info("Browser mode requested application shutdown")
+    try:
+        session_manager.close_all_sessions()
+    except Exception:
+        logger.exception("Failed to close sessions during browser shutdown")
+    os._exit(0)
+
+
+def _schedule_browser_shutdown():
+    shutdown_thread = threading.Thread(
+        target=_shutdown_browser_process,
+        name="gridvibe-browser-shutdown",
+        daemon=True,
+    )
+    shutdown_thread.start()
+
+
+@app.route('/api/browser-shutdown', methods=['POST'])
+def shutdown_browser_application():
+    """End GridVibe only when explicit browser mode enabled this endpoint."""
+    with _browser_shutdown_lock:
+        expected_token = _browser_shutdown_token
+    if not expected_token:
+        return jsonify({"error": "Browser shutdown is unavailable"}), 404
+
+    provided_token = request.headers.get("X-GridVibe-Shutdown-Token", "")
+    if provided_token != expected_token:
+        return jsonify({"error": "Invalid shutdown token"}), 403
+
+    logger.info("Accepted browser mode shutdown request")
+    _schedule_browser_shutdown()
+    return jsonify({"message": "GridVibe is shutting down"}), 202
 
 
 @app.route('/api/app-update', methods=['POST'])

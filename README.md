@@ -193,7 +193,7 @@ Use the included launcher for the easiest Windows setup:
 .\GridVibe.bat
 ```
 
-`GridVibe.bat` creates or repairs `.venv`, upgrades installer tooling, upgrades runtime and desktop dependencies, verifies native dependency imports, checks optional voice dependencies, prompts to install them when missing, then launches the native window when possible.
+`GridVibe.bat` creates or repairs `.venv`, upgrades installer tooling, installs and verifies the core dependencies, then asks whether to start in Desktop mode, Browser mode, or quit. Desktop mode installs the optional desktop dependencies and opens a `pywebview` window, falling back to the default browser if desktop support is unavailable. Browser mode skips the desktop dependency installation and opens only the Windows default browser. In explicit Browser mode, the Launcher Setup header includes a Close button that stops the GridVibe Python process.
 
 Manual Windows setup:
 
@@ -212,6 +212,13 @@ Install optional desktop-window support with:
 ```powershell
 python -m pip install --upgrade -r requirements-desktop.txt
 python webview_launcher.py
+```
+
+The explicit launcher modes are also available from the command line:
+
+```powershell
+python webview_launcher.py --mode native
+python webview_launcher.py --mode browser
 ```
 
 ### Linux Install

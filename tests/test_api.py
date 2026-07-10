@@ -118,6 +118,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.saved_sessions_patch.start()
         api._refresh_runtime_config()
         api.app.config["TESTING"] = True
+        api.configure_browser_shutdown(False)
         self.client = api.app.test_client()
         api.session_manager.reset_sessions()
         api.active_launch_options.update(
@@ -170,6 +171,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
     def tearDown(self):
+        api.configure_browser_shutdown(False)
         api.session_manager.reset_sessions()
         api.active_launch_options.update(
             {"connection_mode": "ssh", "layout": "grid", "terminal_count": 4}
@@ -209,6 +211,72 @@ class ApiRoutesTestCase(unittest.TestCase):
             },
         )
 
+    def test_browser_shutdown_button_is_hidden_outside_browser_mode(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertNotIn('id="browserCloseBtn"', html)
+
+    def test_browser_shutdown_button_is_rendered_in_browser_mode(self):
+        token = api.configure_browser_shutdown(True)
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('id="browserCloseBtn"', html)
+        self.assertIn("onclick=\"shutdownBrowserApp()\"", html)
+        self.assertIn(f'const BROWSER_SHUTDOWN_TOKEN = "{token}";', html)
+
+    def test_browser_shutdown_endpoint_is_unavailable_outside_browser_mode(self):
+        with patch.object(api, "_schedule_browser_shutdown") as schedule_shutdown:
+            response = self.client.post("/api/browser-shutdown")
+
+        self.assertEqual(response.status_code, 404)
+        schedule_shutdown.assert_not_called()
+
+    def test_browser_shutdown_endpoint_rejects_invalid_token(self):
+        api.configure_browser_shutdown(True)
+
+        with patch.object(api, "_schedule_browser_shutdown") as schedule_shutdown:
+            response = self.client.post(
+                "/api/browser-shutdown",
+                headers={"X-GridVibe-Shutdown-Token": "invalid"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        schedule_shutdown.assert_not_called()
+
+    def test_browser_shutdown_endpoint_schedules_process_exit(self):
+        token = api.configure_browser_shutdown(True)
+
+        with patch.object(api, "_schedule_browser_shutdown") as schedule_shutdown:
+            response = self.client.post(
+                "/api/browser-shutdown",
+                headers={"X-GridVibe-Shutdown-Token": token},
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json(), {"message": "GridVibe is shutting down"})
+        schedule_shutdown.assert_called_once_with()
+
+    def test_browser_shutdown_worker_closes_sessions_and_exits_process(self):
+        with patch.object(api.time, "sleep") as sleep, patch.object(
+            api.session_manager,
+            "close_all_sessions",
+        ) as close_all_sessions, patch.object(
+            api.os,
+            "_exit",
+            side_effect=SystemExit(0),
+        ) as process_exit:
+            with self.assertRaises(SystemExit):
+                api._shutdown_browser_process()
+
+        sleep.assert_called_once_with(0.2)
+        close_all_sessions.assert_called_once_with()
+        process_exit.assert_called_once_with(0)
+
     def test_windows_launcher_prompts_for_missing_voice_dependencies(self):
         launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
 
@@ -216,6 +284,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("faster_whisper", launcher)
         self.assertIn("requirements-voice.txt", launcher)
         self.assertIn("choice /C YN", launcher)
+
+    def test_windows_launcher_selects_desktop_browser_or_quit_after_core_setup(self):
+        launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
+
+        prompt_index = launcher.index("choice /C DBQ")
+        core_check_index = launcher.index("Core dependency import check passed.")
+        desktop_install_index = launcher.index("Installing optional desktop dependencies")
+
+        self.assertGreater(prompt_index, core_check_index)
+        self.assertLess(prompt_index, desktop_install_index)
+        self.assertIn('set "LAUNCH_MODE=auto"', launcher)
+        self.assertIn('set "LAUNCH_MODE=browser"', launcher)
+        self.assertIn("if errorlevel 3 exit /b 0", launcher)
+        self.assertIn("--mode %LAUNCH_MODE%", launcher)
+        self.assertIn("goto check_voice_dependencies", launcher)
 
     def test_launcher_page_exposes_agent_startup_controls(self):
         response = self.client.get("/")

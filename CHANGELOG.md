@@ -4,7 +4,9 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
-- Added `GridVibe.sh` for Ubuntu/Linux startup with a terminal mode prompt, plus strict `webview_launcher.py --mode browser|native|auto` launch modes.
+- Added a Windows console launch prompt with Desktop, Browser, and Quit choices; Desktop uses native-first startup with browser fallback, while Browser skips optional desktop dependency setup.
+- Added a token-protected Close button beside the Launcher Setup Session and Mode badges when running in explicit Browser mode, allowing the browser UI to stop the GridVibe Python process.
+- Added `GridVibe.sh` for Ubuntu/Linux startup with a terminal mode prompt, plus explicit `webview_launcher.py --mode browser|native|auto` launch modes.
 - Updated dependency floors and the Windows launcher dependency bootstrap so existing virtualenvs upgrade, verify native imports, and repair stale compiled wheels before startup.
 - Enabled read-only File Explorer panes for SSH sessions using SFTP with root-bound remote path validation and terminal/explorer mode switching.
 - Added read-only Git awareness to Local Repo and SSH file explorer panes, including branch/dirty summaries, per-entry status badges, directory dirty markers, and bounded internal old/new diff previews with added/removed line highlighting.

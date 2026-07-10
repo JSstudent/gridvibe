@@ -92,15 +92,15 @@ Mode behavior:
 | `native` | Strict native mode. Start the server and open `pywebview`. If `pywebview` or its backend fails, show/log the error and exit without opening a browser automatically. |
 | `browser` | Strict browser mode. Start the server, wait for `/api/health`, open the default browser, and never create or start a `pywebview` window. |
 
-The clickable wrappers should use only `--mode native` or `--mode browser`, not `--mode auto`.
+The Windows Desktop choice uses `--mode auto` to retain native-first startup with browser fallback. The Browser choice uses `--mode browser` so it never creates a native window.
 
-This prevents the confusing case where the user chooses native mode but ends up in a browser because the embedded backend failed silently.
+This keeps the familiar desktop fallback while making an explicit Browser selection reliably browser-only.
 
 ### Server Ownership
 
-Both strict modes should be owned by one Python process:
+Each selected mode should be owned by one Python process:
 
-- Native mode owns the server thread and the `pywebview` lifecycle.
+- Desktop/auto mode owns the server thread and the `pywebview` lifecycle, or retains the server when it falls back to the browser.
 - Browser mode owns the server thread and opens the system browser.
 
 Do not implement browser mode by starting `main.py` in one process and `webview_launcher.py` in another. That creates port conflicts, duplicate shutdown paths, and unclear ownership of voice services and sessions.
@@ -130,13 +130,13 @@ Importing `webview` opportunistically is acceptable for backwards compatibility,
 Add a `choice` prompt to `GridVibe.bat` after core dependency setup and before desktop dependency installation:
 
 ```bat
-choice /C NBQ /N /M "Start GridVibe in [N]ative window, [B]rowser, or [Q]uit? "
+choice /C DBQ /N /M "Select [D/B/Q]: "
 ```
 
 Behavior:
 
-- `N`: install `requirements-desktop.txt`, then run `webview_launcher.py --mode native`.
-- `B`: skip desktop dependency installation, then run `webview_launcher.py --mode browser`.
+- `D`: install `requirements-desktop.txt`, then run `webview_launcher.py --mode auto` for a desktop window with browser fallback.
+- `B`: skip desktop dependency installation, then run `webview_launcher.py --mode browser`; the Launcher Setup header shows a Close button that stops the owning Python process.
 - `Q`: exit.
 
 Pros:
@@ -155,7 +155,7 @@ Use a small PowerShell Windows Forms dialog from `GridVibe.bat`, with a `choice`
 
 Dialog buttons:
 
-- Native Window
+- Desktop Window
 - Browser
 - Quit
 
@@ -171,9 +171,9 @@ Cons:
 
 ### Windows Recommendation
 
-Use W2: a PowerShell popup with a `choice` fallback.
+Use W1: the console `choice` prompt with Desktop, Browser, and Quit options. It keeps the launcher usable from Explorer, plain consoles, and restricted Windows machines without adding a PowerShell UI dependency. Desktop retains browser fallback; Browser opens only the system default browser.
 
-That gives Windows users the requested popup when launched from Explorer, while still keeping the launcher usable on restricted machines or plain consoles. The important guardrail is that the popup result must choose one strict launcher mode before the server starts.
+The Close button is enabled only for the explicit Browser choice. It is not shown in Desktop mode, including when Desktop mode falls back to a browser.
 
 ## Ubuntu/Linux Options
 
@@ -254,9 +254,9 @@ Recommended ordering:
 2. Create or repair `.venv`.
 3. Install `requirements.txt`.
 4. Ask for launch mode.
-5. If native mode, install `requirements-desktop.txt`.
+5. If Desktop mode, install `requirements-desktop.txt`.
 6. Check optional voice dependencies.
-7. Launch strict selected mode.
+7. Launch the selected mode.
 
 This avoids installing `pywebview` and Qt packages when the user explicitly chooses browser mode.
 
@@ -277,8 +277,7 @@ Strict browser mode:
 
 Auto mode:
 
-- Keep current fallback behavior for direct CLI compatibility only.
-- Do not use auto mode from clickable platform launchers.
+- Keep native-first browser fallback behavior for direct CLI compatibility and the Windows Desktop choice.
 
 ## Implementation Sketch
 
@@ -307,10 +306,10 @@ main()
 ### Windows
 
 1. Update `GridVibe.bat` to ask for mode before installing desktop dependencies.
-2. For native mode, run:
+2. For Desktop mode, run:
 
 ```bat
-start "GridVibe" /min cmd /c ""%VENV_PYTHON%" "%PROJECT_DIR%\webview_launcher.py" --mode native"
+start "GridVibe" /min cmd /c ""%VENV_PYTHON%" "%PROJECT_DIR%\webview_launcher.py" --mode auto"
 ```
 
 3. For browser mode, run:
@@ -343,8 +342,8 @@ or:
 
 1. Add strict `--mode` support to `web/webview_launcher.py`.
 2. Update tests around fallback behavior and browser-mode isolation.
-3. Update `GridVibe.bat` with a PowerShell popup and `choice` fallback.
+3. Update `GridVibe.bat` with the W1 console `choice` prompt.
 4. Add `GridVibe.sh` with the L1 terminal prompt.
 5. Update README startup instructions.
 
-This keeps the launch architecture simple: one user choice, one owning process, one server, one UI surface.
+This keeps the launch architecture simple: one user choice, one owning process, one server, and only the requested UI surface or surfaces.

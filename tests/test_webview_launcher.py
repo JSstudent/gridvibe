@@ -124,7 +124,12 @@ class WebviewLauncherTestCase(unittest.TestCase):
             webview_launcher,
             "webview",
             fake_webview,
-        ), patch.object(webview_launcher.webbrowser, "open") as browser_open:
+        ), patch.object(
+            webview_launcher,
+            "configure_browser_shutdown",
+        ) as configure_shutdown, patch.object(
+            webview_launcher.webbrowser, "open"
+        ) as browser_open:
             webview_launcher.main()
 
         self.assertTrue(fake_thread.started)
@@ -132,6 +137,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
         browser_open.assert_called_once_with("http://127.0.0.1:5050")
         fake_webview.create_window.assert_not_called()
         fake_webview.start.assert_not_called()
+        configure_shutdown.assert_called_once_with(True)
 
     def test_auto_mode_preserves_browser_fallback_when_pywebview_is_missing(self):
         fake_thread = _FakeThread()
@@ -159,12 +165,61 @@ class WebviewLauncherTestCase(unittest.TestCase):
             webview_launcher,
             "webview",
             None,
+        ), patch.object(
+            webview_launcher,
+            "configure_browser_shutdown",
+        ) as configure_shutdown, patch.object(
+            webview_launcher.webbrowser, "open"
+        ) as browser_open:
+            webview_launcher.main()
+
+        self.assertTrue(fake_thread.started)
+        self.assertTrue(fake_thread.joined)
+        browser_open.assert_called_once_with("http://127.0.0.1:5050")
+        configure_shutdown.assert_called_once_with(False)
+
+    def test_auto_mode_falls_back_when_native_window_creation_fails(self):
+        fake_thread = _FakeThread()
+        fake_webview = Mock()
+        fake_webview.create_window.return_value = None
+
+        with patch.object(
+            webview_launcher.sys,
+            "argv",
+            ["webview_launcher.py", "--mode", "auto"],
+        ), patch.object(
+            webview_launcher.os.path,
+            "exists",
+            return_value=False,
+        ), patch.object(
+            webview_launcher,
+            "setup_logging",
+        ), patch.object(
+            webview_launcher,
+            "_wait_for_server",
+            return_value=True,
+        ), patch.object(
+            webview_launcher.threading,
+            "Thread",
+            return_value=fake_thread,
+        ), patch.object(
+            webview_launcher,
+            "webview",
+            fake_webview,
+        ), patch.object(
+            webview_launcher,
+            "_preferred_pywebview_gui",
+            return_value=None,
+        ), patch.object(
+            webview_launcher,
+            "_set_linux_qtwebengine_env",
         ), patch.object(webview_launcher.webbrowser, "open") as browser_open:
             webview_launcher.main()
 
         self.assertTrue(fake_thread.started)
         self.assertTrue(fake_thread.joined)
         browser_open.assert_called_once_with("http://127.0.0.1:5050")
+        fake_webview.start.assert_not_called()
 
     def test_native_mode_missing_pywebview_exits_without_browser_fallback(self):
         fake_thread = _FakeThread()
