@@ -918,6 +918,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("mode: commit ? 'commit' : 'head'", html)
         self.assertIn("params.set('commit', commit);", html)
         self.assertIn("${explorerGitBadgeHtml(entry.git)}", html)
+        self.assertIn("data-explorer-git-stage", html)
+        self.assertIn("data-explorer-git-unstage", html)
+        self.assertIn("data-explorer-git-commit", html)
+        self.assertIn("data-explorer-git-publish", html)
+        self.assertIn("function splitExplorerGitChanges(changes)", html)
+        self.assertIn("function explorerGitStageFile(index, path)", html)
+        self.assertIn("function explorerGitUnstageFile(index, path)", html)
+        self.assertIn("async function explorerGitCommit(index)", html)
+        self.assertIn("function explorerGitPublish(index)", html)
+        self.assertIn("Staged Changes", html)
 
     def test_terminals_page_explorer_file_tree_hooks_are_present(self):
         response = self.client.get("/terminals")
@@ -2936,6 +2946,96 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("initial", payload["commits"][0]["line"])
         self.assertEqual(payload["commits"][0]["files"][0]["path"], "README.md")
         self.assertEqual(payload["commits"][0]["files"][0]["git"]["status"], "added")
+
+    def test_explorer_git_stage_and_unstage_roundtrip(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        readme.write_text("# Project\n\nchanged\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        stage_response = self.client.post(
+            f"/api/explorer/{session_id}/git/stage",
+            json={"path": "README.md"},
+        )
+
+        self.assertEqual(stage_response.status_code, 200)
+        staged = {change["path"]: change for change in stage_response.get_json()["changes"]}
+        self.assertEqual(staged["README.md"]["git"]["index_status"], "M")
+
+        unstage_response = self.client.post(
+            f"/api/explorer/{session_id}/git/unstage",
+            json={"path": "README.md"},
+        )
+
+        self.assertEqual(unstage_response.status_code, 200)
+        unstaged = {change["path"]: change for change in unstage_response.get_json()["changes"]}
+        self.assertEqual(unstaged["README.md"]["git"]["index_status"], ".")
+        self.assertEqual(unstaged["README.md"]["git"]["worktree_status"], "M")
+
+    def test_explorer_git_commit_creates_commit(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        readme.write_text("# Project\n\nchanged\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        session_id = self._create_explorer_session(repo_dir)
+
+        commit_response = self.client.post(
+            f"/api/explorer/{session_id}/git/commit",
+            json={"message": "second commit"},
+        )
+
+        self.assertEqual(commit_response.status_code, 200)
+        payload = commit_response.get_json()
+        self.assertFalse(payload["changes"])
+        self.assertIn("second commit", payload["commits"][0]["line"])
+        latest = self._run_git(repo_dir, "log", "-1", "--pretty=%s").stdout.decode().strip()
+        self.assertEqual(latest, "second commit")
+
+    def test_explorer_git_commit_requires_message(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/commit",
+            json={"message": "   "},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("message", response.get_json()["error"].lower())
+
+    def test_explorer_git_stage_rejects_path_outside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project\n", encoding="utf-8")
+        outside_file = Path(self.temp_dir.name) / "outside.txt"
+        outside_file.write_text("secret\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/stage",
+            json={"path": "../outside.txt"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("inside the configured root", response.get_json()["error"])
 
     def test_parse_git_graph_log_skips_connector_only_lines(self):
         commits = api._parse_git_graph_log(

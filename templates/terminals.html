@@ -1917,6 +1917,31 @@
             outline: none;
         }
 
+        .explorer-git-stage-btn,
+        .explorer-git-unstage-btn {
+            width: 22px;
+            height: 22px;
+            font-size: .95rem;
+            font-weight: 700;
+            border-color: var(--explorer-open-folder-border);
+            background: var(--explorer-open-folder-bg);
+            color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-git-stage-btn:hover,
+        .explorer-git-stage-btn:focus-visible,
+        .explorer-git-unstage-btn:hover,
+        .explorer-git-unstage-btn:focus-visible {
+            background: var(--explorer-open-folder-hover-bg);
+            outline: none;
+        }
+
+        .explorer-diff-commit-file-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+        }
+
         .explorer-zoom-btn {
             width: 28px;
             height: 28px;
@@ -2245,6 +2270,78 @@
         button.explorer-diff-commit-file-path:focus {
             color: var(--t-accent);
             outline: none;
+        }
+
+        .explorer-git-repo-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 8px 10px;
+        }
+
+        .explorer-git-repo-branch {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: .74rem;
+            font-weight: 700;
+            color: var(--explorer-text);
+        }
+
+        .explorer-git-publish-btn,
+        .explorer-git-commit-btn {
+            flex: 0 0 auto;
+            border: 1px solid var(--t-accent);
+            border-radius: 5px;
+            background: var(--t-accent);
+            color: #04121a;
+            cursor: pointer;
+            font: inherit;
+            font-size: .72rem;
+            font-weight: 700;
+            padding: 5px 12px;
+        }
+
+        .explorer-git-publish-btn:hover:not(:disabled),
+        .explorer-git-commit-btn:hover:not(:disabled) {
+            filter: brightness(1.08);
+        }
+
+        .explorer-git-publish-btn:disabled,
+        .explorer-git-commit-btn:disabled {
+            opacity: .45;
+            cursor: default;
+        }
+
+        .explorer-git-commit-box {
+            display: grid;
+            gap: 6px;
+            padding: 8px 10px 2px;
+        }
+
+        .explorer-git-commit-message {
+            width: 100%;
+            box-sizing: border-box;
+            resize: vertical;
+            min-height: 44px;
+            border: 1px solid var(--explorer-row-border);
+            border-radius: 5px;
+            background: var(--explorer-bg);
+            color: var(--explorer-text);
+            font: inherit;
+            font-size: .74rem;
+            padding: 6px 8px;
+        }
+
+        .explorer-git-commit-message:focus {
+            outline: none;
+            border-color: var(--t-accent);
+        }
+
+        .explorer-git-commit-btn {
+            justify-self: end;
         }
 
         .explorer-side-by-side-diff {
@@ -10354,22 +10451,86 @@
         }).join('');
     }
 
+    function explorerGitStatusFromCode(code) {
+        switch (code) {
+            case 'M':
+            case 'T':
+                return 'modified';
+            case 'A':
+                return 'added';
+            case 'D':
+                return 'deleted';
+            case 'R':
+                return 'renamed';
+            case 'C':
+                return 'added';
+            case 'U':
+                return 'conflicted';
+            case '?':
+                return 'untracked';
+            case '!':
+                return 'ignored';
+            default:
+                return 'clean';
+        }
+    }
+
+    function explorerGitCodeUnmodified(code) {
+        // Porcelain v2 uses '.' for an unchanged index/worktree position; clean rows use ' '.
+        return !code || code === ' ' || code === '.';
+    }
+
+    function splitExplorerGitChanges(changes) {
+        const staged = [];
+        const unstaged = [];
+        (Array.isArray(changes) ? changes : []).forEach(file => {
+            const git = file.git || {};
+            const indexCode = git.index_status || ' ';
+            const worktreeCode = git.worktree_status || ' ';
+            if (git.status === 'conflicted') {
+                unstaged.push({ ...file, git: { ...git, status: 'conflicted' } });
+                return;
+            }
+            if (git.status === 'untracked' || indexCode === '?') {
+                unstaged.push({ ...file, git: { ...git, status: 'untracked' } });
+                return;
+            }
+            if (!explorerGitCodeUnmodified(indexCode)) {
+                staged.push({ ...file, git: { ...git, status: explorerGitStatusFromCode(indexCode) } });
+            }
+            if (!explorerGitCodeUnmodified(worktreeCode)) {
+                unstaged.push({ ...file, git: { ...git, status: explorerGitStatusFromCode(worktreeCode) } });
+            }
+        });
+        return { staged, unstaged };
+    }
+
     function renderExplorerGitFileRows(index, files, options = {}) {
         const entries = Array.isArray(files) ? files : [];
         if (!entries.length) {
             return `<div class="explorer-diff-sidebar-empty">${escHtml(options.emptyText || 'No files.')}</div>`;
         }
         const commitHash = options.commitHash || '';
+        const action = options.action || '';
         return entries.map(file => {
             const path = file.path || file.repo_path || '';
             const pathAction = commitHash
                 ? `data-explorer-git-open-commit-diff="${escHtml(path)}" data-explorer-git-commit="${escHtml(commitHash)}"`
                 : `data-explorer-git-open-file="${escHtml(path)}"`;
+            let actionButton = '';
+            if (action === 'stage') {
+                actionButton = `<button type="button" class="explorer-search-btn explorer-git-stage-btn" data-explorer-git-stage="${escHtml(path)}" title="Stage changes" aria-label="Stage changes">+</button>`;
+            } else if (action === 'unstage') {
+                actionButton = `<button type="button" class="explorer-search-btn explorer-git-unstage-btn" data-explorer-git-unstage="${escHtml(path)}" title="Unstage changes" aria-label="Unstage changes">−</button>`;
+            }
             return `
                 <div class="explorer-diff-commit-file" title="${escHtml(path)}">
                     ${explorerDiffSidebarStatusHtml(file.git)}
                     <button type="button" class="explorer-diff-commit-file-path" ${pathAction}>${escHtml(path || file.name || 'Changed file')}</button>
-                    <button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">↪</button>
+                    <span class="explorer-diff-commit-file-actions">
+                        ${actionButton}
+                        <button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">↪</button>
+                    </span>
                 </div>
             `;
         }).join('');
@@ -10385,15 +10546,25 @@
             panel.innerHTML = '<div class="explorer-diff-sidebar-empty">Loading repository...</div>';
             return;
         }
-        if (pane._explorerGitRepoError) {
+        if (pane._explorerGitRepoError && !pane._explorerGitRepo) {
             panel.innerHTML = `<div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>`;
             return;
         }
 
         const repo = pane._explorerGitRepo || {};
+        const git = repo.git || {};
+        const errorBanner = pane._explorerGitRepoError
+            ? `<div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>`
+            : '';
         const changes = Array.isArray(repo.changes) ? repo.changes : [];
+        const { staged, unstaged } = splitExplorerGitChanges(changes);
         const commits = Array.isArray(repo.commits) ? repo.commits : [];
         const expandedCommits = ensureExplorerDiffExpandedCommits(pane);
+        const busy = Boolean(pane._explorerGitActionBusy);
+        const commitMessage = typeof pane._explorerGitCommitMessage === 'string' ? pane._explorerGitCommitMessage : '';
+        const hasUpstream = git.ahead !== null && git.ahead !== undefined;
+        const publishLabel = hasUpstream ? 'Push' : 'Publish branch';
+        const branchText = explorerGitSummaryText(git) || 'Git';
         const commitRows = commits.length
             ? commits.map(commit => {
                 const hash = commit.hash || '';
@@ -10410,10 +10581,25 @@
             : '<div class="explorer-diff-sidebar-empty">No commits in this scope.</div>';
 
         panel.innerHTML = `
+            ${errorBanner}
+            <div class="explorer-diff-sidebar-section explorer-git-repo-bar">
+                <span class="explorer-git-repo-branch" title="${escHtml(git.repo_root || branchText)}">${escHtml(branchText)}</span>
+                <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
+            </div>
+            <div class="explorer-diff-sidebar-section">
+                <div class="explorer-diff-sidebar-title">Staged Changes</div>
+                <div class="explorer-diff-commit-files">
+                    ${renderExplorerGitFileRows(index, staged, { emptyText: 'No staged changes.', action: 'unstage' })}
+                </div>
+                <div class="explorer-git-commit-box">
+                    <textarea class="explorer-git-commit-message" id="explorer-git-commit-message-${index}" rows="2" placeholder="Message (commits staged changes)" ${busy ? 'disabled' : ''}>${escHtml(commitMessage)}</textarea>
+                    <button type="button" class="explorer-git-commit-btn" data-explorer-git-commit ${(busy || !staged.length) ? 'disabled' : ''} title="Commit staged changes">Commit</button>
+                </div>
+            </div>
             <div class="explorer-diff-sidebar-section">
                 <div class="explorer-diff-sidebar-title">Changes</div>
                 <div class="explorer-diff-commit-files">
-                    ${renderExplorerGitFileRows(index, changes, { emptyText: 'No uncommitted changes.' })}
+                    ${renderExplorerGitFileRows(index, unstaged, { emptyText: 'No unstaged changes.', action: 'stage' })}
                 </div>
             </div>
             <div class="explorer-diff-sidebar-section">
@@ -10421,6 +10607,32 @@
                 ${commitRows}
             </div>
         `;
+        const commitMessageInput = panel.querySelector(`#explorer-git-commit-message-${index}`);
+        if (commitMessageInput) {
+            commitMessageInput.addEventListener('input', () => {
+                pane._explorerGitCommitMessage = commitMessageInput.value;
+            });
+        }
+        panel.querySelectorAll('[data-explorer-git-stage]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                explorerGitStageFile(index, button.dataset.explorerGitStage || '');
+            });
+        });
+        panel.querySelectorAll('[data-explorer-git-unstage]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                explorerGitUnstageFile(index, button.dataset.explorerGitUnstage || '');
+            });
+        });
+        const publishButton = panel.querySelector('[data-explorer-git-publish]');
+        if (publishButton) {
+            publishButton.addEventListener('click', () => explorerGitPublish(index));
+        }
+        const commitButton = panel.querySelector('[data-explorer-git-commit]');
+        if (commitButton) {
+            commitButton.addEventListener('click', () => explorerGitCommit(index));
+        }
         panel.querySelectorAll('[data-explorer-git-open-file]').forEach(button => {
             button.addEventListener('click', () => {
                 explorerGitOpenFile(index, button.dataset.explorerGitOpenFile || '');
@@ -10929,6 +11141,91 @@
             pane._explorerGitRepoLoading = false;
             renderExplorerGitPanels(index);
         }
+    }
+
+    async function performExplorerGitAction(index, endpoint, body) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId || pane._explorerGitActionBusy) {
+            return false;
+        }
+        pane._explorerGitActionBusy = true;
+        pane._explorerGitRepoError = '';
+        renderExplorerGitPanels(index);
+        let succeeded = false;
+        try {
+            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/git/${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body || {}),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Git action failed');
+            }
+            pane._explorerGitRepo = data;
+            pane._explorerGitRepoLoaded = true;
+            succeeded = true;
+        } catch (error) {
+            console.error('[GridVibe Sessions] Explorer Git action failed:', error);
+            pane._explorerGitRepoError = error.message || 'Git action failed.';
+        } finally {
+            pane._explorerGitActionBusy = false;
+            renderExplorerGitPanels(index);
+        }
+        if (succeeded && pane._explorerMode === 'directory') {
+            loadExplorerPane(index, null, { force: true, showLoading: false });
+        }
+        return succeeded;
+    }
+
+    function explorerGitStageFile(index, path) {
+        if (!path) {
+            return;
+        }
+        performExplorerGitAction(index, 'stage', { path });
+    }
+
+    function explorerGitUnstageFile(index, path) {
+        if (!path) {
+            return;
+        }
+        performExplorerGitAction(index, 'unstage', { path });
+    }
+
+    async function explorerGitCommit(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const message = String(pane._explorerGitCommitMessage || '').trim();
+        if (!message) {
+            pane._explorerGitRepoError = 'Commit message is required.';
+            renderExplorerGitPanels(index);
+            const input = document.getElementById(`explorer-git-commit-message-${index}`);
+            if (input) {
+                input.focus();
+            }
+            return;
+        }
+        const committed = await performExplorerGitAction(index, 'commit', { message });
+        if (committed) {
+            pane._explorerGitCommitMessage = '';
+            renderExplorerGitPanels(index);
+        }
+    }
+
+    function explorerGitPublish(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const git = (pane._explorerGitRepo && pane._explorerGitRepo.git) || {};
+        const branch = git.branch || 'this branch';
+        if (!window.confirm(`Publish ${branch} to its remote?`)) {
+            return;
+        }
+        performExplorerGitAction(index, 'publish', {});
     }
 
     function renderExplorerDiff(index) {

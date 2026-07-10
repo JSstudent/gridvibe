@@ -317,4 +317,16 @@ Implemented the recommended V1 scope as a read-only Local Repo and SSH explorer 
 - Updated `README.md` and `CHANGELOG.md` to document the new read-only Git status/diff support and the intentionally excluded mutating actions.
 - Added tests for porcelain parsing, local and SSH listing Git metadata, diff endpoint safety, and template hooks.
 
-V1 remains intentionally non-mutating: no stage, unstage, restore, checkout, commit, pull, or push actions were added.
+V1 remained intentionally non-mutating: no stage, unstage, restore, checkout, commit, pull, or push actions were added.
+
+## Phase 3 Implementation Notes (basic staging, commit, publish)
+
+Added the first slice of the Phase 3 mutating actions for both Local Repo and SSH explorer panes, keeping the rest of the read-only contract intact:
+
+- Added mutating Git command runners (`_run_git_write_command` locally and `_run_remote_git_write_command` over SSH) that set `GIT_TERMINAL_PROMPT=0` so pushes fail fast instead of hanging on credential prompts, with longer timeouts for commit and push.
+- Added local (`_git_stage_path`, `_git_unstage_path`, `_git_commit`, `_git_publish`) and remote equivalents. Unstage uses `git reset HEAD -- <path>`, falling back to `git rm --cached` on an unborn branch. Publish pushes the current branch, adding `--set-upstream origin <branch>` when the branch has no upstream.
+- Added `POST /api/explorer/<session_id>/git/{stage,unstage,commit,publish}` routes that reuse the existing root-bound path resolvers before invoking Git and return the refreshed `git/repo` summary so the sidebar re-renders in one round trip.
+- Updated `templates/terminals.html` to split the sidebar `changes` list into a `Staged Changes` section (with `-` unstage buttons, a commit message box, and a `Commit` button) above the working `Changes` section (with `+` stage buttons), plus a `Publish branch` button in a repository header. Publishing prompts for confirmation before pushing.
+- Added tests for the stage/unstage roundtrip, commit creation, empty-message rejection, outside-root path rejection, and the new frontend hooks.
+
+Still intentionally excluded: restore, checkout, pull, merge, stash, and any history rewriting.

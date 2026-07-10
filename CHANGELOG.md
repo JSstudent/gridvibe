@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- Added basic Git staging to the file explorer Git sidebar: unstaged change rows show a `+` stage button and staged rows show a `-` unstage button, with a separate `Staged Changes` section above the working `Changes` list. Available for Local Repo and SSH explorer panes.
+- Added a commit message box with a `Commit` button that commits the staged changes, and a `Publish branch` button that pushes the current branch (setting the upstream to `origin` when none exists). Mutating Git commands never prompt for credentials, so publishing fails fast instead of hanging when authentication is required.
 - Added a Windows console launch prompt with Desktop, Browser, and Quit choices; Desktop uses native-first startup with browser fallback, while Browser skips optional desktop dependency setup.
 - Added a token-protected Close button beside the Launcher Setup Session and Mode badges when running in explicit Browser mode, allowing the browser UI to stop the GridVibe Python process.
 - Added `GridVibe.sh` for Ubuntu/Linux startup with a terminal mode prompt, plus explicit `webview_launcher.py --mode browser|native|auto` launch modes.

@@ -3027,6 +3027,26 @@ def _run_git_command(
     )
 
 
+def _run_git_write_command(
+    args: List[str],
+    *,
+    cwd: str,
+    timeout: float = 15.0,
+) -> subprocess.CompletedProcess:
+    """Run a mutating Git command without allowing interactive credential prompts."""
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+
+
 def _decode_git_output(raw_output: bytes) -> str:
     """Decode Git command output without raising on repository filename bytes."""
     return raw_output.decode("utf-8", errors="replace").strip()
@@ -3346,6 +3366,36 @@ def _run_remote_git_command(
 ) -> Any:
     """Run a read-only Git command over SSH and return a subprocess-like result."""
     command = _remote_git_shell_command(args, cwd)
+    _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    stdout_data = stdout.read()
+    stderr_data = stderr.read()
+    if isinstance(stdout_data, str):
+        stdout_data = stdout_data.encode("utf-8", errors="replace")
+    if isinstance(stderr_data, str):
+        stderr_data = stderr_data.encode("utf-8", errors="replace")
+    return subprocess.CompletedProcess(
+        args=command,
+        returncode=stdout.channel.recv_exit_status(),
+        stdout=stdout_data,
+        stderr=stderr_data,
+    )
+
+
+def _remote_git_write_shell_command(args: List[str], cwd: str) -> str:
+    """Build a mutating Git command for a remote POSIX-compatible SSH shell."""
+    quoted_args = " ".join(shlex.quote(part) for part in args)
+    return f"GIT_TERMINAL_PROMPT=0 git -C {shlex.quote(cwd)} {quoted_args}"
+
+
+def _run_remote_git_write_command(
+    client: Any,
+    args: List[str],
+    *,
+    cwd: str,
+    timeout: float = 30.0,
+) -> Any:
+    """Run a mutating Git command over SSH and return a subprocess-like result."""
+    command = _remote_git_write_shell_command(args, cwd)
     _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
     stdout_data = stdout.read()
     stderr_data = stderr.read()
@@ -3811,6 +3861,97 @@ def _get_git_diff(root_path: str, file_path: str, mode: str, commit: Optional[st
     }
 
 
+def _local_git_action_repo_root(root_path: str) -> str:
+    """Return the repository root for a local explorer git mutation, or raise."""
+    git_context, _statuses = _get_git_context(root_path, root_path)
+    if not git_context.get("available"):
+        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
+    return str(git_context["repo_root"])
+
+
+def _local_git_has_head(repo_root: str) -> bool:
+    """Return whether the local repository has at least one commit."""
+    try:
+        result = _run_git_command(["rev-parse", "--verify", "--quiet", "HEAD"], cwd=repo_root, timeout=2.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _git_stage_path(root_path: str, file_path: str) -> None:
+    """Stage one worktree path inside a local explorer repository."""
+    repo_root = _local_git_action_repo_root(root_path)
+    pathspec = _git_pathspec(repo_root, file_path)
+    try:
+        result = _run_git_write_command(["add", "--", pathspec], cwd=repo_root)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git stage timed out") from exc
+    if result.returncode != 0:
+        raise ValueError(_decode_git_output(result.stderr) or "Git stage failed")
+
+
+def _git_unstage_path(root_path: str, file_path: str) -> None:
+    """Unstage one path inside a local explorer repository."""
+    repo_root = _local_git_action_repo_root(root_path)
+    pathspec = _git_pathspec(repo_root, file_path)
+    if _local_git_has_head(repo_root):
+        args = ["reset", "--quiet", "HEAD", "--", pathspec]
+    else:
+        args = ["rm", "--cached", "--quiet", "--", pathspec]
+    try:
+        result = _run_git_write_command(args, cwd=repo_root)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git unstage timed out") from exc
+    if result.returncode != 0:
+        raise ValueError(_decode_git_output(result.stderr) or "Git unstage failed")
+
+
+def _git_commit(root_path: str, message: str) -> None:
+    """Commit staged changes inside a local explorer repository."""
+    commit_message = str(message or "").strip()
+    if not commit_message:
+        raise ValueError("Commit message is required")
+    repo_root = _local_git_action_repo_root(root_path)
+    try:
+        result = _run_git_write_command(["commit", "-m", commit_message], cwd=repo_root, timeout=30.0)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git commit timed out") from exc
+    if result.returncode != 0:
+        raise ValueError(
+            _decode_git_output(result.stderr)
+            or _decode_git_output(result.stdout)
+            or "Git commit failed"
+        )
+
+
+def _git_publish(root_path: str) -> None:
+    """Push the current branch of a local explorer repository, setting upstream if needed."""
+    repo_root = _local_git_action_repo_root(root_path)
+    try:
+        upstream = _run_git_command(
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            cwd=repo_root,
+            timeout=3.0,
+        )
+        if upstream.returncode == 0:
+            push_args = ["push"]
+        else:
+            branch_result = _run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root, timeout=3.0)
+            branch = _decode_git_output(branch_result.stdout)
+            if branch_result.returncode != 0 or not branch or branch == "HEAD":
+                raise ValueError("Cannot publish a detached HEAD")
+            push_args = ["push", "--set-upstream", "origin", branch]
+        result = _run_git_write_command(push_args, cwd=repo_root, timeout=120.0)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git publish timed out") from exc
+    if result.returncode != 0:
+        raise ValueError(
+            _decode_git_output(result.stderr)
+            or _decode_git_output(result.stdout)
+            or "Git publish failed"
+        )
+
+
 def _bounded_remote_git_diff(client: Any, repo_root: str, args: List[str]) -> Tuple[str, bool, int]:
     """Run remote Git diff and return bounded UTF-8 text output."""
     result = _run_remote_git_command(client, args, cwd=repo_root, timeout=3.0)
@@ -3964,6 +4105,101 @@ def _get_remote_git_diff(
         "truncated": truncated,
         "raw_bytes": raw_bytes,
     }
+
+
+def _remote_git_action_repo_root(client: Any, root_path: str) -> str:
+    """Return the repository root for a remote explorer git mutation, or raise."""
+    git_context, _statuses = _get_remote_git_context(client, root_path, root_path)
+    if not git_context.get("available"):
+        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
+    return str(git_context["repo_root"])
+
+
+def _remote_git_has_head(client: Any, repo_root: str) -> bool:
+    """Return whether the remote repository has at least one commit."""
+    try:
+        result = _run_remote_git_command(
+            client,
+            ["rev-parse", "--verify", "--quiet", "HEAD"],
+            cwd=repo_root,
+            timeout=2.0,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def _remote_git_stage_path(client: Any, root_path: str, file_path: str) -> None:
+    """Stage one worktree path inside a remote explorer repository."""
+    repo_root = _remote_git_action_repo_root(client, root_path)
+    pathspec = _remote_git_pathspec(repo_root, file_path)
+    result = _run_remote_git_write_command(client, ["add", "--", pathspec], cwd=repo_root)
+    if result.returncode != 0:
+        raise ValueError(_decode_git_output(result.stderr) or "Git stage failed")
+
+
+def _remote_git_unstage_path(client: Any, root_path: str, file_path: str) -> None:
+    """Unstage one path inside a remote explorer repository."""
+    repo_root = _remote_git_action_repo_root(client, root_path)
+    pathspec = _remote_git_pathspec(repo_root, file_path)
+    if _remote_git_has_head(client, repo_root):
+        args = ["reset", "--quiet", "HEAD", "--", pathspec]
+    else:
+        args = ["rm", "--cached", "--quiet", "--", pathspec]
+    result = _run_remote_git_write_command(client, args, cwd=repo_root)
+    if result.returncode != 0:
+        raise ValueError(_decode_git_output(result.stderr) or "Git unstage failed")
+
+
+def _remote_git_commit(client: Any, root_path: str, message: str) -> None:
+    """Commit staged changes inside a remote explorer repository."""
+    commit_message = str(message or "").strip()
+    if not commit_message:
+        raise ValueError("Commit message is required")
+    repo_root = _remote_git_action_repo_root(client, root_path)
+    result = _run_remote_git_write_command(
+        client,
+        ["commit", "-m", commit_message],
+        cwd=repo_root,
+        timeout=30.0,
+    )
+    if result.returncode != 0:
+        raise ValueError(
+            _decode_git_output(result.stderr)
+            or _decode_git_output(result.stdout)
+            or "Git commit failed"
+        )
+
+
+def _remote_git_publish(client: Any, root_path: str) -> None:
+    """Push the current branch of a remote explorer repository, setting upstream if needed."""
+    repo_root = _remote_git_action_repo_root(client, root_path)
+    upstream = _run_remote_git_command(
+        client,
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        cwd=repo_root,
+        timeout=3.0,
+    )
+    if upstream.returncode == 0:
+        push_args = ["push"]
+    else:
+        branch_result = _run_remote_git_command(
+            client,
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_root,
+            timeout=3.0,
+        )
+        branch = _decode_git_output(branch_result.stdout)
+        if branch_result.returncode != 0 or not branch or branch == "HEAD":
+            raise ValueError("Cannot publish a detached HEAD")
+        push_args = ["push", "--set-upstream", "origin", branch]
+    result = _run_remote_git_write_command(client, push_args, cwd=repo_root, timeout=120.0)
+    if result.returncode != 0:
+        raise ValueError(
+            _decode_git_output(result.stderr)
+            or _decode_git_output(result.stdout)
+            or "Git publish failed"
+        )
 
 
 _REMOTE_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
@@ -4948,6 +5184,162 @@ def get_explorer_git_repo(session_id: str):
                 **summary,
             }
         )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route('/api/explorer/<session_id>/git/stage', methods=['POST'])
+def stage_explorer_git_file(session_id: str):
+    """Stage one changed file in an explorer Git repository."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    data = request.get_json(silent=True) or {}
+    requested_path = data.get("path", "")
+    if _is_remote_explorer_session(session):
+        client = None
+        sftp = None
+        try:
+            client, sftp = _open_ssh_sftp(session)
+            root_path, file_path = _resolve_remote_explorer_candidate_path(
+                sftp, session, requested_path, allow_empty_root=False
+            )
+            _remote_git_stage_path(client, root_path, file_path)
+            summary = _get_remote_git_repo_summary(client, root_path)
+            return jsonify({"session_id": session.session_id, "root": root_path, **summary})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": str(exc)}), 500
+        finally:
+            if client is not None and sftp is not None:
+                _close_sftp_client(client, sftp)
+
+    try:
+        root_path, file_path = _resolve_explorer_candidate_path(
+            session, requested_path, allow_empty_root=False
+        )
+        _git_stage_path(root_path, file_path)
+        summary = _get_git_repo_summary(root_path)
+        return jsonify({"session_id": session.session_id, "root": root_path, **summary})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route('/api/explorer/<session_id>/git/unstage', methods=['POST'])
+def unstage_explorer_git_file(session_id: str):
+    """Unstage one file in an explorer Git repository."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    data = request.get_json(silent=True) or {}
+    requested_path = data.get("path", "")
+    if _is_remote_explorer_session(session):
+        client = None
+        sftp = None
+        try:
+            client, sftp = _open_ssh_sftp(session)
+            root_path, file_path = _resolve_remote_explorer_candidate_path(
+                sftp, session, requested_path, allow_empty_root=False
+            )
+            _remote_git_unstage_path(client, root_path, file_path)
+            summary = _get_remote_git_repo_summary(client, root_path)
+            return jsonify({"session_id": session.session_id, "root": root_path, **summary})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": str(exc)}), 500
+        finally:
+            if client is not None and sftp is not None:
+                _close_sftp_client(client, sftp)
+
+    try:
+        root_path, file_path = _resolve_explorer_candidate_path(
+            session, requested_path, allow_empty_root=False
+        )
+        _git_unstage_path(root_path, file_path)
+        summary = _get_git_repo_summary(root_path)
+        return jsonify({"session_id": session.session_id, "root": root_path, **summary})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route('/api/explorer/<session_id>/git/commit', methods=['POST'])
+def commit_explorer_git(session_id: str):
+    """Commit staged changes in an explorer Git repository."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    data = request.get_json(silent=True) or {}
+    message = data.get("message", "")
+    if _is_remote_explorer_session(session):
+        client = None
+        sftp = None
+        try:
+            client, sftp = _open_ssh_sftp(session)
+            root_path = _remote_explorer_root_directory(session)
+            if not root_path:
+                raise ValueError("Explorer root directory is not configured")
+            root_path = sftp.normalize(root_path)
+            _remote_git_commit(client, root_path, message)
+            summary = _get_remote_git_repo_summary(client, root_path)
+            return jsonify({"session_id": session.session_id, "root": root_path, **summary})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": str(exc)}), 500
+        finally:
+            if client is not None and sftp is not None:
+                _close_sftp_client(client, sftp)
+
+    try:
+        root_path = _explorer_root_directory(session)
+        _git_commit(root_path, message)
+        summary = _get_git_repo_summary(root_path)
+        return jsonify({"session_id": session.session_id, "root": root_path, **summary})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route('/api/explorer/<session_id>/git/publish', methods=['POST'])
+def publish_explorer_git(session_id: str):
+    """Push the current branch of an explorer Git repository to its remote."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if _is_remote_explorer_session(session):
+        client = None
+        sftp = None
+        try:
+            client, sftp = _open_ssh_sftp(session)
+            root_path = _remote_explorer_root_directory(session)
+            if not root_path:
+                raise ValueError("Explorer root directory is not configured")
+            root_path = sftp.normalize(root_path)
+            _remote_git_publish(client, root_path)
+            summary = _get_remote_git_repo_summary(client, root_path)
+            return jsonify({"session_id": session.session_id, "root": root_path, **summary})
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": str(exc)}), 500
+        finally:
+            if client is not None and sftp is not None:
+                _close_sftp_client(client, sftp)
+
+    try:
+        root_path = _explorer_root_directory(session)
+        _git_publish(root_path)
+        summary = _get_git_repo_summary(root_path)
+        return jsonify({"session_id": session.session_id, "root": root_path, **summary})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except OSError as exc:
