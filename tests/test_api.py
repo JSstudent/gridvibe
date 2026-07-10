@@ -118,6 +118,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.saved_sessions_patch.start()
         api._refresh_runtime_config()
         api.app.config["TESTING"] = True
+        api.configure_browser_shutdown(False)
         self.client = api.app.test_client()
         api.session_manager.reset_sessions()
         api.active_launch_options.update(
@@ -170,6 +171,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
     def tearDown(self):
+        api.configure_browser_shutdown(False)
         api.session_manager.reset_sessions()
         api.active_launch_options.update(
             {"connection_mode": "ssh", "layout": "grid", "terminal_count": 4}
@@ -209,6 +211,72 @@ class ApiRoutesTestCase(unittest.TestCase):
             },
         )
 
+    def test_browser_shutdown_button_is_hidden_outside_browser_mode(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertNotIn('id="browserCloseBtn"', html)
+
+    def test_browser_shutdown_button_is_rendered_in_browser_mode(self):
+        token = api.configure_browser_shutdown(True)
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('id="browserCloseBtn"', html)
+        self.assertIn("onclick=\"shutdownBrowserApp()\"", html)
+        self.assertIn(f'const BROWSER_SHUTDOWN_TOKEN = "{token}";', html)
+
+    def test_browser_shutdown_endpoint_is_unavailable_outside_browser_mode(self):
+        with patch.object(api, "_schedule_browser_shutdown") as schedule_shutdown:
+            response = self.client.post("/api/browser-shutdown")
+
+        self.assertEqual(response.status_code, 404)
+        schedule_shutdown.assert_not_called()
+
+    def test_browser_shutdown_endpoint_rejects_invalid_token(self):
+        api.configure_browser_shutdown(True)
+
+        with patch.object(api, "_schedule_browser_shutdown") as schedule_shutdown:
+            response = self.client.post(
+                "/api/browser-shutdown",
+                headers={"X-GridVibe-Shutdown-Token": "invalid"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        schedule_shutdown.assert_not_called()
+
+    def test_browser_shutdown_endpoint_schedules_process_exit(self):
+        token = api.configure_browser_shutdown(True)
+
+        with patch.object(api, "_schedule_browser_shutdown") as schedule_shutdown:
+            response = self.client.post(
+                "/api/browser-shutdown",
+                headers={"X-GridVibe-Shutdown-Token": token},
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json(), {"message": "GridVibe is shutting down"})
+        schedule_shutdown.assert_called_once_with()
+
+    def test_browser_shutdown_worker_closes_sessions_and_exits_process(self):
+        with patch.object(api.time, "sleep") as sleep, patch.object(
+            api.session_manager,
+            "close_all_sessions",
+        ) as close_all_sessions, patch.object(
+            api.os,
+            "_exit",
+            side_effect=SystemExit(0),
+        ) as process_exit:
+            with self.assertRaises(SystemExit):
+                api._shutdown_browser_process()
+
+        sleep.assert_called_once_with(0.2)
+        close_all_sessions.assert_called_once_with()
+        process_exit.assert_called_once_with(0)
+
     def test_windows_launcher_prompts_for_missing_voice_dependencies(self):
         launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
 
@@ -216,6 +284,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("faster_whisper", launcher)
         self.assertIn("requirements-voice.txt", launcher)
         self.assertIn("choice /C YN", launcher)
+
+    def test_windows_launcher_selects_desktop_browser_or_quit_after_core_setup(self):
+        launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
+
+        prompt_index = launcher.index("choice /C DBQ")
+        core_check_index = launcher.index("Core dependency import check passed.")
+        desktop_install_index = launcher.index("Installing optional desktop dependencies")
+
+        self.assertGreater(prompt_index, core_check_index)
+        self.assertLess(prompt_index, desktop_install_index)
+        self.assertIn('set "LAUNCH_MODE=auto"', launcher)
+        self.assertIn('set "LAUNCH_MODE=browser"', launcher)
+        self.assertIn("if errorlevel 3 exit /b 0", launcher)
+        self.assertIn("--mode %LAUNCH_MODE%", launcher)
+        self.assertIn("goto check_voice_dependencies", launcher)
 
     def test_launcher_page_exposes_agent_startup_controls(self):
         response = self.client.get("/")
@@ -791,10 +874,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorer-git-summary", html)
         self.assertIn("data-explorer-git-toggle", html)
         self.assertIn("explorer-git-panel", html)
-        self.assertIn("data-explorer-git-resizer", html)
+        self.assertIn("data-explorer-sidebar-resizer", html)
         self.assertIn("function toggleExplorerGitSidebar(index)", html)
-        self.assertIn("function wireExplorerGitSidebarResize(index)", html)
-        self.assertIn("function applyExplorerGitSidebarWidth(index)", html)
+        self.assertIn("function wireExplorerSidebarResize(index)", html)
+        self.assertIn("function applyExplorerSidebarWidth(index)", html)
         self.assertIn("const explorerGitToggle = card.querySelector(`[data-explorer-git-toggle=\"${i}\"]`);", html)
         self.assertIn("data-explorer-git-open-folder", html)
         self.assertIn("data-explorer-git-open-commit-diff", html)
@@ -835,6 +918,54 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("mode: commit ? 'commit' : 'head'", html)
         self.assertIn("params.set('commit', commit);", html)
         self.assertIn("${explorerGitBadgeHtml(entry.git)}", html)
+        self.assertIn("data-explorer-git-stage", html)
+        self.assertIn("data-explorer-git-unstage", html)
+        self.assertIn("data-explorer-git-commit", html)
+        self.assertIn("data-explorer-git-publish", html)
+        self.assertIn("function splitExplorerGitChanges(changes)", html)
+        self.assertIn("function explorerGitStageFile(index, path)", html)
+        self.assertIn("function explorerGitUnstageFile(index, path)", html)
+        self.assertIn("async function explorerGitCommit(index)", html)
+        self.assertIn("function explorerGitPublish(index)", html)
+        self.assertIn("Staged Changes", html)
+
+    def test_terminals_page_explorer_file_tree_hooks_are_present(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("data-explorer-tree-toggle", html)
+        self.assertIn("explorer-tree-panel", html)
+        self.assertIn("data-explorer-tree-dir", html)
+        self.assertIn("data-explorer-tree-file", html)
+        self.assertIn("data-explorer-tree-open-folder", html)
+        self.assertIn("function toggleExplorerTreeSidebar(index)", html)
+        self.assertIn("function toggleExplorerTreeDirectory(index, path)", html)
+        self.assertIn("function renderExplorerTreePanel(index)", html)
+        self.assertIn("function loadExplorerTreeChildren(index, path)", html)
+        self.assertIn("function revealExplorerTreePath(index)", html)
+        self.assertIn("function reloadExplorerTree(index)", html)
+        self.assertIn("const explorerTreeToggle = card.querySelector(`[data-explorer-tree-toggle=\"${i}\"]`);", html)
+        self.assertIn(".filter(entry => !entry.deleted)", html)
+
+    def test_terminals_page_explorer_sidebar_supports_tree_and_git_together(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("explorer-sidebar-splitter", html)
+        self.assertIn("data-explorer-sidebar-splitter", html)
+        self.assertIn("function syncExplorerSidebar(index)", html)
+        self.assertIn("function applyExplorerSidebarSplit(index)", html)
+        self.assertIn("function wireExplorerSidebarSplitter(index)", html)
+        self.assertIn("sidebar.classList.toggle('split', treeOpen && gitOpen);", html)
+        self.assertIn("main.classList.toggle('tree-open', treeOpen);", html)
+        self.assertIn("main.classList.toggle('git-open', gitOpen);", html)
+        self.assertIn(
+            ".explorer-sidebar.split {\n            grid-template-rows:"
+            " var(--explorer-sidebar-tree-height, minmax(0, 1fr)) 6px minmax(0, 1fr);",
+            html,
+        )
 
     def test_terminals_page_explorer_diff_search_hooks_are_present(self):
         response = self.client.get("/terminals")
@@ -2816,6 +2947,96 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["commits"][0]["files"][0]["path"], "README.md")
         self.assertEqual(payload["commits"][0]["files"][0]["git"]["status"], "added")
 
+    def test_explorer_git_stage_and_unstage_roundtrip(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        readme.write_text("# Project\n\nchanged\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        stage_response = self.client.post(
+            f"/api/explorer/{session_id}/git/stage",
+            json={"path": "README.md"},
+        )
+
+        self.assertEqual(stage_response.status_code, 200)
+        staged = {change["path"]: change for change in stage_response.get_json()["changes"]}
+        self.assertEqual(staged["README.md"]["git"]["index_status"], "M")
+
+        unstage_response = self.client.post(
+            f"/api/explorer/{session_id}/git/unstage",
+            json={"path": "README.md"},
+        )
+
+        self.assertEqual(unstage_response.status_code, 200)
+        unstaged = {change["path"]: change for change in unstage_response.get_json()["changes"]}
+        self.assertEqual(unstaged["README.md"]["git"]["index_status"], ".")
+        self.assertEqual(unstaged["README.md"]["git"]["worktree_status"], "M")
+
+    def test_explorer_git_commit_creates_commit(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        readme.write_text("# Project\n\nchanged\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        session_id = self._create_explorer_session(repo_dir)
+
+        commit_response = self.client.post(
+            f"/api/explorer/{session_id}/git/commit",
+            json={"message": "second commit"},
+        )
+
+        self.assertEqual(commit_response.status_code, 200)
+        payload = commit_response.get_json()
+        self.assertFalse(payload["changes"])
+        self.assertIn("second commit", payload["commits"][0]["line"])
+        latest = self._run_git(repo_dir, "log", "-1", "--pretty=%s").stdout.decode().strip()
+        self.assertEqual(latest, "second commit")
+
+    def test_explorer_git_commit_requires_message(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/commit",
+            json={"message": "   "},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("message", response.get_json()["error"].lower())
+
+    def test_explorer_git_stage_rejects_path_outside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project\n", encoding="utf-8")
+        outside_file = Path(self.temp_dir.name) / "outside.txt"
+        outside_file.write_text("secret\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/stage",
+            json={"path": "../outside.txt"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("inside the configured root", response.get_json()["error"])
+
     def test_parse_git_graph_log_skips_connector_only_lines(self):
         commits = api._parse_git_graph_log(
             b"* a1b2c3d initial\n"
@@ -3177,6 +3398,52 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("<strong>Safe bold</strong>", payload["preview_html"])
         self.assertNotIn("<script", payload["preview_html"])
         self.assertNotIn("javascript:", payload["preview_html"])
+
+    def test_explorer_markdown_preview_keeps_fenced_code_language(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "README.md"
+        file_path.write_text(
+            "```python\nprint(1)\n```\n\ninline `x` text\n",
+            encoding="utf-8",
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        preview_html = file_response.get_json()["preview_html"]
+        # Fenced blocks keep their language hint so the client can syntax-highlight.
+        self.assertIn('<code class="language-python">', preview_html)
+        # Inline code stays classless and is left as plain monospace.
+        self.assertIn("inline <code>x</code> text", preview_html)
+
+    def test_explorer_markdown_preview_treats_raw_html_as_literal_text(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "README.md"
+        file_path.write_text(
+            "The feed ends at <img> before this text.\n\n"
+            "![Markdown image](https://example.com/image.png)\n",
+            encoding="utf-8",
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        preview_html = file_response.get_json()["preview_html"]
+        self.assertIn("The feed ends at &lt;img&gt; before this text.", preview_html)
+        self.assertIn(
+            '<img alt="Markdown image" src="https://example.com/image.png">',
+            preview_html,
+        )
 
     def test_explorer_file_does_not_preview_non_markdown_text(self):
         repo_dir = Path(self.temp_dir.name) / "repo"

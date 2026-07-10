@@ -20,7 +20,7 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 from main import setup_logging
-from web.api import app, load_config, session_manager, socketio
+from web.api import app, configure_browser_shutdown, load_config, session_manager, socketio
 
 try:
     import webview
@@ -924,6 +924,7 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--config", default="config.json", help="Path to configuration file")
     args = parser.parse_args()
+    configure_browser_shutdown(args.mode == "browser")
 
     config = load_config(args.config) if os.path.exists(args.config) else {}
     host = config.get("server", {}).get("host", args.host)
@@ -963,6 +964,7 @@ def main():
             "GridVibe in browser mode."
         )
         _exit_after_startup_failure(1)
+        return
 
     open_windows = set()
 
@@ -1041,7 +1043,11 @@ def main():
     )
     if window is None:
         logger.error("Failed to create pywebview window")
-        raise SystemExit(1)
+        if args.mode == "auto":
+            _open_browser_fallback(base_url, server_thread)
+            return
+        _exit_after_startup_failure(1)
+        return
     api_bridge._attach_window(window)
     register_window(window, "launcher")
     if preferred_gui:
@@ -1061,7 +1067,12 @@ def main():
                 _open_browser_fallback(base_url, server_thread)
                 return
             _exit_after_startup_failure(1)
-        raise
+            return
+        logger.exception("Native window startup failed")
+        if args.mode == "auto":
+            _open_browser_fallback(base_url, server_thread)
+            return
+        _exit_after_startup_failure(1)
 
 
 if __name__ == "__main__":

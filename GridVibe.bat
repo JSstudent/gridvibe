@@ -9,10 +9,10 @@ echo                        GRIDVIBE
 echo         Multi-Session SSH Terminal Manager
 echo  ===============================================================
 echo.
-echo  GUI: Native window on http://localhost:5050
+echo  Server URL: http://localhost:5050
 echo.
-echo  The terminal will minimize after launch.
-echo  Close the settings window to stop the server.
+echo  The launcher will minimize after startup.
+echo  In native mode, closing the settings window stops the server.
 echo.
 
 :: %~dp0 is the folder containing this .bat file (the project root)
@@ -151,6 +151,21 @@ if errorlevel 1 (
     )
 )
 
+echo.
+echo  Choose how to start GridVibe:
+echo    [D] Desktop window
+echo    [B] Browser
+echo    [Q] Quit
+echo.
+choice /C DBQ /N /M " Select [D/B/Q]: "
+if errorlevel 3 exit /b 0
+if errorlevel 2 (
+    set "LAUNCH_MODE=browser"
+    goto check_voice_dependencies
+)
+set "LAUNCH_MODE=auto"
+
+:install_desktop_dependencies
 echo  Installing optional desktop dependencies...
 echo.
 
@@ -184,6 +199,7 @@ if errorlevel 1 (
     )
 )
 
+:check_voice_dependencies
 echo  Checking optional voice dependencies...
 echo.
 
@@ -235,7 +251,7 @@ echo  Starting GridVibe...
 echo.
 
 :: Hand off the long-running launcher to a minimized console window.
-start "GridVibe" /min cmd /c ""%VENV_PYTHON%" "%PROJECT_DIR%\webview_launcher.py""
+start "GridVibe" /min cmd /c ""%VENV_PYTHON%" "%PROJECT_DIR%\webview_launcher.py" --mode %LAUNCH_MODE%"
 if errorlevel 1 (
     echo  Error: Failed to start GridVibe.
     echo.

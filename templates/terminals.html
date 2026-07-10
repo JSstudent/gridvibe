@@ -179,6 +179,35 @@
             --explorer-file: #9fb2c8;
         }
 
+        :root,
+        [data-theme="dark"],
+        .explorer-pane[data-explorer-theme="dark"] {
+            --git-lane-0: #58a6ff;
+            --git-lane-1: #7ee787;
+            --git-lane-2: #d2a8ff;
+            --git-lane-3: #f0883e;
+            --git-lane-4: #f778ba;
+            --git-lane-5: #56d4dd;
+            --explorer-open-folder-text: #7cc4ff;
+            --explorer-open-folder-bg: #10283d;
+            --explorer-open-folder-border: #2a5b83;
+            --explorer-open-folder-hover-bg: #17456b;
+        }
+
+        [data-theme="light"],
+        .explorer-pane[data-explorer-theme="light"] {
+            --git-lane-0: #0969da;
+            --git-lane-1: #1a7f37;
+            --git-lane-2: #8250df;
+            --git-lane-3: #bc4c00;
+            --git-lane-4: #bf3989;
+            --git-lane-5: #0f7c8a;
+            --explorer-open-folder-text: #0b5fa8;
+            --explorer-open-folder-bg: #e5f2ff;
+            --explorer-open-folder-border: #9dc9ee;
+            --explorer-open-folder-hover-bg: #cee6fb;
+        }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
@@ -1378,19 +1407,30 @@
             cursor: default;
         }
 
-        .explorer-git-toggle {
+        .explorer-git-toggle,
+        .explorer-tree-toggle {
+            width: 30px;
             height: 28px;
-            min-width: 34px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 auto;
             border: 1px solid var(--t-border-tab);
             border-radius: 5px;
             background: var(--t-btn-bg);
             color: var(--t-btn-text);
             cursor: pointer;
-            font-size: .72rem;
-            font-weight: 700;
         }
 
-        .explorer-git-toggle[aria-pressed="true"] {
+        .explorer-toggle-icon {
+            width: 17px;
+            height: 17px;
+            display: block;
+            pointer-events: none;
+        }
+
+        .explorer-git-toggle[aria-pressed="true"],
+        .explorer-tree-toggle[aria-pressed="true"] {
             border-color: var(--t-accent);
             color: var(--t-accent);
             background: var(--explorer-row-active);
@@ -1408,7 +1448,7 @@
         }
 
         .explorer-git-summary {
-            max-width: 42%;
+            max-width: 30%;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -1418,17 +1458,40 @@
             flex: 0 1 auto;
         }
 
+        .explorer-git-summary:empty {
+            display: none;
+        }
+
         .explorer-main {
             min-height: 0;
             display: grid;
             grid-template-columns: minmax(0, 1fr);
         }
 
-        .explorer-main.git-open {
-            grid-template-columns: var(--explorer-git-sidebar-width, 260px) 6px minmax(0, 1fr);
+        .explorer-main.git-open,
+        .explorer-main.tree-open {
+            grid-template-columns: var(--explorer-sidebar-width, 260px) 6px minmax(0, 1fr);
         }
 
-        .explorer-git-panel {
+        .explorer-sidebar {
+            min-width: 0;
+            min-height: 0;
+            display: grid;
+            grid-template-rows: minmax(0, 1fr);
+            overflow: hidden;
+            background: var(--explorer-bar-bg);
+        }
+
+        .explorer-sidebar.split {
+            grid-template-rows: var(--explorer-sidebar-tree-height, minmax(0, 1fr)) 6px minmax(0, 1fr);
+        }
+
+        .explorer-sidebar[hidden] {
+            display: none;
+        }
+
+        .explorer-git-panel,
+        .explorer-tree-panel {
             min-width: 0;
             min-height: 0;
             overflow: auto;
@@ -1436,11 +1499,32 @@
             color: var(--explorer-text);
         }
 
-        .explorer-git-panel[hidden] {
+        .explorer-git-panel[hidden],
+        .explorer-tree-panel[hidden] {
             display: none;
         }
 
-        .explorer-git-resizer {
+        .explorer-sidebar-splitter {
+            height: 6px;
+            min-height: 6px;
+            width: 100%;
+            border: 0;
+            border-top: 1px solid var(--explorer-row-border);
+            border-bottom: 1px solid var(--explorer-row-border);
+            background: var(--explorer-bar-bg);
+            cursor: row-resize;
+        }
+
+        .explorer-sidebar-splitter:hover,
+        .explorer-sidebar-splitter.dragging {
+            background: var(--t-accent);
+        }
+
+        .explorer-sidebar-splitter[hidden] {
+            display: none;
+        }
+
+        .explorer-sidebar-resizer {
             width: 6px;
             min-width: 6px;
             border: 0;
@@ -1450,13 +1534,109 @@
             cursor: col-resize;
         }
 
-        .explorer-git-resizer:hover,
-        .explorer-git-resizer.dragging {
+        .explorer-sidebar-resizer:hover,
+        .explorer-sidebar-resizer.dragging {
             background: var(--t-accent);
         }
 
-        .explorer-git-resizer[hidden] {
+        .explorer-sidebar-resizer[hidden] {
             display: none;
+        }
+
+        .explorer-tree-section {
+            padding: 8px 0;
+        }
+
+        .explorer-tree-title {
+            padding: 0 10px 6px;
+            color: var(--explorer-muted);
+            font-size: .7rem;
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+
+        .explorer-tree-children {
+            display: grid;
+            align-content: start;
+        }
+
+        .explorer-tree-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto auto;
+            align-items: center;
+            gap: 4px;
+            min-width: 0;
+            padding-right: 6px;
+            border-left: 3px solid transparent;
+        }
+
+        .explorer-tree-row:hover {
+            background: var(--explorer-row-hover);
+        }
+
+        .explorer-tree-row.active {
+            border-left-color: var(--t-accent);
+            background: var(--explorer-row-active);
+        }
+
+        .explorer-tree-main {
+            display: grid;
+            grid-template-columns: 14px 20px minmax(0, 1fr);
+            align-items: center;
+            gap: 4px;
+            min-width: 0;
+            padding: 3px 4px 3px 7px;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+            font: inherit;
+            font-size: .74rem;
+            text-align: left;
+        }
+
+        .explorer-tree-main:focus-visible {
+            outline: 2px solid var(--t-accent);
+            outline-offset: -2px;
+        }
+
+        .explorer-tree-chevron {
+            color: var(--explorer-muted);
+            font-size: .68rem;
+            text-align: center;
+        }
+
+        .explorer-tree-name {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .explorer-tree-row .explorer-icon {
+            width: 20px;
+            height: 20px;
+        }
+
+        .explorer-tree-row .explorer-icon svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        .explorer-tree-empty,
+        .explorer-tree-loading,
+        .explorer-tree-error {
+            padding: 3px 10px;
+            color: var(--explorer-muted);
+            font-size: .7rem;
+        }
+
+        .explorer-tree-error {
+            color: #b45309;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-tree-error {
+            color: #fbbf24;
         }
 
         .explorer-list {
@@ -1720,6 +1900,46 @@
         .explorer-search-btn:disabled {
             opacity: .45;
             cursor: default;
+        }
+
+        .explorer-open-folder-btn {
+            width: 22px;
+            height: 22px;
+            font-size: .68rem;
+            border-color: var(--explorer-open-folder-border);
+            background: var(--explorer-open-folder-bg);
+            color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-open-folder-btn:hover,
+        .explorer-open-folder-btn:focus-visible {
+            background: var(--explorer-open-folder-hover-bg);
+            outline: none;
+        }
+
+        .explorer-git-stage-btn,
+        .explorer-git-unstage-btn {
+            width: 22px;
+            height: 22px;
+            font-size: .95rem;
+            font-weight: 700;
+            border-color: var(--explorer-open-folder-border);
+            background: var(--explorer-open-folder-bg);
+            color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-git-stage-btn:hover,
+        .explorer-git-stage-btn:focus-visible,
+        .explorer-git-unstage-btn:hover,
+        .explorer-git-unstage-btn:focus-visible {
+            background: var(--explorer-open-folder-hover-bg);
+            outline: none;
+        }
+
+        .explorer-diff-commit-file-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
         }
 
         .explorer-zoom-btn {
@@ -1997,6 +2217,17 @@
             white-space: pre;
         }
 
+        .explorer-diff-commit-graph-lane[data-git-lane="0"] { color: var(--git-lane-0); }
+        .explorer-diff-commit-graph-lane[data-git-lane="1"] { color: var(--git-lane-1); }
+        .explorer-diff-commit-graph-lane[data-git-lane="2"] { color: var(--git-lane-2); }
+        .explorer-diff-commit-graph-lane[data-git-lane="3"] { color: var(--git-lane-3); }
+        .explorer-diff-commit-graph-lane[data-git-lane="4"] { color: var(--git-lane-4); }
+        .explorer-diff-commit-graph-lane[data-git-lane="5"] { color: var(--git-lane-5); }
+
+        .explorer-diff-commit-graph-lane.node {
+            font-weight: 700;
+        }
+
         .explorer-diff-commit-toggle {
             color: var(--explorer-muted);
             text-align: center;
@@ -2039,6 +2270,78 @@
         button.explorer-diff-commit-file-path:focus {
             color: var(--t-accent);
             outline: none;
+        }
+
+        .explorer-git-repo-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 8px 10px;
+        }
+
+        .explorer-git-repo-branch {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: .74rem;
+            font-weight: 700;
+            color: var(--explorer-text);
+        }
+
+        .explorer-git-publish-btn,
+        .explorer-git-commit-btn {
+            flex: 0 0 auto;
+            border: 1px solid var(--t-accent);
+            border-radius: 5px;
+            background: var(--t-accent);
+            color: #04121a;
+            cursor: pointer;
+            font: inherit;
+            font-size: .72rem;
+            font-weight: 700;
+            padding: 5px 12px;
+        }
+
+        .explorer-git-publish-btn:hover:not(:disabled),
+        .explorer-git-commit-btn:hover:not(:disabled) {
+            filter: brightness(1.08);
+        }
+
+        .explorer-git-publish-btn:disabled,
+        .explorer-git-commit-btn:disabled {
+            opacity: .45;
+            cursor: default;
+        }
+
+        .explorer-git-commit-box {
+            display: grid;
+            gap: 6px;
+            padding: 8px 10px 2px;
+        }
+
+        .explorer-git-commit-message {
+            width: 100%;
+            box-sizing: border-box;
+            resize: vertical;
+            min-height: 44px;
+            border: 1px solid var(--explorer-row-border);
+            border-radius: 5px;
+            background: var(--explorer-bg);
+            color: var(--explorer-text);
+            font: inherit;
+            font-size: .74rem;
+            padding: 6px 8px;
+        }
+
+        .explorer-git-commit-message:focus {
+            outline: none;
+            border-color: var(--t-accent);
+        }
+
+        .explorer-git-commit-btn {
+            justify-self: end;
         }
 
         .explorer-side-by-side-diff {
@@ -2286,6 +2589,29 @@
             white-space: inherit;
             overflow-wrap: inherit;
             word-break: inherit;
+        }
+
+        .explorer-markdown-preview pre.explorer-preview-code {
+            position: relative;
+            padding-top: 26px;
+        }
+
+        .explorer-markdown-preview pre.explorer-preview-code[data-lang]::before {
+            content: attr(data-lang);
+            position: absolute;
+            top: 0;
+            right: 0;
+            padding: 2px 8px;
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-size: .68rem;
+            font-weight: 700;
+            letter-spacing: .04em;
+            color: var(--explorer-muted);
+            background: var(--explorer-bg);
+            border: 1px solid var(--explorer-row-border);
+            border-top: 0;
+            border-right: 0;
+            border-bottom-left-radius: 6px;
         }
 
         .explorer-markdown-preview blockquote {
@@ -6508,14 +6834,19 @@
                             <div class="explorer-surface" id="explorer-${i}">
                                 <div class="explorer-bar">
                                      <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
-                                     <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
-                                     <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">Git</button>
+                                     <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${i}" data-explorer-tree-toggle="${i}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
+                                     <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
                                      <div class="explorer-git-summary" id="explorer-git-${i}" aria-live="polite"></div>
+                                     <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
                                      <div class="explorer-directory-search" id="explorer-directory-search-${i}"></div>
                                  </div>
                                  <div class="explorer-main" id="explorer-main-${i}">
-                                     <aside class="explorer-git-panel" id="explorer-git-panel-${i}" hidden></aside>
-                                     <button type="button" class="explorer-git-resizer" id="explorer-git-resizer-${i}" data-explorer-git-resizer="${i}" aria-label="Resize Git sidebar" hidden></button>
+                                     <aside class="explorer-sidebar" id="explorer-sidebar-${i}" hidden>
+                                         <div class="explorer-tree-panel" id="explorer-tree-panel-${i}" hidden></div>
+                                         <button type="button" class="explorer-sidebar-splitter" id="explorer-sidebar-splitter-${i}" data-explorer-sidebar-splitter="${i}" aria-label="Resize file tree and Git panels" hidden></button>
+                                         <div class="explorer-git-panel" id="explorer-git-panel-${i}" hidden></div>
+                                     </aside>
+                                     <button type="button" class="explorer-sidebar-resizer" id="explorer-sidebar-resizer-${i}" data-explorer-sidebar-resizer="${i}" aria-label="Resize explorer sidebar" hidden></button>
                                      <div class="explorer-list" id="explorer-list-${i}">
                                          <div class="explorer-message">Loading directory...</div>
                                      </div>
@@ -6717,6 +7048,19 @@
                     event.preventDefault();
                     event.stopPropagation();
                     toggleExplorerGitSidebar(i);
+                });
+            }
+            const explorerTreeToggle = card.querySelector(`[data-explorer-tree-toggle="${i}"]`);
+            if (explorerTreeToggle) {
+                explorerTreeToggle.draggable = false;
+                explorerTreeToggle.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                explorerTreeToggle.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleExplorerTreeSidebar(i);
                 });
             }
             grid.appendChild(card);
@@ -7150,6 +7494,21 @@
                 toggleExplorerGitSidebar(index);
             });
         }
+
+        const explorerTreeToggle = card.querySelector(`[data-explorer-tree-toggle="${index}"]`);
+        if (explorerTreeToggle && !explorerTreeToggle.dataset.bound) {
+            explorerTreeToggle.dataset.bound = 'true';
+            explorerTreeToggle.draggable = false;
+            explorerTreeToggle.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            explorerTreeToggle.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleExplorerTreeSidebar(index);
+            });
+        }
     }
 
     function ensureExplorerThemeButton(card, index) {
@@ -7322,14 +7681,19 @@
                 <div class="explorer-surface" id="explorer-${index}">
                     <div class="explorer-bar">
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
-                        <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
-                        <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">Git</button>
+                        <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${index}" data-explorer-tree-toggle="${index}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
+                        <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
                         <div class="explorer-git-summary" id="explorer-git-${index}" aria-live="polite"></div>
+                        <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
                         <div class="explorer-directory-search" id="explorer-directory-search-${index}"></div>
                     </div>
                     <div class="explorer-main" id="explorer-main-${index}">
-                        <aside class="explorer-git-panel" id="explorer-git-panel-${index}" hidden></aside>
-                        <button type="button" class="explorer-git-resizer" id="explorer-git-resizer-${index}" data-explorer-git-resizer="${index}" aria-label="Resize Git sidebar" hidden></button>
+                        <aside class="explorer-sidebar" id="explorer-sidebar-${index}" hidden>
+                            <div class="explorer-tree-panel" id="explorer-tree-panel-${index}" hidden></div>
+                            <button type="button" class="explorer-sidebar-splitter" id="explorer-sidebar-splitter-${index}" data-explorer-sidebar-splitter="${index}" aria-label="Resize file tree and Git panels" hidden></button>
+                            <div class="explorer-git-panel" id="explorer-git-panel-${index}" hidden></div>
+                        </aside>
+                        <button type="button" class="explorer-sidebar-resizer" id="explorer-sidebar-resizer-${index}" data-explorer-sidebar-resizer="${index}" aria-label="Resize explorer sidebar" hidden></button>
                         <div class="explorer-list" id="explorer-list-${index}">
                             <div class="explorer-message">Loading directory...</div>
                         </div>
@@ -9564,6 +9928,10 @@
     const EXPLORER_SEARCH_MAX_MATCHES = 1000;
     const EXPLORER_SEARCH_CHUNK_SIZE = 65536;
     const EXPLORER_SEARCH_YIELD_MS = 8;
+    const EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT = 64;
+    const EXPLORER_TREE_INDENT_PX = 12;
+    const EXPLORER_GIT_GRAPH_LANE_COUNT = 6;
+
     const EXPLORER_GIT_STATUS_LABELS = Object.freeze({
         modified: 'M',
         added: 'A',
@@ -10064,22 +10432,105 @@
         loadExplorerPane(index, explorerParentDirectory(path));
     }
 
+    function explorerGitGraphLane(character, position) {
+        // `git log --graph` gives each branch a two-character column, and a diagonal
+        // always belongs to the column it is reaching towards, not the one it starts in.
+        const column = character === '/' || character === '\\' ? (position + 1) / 2 : position / 2;
+        return Math.floor(column) % EXPLORER_GIT_GRAPH_LANE_COUNT;
+    }
+
+    function explorerGitGraphHtml(graph) {
+        const characters = Array.from(typeof graph === 'string' && graph ? graph : '*');
+        return characters.map((character, position) => {
+            if (character === ' ') {
+                return ' ';
+            }
+            const lane = explorerGitGraphLane(character, position);
+            const nodeClass = character === '*' ? ' node' : '';
+            return `<span class="explorer-diff-commit-graph-lane${nodeClass}" data-git-lane="${lane}">${escHtml(character)}</span>`;
+        }).join('');
+    }
+
+    function explorerGitStatusFromCode(code) {
+        switch (code) {
+            case 'M':
+            case 'T':
+                return 'modified';
+            case 'A':
+                return 'added';
+            case 'D':
+                return 'deleted';
+            case 'R':
+                return 'renamed';
+            case 'C':
+                return 'added';
+            case 'U':
+                return 'conflicted';
+            case '?':
+                return 'untracked';
+            case '!':
+                return 'ignored';
+            default:
+                return 'clean';
+        }
+    }
+
+    function explorerGitCodeUnmodified(code) {
+        // Porcelain v2 uses '.' for an unchanged index/worktree position; clean rows use ' '.
+        return !code || code === ' ' || code === '.';
+    }
+
+    function splitExplorerGitChanges(changes) {
+        const staged = [];
+        const unstaged = [];
+        (Array.isArray(changes) ? changes : []).forEach(file => {
+            const git = file.git || {};
+            const indexCode = git.index_status || ' ';
+            const worktreeCode = git.worktree_status || ' ';
+            if (git.status === 'conflicted') {
+                unstaged.push({ ...file, git: { ...git, status: 'conflicted' } });
+                return;
+            }
+            if (git.status === 'untracked' || indexCode === '?') {
+                unstaged.push({ ...file, git: { ...git, status: 'untracked' } });
+                return;
+            }
+            if (!explorerGitCodeUnmodified(indexCode)) {
+                staged.push({ ...file, git: { ...git, status: explorerGitStatusFromCode(indexCode) } });
+            }
+            if (!explorerGitCodeUnmodified(worktreeCode)) {
+                unstaged.push({ ...file, git: { ...git, status: explorerGitStatusFromCode(worktreeCode) } });
+            }
+        });
+        return { staged, unstaged };
+    }
+
     function renderExplorerGitFileRows(index, files, options = {}) {
         const entries = Array.isArray(files) ? files : [];
         if (!entries.length) {
             return `<div class="explorer-diff-sidebar-empty">${escHtml(options.emptyText || 'No files.')}</div>`;
         }
         const commitHash = options.commitHash || '';
+        const action = options.action || '';
         return entries.map(file => {
             const path = file.path || file.repo_path || '';
             const pathAction = commitHash
                 ? `data-explorer-git-open-commit-diff="${escHtml(path)}" data-explorer-git-commit="${escHtml(commitHash)}"`
                 : `data-explorer-git-open-file="${escHtml(path)}"`;
+            let actionButton = '';
+            if (action === 'stage') {
+                actionButton = `<button type="button" class="explorer-search-btn explorer-git-stage-btn" data-explorer-git-stage="${escHtml(path)}" title="Stage changes" aria-label="Stage changes">+</button>`;
+            } else if (action === 'unstage') {
+                actionButton = `<button type="button" class="explorer-search-btn explorer-git-unstage-btn" data-explorer-git-unstage="${escHtml(path)}" title="Unstage changes" aria-label="Unstage changes">−</button>`;
+            }
             return `
                 <div class="explorer-diff-commit-file" title="${escHtml(path)}">
                     ${explorerDiffSidebarStatusHtml(file.git)}
                     <button type="button" class="explorer-diff-commit-file-path" ${pathAction}>${escHtml(path || file.name || 'Changed file')}</button>
-                    <button type="button" class="explorer-search-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">↪</button>
+                    <span class="explorer-diff-commit-file-actions">
+                        ${actionButton}
+                        <button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">↪</button>
+                    </span>
                 </div>
             `;
         }).join('');
@@ -10095,22 +10546,32 @@
             panel.innerHTML = '<div class="explorer-diff-sidebar-empty">Loading repository...</div>';
             return;
         }
-        if (pane._explorerGitRepoError) {
+        if (pane._explorerGitRepoError && !pane._explorerGitRepo) {
             panel.innerHTML = `<div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>`;
             return;
         }
 
         const repo = pane._explorerGitRepo || {};
+        const git = repo.git || {};
+        const errorBanner = pane._explorerGitRepoError
+            ? `<div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>`
+            : '';
         const changes = Array.isArray(repo.changes) ? repo.changes : [];
+        const { staged, unstaged } = splitExplorerGitChanges(changes);
         const commits = Array.isArray(repo.commits) ? repo.commits : [];
         const expandedCommits = ensureExplorerDiffExpandedCommits(pane);
+        const busy = Boolean(pane._explorerGitActionBusy);
+        const commitMessage = typeof pane._explorerGitCommitMessage === 'string' ? pane._explorerGitCommitMessage : '';
+        const hasUpstream = git.ahead !== null && git.ahead !== undefined;
+        const publishLabel = hasUpstream ? 'Push' : 'Publish branch';
+        const branchText = explorerGitSummaryText(git) || 'Git';
         const commitRows = commits.length
             ? commits.map(commit => {
                 const hash = commit.hash || '';
                 const expanded = hash && expandedCommits.has(`explorer:${hash}`);
                 return `
                     <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
-                        <span class="explorer-diff-commit-graph">${escHtml(commit.graph || '*')}</span>
+                        <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
                         <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
                         <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${escHtml(commit.subject || commit.line || '')}</span>
                     </button>
@@ -10120,10 +10581,25 @@
             : '<div class="explorer-diff-sidebar-empty">No commits in this scope.</div>';
 
         panel.innerHTML = `
+            ${errorBanner}
+            <div class="explorer-diff-sidebar-section explorer-git-repo-bar">
+                <span class="explorer-git-repo-branch" title="${escHtml(git.repo_root || branchText)}">${escHtml(branchText)}</span>
+                <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
+            </div>
+            <div class="explorer-diff-sidebar-section">
+                <div class="explorer-diff-sidebar-title">Staged Changes</div>
+                <div class="explorer-diff-commit-files">
+                    ${renderExplorerGitFileRows(index, staged, { emptyText: 'No staged changes.', action: 'unstage' })}
+                </div>
+                <div class="explorer-git-commit-box">
+                    <textarea class="explorer-git-commit-message" id="explorer-git-commit-message-${index}" rows="2" placeholder="Message (commits staged changes)" ${busy ? 'disabled' : ''}>${escHtml(commitMessage)}</textarea>
+                    <button type="button" class="explorer-git-commit-btn" data-explorer-git-commit ${(busy || !staged.length) ? 'disabled' : ''} title="Commit staged changes">Commit</button>
+                </div>
+            </div>
             <div class="explorer-diff-sidebar-section">
                 <div class="explorer-diff-sidebar-title">Changes</div>
                 <div class="explorer-diff-commit-files">
-                    ${renderExplorerGitFileRows(index, changes, { emptyText: 'No uncommitted changes.' })}
+                    ${renderExplorerGitFileRows(index, unstaged, { emptyText: 'No unstaged changes.', action: 'stage' })}
                 </div>
             </div>
             <div class="explorer-diff-sidebar-section">
@@ -10131,6 +10607,32 @@
                 ${commitRows}
             </div>
         `;
+        const commitMessageInput = panel.querySelector(`#explorer-git-commit-message-${index}`);
+        if (commitMessageInput) {
+            commitMessageInput.addEventListener('input', () => {
+                pane._explorerGitCommitMessage = commitMessageInput.value;
+            });
+        }
+        panel.querySelectorAll('[data-explorer-git-stage]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                explorerGitStageFile(index, button.dataset.explorerGitStage || '');
+            });
+        });
+        panel.querySelectorAll('[data-explorer-git-unstage]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                explorerGitUnstageFile(index, button.dataset.explorerGitUnstage || '');
+            });
+        });
+        const publishButton = panel.querySelector('[data-explorer-git-publish]');
+        if (publishButton) {
+            publishButton.addEventListener('click', () => explorerGitPublish(index));
+        }
+        const commitButton = panel.querySelector('[data-explorer-git-commit]');
+        if (commitButton) {
+            commitButton.addEventListener('click', () => explorerGitCommit(index));
+        }
         panel.querySelectorAll('[data-explorer-git-open-file]').forEach(button => {
             button.addEventListener('click', () => {
                 explorerGitOpenFile(index, button.dataset.explorerGitOpenFile || '');
@@ -10185,27 +10687,65 @@
         renderExplorerGitPanels(index);
     }
 
-    function setExplorerGitSidebarOpen(index, open) {
+    function syncExplorerSidebar(index) {
         const pane = terminals[index];
         const main = document.getElementById(`explorer-main-${index}`);
-        const panel = document.getElementById(`explorer-git-panel-${index}`);
-        const handle = document.getElementById(`explorer-git-resizer-${index}`);
-        const button = document.getElementById(`explorer-git-toggle-${index}`);
-        if (!pane || !main || !panel) {
+        const sidebar = document.getElementById(`explorer-sidebar-${index}`);
+        if (!pane || !main || !sidebar) {
+            return;
+        }
+
+        const treeOpen = Boolean(pane._explorerTreeSidebarOpen);
+        const gitOpen = Boolean(pane._explorerGitSidebarOpen);
+        const anyOpen = treeOpen || gitOpen;
+        const treePanel = document.getElementById(`explorer-tree-panel-${index}`);
+        const gitPanel = document.getElementById(`explorer-git-panel-${index}`);
+        const splitter = document.getElementById(`explorer-sidebar-splitter-${index}`);
+        const handle = document.getElementById(`explorer-sidebar-resizer-${index}`);
+        const treeButton = document.getElementById(`explorer-tree-toggle-${index}`);
+        const gitButton = document.getElementById(`explorer-git-toggle-${index}`);
+
+        main.classList.toggle('tree-open', treeOpen);
+        main.classList.toggle('git-open', gitOpen);
+        sidebar.hidden = !anyOpen;
+        sidebar.classList.toggle('split', treeOpen && gitOpen);
+        if (treePanel) {
+            treePanel.hidden = !treeOpen;
+        }
+        if (gitPanel) {
+            gitPanel.hidden = !gitOpen;
+        }
+        if (splitter) {
+            splitter.hidden = !(treeOpen && gitOpen);
+        }
+        if (handle) {
+            handle.hidden = !anyOpen;
+        }
+        if (treeButton) {
+            treeButton.setAttribute('aria-pressed', treeOpen ? 'true' : 'false');
+        }
+        if (gitButton) {
+            gitButton.setAttribute('aria-pressed', gitOpen ? 'true' : 'false');
+        }
+
+        if (anyOpen) {
+            applyExplorerSidebarWidth(index);
+            wireExplorerSidebarResize(index);
+        }
+        if (treeOpen && gitOpen) {
+            applyExplorerSidebarSplit(index);
+            wireExplorerSidebarSplitter(index);
+        }
+    }
+
+    function setExplorerGitSidebarOpen(index, open) {
+        const pane = terminals[index];
+        if (!pane) {
             return;
         }
         pane._explorerGitSidebarOpen = Boolean(open);
-        main.classList.toggle('git-open', pane._explorerGitSidebarOpen);
-        panel.hidden = !pane._explorerGitSidebarOpen;
-        if (handle) {
-            handle.hidden = !pane._explorerGitSidebarOpen;
-        }
-        if (button) {
-            button.setAttribute('aria-pressed', pane._explorerGitSidebarOpen ? 'true' : 'false');
-        }
+        syncExplorerSidebar(index);
         if (pane._explorerGitSidebarOpen) {
-            applyExplorerGitSidebarWidth(index);
-            wireExplorerGitSidebarResize(index);
             loadExplorerGitRepo(index);
         }
     }
@@ -10215,25 +10755,42 @@
         setExplorerGitSidebarOpen(index, !pane?._explorerGitSidebarOpen);
     }
 
-    function applyExplorerGitSidebarWidth(index) {
+    function setExplorerTreeSidebarOpen(index, open) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        pane._explorerTreeSidebarOpen = Boolean(open);
+        syncExplorerSidebar(index);
+        if (pane._explorerTreeSidebarOpen) {
+            loadExplorerTree(index);
+        }
+    }
+
+    function toggleExplorerTreeSidebar(index) {
+        const pane = terminals[index];
+        setExplorerTreeSidebarOpen(index, !pane?._explorerTreeSidebarOpen);
+    }
+
+    function applyExplorerSidebarWidth(index) {
         const pane = terminals[index];
         const main = document.getElementById(`explorer-main-${index}`);
         if (!pane || !main) {
             return;
         }
-        const width = Math.max(180, Math.min(Number(pane._explorerGitSidebarWidth || 260), 520));
-        pane._explorerGitSidebarWidth = width;
-        main.style.setProperty('--explorer-git-sidebar-width', `${width}px`);
+        const width = Math.max(180, Math.min(Number(pane._explorerSidebarWidth || 260), 520));
+        pane._explorerSidebarWidth = width;
+        main.style.setProperty('--explorer-sidebar-width', `${width}px`);
     }
 
-    function wireExplorerGitSidebarResize(index) {
+    function wireExplorerSidebarResize(index) {
         const pane = terminals[index];
         const main = document.getElementById(`explorer-main-${index}`);
-        const handle = document.getElementById(`explorer-git-resizer-${index}`);
+        const handle = document.getElementById(`explorer-sidebar-resizer-${index}`);
         if (!pane || !main || !handle) {
             return;
         }
-        applyExplorerGitSidebarWidth(index);
+        applyExplorerSidebarWidth(index);
         if (handle.dataset.bound) {
             return;
         }
@@ -10247,8 +10804,8 @@
                 const rect = main.getBoundingClientRect();
                 const maxWidth = Math.min(520, Math.max(180, rect.width - 280));
                 const nextWidth = Math.max(180, Math.min(Math.round(moveEvent.clientX - rect.left), maxWidth));
-                pane._explorerGitSidebarWidth = nextWidth;
-                main.style.setProperty('--explorer-git-sidebar-width', `${nextWidth}px`);
+                pane._explorerSidebarWidth = nextWidth;
+                main.style.setProperty('--explorer-sidebar-width', `${nextWidth}px`);
             };
             const onEnd = endEvent => {
                 handle.classList.remove('dragging');
@@ -10261,6 +10818,294 @@
             window.addEventListener('pointerup', onEnd, { once: true });
             window.addEventListener('pointercancel', onEnd, { once: true });
         });
+    }
+
+    /* Unset tree height means the two stacked panels share the sidebar evenly. */
+    function applyExplorerSidebarSplit(index) {
+        const pane = terminals[index];
+        const sidebar = document.getElementById(`explorer-sidebar-${index}`);
+        if (!pane || !sidebar) {
+            return;
+        }
+        const stored = Number(pane._explorerSidebarTreeHeight || 0);
+        if (!stored) {
+            sidebar.style.removeProperty('--explorer-sidebar-tree-height');
+            return;
+        }
+        const height = sidebar.getBoundingClientRect().height;
+        const maxTop = Math.max(EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT, height - EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT - 6);
+        const top = Math.max(EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT, Math.min(stored, maxTop));
+        pane._explorerSidebarTreeHeight = top;
+        sidebar.style.setProperty('--explorer-sidebar-tree-height', `${top}px`);
+    }
+
+    function wireExplorerSidebarSplitter(index) {
+        const pane = terminals[index];
+        const sidebar = document.getElementById(`explorer-sidebar-${index}`);
+        const splitter = document.getElementById(`explorer-sidebar-splitter-${index}`);
+        if (!pane || !sidebar || !splitter || splitter.dataset.bound) {
+            return;
+        }
+
+        splitter.dataset.bound = 'true';
+        splitter.addEventListener('pointerdown', event => {
+            event.preventDefault();
+            splitter.classList.add('dragging');
+            splitter.setPointerCapture?.(event.pointerId);
+            const onMove = moveEvent => {
+                const rect = sidebar.getBoundingClientRect();
+                const maxTop = Math.max(
+                    EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT,
+                    rect.height - EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT - 6
+                );
+                const nextTop = Math.max(
+                    EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT,
+                    Math.min(Math.round(moveEvent.clientY - rect.top), maxTop)
+                );
+                pane._explorerSidebarTreeHeight = nextTop;
+                sidebar.style.setProperty('--explorer-sidebar-tree-height', `${nextTop}px`);
+            };
+            const onEnd = endEvent => {
+                splitter.classList.remove('dragging');
+                splitter.releasePointerCapture?.(endEvent.pointerId);
+                window.removeEventListener('pointermove', onMove);
+                window.removeEventListener('pointerup', onEnd);
+                window.removeEventListener('pointercancel', onEnd);
+            };
+            window.addEventListener('pointermove', onMove);
+            window.addEventListener('pointerup', onEnd, { once: true });
+            window.addEventListener('pointercancel', onEnd, { once: true });
+        });
+    }
+
+    function ensureExplorerTreeState(pane) {
+        if (!(pane._explorerTreeExpanded instanceof Set)) {
+            pane._explorerTreeExpanded = new Set();
+        }
+        if (!(pane._explorerTreeChildren instanceof Map)) {
+            pane._explorerTreeChildren = new Map();
+        }
+        if (!(pane._explorerTreeErrors instanceof Map)) {
+            pane._explorerTreeErrors = new Map();
+        }
+        if (!(pane._explorerTreeLoading instanceof Set)) {
+            pane._explorerTreeLoading = new Set();
+        }
+        return pane;
+    }
+
+    async function loadExplorerTreeChildren(index, path) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId) {
+            return [];
+        }
+
+        ensureExplorerTreeState(pane);
+        const key = String(path || '');
+        if (pane._explorerTreeChildren.has(key)) {
+            return pane._explorerTreeChildren.get(key);
+        }
+        if (pane._explorerTreeLoading.has(key)) {
+            return [];
+        }
+
+        pane._explorerTreeLoading.add(key);
+        pane._explorerTreeErrors.delete(key);
+        renderExplorerTreePanel(index);
+        try {
+            const entriesUrl = `/api/explorer/${encodeURIComponent(sessionId)}/entries`;
+            // Always send an explicit path (empty === the explorer root) so the tree stays
+            // anchored to the configured root. Omitting it makes the backend fall back to the
+            // session's current directory, which strands the tree on a subdirectory after the
+            // pane re-enters explorer mode from a deeper terminal cwd.
+            const response = await fetch(`${entriesUrl}?path=${encodeURIComponent(key)}`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load directory');
+            }
+            const entries = (Array.isArray(data.entries) ? data.entries : []).filter(entry => !entry.deleted);
+            pane._explorerTreeChildren.set(key, entries);
+            return entries;
+        } catch (error) {
+            console.error('[GridVibe Sessions] Explorer tree load failed:', error);
+            pane._explorerTreeErrors.set(key, error.message || 'Failed to load directory.');
+            return [];
+        } finally {
+            pane._explorerTreeLoading.delete(key);
+            renderExplorerTreePanel(index);
+        }
+    }
+
+    function explorerTreeRowIsActive(pane, entry) {
+        const path = entry.path || '';
+        if (entry.type === 'directory') {
+            return pane._explorerMode !== 'file' && (pane._explorerPath || '') === path;
+        }
+        return pane._explorerMode === 'file' && (pane._explorerFilePath || '') === path;
+    }
+
+    function explorerTreeRowHtml(pane, entry, depth) {
+        const isDirectory = entry.type === 'directory';
+        const path = entry.path || '';
+        const expanded = isDirectory && pane._explorerTreeExpanded.has(path);
+        const active = explorerTreeRowIsActive(pane, entry);
+        const action = isDirectory
+            ? `data-explorer-tree-dir="${escHtml(path)}" aria-expanded="${expanded ? 'true' : 'false'}"`
+            : `data-explorer-tree-file="${escHtml(path)}"`;
+        const chevron = isDirectory ? (expanded ? '▾' : '▸') : '';
+        const badge = explorerGitStatusLabel(entry.git) ? explorerGitBadgeHtml(entry.git) : '';
+        const openFolder = isDirectory
+            ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">↪</button>`
+            : '';
+
+        return `
+            <div class="explorer-tree-row${active ? ' active' : ''}">
+                <button type="button" class="explorer-tree-main" ${action} style="padding-left:${7 + depth * EXPLORER_TREE_INDENT_PX}px" title="${escHtml(path)}">
+                    <span class="explorer-tree-chevron" aria-hidden="true">${chevron}</span>
+                    ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
+                    <span class="explorer-tree-name">${escHtml(entry.name || path)}</span>
+                </button>
+                ${badge}
+                ${openFolder}
+            </div>
+        `;
+    }
+
+    function renderExplorerTreeNodes(pane, path, depth) {
+        const indent = `style="padding-left:${10 + depth * EXPLORER_TREE_INDENT_PX}px"`;
+        const error = pane._explorerTreeErrors.get(path);
+        if (error) {
+            return `<div class="explorer-tree-error" ${indent}>${escHtml(error)}</div>`;
+        }
+        if (pane._explorerTreeLoading.has(path)) {
+            return `<div class="explorer-tree-loading" ${indent}>Loading...</div>`;
+        }
+
+        const entries = pane._explorerTreeChildren.get(path);
+        if (!entries) {
+            return '';
+        }
+        if (!entries.length) {
+            return `<div class="explorer-tree-empty" ${indent}>Empty folder.</div>`;
+        }
+
+        return entries.map(entry => {
+            const row = explorerTreeRowHtml(pane, entry, depth);
+            if (entry.type !== 'directory' || !pane._explorerTreeExpanded.has(entry.path || '')) {
+                return row;
+            }
+            const children = renderExplorerTreeNodes(pane, entry.path || '', depth + 1);
+            return `${row}<div class="explorer-tree-children">${children}</div>`;
+        }).join('');
+    }
+
+    function renderExplorerTreePanel(index) {
+        const pane = terminals[index];
+        const panel = document.getElementById(`explorer-tree-panel-${index}`);
+        if (!pane || !panel) {
+            return;
+        }
+
+        ensureExplorerTreeState(pane);
+        panel.innerHTML = `
+            <div class="explorer-tree-section">
+                <div class="explorer-tree-title">Files</div>
+                <div class="explorer-tree-children">${renderExplorerTreeNodes(pane, '', 0)}</div>
+            </div>
+        `;
+        panel.querySelectorAll('[data-explorer-tree-dir]').forEach(button => {
+            button.addEventListener('click', () => {
+                toggleExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');
+            });
+        });
+        panel.querySelectorAll('[data-explorer-tree-file]').forEach(button => {
+            button.addEventListener('click', () => {
+                openExplorerFile(index, button.dataset.explorerTreeFile || '');
+            });
+        });
+        panel.querySelectorAll('[data-explorer-tree-open-folder]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                loadExplorerPane(index, button.dataset.explorerTreeOpenFolder || '');
+            });
+        });
+    }
+
+    async function toggleExplorerTreeDirectory(index, path) {
+        const pane = terminals[index];
+        if (!pane || !path) {
+            return;
+        }
+
+        ensureExplorerTreeState(pane);
+        if (pane._explorerTreeExpanded.has(path)) {
+            pane._explorerTreeExpanded.delete(path);
+            renderExplorerTreePanel(index);
+            return;
+        }
+
+        pane._explorerTreeExpanded.add(path);
+        pane._explorerTreeErrors.delete(path);
+        renderExplorerTreePanel(index);
+        await loadExplorerTreeChildren(index, path);
+    }
+
+    /* Expand every ancestor of the pane's current directory or open file. */
+    async function revealExplorerTreePath(index) {
+        const pane = terminals[index];
+        if (!pane?._explorerTreeSidebarOpen) {
+            return;
+        }
+
+        ensureExplorerTreeState(pane);
+        const target = pane._explorerMode === 'file'
+            ? (pane._explorerFilePath || '')
+            : (pane._explorerPath || '');
+        const segments = String(target).split('/').filter(Boolean);
+        if (pane._explorerMode === 'file') {
+            segments.pop();
+        }
+
+        await loadExplorerTreeChildren(index, '');
+        let current = '';
+        for (const segment of segments) {
+            current = current ? `${current}/${segment}` : segment;
+            pane._explorerTreeExpanded.add(current);
+            await loadExplorerTreeChildren(index, current);
+        }
+        renderExplorerTreePanel(index);
+    }
+
+    async function loadExplorerTree(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        ensureExplorerTreeState(pane);
+        renderExplorerTreePanel(index);
+        await revealExplorerTreePath(index);
+    }
+
+    /* Drop cached children but keep expansion state, then refetch what is visible. */
+    async function reloadExplorerTree(index) {
+        const pane = terminals[index];
+        if (!pane?._explorerTreeSidebarOpen) {
+            return;
+        }
+
+        ensureExplorerTreeState(pane);
+        pane._explorerTreeChildren.clear();
+        pane._explorerTreeErrors.clear();
+        renderExplorerTreePanel(index);
+
+        const expanded = [...pane._explorerTreeExpanded]
+            .sort((left, right) => left.split('/').length - right.split('/').length);
+        await loadExplorerTreeChildren(index, '');
+        for (const path of expanded) {
+            await loadExplorerTreeChildren(index, path);
+        }
+        renderExplorerTreePanel(index);
     }
 
     function ensureExplorerDiffExpandedCommits(pane) {
@@ -10296,6 +11141,91 @@
             pane._explorerGitRepoLoading = false;
             renderExplorerGitPanels(index);
         }
+    }
+
+    async function performExplorerGitAction(index, endpoint, body) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId || pane._explorerGitActionBusy) {
+            return false;
+        }
+        pane._explorerGitActionBusy = true;
+        pane._explorerGitRepoError = '';
+        renderExplorerGitPanels(index);
+        let succeeded = false;
+        try {
+            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/git/${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body || {}),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Git action failed');
+            }
+            pane._explorerGitRepo = data;
+            pane._explorerGitRepoLoaded = true;
+            succeeded = true;
+        } catch (error) {
+            console.error('[GridVibe Sessions] Explorer Git action failed:', error);
+            pane._explorerGitRepoError = error.message || 'Git action failed.';
+        } finally {
+            pane._explorerGitActionBusy = false;
+            renderExplorerGitPanels(index);
+        }
+        if (succeeded && pane._explorerMode === 'directory') {
+            loadExplorerPane(index, null, { force: true, showLoading: false });
+        }
+        return succeeded;
+    }
+
+    function explorerGitStageFile(index, path) {
+        if (!path) {
+            return;
+        }
+        performExplorerGitAction(index, 'stage', { path });
+    }
+
+    function explorerGitUnstageFile(index, path) {
+        if (!path) {
+            return;
+        }
+        performExplorerGitAction(index, 'unstage', { path });
+    }
+
+    async function explorerGitCommit(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const message = String(pane._explorerGitCommitMessage || '').trim();
+        if (!message) {
+            pane._explorerGitRepoError = 'Commit message is required.';
+            renderExplorerGitPanels(index);
+            const input = document.getElementById(`explorer-git-commit-message-${index}`);
+            if (input) {
+                input.focus();
+            }
+            return;
+        }
+        const committed = await performExplorerGitAction(index, 'commit', { message });
+        if (committed) {
+            pane._explorerGitCommitMessage = '';
+            renderExplorerGitPanels(index);
+        }
+    }
+
+    function explorerGitPublish(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const git = (pane._explorerGitRepo && pane._explorerGitRepo.git) || {};
+        const branch = git.branch || 'this branch';
+        if (!window.confirm(`Publish ${branch} to its remote?`)) {
+            return;
+        }
+        performExplorerGitAction(index, 'publish', {});
     }
 
     function renderExplorerDiff(index) {
@@ -10815,11 +11745,37 @@
         wireExplorerMarkdownSectionControls(index);
     }
 
+    function explorerPreviewBlockLanguage(code) {
+        const match = String(code.className || '').match(/(?:^|\s)language-([\w+#.-]+)/i);
+        return match ? normalizeExplorerLanguage(match[1]) : '';
+    }
+
+    function highlightExplorerPreviewCode(root) {
+        if (!root) {
+            return;
+        }
+        root.querySelectorAll('pre > code').forEach(code => {
+            const language = explorerPreviewBlockLanguage(code);
+            if (!language) {
+                return;
+            }
+            const pre = code.parentElement;
+            pre.classList.add('explorer-preview-code');
+            pre.dataset.lang = language.toUpperCase();
+            // Plain text/markdown blocks stay unstyled; string/number rules would mislead there.
+            if (language === 'text' || language === 'markdown') {
+                return;
+            }
+            code.innerHTML = highlightExplorerCode(code.textContent, language);
+        });
+    }
+
     function restoreExplorerPreview(index) {
         const pane = terminals[index];
         const preview = document.getElementById(`explorer-preview-${index}`);
         if (pane && preview) {
             preview.innerHTML = pane._explorerPreviewHtml || '';
+            highlightExplorerPreviewCode(preview);
         }
         return preview;
     }
@@ -11374,6 +12330,29 @@
         </span>
     `;
 
+    const EXPLORER_TREE_TOGGLE_ICON = `
+        <svg class="explorer-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+            fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="5" rx="1.5"/>
+            <rect x="14" y="9.5" width="7" height="5" rx="1.5"/>
+            <rect x="14" y="16.5" width="7" height="5" rx="1.5"/>
+            <path d="M6.5 8v11"/>
+            <path d="M6.5 12h7.5"/>
+            <path d="M6.5 19h7.5"/>
+        </svg>
+    `;
+
+    const EXPLORER_GIT_TOGGLE_ICON = `
+        <svg class="explorer-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+            fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="5.5" cy="5" r="2.25"/>
+            <circle cx="5.5" cy="19" r="2.25"/>
+            <circle cx="18.5" cy="5" r="2.25"/>
+            <path d="M5.5 7.25v9.5"/>
+            <path d="M18.5 7.25v1.5a4 4 0 0 1-4 4h-5a4 4 0 0 0-4 4"/>
+        </svg>
+    `;
+
     function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '' } = {}) {
         const pane = terminals[index];
         const list = document.getElementById(`explorer-list-${index}`);
@@ -11488,6 +12467,7 @@
         const preview = document.getElementById(`explorer-preview-${index}`);
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
+            highlightExplorerPreviewCode(preview);
         }
 
         const backButton = list.querySelector(`[data-explorer-editor-back="${index}"]`);
@@ -11555,6 +12535,7 @@
         renderExplorerSource(index);
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
+            highlightExplorerPreviewCode(preview);
         }
         if (diffPanel && hasGitDiff) {
             renderExplorerDiff(index);
@@ -11703,7 +12684,11 @@
             ) {
                 return true;
             }
-            return renderExplorerFile(index, data, { scrollState, openDiff, diffCommit });
+            const rendered = renderExplorerFile(index, data, { scrollState, openDiff, diffCommit });
+            if (rendered) {
+                revealExplorerTreePath(index);
+            }
+            return rendered;
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer file open failed:', error);
             renderExplorerDirectoryOpenError(index, error.message || 'Failed to open file.');
@@ -11714,6 +12699,7 @@
     async function refreshExplorerPane(index) {
         const pane = terminals[index];
         const refreshGitSidebar = Boolean(pane?._explorerGitSidebarOpen);
+        const refreshTreeSidebar = Boolean(pane?._explorerTreeSidebarOpen);
         if (refreshGitSidebar) {
             invalidateExplorerGitRepo(index);
         }
@@ -11725,6 +12711,9 @@
         }
         if (refreshGitSidebar) {
             await loadExplorerGitRepo(index);
+        }
+        if (refreshTreeSidebar) {
+            await reloadExplorerTree(index);
         }
         return refreshed;
     }
@@ -11784,6 +12773,7 @@
             document.getElementById(`ph-${index}`)?.remove();
             updateExplorerGitSummary(index, data.git || null);
             renderExplorerDirectorySearchControls(index);
+            revealExplorerTreePath(index);
 
             const pathLabel = document.getElementById(`explorer-path-${index}`);
             const upButton = document.getElementById(`explorer-up-${index}`);

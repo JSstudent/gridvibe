@@ -84,9 +84,13 @@ Explorer panes support:
 - Lightweight syntax coloring for common source, config, log, JSON Lines, Dockerfile, and environment files.
 - Size-limited previews. Binary files, directories, and paths outside the root are rejected.
 - Local Repo explorers add read-only Git awareness when `git` is available. SSH explorers use the remote host's `git` command when available. Both support branch/dirty summary, per-entry status badges, directory dirty markers, and a bounded internal old/new Diff panel with added and removed line highlighting for changed tracked files.
-- The explorer `Git` button opens a resizable repository sidebar with uncommitted changed files and a collapsible commit graph. Uncommitted file rows open the current file, commit file rows open that historical read-only diff, folder buttons jump to containing folders, and the file Diff tab preserves whitespace and syntax coloring.
+- The explorer tree and Git sidebar toggles sit at the left of the explorer bar, next to the Git branch summary, and are labelled with a file-hierarchy icon and a Git-branch icon.
+- The Git toggle opens a resizable repository sidebar with a `Staged Changes` section above the working `Changes` list and a collapsible commit graph whose branch lanes are colour-coded. Uncommitted file rows open the current file, commit file rows open that historical read-only diff, folder buttons jump to containing folders, and the file Diff tab preserves whitespace and syntax coloring.
+- The Git sidebar supports basic staging: working change rows have a `+` button to stage them, staged rows have a `-` button to unstage, a commit message box with a `Commit` button commits the staged changes, and a `Publish branch` button pushes the current branch (setting the `origin` upstream when none exists). These mutating actions never prompt for credentials, so publishing fails fast instead of hanging when authentication is required.
+- The tree toggle opens a lazily loaded file tree sidebar for faster navigation. Folder rows expand and collapse in place, folder buttons jump the explorer list to that folder, file rows open the read-only preview, and rows carry the same Git status badges. The tree follows the pane, expanding the ancestors of the current directory or open file.
+- The tree and Git sidebars are independent. Opening both stacks the file tree above the Git sidebar in one shared sidebar, split evenly by a draggable horizontal divider.
 
-File moving, editing, deleting, upload, staging, restoring, checkout, commit, pull, and push actions are not part of the current file explorer implementation.
+File moving, editing, deleting, and upload, along with Git restore, checkout, pull, and merge actions, are not part of the current file explorer implementation. Git staging, unstaging, commit, and branch publishing (push) are the only supported mutating actions.
 
 ### Browser Panes
 
@@ -165,7 +169,7 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 - Saved launcher and active-workspace presets with encrypted SSH passwords
 - Session groups with numbered closable tabs, `Alt+1` through `Alt+9` tab switching, import/save actions, drag-to-reorder persistence, collapsible top bar, and max surface mode
 - xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and drag-resizable dynamic split-pane support
-- Local and SSH read-only file explorer panes with directory search, text/Markdown preview, syntax highlighting, per-pane editor font zoom, client-side file/diff search, and read-only Git status/diff awareness with a resizable changed-file and commit-graph sidebar
+- Local and SSH file explorer panes with directory search, a lazily loaded file tree sidebar, text/Markdown preview, syntax highlighting, per-pane editor font zoom, client-side file/diff search, and a resizable Git sidebar with status/diff awareness, a commit graph, and basic staging, commit, and branch publishing
 - Optional resizable native desktop window through `pywebview`
 - Optional offline voice input through Vosk or faster-whisper
 - Theme support for system, light, and dark modes
@@ -190,7 +194,7 @@ Use the included launcher for the easiest Windows setup:
 .\GridVibe.bat
 ```
 
-`GridVibe.bat` creates or repairs `.venv`, upgrades installer tooling, upgrades runtime and desktop dependencies, verifies native dependency imports, checks optional voice dependencies, prompts to install them when missing, then launches the native window when possible.
+`GridVibe.bat` creates or repairs `.venv`, upgrades installer tooling, installs and verifies the core dependencies, then asks whether to start in Desktop mode, Browser mode, or quit. Desktop mode installs the optional desktop dependencies and opens a `pywebview` window, falling back to the default browser if desktop support is unavailable. Browser mode skips the desktop dependency installation and opens only the Windows default browser. In explicit Browser mode, the Launcher Setup header includes a Close button that stops the GridVibe Python process.
 
 Manual Windows setup:
 
@@ -209,6 +213,13 @@ Install optional desktop-window support with:
 ```powershell
 python -m pip install --upgrade -r requirements-desktop.txt
 python webview_launcher.py
+```
+
+The explicit launcher modes are also available from the command line:
+
+```powershell
+python webview_launcher.py --mode native
+python webview_launcher.py --mode browser
 ```
 
 ### Linux Install
