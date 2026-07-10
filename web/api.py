@@ -2792,9 +2792,18 @@ MARKDOWN_ALLOWED_TAGS = {
     "tr",
     "ul",
 }
+def _allow_fenced_code_language(tag: str, name: str, value: str) -> bool:
+    """Permit only fenced-code language hints (``class="language-*"``) on code."""
+    if name != "class":
+        return False
+    tokens = value.split()
+    return bool(tokens) and all(token.startswith("language-") for token in tokens)
+
+
 MARKDOWN_ALLOWED_ATTRIBUTES = {
     "a": ["href", "title"],
     "abbr": ["title"],
+    "code": _allow_fenced_code_language,
     "img": ["alt", "src", "title"],
     "input": ["checked", "disabled", "type"],
     "td": ["align"],

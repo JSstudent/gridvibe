@@ -3216,6 +3216,28 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("<script", payload["preview_html"])
         self.assertNotIn("javascript:", payload["preview_html"])
 
+    def test_explorer_markdown_preview_keeps_fenced_code_language(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "README.md"
+        file_path.write_text(
+            "```python\nprint(1)\n```\n\ninline `x` text\n",
+            encoding="utf-8",
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        preview_html = file_response.get_json()["preview_html"]
+        # Fenced blocks keep their language hint so the client can syntax-highlight.
+        self.assertIn('<code class="language-python">', preview_html)
+        # Inline code stays classless and is left as plain monospace.
+        self.assertIn("inline <code>x</code> text", preview_html)
+
     def test_explorer_markdown_preview_treats_raw_html_as_literal_text(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()

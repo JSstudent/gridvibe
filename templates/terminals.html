@@ -2494,6 +2494,29 @@
             word-break: inherit;
         }
 
+        .explorer-markdown-preview pre.explorer-preview-code {
+            position: relative;
+            padding-top: 26px;
+        }
+
+        .explorer-markdown-preview pre.explorer-preview-code[data-lang]::before {
+            content: attr(data-lang);
+            position: absolute;
+            top: 0;
+            right: 0;
+            padding: 2px 8px;
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-size: .68rem;
+            font-weight: 700;
+            letter-spacing: .04em;
+            color: var(--explorer-muted);
+            background: var(--explorer-bg);
+            border: 1px solid var(--explorer-row-border);
+            border-top: 0;
+            border-right: 0;
+            border-bottom-left-radius: 6px;
+        }
+
         .explorer-markdown-preview blockquote {
             border-left: 3px solid var(--explorer-border);
             padding-left: 12px;
@@ -11425,11 +11448,37 @@
         wireExplorerMarkdownSectionControls(index);
     }
 
+    function explorerPreviewBlockLanguage(code) {
+        const match = String(code.className || '').match(/(?:^|\s)language-([\w+#.-]+)/i);
+        return match ? normalizeExplorerLanguage(match[1]) : '';
+    }
+
+    function highlightExplorerPreviewCode(root) {
+        if (!root) {
+            return;
+        }
+        root.querySelectorAll('pre > code').forEach(code => {
+            const language = explorerPreviewBlockLanguage(code);
+            if (!language) {
+                return;
+            }
+            const pre = code.parentElement;
+            pre.classList.add('explorer-preview-code');
+            pre.dataset.lang = language.toUpperCase();
+            // Plain text/markdown blocks stay unstyled; string/number rules would mislead there.
+            if (language === 'text' || language === 'markdown') {
+                return;
+            }
+            code.innerHTML = highlightExplorerCode(code.textContent, language);
+        });
+    }
+
     function restoreExplorerPreview(index) {
         const pane = terminals[index];
         const preview = document.getElementById(`explorer-preview-${index}`);
         if (pane && preview) {
             preview.innerHTML = pane._explorerPreviewHtml || '';
+            highlightExplorerPreviewCode(preview);
         }
         return preview;
     }
@@ -12121,6 +12170,7 @@
         const preview = document.getElementById(`explorer-preview-${index}`);
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
+            highlightExplorerPreviewCode(preview);
         }
 
         const backButton = list.querySelector(`[data-explorer-editor-back="${index}"]`);
@@ -12188,6 +12238,7 @@
         renderExplorerSource(index);
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
+            highlightExplorerPreviewCode(preview);
         }
         if (diffPanel && hasGitDiff) {
             renderExplorerDiff(index);
