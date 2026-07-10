@@ -114,6 +114,14 @@ binding does not protect against the user's own browser.
    use `room=session_id` for output; `session_status` in `_broadcast_session_status` is global —
    move it to the session room too).
 
+> **✅ Implemented (2026-07-10).** `_resolve_cors_origins` in `web/api.py` now derives
+> same-origin defaults (`http://127.0.0.1:<port>` + `http://localhost:<port>`, plus the
+> configured host when it isn't loopback/wildcard) from `server.host`/`server.port`;
+> `default_config.json` ships `security.cors_origins: []` so the derivation applies. An
+> explicit non-empty `cors_origins` list (including `["*"]`) still wins for reverse-proxy
+> setups. Flagged as breaking in `CHANGELOG.md`. Step 3 (room-scoping `session_status`) was
+> **not** done. Covered by `CorsOriginDefaultsTestCase` in `tests/test_api.py`.
+
 ### 1.2 No Origin/CSRF guard on state-changing HTTP endpoints — **High**
 
 **Location:** all `POST`/`DELETE` routes in `web/api.py` — notably `/api/sessions` (launch with
@@ -143,6 +151,13 @@ Requests from the app's own pages send a matching `Origin` (or none for same-ori
 non-CORS requests and pywebview); cross-site `fetch`/form posts always send the attacker's
 origin. Requiring a custom header (`X-GridVibe-Request: 1`) on all frontend `fetch` calls is an
 equivalent alternative (custom headers force a CORS preflight, which then fails).
+
+> **✅ Implemented (2026-07-10).** `web/api.py` gained a `_reject_cross_origin_writes`
+> `before_request` hook (plus `_allowed_write_origin_netlocs` helper): non-GET/HEAD/OPTIONS
+> requests carrying a cross-origin (or `null`) `Origin` header get `403`. Same-origin requests,
+> requests with no `Origin` header (curl, pywebview), the `127.0.0.1`↔`localhost` alias pair,
+> and any origins listed in `security.cors_origins` (with `"*"` disabling the guard) are
+> allowed. Covered by `CrossOriginWriteGuardTestCase` in `tests/test_api.py`.
 
 ### 1.3 `_decrypt_password` silently returns the ciphertext on failure — **Medium**
 
@@ -186,6 +201,17 @@ client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 client.save_host_keys(os.path.join(BASE_DIR, ".known_hosts"))
 ```
 This keeps first-use convenience but detects key *changes* on later connections.
+
+> **✅ Implemented (2026-07-10).** New `_load_persistent_host_keys(client)` helper in
+> `web/api.py` creates (if needed) and loads a project-local `.known_hosts`
+> (`KNOWN_HOSTS_PATH`, added to `.gitignore`); it is called at all three SSH entry points
+> (`_connect_ssh_session`, `_open_ssh_sftp`, `_detect_ssh_command`). No explicit
+> `save_host_keys` call is needed: because `load_host_keys` records the filename, paramiko's
+> `AutoAddPolicy` persists newly accepted keys automatically, and `connect` raises
+> `BadHostKeyException` (a `SSHException`, surfaced through the existing error path) when a
+> known host presents a different key. Load failures degrade gracefully to today's behaviour
+> with a warning. Covered by `KnownHostsPersistenceTestCase` in `tests/test_api.py`.
+> Feature 10.7 (configurable strict mode) remains open.
 
 ---
 
@@ -1348,7 +1374,8 @@ posture paragraph.
 
 1. **Quick wins (small, high value):** 1.3, 2.1, 2.7, 4.1, 4.2, 4.4, 4.5, 9.1, 10.1 — each is
    under ~30 lines. ✅ **All nine implemented 2026-07-10** (see the per-finding notes above).
-2. **Security defaults:** 1.1 + 1.2 together (one PR, changelog entry).
+2. **Security defaults:** 1.1 + 1.2 together (one PR, changelog entry). ✅ **Implemented
+   2026-07-10**, together with 1.4's known_hosts persistence (see the per-finding notes above).
 3. **Perf pass:** 3.1 (SFTP pool) then 3.2/3.4; 3.6 (vendor assets) can ship independently.
 4. **Structural:** 6.1 (explorer backend) → 6.2 (module split) → 3.5/6.4 (template extraction),
    each incremental with `make check` green between steps.

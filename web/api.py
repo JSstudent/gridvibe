@@ -117,6 +117,7 @@ def configure_browser_shutdown(enabled: bool) -> str:
         return _browser_shutdown_token
 
 ENCRYPTION_KEY_PATH = os.path.join(BASE_DIR, ".encryption_key")
+KNOWN_HOSTS_PATH = os.path.join(BASE_DIR, ".known_hosts")
 
 def _get_encryption_key() -> bytes:
     """Load or generate encryption key for password storage."""
@@ -1500,6 +1501,27 @@ def _detect_wsl_command(binary: str, distribution: str = "") -> Dict[str, Any]:
     )
 
 
+def _load_persistent_host_keys(client: Any) -> None:
+    """Load the project-local known_hosts file so host key changes are detected.
+
+    First contact still auto-accepts the key (AutoAddPolicy), but because
+    ``load_host_keys`` records the filename, paramiko persists newly accepted
+    keys back to the file and raises ``BadHostKeyException`` if a known host
+    presents a different key on a later connection.
+    """
+    try:
+        if not os.path.exists(KNOWN_HOSTS_PATH):
+            with open(KNOWN_HOSTS_PATH, "a", encoding="utf-8"):
+                pass
+        client.load_host_keys(KNOWN_HOSTS_PATH)
+    except Exception as exc:
+        logger.warning(
+            "Could not load %s; SSH host key changes will not be detected: %s",
+            KNOWN_HOSTS_PATH,
+            exc,
+        )
+
+
 def _detect_ssh_command(binary: str, target: Dict[str, Any]) -> Dict[str, Any]:
     """Detect a command on a remote SSH host."""
     host = str(target.get("host") or "").strip()
@@ -1528,6 +1550,7 @@ def _detect_ssh_command(binary: str, target: Dict[str, Any]) -> Dict[str, Any]:
     try:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        _load_persistent_host_keys(client)
         client.connect(
             hostname=host,
             port=port,
@@ -1830,9 +1853,23 @@ def _resolve_secret_key() -> bytes | str:
 
 
 def _resolve_cors_origins():
-    """Return configured Socket.IO CORS origins for the local app."""
-    origins = app_config.get("security", {}).get("cors_origins", ["*"])
-    return origins if origins else ["*"]
+    """Return Socket.IO CORS origins; defaults to same-origin only.
+
+    The Socket.IO channel accepts terminal input, so a wildcard here would let
+    any web page in the user's browser reach live shells. An explicit
+    ``security.cors_origins`` list in config (including ``["*"]``) still wins,
+    e.g. for reverse-proxy setups.
+    """
+    configured = app_config.get("security", {}).get("cors_origins")
+    if configured:
+        return configured
+    server_config = app_config.get("server", {})
+    port = server_config.get("port", 5050)
+    host = str(server_config.get("host", "127.0.0.1")).strip()
+    origins = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
+    if host and host not in {"127.0.0.1", "localhost", "0.0.0.0", "::", "::1"}:
+        origins.append(f"http://{host}:{port}")
+    return origins
 # Create Flask app
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 app.config["SECRET_KEY"] = _resolve_secret_key()
@@ -1840,6 +1877,51 @@ app.config['JSON_SORT_KEYS'] = False
 
 # Initialize SocketIO
 socketio = SocketIO(app, cors_allowed_origins=_resolve_cors_origins(), async_mode="threading")
+
+
+def _allowed_write_origin_netlocs() -> Optional[set]:
+    """Origins allowed to issue state-changing requests; None means allow all."""
+    netlocs = set()
+    for entry in app_config.get("security", {}).get("cors_origins") or []:
+        entry = str(entry).strip()
+        if entry == "*":
+            return None
+        parsed = urlparse(entry if "//" in entry else f"//{entry}")
+        if parsed.netloc:
+            netlocs.add(parsed.netloc.lower())
+    host = request.host.lower()
+    netlocs.add(host)
+    netlocs.add(host.replace("127.0.0.1", "localhost", 1))
+    netlocs.add(host.replace("localhost", "127.0.0.1", 1))
+    return netlocs
+
+
+@app.before_request
+def _reject_cross_origin_writes():
+    """Reject cross-origin state-changing requests.
+
+    CORS stops a hostile page from *reading* responses, but "simple"
+    cross-origin POSTs still execute server-side. The app's own pages send a
+    matching Origin header (or none for non-CORS requests and pywebview),
+    while a cross-site fetch/form post always carries the attacker's origin.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    origin = request.headers.get("Origin", "").strip()
+    if not origin:
+        return None
+    allowed = _allowed_write_origin_netlocs()
+    if allowed is None:
+        return None
+    if origin.lower() == "null" or urlparse(origin).netloc.lower() not in allowed:
+        logger.warning(
+            "Rejected cross-origin %s %s from Origin %s",
+            request.method,
+            request.path,
+            origin,
+        )
+        return jsonify({"error": "Cross-origin request rejected"}), 403
+    return None
 
 # Initialize session manager
 session_manager = SessionManager()
@@ -4305,6 +4387,7 @@ def _open_ssh_sftp(session: Any) -> Tuple[Any, Any]:
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    _load_persistent_host_keys(client)
     client.connect(
         hostname=session.host,
         port=session.port,
@@ -4559,6 +4642,7 @@ def _connect_ssh_session(session_id: str, session: Any):
     try:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        _load_persistent_host_keys(client)
         logger.info(
             f"[{session_id}] paramiko.connect hostname={session.host} port={session.port}"
             f" user={session.username} password={'***' if session.password else None}"

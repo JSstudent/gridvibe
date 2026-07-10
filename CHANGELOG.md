@@ -4,6 +4,9 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **Security (breaking for reverse-proxy setups):** Socket.IO CORS now defaults to same-origin (`http://127.0.0.1:<port>` / `http://localhost:<port>`) instead of `*`. If GridVibe is served from another origin (for example behind a reverse proxy), set `security.cors_origins` in `config.json` explicitly; `["*"]` restores the old behaviour.
+- **Security:** state-changing HTTP requests (`POST`/`DELETE`/`PUT`/`PATCH`) with a cross-origin `Origin` header are now rejected with `403`, blocking drive-by requests from hostile web pages against the local API. Origins listed in `security.cors_origins` remain allowed.
+- **Security:** SSH host keys are now persisted to a project-local `.known_hosts` file (gitignored). First connections still auto-accept the key, but a changed host key on a later connection is rejected instead of being silently accepted.
 - Added SSH keepalive for terminal sessions: the existing `ssh.keepalive_interval` config key (default 60 seconds, `0` disables) is now applied to SSH connections so idle panes behind NAT/firewalls stay alive.
 - Fixed the launcher's `💾 Save Session` button doing nothing in the native desktop window: the session-name prompt is now an in-page modal instead of `window.prompt`, which WebView2 blocks.
 - Fixed stored SSH passwords being sent as raw ciphertext when the encryption key changed; undecryptable passwords are now ignored with a warning in the log.

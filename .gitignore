@@ -39,6 +39,7 @@ saved_sessions.json
 saved_sessions*.json
 gridvibe.log
 .encryption_key
+.known_hosts
 config.json
 config.local.json
 

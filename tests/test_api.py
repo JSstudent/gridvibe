@@ -5874,3 +5874,205 @@ class VoiceAudioRaceTestCase(unittest.TestCase):
         api._handle_vosk_audio_chunk("voice-no-conn", b"\x00\x01\x02\x03")
 
         mock_emit.assert_not_called()
+
+
+class CorsOriginDefaultsTestCase(unittest.TestCase):
+    """Finding 1.1 — Socket.IO CORS must default to same-origin, not '*'."""
+
+    def test_defaults_to_same_origin_when_not_configured(self):
+        config = {"security": {"cors_origins": []}, "server": {"host": "127.0.0.1", "port": 5050}}
+        with patch.object(api, "app_config", config):
+            origins = api._resolve_cors_origins()
+
+        self.assertEqual(origins, ["http://127.0.0.1:5050", "http://localhost:5050"])
+
+    def test_defaults_use_configured_port(self):
+        config = {"security": {}, "server": {"host": "localhost", "port": 8080}}
+        with patch.object(api, "app_config", config):
+            origins = api._resolve_cors_origins()
+
+        self.assertEqual(origins, ["http://127.0.0.1:8080", "http://localhost:8080"])
+
+    def test_non_loopback_host_is_included(self):
+        config = {"server": {"host": "192.168.1.20", "port": 5050}}
+        with patch.object(api, "app_config", config):
+            origins = api._resolve_cors_origins()
+
+        self.assertIn("http://192.168.1.20:5050", origins)
+
+    def test_explicit_configuration_wins(self):
+        config = {"security": {"cors_origins": ["https://example.com"]}}
+        with patch.object(api, "app_config", config):
+            origins = api._resolve_cors_origins()
+
+        self.assertEqual(origins, ["https://example.com"])
+
+    def test_explicit_wildcard_is_honored(self):
+        config = {"security": {"cors_origins": ["*"]}}
+        with patch.object(api, "app_config", config):
+            origins = api._resolve_cors_origins()
+
+        self.assertEqual(origins, ["*"])
+
+
+class CrossOriginWriteGuardTestCase(unittest.TestCase):
+    """Finding 1.2 — state-changing routes must reject cross-origin requests."""
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.config_path_patch = patch.object(
+            api, "CONFIG_PATH",
+            str(Path(self.temp_dir.name) / "config.json"),
+        )
+        self.config_path_patch.start()
+        self.addCleanup(self.config_path_patch.stop)
+        self.saved_sessions_patch = patch.object(
+            api, "SAVED_SESSIONS_PATH",
+            str(Path(self.temp_dir.name) / "saved_sessions.json"),
+        )
+        self.saved_sessions_patch.start()
+        self.addCleanup(self.saved_sessions_patch.stop)
+        api._refresh_runtime_config()
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+
+    def tearDown(self):
+        api.session_manager.reset_sessions()
+        api._refresh_runtime_config()
+
+    def test_cross_origin_post_is_rejected(self):
+        response = self.client.post(
+            "/api/sessions",
+            json={"connection_mode": "ssh", "sessions": []},
+            headers={"Origin": "http://evil.example"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Cross-origin", response.get_json()["error"])
+
+    def test_cross_origin_delete_is_rejected(self):
+        response = self.client.delete(
+            "/api/sessions",
+            headers={"Origin": "http://evil.example"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_null_origin_is_rejected(self):
+        response = self.client.delete(
+            "/api/sessions",
+            headers={"Origin": "null"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_same_origin_write_is_allowed(self):
+        response = self.client.delete(
+            "/api/sessions",
+            headers={"Origin": "http://localhost"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_loopback_alias_origin_is_allowed(self):
+        # Test client host is "localhost"; 127.0.0.1 must count as the same origin.
+        response = self.client.delete(
+            "/api/sessions",
+            headers={"Origin": "http://127.0.0.1"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_write_without_origin_header_is_allowed(self):
+        response = self.client.delete("/api/sessions")
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_get_requests_are_not_guarded(self):
+        response = self.client.get(
+            "/api/sessions",
+            headers={"Origin": "http://evil.example"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_configured_extra_origin_is_allowed(self):
+        config = {"security": {"cors_origins": ["http://proxy.example:8443"]}}
+        with patch.object(api, "app_config", config):
+            response = self.client.delete(
+                "/api/sessions",
+                headers={"Origin": "http://proxy.example:8443"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_configured_wildcard_allows_cross_origin(self):
+        config = {"security": {"cors_origins": ["*"]}}
+        with patch.object(api, "app_config", config):
+            response = self.client.delete(
+                "/api/sessions",
+                headers={"Origin": "http://evil.example"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+
+
+class KnownHostsPersistenceTestCase(unittest.TestCase):
+    """Finding 1.4 — SSH clients load/persist a project-local known_hosts file."""
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.known_hosts_path = str(Path(self.temp_dir.name) / ".known_hosts")
+        self.known_hosts_patch = patch.object(
+            api, "KNOWN_HOSTS_PATH", self.known_hosts_path,
+        )
+        self.known_hosts_patch.start()
+        self.addCleanup(self.known_hosts_patch.stop)
+        api.session_manager.reset_sessions()
+
+    def tearDown(self):
+        api.session_manager.reset_sessions()
+
+    def test_creates_and_loads_known_hosts_file(self):
+        client = MagicMock()
+
+        api._load_persistent_host_keys(client)
+
+        self.assertTrue(Path(self.known_hosts_path).exists())
+        client.load_host_keys.assert_called_once_with(self.known_hosts_path)
+
+    def test_load_failure_is_non_fatal(self):
+        client = MagicMock()
+        client.load_host_keys.side_effect = OSError("file locked")
+
+        api._load_persistent_host_keys(client)  # must not raise
+
+    @patch("web.api.paramiko")
+    def test_open_ssh_sftp_loads_known_hosts(self, mock_paramiko):
+        mock_client = MagicMock()
+        mock_paramiko.SSHClient.return_value = mock_client
+        session = SimpleNamespace(
+            session_id="s1", host="host", port=22, username="u", password="p",
+        )
+
+        api._open_ssh_sftp(session)
+
+        mock_client.load_host_keys.assert_called_once_with(self.known_hosts_path)
+
+    @patch("web.api.paramiko")
+    def test_connect_ssh_session_loads_known_hosts(self, mock_paramiko):
+        mock_client = MagicMock()
+        mock_paramiko.SSHClient.return_value = mock_client
+        mock_paramiko.SSHException = type("SSHException", (Exception,), {})
+        mock_client.connect.side_effect = OSError("Connection refused")
+        session = api.session_manager.create_session(
+            group_id="grp-kh", host="127.0.0.1", directory="/tmp",
+            username="root", password="pass",
+        )
+
+        api._connect_ssh_session(session.session_id, session)
+
+        mock_client.load_host_keys.assert_called_once_with(self.known_hosts_path)
