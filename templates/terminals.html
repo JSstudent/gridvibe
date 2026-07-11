@@ -1392,6 +1392,7 @@
             display: inline-flex;
         }
 
+        .explorer-refresh,
         .explorer-up {
             width: 32px;
             height: 28px;
@@ -1402,6 +1403,7 @@
             cursor: pointer;
         }
 
+        .explorer-refresh:disabled,
         .explorer-up:disabled {
             opacity: .45;
             cursor: default;
@@ -3479,6 +3481,15 @@
         });
     }
 
+    // xterm renders its scrollbar on an internal .xterm-viewport element. Detaching
+    // the grid fragment on a session-tab switch resets that element's scrollTop to 0,
+    // and because the pane size is unchanged, neither fit()/resize() nor scrollToBottom()
+    // re-syncs it (xterm short-circuits when ydisp is unchanged). So we must capture and
+    // restore the viewport element's scrollTop directly, the way the explorer panes do.
+    function terminalViewportElement(terminal) {
+        return terminal?.term?.element?.querySelector('.xterm-viewport') || null;
+    }
+
     function captureTerminalViewportState(terminal) {
         const buffer = terminal?.term?.buffer?.active;
         if (!buffer) {
@@ -3487,25 +3498,39 @@
 
         const viewportY = Number(buffer.viewportY || 0);
         const baseY = Number(buffer.baseY || 0);
+        const viewportEl = terminalViewportElement(terminal);
+        const maxScrollTop = viewportEl ? Math.max(0, viewportEl.scrollHeight - viewportEl.clientHeight) : 0;
+        const scrollTop = viewportEl ? viewportEl.scrollTop : 0;
         return {
             viewportY,
             baseY,
-            wasAtBottom: viewportY >= baseY
+            wasAtBottom: viewportY >= baseY,
+            scrollTop,
+            scrollTopRatio: maxScrollTop > 0 ? scrollTop / maxScrollTop : 0
         };
     }
 
-    function restoreTerminalViewportState(terminal, state) {
-        if (!terminal?.term || !state || state.wasAtBottom) {
+    // How long (ms) after a session-tab switch we keep re-asserting a terminal's
+    // saved scroll position. Fits triggered by ResizeObserver, redraw passes and
+    // PTY resize echoes land asynchronously well after the initial restore, so a
+    // single scroll call loses the race — every fit within this window re-applies
+    // the target. After it elapses we release control so normal scrolling works.
+    const TERMINAL_VIEWPORT_RESTORE_SETTLE_MS = 400;
+
+    function restoreTerminalViewportState(terminal, state, { isCurrent = null } = {}) {
+        if (!terminal?.term || !state) {
             return;
         }
 
-        const applyScroll = () => {
-            const buffer = terminal.term?.buffer?.active;
-            if (!buffer || typeof terminal.term.scrollToLine !== 'function') {
-                return;
-            }
-            terminal.term.scrollToLine(Math.min(Number(state.viewportY || 0), Number(buffer.baseY || 0)));
+        const stillCurrent = typeof isCurrent === 'function' ? isCurrent : () => true;
+        // Stash the target so fitTerminal() re-asserts it after each reflow until
+        // the layout settles (see applyTerminalViewportRestore / fitTerminal).
+        terminal._viewportRestore = {
+            state,
+            stillCurrent,
+            until: Date.now() + TERMINAL_VIEWPORT_RESTORE_SETTLE_MS
         };
+        const applyScroll = () => applyTerminalViewportRestore(terminal);
 
         applyScroll();
         requestAnimationFrame(() => {
@@ -3513,6 +3538,44 @@
             requestAnimationFrame(applyScroll);
         });
         window.setTimeout(applyScroll, 80);
+        window.setTimeout(applyScroll, 200);
+        window.setTimeout(applyScroll, TERMINAL_VIEWPORT_RESTORE_SETTLE_MS);
+    }
+
+    function applyTerminalViewportRestore(terminal) {
+        const pending = terminal?._viewportRestore;
+        if (!pending || !terminal.term) {
+            return;
+        }
+        if (!pending.stillCurrent() || Date.now() > pending.until) {
+            terminal._viewportRestore = null;
+            return;
+        }
+        const buffer = terminal.term?.buffer?.active;
+        if (!buffer) {
+            return;
+        }
+        const state = pending.state;
+        // Drive xterm's internal ydisp so its model matches...
+        if (state.wasAtBottom && typeof terminal.term.scrollToBottom === 'function') {
+            terminal.term.scrollToBottom();
+        } else if (typeof terminal.term.scrollToLine === 'function') {
+            terminal.term.scrollToLine(Math.min(Number(state.viewportY || 0), Number(buffer.baseY || 0)));
+        }
+        // ...but the API no-ops when ydisp is unchanged, so also force the actual
+        // scrollbar element back into position (the detach/reattach reset it to 0).
+        const viewportEl = terminalViewportElement(terminal);
+        if (viewportEl) {
+            const maxScrollTop = Math.max(0, viewportEl.scrollHeight - viewportEl.clientHeight);
+            viewportEl.scrollTop = state.wasAtBottom
+                ? maxScrollTop
+                : Math.min(
+                    maxScrollTop,
+                    maxScrollTop > 0
+                        ? Math.round(maxScrollTop * (state.scrollTopRatio || 0))
+                        : (state.scrollTop || 0)
+                );
+        }
     }
 
     function captureCachedPaneUiState() {
@@ -3527,16 +3590,20 @@
         });
     }
 
-    function restoreCachedPaneUiState() {
+    function restoreCachedPaneUiState({ restoreTerminalViewports = true, clearTerminalViewports = true } = {}) {
         terminals.forEach((terminal, index) => {
             if (!terminal) {
                 return;
             }
-            restoreTerminalViewportState(terminal, terminal._cachedTerminalViewport);
+            if (restoreTerminalViewports) {
+                restoreTerminalViewportState(terminal, terminal._cachedTerminalViewport);
+            }
             if (isExplorerPaneInstance(terminal)) {
                 restoreExplorerFileScroll(index, terminal._cachedExplorerScroll);
             }
-            terminal._cachedTerminalViewport = null;
+            if (clearTerminalViewports) {
+                terminal._cachedTerminalViewport = null;
+            }
             terminal._cachedExplorerScroll = null;
         });
     }
@@ -3672,7 +3739,10 @@
         } else {
             renderResizeHandles();
         }
-        restoreCachedPaneUiState();
+        restoreCachedPaneUiState({
+            restoreTerminalViewports: false,
+            clearTerminalViewports: false
+        });
         restoreActiveTerminalObservers();
         document.getElementById('emptyState').classList.remove('visible');
         return true;
@@ -6186,12 +6256,18 @@
 
     function setTerminalActionState(index, action = '') {
         const refreshButton = document.getElementById(`trefresh-${index}`);
+        const explorerRefreshButton = document.getElementById(`explorer-refresh-${index}`);
         const clearButton = document.getElementById(`tclear-${index}`);
         const isBusy = Boolean(action);
 
         if (refreshButton) {
             refreshButton.disabled = isBusy;
             refreshButton.textContent = action === 'refresh' ? 'Refreshing…' : '↻';
+        }
+
+        if (explorerRefreshButton) {
+            explorerRefreshButton.disabled = isBusy;
+            explorerRefreshButton.setAttribute('aria-busy', action === 'refresh' ? 'true' : 'false');
         }
 
         if (clearButton) {
@@ -6252,6 +6328,10 @@
         terminal._fitReady = true;
         emitTerminalResize(index);
         flushPendingOutput(index);
+        // A fit reflows the buffer and drops the viewport; if a session-tab
+        // switch is still restoring this pane's scroll, re-assert it here so the
+        // async fits don't win the race and snap the terminal back to the top.
+        applyTerminalViewportRestore(terminal);
         return true;
     }
 
@@ -6833,6 +6913,7 @@
                         ` : (isExplorer ? `
                             <div class="explorer-surface" id="explorer-${i}">
                                 <div class="explorer-bar">
+                                     <button type="button" class="explorer-refresh" id="explorer-refresh-${i}" data-explorer-refresh="${i}" title="Refresh explorer" aria-label="Refresh explorer">↻</button>
                                      <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
                                      <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${i}" data-explorer-tree-toggle="${i}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                                      <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
@@ -7020,6 +7101,19 @@
                 });
             }
             _syncVoiceControls(i);
+            const explorerRefreshButton = card.querySelector(`[data-explorer-refresh="${i}"]`);
+            if (explorerRefreshButton) {
+                explorerRefreshButton.draggable = false;
+                explorerRefreshButton.addEventListener('mousedown', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                });
+                explorerRefreshButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    refreshTerminalDisplay(i);
+                });
+            }
             const explorerUpButton = card.querySelector(`[data-explorer-up="${i}"]`);
             if (explorerUpButton) {
                 explorerUpButton.draggable = false;
@@ -7461,6 +7555,21 @@
             });
         }
 
+        const explorerRefreshButton = card.querySelector(`[data-explorer-refresh="${index}"]`);
+        if (explorerRefreshButton && !explorerRefreshButton.dataset.bound) {
+            explorerRefreshButton.dataset.bound = 'true';
+            explorerRefreshButton.draggable = false;
+            explorerRefreshButton.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            explorerRefreshButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                refreshTerminalDisplay(index);
+            });
+        }
+
         const explorerUpButton = card.querySelector(`[data-explorer-up="${index}"]`);
         if (explorerUpButton && !explorerUpButton.dataset.bound) {
             explorerUpButton.dataset.bound = 'true';
@@ -7680,6 +7789,7 @@
             <div class="terminal-surface">
                 <div class="explorer-surface" id="explorer-${index}">
                     <div class="explorer-bar">
+                        <button type="button" class="explorer-refresh" id="explorer-refresh-${index}" data-explorer-refresh="${index}" title="Refresh explorer" aria-label="Refresh explorer">↻</button>
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
                         <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${index}" data-explorer-tree-toggle="${index}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                         <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
@@ -9366,7 +9476,12 @@
 
             updateSessionChrome(data.sessions.length, requestedGroupId);
             const restoredViewportStates = (usingCurrentView || restoredFromCache)
-                ? new Map(attachedIndices.map(index => [index, captureTerminalViewportState(terminals[index])]))
+                ? new Map(attachedIndices.map(index => [
+                    index,
+                    restoredFromCache
+                        ? (terminals[index]?._cachedTerminalViewport || captureTerminalViewportState(terminals[index]))
+                        : captureTerminalViewportState(terminals[index])
+                ]))
                 : null;
 
             if (!usingCurrentView && !restoredFromCache) {
@@ -9392,8 +9507,15 @@
                     isCurrent: stillCurrent
                 });
                 restoredViewportStates?.forEach((state, index) => {
-                    restoreTerminalViewportState(terminals[index], state);
+                    restoreTerminalViewportState(terminals[index], state, { isCurrent: stillCurrent });
                 });
+                if (restoredFromCache) {
+                    terminals.forEach(terminal => {
+                        if (terminal) {
+                            terminal._cachedTerminalViewport = null;
+                        }
+                    });
+                }
             } else {
                 await redrawAttachedTerminalsLikeFullscreen(attachedIndices, {
                     isCurrent: stillCurrent
@@ -12253,6 +12375,55 @@
         });
     }
 
+    function explorerPanelScrollTarget(panel) {
+        if (!panel) {
+            return null;
+        }
+        // The diff panel wrapper (.explorer-diff-split) is overflow:hidden; the
+        // element that actually scrolls is the inner .explorer-diff-content.
+        if (panel.dataset.explorerFilePanel === 'diff') {
+            return panel.querySelector('.explorer-diff-content') || panel;
+        }
+        return panel;
+    }
+
+    function captureScrollMetrics(el) {
+        if (!el) {
+            return null;
+        }
+        const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+        const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+        return {
+            scrollLeft: el.scrollLeft,
+            scrollLeftRatio: maxScrollLeft > 0 ? el.scrollLeft / maxScrollLeft : 0,
+            scrollTop: el.scrollTop,
+            scrollTopRatio: maxScrollTop > 0 ? el.scrollTop / maxScrollTop : 0,
+            wasAtBottom: maxScrollTop > 0 && el.scrollTop >= maxScrollTop - 2
+        };
+    }
+
+    function applyScrollMetrics(el, metrics) {
+        if (!el || !metrics) {
+            return;
+        }
+        const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+        const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+        el.scrollLeft = Math.min(
+            maxScrollLeft,
+            maxScrollLeft > 0
+                ? Math.round(maxScrollLeft * (metrics.scrollLeftRatio || 0))
+                : (metrics.scrollLeft || 0)
+        );
+        el.scrollTop = metrics.wasAtBottom
+            ? maxScrollTop
+            : Math.min(
+                maxScrollTop,
+                maxScrollTop > 0
+                    ? Math.round(maxScrollTop * (metrics.scrollTopRatio || 0))
+                    : (metrics.scrollTop || 0)
+            );
+    }
+
     function captureExplorerFileScroll(index) {
         const list = document.getElementById(`explorer-list-${index}`);
         if (!list) {
@@ -12264,17 +12435,27 @@
             activeView: activeButton?.dataset.explorerFileView || 'source',
             listScrollLeft: list.scrollLeft,
             listScrollTop: list.scrollTop,
-            panels: {}
+            panels: {},
+            // File tree / Git sidebar panels sit outside the list and are their own
+            // overflow:auto scrollers, so capture them too (they reset on reattach).
+            sidebar: {
+                tree: captureScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`)),
+                git: captureScrollMetrics(document.getElementById(`explorer-git-panel-${index}`))
+            }
         };
         list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
-            const maxScrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
-            const maxScrollLeft = Math.max(0, panel.scrollWidth - panel.clientWidth);
+            const scrollEl = explorerPanelScrollTarget(panel);
+            if (!scrollEl) {
+                return;
+            }
+            const maxScrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+            const maxScrollLeft = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
             state.panels[panel.dataset.explorerFilePanel || 'source'] = {
-                scrollLeft: panel.scrollLeft,
-                scrollLeftRatio: maxScrollLeft > 0 ? panel.scrollLeft / maxScrollLeft : 0,
-                scrollTop: panel.scrollTop,
-                scrollTopRatio: maxScrollTop > 0 ? panel.scrollTop / maxScrollTop : 0,
-                wasAtBottom: maxScrollTop > 0 && panel.scrollTop >= maxScrollTop - 2
+                scrollLeft: scrollEl.scrollLeft,
+                scrollLeftRatio: maxScrollLeft > 0 ? scrollEl.scrollLeft / maxScrollLeft : 0,
+                scrollTop: scrollEl.scrollTop,
+                scrollTopRatio: maxScrollTop > 0 ? scrollEl.scrollTop / maxScrollTop : 0,
+                wasAtBottom: maxScrollTop > 0 && scrollEl.scrollTop >= maxScrollTop - 2
             };
         });
         return state;
@@ -12294,18 +12475,21 @@
             }
             list.scrollLeft = state.listScrollLeft || 0;
             list.scrollTop = state.listScrollTop || 0;
+            applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), state.sidebar?.tree);
+            applyScrollMetrics(document.getElementById(`explorer-git-panel-${index}`), state.sidebar?.git);
             list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
                 const panelState = state.panels?.[panel.dataset.explorerFilePanel || 'source'];
-                if (panelState) {
-                    const maxScrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
-                    const maxScrollLeft = Math.max(0, panel.scrollWidth - panel.clientWidth);
-                    panel.scrollLeft = Math.min(
+                const scrollEl = explorerPanelScrollTarget(panel);
+                if (panelState && scrollEl) {
+                    const maxScrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+                    const maxScrollLeft = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
+                    scrollEl.scrollLeft = Math.min(
                         maxScrollLeft,
                         maxScrollLeft > 0
                             ? Math.round(maxScrollLeft * (panelState.scrollLeftRatio || 0))
                             : (panelState.scrollLeft || 0)
                     );
-                    panel.scrollTop = panelState.wasAtBottom
+                    scrollEl.scrollTop = panelState.wasAtBottom
                         ? maxScrollTop
                         : Math.min(
                             maxScrollTop,

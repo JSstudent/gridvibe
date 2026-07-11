@@ -575,6 +575,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function setTerminalRefreshState(index, refreshing)", html)
         self.assertIn("async function refreshTerminalDisplay(index)", html)
 
+    def test_terminals_page_explorer_bar_has_refresh_before_up_control(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        initial_refresh = 'data-explorer-refresh="${i}"'
+        initial_up = 'data-explorer-up="${i}"'
+        dynamic_refresh = 'data-explorer-refresh="${index}"'
+        dynamic_up = 'data-explorer-up="${index}"'
+        self.assertEqual(html.count(initial_refresh), 2)
+        self.assertEqual(html.count(dynamic_refresh), 2)
+        self.assertLess(html.index(initial_refresh), html.index(initial_up))
+        self.assertLess(html.index(dynamic_refresh), html.index(dynamic_up))
+        self.assertIn('aria-label="Refresh explorer"', html)
+        self.assertIn("const explorerRefreshButton = card.querySelector", html)
+        self.assertIn("refreshTerminalDisplay(i);", html)
+        self.assertIn("refreshTerminalDisplay(index);", html)
+        self.assertIn("const explorerRefreshButton = document.getElementById(`explorer-refresh-${index}`);", html)
+        self.assertIn("explorerRefreshButton.disabled = isBusy;", html)
+
     def test_terminals_page_exposes_per_terminal_close_control(self):
         response = self.client.get("/terminals")
 
@@ -692,8 +712,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("list.classList.add('file-view');", html)
         self.assertIn("listScrollTop: list.scrollTop", html)
         self.assertIn("list.scrollTop = state.listScrollTop || 0;", html)
-        self.assertIn("wasAtBottom: maxScrollTop > 0 && panel.scrollTop >= maxScrollTop - 2", html)
-        self.assertIn("panel.scrollTop = panelState.wasAtBottom", html)
+        self.assertIn("wasAtBottom: maxScrollTop > 0 && scrollEl.scrollTop >= maxScrollTop - 2", html)
+        self.assertIn("scrollEl.scrollTop = panelState.wasAtBottom", html)
         self.assertIn("window.setTimeout(applyScroll, 80);", html)
         self.assertIn("async function syncExplorerPane(index)", html)
         self.assertIn("if (pane?._explorerMode === 'file' && pane._explorerFilePath) {\n            return true;\n        }", html)
@@ -1297,9 +1317,33 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("cacheVisibleGroupView(visibleGroupId);", html)
         self.assertIn("restoredFromCache = restoreCachedGroupView(requestedGroupId);", html)
         self.assertIn("function captureTerminalViewportState(terminal)", html)
-        self.assertIn("function restoreTerminalViewportState(terminal, state)", html)
+        self.assertIn("function restoreTerminalViewportState(terminal, state, { isCurrent = null } = {})", html)
         self.assertIn("captureCachedPaneUiState();", html)
-        self.assertIn("restoreCachedPaneUiState();", html)
+        self.assertIn("restoreCachedPaneUiState({", html)
+        self.assertIn("restoreTerminalViewports: false", html)
+        self.assertIn("clearTerminalViewports: false", html)
+
+    def test_terminals_page_restores_viewports_after_cached_group_redraw(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        restore_start = html.index("function restoreTerminalViewportState(terminal, state")
+        restore_end = html.index("function captureCachedPaneUiState()", restore_start)
+        restore_html = html[restore_start:restore_end]
+        self.assertIn("state.wasAtBottom", restore_html)
+        self.assertIn("terminal.term.scrollToBottom();", restore_html)
+        self.assertIn("terminal.term.scrollToLine", restore_html)
+        self.assertIn("pending.stillCurrent()", restore_html)
+
+        initial_load_start = html.index("async function initialLoad()")
+        initial_load_end = html.index("/* ─────────────────────────────────────────────", initial_load_start)
+        initial_load_html = html[initial_load_start:initial_load_end]
+        redraw = initial_load_html.index("await redrawAttachedTerminals(attachedIndices, {")
+        restore = initial_load_html.index("restoreTerminalViewportState(terminals[index], state, { isCurrent: stillCurrent });")
+        self.assertLess(redraw, restore)
+        self.assertIn("terminals[index]?._cachedTerminalViewport || captureTerminalViewportState", initial_load_html)
+        self.assertIn("terminal._cachedTerminalViewport = null;", initial_load_html[restore:])
 
     def test_terminals_page_routes_terminal_output_by_session_across_cached_groups(self):
         response = self.client.get("/terminals")

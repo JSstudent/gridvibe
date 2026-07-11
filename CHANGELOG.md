@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- Added an icon-only refresh control to the file explorer toolbar, immediately before the parent-directory button, using the existing scroll-preserving directory/file and sidebar refresh flow.
+- Fixed session tab switching moving terminal views to the top; cached panes now restore exact xterm viewport positions after redraw, keep bottom-following panes at the live buffer bottom, and ignore stale delayed restores from rapid tab switches.
 - **Performance:** remote file explorer requests now reuse a pooled SSH connection per session instead of opening a fresh TCP + SSH + SFTP handshake on every directory listing, file preview, or Git action, removing roughly 300–1000 ms of latency per click. Idle pooled connections close after 60 seconds and are evicted when the session closes.
 - **Performance:** terminal replay buffers now store output chunks in a deque with an exact 50 KB rolling trim instead of re-copying the whole buffer on every chunk, shortening lock hold times for busy panes.
 - **Performance:** the terminals page no longer polls session state every 3 seconds. The backend pushes a `session_groups_updated` Socket.IO event on launch, split, close, and tab reorder, and the page refreshes on push; a 15-second reconciliation poll remains only while the Socket.IO connection is down.

@@ -1,9 +1,69 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-04
+Last updated: 2026-07-11
 
 ## Open Issues
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-012
+- Title: Session tab switching resets terminal scroll positions
+- Priority: Medium
+- Status: Closed
+- Area: `templates/terminals.html`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `terminal`, `session`, `ui`, `tests`
+- Reported: 2026-07-11
+- Closed: 2026-07-11
+
+Description:
+Switching between session tabs scrolls every terminal view to the top instead of preserving each pane's current viewport. This disrupts terminal and agent workflows because users lose the output location they were reading whenever they inspect another session and return.
+
+Steps to reproduce:
+1. Open GridVibe with at least two session tabs and one or more terminals containing enough output to scroll.
+2. Scroll one or more terminal panes away from the top, then switch to another session tab.
+3. Switch back and observe that the terminal viewports have moved to the top rather than remaining at their previous positions.
+
+Expected behavior:
+Session tab switching should not change any terminal pane's scrollbar or xterm viewport position. Each pane should return at the exact line it displayed before the tab switch, including panes following the live bottom of the buffer.
+
+Actual behavior / logs:
+User report: all terminal views scroll to the top whenever session tabs are swapped, which also breaks the visual context of agent terminals. Code inspection shows `templates/terminals.html` already attempts to cache `buffer.active.viewportY` in `captureTerminalViewportState()` before detaching a group and restore it through `restoreTerminalViewportState()` after reattaching the cached group. The reported behavior confirms this preservation path is ineffective in the current tab-switch lifecycle; the exact overwrite point among cached DOM restoration, xterm redraw, fit, resize observation, and deferred scroll restoration remains an investigation target.
+
+### Proposed solution:
+Make viewport preservation an invariant of `cacheVisibleGroupView()`, `restoreCachedGroupView()`, and `initialLoad()` in `templates/terminals.html`. Capture every terminal's active-buffer viewport immediately before the visible group is detached, distinguish exact scrolled positions from intentional bottom-following state, and restore only after all DOM reattachment, fit/redraw, and resize work that can alter xterm's viewport has completed. Guard delayed callbacks so a stale group switch cannot overwrite a newer viewport. Add focused regression coverage in `tests/test_api.py` for multiple panes, repeated tab swaps, top/middle/bottom positions, panes receiving output while hidden, and rapid switching.
+
+Resolution:
+`templates/terminals.html` now retains each cached terminal viewport until the cached session group has been reattached and its xterm redraw/fit cycle has completed. Restoration explicitly returns bottom-following panes to the live buffer bottom, restores other panes to their captured `viewportY`, and checks the active load token before every immediate or delayed scroll so stale rapid-switch callbacks cannot move the newly active group. `tests/test_api.py` verifies that cached viewport state survives until after redraw, covers both bottom and exact-line restoration paths, and confirms stale-switch guards are present.
+
+### Issue ID: ISSUE-2026-011
+- Title: Add refresh control to explorer toolbar
+- Priority: Low
+- Status: Closed
+- Area: `templates/terminals.html`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `terminal`, `ui`, `tests`
+- Reported: 2026-07-11
+- Closed: 2026-07-11
+
+Description:
+Explorer mode needs a dedicated refresh icon in its own navigation toolbar. Although terminal pane headers expose a refresh action on the right and the existing refresh flow can reload explorer content, the explorer bar itself starts with the parent-directory up-arrow, so refreshing the current directory or open file is not available alongside the explorer navigation controls.
+
+Steps to reproduce:
+1. Open a GridVibe pane in explorer mode.
+2. Inspect the explorer navigation bar above the directory listing or open file.
+3. Observe that the leftmost control is the up-arrow and there is no refresh icon immediately before it.
+
+Expected behavior:
+The explorer bar should show an icon-only refresh button on the far left, immediately before the up-arrow. Activating it should refresh the current directory or currently open file through the existing explorer refresh behavior while preserving applicable file scroll state and keeping the explorer read-only.
+
+Actual behavior / logs:
+Code inspection confirms both explorer toolbar render paths in `templates/terminals.html` begin with the `explorer-up` button, followed by tree and Git controls, with no explorer-toolbar refresh button. The pane-header `data-terminal-refresh` action exists separately, and `refreshTerminalDisplay()` already delegates explorer sessions to `refreshExplorerPane()`, which refreshes the open file with scroll preservation or force-reloads the current directory.
+
+### Proposed solution:
+Add a compact, accessible refresh-icon button to both explorer toolbar construction paths in `templates/terminals.html`, positioned immediately before `explorer-up`. Wire it to the existing `refreshTerminalDisplay(index)` or `refreshExplorerPane(index)` lifecycle so loading/disabled state cannot trigger overlapping refreshes, and keep directory, file, Git-sidebar, tree-sidebar, and scroll-preservation behavior consistent with the existing refresh action. Add focused rendered-template tests in `tests/test_api.py` for button placement, icon-only accessible labeling, dynamic mode-switch rendering, event wiring, and refresh behavior for directory and file views.
+
+Resolution:
+`templates/terminals.html` now renders an accessible icon-only refresh control immediately before the up-arrow in both initially created and dynamically mode-switched explorer toolbars. The control reuses `refreshTerminalDisplay()` and the existing explorer refresh lifecycle, shares busy/disabled state with the pane-header actions, preserves open-file scroll state, and refreshes active Tree and Git sidebars. `tests/test_api.py` verifies placement in both render paths, accessible labeling, event wiring, and shared busy-state handling.
 
 ### Issue ID: ISSUE-2026-009
 - Title: Native title bar theme waits for refocus to repaint
