@@ -519,6 +519,14 @@ while not channel.closed:
 Idle cost drops to ~2 wakeups/sec, and disappearance from `ssh_connections` is detected via the
 channel close that `_close_ssh_connection` already performs.
 
+> **✅ Implemented (2026-07-11).** `_stream_ssh_output` in `web/api.py` now fetches the
+> connection once before the loop, calls `channel.settimeout(SSH_STREAM_RECV_TIMEOUT)`
+> (0.5 s), and blocks on `channel.recv(4096)`: a `socket.timeout` re-checks
+> `exit_status_ready()` and continues, an empty recv (EOF) or `channel.closed` ends the loop.
+> Intentional closes are detected through the channel shutdown that `_close_ssh_connection`
+> performs, so the per-iteration `connection_lock` acquisition and the 50 ms sleep are gone.
+> Covered by `SshStreamBlockingRecvTestCase` in `tests/test_api.py`.
+
 ### 3.4 3-second full-state polling on top of Socket.IO push — **Medium**
 
 **Location:** `templates/terminals.html:12941` (`setInterval(refreshStatuses, 3000)`),
@@ -581,6 +589,13 @@ socket.io-client 4.7.2) into `web/static/vendor/` and reference them via `url_fo
 ~200 KB total, licence-compatible (MIT). Optionally add Subresource Integrity if the CDN must
 stay.
 
+> **✅ Implemented (2026-07-11).** The four assets (xterm 5.3.0 `xterm.css` + `xterm.min.js`,
+> xterm-addon-fit 0.8.0, socket.io-client 4.7.2) are vendored in `web/static/vendor/` with a
+> `README.md` documenting versions, sources, and licences, and `templates/terminals.html`
+> references them via `url_for('static', filename='vendor/…')`. No `cdn.jsdelivr.net`
+> references remain in either template, so the terminals page works fully offline. Flagged in
+> `CHANGELOG.md`. Covered by `VendoredFrontendAssetsTestCase` in `tests/test_api.py`.
+
 ### 3.7 Fallback local-output path reads 1 byte at a time — **Low**
 
 **Location:** `web/api.py:2493-2506` (`_stream_local_output`, `stdout_handle` branch)
@@ -591,6 +606,13 @@ when hit it is pathological.
 
 **Proposed implementation.** `os.read(stdout_handle.fileno(), 4096)` /
 `stdout_handle.read1(4096)` with the same loop structure as the other branches.
+
+> **✅ Implemented (2026-07-11).** The `stdout_handle` branch of `_stream_local_output` in
+> `web/api.py` now uses `stdout_handle.read1(4096)` (returns whatever is buffered, blocking
+> until at least one byte or EOF) when the handle provides it, falling back to the old
+> `read(1)` only for handles without `read1`. Covered by
+> `LocalPtyStreamTestCase.test_stream_local_output_fallback_reads_chunks_via_read1` in
+> `tests/test_api.py`.
 
 ---
 

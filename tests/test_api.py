@@ -1,6 +1,7 @@
 import io
 import json
 import shutil
+import socket
 import stat
 import subprocess
 import threading
@@ -6054,6 +6055,186 @@ class LocalPtyStreamTestCase(unittest.TestCase):
         mock_session_mgr.update_session_status.assert_called_with(
             session_id, api.SessionStatus.DISCONNECTED
         )
+
+    @patch("web.api._broadcast_session_status")
+    @patch("web.api.session_manager")
+    def test_stream_local_output_fallback_reads_chunks_via_read1(
+        self, mock_session_mgr, _mock_broadcast
+    ):
+        session_id = "stdout-chunk-test"
+
+        class FakeStdout:
+            def __init__(self):
+                self.read1_sizes = []
+                self._chunks = [b"chunk-one", b""]
+
+            def read1(self, size):
+                self.read1_sizes.append(size)
+                return self._chunks.pop(0)
+
+            def read(self, _size):
+                raise AssertionError("byte-at-a-time read used despite read1 being available")
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def poll(self):
+                return 0
+
+        stdout = FakeStdout()
+        with api.connection_lock:
+            api.ssh_connections[session_id] = {
+                "kind": "local",
+                "process": FakeProcess(),
+                "pty_process": None,
+                "master_fd": None,
+                "stdout": stdout,
+            }
+
+        mock_session = MagicMock()
+        mock_session.status = api.SessionStatus.CONNECTED
+        mock_session_mgr.get_session.return_value = mock_session
+
+        emitted = []
+        with patch.object(
+            api.socketio, "emit",
+            side_effect=lambda _event, payload, **_kw: emitted.append(payload["data"]),
+        ):
+            api._stream_local_output(session_id)
+
+        self.assertEqual(stdout.read1_sizes, [4096, 4096])
+        self.assertEqual(emitted, ["chunk-one"])
+        with api.connection_lock:
+            self.assertNotIn(session_id, api.ssh_connections)
+
+
+class SshStreamBlockingRecvTestCase(unittest.TestCase):
+    """Deep-dive 3.3 — SSH stream blocks on recv with a timeout instead of 50 ms polling."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+
+    def tearDown(self):
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+
+    class FakeChannel:
+        def __init__(self, chunks, exit_ready_when_drained=False):
+            self._chunks = list(chunks)
+            self._exit_ready_when_drained = exit_ready_when_drained
+            self.closed = False
+            self.timeout = None
+
+        def settimeout(self, value):
+            self.timeout = value
+
+        def recv(self, _size):
+            if not self._chunks:
+                return b""
+            item = self._chunks.pop(0)
+            if item is socket.timeout:
+                raise socket.timeout()
+            return item
+
+        def exit_status_ready(self):
+            return self._exit_ready_when_drained and not self._chunks
+
+        def close(self):
+            self.closed = True
+
+    @patch("web.api._broadcast_session_status")
+    @patch("web.api.session_manager")
+    def test_stream_ssh_output_sets_recv_timeout_and_survives_timeouts(
+        self, mock_session_mgr, _mock_broadcast
+    ):
+        session_id = "ssh-recv-test"
+        channel = self.FakeChannel([b"hello ", socket.timeout, b"world"])
+        with api.connection_lock:
+            api.ssh_connections[session_id] = {"kind": "ssh", "channel": channel}
+
+        mock_session = MagicMock()
+        mock_session.status = api.SessionStatus.CONNECTED
+        mock_session_mgr.get_session.return_value = mock_session
+
+        emitted = []
+        with patch.object(
+            api.socketio, "emit",
+            side_effect=lambda _event, payload, **_kw: emitted.append(payload["data"]),
+        ):
+            api._stream_ssh_output(session_id)
+
+        self.assertEqual(channel.timeout, api.SSH_STREAM_RECV_TIMEOUT)
+        self.assertEqual("".join(emitted), "hello world")
+        # EOF (empty recv) ends the loop and the connection is finalized.
+        mock_session_mgr.update_session_status.assert_called_with(
+            session_id, api.SessionStatus.DISCONNECTED
+        )
+        with api.connection_lock:
+            self.assertNotIn(session_id, api.ssh_connections)
+
+    @patch("web.api._broadcast_session_status")
+    @patch("web.api.session_manager")
+    def test_stream_ssh_output_exits_on_exit_status_after_timeout(
+        self, mock_session_mgr, _mock_broadcast
+    ):
+        session_id = "ssh-exit-test"
+        channel = self.FakeChannel(
+            [b"bye", socket.timeout], exit_ready_when_drained=True
+        )
+        with api.connection_lock:
+            api.ssh_connections[session_id] = {"kind": "ssh", "channel": channel}
+
+        mock_session = MagicMock()
+        mock_session.status = api.SessionStatus.CONNECTED
+        mock_session_mgr.get_session.return_value = mock_session
+
+        emitted = []
+        with patch.object(
+            api.socketio, "emit",
+            side_effect=lambda _event, payload, **_kw: emitted.append(payload["data"]),
+        ):
+            api._stream_ssh_output(session_id)
+
+        self.assertEqual(emitted, ["bye"])
+        with api.connection_lock:
+            self.assertNotIn(session_id, api.ssh_connections)
+
+
+class VendoredFrontendAssetsTestCase(unittest.TestCase):
+    """Deep-dive 3.6 — xterm/socket.io are served locally instead of from a CDN."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def test_terminals_page_references_vendored_assets_not_cdn(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertNotIn("cdn.jsdelivr.net", html)
+        self.assertIn("/static/vendor/xterm.css", html)
+        self.assertIn("/static/vendor/xterm.min.js", html)
+        self.assertIn("/static/vendor/xterm-addon-fit.min.js", html)
+        self.assertIn("/static/vendor/socket.io.min.js", html)
+
+    def test_vendored_assets_are_served(self):
+        for filename in (
+            "vendor/xterm.css",
+            "vendor/xterm.min.js",
+            "vendor/xterm-addon-fit.min.js",
+            "vendor/socket.io.min.js",
+        ):
+            with self.subTest(filename=filename):
+                response = self.client.get(f"/static/{filename}")
+                self.assertEqual(response.status_code, 200)
+                self.assertGreater(len(response.get_data()), 1000)
+                response.close()
 
 
 class VoiceAudioRaceTestCase(unittest.TestCase):

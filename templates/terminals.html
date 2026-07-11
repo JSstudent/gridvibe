@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GridVibe — Terminals</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/xterm.css') }}">
     <style>
         :root {
             --t-bg: #0d0d0d;
@@ -2924,9 +2924,9 @@
     </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js"></script>
+<script src="{{ url_for('static', filename='vendor/xterm.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/xterm-addon-fit.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/socket.io.min.js') }}"></script>
 <script>
     /* ── Theme management ── */
     const THEME_STORAGE_KEY = 'gridvibe.theme';

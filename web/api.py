@@ -2508,34 +2508,44 @@ def _finalize_stream(session_id: str):
     _close_ssh_connection(session_id)
 
 
+SSH_STREAM_RECV_TIMEOUT = 0.5
+
+
 def _stream_ssh_output(session_id: str):
     """Read terminal output from the SSH channel and forward it to clients."""
     try:
-        while True:
-            with connection_lock:
-                connection = ssh_connections.get(session_id)
+        with connection_lock:
+            connection = ssh_connections.get(session_id)
 
-            if not connection:
-                break
+        if not connection:
+            return
 
-            channel = connection["channel"]
+        # The connection entry never changes for a session's lifetime, so fetch
+        # the channel once and block on recv with a timeout instead of polling.
+        # An intentional close (_close_ssh_connection) closes the channel, which
+        # wakes the recv and ends the loop.
+        channel = connection["channel"]
+        channel.settimeout(SSH_STREAM_RECV_TIMEOUT)
 
-            if channel.recv_ready():
-                output = channel.recv(4096).decode("utf-8", errors="ignore")
-                if output:
-                    with connection_lock:
-                        _cache_terminal_output(session_id, output)
-                        socketio.emit(
-                            'terminal_output',
-                            {'session_id': session_id, 'data': output},
-                            room=session_id # type: ignore
-                        )
+        while not channel.closed:
+            try:
+                data = channel.recv(4096)
+            except socket.timeout:
+                if channel.exit_status_ready():
+                    break
                 continue
 
-            if channel.closed or channel.exit_status_ready():
+            if not data:
                 break
 
-            time.sleep(0.05)
+            output = data.decode("utf-8", errors="ignore")
+            with connection_lock:
+                _cache_terminal_output(session_id, output)
+                socketio.emit(
+                    'terminal_output',
+                    {'session_id': session_id, 'data': output},
+                    room=session_id # type: ignore
+                )
     except Exception as e:
         session = session_manager.get_session(session_id)
         if session and _is_explorer_session(session):
@@ -2625,7 +2635,10 @@ def _stream_local_output(session_id: str):
             if stdout_handle is None:
                 break
 
-            output = stdout_handle.read(1)
+            # read1 returns whatever is buffered (blocking until at least one
+            # byte or EOF) instead of one syscall + one emit per byte.
+            read1 = getattr(stdout_handle, "read1", None)
+            output = read1(4096) if read1 is not None else stdout_handle.read(1)
             if output:
                 chunk = output.decode("utf-8", errors="ignore")
                 with connection_lock:
