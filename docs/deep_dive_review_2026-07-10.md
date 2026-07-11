@@ -11,6 +11,23 @@ prioritisation aid: **High** = fix soon (correctness/security), **Medium** = wor
 
 **Scope note:** this is an analysis document only — no code was changed.
 
+> **♻️ Re-validated 2026-07-11** (after commits `b4d7734` *Explorer refresh and scroll bar
+> stable* and `0eb8be7` *Save session terminal mode saved…*):
+> - **All implemented findings verified intact** — full suite green (351 tests, 1 skip) and
+>   `ruff check` clean; the regression tests added with each fix
+>   (`CorsOriginDefaultsTestCase`, `CrossOriginWriteGuardTestCase`,
+>   `KnownHostsPersistenceTestCase`, `SshSftpPoolTestCase`,
+>   `TerminalOutputBufferCacheTestCase`, `SshStreamBlockingRecvTestCase`,
+>   `SessionGroupsUpdatedBroadcastTestCase`, `VendoredFrontendAssetsTestCase`) all pass.
+> - **All open findings re-confirmed still present**, with three metadata updates: 5.1
+>   (`ssh.keepalive_interval` is now wired — see the updated note), 6.2/6.3 (`web/api.py` grew
+>   to ~7.3k lines; the duplicated session signature grew to 19 parameters with the new
+>   `explorer_tree_open`/`explorer_git_open` fields), and 3.5 (template totals updated).
+> - **One new finding** from the new commits: 2.10 (runtime agent tracking mutates
+>   connection-dict state outside `connection_lock`).
+> - Line numbers cited in the original findings have drifted slightly with the new commits;
+>   the ones load-bearing for open findings (2.4) were refreshed, the rest are ±~100 lines.
+
 ---
 
 ## Index
@@ -30,6 +47,7 @@ prioritisation aid: **High** = fix soon (correctness/security), **Medium** = wor
 | 2.7 | Whisper model instance never reloaded after settings change | Race condition / Correctness | Medium |
 | 2.8 | 8-char session IDs stored without collision check | Race condition | Low |
 | 2.9 | `active_launch_options` mutated without a lock | Race condition | Low |
+| 2.10 | Runtime agent tracking mutates connection state outside `connection_lock` *(new 2026-07-11)* | Race condition | Low |
 | 3.1 | New SSH+SFTP connection per explorer request | Performance | High |
 | 3.2 | Terminal output buffer: full-string copy per chunk | Performance | Medium |
 | 3.3 | SSH stream loop busy-waits with 50 ms polling | Performance | Low |
@@ -47,7 +65,7 @@ prioritisation aid: **High** = fix soon (correctness/security), **Medium** = wor
 | 4.8 | Vosk port configured in two unrelated keys | Correctness / Config | Medium |
 | 4.9 | `cleanup.py` deletes live logs, has stale branding, dir/file pattern confusion | Correctness | Low |
 | 4.10 | Misindented return block in `get_explorer_entries` | Style | Low |
-| 5.1 | Unused config keys (`keepalive_interval`, `default_username`, `terminal.*`) | Dead code / Feature gap | Medium |
+| 5.1 | Unused config keys (`default_username`, `terminal.*`; `keepalive_interval` now wired) | Dead code / Feature gap | Medium |
 | 5.2 | `/api/sessions/active` endpoint has no callers | Dead code | Low |
 | 5.3 | `SessionManager` callback registry is dead code | Dead code | Low |
 | 5.4 | `DESTRUCTIVE_PATTERNS = []` and other cleanup leftovers | Dead code | Low |
@@ -304,8 +322,10 @@ worth a comment at both lock definitions.)
 
 ### 2.4 `socketio.emit` happens while holding `connection_lock` — **Medium**
 
-**Location:** `web/api.py` — `_drain_until_prompt` (:2327-2333), `_stream_ssh_output`
-(:2400-2406), `_stream_local_output` (three sites), `handle_join_session` replay (:6079-6101)
+**Location:** `web/api.py` — `_drain_until_prompt` (:2519-2526), `_stream_ssh_output`
+(:2608-2614), `_stream_local_output` (three sites: :2661, :2685, :2712),
+`handle_join_session` replay (:6530-6552). *(Line refs refreshed 2026-07-11; the 3.3
+blocking-recv rewrite kept the emit inside `connection_lock`, so this finding is unchanged.)*
 
 **Problem.** Every output chunk is emitted to Socket.IO clients *inside* `connection_lock`.
 In `threading` async mode a slow/blocked client write can stall the emit, and while the lock is
@@ -415,6 +435,27 @@ layout/count pair — cosmetic, but easy to harden.
 **Proposed implementation.** Replace wholesale instead of updating in place:
 `active_launch_options = {**active_launch_options, ...}` assigned to a module global (atomic
 reference swap), or guard with a small lock.
+
+### 2.10 Runtime agent tracking mutates connection-dict state outside `connection_lock` — **Low** *(new 2026-07-11)*
+
+**Location:** `web/api.py` — `handle_terminal_input` (:6612) → `_track_terminal_agent_input`
+(:4826-4893); introduced by commit `0eb8be7`.
+
+**Problem.** The handler fetches the connection dict under `connection_lock`, releases it, and
+then `_track_terminal_agent_input` reads and writes `connection["_gridvibe_input_line"]`,
+`_gridvibe_agent_interrupt_at`, and `_gridvibe_agent_interrupt_count` with no lock. Each
+Socket.IO event is handled on its own thread, so two browser windows joined to the same
+session (a supported flow — the replay buffer exists for it) can interleave keystrokes and
+lose/corrupt the reconstructed input line. The blast radius is small by design: only the
+*metadata heuristics* (agent start/exit detection, pane-mode tracking) can mis-fire —
+`_send_connection_input` and the actual terminal stream are unaffected. Also worth noting:
+`session_manager.get_session` is now called on every keystroke event (cheap RLock, but it is
+per-keystroke hot path).
+
+**Proposed implementation.** Move the tracking-state mutation under `connection_lock` (the
+work inside is trivial string handling, so lock hold time stays negligible), or key the
+line-reconstruction state per client (`(request.sid, session_id)`) so concurrent writers never
+share a buffer. Batchable with 2.9 into whichever PR touches `handle_terminal_input` next.
 
 ---
 
@@ -557,7 +598,8 @@ special werkzeug log filter to hide.
 
 ### 3.5 ~18k lines of inline CSS/JS re-parsed on every page load — **Medium**
 
-**Location:** `templates/index.html` (5.3k lines), `templates/terminals.html` (12.9k lines)
+**Location:** `templates/index.html` (5.4k lines), `templates/terminals.html` (13.2k lines —
+still growing: +280 lines across the 2026-07-11 commits)
 
 **Problem.** Everything ships inline in the HTML: no browser caching, no HTTP caching between
 launcher/session windows, and both Jinja templates are monolithic and hard to navigate. The
@@ -828,15 +870,18 @@ formatting to `make fix`.
 
 ### 5.1 Unused config keys promise features that don't exist — **Medium**
 
-**Location:** `default_config.json` — `ssh.default_username`, `ssh.keepalive_interval`,
+**Location:** `default_config.json` — `ssh.default_username`,
 `terminal.default_rows`, `terminal.default_cols`, `terminal.font_family`, `terminal.font_size`
 
 **Problem.** Grep confirms none of these keys are read anywhere in the codebase. Users editing
-them see no effect. Two of them (`keepalive_interval`, `font_size`) describe genuinely useful
-behaviour (see features 10.1 / 10.2).
+them see no effect. `font_size` describes genuinely useful behaviour (see feature 10.2).
+
+> **Partially resolved (2026-07-11 re-validation):** `ssh.keepalive_interval` is now read and
+> applied by `_connect_ssh_session` (feature 10.1, implemented 2026-07-10) and is removed from
+> this finding's scope. The five keys above remain unread.
 
 **Proposed implementation.** For each key, either wire it up (preferred where cheap — see
-10.1/10.2) or delete it from `default_config.json` and mention the removal in `CHANGELOG.md`.
+10.2) or delete it from `default_config.json` and mention the removal in `CHANGELOG.md`.
 `ssh.default_username` overlaps with the per-saved-session username and should be removed;
 `default_rows/cols` are superseded by the fit addon and should be removed.
 
@@ -968,9 +1013,9 @@ with explorer_backend_for(session) as backend:
 ```
 This is the highest-leverage refactor in the codebase (roughly −1,000 lines) and the natural
 place to slot in the SFTP connection pool (3.1). Migrate one route at a time with the existing
-tests (`tests/test_api.py` is 5.8k lines and covers these routes) as the safety net.
+tests (`tests/test_api.py` is 6.9k lines and covers these routes) as the safety net.
 
-### 6.2 `web/api.py` is a 6,805-line monolith — **Medium**
+### 6.2 `web/api.py` is a 7,261-line monolith — **Medium** *(was 6,805 on 2026-07-10; +456 lines since)*
 
 **Location:** `web/api.py`
 
@@ -998,14 +1043,17 @@ Keep `web.api` re-exporting `app`, `socketio`, `session_manager`, `load_config` 
 the launcher, the root shims, and the tests keep working during the transition. Do it
 incrementally (one module per PR), running `make check` between steps.
 
-### 6.3 `create_session` and `append_session_to_group` duplicate a 17-parameter signature — **Low**
+### 6.3 `create_session` and `append_session_to_group` duplicate a 19-parameter signature — **Low**
 
-**Location:** `sessions/manager.py:161-282`
+**Location:** `sessions/manager.py:161-300`
 
 **Problem.** Both methods take the identical parameter list, build the identical
 `TerminalSession(...)`, and differ only in the group-existence check + counter increment.
 Adding a session field currently means touching four places (dataclass, both methods,
-`create_sessions`).
+`create_sessions`). Commit `0eb8be7` demonstrated exactly this cost: adding
+`explorer_tree_open`/`explorer_git_open` required edits in five places in this file
+(dataclass, `to_dict`, both signatures + both constructor calls, `create_sessions`,
+`update_session_metadata`), growing the duplicated signature from 17 to 19 parameters.
 
 **Proposed implementation.**
 ```python
@@ -1432,14 +1480,13 @@ posture paragraph.
 2. **Security defaults:** 1.1 + 1.2 together (one PR, changelog entry). ✅ **Implemented
    2026-07-10**, together with 1.4's known_hosts persistence (see the per-finding notes above).
 3. **Perf pass:** 3.1 (SFTP pool) then 3.2/3.4; 3.6 (vendor assets) can ship independently.
-   ✅ **3.1, 3.2 and 3.4 implemented 2026-07-11** (see the per-finding notes above). Still open
-   from this group: 3.6 (vendor xterm/socket.io — still independent), plus the low-severity
-   stream-loop tweaks 3.3 and 3.7; 3.5 (template extraction) is sequenced with the structural
-   work in step 5.
+   ✅ **3.1, 3.2, 3.3, 3.4, 3.6 and 3.7 all implemented 2026-07-11** (see the per-finding notes
+   above). The only remaining item from this group is 3.5 (template extraction), which is
+   sequenced with the structural work in step 5.
 4. **Concurrency hardening:** 2.3 + 2.4 together (both are about `connection_lock` discipline —
    re-validate inside the lock, emit outside it), then 2.2 (empty-group deletion race) and 2.5
-   (agent detection outside the cache lock), with the low-severity 2.6/2.8/2.9 batched into
-   whichever PR touches their files anyway.
+   (agent detection outside the cache lock), with the low-severity 2.6/2.8/2.9/2.10 batched
+   into whichever PR touches their files anyway.
 5. **Structural:** 6.1 (explorer backend abstraction — slots in naturally on top of the 3.1
    connection pool) → 6.2 (module split) → 3.5/6.4 (template/shared-JS extraction, which also
    unblocks 6.5's function decomposition) → 6.3/6.6 as small cleanups along the way, each step
