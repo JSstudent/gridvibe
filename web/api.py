@@ -440,6 +440,8 @@ def _default_terminal_entries():
             "startup_mode": "terminal",
             "agent_selection": "",
             "custom_agent": "",
+            "explorer_tree_open": False,
+            "explorer_git_open": False,
             "distribution": "",
             "use_wsl": False,
             "use_powershell": False,
@@ -619,6 +621,8 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
                 "startup_mode": startup_mode,
                 "agent_selection": str(entry.get("agent_selection") or ""),
                 "custom_agent": str(entry.get("custom_agent") or ""),
+                "explorer_tree_open": bool(entry.get("explorer_tree_open")),
+                "explorer_git_open": bool(entry.get("explorer_git_open")),
                 "distribution": str(entry.get("distribution") or ""),
                 "use_wsl": bool(entry.get("use_wsl")) and not use_powershell,
                 "use_powershell": use_powershell,
@@ -669,6 +673,68 @@ def _normalize_session_config(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "terminals": _normalize_terminal_entries(data.get("terminals"), connection_mode),
         "workspace_layout": _normalize_workspace_layout(data.get("workspace_layout"), terminal_count),
     }
+
+
+def _merge_workspace_session_config(
+    base_config: Dict[str, Any],
+    workspace_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Apply saveable live-workspace state without changing launcher setup fields."""
+    base = _normalize_session_config(base_config)
+    workspace_input = dict(workspace_config or {})
+    workspace_input["connection_mode"] = base["connection_mode"]
+    workspace = _normalize_session_config(workspace_input)
+    merged = json.loads(json.dumps(base))
+
+    merged["terminal_count"] = workspace["terminal_count"]
+    merged["layout"] = workspace["layout"]
+    merged["workspace_layout"] = workspace["workspace_layout"]
+
+    for index in range(min(len(merged["terminals"]), len(workspace["terminals"]))):
+        saved_terminal = merged["terminals"][index]
+        workspace_terminal = workspace["terminals"][index]
+        startup_mode = workspace_terminal["startup_mode"]
+
+        saved_terminal["startup_mode"] = startup_mode
+        saved_terminal["initial_command_mode"] = (
+            startup_mode if startup_mode in {"agent", "explorer", "browser"} else "command"
+        )
+
+        # Agent identity and command are required mode metadata. Unlike the
+        # terminal directory, these values must follow the live pane so the
+        # saved preset can recreate Codex, Claude, or a custom agent pane.
+        if startup_mode == "agent":
+            agent_selection = workspace_terminal["agent_selection"]
+            custom_agent = workspace_terminal["custom_agent"]
+            initial_command = workspace_terminal["initial_command"]
+            if not initial_command:
+                initial_command = custom_agent if agent_selection == "other" else agent_selection
+            saved_terminal["agent_selection"] = agent_selection
+            saved_terminal["custom_agent"] = custom_agent
+            saved_terminal["initial_command"] = initial_command
+        elif (
+            base["terminals"][index]["initial_command_mode"] == "agent"
+            or base["terminals"][index]["agent_selection"]
+            or base["terminals"][index]["custom_agent"]
+        ):
+            saved_terminal["agent_selection"] = ""
+            saved_terminal["custom_agent"] = ""
+            saved_terminal["initial_command"] = ""
+
+        saved_terminal["explorer_tree_open"] = (
+            startup_mode == "explorer" and workspace_terminal["explorer_tree_open"]
+        )
+        saved_terminal["explorer_git_open"] = (
+            startup_mode == "explorer" and workspace_terminal["explorer_git_open"]
+        )
+
+        # Browser panes need a valid URL, but navigation performed in the live
+        # browser pane is transient. Keep an existing configured browser URL or
+        # use the product default when a pane is newly switched to browser mode.
+        if startup_mode == "browser" and base["terminals"][index]["startup_mode"] != "browser":
+            saved_terminal["initial_command"] = DEFAULT_BROWSER_URL
+
+    return _normalize_session_config(merged)
 
 
 def load_session_config() -> Dict[str, Any]:
@@ -4731,6 +4797,122 @@ def _sanitize_terminal_input(connection: Dict[str, Any], input_data: Any) -> str
     return text
 
 
+_TERMINAL_INPUT_ESCAPE_SEQUENCE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|.)")
+_MAX_TRACKED_TERMINAL_COMMAND_LENGTH = 4096
+
+
+def _agent_from_terminal_command(command: str) -> Optional[Tuple[str, str]]:
+    """Return registered agent metadata when a submitted shell command starts one."""
+    try:
+        tokens = shlex.split(str(command or "").strip(), posix=True)
+    except ValueError:
+        return None
+
+    while tokens and tokens[0].lower() in {"command", "exec", "sudo"}:
+        tokens.pop(0)
+    if not tokens:
+        return None
+
+    executable = re.split(r"[/\\]", tokens[0])[-1].lower()
+    executable = re.sub(r"\.(?:bat|cmd|exe)$", "", executable)
+    for agent_key, spec in AGENT_REGISTRY.items():
+        binary = str(spec.get("binary") or agent_key).strip().lower()
+        if executable == binary:
+            return agent_key, str(command or "").strip()
+    return None
+
+
+def _track_terminal_agent_input(
+    session_id: str,
+    connection: Dict[str, Any],
+    input_data: str,
+) -> None:
+    """Track submitted input lines and promote recognized agent commands to runtime metadata."""
+    text = _TERMINAL_INPUT_ESCAPE_SEQUENCE.sub("", str(input_data or ""))
+    current_line = str(connection.get("_gridvibe_input_line") or "")
+    submitted_lines = []
+
+    session = session_manager.get_session(session_id)
+    if session and session.startup_mode == "agent":
+        if "\x04" in text:
+            _mark_runtime_agent_exited(session_id, "end-of-input")
+            connection["_gridvibe_input_line"] = ""
+            return
+        if "\x03" in text:
+            agent_key = str(session.agent_selection or "").strip().lower()
+            now = time.monotonic()
+            last_interrupt = float(connection.get("_gridvibe_agent_interrupt_at") or 0.0)
+            interrupt_count = (
+                int(connection.get("_gridvibe_agent_interrupt_count") or 0) + 1
+                if now - last_interrupt <= 2.0
+                else 1
+            )
+            connection["_gridvibe_agent_interrupt_at"] = now
+            connection["_gridvibe_agent_interrupt_count"] = interrupt_count
+            if agent_key == "codex" or interrupt_count >= 2:
+                _mark_runtime_agent_exited(session_id, "interrupt")
+                connection["_gridvibe_input_line"] = ""
+                return
+
+    for character in text:
+        if character in {"\r", "\n"}:
+            if current_line.strip():
+                submitted_lines.append(current_line)
+            current_line = ""
+        elif character in {"\b", "\x7f"}:
+            current_line = current_line[:-1]
+        elif character in {"\x03", "\x15"}:
+            current_line = ""
+        elif character.isprintable() or character == "\t":
+            current_line = (current_line + character)[-_MAX_TRACKED_TERMINAL_COMMAND_LENGTH:]
+
+    connection["_gridvibe_input_line"] = current_line
+    for submitted_line in submitted_lines:
+        if submitted_line.strip().lower() in {"/exit", "/quit"}:
+            if _mark_runtime_agent_exited(session_id, "exit command"):
+                return
+        detected = _agent_from_terminal_command(submitted_line)
+        if not detected:
+            continue
+        agent_selection, initial_command = detected
+        updated = session_manager.update_session_metadata(
+            session_id,
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection=agent_selection,
+            custom_agent="",
+            initial_command=initial_command,
+        )
+        if updated:
+            logger.info(
+                "Detected runtime agent command for session %s: %s",
+                session_id,
+                agent_selection,
+            )
+            _broadcast_session_status(session_id)
+        return
+
+
+def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
+    """Return an agent-backed runtime pane to ordinary terminal metadata."""
+    session = session_manager.get_session(session_id)
+    if not session or session.startup_mode != "agent":
+        return False
+    updated = session_manager.update_session_metadata(
+        session_id,
+        startup_mode="terminal",
+        initial_command_mode="command",
+        agent_selection="",
+        custom_agent="",
+        initial_command="",
+    )
+    if not updated:
+        return False
+    logger.info("Detected runtime agent exit for session %s: %s", session_id, reason)
+    _broadcast_session_status(session_id)
+    return True
+
+
 def _resolve_wsl_distribution(session: Any) -> str:
     """Return the user-configured WSL distro for a local session."""
     if not getattr(session, "use_wsl", False) or getattr(session, "use_powershell", False):
@@ -5735,7 +5917,20 @@ def get_saved_sessions():
 def create_saved_session():
     """Persist one named saved launcher preset."""
     data = request.get_json(silent=True) or {}
-    config = _normalize_session_config(data.get("config"))
+    raw_config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    config = _normalize_session_config(raw_config)
+    if data.get("workspace_only") is True:
+        state = _load_saved_sessions_payload()
+        source_session_id = str(
+            data.get("id") or data.get("source_saved_session_id") or ""
+        ).strip()
+        source_entry = (
+            _default_saved_session_entry()
+            if source_session_id == DEFAULT_SAVED_SESSION_ID
+            else _find_saved_session_entry(state["sessions"], source_session_id)
+        )
+        if source_entry:
+            config = _merge_workspace_session_config(source_entry["config"], raw_config)
     group_id = str(data.get("group_id") or "").strip()
     activate_saved_session = data.get("activate", True) is not False
     saved_entry = upsert_saved_session(
@@ -6414,6 +6609,7 @@ def handle_terminal_input(data):
         sanitized_input = _sanitize_terminal_input(connection, input_data)
         if not sanitized_input:
             return
+        _track_terminal_agent_input(session_id, connection, sanitized_input)
         _send_connection_input(connection, sanitized_input)
     except Exception as e:
         logger.error(f"Error sending input: {e}")

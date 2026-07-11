@@ -4,6 +4,9 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- Fixed workspace `Save Session` and `Save Session as ...` replacing launcher repository roots and per-terminal directories with transient File Explorer navigation paths; workspace saves now preserve launcher connection/directory setup while updating pane modes (including registered agents started interactively with commands such as `codex` or `claude`), counts, ordering, and resize geometry.
+- Saved Explorer panes now restore whether the File Tree and Git sidebars were open when the workspace session was saved.
+- Agent panes now return to persisted terminal mode after an explicit CLI exit, clearing the stale agent selection and startup command before the workspace is saved.
 - Added an icon-only refresh control to the file explorer toolbar, immediately before the parent-directory button, using the existing scroll-preserving directory/file and sidebar refresh flow.
 - Fixed session tab switching moving terminal views to the top; cached panes now restore exact xterm viewport positions after redraw, keep bottom-following panes at the live buffer bottom, and ignore stale delayed restores from rapid tab switches.
 - **Performance:** remote file explorer requests now reuse a pooled SSH connection per session instead of opening a fresh TCP + SSH + SFTP handshake on every directory listing, file preview, or Git action, removing roughly 300–1000 ms of latency per click. Idle pooled connections close after 60 seconds and are evicted when the session closes.

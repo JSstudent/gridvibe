@@ -493,7 +493,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         entry_start = html.index("function buildWorkspaceTerminalEntry")
         entry_end = html.index("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)", entry_start)
-        self.assertIn("terminal?._explorerPath || session.directory", html[entry_start:entry_end])
+        entry_html = html[entry_start:entry_end]
+        self.assertIn("session.explorer_root_directory || session.directory", entry_html)
+        self.assertNotIn("terminal?._explorerPath", entry_html)
+        self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
+        self.assertIn("Boolean(terminal?._explorerGitSidebarOpen)", entry_html)
+        self.assertIn("function restoreExplorerSidebarState(index)", html)
+        self.assertIn("_explorerTreeSidebarOpen: Boolean(session.explorer_tree_open)", html)
+        self.assertIn("_explorerGitSidebarOpen: Boolean(session.explorer_git_open)", html)
+        self.assertIn("workspace_only: true", save_handler_html)
+        self.assertIn("source_saved_session_id: saveTarget.id || undefined", save_handler_html)
 
     def test_launcher_forwards_saved_workspace_layout_and_agent_metadata(self):
         response = self.client.get("/")
@@ -508,6 +517,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("surface_mode: appSettings.workspace?.surface_mode === 'max' ? 'max' : 'normal'", html)
         self.assertIn("initial_command_mode: terminal.startup_mode === 'explorer'", html)
         self.assertIn("agent_selection: terminal.initial_command_mode === 'agent'", html)
+        self.assertIn("data-explorer-tree-open=", html)
+        self.assertIn("data-explorer-git-open=", html)
+        self.assertIn("explorer_tree_open: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_git_open: terminal.startup_mode === 'explorer'", html)
         self.assertIn('<option value="browser"', html)
         self.assertIn('class="field t-browser-field', html)
         self.assertIn("function normalizeBrowserPaneUrl(value)", html)
@@ -3848,6 +3861,252 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(get_response.status_code, 200)
         self.assertEqual(get_response.get_json()["config"]["ssh"]["host"], "10.0.0.20")
 
+    def test_workspace_save_preserves_launcher_directories_and_connection_setup(self):
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "local-grid",
+                "config": {
+                    "connection_mode": "wsl",
+                    "terminal_count": 2,
+                    "layout": "horizontal",
+                    "ssh": {"host": "", "username": "ubuntu", "port": 22, "default_dir": ""},
+                    "wsl": {
+                        "distribution": "Ubuntu",
+                        "username": "saso",
+                        "default_dir": "C:\\repos\\gridvibe",
+                    },
+                    "terminals": [
+                        {
+                            "title": "Shell",
+                            "directory": "C:\\repos\\gridvibe",
+                            "initial_command": "",
+                            "startup_mode": "terminal",
+                        },
+                        {
+                            "title": "Server",
+                            "directory": "backend",
+                            "initial_command": "python main.py",
+                            "startup_mode": "terminal",
+                        },
+                    ],
+                },
+            },
+        ).get_json()
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "vertical",
+                    "wsl": {
+                        "distribution": "Changed",
+                        "username": "changed",
+                        "default_dir": "C:\\repos\\gridvibe\\src\\services",
+                    },
+                    "terminals": [
+                        {
+                            "title": "Changed title",
+                            "directory": "src/services",
+                            "startup_mode": "explorer",
+                            "explorer_tree_open": True,
+                            "explorer_git_open": True,
+                        },
+                        {
+                            "title": "Changed server",
+                            "directory": "C:\\other-repo",
+                            "startup_mode": "browser",
+                            "explorer_tree_open": True,
+                            "explorer_git_open": True,
+                        },
+                    ],
+                    "workspace_layout": {
+                        "class_name": "layout-split-local",
+                        "split_slot_rects": [
+                            {"originSlot": 0, "x": 1, "y": 1, "w": 3, "h": 1},
+                            {"originSlot": 1, "x": 4, "y": 1, "w": 1, "h": 1},
+                        ],
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        config = response.get_json()["config"]
+        self.assertEqual(config["connection_mode"], "wsl")
+        self.assertEqual(config["wsl"]["default_dir"], "C:\\repos\\gridvibe")
+        self.assertEqual(config["wsl"]["distribution"], "Ubuntu")
+        self.assertEqual(config["wsl"]["username"], "saso")
+        self.assertEqual(config["terminals"][0]["directory"], "C:\\repos\\gridvibe")
+        self.assertEqual(config["terminals"][1]["directory"], "backend")
+        self.assertEqual(config["terminals"][0]["title"], "Shell")
+        self.assertEqual(config["terminals"][1]["title"], "Server")
+        self.assertEqual(config["terminals"][0]["startup_mode"], "explorer")
+        self.assertTrue(config["terminals"][0]["explorer_tree_open"])
+        self.assertTrue(config["terminals"][0]["explorer_git_open"])
+        self.assertEqual(config["terminals"][1]["startup_mode"], "browser")
+        self.assertFalse(config["terminals"][1]["explorer_tree_open"])
+        self.assertFalse(config["terminals"][1]["explorer_git_open"])
+        self.assertEqual(config["terminals"][1]["initial_command"], api.DEFAULT_BROWSER_URL)
+        self.assertEqual(config["layout"], "vertical")
+        self.assertEqual(config["workspace_layout"]["split_slot_rects"][0]["w"], 3)
+
+    def test_workspace_save_as_clones_source_directories_before_applying_modes(self):
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "source",
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 1,
+                    "layout": "single",
+                    "ssh": {
+                        "host": "example.com",
+                        "username": "ubuntu",
+                        "port": 2222,
+                        "default_dir": "/srv/gridvibe",
+                    },
+                    "terminals": [
+                        {
+                            "title": "Shell",
+                            "directory": "services/api",
+                            "initial_command": "",
+                            "startup_mode": "terminal",
+                        }
+                    ],
+                },
+            },
+        ).get_json()
+
+        copied = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "source copy",
+                "source_saved_session_id": original["id"],
+                "workspace_only": True,
+                "activate": False,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 1,
+                    "layout": "single",
+                    "ssh": {"host": "wrong", "default_dir": "/srv/gridvibe/tmp"},
+                    "terminals": [
+                        {"directory": "tmp/navigation", "startup_mode": "explorer"}
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(copied.status_code, 201)
+        body = copied.get_json()
+        self.assertNotEqual(body["id"], original["id"])
+        self.assertEqual(body["config"]["ssh"]["host"], "example.com")
+        self.assertEqual(body["config"]["ssh"]["port"], 2222)
+        self.assertEqual(body["config"]["ssh"]["default_dir"], "/srv/gridvibe")
+        self.assertEqual(body["config"]["terminals"][0]["directory"], "services/api")
+        self.assertEqual(body["config"]["terminals"][0]["startup_mode"], "explorer")
+
+    def test_workspace_save_preserves_running_agent_identity_and_command(self):
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "agents",
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "horizontal",
+                    "ssh": {
+                        "host": "example.com",
+                        "username": "ubuntu",
+                        "port": 22,
+                        "default_dir": "/srv/gridvibe",
+                    },
+                    "terminals": [
+                        {"title": "Codex", "directory": "", "startup_mode": "terminal"},
+                        {"title": "Claude", "directory": "backend", "startup_mode": "terminal"},
+                    ],
+                },
+            },
+        ).get_json()
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "horizontal",
+                    "ssh": {"host": "wrong", "default_dir": "/srv/gridvibe/tmp"},
+                    "terminals": [
+                        {
+                            "directory": "tmp/navigation",
+                            "startup_mode": "agent",
+                            "initial_command_mode": "agent",
+                            "agent_selection": "codex",
+                            "initial_command": "codex",
+                        },
+                        {
+                            "directory": "/other/repo",
+                            "startup_mode": "agent",
+                            "initial_command_mode": "agent",
+                            "agent_selection": "other",
+                            "custom_agent": "claude-code",
+                            "initial_command": "claude-code",
+                        },
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        terminals = response.get_json()["config"]["terminals"]
+        self.assertEqual(terminals[0]["directory"], "")
+        self.assertEqual(terminals[0]["startup_mode"], "agent")
+        self.assertEqual(terminals[0]["initial_command_mode"], "agent")
+        self.assertEqual(terminals[0]["agent_selection"], "codex")
+        self.assertEqual(terminals[0]["initial_command"], "codex")
+        self.assertEqual(terminals[1]["directory"], "backend")
+        self.assertEqual(terminals[1]["agent_selection"], "other")
+        self.assertEqual(terminals[1]["custom_agent"], "claude-code")
+        self.assertEqual(terminals[1]["initial_command"], "claude-code")
+
+        terminal_response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "horizontal",
+                    "terminals": [
+                        {"directory": "wrong", "startup_mode": "terminal"},
+                        {"directory": "also-wrong", "startup_mode": "terminal"},
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(terminal_response.status_code, 201)
+        terminal_modes = terminal_response.get_json()["config"]["terminals"]
+        self.assertEqual(terminal_modes[0]["directory"], "")
+        self.assertEqual(terminal_modes[1]["directory"], "backend")
+        for terminal in terminal_modes[:2]:
+            self.assertEqual(terminal["startup_mode"], "terminal")
+            self.assertEqual(terminal["initial_command_mode"], "command")
+            self.assertEqual(terminal["agent_selection"], "")
+            self.assertEqual(terminal["custom_agent"], "")
+            self.assertEqual(terminal["initial_command"], "")
+
     def test_save_as_updates_only_the_requesting_session_group_target(self):
         original_group = api.session_manager.create_group(
             name="GridVibe",
@@ -4746,6 +5005,122 @@ class ApiRoutesTestCase(unittest.TestCase):
             )
 
         self.assertEqual(sanitized, f"{api.WINDOWS_DEVICE_ATTRIBUTES_RESPONSE}pwd\r")
+
+    def test_terminal_input_promotes_manually_started_codex_to_agent_metadata(self):
+        group = api.session_manager.create_group(
+            name="Manual agent",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/gridvibe",
+            username="ubuntu",
+            startup_mode="terminal",
+        )
+        connection = {}
+
+        with patch.object(api, "_broadcast_session_status") as broadcast:
+            api._track_terminal_agent_input(session.session_id, connection, "co")
+            api._track_terminal_agent_input(session.session_id, connection, "dex --full-auto\r")
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "agent")
+        self.assertEqual(updated.initial_command_mode, "agent")
+        self.assertEqual(updated.agent_selection, "codex")
+        self.assertEqual(updated.custom_agent, "")
+        self.assertEqual(updated.initial_command, "codex --full-auto")
+        self.assertEqual(connection["_gridvibe_input_line"], "")
+        broadcast.assert_called_once_with(session.session_id)
+
+    def test_terminal_input_assigns_claude_to_unassigned_agent_mode(self):
+        group = api.session_manager.create_group(
+            name="Unassigned agent",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Local",
+            directory="C:\\repos\\gridvibe",
+            username="",
+            mode="wsl",
+            startup_mode="agent",
+            initial_command_mode="agent",
+        )
+
+        with patch.object(api, "_broadcast_session_status") as broadcast:
+            api._track_terminal_agent_input(session.session_id, {}, "claudx\be\r")
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "agent")
+        self.assertEqual(updated.agent_selection, "claude")
+        self.assertEqual(updated.initial_command, "claude")
+        broadcast.assert_called_once_with(session.session_id)
+
+    def test_terminal_input_returns_codex_to_terminal_mode_on_interrupt(self):
+        group = api.session_manager.create_group(
+            name="Codex",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/gridvibe",
+            username="ubuntu",
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="codex",
+            initial_command="codex",
+        )
+
+        with patch.object(api, "_broadcast_session_status") as broadcast:
+            api._track_terminal_agent_input(session.session_id, {}, "\x03")
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertEqual(updated.initial_command_mode, "command")
+        self.assertEqual(updated.agent_selection, "")
+        self.assertEqual(updated.initial_command, "")
+        broadcast.assert_called_once_with(session.session_id)
+
+    def test_terminal_input_returns_claude_to_terminal_mode_on_exit_command(self):
+        group = api.session_manager.create_group(
+            name="Claude",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/gridvibe",
+            username="ubuntu",
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+        )
+
+        with patch.object(api, "_broadcast_session_status") as broadcast:
+            api._track_terminal_agent_input(session.session_id, {}, "/exit\r")
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertEqual(updated.agent_selection, "")
+        self.assertEqual(updated.initial_command, "")
+        broadcast.assert_called_once_with(session.session_id)
+
+    def test_agent_command_detection_ignores_non_agent_shell_commands(self):
+        self.assertEqual(api._agent_from_terminal_command("sudo codex --help"), ("codex", "sudo codex --help"))
+        self.assertEqual(api._agent_from_terminal_command("claude.exe"), ("claude", "claude.exe"))
+        self.assertIsNone(api._agent_from_terminal_command("echo codex"))
+        self.assertIsNone(api._agent_from_terminal_command("codex-helper"))
 
     def test_build_local_command_uses_wsl_startup_directory_when_available(self):
         session = SimpleNamespace(use_wsl=True, username="devuser")

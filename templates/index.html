@@ -2721,6 +2721,8 @@
         startup_mode: 'terminal',
         agent_selection: '',
         custom_agent: '',
+        explorer_tree_open: false,
+        explorer_git_open: false,
         distribution: '',
         use_wsl: false,
         use_powershell: false
@@ -3750,6 +3752,8 @@
                 custom_agent: commandMode === 'agent'
                     ? (row.querySelector('.t-agent-custom')?.value.trim() || '')
                     : '',
+                explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
+                explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
                 distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
                 use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
                     ? Boolean(row.querySelector('.t-use-wsl')?.checked)
@@ -4545,7 +4549,12 @@
                 commandUi.commandValue = '';
             }
             return `
-                <div class="t-row" data-command-mode="${escHtml(commandUi.mode)}">
+                <div
+                    class="t-row"
+                    data-command-mode="${escHtml(commandUi.mode)}"
+                    data-explorer-tree-open="${terminal.explorer_tree_open ? 'true' : 'false'}"
+                    data-explorer-git-open="${terminal.explorer_git_open ? 'true' : 'false'}"
+                >
                     <div class="t-row-head">
                         <span class="t-badge">T${index + 1}</span>
                         <input class="t-title" type="text" value="${escHtml(terminal.title || `Terminal ${index + 1}`)}" placeholder="Terminal ${index + 1}" aria-label="Terminal ${index + 1} title">
@@ -5215,6 +5224,12 @@
                     custom_agent: terminal.initial_command_mode === 'agent'
                         ? (terminal.custom_agent || '')
                         : '',
+                    explorer_tree_open: terminal.startup_mode === 'explorer'
+                        ? Boolean(terminal.explorer_tree_open)
+                        : false,
+                    explorer_git_open: terminal.startup_mode === 'explorer'
+                        ? Boolean(terminal.explorer_git_open)
+                        : false,
                     startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
                         ? terminal.startup_mode
                         : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')

@@ -94,6 +94,8 @@ class SessionManagerTestCase(unittest.TestCase):
                     "title": "Files",
                     "startup_mode": "explorer",
                     "explorer_root_directory": "C:\\repo",
+                    "explorer_tree_open": True,
+                    "explorer_git_open": True,
                 }
             ],
             group_id="group-local",
@@ -102,8 +104,12 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].startup_mode, "explorer")
         self.assertEqual(sessions[0].explorer_root_directory, "C:\\repo")
+        self.assertTrue(sessions[0].explorer_tree_open)
+        self.assertTrue(sessions[0].explorer_git_open)
         self.assertEqual(sessions[0].to_dict()["startup_mode"], "explorer")
         self.assertEqual(sessions[0].to_dict()["explorer_root_directory"], "C:\\repo")
+        self.assertTrue(sessions[0].to_dict()["explorer_tree_open"])
+        self.assertTrue(sessions[0].to_dict()["explorer_git_open"])
 
     def test_create_sessions_supports_agent_metadata(self):
         sessions = self.manager.create_sessions(

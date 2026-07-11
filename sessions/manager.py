@@ -44,6 +44,8 @@ class TerminalSession:
     use_powershell: bool = False
     startup_mode: str = "terminal"
     explorer_root_directory: Optional[str] = None
+    explorer_tree_open: bool = False
+    explorer_git_open: bool = False
     status: SessionStatus = SessionStatus.PENDING
     created_at: float = field(default_factory=time.time)
     connected_at: Optional[float] = None
@@ -69,6 +71,8 @@ class TerminalSession:
             "use_powershell": self.use_powershell,
             "startup_mode": self.startup_mode,
             "explorer_root_directory": self.explorer_root_directory,
+            "explorer_tree_open": self.explorer_tree_open,
+            "explorer_git_open": self.explorer_git_open,
             "status": self.status.value,
             "created_at": self.created_at,
             "connected_at": self.connected_at,
@@ -175,6 +179,8 @@ class SessionManager:
         use_powershell: bool = False,
         startup_mode: str = "terminal",
         explorer_root_directory: Optional[str] = None,
+        explorer_tree_open: bool = False,
+        explorer_git_open: bool = False,
     ) -> TerminalSession:
         """
         Create a new terminal session.
@@ -216,6 +222,8 @@ class SessionManager:
             use_powershell=use_powershell,
             startup_mode=startup_mode,
             explorer_root_directory=explorer_root_directory,
+            explorer_tree_open=explorer_tree_open,
+            explorer_git_open=explorer_git_open,
             status=SessionStatus.PENDING
         )
 
@@ -244,6 +252,8 @@ class SessionManager:
         use_powershell: bool = False,
         startup_mode: str = "terminal",
         explorer_root_directory: Optional[str] = None,
+        explorer_tree_open: bool = False,
+        explorer_git_open: bool = False,
     ) -> Optional[TerminalSession]:
         """Append one session to an existing group and update its count."""
         session_id = str(uuid.uuid4())[:8]
@@ -266,6 +276,8 @@ class SessionManager:
             use_powershell=use_powershell,
             startup_mode=startup_mode,
             explorer_root_directory=explorer_root_directory,
+            explorer_tree_open=explorer_tree_open,
+            explorer_git_open=explorer_git_open,
             status=SessionStatus.PENDING,
         )
 
@@ -322,6 +334,8 @@ class SessionManager:
                     use_powershell=bool(config.get("use_powershell")),
                     startup_mode=str(config.get("startup_mode") or "terminal"),
                     explorer_root_directory=config.get("explorer_root_directory"),
+                    explorer_tree_open=bool(config.get("explorer_tree_open")),
+                    explorer_git_open=bool(config.get("explorer_git_open")),
                 )
                 created.append(session)
             except Exception as e:
@@ -353,6 +367,8 @@ class SessionManager:
             "use_powershell",
             "startup_mode",
             "explorer_root_directory",
+            "explorer_tree_open",
+            "explorer_git_open",
         }
         with self.lock:
             session = self.sessions.get(session_id)

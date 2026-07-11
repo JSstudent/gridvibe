@@ -4181,6 +4181,8 @@
                     : (startupMode === 'agent' ? 'agent' : 'command'),
                 agent_selection: startupMode === 'agent' ? (terminal?.agent_selection || '') : '',
                 custom_agent: startupMode === 'agent' ? (terminal?.custom_agent || '') : '',
+                explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_tree_open) : false,
+                explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_git_open) : false,
                 startup_mode: startupMode
             };
 
@@ -4447,7 +4449,7 @@
             ? 'agent'
             : (startupMode === 'explorer' || startupMode === 'browser' ? startupMode : 'command');
         const selectedDirectory = startupMode === 'explorer'
-            ? (terminal?._explorerPath || session.directory || session.explorer_root_directory || '')
+            ? (session.explorer_root_directory || session.directory || '')
             : (session.directory || '');
 
         return {
@@ -4458,6 +4460,8 @@
             startup_mode: startupMode,
             agent_selection: commandMode === 'agent' ? (session.agent_selection || '') : '',
             custom_agent: commandMode === 'agent' ? (session.custom_agent || '') : '',
+            explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?._explorerTreeSidebarOpen) : false,
+            explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
             distribution: connectionMode === 'wsl' ? (session.distribution || '') : '',
             use_wsl: connectionMode === 'wsl' ? Boolean(session.use_wsl) : false,
             use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false
@@ -4472,7 +4476,7 @@
             buildWorkspaceTerminalEntry(terminal, index, connectionMode)
         ));
         const firstSession = groupTerminals.find(terminal => terminal?._session)?._session || {};
-        const firstDirectory = terminalEntries.find(entry => entry.directory)?.directory || '';
+        const firstDirectory = firstSession.explorer_root_directory || firstSession.directory || '';
 
         return {
             connection_mode: connectionMode,
@@ -4538,6 +4542,8 @@
                 id: savedSessionId || undefined,
                 name: sessionName,
                 config,
+                workspace_only: true,
+                source_saved_session_id: saveTarget.id || undefined,
                 activate: shouldActivateSavedSession
             };
             if (shouldUpdateSourceGroup) {
@@ -6753,7 +6759,13 @@
             const isBrowser = isBrowserSession(session);
             /* create pane instance */
             const t = isExplorer
-                ? { _session: session, _paneType: 'explorer', _attached: false }
+                ? {
+                    _session: session,
+                    _paneType: 'explorer',
+                    _attached: false,
+                    _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
+                    _explorerGitSidebarOpen: Boolean(session.explorer_git_open)
+                }
                 : (isBrowser
                     ? { _session: session, _paneType: 'browser', _attached: false }
                     : makeTerminal());
@@ -7760,7 +7772,13 @@
 
         const explorerThemeKey = session.session_id || `${activeGroupId || 'group'}:${index}`;
         const initialExplorerTheme = getExplorerTheme(explorerThemeKey);
-        terminals[index] = { _session: session, _paneType: 'explorer', _attached: false };
+        terminals[index] = {
+            _session: session,
+            _paneType: 'explorer',
+            _attached: false,
+            _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
+            _explorerGitSidebarOpen: Boolean(session.explorer_git_open)
+        };
         sessionIds[index] = session.session_id;
         setSessionRoute(session.session_id, activeGroupId, index);
 
@@ -7818,6 +7836,7 @@
         wireExplorerOnlyControls(card, index);
         setStatus(index, session.status);
         loadExplorerPane(index, null, { force: true });
+        restoreExplorerSidebarState(index);
         updateAllSplitButtonStates();
         return true;
     }
@@ -9447,6 +9466,7 @@
                     document.getElementById(`ph-${i}`)?.remove();
                 } else if (session.status === 'connected' && isExplorerSession(session)) {
                     loadExplorerPane(i);
+                    restoreExplorerSidebarState(i);
                 } else if (session.status === 'connected') {
                     if (!terminals[i]._attached) {
                         attachTerminal(i);
@@ -10868,6 +10888,20 @@
         if (treeOpen && gitOpen) {
             applyExplorerSidebarSplit(index);
             wireExplorerSidebarSplitter(index);
+        }
+    }
+
+    function restoreExplorerSidebarState(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        syncExplorerSidebar(index);
+        if (pane._explorerTreeSidebarOpen) {
+            loadExplorerTree(index);
+        }
+        if (pane._explorerGitSidebarOpen) {
+            loadExplorerGitRepo(index);
         }
     }
 
