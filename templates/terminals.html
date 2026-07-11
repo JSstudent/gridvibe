@@ -9612,8 +9612,19 @@
     }
 
     /* ─────────────────────────────────────────────
-       Periodic status refresh (no grid rebuild)
+       Status refresh (no grid rebuild) — triggered by
+       session_groups_updated pushes, with a slow poll
+       as fallback while the socket is down
     ───────────────────────────────────────────── */
+    let statusRefreshTimer = null;
+    function scheduleStatusRefresh() {
+        if (statusRefreshTimer) return;
+        statusRefreshTimer = setTimeout(() => {
+            statusRefreshTimer = null;
+            refreshStatuses();
+        }, 200);
+    }
+
     async function refreshStatuses() {
         if (!gridBuilt) { initialLoad(); return; }
         try {
@@ -12870,6 +12881,21 @@
             applyAppConfigSurfaceMode(message || {});
         });
 
+        socket.on('session_groups_updated', () => {
+            scheduleStatusRefresh();
+        });
+
+        /* Reconcile anything missed while the socket was disconnected.
+           Skipped on the first connect — initialLoad() covers boot. */
+        let hadSocketConnection = false;
+        socket.on('connect', () => {
+            if (!hadSocketConnection) {
+                hadSocketConnection = true;
+                return;
+            }
+            scheduleStatusRefresh();
+        });
+
         /* ── Voice transcription results ── */
         socket.on('voice_result', ({ session_id, text, final: isFinal }) => {
             const index = _voiceIndexForSession(session_id);
@@ -12938,7 +12964,13 @@
     _loadVoicePrefsFromServer();
     _loadVoiceServiceStatus();
     initialLoad();
-    setInterval(refreshStatuses, 3000);
+    /* Fallback reconciliation poll: session_status + session_groups_updated
+       pushes keep the view current, so only poll while the socket is down. */
+    const STATUS_POLL_FALLBACK_MS = 15000;
+    setInterval(() => {
+        if (socket && socket.connected) return;
+        refreshStatuses();
+    }, STATUS_POLL_FALLBACK_MS);
 </script>
 </body>
 </html>

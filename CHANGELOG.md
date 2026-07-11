@@ -4,6 +4,9 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **Performance:** remote file explorer requests now reuse a pooled SSH connection per session instead of opening a fresh TCP + SSH + SFTP handshake on every directory listing, file preview, or Git action, removing roughly 300–1000 ms of latency per click. Idle pooled connections close after 60 seconds and are evicted when the session closes.
+- **Performance:** terminal replay buffers now store output chunks in a deque with an exact 50 KB rolling trim instead of re-copying the whole buffer on every chunk, shortening lock hold times for busy panes.
+- **Performance:** the terminals page no longer polls session state every 3 seconds. The backend pushes a `session_groups_updated` Socket.IO event on launch, split, close, and tab reorder, and the page refreshes on push; a 15-second reconciliation poll remains only while the Socket.IO connection is down.
 - **Security (breaking for reverse-proxy setups):** Socket.IO CORS now defaults to same-origin (`http://127.0.0.1:<port>` / `http://localhost:<port>`) instead of `*`. If GridVibe is served from another origin (for example behind a reverse proxy), set `security.cors_origins` in `config.json` explicitly; `["*"]` restores the old behaviour.
 - **Security:** state-changing HTTP requests (`POST`/`DELETE`/`PUT`/`PATCH`) with a cross-origin `Origin` header are now rejected with `403`, blocking drive-by requests from hostile web pages against the local API. Origins listed in `security.cors_origins` remain allowed.
 - **Security:** SSH host keys are now persisted to a project-local `.known_hosts` file (gitignored). First connections still auto-accept the key, but a changed host key on a later connection is rejected instead of being silently accepted.

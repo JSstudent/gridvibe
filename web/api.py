@@ -20,8 +20,9 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
@@ -1928,7 +1929,11 @@ session_manager = SessionManager()
 
 # Store active SSH connections and buffered output
 ssh_connections: Dict[str, Dict[str, Any]] = {}
-session_output_buffers: Dict[str, str] = {}
+# Rolling replay buffers kept as chunk deques so a busy pane appends cheaply
+# instead of re-copying the whole tail on every output chunk; join only at
+# replay time via _get_buffered_terminal_output.
+session_output_buffers: Dict[str, Deque[str]] = {}
+TERMINAL_OUTPUT_BUFFER_MAX_CHARS = 50000
 client_joined_sessions: Dict[str, set[str]] = {}
 _MAX_TRACKED_SOCKET_CLIENTS = 1000
 connection_lock = threading.RLock()
@@ -2109,6 +2114,16 @@ def _broadcast_session_status(session_id: str):
             socketio.emit('session_status', session.to_dict())
 
 
+def _broadcast_session_groups_updated(reason: str = ""):
+    """Notify open terminal windows that the set of session groups changed.
+
+    Lets the frontend refresh on push instead of relying on its old 3-second
+    reconciliation poll (that poll now only runs as a slow fallback while the
+    Socket.IO connection is down).
+    """
+    socketio.emit('session_groups_updated', {"reason": reason})
+
+
 def _resolve_group_id() -> str:
     """Return the requested session group id, if any."""
     return str(request.args.get("group") or "").strip()
@@ -2139,9 +2154,31 @@ def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
 
 def _cache_terminal_output(session_id: str, output: str):
     """Keep a short rolling output buffer for late-joining clients."""
+    if not output:
+        return
     with connection_lock:
-        existing = session_output_buffers.get(session_id, "")
-        session_output_buffers[session_id] = (existing + output)[-50000:]
+        buffer = session_output_buffers.get(session_id)
+        if buffer is None:
+            buffer = deque()
+            session_output_buffers[session_id] = buffer
+        buffer.append(output)
+        total = sum(len(chunk) for chunk in buffer)
+        while buffer and total > TERMINAL_OUTPUT_BUFFER_MAX_CHARS:
+            excess = total - TERMINAL_OUTPUT_BUFFER_MAX_CHARS
+            head = buffer[0]
+            if len(head) <= excess:
+                buffer.popleft()
+                total -= len(head)
+            else:
+                buffer[0] = head[excess:]
+                total = TERMINAL_OUTPUT_BUFFER_MAX_CHARS
+
+
+def _get_buffered_terminal_output(session_id: str) -> str:
+    """Join the buffered output chunks for one session into a replay string."""
+    with connection_lock:
+        buffer = session_output_buffers.get(session_id)
+        return "".join(buffer) if buffer else ""
 
 
 def _clear_client_joined_sessions(client_id: str):
@@ -2153,7 +2190,7 @@ def _clear_client_joined_sessions(client_id: str):
 def _clear_terminal_output_buffer(session_id: str):
     """Drop the buffered replay output for one terminal session."""
     with connection_lock:
-        session_output_buffers[session_id] = ""
+        session_output_buffers[session_id] = deque()
 
 
 def _close_ssh_connection(session_id: str, clear_buffer: bool = True):
@@ -2164,6 +2201,7 @@ def _close_ssh_connection(session_id: str, clear_buffer: bool = True):
             session_output_buffers.pop(session_id, None)
 
     _shutdown_connection(connection)
+    _evict_pooled_ssh_client(session_id)
 
 
 def _shutdown_connection(connection: Optional[Dict[str, Any]]):
@@ -2250,6 +2288,10 @@ def _close_all_ssh_connections(clear_buffers: bool = True):
 
     for session_id in session_ids:
         _close_ssh_connection(session_id, clear_buffer=not clear_buffers)
+
+    # Explorer-only sessions have no ssh_connections entry, so flush the
+    # pooled explorer transports as well.
+    _evict_all_pooled_ssh_clients()
 
 
 def _send_connection_input(connection: Dict[str, Any], input_data: str):
@@ -2343,8 +2385,7 @@ def _resolve_live_terminal_cwd(session_id: str, session: Any, timeout: float = 0
 
     deadline = time.time() + max(0.05, timeout)
     while time.time() < deadline:
-        with connection_lock:
-            buffer = session_output_buffers.get(session_id, "")
+        buffer = _get_buffered_terminal_output(session_id)
         cwd = _extract_terminal_cwd_from_buffer(buffer, marker_start, marker_end)
         if cwd:
             shell_kind = str(connection.get("shell_kind") or "").strip()
@@ -4381,7 +4422,7 @@ def _remote_explorer_entry_payload(root_path: str, directory_path: str, entry: A
 
 
 def _open_ssh_sftp(session: Any) -> Tuple[Any, Any]:
-    """Open a short-lived SSH/SFTP connection for one explorer request."""
+    """Open a fresh SSH/SFTP connection for one explorer session."""
     if paramiko is None:
         raise RuntimeError("Paramiko is not installed. Run `pip install -r requirements.txt`.")
 
@@ -4400,16 +4441,116 @@ def _open_ssh_sftp(session: Any) -> Tuple[Any, Any]:
     return client, client.open_sftp()
 
 
-def _close_sftp_client(client: Any, sftp: Any) -> None:
-    """Close an SFTP handle and its owning SSH client."""
-    try:
-        sftp.close()
-    except Exception:
-        pass
+# Remote explorer requests reuse one live SSH transport per session instead of
+# paying a TCP + SSH handshake + auth round-trip on every click. Each request
+# still opens its own SFTP channel from the pooled client (paramiko SFTP
+# channels are not safe for concurrent use, but opening a channel on a live
+# transport is cheap). Only genuine paramiko clients with an active transport
+# are pooled; anything else keeps the historical open/close-per-request path.
+_ssh_client_pool: Dict[str, Tuple[float, Any]] = {}  # session_id -> (last_used, client)
+_ssh_client_pool_lock = threading.Lock()
+SSH_CLIENT_POOL_IDLE_TIMEOUT = 60.0
+
+
+def _ssh_client_transport_active(client: Any) -> bool:
+    """Return whether a client is a paramiko SSHClient with a live transport."""
+    if paramiko is None or not isinstance(client, paramiko.SSHClient):
+        return False
+    transport = client.get_transport()
+    return transport is not None and transport.is_active()
+
+
+def _close_ssh_client_quietly(client: Any) -> None:
+    """Close one SSH client, swallowing shutdown errors."""
     try:
         client.close()
     except Exception:
         pass
+
+
+def _reap_idle_pooled_ssh_clients() -> None:
+    """Drop pooled SSH clients that have been idle past the timeout."""
+    now = time.monotonic()
+    stale_clients = []
+    with _ssh_client_pool_lock:
+        for session_id, (last_used, client) in list(_ssh_client_pool.items()):
+            if now - last_used > SSH_CLIENT_POOL_IDLE_TIMEOUT:
+                stale_clients.append(client)
+                del _ssh_client_pool[session_id]
+    for client in stale_clients:
+        _close_ssh_client_quietly(client)
+
+
+def _evict_pooled_ssh_client(session_id: str, client: Any = None) -> None:
+    """Drop one pooled SSH client (optionally only when it matches `client`)."""
+    with _ssh_client_pool_lock:
+        entry = _ssh_client_pool.get(session_id)
+        if entry is None or (client is not None and entry[1] is not client):
+            return
+        del _ssh_client_pool[session_id]
+        pooled_client = entry[1]
+    _close_ssh_client_quietly(pooled_client)
+
+
+def _evict_all_pooled_ssh_clients() -> None:
+    """Close and forget every pooled SSH client."""
+    with _ssh_client_pool_lock:
+        clients = [client for _, client in _ssh_client_pool.values()]
+        _ssh_client_pool.clear()
+    for client in clients:
+        _close_ssh_client_quietly(client)
+
+
+def _acquire_ssh_sftp(session: Any) -> Tuple[Any, Any]:
+    """Return (client, sftp), reusing the pooled SSH transport when it is alive."""
+    _reap_idle_pooled_ssh_clients()
+    session_id = session.session_id
+    with _ssh_client_pool_lock:
+        entry = _ssh_client_pool.get(session_id)
+    if entry is not None:
+        client = entry[1]
+        if _ssh_client_transport_active(client):
+            try:
+                sftp = client.open_sftp()
+            except Exception:
+                _evict_pooled_ssh_client(session_id, client)
+            else:
+                with _ssh_client_pool_lock:
+                    current = _ssh_client_pool.get(session_id)
+                    if current is not None and current[1] is client:
+                        _ssh_client_pool[session_id] = (time.monotonic(), client)
+                return client, sftp
+        else:
+            _evict_pooled_ssh_client(session_id, client)
+
+    client, sftp = _open_ssh_sftp(session)
+    if _ssh_client_transport_active(client):
+        with _ssh_client_pool_lock:
+            # A concurrent request may have pooled its own client meanwhile;
+            # leave that one in place and let release close this one instead.
+            if session_id not in _ssh_client_pool:
+                _ssh_client_pool[session_id] = (time.monotonic(), client)
+    return client, sftp
+
+
+def _release_ssh_sftp(session: Any, client: Any, sftp: Any) -> None:
+    """Finish one explorer request: close the SFTP channel, keep the transport."""
+    try:
+        if sftp is not None:
+            sftp.close()
+    except Exception:
+        pass
+    if client is None:
+        return
+    session_id = getattr(session, "session_id", "")
+    with _ssh_client_pool_lock:
+        entry = _ssh_client_pool.get(session_id)
+        if entry is not None and entry[1] is client:
+            if _ssh_client_transport_active(client):
+                _ssh_client_pool[session_id] = (time.monotonic(), client)
+                return
+            del _ssh_client_pool[session_id]
+    _close_ssh_client_quietly(client)
 
 
 def _sftp_request_error_types() -> Tuple[type, ...]:
@@ -4679,7 +4820,7 @@ def _connect_ssh_session(session_id: str, session: Any):
 
         with connection_lock:
             ssh_connections[session_id] = connection
-            session_output_buffers[session_id] = ""
+            session_output_buffers[session_id] = deque()
 
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         _broadcast_session_status(session_id)
@@ -4787,7 +4928,7 @@ def _connect_local_session(session_id: str, session: Any):
 
         with connection_lock:
             ssh_connections[session_id] = connection
-            session_output_buffers[session_id] = ""
+            session_output_buffers[session_id] = deque()
 
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         _broadcast_session_status(session_id)
@@ -5005,7 +5146,7 @@ def get_explorer_entries(session_id: str):
         client = None
         sftp = None
         try:
-            client, sftp = _open_ssh_sftp(session)
+            client, sftp = _acquire_ssh_sftp(session)
             root_path, current_path = _resolve_remote_explorer_paths(
                 sftp,
                 session,
@@ -5039,8 +5180,7 @@ def get_explorer_entries(session_id: str):
         except _sftp_request_error_types() as exc:
             return jsonify({"error": str(exc)}), 500
         finally:
-            if client is not None and sftp is not None:
-                _close_sftp_client(client, sftp)
+            _release_ssh_sftp(session, client, sftp)
 
     try:
         root_path, current_path = _resolve_explorer_paths(
@@ -5087,7 +5227,7 @@ def get_explorer_file(session_id: str):
         client = None
         sftp = None
         try:
-            client, sftp = _open_ssh_sftp(session)
+            client, sftp = _acquire_ssh_sftp(session)
             root_path, file_path = _resolve_remote_explorer_file_path(
                 sftp,
                 session,
@@ -5135,8 +5275,7 @@ def get_explorer_file(session_id: str):
         except _sftp_request_error_types() as exc:
             return jsonify({"error": str(exc)}), 500
         finally:
-            if client is not None and sftp is not None:
-                _close_sftp_client(client, sftp)
+            _release_ssh_sftp(session, client, sftp)
 
     try:
         root_path, file_path = _resolve_explorer_file_path(
@@ -5198,7 +5337,7 @@ def get_explorer_git_diff(session_id: str):
         mode = request.args.get("mode", "worktree")
         commit = request.args.get("commit")
         try:
-            client, sftp = _open_ssh_sftp(session)
+            client, sftp = _acquire_ssh_sftp(session)
             root_path, file_path = _resolve_remote_explorer_file_path(
                 sftp,
                 session,
@@ -5219,8 +5358,7 @@ def get_explorer_git_diff(session_id: str):
         except _sftp_request_error_types() as exc:
             return jsonify({"error": str(exc)}), 500
         finally:
-            if client is not None and sftp is not None:
-                _close_sftp_client(client, sftp)
+            _release_ssh_sftp(session, client, sftp)
 
     mode = request.args.get("mode", "worktree")
     commit = request.args.get("commit")
@@ -5258,7 +5396,7 @@ def get_explorer_git_repo(session_id: str):
         client = None
         sftp = None
         try:
-            client, sftp = _open_ssh_sftp(session)
+            client, sftp = _acquire_ssh_sftp(session)
             root_path = _remote_explorer_root_directory(session)
             if not root_path:
                 raise ValueError("Explorer root directory is not configured")
@@ -5276,8 +5414,7 @@ def get_explorer_git_repo(session_id: str):
         except _sftp_request_error_types() as exc:
             return jsonify({"error": str(exc)}), 500
         finally:
-            if client is not None and sftp is not None:
-                _close_sftp_client(client, sftp)
+            _release_ssh_sftp(session, client, sftp)
 
     try:
         root_path = _explorer_root_directory(session)
@@ -5307,7 +5444,7 @@ def stage_explorer_git_file(session_id: str):
         client = None
         sftp = None
         try:
-            client, sftp = _open_ssh_sftp(session)
+            client, sftp = _acquire_ssh_sftp(session)
             root_path, file_path = _resolve_remote_explorer_candidate_path(
                 sftp, session, requested_path, allow_empty_root=False
             )
@@ -5319,8 +5456,7 @@ def stage_explorer_git_file(session_id: str):
         except _sftp_request_error_types() as exc:
             return jsonify({"error": str(exc)}), 500
         finally:
-            if client is not None and sftp is not None:
-                _close_sftp_client(client, sftp)
+            _release_ssh_sftp(session, client, sftp)
 
     try:
         root_path, file_path = _resolve_explorer_candidate_path(
@@ -5347,7 +5483,7 @@ def unstage_explorer_git_file(session_id: str):
         client = None
         sftp = None
         try:
-            client, sftp = _open_ssh_sftp(session)
+            client, sftp = _acquire_ssh_sftp(session)
             root_path, file_path = _resolve_remote_explorer_candidate_path(
                 sftp, session, requested_path, allow_empty_root=False
             )
@@ -5359,8 +5495,7 @@ def unstage_explorer_git_file(session_id: str):
         except _sftp_request_error_types() as exc:
             return jsonify({"error": str(exc)}), 500
         finally:
-            if client is not None and sftp is not None:
-                _close_sftp_client(client, sftp)
+            _release_ssh_sftp(session, client, sftp)
 
     try:
         root_path, file_path = _resolve_explorer_candidate_path(
@@ -5387,7 +5522,7 @@ def commit_explorer_git(session_id: str):
         client = None
         sftp = None
         try:
-            client, sftp = _open_ssh_sftp(session)
+            client, sftp = _acquire_ssh_sftp(session)
             root_path = _remote_explorer_root_directory(session)
             if not root_path:
                 raise ValueError("Explorer root directory is not configured")
@@ -5400,8 +5535,7 @@ def commit_explorer_git(session_id: str):
         except _sftp_request_error_types() as exc:
             return jsonify({"error": str(exc)}), 500
         finally:
-            if client is not None and sftp is not None:
-                _close_sftp_client(client, sftp)
+            _release_ssh_sftp(session, client, sftp)
 
     try:
         root_path = _explorer_root_directory(session)
@@ -5424,7 +5558,7 @@ def publish_explorer_git(session_id: str):
         client = None
         sftp = None
         try:
-            client, sftp = _open_ssh_sftp(session)
+            client, sftp = _acquire_ssh_sftp(session)
             root_path = _remote_explorer_root_directory(session)
             if not root_path:
                 raise ValueError("Explorer root directory is not configured")
@@ -5437,8 +5571,7 @@ def publish_explorer_git(session_id: str):
         except _sftp_request_error_types() as exc:
             return jsonify({"error": str(exc)}), 500
         finally:
-            if client is not None and sftp is not None:
-                _close_sftp_client(client, sftp)
+            _release_ssh_sftp(session, client, sftp)
 
     try:
         root_path = _explorer_root_directory(session)
@@ -5494,6 +5627,7 @@ def reorder_session_groups():
         return jsonify({"error": "A non-empty 'group_ids' list is required"}), 400
 
     groups = [group.to_dict() for group in session_manager.reorder_groups(group_ids)]
+    _broadcast_session_groups_updated("reordered")
     return jsonify({"groups": groups, "count": len(groups)})
 
 
@@ -5828,6 +5962,8 @@ def create_sessions():
             )
             socketio.start_background_task(_connect_session, session.session_id)
 
+        _broadcast_session_groups_updated("launched")
+
         return jsonify({
             "sessions": [s.to_dict() for s in created_sessions],
             "count": len(created_sessions),
@@ -5909,6 +6045,7 @@ def split_session(session_id: str):
         group.group_id,
     )
     socketio.start_background_task(_connect_session, new_session.session_id)
+    _broadcast_session_groups_updated("split")
 
     return jsonify(
         {
@@ -5978,7 +6115,7 @@ def change_session_mode(session_id: str):
             client = None
             sftp = None
             try:
-                client, sftp = _open_ssh_sftp(session)
+                client, sftp = _acquire_ssh_sftp(session)
                 next_directory = sftp.normalize(next_directory)
                 if not _remote_is_directory(sftp, next_directory):
                     raise ValueError("Explorer root directory does not exist")
@@ -5995,8 +6132,7 @@ def change_session_mode(session_id: str):
             except _sftp_request_error_types() as exc:
                 return jsonify({"error": str(exc)}), 500
             finally:
-                if client is not None and sftp is not None:
-                    _close_sftp_client(client, sftp)
+                _release_ssh_sftp(session, client, sftp)
 
             session_manager.update_session_metadata(
                 session_id,
@@ -6051,7 +6187,7 @@ def change_session_mode(session_id: str):
         client = None
         sftp = None
         try:
-            client, sftp = _open_ssh_sftp(session)
+            client, sftp = _acquire_ssh_sftp(session)
             root_path, selected_directory = _resolve_remote_explorer_candidate_path(
                 sftp,
                 session,
@@ -6062,8 +6198,7 @@ def change_session_mode(session_id: str):
         except _sftp_request_error_types() as exc:
             return jsonify({"error": str(exc)}), 500
         finally:
-            if client is not None and sftp is not None:
-                _close_sftp_client(client, sftp)
+            _release_ssh_sftp(session, client, sftp)
         next_directory = selected_directory
     else:
         try:
@@ -6107,6 +6242,7 @@ def close_session(session_id: str):
 
     _close_ssh_connection(session_id, clear_buffer=True)
     session_manager.clear_disconnected_sessions()
+    _broadcast_session_groups_updated("session_closed")
 
     return jsonify({"message": "Session closed successfully"})
 
@@ -6125,11 +6261,13 @@ def close_all_sessions():
             _close_ssh_connection(session.session_id, clear_buffer=True)
 
         session_manager.clear_disconnected_sessions()
+        _broadcast_session_groups_updated("group_closed")
         return jsonify({"message": "Session group closed successfully", "group_id": group_id})
 
     session_manager.close_all_sessions()
     _close_all_ssh_connections(clear_buffers=True)
     session_manager.reset_sessions()
+    _broadcast_session_groups_updated("all_closed")
 
     return jsonify({"message": "All sessions closed successfully"})
 
@@ -6194,7 +6332,7 @@ def handle_join_session(data):
             joined_sessions.add(session_id)
         join_room(session_id)
         logger.info(f"Client {request.sid} joined session {session_id}") # type: ignore
-        buffered_output = session_output_buffers.get(session_id, "") if should_replay_buffer else ""
+        buffered_output = _get_buffered_terminal_output(session_id) if should_replay_buffer else ""
 
         if buffered_output:
             # Serialize replay with live output streaming so startup output is not

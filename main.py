@@ -29,7 +29,8 @@ LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 MAX_LOG_SIZE = 2 * 1024 * 1024  # 2 MB per file
 MAX_LOG_BACKUPS = 10
 
-# Matches high-frequency polling GETs that clutter the log (e.g. status polls every 3 s)
+# Matches reconciliation GETs from the terminals page (push-triggered status
+# refreshes plus its slow fallback poll) that would otherwise clutter the log
 _POLL_RE = re.compile(r'"GET /api/(sessions|session-groups)(\?[^ ]*)? HTTP/[\d.]+" 2\d\d')
 
 

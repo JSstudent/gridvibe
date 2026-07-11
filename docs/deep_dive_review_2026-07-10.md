@@ -455,6 +455,20 @@ def _acquire_ssh_sftp(session):
   is cheap).
 - Keep the current open/close path as fallback when pooling fails.
 
+> **✅ Implemented (2026-07-11).** `web/api.py` gained a per-session SSH client pool
+> (`_ssh_client_pool`, `_ssh_client_pool_lock`, `SSH_CLIENT_POOL_IDLE_TIMEOUT = 60.0`) with
+> `_acquire_ssh_sftp(session)` / `_release_ssh_sftp(session, client, sftp)` used by all remote
+> explorer/git routes and `change_session_mode` (the old `_close_sftp_client` helper was
+> removed). The pool keeps the SSH *client* (transport) alive and opens a fresh SFTP channel
+> per request, so concurrent explorer requests never share an SFTP channel (paramiko SFTP
+> channels are not thread-safe; new channels on a live transport are cheap). Only genuine
+> `paramiko.SSHClient` instances with an active transport are pooled — anything else keeps the
+> historical open/close-per-request behaviour, which also keeps the MagicMock-based route tests
+> valid. Idle entries are reaped opportunistically on acquire; pool entries are evicted in
+> `_close_ssh_connection` (per session) and `_close_all_ssh_connections` (flush all, covering
+> explorer-only sessions that have no `ssh_connections` entry). Covered by
+> `SshSftpPoolTestCase` in `tests/test_api.py`.
+
 ### 3.2 Rolling output buffer copies up to 50 KB per output chunk — **Medium**
 
 **Location:** `web/api.py:2055-2059` (`_cache_terminal_output`)
@@ -472,6 +486,15 @@ while total > 50000 and len(buf) > 1:
     total -= len(buf.popleft())
 ```
 Join with `''.join(buf)` only at replay time (`handle_join_session`), which is rare.
+
+> **✅ Implemented (2026-07-11).** `session_output_buffers` in `web/api.py` is now
+> `Dict[str, Deque[str]]` with a `TERMINAL_OUTPUT_BUFFER_MAX_CHARS = 50000` constant.
+> `_cache_terminal_output` appends the chunk and trims from the head (partially trimming the
+> oldest chunk when needed), preserving the exact last-50k-chars semantics of the old
+> string-slice implementation without the per-chunk full copy. A new
+> `_get_buffered_terminal_output(session_id)` joins the chunks at the two rare read sites
+> (`handle_join_session` replay and the live-cwd probe). Covered by
+> `TerminalOutputBufferCacheTestCase` in `tests/test_api.py`.
 
 ### 3.3 SSH output loop busy-polls at 50 ms with a lock acquisition per iteration — **Low**
 
@@ -513,6 +536,16 @@ special werkzeug log filter to hide.
 2. Keep the poll as fallback but at 15–30 s, and pause it entirely while the socket is
    connected (`socket.connected === true`), resuming on `disconnect`.
 3. The `_SuppressPollLogs` filter can then be deleted.
+
+> **✅ Implemented (2026-07-11).** `web/api.py` gained `_broadcast_session_groups_updated(reason)`,
+> emitted from session launch (`POST /api/sessions`), pane split, single-session close,
+> group/all close, and tab reorder. `templates/terminals.html` listens for
+> `session_groups_updated` (debounced 200 ms via `scheduleStatusRefresh()`) and reconciles on
+> socket *re*connect; the old 3-second `setInterval(refreshStatuses, 3000)` is now a 15-second
+> fallback that only runs while `socket.connected` is false. Step 3 was **not** taken: the
+> `_SuppressPollLogs` filter in `main.py` stays (comment updated) because push-triggered
+> refreshes still issue the same `GET /api/sessions` / `GET /api/session-groups` requests.
+> Covered by `SessionGroupsUpdatedBroadcastTestCase` in `tests/test_api.py`.
 
 ### 3.5 ~18k lines of inline CSS/JS re-parsed on every page load — **Medium**
 
@@ -1377,6 +1410,25 @@ posture paragraph.
 2. **Security defaults:** 1.1 + 1.2 together (one PR, changelog entry). ✅ **Implemented
    2026-07-10**, together with 1.4's known_hosts persistence (see the per-finding notes above).
 3. **Perf pass:** 3.1 (SFTP pool) then 3.2/3.4; 3.6 (vendor assets) can ship independently.
-4. **Structural:** 6.1 (explorer backend) → 6.2 (module split) → 3.5/6.4 (template extraction),
-   each incremental with `make check` green between steps.
-5. **UX/features:** 8.4 + 10.x as individually scoped follow-ups.
+   ✅ **3.1, 3.2 and 3.4 implemented 2026-07-11** (see the per-finding notes above). Still open
+   from this group: 3.6 (vendor xterm/socket.io — still independent), plus the low-severity
+   stream-loop tweaks 3.3 and 3.7; 3.5 (template extraction) is sequenced with the structural
+   work in step 5.
+4. **Concurrency hardening:** 2.3 + 2.4 together (both are about `connection_lock` discipline —
+   re-validate inside the lock, emit outside it), then 2.2 (empty-group deletion race) and 2.5
+   (agent detection outside the cache lock), with the low-severity 2.6/2.8/2.9 batched into
+   whichever PR touches their files anyway.
+5. **Structural:** 6.1 (explorer backend abstraction — slots in naturally on top of the 3.1
+   connection pool) → 6.2 (module split) → 3.5/6.4 (template/shared-JS extraction, which also
+   unblocks 6.5's function decomposition) → 6.3/6.6 as small cleanups along the way, each step
+   incremental with `make check` green between steps.
+6. **Correctness & config cleanups:** 4.7 + 4.8 together (CLI-vs-config precedence and the vosk
+   port key are both config-resolution fixes; 5.7's shared `run_server` is the natural home for
+   4.7), then 4.3/4.6/4.9/4.10 and the log polish 9.2/9.3 as one sweep.
+7. **Dead-code sweep:** 5.1–5.6 in one or two commits validated by `make check` (5.1's useful
+   keys graduate into features 10.2 instead of being deleted).
+8. **Style/theming:** 7.1 (shared design tokens — pairs with the 3.5/6.4 extraction, do them in
+   the same PR series), then 7.2/7.3 as low-risk follow-ups.
+9. **UX/features:** 8.1 and 8.4 first (close confirmation, reconnect affordance — the two
+   Medium UX gaps), then 8.2/8.3/8.5 polish, and 10.2–10.7 as individually scoped follow-ups
+   (10.3 depends on 3.6's vendored assets; 10.7 completes 1.4's host-key story).

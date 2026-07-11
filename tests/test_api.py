@@ -4,6 +4,7 @@ import shutil
 import stat
 import subprocess
 import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1961,8 +1962,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             host="old-host",
             directory="/tmp",
         )
-        with api.connection_lock:
-            api.session_output_buffers[existing_session.session_id] = "stale output"
+        api._cache_terminal_output(existing_session.session_id, "stale output")
 
         sessions_payload = {
             "connection_mode": "ssh",
@@ -2010,9 +2010,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(len(api.session_manager.get_group_sessions(body["group_id"])), 2)
         with api.connection_lock:
             self.assertEqual(
-                api.session_output_buffers,
-                {existing_session.session_id: "stale output"},
+                list(api.session_output_buffers),
+                [existing_session.session_id],
             )
+        self.assertEqual(
+            api._get_buffered_terminal_output(existing_session.session_id),
+            "stale output",
+        )
 
     def test_create_sessions_reuses_saved_session_group_id_and_replaces_existing_sessions(self):
         initial_payload = {
@@ -2041,8 +2045,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(initial_body["group"]["saved_session_id"], "session-dev-grid")
         self.assertEqual(initial_start_task.call_count, 1)
 
-        with api.connection_lock:
-            api.session_output_buffers[original_session_id] = "stale output"
+        api._cache_terminal_output(original_session_id, "stale output")
 
         replacement_payload = {
             "connection_mode": "ssh",
@@ -4975,14 +4978,14 @@ class ApiRoutesTestCase(unittest.TestCase):
             directory="/tmp/project",
         )
 
-        with api.connection_lock:
-            api.session_output_buffers[session.session_id] = (
-                "boot"
-                f"{api.WINDOWS_DEVICE_ATTRIBUTES_RESPONSE}"
-                "\x1b]10;?\x07"
-                "\x1b]11;?\x1b\\"
-                "prompt"
-            )
+        api._cache_terminal_output(
+            session.session_id,
+            "boot"
+            f"{api.WINDOWS_DEVICE_ATTRIBUTES_RESPONSE}"
+            "\x1b]10;?\x07"
+            "\x1b]11;?\x1b\\"
+            "prompt",
+        )
 
         socket_client = api.socketio.test_client(
             api.app,
@@ -5024,8 +5027,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             directory="/tmp/project",
         )
 
-        with api.connection_lock:
-            api.session_output_buffers[session.session_id] = "bootprompt"
+        api._cache_terminal_output(session.session_id, "bootprompt")
 
         socket_client = api.socketio.test_client(
             api.app,
@@ -5062,8 +5064,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             directory="/tmp/project",
         )
 
-        with api.connection_lock:
-            api.session_output_buffers[session.session_id] = "bootprompt"
+        api._cache_terminal_output(session.session_id, "bootprompt")
 
         socket_client = api.socketio.test_client(
             api.app,
@@ -5098,8 +5099,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             directory="/tmp/project",
         )
 
-        with api.connection_lock:
-            api.session_output_buffers[session.session_id] = "bootprompt"
+        api._cache_terminal_output(session.session_id, "bootprompt")
 
         socket_client = api.socketio.test_client(
             api.app,
@@ -5109,8 +5109,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         socket_client.emit("clear_terminal_buffer", {"session_id": session.session_id})
 
-        with api.connection_lock:
-            self.assertEqual(api.session_output_buffers[session.session_id], "")
+        self.assertEqual(api._get_buffered_terminal_output(session.session_id), "")
 
         socket_client.get_received()
         socket_client.emit("join_session", {"session_id": session.session_id})
@@ -5604,8 +5603,7 @@ class SessionOutputBufferTestCase(unittest.TestCase):
 
     def test_buffer_cleared_when_connection_closed(self):
         session_id = "buf-test"
-        with api.connection_lock:
-            api.session_output_buffers[session_id] = "some output data"
+        api._cache_terminal_output(session_id, "some output data")
 
         api._close_ssh_connection(session_id)
 
@@ -5613,12 +5611,247 @@ class SessionOutputBufferTestCase(unittest.TestCase):
 
     def test_buffer_preserved_when_clear_buffer_false(self):
         session_id = "buf-keep"
-        with api.connection_lock:
-            api.session_output_buffers[session_id] = "keep this"
+        api._cache_terminal_output(session_id, "keep this")
 
         api._close_ssh_connection(session_id, clear_buffer=False)
 
         self.assertIn(session_id, api.session_output_buffers)
+
+
+class TerminalOutputBufferCacheTestCase(unittest.TestCase):
+    """Perf finding 3.2 — rolling output buffer stores chunks and trims exactly."""
+
+    def setUp(self):
+        with api.connection_lock:
+            api.session_output_buffers.clear()
+        self.addCleanup(self._clear_buffers)
+
+    def _clear_buffers(self):
+        with api.connection_lock:
+            api.session_output_buffers.clear()
+
+    def test_cache_appends_chunks_and_joins_for_replay(self):
+        api._cache_terminal_output("buf-a", "hello ")
+        api._cache_terminal_output("buf-a", "world")
+
+        self.assertEqual(api._get_buffered_terminal_output("buf-a"), "hello world")
+
+    def test_cache_trims_to_last_max_chars(self):
+        limit = api.TERMINAL_OUTPUT_BUFFER_MAX_CHARS
+        api._cache_terminal_output("buf-b", "x" * 30000)
+        api._cache_terminal_output("buf-b", "y" * 30000)
+
+        buffered = api._get_buffered_terminal_output("buf-b")
+        self.assertEqual(len(buffered), limit)
+        self.assertEqual(buffered, "x" * (limit - 30000) + "y" * 30000)
+
+    def test_single_oversized_chunk_keeps_only_the_tail(self):
+        limit = api.TERMINAL_OUTPUT_BUFFER_MAX_CHARS
+        api._cache_terminal_output("buf-c", "a" + "b" * limit)
+
+        self.assertEqual(api._get_buffered_terminal_output("buf-c"), "b" * limit)
+
+    def test_empty_output_is_ignored(self):
+        api._cache_terminal_output("buf-d", "")
+
+        with api.connection_lock:
+            self.assertNotIn("buf-d", api.session_output_buffers)
+
+    def test_clear_terminal_output_buffer_empties_replay(self):
+        api._cache_terminal_output("buf-e", "data")
+        api._clear_terminal_output_buffer("buf-e")
+
+        self.assertEqual(api._get_buffered_terminal_output("buf-e"), "")
+
+
+class SshSftpPoolTestCase(unittest.TestCase):
+    """Perf finding 3.1 — explorer SSH transports are pooled per session."""
+
+    def setUp(self):
+        api._evict_all_pooled_ssh_clients()
+        self.addCleanup(api._evict_all_pooled_ssh_clients)
+
+    def _fake_client(self, active=True):
+        if api.paramiko is None:
+            self.skipTest("paramiko is not installed")
+        client = api.paramiko.SSHClient()
+        transport = MagicMock()
+        transport.is_active.return_value = active
+        client.get_transport = MagicMock(return_value=transport)
+        client.open_sftp = MagicMock(side_effect=lambda: MagicMock())
+        client.close = MagicMock()
+        return client
+
+    def test_acquire_reuses_pooled_transport_for_next_request(self):
+        session = SimpleNamespace(session_id="pool-1")
+        client = self._fake_client()
+        first_sftp = MagicMock()
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(client, first_sftp)) as opener:
+            got_client, got_sftp = api._acquire_ssh_sftp(session)
+            api._release_ssh_sftp(session, got_client, got_sftp)
+            second_client, second_sftp = api._acquire_ssh_sftp(session)
+            api._release_ssh_sftp(session, second_client, second_sftp)
+
+        opener.assert_called_once()
+        self.assertIs(got_client, client)
+        self.assertIs(second_client, client)
+        # The pooled client served the second request via a fresh SFTP channel.
+        client.open_sftp.assert_called_once()
+        first_sftp.close.assert_called_once()
+        second_sftp.close.assert_called_once()
+        client.close.assert_not_called()
+
+    def test_release_closes_clients_that_cannot_be_pooled(self):
+        session = SimpleNamespace(session_id="pool-2")
+        client = MagicMock()
+        sftp = MagicMock()
+
+        with patch.object(api, "_open_ssh_sftp", return_value=(client, sftp)):
+            api._acquire_ssh_sftp(session)
+
+        with api._ssh_client_pool_lock:
+            self.assertNotIn("pool-2", api._ssh_client_pool)
+
+        api._release_ssh_sftp(session, client, sftp)
+        sftp.close.assert_called_once()
+        client.close.assert_called_once()
+
+    def test_dead_pooled_client_is_replaced_with_a_fresh_connection(self):
+        session = SimpleNamespace(session_id="pool-3")
+        dead_client = self._fake_client(active=False)
+        with api._ssh_client_pool_lock:
+            api._ssh_client_pool["pool-3"] = (time.monotonic(), dead_client)
+
+        fresh_client = self._fake_client()
+        fresh_sftp = MagicMock()
+        with patch.object(api, "_open_ssh_sftp", return_value=(fresh_client, fresh_sftp)) as opener:
+            got_client, got_sftp = api._acquire_ssh_sftp(session)
+
+        opener.assert_called_once()
+        self.assertIs(got_client, fresh_client)
+        self.assertIs(got_sftp, fresh_sftp)
+        dead_client.close.assert_called_once()
+
+    def test_idle_pooled_clients_are_reaped(self):
+        idle_client = self._fake_client()
+        with api._ssh_client_pool_lock:
+            api._ssh_client_pool["pool-idle"] = (
+                time.monotonic() - api.SSH_CLIENT_POOL_IDLE_TIMEOUT - 1,
+                idle_client,
+            )
+
+        api._reap_idle_pooled_ssh_clients()
+
+        with api._ssh_client_pool_lock:
+            self.assertNotIn("pool-idle", api._ssh_client_pool)
+        idle_client.close.assert_called_once()
+
+    def test_close_ssh_connection_evicts_the_pool_entry(self):
+        client = self._fake_client()
+        with api._ssh_client_pool_lock:
+            api._ssh_client_pool["pool-close"] = (time.monotonic(), client)
+
+        api._close_ssh_connection("pool-close")
+
+        with api._ssh_client_pool_lock:
+            self.assertNotIn("pool-close", api._ssh_client_pool)
+        client.close.assert_called_once()
+
+
+class SessionGroupsUpdatedBroadcastTestCase(unittest.TestCase):
+    """Perf finding 3.4 — group changes are pushed so the UI need not poll."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+
+    def _socket_client(self):
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+        self.addCleanup(socket_client.disconnect)
+        socket_client.get_received()
+        return socket_client
+
+    def _received_reasons(self, socket_client):
+        return [
+            event["args"][0].get("reason")
+            for event in socket_client.get_received()
+            if event["name"] == "session_groups_updated"
+        ]
+
+    def test_launch_broadcasts_session_groups_updated(self):
+        socket_client = self._socket_client()
+
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "ssh",
+                    "sessions": [
+                        {
+                            "host": "10.0.0.10",
+                            "directory": "/srv/app",
+                            "username": "ubuntu",
+                            "title": "App",
+                        }
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertIn("launched", self._received_reasons(socket_client))
+
+    def test_reorder_broadcasts_session_groups_updated(self):
+        for group_id, name in (("g-a", "A"), ("g-b", "B")):
+            api.session_manager.create_group(
+                name=name,
+                connection_mode="ssh",
+                layout="single",
+                terminal_count=1,
+                group_id=group_id,
+            )
+        socket_client = self._socket_client()
+
+        response = self.client.post(
+            "/api/session-groups/order",
+            json={"group_ids": ["g-b", "g-a"]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("reordered", self._received_reasons(socket_client))
+
+    def test_close_session_broadcasts_session_groups_updated(self):
+        api.session_manager.create_group(
+            name="Solo",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="g-solo",
+        )
+        session = api.session_manager.create_session(
+            group_id="g-solo",
+            host="10.0.0.10",
+            directory="/srv/app",
+        )
+        socket_client = self._socket_client()
+
+        response = self.client.delete(f"/api/sessions/{session.session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("session_closed", self._received_reasons(socket_client))
+
+    def test_close_all_broadcasts_session_groups_updated(self):
+        socket_client = self._socket_client()
+
+        response = self.client.delete("/api/sessions")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("all_closed", self._received_reasons(socket_client))
 
 
 class SessionStatusBroadcastRaceTestCase(unittest.TestCase):
