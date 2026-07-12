@@ -362,7 +362,7 @@ A minimal local override can look like this:
     "debug": false
   },
   "security": {
-    "cors_origins": ["*"]
+    "cors_origins": []
   },
   "appearance": {
     "theme": "system"
@@ -385,8 +385,9 @@ GridVibe is designed as a local desktop/browser tool, not a public web service. 
 
 - There is no built-in authentication or multi-user isolation.
 - Flask-SocketIO is run with Werkzeug for local usage; do not expose it directly to the internet.
-- Socket.IO defaults to wildcard CORS for local browser/native-window usage. Restrict `security.cors_origins` if you bind outside localhost.
-- Paramiko currently uses `AutoAddPolicy`, which accepts unknown SSH host keys on first use.
+- Socket.IO CORS defaults to same-origin (`http://127.0.0.1:<port>` / `http://localhost:<port>`). Set `security.cors_origins` explicitly if GridVibe is served from another origin (for example behind a reverse proxy); `["*"]` restores the wildcard behaviour.
+- State-changing HTTP requests (`POST`/`DELETE`/…) that carry a cross-origin `Origin` header are rejected with `403`; origins listed in `security.cors_origins` are also allowed.
+- Paramiko accepts unknown SSH host keys on first use (`AutoAddPolicy`), but persists them to a local `.known_hosts` file and rejects a changed host key on later connections.
 - Saved SSH passwords are encrypted with Fernet before writing to `saved_sessions.json`.
 - The Fernet key is stored in `.encryption_key`; Unix-like systems use `0600` permissions, while Windows users should rely on normal profile/account isolation or add stricter ACLs if needed.
 

@@ -1,9 +1,12 @@
 import io
 import json
+import re
 import shutil
+import socket
 import stat
 import subprocess
 import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,6 +15,10 @@ from unittest.mock import ANY, MagicMock, patch
 
 import api
 from gridvibe_version import __version__
+from web import config as web_config
+from web import explorer as web_explorer
+from web import hostkeys as web_hostkeys
+from web import selfupdate
 
 
 class FakeSftp:
@@ -104,7 +111,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.config_path = Path(self.temp_dir.name) / "config.json"
         self.config_path_patch = patch.object(
-            api,
+            web_config,
             "CONFIG_PATH",
             str(self.config_path),
         )
@@ -158,6 +165,25 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 201)
         return response.get_json()["sessions"][0]["session_id"]
+
+    def _page_html(self, response) -> str:
+        """Return page HTML plus its extracted static CSS/JS.
+
+        Finding 3.5 moved the inline styles and scripts to web/static/, so
+        content assertions look at the page and its own assets together.
+        """
+        html = response.get_data(as_text=True)
+        for asset in (
+            "css/launcher.css",
+            "js/shared.js",
+            "js/launcher.js",
+            "css/terminals.css",
+            "js/terminals.js",
+        ):
+            marker = f"/static/{asset}"
+            if marker in html:
+                html += "\n" + self.client.get(marker).get_data(as_text=True)
+        return html
 
     def _run_git(self, repo_dir: Path, *args: str) -> subprocess.CompletedProcess:
         if shutil.which("git") is None:
@@ -215,7 +241,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertNotIn('id="browserCloseBtn"', html)
 
     def test_browser_shutdown_button_is_rendered_in_browser_mode(self):
@@ -224,7 +250,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="browserCloseBtn"', html)
         self.assertIn("onclick=\"shutdownBrowserApp()\"", html)
         self.assertIn(f'const BROWSER_SHUTDOWN_TOKEN = "{token}";', html)
@@ -304,7 +330,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const AGENT_OPTIONS = [", html)
         self.assertIn('class="startup-mode-select"', html)
         self.assertIn('<option value="terminal"', html)
@@ -318,18 +344,18 @@ class ApiRoutesTestCase(unittest.TestCase):
             response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
+        # The shell-option markup moved to static JS (finding 3.5), so hiding
+        # is now a runtime gate on the server-rendered constant.
         self.assertIn("const LOCAL_WINDOWS_SHELLS_AVAILABLE = false;", html)
-        self.assertNotIn("Prefer WSL", html)
-        self.assertNotIn("Use PowerShell", html)
-        self.assertNotIn("Ubuntu Distro", html)
+        self.assertIn("${LOCAL_WINDOWS_SHELLS_AVAILABLE ? `", html)
 
     def test_launcher_page_shows_windows_shell_options_on_windows(self):
         with patch.object(api.os, "name", "nt"):
             response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const LOCAL_WINDOWS_SHELLS_AVAILABLE = true;", html)
         self.assertIn("Prefer WSL", html)
         self.assertIn("Use PowerShell", html)
@@ -339,7 +365,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("/api/agent-preflight", html)
         self.assertIn("function queueAgentPreflight(row)", html)
         self.assertIn("function scheduleAgentPreflight(row, delayMs = 180)", html)
@@ -351,7 +377,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="sshPingBtn"', html)
         self.assertIn('id="sshPingStatus"', html)
         self.assertIn("function initSshPingButton()", html)
@@ -361,7 +387,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="checkUpdatesBtn"', html)
         self.assertIn('title="Check for updates"', html)
         self.assertIn("async function checkForUpdates()", html)
@@ -372,7 +398,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="appSettingsBtn"', html)
         self.assertIn("function openAppSettings()", html)
         self.assertIn("function saveAppSettings()", html)
@@ -401,7 +427,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('<h1>Launcher Setup</h1>', html)
         self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
         self.assertIn('<div class="app-titlebar-right">', html)
@@ -413,7 +439,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function resetTerminalSetupIfTargetChanged", html)
         self.assertIn("buildTerminalRows(selectedCount, buildDefaultTerminalDrafts());", html)
         self.assertIn("resetTerminalSetupIfTargetChanged(connectionMode, collectModeInputs());", html)
@@ -423,7 +449,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn(
             '<a href="/" onclick="return goToSettings(event)">Launch terminals →</a>',
             html,
@@ -433,7 +459,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
         self.assertIn(">Sessions...</button>", html)
         self.assertIn(">Import Session ...</button>", html)
@@ -491,13 +517,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         entry_start = html.index("function buildWorkspaceTerminalEntry")
         entry_end = html.index("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)", entry_start)
-        self.assertIn("terminal?._explorerPath || session.directory", html[entry_start:entry_end])
+        entry_html = html[entry_start:entry_end]
+        self.assertIn("session.explorer_root_directory || session.directory", entry_html)
+        self.assertNotIn("terminal?._explorerPath", entry_html)
+        self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
+        self.assertIn("Boolean(terminal?._explorerGitSidebarOpen)", entry_html)
+        self.assertIn("function restoreExplorerSidebarState(index)", html)
+        self.assertIn("_explorerTreeSidebarOpen: Boolean(session.explorer_tree_open)", html)
+        self.assertIn("_explorerGitSidebarOpen: Boolean(session.explorer_git_open)", html)
+        self.assertIn("workspace_only: true", save_handler_html)
+        self.assertIn("source_saved_session_id: saveTarget.id || undefined", save_handler_html)
 
     def test_launcher_forwards_saved_workspace_layout_and_agent_metadata(self):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("let activeWorkspaceLayout = null;", html)
         self.assertIn("function clearActiveWorkspaceLayoutOverride()", html)
         self.assertIn("workspace_layout: workspaceLayout", html)
@@ -506,6 +541,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("surface_mode: appSettings.workspace?.surface_mode === 'max' ? 'max' : 'normal'", html)
         self.assertIn("initial_command_mode: terminal.startup_mode === 'explorer'", html)
         self.assertIn("agent_selection: terminal.initial_command_mode === 'agent'", html)
+        self.assertIn("data-explorer-tree-open=", html)
+        self.assertIn("data-explorer-git-open=", html)
+        self.assertIn("explorer_tree_open: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_git_open: terminal.startup_mode === 'explorer'", html)
         self.assertIn('<option value="browser"', html)
         self.assertIn('class="field t-browser-field', html)
         self.assertIn("function normalizeBrowserPaneUrl(value)", html)
@@ -523,7 +562,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';", html)
         self.assertIn("const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';", html)
         self.assertIn("async function refreshActiveSavedSessionFromUpdate(payload)", html)
@@ -537,7 +576,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
 
         menu_start = html.index('>Import Session ...</button>')
         go_to_settings_start = html.index("async function goToSettings(event)")
@@ -553,7 +592,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('class="btn btn-neutral btn-icon settings-window-btn"', html)
         self.assertIn('aria-label="Open settings"', html)
         self.assertIn('class="vibe-flow-icon"', html)
@@ -568,16 +607,38 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-terminal-refresh="${i}"', html)
         self.assertIn("function setTerminalRefreshState(index, refreshing)", html)
         self.assertIn("async function refreshTerminalDisplay(index)", html)
+
+    def test_terminals_page_explorer_bar_has_refresh_before_up_control(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        initial_refresh = 'data-explorer-refresh="${i}"'
+        initial_up = 'data-explorer-up="${i}"'
+        dynamic_refresh = 'data-explorer-refresh="${index}"'
+        dynamic_up = 'data-explorer-up="${index}"'
+        self.assertEqual(html.count(initial_refresh), 2)
+        self.assertEqual(html.count(dynamic_refresh), 2)
+        self.assertLess(html.index(initial_refresh), html.index(initial_up))
+        self.assertLess(html.index(dynamic_refresh), html.index(dynamic_up))
+        self.assertIn('aria-label="Refresh explorer"', html)
+        self.assertIn(
+            'wireCardButton(card, `[data-explorer-refresh="${i}"]`, () => refreshTerminalDisplay(i));',
+            html,
+        )
+        self.assertIn("refreshTerminalDisplay(index);", html)
+        self.assertIn("const explorerRefreshButton = document.getElementById(`explorer-refresh-${index}`);", html)
+        self.assertIn("explorerRefreshButton.disabled = isBusy;", html)
 
     def test_terminals_page_exposes_per_terminal_close_control(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-terminal-close="${i}"', html)
         self.assertIn('aria-label="Close this terminal pane"', html)
         self.assertIn(".terminal-close-btn", html)
@@ -588,7 +649,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function buildTerminalCloseRectsForSideGroup(plan, sideGroup)", html)
         self.assertIn("function sharedBorderLength(left, right)", html)
         self.assertIn("async function closeTerminalPane(index)", html)
-        self.assertIn("closeTerminalPane(i);", html)
+        self.assertIn(
+            'wireCardButton(card, `[data-terminal-close="${i}"]`, () => closeTerminalPane(i));',
+            html,
+        )
         self.assertIn("closeTerminalPane(index);", html)
         self.assertIn("rectsBySessionId: restoreRectsBySessionId", html)
         self.assertIn("no neighboring pane can safely fill this layout", html)
@@ -601,7 +665,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-session-mode-toggle="${i}"', html)
         self.assertIn("async function switchSessionPaneMode(index)", html)
         self.assertIn("body.directory = getExplorerSelectedDirectory(index);", html)
@@ -624,7 +688,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function isBrowserSession(session)", html)
         self.assertIn("function isBrowserPaneInstance(terminal)", html)
         self.assertIn("function getBrowserSessionUrl(session)", html)
@@ -644,7 +708,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         explorer_start = html.index("async function loadExplorerPane(index, path = null")
         explorer_end = html.index("/* ─────────────────────────────────────────────", explorer_start)
         explorer_html = html[explorer_start:explorer_end]
@@ -664,7 +728,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         explorer_refresh_start = html.index("async function refreshExplorerPane(index)")
         explorer_refresh_end = html.index("async function loadExplorerPane(index, path = null", explorer_refresh_start)
         explorer_refresh_html = html[explorer_refresh_start:explorer_refresh_end]
@@ -690,8 +754,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("list.classList.add('file-view');", html)
         self.assertIn("listScrollTop: list.scrollTop", html)
         self.assertIn("list.scrollTop = state.listScrollTop || 0;", html)
-        self.assertIn("wasAtBottom: maxScrollTop > 0 && panel.scrollTop >= maxScrollTop - 2", html)
-        self.assertIn("panel.scrollTop = panelState.wasAtBottom", html)
+        self.assertIn("wasAtBottom: maxScrollTop > 0 && scrollEl.scrollTop >= maxScrollTop - 2", html)
+        self.assertIn("scrollEl.scrollTop = panelState.wasAtBottom", html)
         self.assertIn("window.setTimeout(applyScroll, 80);", html)
         self.assertIn("async function syncExplorerPane(index)", html)
         self.assertIn("if (pane?._explorerMode === 'file' && pane._explorerFilePath) {\n            return true;\n        }", html)
@@ -702,7 +766,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function hasExplorerThemeOverride(key = '')", html)
         self.assertIn('[data-theme="dark"]', html)
         self.assertIn("--explorer-bg: #0f141b;", html)
@@ -717,7 +781,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
         self.assertIn(".explorer-source-line-number", html)
@@ -740,7 +804,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("jsonl: 'JSON Lines source'", html)
         self.assertIn("log: 'Log file'", html)
         self.assertIn("dotenv: 'Environment file'", html)
@@ -755,7 +819,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("--explorer-editor-font-size", html)
         self.assertIn("const EXPLORER_EDITOR_FONT_MIN = 10;", html)
         self.assertIn("const EXPLORER_EDITOR_FONT_MAX = 24;", html)
@@ -771,7 +835,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-explorer-search-input="${index}"', html)
         self.assertIn("function explorerFindRanges(content, query, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
         self.assertIn("function explorerMarkedEscHtml(text, absoluteStart = 0, searchRanges = [])", html)
@@ -787,7 +851,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const EXPLORER_SEARCH_DEBOUNCE_MS = 160;", html)
         self.assertIn("const EXPLORER_SEARCH_MAX_MATCHES = 1000;", html)
         self.assertIn("const EXPLORER_SEARCH_CHUNK_SIZE = 65536;", html)
@@ -807,7 +871,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("explorer-directory-search", html)
         self.assertIn('id="explorer-directory-search-${i}"', html)
         self.assertIn('id="explorer-directory-search-${index}"', html)
@@ -826,7 +890,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function isExplorerSearchablePane(pane)", html)
         self.assertIn("pane?._explorerMode === 'file' || pane?._explorerMode === 'directory'", html)
         self.assertIn("isExplorerSearchablePane(terminals[activeSlot])", html)
@@ -838,7 +902,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const key = mode === 'directory' ? '_explorerDirectorySearch' : '_explorerSearch';", html)
         self.assertIn("const searchState = ensureExplorerSearchState(pane, 'file');", html)
         self.assertIn("const state = ensureExplorerSearchState(pane, 'directory');", html)
@@ -848,7 +912,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function renderExplorerDirectoryOpenError(index, message)", html)
         self.assertIn("renderExplorerDirectoryRows(index);", html)
         self.assertIn("list.prepend(notice);", html)
@@ -860,7 +924,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function resetExplorerDirectorySearch(pane)", html)
         self.assertIn("if (isNavigation) {\n                resetExplorerDirectorySearch(pane);\n            }", html)
         self.assertIn("state.query = '';", html)
@@ -870,7 +934,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("explorer-git-summary", html)
         self.assertIn("data-explorer-git-toggle", html)
         self.assertIn("explorer-git-panel", html)
@@ -878,7 +942,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function toggleExplorerGitSidebar(index)", html)
         self.assertIn("function wireExplorerSidebarResize(index)", html)
         self.assertIn("function applyExplorerSidebarWidth(index)", html)
-        self.assertIn("const explorerGitToggle = card.querySelector(`[data-explorer-git-toggle=\"${i}\"]`);", html)
+        self.assertIn(
+            'wireCardButton(card, `[data-explorer-git-toggle="${i}"]`, () => toggleExplorerGitSidebar(i));',
+            html,
+        )
         self.assertIn("data-explorer-git-open-folder", html)
         self.assertIn("data-explorer-git-open-commit-diff", html)
         self.assertIn("function explorerGitOpenCommitDiff(index, path, commit)", html)
@@ -933,7 +1000,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("data-explorer-tree-toggle", html)
         self.assertIn("explorer-tree-panel", html)
         self.assertIn("data-explorer-tree-dir", html)
@@ -945,14 +1012,17 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function loadExplorerTreeChildren(index, path)", html)
         self.assertIn("function revealExplorerTreePath(index)", html)
         self.assertIn("function reloadExplorerTree(index)", html)
-        self.assertIn("const explorerTreeToggle = card.querySelector(`[data-explorer-tree-toggle=\"${i}\"]`);", html)
+        self.assertIn(
+            'wireCardButton(card, `[data-explorer-tree-toggle="${i}"]`, () => toggleExplorerTreeSidebar(i));',
+            html,
+        )
         self.assertIn(".filter(entry => !entry.deleted)", html)
 
     def test_terminals_page_explorer_sidebar_supports_tree_and_git_together(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("explorer-sidebar-splitter", html)
         self.assertIn("data-explorer-sidebar-splitter", html)
         self.assertIn("function syncExplorerSidebar(index)", html)
@@ -971,7 +1041,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("} else if (query && view === 'diff') {", html)
         self.assertIn("const diffMarks = markExplorerSearchInElement(diff, query, state.activeIndex || 0);", html)
         self.assertIn("renderExplorerDiff(index);", html)
@@ -982,7 +1052,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function explorerMarkdownHeadingLevel(line)", html)
         self.assertIn("function explorerMarkdownHeadingLevels(records)", html)
         self.assertIn("data-explorer-markdown-section", html)
@@ -998,7 +1068,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-terminal-clear="${i}"', html)
         self.assertIn("function setTerminalClearState(index, clearing)", html)
         self.assertIn("async function clearTerminalDisplay(index)", html)
@@ -1007,7 +1077,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function hasMatchingSessionIds(existingIds, sessions)", html)
         self.assertIn("function hasMatchingSessionViews(existingIds, existingTerminals, sessions)", html)
         self.assertIn("&& hasMatchingSessionViews(sessionIds, terminals, data.sessions)", html)
@@ -1021,13 +1091,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
     def test_terminals_page_uses_global_voice_capture_preferences_and_worklet(self):
-        with patch.object(api, "voice_engine", "whisper"), patch.object(
-            api, "whisper_model", "base"
+        with patch.object(api.runtime_config, "voice_engine", "whisper"), patch.object(
+            api.runtime_config, "whisper_model", "base"
         ):
             response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-voice-engine="whisper"', html)
         self.assertNotIn('data-terminal-voice-settings="${i}"', html)
         self.assertNotIn('data-terminal-voice-profile="${i}"', html)
@@ -1045,7 +1115,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         start = html.index("async function _startVoice(index) {")
         end = html.index("if (!navigator.mediaDevices?.getUserMedia)", start)
         startup_html = html[start:end]
@@ -1058,7 +1128,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         handler_start = html.index("socket.on('voice_status', async ({ session_id, status, message }) => {")
         handler_end = html.index("return;", handler_start)
         error_handler = html[handler_start:handler_end]
@@ -1070,18 +1140,18 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-terminal-voice="${i}"', html)
         self.assertNotIn('id="tvoice-panel-toggle-${i}"', html)
         self.assertNotIn('id="tvoice-settings-${i}"', html)
         self.assertNotIn("settings: document.getElementById(`tvoice-settings-${index}`),", html)
 
     def test_terminals_page_keeps_voice_toggle_available_for_live_setting_refresh(self):
-        with patch.object(api, "voice_enabled", False):
+        with patch.object(api.runtime_config, "voice_enabled", False):
             response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-voice-enabled="false"', html)
         self.assertIn('data-terminal-voice-control="${i}"', html)
         self.assertIn('data-terminal-voice="${i}"', html)
@@ -1096,7 +1166,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertNotIn('data-terminal-voice-ptt="${i}"', html)
         self.assertNotIn('data-terminal-voice-ptt-keybind="${i}"', html)
         self.assertNotIn('id="tvoice-ptt-toggle-${i}"', html)
@@ -1109,7 +1179,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertNotIn('class="terminal-action-btn terminal-shortcut-btn"', html)
         self.assertNotIn('data-terminal-enter="${i}"', html)
         self.assertNotIn('data-terminal-clearline="${i}"', html)
@@ -1119,7 +1189,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         clear_index = html.index('data-terminal-clear="${i}"')
         voice_index = html.index('data-terminal-voice-control="${i}"')
         close_index = html.index('data-terminal-close="${i}"')
@@ -1131,7 +1201,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         refresh_start = html.index("async function refreshTerminalDisplay(index)")
         self.assertIn("terminal.term.reset();", html[refresh_start:])
         self.assertIn("emitTerminalResize(index, true);", html[refresh_start:])
@@ -1142,7 +1212,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('aria-label="Refresh all"', html)
         self.assertIn('class="refresh-all-icon"', html)
         self.assertNotIn(">Refresh all</button>", html)
@@ -1157,7 +1227,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn(".session-tab-number {", html)
         self.assertIn("sessionGroups.forEach((group, index) => {", html)
         self.assertIn("const tabNumber = index + 1;", html)
@@ -1174,7 +1244,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('class="btn btn-success btn-icon"', html)
         self.assertIn('id="fullscreenBtn"', html)
         self.assertIn('title="Enter fullscreen"', html)
@@ -1190,7 +1260,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         grid_css = html[html.index("#terminalsGrid {"):html.index("/* Layout classes */")]
         self.assertIn("width: 100%;", grid_css)
         self.assertNotIn("min(1800px, 100%)", grid_css)
@@ -1218,7 +1288,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('class="topbar" id="terminalTopbar"', html)
         self.assertIn('class="session-bar"', html)
         self.assertIn('id="topbarToggleBtn"', html)
@@ -1232,7 +1302,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);", html)
         self.assertIn("justify-self: center;", html)
         self.assertIn('class="topbar-actions"', html)
@@ -1244,7 +1314,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("--session-color", html)
         self.assertIn("--session-color-dim", html)
         self.assertIn("var(--session-color-dim, var(--t-border-tab))", html)
@@ -1255,7 +1325,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         clear_start = html.index("async function clearTerminalDisplay(index)")
         self.assertIn("terminal.term.reset();", html[clear_start:])
         self.assertIn("terminal.term.clear();", html[clear_start:])
@@ -1267,7 +1337,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("async function redrawAttachedTerminals(indices, { forceResize = false, isCurrent = null } = {})", html)
         self.assertIn("async function redrawAttachedTerminalsLikeFullscreen(indices, { isCurrent = null } = {})", html)
 
@@ -1288,22 +1358,46 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("let cachedGroupViews = new Map();", html)
         self.assertIn("function cacheVisibleGroupView(groupId = visibleGroupId)", html)
         self.assertIn("function restoreCachedGroupView(groupId)", html)
         self.assertIn("cacheVisibleGroupView(visibleGroupId);", html)
         self.assertIn("restoredFromCache = restoreCachedGroupView(requestedGroupId);", html)
         self.assertIn("function captureTerminalViewportState(terminal)", html)
-        self.assertIn("function restoreTerminalViewportState(terminal, state)", html)
+        self.assertIn("function restoreTerminalViewportState(terminal, state, { isCurrent = null } = {})", html)
         self.assertIn("captureCachedPaneUiState();", html)
-        self.assertIn("restoreCachedPaneUiState();", html)
+        self.assertIn("restoreCachedPaneUiState({", html)
+        self.assertIn("restoreTerminalViewports: false", html)
+        self.assertIn("clearTerminalViewports: false", html)
+
+    def test_terminals_page_restores_viewports_after_cached_group_redraw(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        restore_start = html.index("function restoreTerminalViewportState(terminal, state")
+        restore_end = html.index("function captureCachedPaneUiState()", restore_start)
+        restore_html = html[restore_start:restore_end]
+        self.assertIn("state.wasAtBottom", restore_html)
+        self.assertIn("terminal.term.scrollToBottom();", restore_html)
+        self.assertIn("terminal.term.scrollToLine", restore_html)
+        self.assertIn("pending.stillCurrent()", restore_html)
+
+        initial_load_start = html.index("async function initialLoad()")
+        initial_load_end = html.index("/* ─────────────────────────────────────────────", initial_load_start)
+        initial_load_html = html[initial_load_start:initial_load_end]
+        redraw = initial_load_html.index("await redrawAttachedTerminals(attachedIndices, {")
+        restore = initial_load_html.index("restoreTerminalViewportState(terminals[index], state, { isCurrent: stillCurrent });")
+        self.assertLess(redraw, restore)
+        self.assertIn("terminals[index]?._cachedTerminalViewport || captureTerminalViewportState", initial_load_html)
+        self.assertIn("terminal._cachedTerminalViewport = null;", initial_load_html[restore:])
 
     def test_terminals_page_routes_terminal_output_by_session_across_cached_groups(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("let sessionRouteMap = new Map();", html)
         self.assertIn("function resolveSessionTarget(sessionId)", html)
         self.assertIn("const target = resolveSessionTarget(session_id);", html)
@@ -1328,18 +1422,18 @@ class ApiRoutesTestCase(unittest.TestCase):
         }
         response = self.client.post(
             "/api/sessions",
-            json={"sessions": [session_config] * (api.max_sessions + 1)},
+            json={"sessions": [session_config] * (api.runtime_config.max_sessions + 1)},
         )
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(
             response.get_json(),
-            {"error": f"Maximum {api.max_sessions} sessions allowed"},
+            {"error": f"Maximum {api.runtime_config.max_sessions} sessions allowed"},
         )
 
     def test_voice_status_endpoint_includes_engine_model_and_language(self):
-        with patch.object(api, "voice_engine", "whisper"), patch.object(
-            api, "whisper_model", "base"
+        with patch.object(api.runtime_config, "voice_engine", "whisper"), patch.object(
+            api.runtime_config, "whisper_model", "base"
         ):
             response = self.client.get("/api/voice-status")
 
@@ -1354,8 +1448,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("status_message", payload)
 
     def test_voice_status_endpoint_reports_vosk_metadata(self):
-        with patch.object(api, "voice_engine", "vosk"), patch.object(
-            api, "vosk_model", "vosk-model-en-us-0.22"
+        with patch.object(api.runtime_config, "voice_engine", "vosk"), patch.object(
+            api.runtime_config, "vosk_model", "vosk-model-en-us-0.22"
         ), patch.object(api, "_vosk_service_reachable", return_value=False):
             response = self.client.get("/api/voice-status")
 
@@ -1363,11 +1457,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["engine"], "vosk")
         self.assertEqual(payload["model"], "vosk-model-en-us-0.22")
-        self.assertEqual(payload["service_url"], api.vosk_service_url)
+        self.assertEqual(payload["service_url"], api.runtime_config.vosk_service_url)
         self.assertFalse(payload["service_running"])
 
     def test_voice_status_endpoint_reports_missing_whisper_dependency(self):
-        with patch.object(api, "voice_engine", "whisper"), patch.object(
+        with patch.object(api.runtime_config, "voice_engine", "whisper"), patch.object(
             api, "WhisperModel", None
         ), patch.object(api, "np", object()):
             response = self.client.get("/api/voice-status")
@@ -1801,7 +1895,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         missing_path = Path(self.temp_dir.name) / "missing-config.json"
-        with patch.object(api, "DEFAULT_CONFIG_PATH", str(default_path)):
+        with patch.object(web_config, "DEFAULT_CONFIG_PATH", str(default_path)):
             cfg = api.load_config(str(missing_path))
 
         self.assertEqual(cfg["voice_input"]["engine"], "whisper")
@@ -1816,8 +1910,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         broken_path = Path(self.temp_dir.name) / "broken-config.json"
         broken_path.write_text('{"appearance": {"theme": "dark"}}\n}', encoding="utf-8")
 
-        with patch.object(api, "DEFAULT_CONFIG_PATH", str(default_path)):
-            with self.assertLogs(api.logger, level="WARNING") as logs:
+        with patch.object(web_config, "DEFAULT_CONFIG_PATH", str(default_path)):
+            with self.assertLogs(web_config.logger, level="WARNING") as logs:
                 cfg = api.load_config(str(broken_path))
 
         self.assertEqual(cfg["appearance"]["theme"], "system")
@@ -1856,7 +1950,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_loads_voice_prefs_from_server(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("_loadVoicePrefsFromServer", html)
         self.assertIn("fetch('/api/voice-prefs'", html)
 
@@ -1899,7 +1993,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout="0\t0\n", stderr=""),
         ]
 
-        with patch.object(api, "_run_self_update_git_command", side_effect=git_results) as mock_git:
+        with patch.object(selfupdate, "_run_repo_git", side_effect=git_results) as mock_git:
             result = api.perform_self_update()
 
         self.assertFalse(result["updated"])
@@ -1923,7 +2017,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout="def987654321\n", stderr=""),
         ]
 
-        with patch.object(api, "_run_self_update_git_command", side_effect=git_results) as mock_git:
+        with patch.object(selfupdate, "_run_repo_git", side_effect=git_results) as mock_git:
             result = api.perform_self_update()
 
         self.assertTrue(result["updated"])
@@ -1941,12 +2035,42 @@ class ApiRoutesTestCase(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout=" M web/api.py\n", stderr=""),
         ]
 
-        with patch.object(api, "_run_self_update_git_command", side_effect=git_results):
+        with patch.object(selfupdate, "_run_repo_git", side_effect=git_results):
             with self.assertRaises(api.AppUpdateError) as context:
                 api.perform_self_update()
 
         self.assertEqual(context.exception.status_code, 409)
         self.assertIn("Local changes are present", str(context.exception))
+
+    def test_app_update_fast_forwards_real_checkout(self):
+        """POST /api/app-update happy path against a real temp git repo (finding 6.6)."""
+        with TemporaryDirectory() as tmp:
+            origin = Path(tmp) / "origin"
+            clone = Path(tmp) / "clone"
+            origin.mkdir()
+            (origin / "README.md").write_text("v1\n", encoding="utf-8")
+            self._run_git(origin, "init")
+            self._run_git(origin, "config", "user.email", "gridvibe@example.invalid")
+            self._run_git(origin, "config", "user.name", "GridVibe Test")
+            self._run_git(origin, "add", ".")
+            self._run_git(origin, "commit", "-m", "initial")
+            self._run_git(Path(tmp), "clone", str(origin), str(clone))
+            (origin / "README.md").write_text("v2\n", encoding="utf-8")
+            self._run_git(origin, "add", ".")
+            self._run_git(origin, "commit", "-m", "second")
+            expected_commit = self._run_git(origin, "rev-parse", "HEAD").stdout.decode().strip()
+
+            with patch.object(selfupdate, "SELF_UPDATE_REPO_DIR", str(clone)):
+                response = self.client.post("/api/app-update")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload["updated"])
+            self.assertTrue(payload["restart_required"])
+            self.assertEqual(payload["behind_count"], 1)
+            self.assertEqual(payload["current_commit"], expected_commit)
+            clone_head = self._run_git(clone, "rev-parse", "HEAD").stdout.decode().strip()
+            self.assertEqual(clone_head, expected_commit)
 
     def test_create_sessions_creates_new_group_without_resetting_existing_state(self):
         api.session_manager.create_group(
@@ -1961,8 +2085,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             host="old-host",
             directory="/tmp",
         )
-        with api.connection_lock:
-            api.session_output_buffers[existing_session.session_id] = "stale output"
+        api._cache_terminal_output(existing_session.session_id, "stale output")
 
         sessions_payload = {
             "connection_mode": "ssh",
@@ -2010,9 +2133,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(len(api.session_manager.get_group_sessions(body["group_id"])), 2)
         with api.connection_lock:
             self.assertEqual(
-                api.session_output_buffers,
-                {existing_session.session_id: "stale output"},
+                list(api.session_output_buffers),
+                [existing_session.session_id],
             )
+        self.assertEqual(
+            api._get_buffered_terminal_output(existing_session.session_id),
+            "stale output",
+        )
 
     def test_create_sessions_reuses_saved_session_group_id_and_replaces_existing_sessions(self):
         initial_payload = {
@@ -2041,8 +2168,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(initial_body["group"]["saved_session_id"], "session-dev-grid")
         self.assertEqual(initial_start_task.call_count, 1)
 
-        with api.connection_lock:
-            api.session_output_buffers[original_session_id] = "stale output"
+        api._cache_terminal_output(original_session_id, "stale output")
 
         replacement_payload = {
             "connection_mode": "ssh",
@@ -2100,7 +2226,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertEqual(data["connection_mode"], "ssh")
-        self.assertEqual(data["terminal_count"], min(4, api.max_sessions))
+        self.assertEqual(data["terminal_count"], min(4, api.runtime_config.max_sessions))
         self.assertEqual(data["layout"], "grid")
         self.assertEqual(data["ssh"]["username"], "ubuntu")
         self.assertEqual(data["last_session"], "")
@@ -2633,7 +2759,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         client = MagicMock()
 
-        with patch.object(api, "_open_ssh_sftp", return_value=(client, fake_sftp)), patch.object(
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(client, fake_sftp)), patch.object(
             api,
             "_close_ssh_connection",
         ) as close_connection:
@@ -2671,7 +2797,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         fake_sftp = FakeSftp({"/srv/app/src": {"type": "directory"}})
 
-        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)), patch.object(
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)), patch.object(
             api,
             "_close_ssh_connection",
         ):
@@ -2710,7 +2836,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api, "_resolve_live_terminal_cwd", return_value="/opt/tools") as resolve_cwd, patch.object(
-            api,
+            web_explorer,
             "_open_ssh_sftp",
             return_value=(MagicMock(), fake_sftp),
         ), patch.object(api, "_close_ssh_connection"):
@@ -2749,7 +2875,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             }
         )
 
-        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)), patch.object(
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)), patch.object(
             api.socketio,
             "start_background_task",
         ) as start_task:
@@ -2815,7 +2941,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             b"! ignored.log\0"
         )
 
-        branch, statuses = api._parse_git_status_porcelain_v2(raw_status)
+        branch, statuses = web_explorer._parse_git_status_porcelain_v2(raw_status)
 
         self.assertEqual(branch["branch"], "main")
         self.assertEqual(branch["head"], "abcdef123456")
@@ -3038,7 +3164,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("inside the configured root", response.get_json()["error"])
 
     def test_parse_git_graph_log_skips_connector_only_lines(self):
-        commits = api._parse_git_graph_log(
+        commits = web_explorer._parse_git_graph_log(
             b"* a1b2c3d initial\n"
             b"|\\\n"
             b"| * b2c3d4e branch work\n"
@@ -3095,7 +3221,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             }
         )
 
-        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
             entries_response = self.client.get(f"/api/explorer/{session.session_id}/entries")
 
         self.assertEqual(entries_response.status_code, 200)
@@ -3144,7 +3270,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             ]
         )
 
-        with patch.object(api, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
             entries_response = self.client.get(f"/api/explorer/{session.session_id}/entries")
 
         self.assertEqual(entries_response.status_code, 200)
@@ -3211,7 +3337,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             }
         )
 
-        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
             response = self.client.get(
                 f"/api/explorer/{session.session_id}/entries",
                 query_string={"path": "/etc"},
@@ -3267,7 +3393,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             }
         )
 
-        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
             response = self.client.get(
                 f"/api/explorer/{session.session_id}/file",
                 query_string={"path": "notes.txt"},
@@ -3316,7 +3442,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             ]
         )
 
-        with patch.object(api, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
             response = self.client.get(
                 f"/api/explorer/{session.session_id}/file",
                 query_string={"path": "notes.txt"},
@@ -3358,7 +3484,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             ]
         )
 
-        with patch.object(api, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
             response = self.client.get(
                 f"/api/explorer/{session.session_id}/git/diff",
                 query_string={"path": "README.md", "mode": "head"},
@@ -3370,6 +3496,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["mode"], "head")
         self.assertIn("+changed", payload["diff"])
         self.assertFalse(payload["truncated"])
+        # Unified backend payload shape (finding 6.1): remote diffs report
+        # byte_count/line_count exactly like local diffs.
+        self.assertEqual(payload["byte_count"], len(b"diff --git a/README.md b/README.md\n+changed\n"))
+        self.assertEqual(payload["line_count"], 2)
+        self.assertNotIn("raw_bytes", payload)
         self.assertIn("git -C /srv/app diff HEAD", fake_client.commands[-1][0])
 
     def test_explorer_file_returns_sanitized_markdown_preview(self):
@@ -3497,7 +3628,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         }
         for path, expected_language in cases.items():
             with self.subTest(path=path):
-                self.assertEqual(api._explorer_code_language(path), expected_language)
+                self.assertEqual(web_explorer._explorer_code_language(path), expected_language)
 
     def test_explorer_file_rejects_path_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -3614,7 +3745,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             }
         )
 
-        with patch.object(api, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
             response = self.client.get(
                 f"/api/explorer/{session.session_id}/file",
                 query_string={"path": "archive.bin"},
@@ -3799,6 +3930,252 @@ class ApiRoutesTestCase(unittest.TestCase):
         get_response = self.client.get(f"/api/saved-sessions/{created['id']}")
         self.assertEqual(get_response.status_code, 200)
         self.assertEqual(get_response.get_json()["config"]["ssh"]["host"], "10.0.0.20")
+
+    def test_workspace_save_preserves_launcher_directories_and_connection_setup(self):
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "local-grid",
+                "config": {
+                    "connection_mode": "wsl",
+                    "terminal_count": 2,
+                    "layout": "horizontal",
+                    "ssh": {"host": "", "username": "ubuntu", "port": 22, "default_dir": ""},
+                    "wsl": {
+                        "distribution": "Ubuntu",
+                        "username": "saso",
+                        "default_dir": "C:\\repos\\gridvibe",
+                    },
+                    "terminals": [
+                        {
+                            "title": "Shell",
+                            "directory": "C:\\repos\\gridvibe",
+                            "initial_command": "",
+                            "startup_mode": "terminal",
+                        },
+                        {
+                            "title": "Server",
+                            "directory": "backend",
+                            "initial_command": "python main.py",
+                            "startup_mode": "terminal",
+                        },
+                    ],
+                },
+            },
+        ).get_json()
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "vertical",
+                    "wsl": {
+                        "distribution": "Changed",
+                        "username": "changed",
+                        "default_dir": "C:\\repos\\gridvibe\\src\\services",
+                    },
+                    "terminals": [
+                        {
+                            "title": "Changed title",
+                            "directory": "src/services",
+                            "startup_mode": "explorer",
+                            "explorer_tree_open": True,
+                            "explorer_git_open": True,
+                        },
+                        {
+                            "title": "Changed server",
+                            "directory": "C:\\other-repo",
+                            "startup_mode": "browser",
+                            "explorer_tree_open": True,
+                            "explorer_git_open": True,
+                        },
+                    ],
+                    "workspace_layout": {
+                        "class_name": "layout-split-local",
+                        "split_slot_rects": [
+                            {"originSlot": 0, "x": 1, "y": 1, "w": 3, "h": 1},
+                            {"originSlot": 1, "x": 4, "y": 1, "w": 1, "h": 1},
+                        ],
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        config = response.get_json()["config"]
+        self.assertEqual(config["connection_mode"], "wsl")
+        self.assertEqual(config["wsl"]["default_dir"], "C:\\repos\\gridvibe")
+        self.assertEqual(config["wsl"]["distribution"], "Ubuntu")
+        self.assertEqual(config["wsl"]["username"], "saso")
+        self.assertEqual(config["terminals"][0]["directory"], "C:\\repos\\gridvibe")
+        self.assertEqual(config["terminals"][1]["directory"], "backend")
+        self.assertEqual(config["terminals"][0]["title"], "Shell")
+        self.assertEqual(config["terminals"][1]["title"], "Server")
+        self.assertEqual(config["terminals"][0]["startup_mode"], "explorer")
+        self.assertTrue(config["terminals"][0]["explorer_tree_open"])
+        self.assertTrue(config["terminals"][0]["explorer_git_open"])
+        self.assertEqual(config["terminals"][1]["startup_mode"], "browser")
+        self.assertFalse(config["terminals"][1]["explorer_tree_open"])
+        self.assertFalse(config["terminals"][1]["explorer_git_open"])
+        self.assertEqual(config["terminals"][1]["initial_command"], api.DEFAULT_BROWSER_URL)
+        self.assertEqual(config["layout"], "vertical")
+        self.assertEqual(config["workspace_layout"]["split_slot_rects"][0]["w"], 3)
+
+    def test_workspace_save_as_clones_source_directories_before_applying_modes(self):
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "source",
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 1,
+                    "layout": "single",
+                    "ssh": {
+                        "host": "example.com",
+                        "username": "ubuntu",
+                        "port": 2222,
+                        "default_dir": "/srv/gridvibe",
+                    },
+                    "terminals": [
+                        {
+                            "title": "Shell",
+                            "directory": "services/api",
+                            "initial_command": "",
+                            "startup_mode": "terminal",
+                        }
+                    ],
+                },
+            },
+        ).get_json()
+
+        copied = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "source copy",
+                "source_saved_session_id": original["id"],
+                "workspace_only": True,
+                "activate": False,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 1,
+                    "layout": "single",
+                    "ssh": {"host": "wrong", "default_dir": "/srv/gridvibe/tmp"},
+                    "terminals": [
+                        {"directory": "tmp/navigation", "startup_mode": "explorer"}
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(copied.status_code, 201)
+        body = copied.get_json()
+        self.assertNotEqual(body["id"], original["id"])
+        self.assertEqual(body["config"]["ssh"]["host"], "example.com")
+        self.assertEqual(body["config"]["ssh"]["port"], 2222)
+        self.assertEqual(body["config"]["ssh"]["default_dir"], "/srv/gridvibe")
+        self.assertEqual(body["config"]["terminals"][0]["directory"], "services/api")
+        self.assertEqual(body["config"]["terminals"][0]["startup_mode"], "explorer")
+
+    def test_workspace_save_preserves_running_agent_identity_and_command(self):
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "agents",
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "horizontal",
+                    "ssh": {
+                        "host": "example.com",
+                        "username": "ubuntu",
+                        "port": 22,
+                        "default_dir": "/srv/gridvibe",
+                    },
+                    "terminals": [
+                        {"title": "Codex", "directory": "", "startup_mode": "terminal"},
+                        {"title": "Claude", "directory": "backend", "startup_mode": "terminal"},
+                    ],
+                },
+            },
+        ).get_json()
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "horizontal",
+                    "ssh": {"host": "wrong", "default_dir": "/srv/gridvibe/tmp"},
+                    "terminals": [
+                        {
+                            "directory": "tmp/navigation",
+                            "startup_mode": "agent",
+                            "initial_command_mode": "agent",
+                            "agent_selection": "codex",
+                            "initial_command": "codex",
+                        },
+                        {
+                            "directory": "/other/repo",
+                            "startup_mode": "agent",
+                            "initial_command_mode": "agent",
+                            "agent_selection": "other",
+                            "custom_agent": "claude-code",
+                            "initial_command": "claude-code",
+                        },
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        terminals = response.get_json()["config"]["terminals"]
+        self.assertEqual(terminals[0]["directory"], "")
+        self.assertEqual(terminals[0]["startup_mode"], "agent")
+        self.assertEqual(terminals[0]["initial_command_mode"], "agent")
+        self.assertEqual(terminals[0]["agent_selection"], "codex")
+        self.assertEqual(terminals[0]["initial_command"], "codex")
+        self.assertEqual(terminals[1]["directory"], "backend")
+        self.assertEqual(terminals[1]["agent_selection"], "other")
+        self.assertEqual(terminals[1]["custom_agent"], "claude-code")
+        self.assertEqual(terminals[1]["initial_command"], "claude-code")
+
+        terminal_response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "horizontal",
+                    "terminals": [
+                        {"directory": "wrong", "startup_mode": "terminal"},
+                        {"directory": "also-wrong", "startup_mode": "terminal"},
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(terminal_response.status_code, 201)
+        terminal_modes = terminal_response.get_json()["config"]["terminals"]
+        self.assertEqual(terminal_modes[0]["directory"], "")
+        self.assertEqual(terminal_modes[1]["directory"], "backend")
+        for terminal in terminal_modes[:2]:
+            self.assertEqual(terminal["startup_mode"], "terminal")
+            self.assertEqual(terminal["initial_command_mode"], "command")
+            self.assertEqual(terminal["agent_selection"], "")
+            self.assertEqual(terminal["custom_agent"], "")
+            self.assertEqual(terminal["initial_command"], "")
 
     def test_save_as_updates_only_the_requesting_session_group_target(self):
         original_group = api.session_manager.create_group(
@@ -4124,7 +4501,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(data["name"], api.DEFAULT_SAVED_SESSION_NAME)
         self.assertTrue(data["is_default"])
         self.assertEqual(data["config"]["connection_mode"], "ssh")
-        self.assertEqual(data["config"]["terminal_count"], min(4, api.max_sessions))
+        self.assertEqual(data["config"]["terminal_count"], min(4, api.runtime_config.max_sessions))
 
     def test_session_config_returns_last_saved_session_metadata(self):
         payload = {
@@ -4699,6 +5076,122 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(sanitized, f"{api.WINDOWS_DEVICE_ATTRIBUTES_RESPONSE}pwd\r")
 
+    def test_terminal_input_promotes_manually_started_codex_to_agent_metadata(self):
+        group = api.session_manager.create_group(
+            name="Manual agent",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/gridvibe",
+            username="ubuntu",
+            startup_mode="terminal",
+        )
+        connection = {}
+
+        with patch.object(api, "_broadcast_session_status") as broadcast:
+            api._track_terminal_agent_input(session.session_id, connection, "co")
+            api._track_terminal_agent_input(session.session_id, connection, "dex --full-auto\r")
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "agent")
+        self.assertEqual(updated.initial_command_mode, "agent")
+        self.assertEqual(updated.agent_selection, "codex")
+        self.assertEqual(updated.custom_agent, "")
+        self.assertEqual(updated.initial_command, "codex --full-auto")
+        self.assertEqual(connection["_gridvibe_input_line"], "")
+        broadcast.assert_called_once_with(session.session_id)
+
+    def test_terminal_input_assigns_claude_to_unassigned_agent_mode(self):
+        group = api.session_manager.create_group(
+            name="Unassigned agent",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Local",
+            directory="C:\\repos\\gridvibe",
+            username="",
+            mode="wsl",
+            startup_mode="agent",
+            initial_command_mode="agent",
+        )
+
+        with patch.object(api, "_broadcast_session_status") as broadcast:
+            api._track_terminal_agent_input(session.session_id, {}, "claudx\be\r")
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "agent")
+        self.assertEqual(updated.agent_selection, "claude")
+        self.assertEqual(updated.initial_command, "claude")
+        broadcast.assert_called_once_with(session.session_id)
+
+    def test_terminal_input_returns_codex_to_terminal_mode_on_interrupt(self):
+        group = api.session_manager.create_group(
+            name="Codex",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/gridvibe",
+            username="ubuntu",
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="codex",
+            initial_command="codex",
+        )
+
+        with patch.object(api, "_broadcast_session_status") as broadcast:
+            api._track_terminal_agent_input(session.session_id, {}, "\x03")
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertEqual(updated.initial_command_mode, "command")
+        self.assertEqual(updated.agent_selection, "")
+        self.assertEqual(updated.initial_command, "")
+        broadcast.assert_called_once_with(session.session_id)
+
+    def test_terminal_input_returns_claude_to_terminal_mode_on_exit_command(self):
+        group = api.session_manager.create_group(
+            name="Claude",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/gridvibe",
+            username="ubuntu",
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+        )
+
+        with patch.object(api, "_broadcast_session_status") as broadcast:
+            api._track_terminal_agent_input(session.session_id, {}, "/exit\r")
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertEqual(updated.agent_selection, "")
+        self.assertEqual(updated.initial_command, "")
+        broadcast.assert_called_once_with(session.session_id)
+
+    def test_agent_command_detection_ignores_non_agent_shell_commands(self):
+        self.assertEqual(api._agent_from_terminal_command("sudo codex --help"), ("codex", "sudo codex --help"))
+        self.assertEqual(api._agent_from_terminal_command("claude.exe"), ("claude", "claude.exe"))
+        self.assertIsNone(api._agent_from_terminal_command("echo codex"))
+        self.assertIsNone(api._agent_from_terminal_command("codex-helper"))
+
     def test_build_local_command_uses_wsl_startup_directory_when_available(self):
         session = SimpleNamespace(use_wsl=True, username="devuser")
 
@@ -4892,11 +5385,11 @@ class ApiRoutesTestCase(unittest.TestCase):
             name="Full",
             connection_mode="ssh",
             layout="grid",
-            terminal_count=api.max_sessions,
+            terminal_count=api.runtime_config.max_sessions,
             group_id="group-full",
         )
         source = None
-        for index in range(api.max_sessions):
+        for index in range(api.runtime_config.max_sessions):
             session = api.session_manager.create_session(
                 group_id="group-full",
                 host=f"10.0.0.{index + 1}",
@@ -4909,7 +5402,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(
             response.get_json(),
-            {"error": f"Maximum {api.max_sessions} sessions allowed"},
+            {"error": f"Maximum {api.runtime_config.max_sessions} sessions allowed"},
         )
 
     def test_delete_session_closes_and_removes_it(self):
@@ -4975,14 +5468,14 @@ class ApiRoutesTestCase(unittest.TestCase):
             directory="/tmp/project",
         )
 
-        with api.connection_lock:
-            api.session_output_buffers[session.session_id] = (
-                "boot"
-                f"{api.WINDOWS_DEVICE_ATTRIBUTES_RESPONSE}"
-                "\x1b]10;?\x07"
-                "\x1b]11;?\x1b\\"
-                "prompt"
-            )
+        api._cache_terminal_output(
+            session.session_id,
+            "boot"
+            f"{api.WINDOWS_DEVICE_ATTRIBUTES_RESPONSE}"
+            "\x1b]10;?\x07"
+            "\x1b]11;?\x1b\\"
+            "prompt",
+        )
 
         socket_client = api.socketio.test_client(
             api.app,
@@ -5024,8 +5517,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             directory="/tmp/project",
         )
 
-        with api.connection_lock:
-            api.session_output_buffers[session.session_id] = "bootprompt"
+        api._cache_terminal_output(session.session_id, "bootprompt")
 
         socket_client = api.socketio.test_client(
             api.app,
@@ -5062,8 +5554,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             directory="/tmp/project",
         )
 
-        with api.connection_lock:
-            api.session_output_buffers[session.session_id] = "bootprompt"
+        api._cache_terminal_output(session.session_id, "bootprompt")
 
         socket_client = api.socketio.test_client(
             api.app,
@@ -5098,8 +5589,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             directory="/tmp/project",
         )
 
-        with api.connection_lock:
-            api.session_output_buffers[session.session_id] = "bootprompt"
+        api._cache_terminal_output(session.session_id, "bootprompt")
 
         socket_client = api.socketio.test_client(
             api.app,
@@ -5109,8 +5599,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         socket_client.emit("clear_terminal_buffer", {"session_id": session.session_id})
 
-        with api.connection_lock:
-            self.assertEqual(api.session_output_buffers[session.session_id], "")
+        self.assertEqual(api._get_buffered_terminal_output(session.session_id), "")
 
         socket_client.get_received()
         socket_client.emit("join_session", {"session_id": session.session_id})
@@ -5277,14 +5766,14 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_launcher_page_includes_theme_css_variables(self):
         response = self.client.get("/")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('[data-theme="light"]', html)
         self.assertIn("--bg:", html)
         self.assertIn("--accent:", html)
 
     def test_launcher_light_theme_overrides_hardcoded_element_backgrounds(self):
         response = self.client.get("/")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         light_selectors = [
             '[data-theme="light"] body',
             '[data-theme="light"] .header-badge',
@@ -5303,7 +5792,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_launcher_page_includes_theme_toggle_control(self):
         response = self.client.get("/")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="themeToggleBtnIndex"', html)
         self.assertIn("cycleTheme()", html)
         self.assertIn('id="themeControl"', html)
@@ -5311,7 +5800,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_launcher_page_includes_theme_js(self):
         response = self.client.get("/")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const THEME_STORAGE_KEY", html)
         self.assertIn("function normalizeThemePreference(", html)
         self.assertIn("function applyTheme(", html)
@@ -5322,7 +5811,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_includes_theme_css_variables(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('[data-theme="light"]', html)
         self.assertIn("--t-bg:", html)
         self.assertIn("--t-accent:", html)
@@ -5334,7 +5823,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_saved_session_modal_covers_resize_overlay(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         modal_css = html[html.index(".modal-shell {"):html.index(".settings-window-btn {")]
         resize_css = html[html.index("#terminalResizeOverlay {"):html.index(".terminal-resize-handle {")]
 
@@ -5344,13 +5833,13 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_includes_theme_toggle_control(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="themeToggleBtn"', html)
         self.assertIn("cycleTheme()", html)
 
     def test_terminals_page_includes_theme_js(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const THEME_STORAGE_KEY", html)
         self.assertIn("function normalizeThemePreference(", html)
         self.assertIn("function applyTheme(", html)
@@ -5361,7 +5850,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_uses_css_variables_for_structural_colors(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("var(--t-bg)", html)
         self.assertIn("var(--t-topbar)", html)
         self.assertIn("var(--t-text)", html)
@@ -5369,7 +5858,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_splits_the_longer_pane_dimension(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("grid?.classList.contains('layout-2-vertical')", html)
         self.assertIn("return candidates.includes('horizontal') ? 'horizontal' : '';", html)
         self.assertIn(
@@ -5379,7 +5868,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_exposes_grid_resize_handles(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="terminalResizeOverlay"', html)
         self.assertIn(".terminal-resize-handle", html)
         self.assertIn("let splitColumnWeights = null;", html)
@@ -5390,7 +5879,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_bounds_resize_handles_to_shared_edges(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function getSharedGridEdgeSegments(rects, axis, lineIndex)", html)
         self.assertIn("function getSharedGridEdgeSegmentStyle(axis, segment, metrics)", html)
         self.assertIn("segments.forEach(segment => {", html)
@@ -5407,7 +5896,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_resize_validation_enforces_minimums(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const MIN_RESIZE_SURFACE_RATIO = 1 / 8;", html)
         self.assertIn(
             "const minimumSurface = metrics.columnTrackSpace * metrics.rowTrackSpace * MIN_RESIZE_SURFACE_RATIO;",
@@ -5419,7 +5908,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_resize_drag_refits_and_forces_final_resize(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("window.addEventListener('pointermove', updateGridResize);", html)
         self.assertIn("window.addEventListener('pointerup', finishGridResize);", html)
         self.assertIn("function getResizeTrackGroups(axis, lineIndex)", html)
@@ -5430,7 +5919,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_cached_group_views_preserve_resize_weights(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("splitColumnWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitColumnWeights) : null", html)
         self.assertIn("splitRowWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitRowWeights) : null", html)
         self.assertIn("splitColumnWeights = cached.className === 'layout-split-local'", html)
@@ -5604,8 +6093,7 @@ class SessionOutputBufferTestCase(unittest.TestCase):
 
     def test_buffer_cleared_when_connection_closed(self):
         session_id = "buf-test"
-        with api.connection_lock:
-            api.session_output_buffers[session_id] = "some output data"
+        api._cache_terminal_output(session_id, "some output data")
 
         api._close_ssh_connection(session_id)
 
@@ -5613,12 +6101,247 @@ class SessionOutputBufferTestCase(unittest.TestCase):
 
     def test_buffer_preserved_when_clear_buffer_false(self):
         session_id = "buf-keep"
-        with api.connection_lock:
-            api.session_output_buffers[session_id] = "keep this"
+        api._cache_terminal_output(session_id, "keep this")
 
         api._close_ssh_connection(session_id, clear_buffer=False)
 
         self.assertIn(session_id, api.session_output_buffers)
+
+
+class TerminalOutputBufferCacheTestCase(unittest.TestCase):
+    """Perf finding 3.2 — rolling output buffer stores chunks and trims exactly."""
+
+    def setUp(self):
+        with api.connection_lock:
+            api.session_output_buffers.clear()
+        self.addCleanup(self._clear_buffers)
+
+    def _clear_buffers(self):
+        with api.connection_lock:
+            api.session_output_buffers.clear()
+
+    def test_cache_appends_chunks_and_joins_for_replay(self):
+        api._cache_terminal_output("buf-a", "hello ")
+        api._cache_terminal_output("buf-a", "world")
+
+        self.assertEqual(api._get_buffered_terminal_output("buf-a"), "hello world")
+
+    def test_cache_trims_to_last_max_chars(self):
+        limit = api.TERMINAL_OUTPUT_BUFFER_MAX_CHARS
+        api._cache_terminal_output("buf-b", "x" * 30000)
+        api._cache_terminal_output("buf-b", "y" * 30000)
+
+        buffered = api._get_buffered_terminal_output("buf-b")
+        self.assertEqual(len(buffered), limit)
+        self.assertEqual(buffered, "x" * (limit - 30000) + "y" * 30000)
+
+    def test_single_oversized_chunk_keeps_only_the_tail(self):
+        limit = api.TERMINAL_OUTPUT_BUFFER_MAX_CHARS
+        api._cache_terminal_output("buf-c", "a" + "b" * limit)
+
+        self.assertEqual(api._get_buffered_terminal_output("buf-c"), "b" * limit)
+
+    def test_empty_output_is_ignored(self):
+        api._cache_terminal_output("buf-d", "")
+
+        with api.connection_lock:
+            self.assertNotIn("buf-d", api.session_output_buffers)
+
+    def test_clear_terminal_output_buffer_empties_replay(self):
+        api._cache_terminal_output("buf-e", "data")
+        api._clear_terminal_output_buffer("buf-e")
+
+        self.assertEqual(api._get_buffered_terminal_output("buf-e"), "")
+
+
+class SshSftpPoolTestCase(unittest.TestCase):
+    """Perf finding 3.1 — explorer SSH transports are pooled per session."""
+
+    def setUp(self):
+        api._evict_all_pooled_ssh_clients()
+        self.addCleanup(api._evict_all_pooled_ssh_clients)
+
+    def _fake_client(self, active=True):
+        if api.paramiko is None:
+            self.skipTest("paramiko is not installed")
+        client = api.paramiko.SSHClient()
+        transport = MagicMock()
+        transport.is_active.return_value = active
+        client.get_transport = MagicMock(return_value=transport)
+        client.open_sftp = MagicMock(side_effect=lambda: MagicMock())
+        client.close = MagicMock()
+        return client
+
+    def test_acquire_reuses_pooled_transport_for_next_request(self):
+        session = SimpleNamespace(session_id="pool-1")
+        client = self._fake_client()
+        first_sftp = MagicMock()
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(client, first_sftp)) as opener:
+            got_client, got_sftp = api._acquire_ssh_sftp(session)
+            api._release_ssh_sftp(session, got_client, got_sftp)
+            second_client, second_sftp = api._acquire_ssh_sftp(session)
+            api._release_ssh_sftp(session, second_client, second_sftp)
+
+        opener.assert_called_once()
+        self.assertIs(got_client, client)
+        self.assertIs(second_client, client)
+        # The pooled client served the second request via a fresh SFTP channel.
+        client.open_sftp.assert_called_once()
+        first_sftp.close.assert_called_once()
+        second_sftp.close.assert_called_once()
+        client.close.assert_not_called()
+
+    def test_release_closes_clients_that_cannot_be_pooled(self):
+        session = SimpleNamespace(session_id="pool-2")
+        client = MagicMock()
+        sftp = MagicMock()
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(client, sftp)):
+            api._acquire_ssh_sftp(session)
+
+        with web_explorer._ssh_client_pool_lock:
+            self.assertNotIn("pool-2", web_explorer._ssh_client_pool)
+
+        api._release_ssh_sftp(session, client, sftp)
+        sftp.close.assert_called_once()
+        client.close.assert_called_once()
+
+    def test_dead_pooled_client_is_replaced_with_a_fresh_connection(self):
+        session = SimpleNamespace(session_id="pool-3")
+        dead_client = self._fake_client(active=False)
+        with web_explorer._ssh_client_pool_lock:
+            web_explorer._ssh_client_pool["pool-3"] = (time.monotonic(), dead_client)
+
+        fresh_client = self._fake_client()
+        fresh_sftp = MagicMock()
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(fresh_client, fresh_sftp)) as opener:
+            got_client, got_sftp = api._acquire_ssh_sftp(session)
+
+        opener.assert_called_once()
+        self.assertIs(got_client, fresh_client)
+        self.assertIs(got_sftp, fresh_sftp)
+        dead_client.close.assert_called_once()
+
+    def test_idle_pooled_clients_are_reaped(self):
+        idle_client = self._fake_client()
+        with web_explorer._ssh_client_pool_lock:
+            web_explorer._ssh_client_pool["pool-idle"] = (
+                time.monotonic() - web_explorer.SSH_CLIENT_POOL_IDLE_TIMEOUT - 1,
+                idle_client,
+            )
+
+        web_explorer._reap_idle_pooled_ssh_clients()
+
+        with web_explorer._ssh_client_pool_lock:
+            self.assertNotIn("pool-idle", web_explorer._ssh_client_pool)
+        idle_client.close.assert_called_once()
+
+    def test_close_ssh_connection_evicts_the_pool_entry(self):
+        client = self._fake_client()
+        with web_explorer._ssh_client_pool_lock:
+            web_explorer._ssh_client_pool["pool-close"] = (time.monotonic(), client)
+
+        api._close_ssh_connection("pool-close")
+
+        with web_explorer._ssh_client_pool_lock:
+            self.assertNotIn("pool-close", web_explorer._ssh_client_pool)
+        client.close.assert_called_once()
+
+
+class SessionGroupsUpdatedBroadcastTestCase(unittest.TestCase):
+    """Perf finding 3.4 — group changes are pushed so the UI need not poll."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+
+    def _socket_client(self):
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+        self.addCleanup(socket_client.disconnect)
+        socket_client.get_received()
+        return socket_client
+
+    def _received_reasons(self, socket_client):
+        return [
+            event["args"][0].get("reason")
+            for event in socket_client.get_received()
+            if event["name"] == "session_groups_updated"
+        ]
+
+    def test_launch_broadcasts_session_groups_updated(self):
+        socket_client = self._socket_client()
+
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "ssh",
+                    "sessions": [
+                        {
+                            "host": "10.0.0.10",
+                            "directory": "/srv/app",
+                            "username": "ubuntu",
+                            "title": "App",
+                        }
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertIn("launched", self._received_reasons(socket_client))
+
+    def test_reorder_broadcasts_session_groups_updated(self):
+        for group_id, name in (("g-a", "A"), ("g-b", "B")):
+            api.session_manager.create_group(
+                name=name,
+                connection_mode="ssh",
+                layout="single",
+                terminal_count=1,
+                group_id=group_id,
+            )
+        socket_client = self._socket_client()
+
+        response = self.client.post(
+            "/api/session-groups/order",
+            json={"group_ids": ["g-b", "g-a"]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("reordered", self._received_reasons(socket_client))
+
+    def test_close_session_broadcasts_session_groups_updated(self):
+        api.session_manager.create_group(
+            name="Solo",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="g-solo",
+        )
+        session = api.session_manager.create_session(
+            group_id="g-solo",
+            host="10.0.0.10",
+            directory="/srv/app",
+        )
+        socket_client = self._socket_client()
+
+        response = self.client.delete(f"/api/sessions/{session.session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("session_closed", self._received_reasons(socket_client))
+
+    def test_close_all_broadcasts_session_groups_updated(self):
+        socket_client = self._socket_client()
+
+        response = self.client.delete("/api/sessions")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("all_closed", self._received_reasons(socket_client))
 
 
 class SessionStatusBroadcastRaceTestCase(unittest.TestCase):
@@ -5822,6 +6545,295 @@ class LocalPtyStreamTestCase(unittest.TestCase):
             session_id, api.SessionStatus.DISCONNECTED
         )
 
+    @patch("web.api._broadcast_session_status")
+    @patch("web.api.session_manager")
+    def test_stream_local_output_fallback_reads_chunks_via_read1(
+        self, mock_session_mgr, _mock_broadcast
+    ):
+        session_id = "stdout-chunk-test"
+
+        class FakeStdout:
+            def __init__(self):
+                self.read1_sizes = []
+                self._chunks = [b"chunk-one", b""]
+
+            def read1(self, size):
+                self.read1_sizes.append(size)
+                return self._chunks.pop(0)
+
+            def read(self, _size):
+                raise AssertionError("byte-at-a-time read used despite read1 being available")
+
+            def close(self):
+                pass
+
+        class FakeProcess:
+            def poll(self):
+                return 0
+
+        stdout = FakeStdout()
+        with api.connection_lock:
+            api.ssh_connections[session_id] = {
+                "kind": "local",
+                "process": FakeProcess(),
+                "pty_process": None,
+                "master_fd": None,
+                "stdout": stdout,
+            }
+
+        mock_session = MagicMock()
+        mock_session.status = api.SessionStatus.CONNECTED
+        mock_session_mgr.get_session.return_value = mock_session
+
+        emitted = []
+        with patch.object(
+            api.socketio, "emit",
+            side_effect=lambda _event, payload, **_kw: emitted.append(payload["data"]),
+        ):
+            api._stream_local_output(session_id)
+
+        self.assertEqual(stdout.read1_sizes, [4096, 4096])
+        self.assertEqual(emitted, ["chunk-one"])
+        with api.connection_lock:
+            self.assertNotIn(session_id, api.ssh_connections)
+
+
+class SshStreamBlockingRecvTestCase(unittest.TestCase):
+    """Deep-dive 3.3 — SSH stream blocks on recv with a timeout instead of 50 ms polling."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+
+    def tearDown(self):
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+
+    class FakeChannel:
+        def __init__(self, chunks, exit_ready_when_drained=False):
+            self._chunks = list(chunks)
+            self._exit_ready_when_drained = exit_ready_when_drained
+            self.closed = False
+            self.timeout = None
+
+        def settimeout(self, value):
+            self.timeout = value
+
+        def recv(self, _size):
+            if not self._chunks:
+                return b""
+            item = self._chunks.pop(0)
+            if item is socket.timeout:
+                raise socket.timeout()
+            return item
+
+        def exit_status_ready(self):
+            return self._exit_ready_when_drained and not self._chunks
+
+        def close(self):
+            self.closed = True
+
+    @patch("web.api._broadcast_session_status")
+    @patch("web.api.session_manager")
+    def test_stream_ssh_output_sets_recv_timeout_and_survives_timeouts(
+        self, mock_session_mgr, _mock_broadcast
+    ):
+        session_id = "ssh-recv-test"
+        channel = self.FakeChannel([b"hello ", socket.timeout, b"world"])
+        with api.connection_lock:
+            api.ssh_connections[session_id] = {"kind": "ssh", "channel": channel}
+
+        mock_session = MagicMock()
+        mock_session.status = api.SessionStatus.CONNECTED
+        mock_session_mgr.get_session.return_value = mock_session
+
+        emitted = []
+        with patch.object(
+            api.socketio, "emit",
+            side_effect=lambda _event, payload, **_kw: emitted.append(payload["data"]),
+        ):
+            api._stream_ssh_output(session_id)
+
+        self.assertEqual(channel.timeout, api.SSH_STREAM_RECV_TIMEOUT)
+        self.assertEqual("".join(emitted), "hello world")
+        # EOF (empty recv) ends the loop and the connection is finalized.
+        mock_session_mgr.update_session_status.assert_called_with(
+            session_id, api.SessionStatus.DISCONNECTED
+        )
+        with api.connection_lock:
+            self.assertNotIn(session_id, api.ssh_connections)
+
+    @patch("web.api._broadcast_session_status")
+    @patch("web.api.session_manager")
+    def test_stream_ssh_output_exits_on_exit_status_after_timeout(
+        self, mock_session_mgr, _mock_broadcast
+    ):
+        session_id = "ssh-exit-test"
+        channel = self.FakeChannel(
+            [b"bye", socket.timeout], exit_ready_when_drained=True
+        )
+        with api.connection_lock:
+            api.ssh_connections[session_id] = {"kind": "ssh", "channel": channel}
+
+        mock_session = MagicMock()
+        mock_session.status = api.SessionStatus.CONNECTED
+        mock_session_mgr.get_session.return_value = mock_session
+
+        emitted = []
+        with patch.object(
+            api.socketio, "emit",
+            side_effect=lambda _event, payload, **_kw: emitted.append(payload["data"]),
+        ):
+            api._stream_ssh_output(session_id)
+
+        self.assertEqual(emitted, ["bye"])
+        with api.connection_lock:
+            self.assertNotIn(session_id, api.ssh_connections)
+
+
+class VendoredFrontendAssetsTestCase(unittest.TestCase):
+    """Deep-dive 3.6 — xterm/socket.io are served locally instead of from a CDN."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def test_terminals_page_references_vendored_assets_not_cdn(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertNotIn("cdn.jsdelivr.net", html)
+        self.assertIn("/static/vendor/xterm.css", html)
+        self.assertIn("/static/vendor/xterm.min.js", html)
+        self.assertIn("/static/vendor/xterm-addon-fit.min.js", html)
+        self.assertIn("/static/vendor/socket.io.min.js", html)
+
+    def test_vendored_assets_are_served(self):
+        for filename in (
+            "vendor/xterm.css",
+            "vendor/xterm.min.js",
+            "vendor/xterm-addon-fit.min.js",
+            "vendor/socket.io.min.js",
+        ):
+            with self.subTest(filename=filename):
+                response = self.client.get(f"/static/{filename}")
+                self.assertEqual(response.status_code, 200)
+                self.assertGreater(len(response.get_data()), 1000)
+                response.close()
+
+
+class ExtractedFrontendAssetsTestCase(unittest.TestCase):
+    """Deep-dive 3.5/6.4 — inline CSS/JS moved to cacheable static files."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def test_pages_reference_versioned_static_assets(self):
+        launcher_html = self.client.get("/").get_data(as_text=True)
+        terminals_html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertIn(f"/static/css/launcher.css?v={__version__}", launcher_html)
+        self.assertIn(f"/static/js/shared.js?v={__version__}", launcher_html)
+        self.assertIn(f"/static/js/launcher.js?v={__version__}", launcher_html)
+        self.assertIn(f"/static/css/terminals.css?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/shared.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/terminals.js?v={__version__}", terminals_html)
+        # shared.js must load before each page script so its globals exist first.
+        self.assertLess(
+            launcher_html.index("js/shared.js"), launcher_html.index("js/launcher.js")
+        )
+        self.assertLess(
+            terminals_html.index("js/shared.js"), terminals_html.index("js/terminals.js")
+        )
+
+    def test_extracted_assets_are_served_without_jinja(self):
+        for filename in (
+            "css/launcher.css",
+            "css/terminals.css",
+            "js/shared.js",
+            "js/launcher.js",
+            "js/terminals.js",
+        ):
+            with self.subTest(filename=filename):
+                response = self.client.get(f"/static/{filename}")
+                self.assertEqual(response.status_code, 200)
+                body = response.get_data(as_text=True)
+                self.assertGreater(len(body), 1000)
+                self.assertNotIn("{{", body)
+                self.assertNotIn("{%", body)
+                response.close()
+
+    def test_shared_helpers_are_not_redefined_by_page_scripts(self):
+        """Finding 6.4 — reconciled helpers exist once, in shared.js."""
+        shared = self.client.get("/static/js/shared.js").get_data(as_text=True)
+        launcher = self.client.get("/static/js/launcher.js").get_data(as_text=True)
+        terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+
+        shared_helpers = (
+            "escHtml",
+            "joinDirectories",
+            "syncNativeTheme",
+            "applyTheme",
+            "persistThemePreference",
+            "cycleTheme",
+            "initTheme",
+            "buildSavedSessionTags",
+            "buildSavedSessionCard",
+            "normalizeThemePreference",
+            "getStoredTheme",
+            "resolveTheme",
+            "buildLaunchDirectory",
+            "resolveTerminalDirectory",
+        )
+        for name in shared_helpers:
+            with self.subTest(helper=name):
+                self.assertEqual(shared.count(f"function {name}("), 1)
+                self.assertNotIn(f"function {name}(", launcher)
+                self.assertNotIn(f"function {name}(", terminals)
+
+        # Each page supplies its theme hook and starts the shared init once.
+        for page in (launcher, terminals):
+            self.assertIn("function onThemeApplied(", page)
+            self.assertIn("initTheme();", page)
+
+    def test_terminals_monster_functions_are_decomposed(self):
+        """Finding 6.5 — buildGrid/_startVoice delegate to focused helpers."""
+        terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+
+        for name in (
+            "createPaneInstance",
+            "wireCardButton",
+            "buildPaneCard",
+            "wirePaneControls",
+            "wirePaneInputForwarding",
+            "_acquireMicStream",
+            "_createVoicePipeline",
+            "_wireVoiceWorkletMessages",
+            "_teardownVoicePipeline",
+        ):
+            with self.subTest(helper=name):
+                self.assertEqual(
+                    len(re.findall(rf"function {re.escape(name)}\(", terminals)), 1
+                )
+
+        def _function_length(source: str, header: str) -> int:
+            lines = source.splitlines()
+            start = next(i for i, line in enumerate(lines) if header in line)
+            end = next(
+                i for i, line in enumerate(lines[start + 1:], start + 1)
+                if line == "    }"
+            )
+            return end - start + 1
+
+        # The orchestrators must stay thin; the old versions were ~445/~308
+        # lines and this is the regression guard against regrowing them.
+        self.assertLess(_function_length(terminals, "function buildGrid("), 60)
+        self.assertLess(_function_length(terminals, "async function _startVoice("), 200)
+
 
 class VoiceAudioRaceTestCase(unittest.TestCase):
     """Issue 1 — verify voice audio handles ws closure gracefully."""
@@ -5874,3 +6886,587 @@ class VoiceAudioRaceTestCase(unittest.TestCase):
         api._handle_vosk_audio_chunk("voice-no-conn", b"\x00\x01\x02\x03")
 
         mock_emit.assert_not_called()
+
+
+class CorsOriginDefaultsTestCase(unittest.TestCase):
+    """Finding 1.1 — Socket.IO CORS must default to same-origin, not '*'."""
+
+    def test_defaults_to_same_origin_when_not_configured(self):
+        config = {"security": {"cors_origins": []}, "server": {"host": "127.0.0.1", "port": 5050}}
+        with patch.object(api.runtime_config, "app_config", config):
+            origins = api._resolve_cors_origins()
+
+        self.assertEqual(origins, ["http://127.0.0.1:5050", "http://localhost:5050"])
+
+    def test_defaults_use_configured_port(self):
+        config = {"security": {}, "server": {"host": "localhost", "port": 8080}}
+        with patch.object(api.runtime_config, "app_config", config):
+            origins = api._resolve_cors_origins()
+
+        self.assertEqual(origins, ["http://127.0.0.1:8080", "http://localhost:8080"])
+
+    def test_non_loopback_host_is_included(self):
+        config = {"server": {"host": "192.168.1.20", "port": 5050}}
+        with patch.object(api.runtime_config, "app_config", config):
+            origins = api._resolve_cors_origins()
+
+        self.assertIn("http://192.168.1.20:5050", origins)
+
+    def test_explicit_configuration_wins(self):
+        config = {"security": {"cors_origins": ["https://example.com"]}}
+        with patch.object(api.runtime_config, "app_config", config):
+            origins = api._resolve_cors_origins()
+
+        self.assertEqual(origins, ["https://example.com"])
+
+    def test_explicit_wildcard_is_honored(self):
+        config = {"security": {"cors_origins": ["*"]}}
+        with patch.object(api.runtime_config, "app_config", config):
+            origins = api._resolve_cors_origins()
+
+        self.assertEqual(origins, ["*"])
+
+
+class CrossOriginWriteGuardTestCase(unittest.TestCase):
+    """Finding 1.2 — state-changing routes must reject cross-origin requests."""
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.config_path_patch = patch.object(
+            web_config, "CONFIG_PATH",
+            str(Path(self.temp_dir.name) / "config.json"),
+        )
+        self.config_path_patch.start()
+        self.addCleanup(self.config_path_patch.stop)
+        self.saved_sessions_patch = patch.object(
+            api, "SAVED_SESSIONS_PATH",
+            str(Path(self.temp_dir.name) / "saved_sessions.json"),
+        )
+        self.saved_sessions_patch.start()
+        self.addCleanup(self.saved_sessions_patch.stop)
+        api._refresh_runtime_config()
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+
+    def tearDown(self):
+        api.session_manager.reset_sessions()
+        api._refresh_runtime_config()
+
+    def test_cross_origin_post_is_rejected(self):
+        response = self.client.post(
+            "/api/sessions",
+            json={"connection_mode": "ssh", "sessions": []},
+            headers={"Origin": "http://evil.example"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("Cross-origin", response.get_json()["error"])
+
+    def test_cross_origin_delete_is_rejected(self):
+        response = self.client.delete(
+            "/api/sessions",
+            headers={"Origin": "http://evil.example"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_null_origin_is_rejected(self):
+        response = self.client.delete(
+            "/api/sessions",
+            headers={"Origin": "null"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_same_origin_write_is_allowed(self):
+        response = self.client.delete(
+            "/api/sessions",
+            headers={"Origin": "http://localhost"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_loopback_alias_origin_is_allowed(self):
+        # Test client host is "localhost"; 127.0.0.1 must count as the same origin.
+        response = self.client.delete(
+            "/api/sessions",
+            headers={"Origin": "http://127.0.0.1"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_write_without_origin_header_is_allowed(self):
+        response = self.client.delete("/api/sessions")
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_get_requests_are_not_guarded(self):
+        response = self.client.get(
+            "/api/sessions",
+            headers={"Origin": "http://evil.example"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_configured_extra_origin_is_allowed(self):
+        config = {"security": {"cors_origins": ["http://proxy.example:8443"]}}
+        with patch.object(api.runtime_config, "app_config", config):
+            response = self.client.delete(
+                "/api/sessions",
+                headers={"Origin": "http://proxy.example:8443"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_configured_wildcard_allows_cross_origin(self):
+        config = {"security": {"cors_origins": ["*"]}}
+        with patch.object(api.runtime_config, "app_config", config):
+            response = self.client.delete(
+                "/api/sessions",
+                headers={"Origin": "http://evil.example"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+
+
+class KnownHostsPersistenceTestCase(unittest.TestCase):
+    """Finding 1.4 — SSH clients load/persist a project-local known_hosts file."""
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.known_hosts_path = str(Path(self.temp_dir.name) / ".known_hosts")
+        self.known_hosts_patch = patch.object(
+            web_hostkeys, "KNOWN_HOSTS_PATH", self.known_hosts_path,
+        )
+        self.known_hosts_patch.start()
+        self.addCleanup(self.known_hosts_patch.stop)
+        api.session_manager.reset_sessions()
+
+    def tearDown(self):
+        api.session_manager.reset_sessions()
+
+    def test_creates_and_loads_known_hosts_file(self):
+        client = MagicMock()
+
+        api._load_persistent_host_keys(client)
+
+        self.assertTrue(Path(self.known_hosts_path).exists())
+        client.load_host_keys.assert_called_once_with(self.known_hosts_path)
+
+    def test_load_failure_is_non_fatal(self):
+        client = MagicMock()
+        client.load_host_keys.side_effect = OSError("file locked")
+
+        api._load_persistent_host_keys(client)  # must not raise
+
+    @patch("web.explorer.paramiko")
+    def test_open_ssh_sftp_loads_known_hosts(self, mock_paramiko):
+        mock_client = MagicMock()
+        mock_paramiko.SSHClient.return_value = mock_client
+        session = SimpleNamespace(
+            session_id="s1", host="host", port=22, username="u", password="p",
+        )
+
+        web_explorer._open_ssh_sftp(session)
+
+        mock_client.load_host_keys.assert_called_once_with(self.known_hosts_path)
+
+    @patch("web.api.paramiko")
+    def test_connect_ssh_session_loads_known_hosts(self, mock_paramiko):
+        mock_client = MagicMock()
+        mock_paramiko.SSHClient.return_value = mock_client
+        mock_paramiko.SSHException = type("SSHException", (Exception,), {})
+        mock_client.connect.side_effect = OSError("Connection refused")
+        session = api.session_manager.create_session(
+            group_id="grp-kh", host="127.0.0.1", directory="/tmp",
+            username="root", password="pass",
+        )
+
+        api._connect_ssh_session(session.session_id, session)
+
+        mock_client.load_host_keys.assert_called_once_with(self.known_hosts_path)
+
+
+class ConnectCloseToctouTestCase(unittest.TestCase):
+    """Finding 2.3 — a close during connect must not leak a live connection."""
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.known_hosts_patch = patch.object(
+            web_hostkeys, "KNOWN_HOSTS_PATH",
+            str(Path(self.temp_dir.name) / ".known_hosts"),
+        )
+        self.known_hosts_patch.start()
+        self.addCleanup(self.known_hosts_patch.stop)
+        api.session_manager.reset_sessions()
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+
+    def tearDown(self):
+        api.session_manager.reset_sessions()
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+
+    @patch("web.api.paramiko")
+    def test_connection_discarded_when_session_removed_mid_connect(self, mock_paramiko):
+        mock_client = MagicMock()
+        mock_paramiko.SSHClient.return_value = mock_client
+        mock_paramiko.SSHException = type("SSHException", (Exception,), {})
+        session = api.session_manager.create_session(
+            group_id="grp-race", host="127.0.0.1", directory="/tmp",
+            username="root", password="pass",
+        )
+        channel = MagicMock()
+
+        def invoke_shell(**_kwargs):
+            # Simulate a concurrent DELETE landing after the shell is opened
+            # but before the connection registry insert.
+            with api.session_manager.lock:
+                del api.session_manager.sessions[session.session_id]
+            return channel
+
+        mock_client.invoke_shell.side_effect = invoke_shell
+
+        api._connect_ssh_session(session.session_id, session)
+
+        with api.connection_lock:
+            self.assertNotIn(session.session_id, api.ssh_connections)
+            self.assertNotIn(session.session_id, api.session_output_buffers)
+        channel.close.assert_called()
+        mock_client.close.assert_called()
+
+    @patch("web.api.paramiko")
+    def test_connection_registered_when_session_still_exists(self, mock_paramiko):
+        mock_client = MagicMock()
+        mock_paramiko.SSHClient.return_value = mock_client
+        mock_paramiko.SSHException = type("SSHException", (Exception,), {})
+        session = api.session_manager.create_session(
+            group_id="grp-ok", host="127.0.0.1", directory="/tmp",
+            username="root", password="pass",
+        )
+
+        with patch.object(api, "_run_startup_sequence"), \
+                patch.object(api, "_stream_ssh_output"):
+            api._connect_ssh_session(session.session_id, session)
+
+        with api.connection_lock:
+            self.assertIn(session.session_id, api.ssh_connections)
+        self.assertEqual(
+            api.session_manager.get_session(session.session_id).status,
+            api.SessionStatus.CONNECTED,
+        )
+
+
+class EmitOutsideConnectionLockTestCase(unittest.TestCase):
+    """Finding 2.4 — terminal output is emitted without holding connection_lock."""
+
+    def setUp(self):
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+        self.addCleanup(self._clear_state)
+
+    def _clear_state(self):
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+
+    def test_stream_ssh_output_emits_without_connection_lock(self):
+        session_id = "emit-lock-ssh"
+
+        class FakeChannel:
+            def __init__(self):
+                self.closed = False
+                self._chunks = [b"hello"]
+
+            def settimeout(self, _timeout):
+                pass
+
+            def recv(self, _size):
+                if self._chunks:
+                    return self._chunks.pop(0)
+                return b""
+
+            def exit_status_ready(self):
+                return True
+
+            def close(self):
+                self.closed = True
+
+        with api.connection_lock:
+            api.ssh_connections[session_id] = {"kind": "ssh", "channel": FakeChannel()}
+
+        lock_owned_during_emit = []
+
+        def fake_emit(_event, payload, **_kwargs):
+            lock_owned_during_emit.append(api.connection_lock._is_owned())
+
+        with patch.object(api.socketio, "emit", side_effect=fake_emit):
+            api._stream_ssh_output(session_id)
+
+        self.assertEqual(lock_owned_during_emit, [False])
+        self.assertEqual(api._get_buffered_terminal_output(session_id), "")
+
+    def test_drain_until_prompt_emits_without_connection_lock(self):
+        session_id = "emit-lock-drain"
+
+        class FakePty:
+            def __init__(self):
+                self._chunks = ["booted"]
+
+            def read(self, _size):
+                return self._chunks.pop(0) if self._chunks else ""
+
+        lock_owned_during_emit = []
+
+        def fake_emit(_event, payload, **_kwargs):
+            lock_owned_during_emit.append(api.connection_lock._is_owned())
+
+        with patch.object(api.socketio, "emit", side_effect=fake_emit):
+            api._drain_until_prompt(session_id, {"pty_process": FakePty()}, timeout=1.0)
+
+        self.assertEqual(lock_owned_during_emit, [False])
+        self.assertEqual(api._get_buffered_terminal_output(session_id), "booted")
+
+
+class AgentDetectionCacheLockTestCase(unittest.TestCase):
+    """Finding 2.5 — slow detection probes run outside the cache lock."""
+
+    def setUp(self):
+        with api._agent_detection_cache_lock:
+            api._agent_detection_cache.clear()
+        self.addCleanup(self._clear_cache)
+
+    def _clear_cache(self):
+        with api._agent_detection_cache_lock:
+            api._agent_detection_cache.clear()
+
+    def test_probe_runs_unlocked_and_result_is_cached(self):
+        target = {
+            "environment_key": "windows_native",
+            "shell_kind": "cmd",
+            "distribution": "",
+            "host": "",
+            "port": 22,
+        }
+        lock_states = []
+
+        def fake_probe(_target, _binary):
+            lock_states.append(api._agent_detection_cache_lock.locked())
+            return {"found": True, "path": "C:/bin/claude"}
+
+        with patch.object(api, "_detect_agent_binary", side_effect=fake_probe) as probe:
+            first = api._detect_agent_binary_cached(target, "claude")
+            second = api._detect_agent_binary_cached(target, "claude")
+
+        self.assertEqual(lock_states, [False])
+        probe.assert_called_once()
+        self.assertEqual(first, second)
+        self.assertTrue(first["found"])
+
+
+class VoiceEngineSwitchTestCase(unittest.TestCase):
+    """Finding 2.6 — audio/stop route to the engine the recording started with."""
+
+    def setUp(self):
+        with api._active_voice_sessions_lock:
+            api._active_voice_sessions.clear()
+        self.addCleanup(self._clear_state)
+
+    def _clear_state(self):
+        with api._active_voice_sessions_lock:
+            api._active_voice_sessions.clear()
+
+    @patch("web.api.emit")
+    def test_stop_routes_to_engine_recorded_at_start(self, _mock_emit):
+        with api.app.test_request_context("/"):
+            api.request.sid = "client-1"  # type: ignore[attr-defined]
+
+            with patch.object(api.runtime_config, "voice_enabled", True), \
+                    patch.object(api.runtime_config, "voice_engine", "whisper"), \
+                    patch.object(api, "_start_whisper_voice_session") as start_whisper:
+                api.handle_voice_start({"session_id": "sess-voice"})
+            start_whisper.assert_called_once_with("sess-voice")
+
+            # The user switches the engine mid-recording; audio and stop must
+            # still route to the engine the recording started with.
+            with patch.object(api.runtime_config, "voice_engine", "vosk"), \
+                    patch.object(api, "_handle_whisper_audio_chunk") as whisper_audio, \
+                    patch.object(api, "_handle_vosk_audio_chunk") as vosk_audio:
+                api.handle_voice_audio({"session_id": "sess-voice", "audio": b"pcm"})
+            whisper_audio.assert_called_once_with("sess-voice", b"pcm")
+            vosk_audio.assert_not_called()
+
+            with patch.object(api.runtime_config, "voice_engine", "vosk"), \
+                    patch.object(api, "_stop_whisper_voice_session") as stop_whisper, \
+                    patch.object(api, "_stop_vosk_voice_session") as stop_vosk:
+                api.handle_voice_stop({"session_id": "sess-voice"})
+            stop_whisper.assert_called_once_with("sess-voice")
+            stop_vosk.assert_not_called()
+
+        with api._active_voice_sessions_lock:
+            self.assertNotIn("sess-voice", api._active_voice_sessions)
+
+    @patch("web.api.emit")
+    def test_audio_without_recorded_session_uses_configured_engine(self, _mock_emit):
+        with api.app.test_request_context("/"):
+            with patch.object(api.runtime_config, "voice_engine", "vosk"), \
+                    patch.object(api, "_handle_vosk_audio_chunk") as vosk_audio:
+                api.handle_voice_audio({"session_id": "sess-unknown", "audio": b"pcm"})
+            vosk_audio.assert_called_once_with("sess-unknown", b"pcm")
+
+
+class AgentInputTrackingLockTestCase(unittest.TestCase):
+    """Finding 2.10 — tracking state mutates under connection_lock and still works."""
+
+    def setUp(self):
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+
+    def test_double_interrupt_marks_agent_exited(self):
+        session = api.session_manager.create_session(
+            group_id="grp-agent", host="local", directory="/tmp",
+            startup_mode="agent", agent_selection="claude",
+        )
+        connection = {}
+
+        with patch.object(api, "_mark_runtime_agent_exited", return_value=True) as mark:
+            api._track_terminal_agent_input(session.session_id, connection, "\x03")
+            mark.assert_not_called()
+            api._track_terminal_agent_input(session.session_id, connection, "\x03")
+            mark.assert_called_once_with(session.session_id, "interrupt")
+
+    def test_typed_line_is_reconstructed_across_events(self):
+        session = api.session_manager.create_session(
+            group_id="grp-line", host="local", directory="/tmp",
+        )
+        connection = {}
+
+        api._track_terminal_agent_input(session.session_id, connection, "cla")
+        api._track_terminal_agent_input(session.session_id, connection, "ude")
+        self.assertEqual(connection["_gridvibe_input_line"], "claude")
+
+        with patch.object(api, "_agent_from_terminal_command", return_value=("claude", "claude")), \
+                patch.object(api, "_broadcast_session_status"):
+            api._track_terminal_agent_input(session.session_id, connection, "\r")
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "agent")
+        self.assertEqual(updated.agent_selection, "claude")
+        self.assertEqual(connection["_gridvibe_input_line"], "")
+
+
+class RuntimeConfigExtractionTestCase(unittest.TestCase):
+    """Finding 6.2 — runtime config lives in web/config.py behind RuntimeConfig."""
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.config_path = Path(self.temp_dir.name) / "config.json"
+        self.config_path_patch = patch.object(
+            web_config, "CONFIG_PATH", str(self.config_path)
+        )
+        self.config_path_patch.start()
+        self.addCleanup(self.config_path_patch.stop)
+        self.addCleanup(api._refresh_runtime_config)
+
+    def _write_config(self, config):
+        self.config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    def test_api_reexports_the_config_module_objects(self):
+        self.assertIs(api.load_config, web_config.load_config)
+        self.assertIs(api.save_config, web_config.save_config)
+        self.assertIs(api.runtime_config, web_config.runtime_config)
+        self.assertIs(api.WHISPER_MODEL_OPTIONS, web_config.WHISPER_MODEL_OPTIONS)
+        self.assertIs(api._config_lock, web_config._config_lock)
+
+    def test_refresh_runtime_config_reloads_settings_from_disk(self):
+        self._write_config(
+            {
+                "terminal": {"max_sessions": 6},
+                "appearance": {"theme": "dark"},
+                "voice_input": {"engine": "whisper", "whisper_model": "small"},
+            }
+        )
+
+        api._refresh_runtime_config()
+
+        self.assertEqual(api.runtime_config.max_sessions, 6)
+        self.assertEqual(api.runtime_config.app_theme, "dark")
+        self.assertEqual(api.runtime_config.voice_engine, "whisper")
+        self.assertEqual(api.runtime_config.whisper_model, "small")
+
+    def test_refresh_normalizes_invalid_values(self):
+        self._write_config(
+            {
+                "appearance": {"theme": "neon"},
+                "workspace": {"surface_mode": "gigantic"},
+                "voice_input": {
+                    "engine": "siri",
+                    "whisper_model": "not-a-model",
+                    "vosk_startup_timeout_seconds": 5,
+                },
+            }
+        )
+
+        api._refresh_runtime_config()
+
+        self.assertEqual(api.runtime_config.app_theme, "system")
+        self.assertEqual(api.runtime_config.app_surface_mode, "normal")
+        self.assertEqual(api.runtime_config.voice_engine, "vosk")
+        self.assertEqual(api.runtime_config.whisper_model, "base")
+        self.assertEqual(api.runtime_config.vosk_startup_timeout_seconds, 30)
+
+    def test_routes_read_the_shared_runtime_config_instance(self):
+        api.app.config["TESTING"] = True
+        client = api.app.test_client()
+        with patch.object(api.runtime_config, "max_sessions", 2):
+            response = client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "wsl",
+                    "sessions": [{"directory": "/tmp"}] * 3,
+                },
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.get_json(), {"error": "Maximum 2 sessions allowed"}
+        )
+
+
+class ExplorerModuleExtractionTestCase(unittest.TestCase):
+    """Finding 6.2 — explorer/git backends extracted to web/explorer.py."""
+
+    def test_api_reexports_the_explorer_module_objects(self):
+        for name in (
+            "_explorer_backend",
+            "_acquire_ssh_sftp",
+            "_release_ssh_sftp",
+            "_evict_pooled_ssh_client",
+            "_evict_all_pooled_ssh_clients",
+            "_is_explorer_session",
+            "_is_remote_explorer_session",
+            "_get_git_diff",
+            "_get_git_repo_summary",
+            "_git_commit",
+            "_git_publish",
+            "EXPLORER_FILE_PREVIEW_MAX_BYTES",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(api, name), getattr(web_explorer, name))
+
+    def test_host_keys_helper_is_shared_between_terminal_and_explorer_code(self):
+        self.assertIs(
+            api._load_persistent_host_keys,
+            web_hostkeys._load_persistent_host_keys,
+        )
+        self.assertIs(
+            web_explorer._load_persistent_host_keys,
+            web_hostkeys._load_persistent_host_keys,
+        )

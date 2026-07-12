@@ -1,6 +1,9 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from session_manager import SessionManager, SessionStatus
+import session_manager as manager_module
+from session_manager import EMPTY_GROUP_GRACE_SECONDS, SessionManager, SessionStatus
 
 
 class SessionManagerTestCase(unittest.TestCase):
@@ -21,6 +24,43 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(session.port, 22)
         self.assertEqual(session.status, SessionStatus.PENDING)
         self.assertEqual(self.manager.get_session_count(), 1)
+
+    def test_create_and_append_build_equivalent_sessions(self):
+        self.manager.create_group(
+            name="Group A",
+            connection_mode="ssh",
+            layout="2x2",
+            terminal_count=1,
+            group_id="group-a",
+        )
+        common_fields = {
+            "host": "example.com",
+            "directory": "/srv/app",
+            "username": "alice",
+            "port": 2222,
+            "explorer_git_open": True,
+        }
+
+        created = self.manager.create_session(group_id="group-a", **common_fields)
+        appended = self.manager.append_session_to_group(group_id="group-a", **common_fields)
+
+        self.assertIsNotNone(appended)
+        created_dict = created.to_dict()
+        appended_dict = appended.to_dict()
+        for volatile_key in ("session_id", "created_at"):
+            created_dict.pop(volatile_key)
+            appended_dict.pop(volatile_key)
+        self.assertEqual(created_dict, appended_dict)
+        self.assertEqual(self.manager.get_group("group-a").terminal_count, 2)
+
+    def test_session_builders_reject_unknown_fields(self):
+        with self.assertRaises(TypeError):
+            self.manager.create_session(
+                group_id="group-a",
+                host="example.com",
+                directory="/srv/app",
+                bogus_field=True,
+            )
 
     def test_create_sessions_accepts_ip_and_hostname_fallbacks(self):
         sessions = self.manager.create_sessions(
@@ -94,6 +134,8 @@ class SessionManagerTestCase(unittest.TestCase):
                     "title": "Files",
                     "startup_mode": "explorer",
                     "explorer_root_directory": "C:\\repo",
+                    "explorer_tree_open": True,
+                    "explorer_git_open": True,
                 }
             ],
             group_id="group-local",
@@ -102,8 +144,12 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0].startup_mode, "explorer")
         self.assertEqual(sessions[0].explorer_root_directory, "C:\\repo")
+        self.assertTrue(sessions[0].explorer_tree_open)
+        self.assertTrue(sessions[0].explorer_git_open)
         self.assertEqual(sessions[0].to_dict()["startup_mode"], "explorer")
         self.assertEqual(sessions[0].to_dict()["explorer_root_directory"], "C:\\repo")
+        self.assertTrue(sessions[0].to_dict()["explorer_tree_open"])
+        self.assertTrue(sessions[0].to_dict()["explorer_git_open"])
 
     def test_create_sessions_supports_agent_metadata(self):
         sessions = self.manager.create_sessions(
@@ -194,6 +240,8 @@ class SessionManagerTestCase(unittest.TestCase):
         self.manager.register_callback(session.session_id, lambda status: None)
         self.manager.close_session(session.session_id)
 
+        # Age the group past the empty-group grace period so cleanup sweeps it.
+        self.manager.get_group("group-c").created_at -= EMPTY_GROUP_GRACE_SECONDS + 1
         self.manager.clear_disconnected_sessions()
 
         self.assertIsNone(self.manager.get_session(session.session_id))
@@ -343,3 +391,95 @@ class SessionManagerTestCase(unittest.TestCase):
         self.manager.clear_disconnected_sessions()
 
         self.assertEqual(self.manager.get_group("group-a").terminal_count, 1)
+
+
+class EmptyGroupGracePeriodTestCase(unittest.TestCase):
+    """Finding 2.2 — cleanup must not delete a freshly created (mid-launch) group."""
+
+    def setUp(self):
+        self.manager = SessionManager()
+
+    def _create_group(self, group_id):
+        return self.manager.create_group(
+            name="Launch",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id=group_id,
+        )
+
+    def test_young_empty_group_survives_cleanup(self):
+        self._create_group("group-young")
+
+        self.manager.clear_disconnected_sessions()
+
+        self.assertIsNotNone(self.manager.get_group("group-young"))
+
+    def test_old_empty_group_is_removed(self):
+        group = self._create_group("group-old")
+        group.created_at -= EMPTY_GROUP_GRACE_SECONDS + 1
+
+        self.manager.clear_disconnected_sessions()
+
+        self.assertIsNone(self.manager.get_group("group-old"))
+
+    def test_forced_group_is_removed_despite_grace_period(self):
+        self._create_group("group-forced")
+
+        self.manager.clear_disconnected_sessions(force_group_ids={"group-forced"})
+
+        self.assertIsNone(self.manager.get_group("group-forced"))
+
+
+class SessionIdCollisionTestCase(unittest.TestCase):
+    """Finding 2.8 — short session ids are regenerated when they collide."""
+
+    def setUp(self):
+        self.manager = SessionManager()
+
+    @staticmethod
+    def _fake_uuid(prefix):
+        return SimpleNamespace(hex=prefix * 4)
+
+    def test_create_session_regenerates_colliding_id(self):
+        fake_ids = [
+            self._fake_uuid("deadbeef"),
+            self._fake_uuid("deadbeef"),
+            self._fake_uuid("cafef00d"),
+        ]
+        with patch.object(manager_module.uuid, "uuid4", side_effect=fake_ids):
+            first = self.manager.create_session(
+                group_id="group-a", host="127.0.0.1", directory="/tmp/one",
+            )
+            second = self.manager.create_session(
+                group_id="group-a", host="127.0.0.1", directory="/tmp/two",
+            )
+
+        self.assertEqual(first.session_id, "deadbeef")
+        self.assertEqual(second.session_id, "cafef00d")
+        self.assertEqual(self.manager.get_session_count(), 2)
+
+    def test_append_session_regenerates_colliding_id(self):
+        self.manager.create_group(
+            name="Group",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-a",
+        )
+        fake_ids = [
+            self._fake_uuid("deadbeef"),
+            self._fake_uuid("deadbeef"),
+            self._fake_uuid("cafef00d"),
+        ]
+        with patch.object(manager_module.uuid, "uuid4", side_effect=fake_ids):
+            first = self.manager.create_session(
+                group_id="group-a", host="127.0.0.1", directory="/tmp/one",
+            )
+            appended = self.manager.append_session_to_group(
+                group_id="group-a", host="127.0.0.1", directory="/tmp/two",
+            )
+
+        self.assertEqual(first.session_id, "deadbeef")
+        self.assertEqual(appended.session_id, "cafef00d")
+        self.assertEqual(self.manager.get_session_count(), 2)

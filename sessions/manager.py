@@ -9,9 +9,13 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# How long a group with no sessions is protected from cleanup after creation,
+# covering the window between create_group and create_session during a launch.
+EMPTY_GROUP_GRACE_SECONDS = 5.0
 
 
 class SessionStatus(Enum):
@@ -30,7 +34,7 @@ class TerminalSession:
     group_id: str
     host: str
     directory: str
-    username: str
+    username: str = "root"
     port: int = 22
     password: Optional[str] = field(default=None, repr=False)
     initial_command: Optional[str] = None
@@ -44,6 +48,8 @@ class TerminalSession:
     use_powershell: bool = False
     startup_mode: str = "terminal"
     explorer_root_directory: Optional[str] = None
+    explorer_tree_open: bool = False
+    explorer_git_open: bool = False
     status: SessionStatus = SessionStatus.PENDING
     created_at: float = field(default_factory=time.time)
     connected_at: Optional[float] = None
@@ -69,6 +75,8 @@ class TerminalSession:
             "use_powershell": self.use_powershell,
             "startup_mode": self.startup_mode,
             "explorer_root_directory": self.explorer_root_directory,
+            "explorer_tree_open": self.explorer_tree_open,
+            "explorer_git_open": self.explorer_git_open,
             "status": self.status.value,
             "created_at": self.created_at,
             "connected_at": self.connected_at,
@@ -116,7 +124,10 @@ class SessionManager:
         """Initialize the session manager."""
         self.sessions: Dict[str, TerminalSession] = {}
         self.groups: Dict[str, SessionGroup] = {}
-        self.lock = threading.RLock()   # RLock: re-entrant so callbacks can be called while lock is held
+        # RLock: re-entrant so callbacks can be called while lock is held.
+        # Lock ordering: web/api.py's connection_lock may be held while taking
+        # this lock; code holding this lock must never take connection_lock.
+        self.lock = threading.RLock()
         self._session_callbacks: Dict[str, List[Callable]] = {}
 
     def create_group(
@@ -141,144 +152,68 @@ class SessionManager:
                 else max((group.display_order for group in self.groups.values()), default=-1) + 1
             )
 
-        group = SessionGroup(
-            group_id=resolved_group_id,
-            name=name or resolved_group_id,
-            connection_mode=connection_mode,
-            layout=layout,
-            terminal_count=terminal_count,
-            display_order=next_display_order,
-            saved_session_id=str(saved_session_id or "").strip(),
-            workspace_layout=workspace_layout,
-            surface_mode=surface_mode if surface_mode in {"normal", "max"} else "normal",
-        )
-
-        with self.lock:
+            group = SessionGroup(
+                group_id=resolved_group_id,
+                name=name or resolved_group_id,
+                connection_mode=connection_mode,
+                layout=layout,
+                terminal_count=terminal_count,
+                display_order=next_display_order,
+                saved_session_id=str(saved_session_id or "").strip(),
+                workspace_layout=workspace_layout,
+                surface_mode=surface_mode if surface_mode in {"normal", "max"} else "normal",
+            )
             self.groups[resolved_group_id] = group
 
         return group
 
-    def create_session(
-        self,
-        group_id: str,
-        host: str,
-        directory: str,
-        username: str = "root",
-        port: int = 22,
-        password: Optional[str] = None,
-        initial_command: Optional[str] = None,
-        initial_command_mode: str = "command",
-        agent_selection: str = "",
-        custom_agent: str = "",
-        title: Optional[str] = None,
-        mode: str = "ssh",
-        distribution: Optional[str] = None,
-        use_wsl: bool = False,
-        use_powershell: bool = False,
-        startup_mode: str = "terminal",
-        explorer_root_directory: Optional[str] = None,
-    ) -> TerminalSession:
+    def _generate_session_id(self) -> str:
+        """Return a short session id that is not already in use.
+
+        Caller must hold self.lock so the id stays unique until it is inserted.
         """
-        Create a new terminal session.
+        while True:
+            session_id = uuid.uuid4().hex[:8]
+            if session_id not in self.sessions:
+                return session_id
 
-        Args:
-            host: Hostname or IP address to connect to
-            directory: Working directory
-            username: SSH username
-            port: SSH port
-            password: SSH password
-            initial_command: Command to run after changing directory
-            title: Human-friendly terminal title
-            mode: Connection mode ("ssh" or "wsl")
-            distribution: WSL distribution name when applicable
-            use_wsl: Whether to prefer launching the local shell via WSL
-            use_powershell: Whether to launch the local shell via Windows PowerShell
+    def _build_session(self, group_id: str, **fields: Any) -> TerminalSession:
+        """Construct a PENDING TerminalSession with a fresh id.
 
-        Returns:
-            TerminalSession object
+        `fields` are TerminalSession dataclass fields (host, directory,
+        username, port, ...); defaults come from the dataclass, so a new
+        session field is added in one place. Caller must hold self.lock so
+        the generated id stays unique until the session is inserted.
         """
-        session_id = str(uuid.uuid4())[:8]
-
-        session = TerminalSession(
-            session_id=session_id,
+        return TerminalSession(
+            session_id=self._generate_session_id(),
             group_id=group_id,
-            host=host,
-            directory=directory,
-            username=username,
-            port=port,
-            password=password,
-            initial_command=initial_command,
-            initial_command_mode=initial_command_mode,
-            agent_selection=agent_selection,
-            custom_agent=custom_agent,
-            title=title,
-            mode=mode,
-            distribution=distribution,
-            use_wsl=use_wsl,
-            use_powershell=use_powershell,
-            startup_mode=startup_mode,
-            explorer_root_directory=explorer_root_directory,
-            status=SessionStatus.PENDING
+            status=SessionStatus.PENDING,
+            **fields,
         )
 
+    def create_session(self, group_id: str, **fields: Any) -> TerminalSession:
+        """Create a new terminal session (see TerminalSession for fields)."""
         with self.lock:
-            self.sessions[session_id] = session
+            session = self._build_session(group_id, **fields)
+            self.sessions[session.session_id] = session
 
-        logger.info(f"Created session {session_id} for {host}")
+        logger.info(f"Created session {session.session_id} for {session.host}")
         return session
 
-    def append_session_to_group(
-        self,
-        group_id: str,
-        host: str,
-        directory: str,
-        username: str = "root",
-        port: int = 22,
-        password: Optional[str] = None,
-        initial_command: Optional[str] = None,
-        initial_command_mode: str = "command",
-        agent_selection: str = "",
-        custom_agent: str = "",
-        title: Optional[str] = None,
-        mode: str = "ssh",
-        distribution: Optional[str] = None,
-        use_wsl: bool = False,
-        use_powershell: bool = False,
-        startup_mode: str = "terminal",
-        explorer_root_directory: Optional[str] = None,
-    ) -> Optional[TerminalSession]:
+    def append_session_to_group(self, group_id: str, **fields: Any) -> Optional[TerminalSession]:
         """Append one session to an existing group and update its count."""
-        session_id = str(uuid.uuid4())[:8]
-        session = TerminalSession(
-            session_id=session_id,
-            group_id=group_id,
-            host=host,
-            directory=directory,
-            username=username,
-            port=port,
-            password=password,
-            initial_command=initial_command,
-            initial_command_mode=initial_command_mode,
-            agent_selection=agent_selection,
-            custom_agent=custom_agent,
-            title=title,
-            mode=mode,
-            distribution=distribution,
-            use_wsl=use_wsl,
-            use_powershell=use_powershell,
-            startup_mode=startup_mode,
-            explorer_root_directory=explorer_root_directory,
-            status=SessionStatus.PENDING,
-        )
-
         with self.lock:
             group = self.groups.get(group_id)
             if group is None:
                 return None
-            self.sessions[session_id] = session
+            session = self._build_session(group_id, **fields)
+            self.sessions[session.session_id] = session
             group.terminal_count += 1
 
-        logger.info(f"Appended session {session_id} to group {group_id} for {host}")
+        logger.info(
+            f"Appended session {session.session_id} to group {group_id} for {session.host}"
+        )
         return session
 
     def create_sessions(
@@ -324,6 +259,8 @@ class SessionManager:
                     use_powershell=bool(config.get("use_powershell")),
                     startup_mode=str(config.get("startup_mode") or "terminal"),
                     explorer_root_directory=config.get("explorer_root_directory"),
+                    explorer_tree_open=bool(config.get("explorer_tree_open")),
+                    explorer_git_open=bool(config.get("explorer_git_open")),
                 )
                 created.append(session)
             except Exception as e:
@@ -355,6 +292,8 @@ class SessionManager:
             "use_powershell",
             "startup_mode",
             "explorer_root_directory",
+            "explorer_tree_open",
+            "explorer_git_open",
         }
         with self.lock:
             session = self.sessions.get(session_id)
@@ -577,8 +516,13 @@ class SessionManager:
         """Get number of active sessions."""
         return len(self.get_active_sessions())
 
-    def clear_disconnected_sessions(self):
-        """Remove disconnected sessions from the manager."""
+    def clear_disconnected_sessions(self, force_group_ids: Optional[Iterable[str]] = None):
+        """Remove disconnected sessions from the manager.
+
+        Groups in `force_group_ids` (e.g. a group the user explicitly closed)
+        are removed when empty regardless of the grace period.
+        """
+        forced_groups = set(force_group_ids or ())
         with self.lock:
             disconnected = [
                 sid for sid, s in self.sessions.items()
@@ -595,9 +539,17 @@ class SessionManager:
             active_group_counts: Dict[str, int] = {}
             for session in self.sessions.values():
                 active_group_counts[session.group_id] = active_group_counts.get(session.group_id, 0) + 1
+            # Grace period: a launch creates its group before its sessions in
+            # separate lock holds, so a brand-new group is briefly empty and
+            # must not be swept by a concurrent cleanup.
+            now = time.time()
             disconnected_groups = [
-                group_id for group_id in self.groups
+                group_id for group_id, group in self.groups.items()
                 if group_id not in active_group_counts
+                and (
+                    group_id in forced_groups
+                    or now - group.created_at > EMPTY_GROUP_GRACE_SECONDS
+                )
             ]
             for group_id in disconnected_groups:
                 del self.groups[group_id]

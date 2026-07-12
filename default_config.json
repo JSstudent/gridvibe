@@ -18,9 +18,7 @@
     "font_size": 14
   },
   "security": {
-    "cors_origins": [
-      "*"
-    ]
+    "cors_origins": []
   },
   "appearance": {
     "theme": "system"
