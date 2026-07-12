@@ -14,6 +14,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 import api
 from gridvibe_version import __version__
+from web import selfupdate
 
 
 class FakeSftp:
@@ -161,6 +162,25 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json()["sessions"][0]["session_id"]
 
+    def _page_html(self, response) -> str:
+        """Return page HTML plus its extracted static CSS/JS.
+
+        Finding 3.5 moved the inline styles and scripts to web/static/, so
+        content assertions look at the page and its own assets together.
+        """
+        html = response.get_data(as_text=True)
+        for asset in (
+            "css/launcher.css",
+            "js/shared.js",
+            "js/launcher.js",
+            "css/terminals.css",
+            "js/terminals.js",
+        ):
+            marker = f"/static/{asset}"
+            if marker in html:
+                html += "\n" + self.client.get(marker).get_data(as_text=True)
+        return html
+
     def _run_git(self, repo_dir: Path, *args: str) -> subprocess.CompletedProcess:
         if shutil.which("git") is None:
             self.skipTest("git executable is not available")
@@ -217,7 +237,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertNotIn('id="browserCloseBtn"', html)
 
     def test_browser_shutdown_button_is_rendered_in_browser_mode(self):
@@ -226,7 +246,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="browserCloseBtn"', html)
         self.assertIn("onclick=\"shutdownBrowserApp()\"", html)
         self.assertIn(f'const BROWSER_SHUTDOWN_TOKEN = "{token}";', html)
@@ -306,7 +326,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const AGENT_OPTIONS = [", html)
         self.assertIn('class="startup-mode-select"', html)
         self.assertIn('<option value="terminal"', html)
@@ -320,18 +340,18 @@ class ApiRoutesTestCase(unittest.TestCase):
             response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
+        # The shell-option markup moved to static JS (finding 3.5), so hiding
+        # is now a runtime gate on the server-rendered constant.
         self.assertIn("const LOCAL_WINDOWS_SHELLS_AVAILABLE = false;", html)
-        self.assertNotIn("Prefer WSL", html)
-        self.assertNotIn("Use PowerShell", html)
-        self.assertNotIn("Ubuntu Distro", html)
+        self.assertIn("${LOCAL_WINDOWS_SHELLS_AVAILABLE ? `", html)
 
     def test_launcher_page_shows_windows_shell_options_on_windows(self):
         with patch.object(api.os, "name", "nt"):
             response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const LOCAL_WINDOWS_SHELLS_AVAILABLE = true;", html)
         self.assertIn("Prefer WSL", html)
         self.assertIn("Use PowerShell", html)
@@ -341,7 +361,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("/api/agent-preflight", html)
         self.assertIn("function queueAgentPreflight(row)", html)
         self.assertIn("function scheduleAgentPreflight(row, delayMs = 180)", html)
@@ -353,7 +373,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="sshPingBtn"', html)
         self.assertIn('id="sshPingStatus"', html)
         self.assertIn("function initSshPingButton()", html)
@@ -363,7 +383,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="checkUpdatesBtn"', html)
         self.assertIn('title="Check for updates"', html)
         self.assertIn("async function checkForUpdates()", html)
@@ -374,7 +394,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="appSettingsBtn"', html)
         self.assertIn("function openAppSettings()", html)
         self.assertIn("function saveAppSettings()", html)
@@ -403,7 +423,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('<h1>Launcher Setup</h1>', html)
         self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
         self.assertIn('<div class="app-titlebar-right">', html)
@@ -415,7 +435,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function resetTerminalSetupIfTargetChanged", html)
         self.assertIn("buildTerminalRows(selectedCount, buildDefaultTerminalDrafts());", html)
         self.assertIn("resetTerminalSetupIfTargetChanged(connectionMode, collectModeInputs());", html)
@@ -425,7 +445,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn(
             '<a href="/" onclick="return goToSettings(event)">Launch terminals →</a>',
             html,
@@ -435,7 +455,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
         self.assertIn(">Sessions...</button>", html)
         self.assertIn(">Import Session ...</button>", html)
@@ -508,7 +528,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("let activeWorkspaceLayout = null;", html)
         self.assertIn("function clearActiveWorkspaceLayoutOverride()", html)
         self.assertIn("workspace_layout: workspaceLayout", html)
@@ -538,7 +558,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';", html)
         self.assertIn("const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';", html)
         self.assertIn("async function refreshActiveSavedSessionFromUpdate(payload)", html)
@@ -552,7 +572,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
 
         menu_start = html.index('>Import Session ...</button>')
         go_to_settings_start = html.index("async function goToSettings(event)")
@@ -568,7 +588,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('class="btn btn-neutral btn-icon settings-window-btn"', html)
         self.assertIn('aria-label="Open settings"', html)
         self.assertIn('class="vibe-flow-icon"', html)
@@ -583,7 +603,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-terminal-refresh="${i}"', html)
         self.assertIn("function setTerminalRefreshState(index, refreshing)", html)
         self.assertIn("async function refreshTerminalDisplay(index)", html)
@@ -592,7 +612,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         initial_refresh = 'data-explorer-refresh="${i}"'
         initial_up = 'data-explorer-up="${i}"'
         dynamic_refresh = 'data-explorer-refresh="${index}"'
@@ -612,7 +632,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-terminal-close="${i}"', html)
         self.assertIn('aria-label="Close this terminal pane"', html)
         self.assertIn(".terminal-close-btn", html)
@@ -636,7 +656,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-session-mode-toggle="${i}"', html)
         self.assertIn("async function switchSessionPaneMode(index)", html)
         self.assertIn("body.directory = getExplorerSelectedDirectory(index);", html)
@@ -659,7 +679,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function isBrowserSession(session)", html)
         self.assertIn("function isBrowserPaneInstance(terminal)", html)
         self.assertIn("function getBrowserSessionUrl(session)", html)
@@ -679,7 +699,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         explorer_start = html.index("async function loadExplorerPane(index, path = null")
         explorer_end = html.index("/* ─────────────────────────────────────────────", explorer_start)
         explorer_html = html[explorer_start:explorer_end]
@@ -699,7 +719,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         explorer_refresh_start = html.index("async function refreshExplorerPane(index)")
         explorer_refresh_end = html.index("async function loadExplorerPane(index, path = null", explorer_refresh_start)
         explorer_refresh_html = html[explorer_refresh_start:explorer_refresh_end]
@@ -737,7 +757,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function hasExplorerThemeOverride(key = '')", html)
         self.assertIn('[data-theme="dark"]', html)
         self.assertIn("--explorer-bg: #0f141b;", html)
@@ -752,7 +772,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
         self.assertIn(".explorer-source-line-number", html)
@@ -775,7 +795,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("jsonl: 'JSON Lines source'", html)
         self.assertIn("log: 'Log file'", html)
         self.assertIn("dotenv: 'Environment file'", html)
@@ -790,7 +810,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("--explorer-editor-font-size", html)
         self.assertIn("const EXPLORER_EDITOR_FONT_MIN = 10;", html)
         self.assertIn("const EXPLORER_EDITOR_FONT_MAX = 24;", html)
@@ -806,7 +826,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-explorer-search-input="${index}"', html)
         self.assertIn("function explorerFindRanges(content, query, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
         self.assertIn("function explorerMarkedEscHtml(text, absoluteStart = 0, searchRanges = [])", html)
@@ -822,7 +842,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const EXPLORER_SEARCH_DEBOUNCE_MS = 160;", html)
         self.assertIn("const EXPLORER_SEARCH_MAX_MATCHES = 1000;", html)
         self.assertIn("const EXPLORER_SEARCH_CHUNK_SIZE = 65536;", html)
@@ -842,7 +862,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("explorer-directory-search", html)
         self.assertIn('id="explorer-directory-search-${i}"', html)
         self.assertIn('id="explorer-directory-search-${index}"', html)
@@ -861,7 +881,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function isExplorerSearchablePane(pane)", html)
         self.assertIn("pane?._explorerMode === 'file' || pane?._explorerMode === 'directory'", html)
         self.assertIn("isExplorerSearchablePane(terminals[activeSlot])", html)
@@ -873,7 +893,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const key = mode === 'directory' ? '_explorerDirectorySearch' : '_explorerSearch';", html)
         self.assertIn("const searchState = ensureExplorerSearchState(pane, 'file');", html)
         self.assertIn("const state = ensureExplorerSearchState(pane, 'directory');", html)
@@ -883,7 +903,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function renderExplorerDirectoryOpenError(index, message)", html)
         self.assertIn("renderExplorerDirectoryRows(index);", html)
         self.assertIn("list.prepend(notice);", html)
@@ -895,7 +915,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function resetExplorerDirectorySearch(pane)", html)
         self.assertIn("if (isNavigation) {\n                resetExplorerDirectorySearch(pane);\n            }", html)
         self.assertIn("state.query = '';", html)
@@ -905,7 +925,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("explorer-git-summary", html)
         self.assertIn("data-explorer-git-toggle", html)
         self.assertIn("explorer-git-panel", html)
@@ -968,7 +988,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("data-explorer-tree-toggle", html)
         self.assertIn("explorer-tree-panel", html)
         self.assertIn("data-explorer-tree-dir", html)
@@ -987,7 +1007,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("explorer-sidebar-splitter", html)
         self.assertIn("data-explorer-sidebar-splitter", html)
         self.assertIn("function syncExplorerSidebar(index)", html)
@@ -1006,7 +1026,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("} else if (query && view === 'diff') {", html)
         self.assertIn("const diffMarks = markExplorerSearchInElement(diff, query, state.activeIndex || 0);", html)
         self.assertIn("renderExplorerDiff(index);", html)
@@ -1017,7 +1037,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function explorerMarkdownHeadingLevel(line)", html)
         self.assertIn("function explorerMarkdownHeadingLevels(records)", html)
         self.assertIn("data-explorer-markdown-section", html)
@@ -1033,7 +1053,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-terminal-clear="${i}"', html)
         self.assertIn("function setTerminalClearState(index, clearing)", html)
         self.assertIn("async function clearTerminalDisplay(index)", html)
@@ -1042,7 +1062,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function hasMatchingSessionIds(existingIds, sessions)", html)
         self.assertIn("function hasMatchingSessionViews(existingIds, existingTerminals, sessions)", html)
         self.assertIn("&& hasMatchingSessionViews(sessionIds, terminals, data.sessions)", html)
@@ -1062,7 +1082,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-voice-engine="whisper"', html)
         self.assertNotIn('data-terminal-voice-settings="${i}"', html)
         self.assertNotIn('data-terminal-voice-profile="${i}"', html)
@@ -1080,7 +1100,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         start = html.index("async function _startVoice(index) {")
         end = html.index("if (!navigator.mediaDevices?.getUserMedia)", start)
         startup_html = html[start:end]
@@ -1093,7 +1113,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         handler_start = html.index("socket.on('voice_status', async ({ session_id, status, message }) => {")
         handler_end = html.index("return;", handler_start)
         error_handler = html[handler_start:handler_end]
@@ -1105,7 +1125,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-terminal-voice="${i}"', html)
         self.assertNotIn('id="tvoice-panel-toggle-${i}"', html)
         self.assertNotIn('id="tvoice-settings-${i}"', html)
@@ -1116,7 +1136,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('data-voice-enabled="false"', html)
         self.assertIn('data-terminal-voice-control="${i}"', html)
         self.assertIn('data-terminal-voice="${i}"', html)
@@ -1131,7 +1151,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertNotIn('data-terminal-voice-ptt="${i}"', html)
         self.assertNotIn('data-terminal-voice-ptt-keybind="${i}"', html)
         self.assertNotIn('id="tvoice-ptt-toggle-${i}"', html)
@@ -1144,7 +1164,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertNotIn('class="terminal-action-btn terminal-shortcut-btn"', html)
         self.assertNotIn('data-terminal-enter="${i}"', html)
         self.assertNotIn('data-terminal-clearline="${i}"', html)
@@ -1154,7 +1174,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         clear_index = html.index('data-terminal-clear="${i}"')
         voice_index = html.index('data-terminal-voice-control="${i}"')
         close_index = html.index('data-terminal-close="${i}"')
@@ -1166,7 +1186,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         refresh_start = html.index("async function refreshTerminalDisplay(index)")
         self.assertIn("terminal.term.reset();", html[refresh_start:])
         self.assertIn("emitTerminalResize(index, true);", html[refresh_start:])
@@ -1177,7 +1197,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('aria-label="Refresh all"', html)
         self.assertIn('class="refresh-all-icon"', html)
         self.assertNotIn(">Refresh all</button>", html)
@@ -1192,7 +1212,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn(".session-tab-number {", html)
         self.assertIn("sessionGroups.forEach((group, index) => {", html)
         self.assertIn("const tabNumber = index + 1;", html)
@@ -1209,7 +1229,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('class="btn btn-success btn-icon"', html)
         self.assertIn('id="fullscreenBtn"', html)
         self.assertIn('title="Enter fullscreen"', html)
@@ -1225,7 +1245,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         grid_css = html[html.index("#terminalsGrid {"):html.index("/* Layout classes */")]
         self.assertIn("width: 100%;", grid_css)
         self.assertNotIn("min(1800px, 100%)", grid_css)
@@ -1253,7 +1273,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('class="topbar" id="terminalTopbar"', html)
         self.assertIn('class="session-bar"', html)
         self.assertIn('id="topbarToggleBtn"', html)
@@ -1267,7 +1287,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);", html)
         self.assertIn("justify-self: center;", html)
         self.assertIn('class="topbar-actions"', html)
@@ -1279,7 +1299,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("--session-color", html)
         self.assertIn("--session-color-dim", html)
         self.assertIn("var(--session-color-dim, var(--t-border-tab))", html)
@@ -1290,7 +1310,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         clear_start = html.index("async function clearTerminalDisplay(index)")
         self.assertIn("terminal.term.reset();", html[clear_start:])
         self.assertIn("terminal.term.clear();", html[clear_start:])
@@ -1302,7 +1322,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("async function redrawAttachedTerminals(indices, { forceResize = false, isCurrent = null } = {})", html)
         self.assertIn("async function redrawAttachedTerminalsLikeFullscreen(indices, { isCurrent = null } = {})", html)
 
@@ -1323,7 +1343,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("let cachedGroupViews = new Map();", html)
         self.assertIn("function cacheVisibleGroupView(groupId = visibleGroupId)", html)
         self.assertIn("function restoreCachedGroupView(groupId)", html)
@@ -1340,7 +1360,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         restore_start = html.index("function restoreTerminalViewportState(terminal, state")
         restore_end = html.index("function captureCachedPaneUiState()", restore_start)
         restore_html = html[restore_start:restore_end]
@@ -1362,7 +1382,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("let sessionRouteMap = new Map();", html)
         self.assertIn("function resolveSessionTarget(sessionId)", html)
         self.assertIn("const target = resolveSessionTarget(session_id);", html)
@@ -1915,7 +1935,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_loads_voice_prefs_from_server(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("_loadVoicePrefsFromServer", html)
         self.assertIn("fetch('/api/voice-prefs'", html)
 
@@ -1958,7 +1978,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout="0\t0\n", stderr=""),
         ]
 
-        with patch.object(api, "_run_self_update_git_command", side_effect=git_results) as mock_git:
+        with patch.object(selfupdate, "_run_repo_git", side_effect=git_results) as mock_git:
             result = api.perform_self_update()
 
         self.assertFalse(result["updated"])
@@ -1982,7 +2002,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout="def987654321\n", stderr=""),
         ]
 
-        with patch.object(api, "_run_self_update_git_command", side_effect=git_results) as mock_git:
+        with patch.object(selfupdate, "_run_repo_git", side_effect=git_results) as mock_git:
             result = api.perform_self_update()
 
         self.assertTrue(result["updated"])
@@ -2000,12 +2020,42 @@ class ApiRoutesTestCase(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout=" M web/api.py\n", stderr=""),
         ]
 
-        with patch.object(api, "_run_self_update_git_command", side_effect=git_results):
+        with patch.object(selfupdate, "_run_repo_git", side_effect=git_results):
             with self.assertRaises(api.AppUpdateError) as context:
                 api.perform_self_update()
 
         self.assertEqual(context.exception.status_code, 409)
         self.assertIn("Local changes are present", str(context.exception))
+
+    def test_app_update_fast_forwards_real_checkout(self):
+        """POST /api/app-update happy path against a real temp git repo (finding 6.6)."""
+        with TemporaryDirectory() as tmp:
+            origin = Path(tmp) / "origin"
+            clone = Path(tmp) / "clone"
+            origin.mkdir()
+            (origin / "README.md").write_text("v1\n", encoding="utf-8")
+            self._run_git(origin, "init")
+            self._run_git(origin, "config", "user.email", "gridvibe@example.invalid")
+            self._run_git(origin, "config", "user.name", "GridVibe Test")
+            self._run_git(origin, "add", ".")
+            self._run_git(origin, "commit", "-m", "initial")
+            self._run_git(Path(tmp), "clone", str(origin), str(clone))
+            (origin / "README.md").write_text("v2\n", encoding="utf-8")
+            self._run_git(origin, "add", ".")
+            self._run_git(origin, "commit", "-m", "second")
+            expected_commit = self._run_git(origin, "rev-parse", "HEAD").stdout.decode().strip()
+
+            with patch.object(selfupdate, "SELF_UPDATE_REPO_DIR", str(clone)):
+                response = self.client.post("/api/app-update")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload["updated"])
+            self.assertTrue(payload["restart_required"])
+            self.assertEqual(payload["behind_count"], 1)
+            self.assertEqual(payload["current_commit"], expected_commit)
+            clone_head = self._run_git(clone, "rev-parse", "HEAD").stdout.decode().strip()
+            self.assertEqual(clone_head, expected_commit)
 
     def test_create_sessions_creates_new_group_without_resetting_existing_state(self):
         api.session_manager.create_group(
@@ -3431,6 +3481,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["mode"], "head")
         self.assertIn("+changed", payload["diff"])
         self.assertFalse(payload["truncated"])
+        # Unified backend payload shape (finding 6.1): remote diffs report
+        # byte_count/line_count exactly like local diffs.
+        self.assertEqual(payload["byte_count"], len(b"diff --git a/README.md b/README.md\n+changed\n"))
+        self.assertEqual(payload["line_count"], 2)
+        self.assertNotIn("raw_bytes", payload)
         self.assertIn("git -C /srv/app diff HEAD", fake_client.commands[-1][0])
 
     def test_explorer_file_returns_sanitized_markdown_preview(self):
@@ -5696,14 +5751,14 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_launcher_page_includes_theme_css_variables(self):
         response = self.client.get("/")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('[data-theme="light"]', html)
         self.assertIn("--bg:", html)
         self.assertIn("--accent:", html)
 
     def test_launcher_light_theme_overrides_hardcoded_element_backgrounds(self):
         response = self.client.get("/")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         light_selectors = [
             '[data-theme="light"] body',
             '[data-theme="light"] .header-badge',
@@ -5722,7 +5777,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_launcher_page_includes_theme_toggle_control(self):
         response = self.client.get("/")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="themeToggleBtnIndex"', html)
         self.assertIn("cycleTheme()", html)
         self.assertIn('id="themeControl"', html)
@@ -5730,7 +5785,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_launcher_page_includes_theme_js(self):
         response = self.client.get("/")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const THEME_STORAGE_KEY", html)
         self.assertIn("function normalizeThemePreference(", html)
         self.assertIn("function applyTheme(", html)
@@ -5741,7 +5796,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_includes_theme_css_variables(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('[data-theme="light"]', html)
         self.assertIn("--t-bg:", html)
         self.assertIn("--t-accent:", html)
@@ -5753,7 +5808,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_saved_session_modal_covers_resize_overlay(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         modal_css = html[html.index(".modal-shell {"):html.index(".settings-window-btn {")]
         resize_css = html[html.index("#terminalResizeOverlay {"):html.index(".terminal-resize-handle {")]
 
@@ -5763,13 +5818,13 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_includes_theme_toggle_control(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="themeToggleBtn"', html)
         self.assertIn("cycleTheme()", html)
 
     def test_terminals_page_includes_theme_js(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const THEME_STORAGE_KEY", html)
         self.assertIn("function normalizeThemePreference(", html)
         self.assertIn("function applyTheme(", html)
@@ -5780,7 +5835,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_uses_css_variables_for_structural_colors(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("var(--t-bg)", html)
         self.assertIn("var(--t-topbar)", html)
         self.assertIn("var(--t-text)", html)
@@ -5788,7 +5843,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_splits_the_longer_pane_dimension(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("grid?.classList.contains('layout-2-vertical')", html)
         self.assertIn("return candidates.includes('horizontal') ? 'horizontal' : '';", html)
         self.assertIn(
@@ -5798,7 +5853,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_exposes_grid_resize_handles(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn('id="terminalResizeOverlay"', html)
         self.assertIn(".terminal-resize-handle", html)
         self.assertIn("let splitColumnWeights = null;", html)
@@ -5809,7 +5864,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_bounds_resize_handles_to_shared_edges(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("function getSharedGridEdgeSegments(rects, axis, lineIndex)", html)
         self.assertIn("function getSharedGridEdgeSegmentStyle(axis, segment, metrics)", html)
         self.assertIn("segments.forEach(segment => {", html)
@@ -5826,7 +5881,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_resize_validation_enforces_minimums(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("const MIN_RESIZE_SURFACE_RATIO = 1 / 8;", html)
         self.assertIn(
             "const minimumSurface = metrics.columnTrackSpace * metrics.rowTrackSpace * MIN_RESIZE_SURFACE_RATIO;",
@@ -5838,7 +5893,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_resize_drag_refits_and_forces_final_resize(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("window.addEventListener('pointermove', updateGridResize);", html)
         self.assertIn("window.addEventListener('pointerup', finishGridResize);", html)
         self.assertIn("function getResizeTrackGroups(axis, lineIndex)", html)
@@ -5849,7 +5904,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_cached_group_views_preserve_resize_weights(self):
         response = self.client.get("/terminals")
-        html = response.get_data(as_text=True)
+        html = self._page_html(response)
         self.assertIn("splitColumnWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitColumnWeights) : null", html)
         self.assertIn("splitRowWeights: hasLocalSplitLayout ? cloneSplitTrackWeights(splitRowWeights) : null", html)
         self.assertIn("splitColumnWeights = cached.className === 'layout-split-local'", html)
@@ -6653,6 +6708,48 @@ class VendoredFrontendAssetsTestCase(unittest.TestCase):
                 response = self.client.get(f"/static/{filename}")
                 self.assertEqual(response.status_code, 200)
                 self.assertGreater(len(response.get_data()), 1000)
+                response.close()
+
+
+class ExtractedFrontendAssetsTestCase(unittest.TestCase):
+    """Deep-dive 3.5/6.4 — inline CSS/JS moved to cacheable static files."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def test_pages_reference_versioned_static_assets(self):
+        launcher_html = self.client.get("/").get_data(as_text=True)
+        terminals_html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertIn(f"/static/css/launcher.css?v={__version__}", launcher_html)
+        self.assertIn(f"/static/js/shared.js?v={__version__}", launcher_html)
+        self.assertIn(f"/static/js/launcher.js?v={__version__}", launcher_html)
+        self.assertIn(f"/static/css/terminals.css?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/shared.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/terminals.js?v={__version__}", terminals_html)
+        # shared.js must load before each page script so its globals exist first.
+        self.assertLess(
+            launcher_html.index("js/shared.js"), launcher_html.index("js/launcher.js")
+        )
+        self.assertLess(
+            terminals_html.index("js/shared.js"), terminals_html.index("js/terminals.js")
+        )
+
+    def test_extracted_assets_are_served_without_jinja(self):
+        for filename in (
+            "css/launcher.css",
+            "css/terminals.css",
+            "js/shared.js",
+            "js/launcher.js",
+            "js/terminals.js",
+        ):
+            with self.subTest(filename=filename):
+                response = self.client.get(f"/static/{filename}")
+                self.assertEqual(response.status_code, 200)
+                body = response.get_data(as_text=True)
+                self.assertGreater(len(body), 1000)
+                self.assertNotIn("{{", body)
+                self.assertNotIn("{%", body)
                 response.close()
 
 

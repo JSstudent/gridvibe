@@ -34,7 +34,7 @@ class TerminalSession:
     group_id: str
     host: str
     directory: str
-    username: str
+    username: str = "root"
     port: int = 22
     password: Optional[str] = field(default=None, repr=False)
     initial_command: Optional[str] = None
@@ -177,132 +177,43 @@ class SessionManager:
             if session_id not in self.sessions:
                 return session_id
 
-    def create_session(
-        self,
-        group_id: str,
-        host: str,
-        directory: str,
-        username: str = "root",
-        port: int = 22,
-        password: Optional[str] = None,
-        initial_command: Optional[str] = None,
-        initial_command_mode: str = "command",
-        agent_selection: str = "",
-        custom_agent: str = "",
-        title: Optional[str] = None,
-        mode: str = "ssh",
-        distribution: Optional[str] = None,
-        use_wsl: bool = False,
-        use_powershell: bool = False,
-        startup_mode: str = "terminal",
-        explorer_root_directory: Optional[str] = None,
-        explorer_tree_open: bool = False,
-        explorer_git_open: bool = False,
-    ) -> TerminalSession:
-        """
-        Create a new terminal session.
+    def _build_session(self, group_id: str, **fields: Any) -> TerminalSession:
+        """Construct a PENDING TerminalSession with a fresh id.
 
-        Args:
-            host: Hostname or IP address to connect to
-            directory: Working directory
-            username: SSH username
-            port: SSH port
-            password: SSH password
-            initial_command: Command to run after changing directory
-            title: Human-friendly terminal title
-            mode: Connection mode ("ssh" or "wsl")
-            distribution: WSL distribution name when applicable
-            use_wsl: Whether to prefer launching the local shell via WSL
-            use_powershell: Whether to launch the local shell via Windows PowerShell
-
-        Returns:
-            TerminalSession object
+        `fields` are TerminalSession dataclass fields (host, directory,
+        username, port, ...); defaults come from the dataclass, so a new
+        session field is added in one place. Caller must hold self.lock so
+        the generated id stays unique until the session is inserted.
         """
+        return TerminalSession(
+            session_id=self._generate_session_id(),
+            group_id=group_id,
+            status=SessionStatus.PENDING,
+            **fields,
+        )
+
+    def create_session(self, group_id: str, **fields: Any) -> TerminalSession:
+        """Create a new terminal session (see TerminalSession for fields)."""
         with self.lock:
-            session_id = self._generate_session_id()
-            session = TerminalSession(
-                session_id=session_id,
-                group_id=group_id,
-                host=host,
-                directory=directory,
-                username=username,
-                port=port,
-                password=password,
-                initial_command=initial_command,
-                initial_command_mode=initial_command_mode,
-                agent_selection=agent_selection,
-                custom_agent=custom_agent,
-                title=title,
-                mode=mode,
-                distribution=distribution,
-                use_wsl=use_wsl,
-                use_powershell=use_powershell,
-                startup_mode=startup_mode,
-                explorer_root_directory=explorer_root_directory,
-                explorer_tree_open=explorer_tree_open,
-                explorer_git_open=explorer_git_open,
-                status=SessionStatus.PENDING
-            )
-            self.sessions[session_id] = session
+            session = self._build_session(group_id, **fields)
+            self.sessions[session.session_id] = session
 
-        logger.info(f"Created session {session_id} for {host}")
+        logger.info(f"Created session {session.session_id} for {session.host}")
         return session
 
-    def append_session_to_group(
-        self,
-        group_id: str,
-        host: str,
-        directory: str,
-        username: str = "root",
-        port: int = 22,
-        password: Optional[str] = None,
-        initial_command: Optional[str] = None,
-        initial_command_mode: str = "command",
-        agent_selection: str = "",
-        custom_agent: str = "",
-        title: Optional[str] = None,
-        mode: str = "ssh",
-        distribution: Optional[str] = None,
-        use_wsl: bool = False,
-        use_powershell: bool = False,
-        startup_mode: str = "terminal",
-        explorer_root_directory: Optional[str] = None,
-        explorer_tree_open: bool = False,
-        explorer_git_open: bool = False,
-    ) -> Optional[TerminalSession]:
+    def append_session_to_group(self, group_id: str, **fields: Any) -> Optional[TerminalSession]:
         """Append one session to an existing group and update its count."""
         with self.lock:
             group = self.groups.get(group_id)
             if group is None:
                 return None
-            session_id = self._generate_session_id()
-            session = TerminalSession(
-                session_id=session_id,
-                group_id=group_id,
-                host=host,
-                directory=directory,
-                username=username,
-                port=port,
-                password=password,
-                initial_command=initial_command,
-                initial_command_mode=initial_command_mode,
-                agent_selection=agent_selection,
-                custom_agent=custom_agent,
-                title=title,
-                mode=mode,
-                distribution=distribution,
-                use_wsl=use_wsl,
-                use_powershell=use_powershell,
-                startup_mode=startup_mode,
-                explorer_root_directory=explorer_root_directory,
-                explorer_tree_open=explorer_tree_open,
-                explorer_git_open=explorer_git_open,
-                status=SessionStatus.PENDING,
-            )
-            self.sessions[session_id] = session
+            session = self._build_session(group_id, **fields)
+            self.sessions[session.session_id] = session
             group.terminal_count += 1
 
-        logger.info(f"Appended session {session_id} to group {group_id} for {host}")
+        logger.info(
+            f"Appended session {session.session_id} to group {group_id} for {session.host}"
+        )
         return session
 
     def create_sessions(

@@ -673,6 +673,20 @@ each time.
 Serve via Flask's static handling with cache headers; bust with `?v={{ version }}` using
 `gridvibe_version.__version__`.
 
+> **✅ Implemented (2026-07-12).** Extracted to `web/static/css/launcher.css` /
+> `terminals.css` and `web/static/js/launcher.js` / `terminals.js` (plus `shared.js`,
+> see 6.4), all referenced with `?v={{ version }}`. `templates/index.html` shrank
+> 5,440 → ~365 lines and `templates/terminals.html` 13,195 → ~205 lines; only the
+> server-rendered constants stay inline (`BROWSER_SHUTDOWN_TOKEN`, `AGENT_OPTIONS`,
+> `LOCAL_WINDOWS_SHELLS_AVAILABLE`, `DEFAULT_SURFACE_MODE`, `MAX_SESSIONS`). The one
+> Jinja conditional inside the launcher script (`{% if local_windows_shells_available %}`
+> around the WSL/PowerShell shell fields) became a runtime gate on
+> `LOCAL_WINDOWS_SHELLS_AVAILABLE`, so the markup ships to all platforms but only
+> renders on Windows. Tests: page-content assertions now go through a `_page_html`
+> helper that appends the page's own static assets, and a new
+> `ExtractedFrontendAssetsTestCase` locks in the versioned links, shared-before-page
+> load order, and Jinja-free asset bodies. `tokens.css` (7.1) remains open.
+
 ### 3.6 xterm.js and socket.io are loaded from a CDN — **High** (reliability)
 
 **Location:** `templates/terminals.html:7, 2927-2929`
@@ -921,6 +935,9 @@ will trip up future edits.
 `ruff format` (or `ruff check --select E1`) would catch this class of issue; consider adding
 formatting to `make fix`.
 
+> **✅ Resolved (2026-07-12).** The misindented block was removed wholesale when the
+> entries route was rewritten onto the shared explorer backend (see 6.1).
+
 ---
 
 ## 5. Dead Code & Dead Config
@@ -1072,6 +1089,22 @@ This is the highest-leverage refactor in the codebase (roughly −1,000 lines) a
 place to slot in the SFTP connection pool (3.1). Migrate one route at a time with the existing
 tests (`tests/test_api.py` is 6.9k lines and covers these routes) as the safety net.
 
+> **✅ Implemented (2026-07-12).** `web/api.py` gained `_LocalExplorerBackend` /
+> `_SftpExplorerBackend` (duck-typed rather than a formal Protocol) exposing `run_git`,
+> path helpers (`repo_relative_path`, `pathspec`, `repo_abs_path`, `path_inside_root`,
+> `rel_explorer_path`, `basename`, `file_dirname`), session path resolution
+> (`resolve_dir/file/candidate/diff_path`, `root_directory`), and read-only filesystem
+> access (`list_entries`, `stat_file`, `read_file_prefix`, `parent_explorer_path`).
+> All formerly duplicated `_git_*`/`_remote_git_*` helpers now exist once, parameterised
+> by the backend; the `_explorer_backend(session)` context manager owns the pooled SSH
+> client lifetime (3.1), and all 8 explorer routes are single-body via
+> `_explorer_route_response`. Net ~−900 lines. The known payload drift was resolved:
+> remote Git diffs now return `byte_count`+`line_count` like local ones (`raw_bytes`
+> dropped; nothing consumed it) — locked in by an assertion added to
+> `test_explorer_git_diff_returns_bounded_ssh_file_diff`. Finding 4.10 (misindented
+> return block) disappeared with the entries-route rewrite. Existing local+remote route
+> tests were the safety net; suite green, `ruff` clean.
+
 ### 6.2 `web/api.py` is a 7,261-line monolith — **Medium** *(was 6,805 on 2026-07-10; +456 lines since)*
 
 **Location:** `web/api.py`
@@ -1099,6 +1132,17 @@ web/
 Keep `web.api` re-exporting `app`, `socketio`, `session_manager`, `load_config` so `main.py`,
 the launcher, the root shims, and the tests keep working during the transition. Do it
 incrementally (one module per PR), running `make check` between steps.
+
+> **⚠️ Partially implemented (2026-07-12) — first tranche.** Extracted `web/paths.py`
+> (`BASE_DIR`), `web/secrets.py` (Fernet key + `_encrypt_password`/`_decrypt_password`),
+> and `web/selfupdate.py` (`AppUpdateError`, `_run_repo_git`, `perform_self_update`),
+> with `web.api` importing/re-exporting the names; the self-update tests now patch
+> `web.selfupdate` directly. Also 6.1's backend abstraction removed ~900 explorer lines,
+> and 3.5 removed the giant templates from the review radius. Remaining modules are
+> blocked on extracting the runtime-config globals into a Config object first
+> (`_open_ssh_sftp` and most terminal/voice code read module-level config globals that
+> tests patch on `web.api`), so the next tranche should be `config.py`, then
+> `explorer.py` (helpers + pool), then `terminal_io.py`/`voice.py`/`app.py`.
 
 ### 6.3 `create_session` and `append_session_to_group` duplicate a 19-parameter signature — **Low**
 
@@ -1136,6 +1180,14 @@ def append_session_to_group(self, group_id, **fields):
 ```
 Callers already pass keyword arguments, so the change is source-compatible.
 
+> **✅ Implemented (2026-07-12).** As proposed: `sessions/manager.py` gained
+> `_build_session(group_id, **fields)` (id generation + PENDING status under the caller's
+> lock hold); `create_session` and `append_session_to_group` are now thin `**fields`
+> wrappers, and the `username="root"` default moved into the `TerminalSession` dataclass,
+> so a new session field is added in two places (dataclass + `create_sessions`) instead of
+> five. Covered by `test_create_and_append_build_equivalent_sessions` and
+> `test_session_builders_reject_unknown_fields` in `tests/test_session_manager.py`.
+
 ### 6.4 Shared JS is copy-pasted between the two templates — **Medium**
 
 **Location:** duplicated between `templates/index.html` and `templates/terminals.html`:
@@ -1153,6 +1205,18 @@ security-relevant (they gate what gets sent as `directory`) and should not exist
 namespace with the theme module, path helpers, `escHtml`, and the saved-session card renderer
 (taking an options object for the selectable/delete variants). Both pages load it before their
 page script. This pairs naturally with 3.5 (extracting page JS to static files).
+
+> **⚠️ Partially implemented (2026-07-12).** `web/static/js/shared.js` exists and is
+> loaded by both pages before their page script. Only the 15 declarations that were
+> still byte-identical between the two pages were lifted: the theme primitives
+> (`normalizeThemePreference`, `getStoredTheme`, `getSystemTheme`, `resolveTheme`,
+> `THEME_STORAGE_KEY`), the directory-resolution rules (`isAbsoluteDirectory`,
+> `normalizeComparableDirectory`, `resolveTerminalDirectory`, `buildLaunchDirectory`,
+> `getDirectoryName`), `getConnectionModeLabel`, and the BroadcastChannel/storage sync
+> key constants. Confirmed drift (so left page-local for now): `escHtml`,
+> `joinDirectories`, `applyTheme`/`cycleTheme`/`syncNativeTheme`, and the saved-session
+> card/modal builders. Reconciling those drifted copies (deciding the canonical
+> behaviour for each) is the remaining half of this finding.
 
 ### 6.5 Monster functions in terminals.html — **Medium**
 
@@ -1195,6 +1259,15 @@ and rename the self-update one to `_run_repo_git(args)` so a positional-only cal
 accidentally bind to the explorer runner. Add a regression test that hits
 `POST /api/app-update` end-to-end against a temp git repo (the July log shows this route had
 no test coverage for the happy path at the time).
+
+> **✅ Implemented (2026-07-12).** The self-update runner is now `_run_repo_git(args)`;
+> the four explorer runners collapsed into two, `_run_git_command(args, *, cwd, timeout=None,
+> write=False)` and `_run_remote_git_command(client, args, *, cwd, timeout=None, write=False)`
+> (reads set `GIT_OPTIONAL_LOCKS=0`, writes set `GIT_TERMINAL_PROMPT=0`; default timeouts
+> 2 s read / 15 s local write / 30 s remote write). With 6.1's backend abstraction the
+> explorer helpers only ever call `backend.run_git`. Added
+> `test_app_update_fast_forwards_real_checkout` in `tests/test_api.py`: an origin + clone
+> pair in a temp dir, one commit behind, `POST /api/app-update` fast-forwards the clone.
 
 ---
 
@@ -1550,6 +1623,11 @@ posture paragraph.
    connection pool) → 6.2 (module split) → 3.5/6.4 (template/shared-JS extraction, which also
    unblocks 6.5's function decomposition) → 6.3/6.6 as small cleanups along the way, each step
    incremental with `make check` green between steps.
+   ✅ **Largely implemented 2026-07-12** (see the per-finding notes above): 6.1, 6.3, 6.6 and
+   3.5 are done (4.10 resolved as a side effect); 6.2 landed its first tranche
+   (`paths`/`secrets`/`selfupdate`, next is `config.py`); 6.4 lifted all still-identical
+   helpers into `shared.js` (drifted copies remain page-local); 6.5 (function decomposition
+   inside `terminals.js`) is now unblocked but not started.
 6. **Correctness & config cleanups:** 4.7 + 4.8 together (CLI-vs-config precedence and the vosk
    port key are both config-resolution fixes; 5.7's shared `run_server` is the natural home for
    4.7), then 4.3/4.6/4.9/4.10 and the log polish 9.2/9.3 as one sweep.

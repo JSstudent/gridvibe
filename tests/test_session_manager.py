@@ -25,6 +25,43 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(session.status, SessionStatus.PENDING)
         self.assertEqual(self.manager.get_session_count(), 1)
 
+    def test_create_and_append_build_equivalent_sessions(self):
+        self.manager.create_group(
+            name="Group A",
+            connection_mode="ssh",
+            layout="2x2",
+            terminal_count=1,
+            group_id="group-a",
+        )
+        common_fields = {
+            "host": "example.com",
+            "directory": "/srv/app",
+            "username": "alice",
+            "port": 2222,
+            "explorer_git_open": True,
+        }
+
+        created = self.manager.create_session(group_id="group-a", **common_fields)
+        appended = self.manager.append_session_to_group(group_id="group-a", **common_fields)
+
+        self.assertIsNotNone(appended)
+        created_dict = created.to_dict()
+        appended_dict = appended.to_dict()
+        for volatile_key in ("session_id", "created_at"):
+            created_dict.pop(volatile_key)
+            appended_dict.pop(volatile_key)
+        self.assertEqual(created_dict, appended_dict)
+        self.assertEqual(self.manager.get_group("group-a").terminal_count, 2)
+
+    def test_session_builders_reject_unknown_fields(self):
+        with self.assertRaises(TypeError):
+            self.manager.create_session(
+                group_id="group-a",
+                host="example.com",
+                directory="/srv/app",
+                bogus_field=True,
+            )
+
     def test_create_sessions_accepts_ip_and_hostname_fallbacks(self):
         sessions = self.manager.create_sessions(
             [

@@ -21,16 +21,19 @@ import threading
 import time
 import uuid
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from cryptography.fernet import Fernet
 from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit, join_room, leave_room
 
 from gridvibe_version import __version__
 from sessions.manager import SessionManager, SessionStatus
+from web.paths import BASE_DIR
+from web.secrets import _decrypt_password, _encrypt_password
+from web.selfupdate import AppUpdateError, perform_self_update
 
 try:
     import pty
@@ -84,7 +87,6 @@ except ImportError:  # pragma: no cover - optional for faster-whisper voice inpu
     WhisperModel = None
 
 logger = logging.getLogger(__name__)
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG_PATH = os.path.join(BASE_DIR, "default_config.json")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
@@ -97,17 +99,8 @@ EXPLORER_GIT_DIFF_MAX_LINES = 4000
 EXPLORER_GIT_LOG_MAX_COMMITS = 60
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
 WINDOWS_DEVICE_ATTRIBUTES_RESPONSE = "\x1b[?1;2c"
-SELF_UPDATE_REPO_DIR = BASE_DIR
 _browser_shutdown_lock = threading.RLock()
 _browser_shutdown_token = ""
-
-
-class AppUpdateError(RuntimeError):
-    """Raised when the application update flow cannot complete safely."""
-
-    def __init__(self, message: str, status_code: int = 400):
-        super().__init__(message)
-        self.status_code = status_code
 
 
 def configure_browser_shutdown(enabled: bool) -> str:
@@ -117,39 +110,7 @@ def configure_browser_shutdown(enabled: bool) -> str:
         _browser_shutdown_token = uuid.uuid4().hex if enabled else ""
         return _browser_shutdown_token
 
-ENCRYPTION_KEY_PATH = os.path.join(BASE_DIR, ".encryption_key")
 KNOWN_HOSTS_PATH = os.path.join(BASE_DIR, ".known_hosts")
-
-def _get_encryption_key() -> bytes:
-    """Load or generate encryption key for password storage."""
-    if os.path.exists(ENCRYPTION_KEY_PATH):
-        with open(ENCRYPTION_KEY_PATH, "rb") as f:
-            return f.read()
-    key = Fernet.generate_key()
-    with open(ENCRYPTION_KEY_PATH, "wb") as f:
-        f.write(key)
-    os.chmod(ENCRYPTION_KEY_PATH, 0o600)
-    return key
-
-_cipher = Fernet(_get_encryption_key())
-
-def _encrypt_password(password: str) -> str:
-    """Encrypt password for storage."""
-    if not password:
-        return ""
-    return _cipher.encrypt(password.encode()).decode()
-
-def _decrypt_password(encrypted: str) -> str:
-    """Decrypt stored password."""
-    if not encrypted:
-        return ""
-    try:
-        return _cipher.decrypt(encrypted.encode()).decode()
-    except Exception:
-        logger.warning(
-            "Stored SSH password could not be decrypted (encryption key changed?); ignoring it."
-        )
-        return ""
 
 
 # ==================== Configuration ====================
@@ -2014,172 +1975,6 @@ connection_lock = threading.RLock()
 folder_dialog_lock = threading.Lock()
 
 
-# ==================== App Update Helpers ====================
-
-def _run_self_update_git_command(args: List[str]) -> subprocess.CompletedProcess[str]:
-    """Run one git command inside the project checkout."""
-    git_path = shutil.which("git")
-    if not git_path:
-        raise AppUpdateError("Git is not installed or is not available on PATH.", 400)
-
-    try:
-        return subprocess.run(
-            [git_path, "-C", SELF_UPDATE_REPO_DIR, *args],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as exc:
-        raise AppUpdateError(f"Failed to run git {' '.join(args)}: {exc}", 500) from exc
-
-
-def _git_error_message(result: subprocess.CompletedProcess[str], fallback: str) -> str:
-    """Return the most useful stderr/stdout text from a git command."""
-    return (result.stderr or result.stdout or fallback).strip()
-
-
-def perform_self_update() -> Dict[str, Any]:
-    """Fetch and fast-forward the current git checkout when safe."""
-    repo_result = _run_self_update_git_command(["rev-parse", "--is-inside-work-tree"])
-    if repo_result.returncode != 0 or repo_result.stdout.strip().lower() != "true":
-        raise AppUpdateError(
-            "This installation is not running from a git checkout.",
-            400,
-        )
-
-    branch_result = _run_self_update_git_command(["rev-parse", "--abbrev-ref", "HEAD"])
-    if branch_result.returncode != 0:
-        raise AppUpdateError(
-            _git_error_message(branch_result, "Could not determine the current branch."),
-            500,
-        )
-
-    branch = branch_result.stdout.strip()
-    if not branch or branch == "HEAD":
-        raise AppUpdateError(
-            "This checkout is in detached HEAD mode and cannot self-update safely.",
-            409,
-        )
-
-    status_result = _run_self_update_git_command(["status", "--porcelain"])
-    if status_result.returncode != 0:
-        raise AppUpdateError(
-            _git_error_message(status_result, "Could not inspect the git worktree."),
-            500,
-        )
-
-    if status_result.stdout.strip():
-        raise AppUpdateError(
-            "Local changes are present. Commit, stash, or discard them before checking for updates.",
-            409,
-        )
-
-    upstream_result = _run_self_update_git_command(
-        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]
-    )
-    if upstream_result.returncode != 0:
-        raise AppUpdateError(
-            f"Branch '{branch}' does not track a remote branch, so automatic updates are unavailable.",
-            400,
-        )
-
-    upstream = upstream_result.stdout.strip()
-
-    fetch_result = _run_self_update_git_command(["fetch", "--all", "--prune"])
-    if fetch_result.returncode != 0:
-        raise AppUpdateError(
-            f"Git fetch failed: {_git_error_message(fetch_result, 'Unable to contact the remote repository.')}",
-            500,
-        )
-
-    count_result = _run_self_update_git_command(["rev-list", "--left-right", "--count", "HEAD...@{u}"])
-    if count_result.returncode != 0:
-        raise AppUpdateError(
-            _git_error_message(count_result, "Could not compare the local branch with its upstream."),
-            500,
-        )
-
-    counts = count_result.stdout.strip().split()
-    if len(counts) != 2:
-        raise AppUpdateError("Git returned an invalid branch comparison result.", 500)
-
-    try:
-        ahead_count = int(counts[0])
-        behind_count = int(counts[1])
-    except ValueError as exc:
-        raise AppUpdateError("Git returned a non-numeric branch comparison result.", 500) from exc
-
-    if behind_count == 0 and ahead_count == 0:
-        return {
-            "updated": False,
-            "restart_required": False,
-            "branch": branch,
-            "upstream": upstream,
-            "ahead_count": 0,
-            "behind_count": 0,
-            "message": f"GridVibe is already up to date on '{branch}'.",
-        }
-
-    if behind_count == 0 and ahead_count > 0:
-        return {
-            "updated": False,
-            "restart_required": False,
-            "branch": branch,
-            "upstream": upstream,
-            "ahead_count": ahead_count,
-            "behind_count": 0,
-            "message": f"Branch '{branch}' is already ahead of {upstream}; no update was applied.",
-        }
-
-    if ahead_count > 0 and behind_count > 0:
-        raise AppUpdateError(
-            f"Branch '{branch}' has diverged from {upstream}. Resolve the branch state manually before updating.",
-            409,
-        )
-
-    previous_commit_result = _run_self_update_git_command(["rev-parse", "HEAD"])
-    if previous_commit_result.returncode != 0:
-        raise AppUpdateError(
-            _git_error_message(previous_commit_result, "Could not determine the current commit."),
-            500,
-        )
-
-    previous_commit = previous_commit_result.stdout.strip()
-
-    pull_result = _run_self_update_git_command(["pull", "--ff-only"])
-    if pull_result.returncode != 0:
-        raise AppUpdateError(
-            f"Git pull failed: {_git_error_message(pull_result, 'The remote update could not be applied.')}",
-            500,
-        )
-
-    current_commit_result = _run_self_update_git_command(["rev-parse", "HEAD"])
-    if current_commit_result.returncode != 0:
-        raise AppUpdateError(
-            _git_error_message(current_commit_result, "Could not determine the updated commit."),
-            500,
-        )
-
-    current_commit = current_commit_result.stdout.strip()
-    return {
-        "updated": previous_commit != current_commit,
-        "restart_required": previous_commit != current_commit,
-        "branch": branch,
-        "upstream": upstream,
-        "ahead_count": 0,
-        "behind_count": behind_count,
-        "previous_commit": previous_commit,
-        "current_commit": current_commit,
-        "message": (
-            f"Updated '{branch}' from {previous_commit[:7]} to {current_commit[:7]}."
-            if previous_commit != current_commit
-            else f"GridVibe is already up to date on '{branch}'."
-        ),
-    }
-
-
-# ==================== SSH Helpers ====================
-
 def _broadcast_session_status(session_id: str):
     """Emit the latest session status to connected clients."""
     with session_manager.lock:
@@ -3232,35 +3027,29 @@ def _clean_git_path(path: str) -> str:
     return str(path or "").strip().replace("\\", "/").strip("/")
 
 
+GIT_READ_TIMEOUT = 2.0
+GIT_WRITE_TIMEOUT = 15.0
+
+
 def _run_git_command(
     args: List[str],
     *,
     cwd: str,
-    timeout: float = 2.0,
+    timeout: Optional[float] = None,
+    write: bool = False,
 ) -> subprocess.CompletedProcess:
-    """Run a read-only Git command with predictable process settings."""
-    env = os.environ.copy()
-    env["GIT_OPTIONAL_LOCKS"] = "0"
-    return subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
-    )
+    """Run an explorer Git command with predictable process settings.
 
-
-def _run_git_write_command(
-    args: List[str],
-    *,
-    cwd: str,
-    timeout: float = 15.0,
-) -> subprocess.CompletedProcess:
-    """Run a mutating Git command without allowing interactive credential prompts."""
+    Reads run with GIT_OPTIONAL_LOCKS=0; writes run with GIT_TERMINAL_PROMPT=0
+    so they can never hang on an interactive credential prompt.
+    """
+    if timeout is None:
+        timeout = GIT_WRITE_TIMEOUT if write else GIT_READ_TIMEOUT
     env = os.environ.copy()
-    env["GIT_TERMINAL_PROMPT"] = "0"
+    if write:
+        env["GIT_TERMINAL_PROMPT"] = "0"
+    else:
+        env["GIT_OPTIONAL_LOCKS"] = "0"
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -3432,48 +3221,14 @@ def _repo_relative_remote_git_path(repo_root: str, path: str) -> str:
     return "" if relative == "." else relative.replace("\\", "/")
 
 
-def _git_pathspec(repo_root: str, scope_path: str) -> str:
-    """Return a Git pathspec for a validated absolute path."""
-    repo_relative = _repo_relative_git_path(repo_root, scope_path)
-    return repo_relative or "."
-
-
-def _remote_git_pathspec(repo_root: str, scope_path: str) -> str:
-    """Return a Git pathspec for a validated remote path."""
-    repo_relative = _repo_relative_remote_git_path(repo_root, scope_path)
-    return repo_relative or "."
-
-
 def _git_status_for_entry(
+    backend: Any,
     repo_root: str,
     entry_path: str,
     statuses: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
     """Return exact or descendant Git status metadata for one explorer entry."""
-    repo_relative = _clean_git_path(_repo_relative_git_path(repo_root, entry_path))
-    status = dict(statuses.get(repo_relative, _clean_git_entry_status()))
-    descendant_prefix = f"{repo_relative}/" if repo_relative else ""
-    if descendant_prefix:
-        descendant_status = _aggregate_git_status(
-            item.get("status", "clean")
-            for path, item in statuses.items()
-            if path.startswith(descendant_prefix)
-        )
-        if descendant_status:
-            status["has_descendant_changes"] = True
-            status["descendant_status"] = descendant_status
-            if status.get("status") == "clean":
-                status["status"] = descendant_status
-    return status
-
-
-def _remote_git_status_for_entry(
-    repo_root: str,
-    entry_path: str,
-    statuses: Dict[str, Dict[str, Any]],
-) -> Dict[str, Any]:
-    """Return exact or descendant Git status metadata for one remote explorer entry."""
-    repo_relative = _clean_git_path(_repo_relative_remote_git_path(repo_root, entry_path))
+    repo_relative = _clean_git_path(backend.repo_relative_path(repo_root, entry_path))
     status = dict(statuses.get(repo_relative, _clean_git_entry_status()))
     descendant_prefix = f"{repo_relative}/" if repo_relative else ""
     if descendant_prefix:
@@ -3508,78 +3263,19 @@ def _aggregate_git_status(statuses: Any) -> Optional[str]:
     return None
 
 
-def _get_git_context(root_path: str, current_path: str) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
-    """Return repository metadata and path statuses for a local explorer directory."""
-    try:
-        rev_parse = _run_git_command(
-            ["rev-parse", "--show-toplevel", "--is-inside-work-tree"],
-            cwd=current_path,
-            timeout=2.0,
-        )
-    except FileNotFoundError:
-        return _empty_explorer_git_context("Git executable was not found"), {}
-    except subprocess.TimeoutExpired:
-        return _empty_explorer_git_context("Git repository detection timed out"), {}
-    except OSError as exc:
-        return _empty_explorer_git_context(str(exc)), {}
-
-    if rev_parse.returncode != 0:
-        return _empty_explorer_git_context(), {}
-
-    rev_lines = _decode_git_output(rev_parse.stdout).splitlines()
-    if len(rev_lines) < 2 or rev_lines[1].lower() != "true":
-        return _empty_explorer_git_context(), {}
-
-    repo_root = os.path.realpath(os.path.abspath(rev_lines[0]))
-    try:
-        os.path.commonpath([repo_root, root_path])
-        os.path.commonpath([repo_root, current_path])
-    except ValueError:
-        return _empty_explorer_git_context("Git repository path could not be compared"), {}
-
-    status_args = [
-        "status",
-        "--porcelain=v2",
-        "-z",
-        "--branch",
-        "--",
-        _git_pathspec(repo_root, current_path),
-    ]
-    try:
-        status_result = _run_git_command(status_args, cwd=repo_root, timeout=2.0)
-    except subprocess.TimeoutExpired:
-        context = _empty_explorer_git_context("Git status timed out")
-        context["repo_root"] = repo_root
-        return context, {}
-    except OSError as exc:
-        context = _empty_explorer_git_context(str(exc))
-        context["repo_root"] = repo_root
-        return context, {}
-
-    if status_result.returncode != 0:
-        error = _decode_git_output(status_result.stderr) or "Git status failed"
-        context = _empty_explorer_git_context(error)
-        context["repo_root"] = repo_root
-        return context, {}
-
-    branch, statuses = _parse_git_status_porcelain_v2(status_result.stdout)
-    context = {
-        "available": True,
-        "repo_root": repo_root,
-        "branch": branch.get("branch"),
-        "head": branch.get("head"),
-        "ahead": branch.get("ahead"),
-        "behind": branch.get("behind"),
-        "dirty": any(item.get("status") != "clean" for item in statuses.values()),
-        "error": None,
-    }
-    return context, statuses
+REMOTE_GIT_READ_TIMEOUT = 2.0
+REMOTE_GIT_WRITE_TIMEOUT = 30.0
 
 
-def _remote_git_shell_command(args: List[str], cwd: str) -> str:
-    """Build a read-only Git command for a remote POSIX-compatible SSH shell."""
+def _remote_git_shell_command(args: List[str], cwd: str, *, write: bool = False) -> str:
+    """Build a Git command for a remote POSIX-compatible SSH shell.
+
+    Reads run with GIT_OPTIONAL_LOCKS=0; writes run with GIT_TERMINAL_PROMPT=0
+    so they can never hang on an interactive credential prompt.
+    """
     quoted_args = " ".join(shlex.quote(part) for part in args)
-    return f"GIT_OPTIONAL_LOCKS=0 git -C {shlex.quote(cwd)} {quoted_args}"
+    env_prefix = "GIT_TERMINAL_PROMPT=0" if write else "GIT_OPTIONAL_LOCKS=0"
+    return f"{env_prefix} git -C {shlex.quote(cwd)} {quoted_args}"
 
 
 def _run_remote_git_command(
@@ -3587,10 +3283,13 @@ def _run_remote_git_command(
     args: List[str],
     *,
     cwd: str,
-    timeout: float = 2.0,
+    timeout: Optional[float] = None,
+    write: bool = False,
 ) -> Any:
-    """Run a read-only Git command over SSH and return a subprocess-like result."""
-    command = _remote_git_shell_command(args, cwd)
+    """Run a Git command over SSH and return a subprocess-like result."""
+    if timeout is None:
+        timeout = REMOTE_GIT_WRITE_TIMEOUT if write else REMOTE_GIT_READ_TIMEOUT
+    command = _remote_git_shell_command(args, cwd, write=write)
     _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
     stdout_data = stdout.read()
     stderr_data = stderr.read()
@@ -3606,50 +3305,251 @@ def _run_remote_git_command(
     )
 
 
-def _remote_git_write_shell_command(args: List[str], cwd: str) -> str:
-    """Build a mutating Git command for a remote POSIX-compatible SSH shell."""
-    quoted_args = " ".join(shlex.quote(part) for part in args)
-    return f"GIT_TERMINAL_PROMPT=0 git -C {shlex.quote(cwd)} {quoted_args}"
+class _LocalExplorerBackend:
+    """Local-filesystem implementation of the explorer backend.
+
+    The backend abstraction exists so every explorer helper and route body is
+    written once: backends supply how Git runs (subprocess vs SSH) and how
+    paths/files are resolved and read (os vs SFTP); the helpers supply the
+    logic. All filesystem access stays read-only.
+    """
+
+    remote = False
+
+    def __init__(self, session: Any = None):
+        self.session = session
+
+    # -- process execution -------------------------------------------------
+    def run_git(
+        self,
+        args: List[str],
+        *,
+        cwd: str,
+        timeout: Optional[float] = None,
+        write: bool = False,
+    ) -> subprocess.CompletedProcess:
+        return _run_git_command(args, cwd=cwd, timeout=timeout, write=write)
+
+    def request_error_types(self) -> Tuple[type, ...]:
+        return (OSError,)
+
+    # -- path handling ------------------------------------------------------
+    def canonical_repo_root(self, raw_root: str) -> str:
+        return os.path.realpath(os.path.abspath(raw_root))
+
+    def validate_repo_paths(self, repo_root: str, root_path: str, current_path: str) -> Optional[str]:
+        try:
+            os.path.commonpath([repo_root, root_path])
+            os.path.commonpath([repo_root, current_path])
+        except ValueError:
+            return "Git repository path could not be compared"
+        return None
+
+    def repo_relative_path(self, repo_root: str, path: str) -> str:
+        return _repo_relative_git_path(repo_root, path)
+
+    def pathspec(self, repo_root: str, scope_path: str) -> str:
+        return _repo_relative_git_path(repo_root, scope_path) or "."
+
+    def repo_abs_path(self, repo_root: str, repo_path: str) -> str:
+        return os.path.realpath(os.path.abspath(os.path.join(repo_root, repo_path.replace("/", os.sep))))
+
+    def entry_abs_path(self, root_path: str, entry_rel_path: str) -> str:
+        return os.path.realpath(os.path.abspath(os.path.join(root_path, entry_rel_path)))
+
+    def path_inside_root(self, root_path: str, abs_path: str) -> bool:
+        root_real = os.path.realpath(os.path.abspath(root_path))
+        try:
+            common_path = os.path.commonpath([root_real, abs_path])
+        except ValueError:
+            return False
+        return os.path.normcase(common_path) == os.path.normcase(root_real)
+
+    def rel_explorer_path(self, root_path: str, abs_path: str) -> str:
+        return _relative_explorer_path(os.path.realpath(os.path.abspath(root_path)), abs_path)
+
+    def basename(self, path: str) -> str:
+        return os.path.basename(path)
+
+    def file_dirname(self, path: str) -> str:
+        return os.path.dirname(path)
+
+    # -- session path resolution ---------------------------------------------
+    def resolve_candidate(self, requested_path: Any, *, allow_empty_root: bool = True) -> Tuple[str, str]:
+        return _resolve_explorer_candidate_path(
+            self.session, requested_path, allow_empty_root=allow_empty_root
+        )
+
+    def resolve_diff_path(self, requested_path: Any) -> Tuple[str, str]:
+        root_path, file_path = self.resolve_candidate(requested_path, allow_empty_root=False)
+        # A deleted file must stay diffable, so only directories are rejected.
+        if os.path.isdir(file_path):
+            raise ValueError("Explorer path is a directory")
+        return root_path, file_path
+
+    def resolve_dir(self, requested_path: Any) -> Tuple[str, str]:
+        return _resolve_explorer_paths(self.session, requested_path)
+
+    def resolve_file(self, requested_path: Any) -> Tuple[str, str]:
+        return _resolve_explorer_file_path(self.session, requested_path)
+
+    def root_directory(self) -> str:
+        root_path = _explorer_root_directory(self.session)
+        if not root_path:
+            raise ValueError("Explorer root directory is not configured")
+        return root_path
+
+    # -- read-only filesystem access ------------------------------------------
+    def list_entries(self, root_path: str, directory_path: str) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        with os.scandir(directory_path) as iterator:
+            for entry in iterator:
+                entries.append(_explorer_entry_payload(root_path, entry))
+        return entries
+
+    def stat_file(self, file_path: str) -> Tuple[Optional[int], Optional[float]]:
+        stat_result = os.stat(file_path, follow_symlinks=False)
+        return stat_result.st_size, stat_result.st_mtime
+
+    def read_file_prefix(self, file_path: str, max_bytes: int) -> bytes:
+        with open(file_path, "rb") as file_handle:
+            return file_handle.read(max_bytes)
+
+    def parent_explorer_path(self, root_path: str, current_path: str) -> str:
+        if os.path.normcase(current_path) == os.path.normcase(root_path):
+            return ""
+        return _relative_explorer_path(root_path, os.path.dirname(current_path))
 
 
-def _run_remote_git_write_command(
-    client: Any,
-    args: List[str],
-    *,
-    cwd: str,
-    timeout: float = 30.0,
-) -> Any:
-    """Run a mutating Git command over SSH and return a subprocess-like result."""
-    command = _remote_git_write_shell_command(args, cwd)
-    _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-    stdout_data = stdout.read()
-    stderr_data = stderr.read()
-    if isinstance(stdout_data, str):
-        stdout_data = stdout_data.encode("utf-8", errors="replace")
-    if isinstance(stderr_data, str):
-        stderr_data = stderr_data.encode("utf-8", errors="replace")
-    return subprocess.CompletedProcess(
-        args=command,
-        returncode=stdout.channel.recv_exit_status(),
-        stdout=stdout_data,
-        stderr=stderr_data,
-    )
+class _SftpExplorerBackend:
+    """SSH/SFTP implementation of the explorer backend."""
+
+    remote = True
+
+    def __init__(self, session: Any = None, client: Any = None, sftp: Any = None):
+        self.session = session
+        self.client = client
+        self.sftp = sftp
+
+    # -- process execution -------------------------------------------------
+    def run_git(
+        self,
+        args: List[str],
+        *,
+        cwd: str,
+        timeout: Optional[float] = None,
+        write: bool = False,
+    ) -> Any:
+        return _run_remote_git_command(self.client, args, cwd=cwd, timeout=timeout, write=write)
+
+    def request_error_types(self) -> Tuple[type, ...]:
+        return _sftp_request_error_types()
+
+    # -- path handling ------------------------------------------------------
+    def canonical_repo_root(self, raw_root: str) -> str:
+        return _remote_path_clean(raw_root).rstrip("/") or "/"
+
+    def validate_repo_paths(self, repo_root: str, root_path: str, current_path: str) -> Optional[str]:
+        if not _remote_path_inside(repo_root, current_path):
+            return "Git repository path could not be compared"
+        return None
+
+    def repo_relative_path(self, repo_root: str, path: str) -> str:
+        return _repo_relative_remote_git_path(repo_root, path)
+
+    def pathspec(self, repo_root: str, scope_path: str) -> str:
+        return _repo_relative_remote_git_path(repo_root, scope_path) or "."
+
+    def repo_abs_path(self, repo_root: str, repo_path: str) -> str:
+        return _remote_path_join(repo_root, repo_path)
+
+    def entry_abs_path(self, root_path: str, entry_rel_path: str) -> str:
+        return _remote_path_join(root_path, entry_rel_path)
+
+    def path_inside_root(self, root_path: str, abs_path: str) -> bool:
+        return _remote_path_inside(root_path, abs_path)
+
+    def rel_explorer_path(self, root_path: str, abs_path: str) -> str:
+        return _relative_remote_explorer_path(root_path, abs_path)
+
+    def basename(self, path: str) -> str:
+        return posixpath.basename(_remote_path_clean(path))
+
+    def file_dirname(self, path: str) -> str:
+        return _remote_path_dirname(path)
+
+    # -- session path resolution ---------------------------------------------
+    def resolve_candidate(self, requested_path: Any, *, allow_empty_root: bool = True) -> Tuple[str, str]:
+        return _resolve_remote_explorer_candidate_path(
+            self.sftp, self.session, requested_path, allow_empty_root=allow_empty_root
+        )
+
+    def resolve_diff_path(self, requested_path: Any) -> Tuple[str, str]:
+        return _resolve_remote_explorer_file_path(self.sftp, self.session, requested_path)
+
+    def resolve_dir(self, requested_path: Any) -> Tuple[str, str]:
+        return _resolve_remote_explorer_paths(self.sftp, self.session, requested_path)
+
+    def resolve_file(self, requested_path: Any) -> Tuple[str, str]:
+        return _resolve_remote_explorer_file_path(self.sftp, self.session, requested_path)
+
+    def root_directory(self) -> str:
+        root_path = _remote_explorer_root_directory(self.session)
+        if not root_path:
+            raise ValueError("Explorer root directory is not configured")
+        return self.sftp.normalize(root_path)
+
+    # -- read-only filesystem access ------------------------------------------
+    def list_entries(self, root_path: str, directory_path: str) -> List[Dict[str, Any]]:
+        return [
+            _remote_explorer_entry_payload(root_path, directory_path, entry)
+            for entry in self.sftp.listdir_attr(directory_path)
+        ]
+
+    def stat_file(self, file_path: str) -> Tuple[Optional[int], Optional[float]]:
+        stat_result = self.sftp.stat(file_path)
+        return getattr(stat_result, "st_size", None), getattr(stat_result, "st_mtime", None)
+
+    def read_file_prefix(self, file_path: str, max_bytes: int) -> bytes:
+        with self.sftp.open(file_path, "rb") as file_handle:
+            return file_handle.read(max_bytes)
+
+    def parent_explorer_path(self, root_path: str, current_path: str) -> str:
+        if _remote_compare_path(current_path) == _remote_compare_path(root_path):
+            return ""
+        return _relative_remote_explorer_path(root_path, _remote_path_dirname(current_path))
 
 
-def _get_remote_git_context(
-    client: Any,
+@contextmanager
+def _explorer_backend(session: Any):
+    """Yield the Git backend for one explorer session, owning any SSH lifetime."""
+    if _is_remote_explorer_session(session):
+        client = None
+        sftp = None
+        try:
+            client, sftp = _acquire_ssh_sftp(session)
+            yield _SftpExplorerBackend(session, client, sftp)
+        finally:
+            _release_ssh_sftp(session, client, sftp)
+    else:
+        yield _LocalExplorerBackend(session)
+
+
+def _get_git_context(
+    backend: Any,
     root_path: str,
     current_path: str,
 ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
-    """Return repository metadata and path statuses for a remote explorer directory."""
+    """Return repository metadata and path statuses for an explorer directory."""
     try:
-        rev_parse = _run_remote_git_command(
-            client,
+        rev_parse = backend.run_git(
             ["rev-parse", "--show-toplevel", "--is-inside-work-tree"],
             cwd=current_path,
             timeout=2.0,
         )
-    except TimeoutError:
+    except FileNotFoundError:
+        return _empty_explorer_git_context("Git executable was not found"), {}
+    except (subprocess.TimeoutExpired, TimeoutError):
         return _empty_explorer_git_context("Git repository detection timed out"), {}
     except Exception as exc:
         return _empty_explorer_git_context(str(exc)), {}
@@ -3661,9 +3561,10 @@ def _get_remote_git_context(
     if len(rev_lines) < 2 or rev_lines[1].lower() != "true":
         return _empty_explorer_git_context(), {}
 
-    repo_root = _remote_path_clean(rev_lines[0]).rstrip("/") or "/"
-    if not _remote_path_inside(repo_root, current_path):
-        return _empty_explorer_git_context("Git repository path could not be compared"), {}
+    repo_root = backend.canonical_repo_root(rev_lines[0])
+    validation_error = backend.validate_repo_paths(repo_root, root_path, current_path)
+    if validation_error:
+        return _empty_explorer_git_context(validation_error), {}
 
     status_args = [
         "status",
@@ -3671,11 +3572,11 @@ def _get_remote_git_context(
         "-z",
         "--branch",
         "--",
-        _remote_git_pathspec(repo_root, current_path),
+        backend.pathspec(repo_root, current_path),
     ]
     try:
-        status_result = _run_remote_git_command(client, status_args, cwd=repo_root, timeout=2.0)
-    except TimeoutError:
+        status_result = backend.run_git(status_args, cwd=repo_root, timeout=2.0)
+    except (subprocess.TimeoutExpired, TimeoutError):
         context = _empty_explorer_git_context("Git status timed out")
         context["repo_root"] = repo_root
         return context, {}
@@ -3705,12 +3606,13 @@ def _get_remote_git_context(
 
 
 def _attach_git_status_to_entries(
+    backend: Any,
     root_path: str,
     git_context: Dict[str, Any],
     statuses: Dict[str, Dict[str, Any]],
     entries: List[Dict[str, Any]],
 ) -> None:
-    """Attach per-entry Git metadata to local explorer entries."""
+    """Attach per-entry Git metadata to explorer entries."""
     if not git_context.get("available"):
         for entry in entries:
             entry["git"] = _clean_git_entry_status()
@@ -3718,29 +3620,12 @@ def _attach_git_status_to_entries(
 
     repo_root = str(git_context.get("repo_root") or "")
     for entry in entries:
-        entry_path = os.path.realpath(os.path.abspath(os.path.join(root_path, entry.get("path") or "")))
-        entry["git"] = _git_status_for_entry(repo_root, entry_path, statuses)
-
-
-def _attach_remote_git_status_to_entries(
-    root_path: str,
-    git_context: Dict[str, Any],
-    statuses: Dict[str, Dict[str, Any]],
-    entries: List[Dict[str, Any]],
-) -> None:
-    """Attach per-entry Git metadata to remote explorer entries."""
-    if not git_context.get("available"):
-        for entry in entries:
-            entry["git"] = _clean_git_entry_status()
-        return
-
-    repo_root = str(git_context.get("repo_root") or "")
-    for entry in entries:
-        entry_path = _remote_path_join(root_path, entry.get("path") or "")
-        entry["git"] = _remote_git_status_for_entry(repo_root, entry_path, statuses)
+        entry_path = backend.entry_abs_path(root_path, entry.get("path") or "")
+        entry["git"] = _git_status_for_entry(backend, repo_root, entry_path, statuses)
 
 
 def _append_deleted_git_entries(
+    backend: Any,
     root_path: str,
     current_path: str,
     git_context: Dict[str, Any],
@@ -3752,7 +3637,7 @@ def _append_deleted_git_entries(
         return
 
     repo_root = str(git_context.get("repo_root") or "")
-    current_repo_relative = _clean_git_path(_repo_relative_git_path(repo_root, current_path))
+    current_repo_relative = _clean_git_path(backend.repo_relative_path(repo_root, current_path))
     existing_paths = {entry.get("path") for entry in entries}
     for status_path, status in statuses.items():
         if status.get("status") != "deleted":
@@ -3767,8 +3652,8 @@ def _append_deleted_git_entries(
         if not current_relative or "/" in current_relative:
             continue
 
-        deleted_abs_path = os.path.abspath(os.path.join(repo_root, status_path.replace("/", os.sep)))
-        deleted_explorer_path = _relative_explorer_path(root_path, deleted_abs_path)
+        deleted_abs_path = backend.repo_abs_path(repo_root, status_path)
+        deleted_explorer_path = backend.rel_explorer_path(root_path, deleted_abs_path)
         if deleted_explorer_path in existing_paths:
             continue
         entries.append(
@@ -3785,54 +3670,9 @@ def _append_deleted_git_entries(
         existing_paths.add(deleted_explorer_path)
 
 
-def _append_deleted_remote_git_entries(
-    root_path: str,
-    current_path: str,
-    git_context: Dict[str, Any],
-    statuses: Dict[str, Dict[str, Any]],
-    entries: List[Dict[str, Any]],
-) -> None:
-    """Add read-only placeholder rows for deleted tracked files in the current remote directory."""
-    if not git_context.get("available"):
-        return
-
-    repo_root = str(git_context.get("repo_root") or "")
-    current_repo_relative = _clean_git_path(_repo_relative_remote_git_path(repo_root, current_path))
-    existing_paths = {entry.get("path") for entry in entries}
-    for status_path, status in statuses.items():
-        if status.get("status") != "deleted":
-            continue
-        if current_repo_relative:
-            prefix = f"{current_repo_relative}/"
-            if not status_path.startswith(prefix):
-                continue
-            current_relative = status_path[len(prefix):]
-        else:
-            current_relative = status_path
-        if not current_relative or "/" in current_relative:
-            continue
-
-        deleted_abs_path = _remote_path_join(repo_root, status_path)
-        deleted_explorer_path = _relative_remote_explorer_path(root_path, deleted_abs_path)
-        if deleted_explorer_path in existing_paths:
-            continue
-        entries.append(
-            {
-                "name": current_relative,
-                "path": deleted_explorer_path,
-                "type": "file",
-                "size": None,
-                "modified": None,
-                "git": dict(status),
-                "deleted": True,
-            }
-        )
-        existing_paths.add(deleted_explorer_path)
-
-
-def _bounded_git_diff(repo_root: str, args: List[str]) -> Tuple[str, bool, int]:
+def _bounded_git_diff(backend: Any, repo_root: str, args: List[str]) -> Tuple[str, bool, int]:
     """Run Git diff and return bounded UTF-8 text output."""
-    result = _run_git_command(args, cwd=repo_root, timeout=3.0)
+    result = backend.run_git(args, cwd=repo_root, timeout=3.0)
     if result.returncode != 0:
         error = _decode_git_output(result.stderr) or "Git diff failed"
         raise ValueError(error)
@@ -3926,9 +3766,9 @@ def _parse_git_name_status_log(raw_output: bytes) -> Dict[str, List[Dict[str, An
     return files_by_commit
 
 
-def _git_commit_files_log(repo_root: str, pathspec: str) -> Dict[str, List[Dict[str, Any]]]:
-    """Return changed files for each displayed local commit."""
-    result = _run_git_command(
+def _git_commit_files_log(backend: Any, repo_root: str, pathspec: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Return changed files for each displayed commit."""
+    result = backend.run_git(
         [
             "log",
             f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
@@ -3945,24 +3785,20 @@ def _git_commit_files_log(repo_root: str, pathspec: str) -> Dict[str, List[Dict[
     return _parse_git_name_status_log(result.stdout)
 
 
-def _local_commit_file_payload(
+def _commit_file_payload(
+    backend: Any,
     root_path: str,
     repo_root: str,
     file_entry: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
     """Convert one repo-relative commit file to an explorer-visible payload."""
     repo_path = str(file_entry.get("repo_path") or "")
-    absolute_path = os.path.realpath(os.path.abspath(os.path.join(repo_root, repo_path.replace("/", os.sep))))
-    root_real = os.path.realpath(os.path.abspath(root_path))
-    try:
-        common_path = os.path.commonpath([root_real, absolute_path])
-    except ValueError:
-        return None
-    if os.path.normcase(common_path) != os.path.normcase(root_real):
+    absolute_path = backend.repo_abs_path(repo_root, repo_path)
+    if not backend.path_inside_root(root_path, absolute_path):
         return None
     payload = dict(file_entry)
-    payload["path"] = _relative_explorer_path(root_real, absolute_path)
-    payload["name"] = os.path.basename(repo_path)
+    payload["path"] = backend.rel_explorer_path(root_path, absolute_path)
+    payload["name"] = backend.basename(repo_path)
     return payload
 
 
@@ -3985,9 +3821,9 @@ def _attach_commit_files(
     return commits
 
 
-def _bounded_git_graph_log(repo_root: str, pathspec: str) -> List[Dict[str, Any]]:
+def _bounded_git_graph_log(backend: Any, repo_root: str, pathspec: str) -> List[Dict[str, Any]]:
     """Return a bounded commit graph for the explorer root scope."""
-    result = _run_git_command(
+    result = backend.run_git(
         [
             "log",
             "--graph",
@@ -4007,71 +3843,74 @@ def _bounded_git_graph_log(repo_root: str, pathspec: str) -> List[Dict[str, Any]
 
 
 def _explorer_git_changed_files(
+    backend: Any,
     root_path: str,
     repo_root: str,
     statuses: Dict[str, Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Return changed Git files visible inside the local explorer root."""
+    """Return changed Git files visible inside the explorer root."""
     changes: List[Dict[str, Any]] = []
-    root_real = os.path.realpath(os.path.abspath(root_path))
     for repo_path, status in sorted(statuses.items()):
         if status.get("status") == "clean":
             continue
-        absolute_path = os.path.realpath(os.path.abspath(os.path.join(repo_root, repo_path.replace("/", os.sep))))
-        try:
-            common_path = os.path.commonpath([root_real, absolute_path])
-        except ValueError:
+        absolute_path = backend.repo_abs_path(repo_root, repo_path)
+        if not backend.path_inside_root(root_path, absolute_path):
             continue
-        if os.path.normcase(common_path) != os.path.normcase(root_real):
-            continue
-        explorer_path = _relative_explorer_path(root_real, absolute_path)
+        explorer_path = backend.rel_explorer_path(root_path, absolute_path)
         changes.append(
             {
                 "path": explorer_path,
                 "repo_path": repo_path,
-                "name": os.path.basename(repo_path),
+                "name": backend.basename(repo_path),
                 "git": dict(status),
             }
         )
     return changes
 
 
-def _get_git_repo_summary(root_path: str) -> Dict[str, Any]:
-    """Return changed files and a bounded commit graph for a local explorer root."""
-    git_context, statuses = _get_git_context(root_path, root_path)
+def _get_git_repo_summary(backend: Any, root_path: str) -> Dict[str, Any]:
+    """Return changed files and a bounded commit graph for an explorer root."""
+    git_context, statuses = _get_git_context(backend, root_path, root_path)
     if not git_context.get("available"):
         raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
 
     repo_root = str(git_context["repo_root"])
-    root_pathspec = _git_pathspec(repo_root, root_path)
-    commits = _bounded_git_graph_log(repo_root, root_pathspec)
-    commit_files = _git_commit_files_log(repo_root, root_pathspec)
+    root_pathspec = backend.pathspec(repo_root, root_path)
+    commits = _bounded_git_graph_log(backend, repo_root, root_pathspec)
+    commit_files = _git_commit_files_log(backend, repo_root, root_pathspec)
     return {
         "git": git_context,
-        "changes": _explorer_git_changed_files(root_path, repo_root, statuses),
+        "changes": _explorer_git_changed_files(backend, root_path, repo_root, statuses),
         "commits": _attach_commit_files(
             commits,
             commit_files,
-            lambda item: _local_commit_file_payload(root_path, repo_root, item),
+            lambda item: _commit_file_payload(backend, root_path, repo_root, item),
         ),
     }
 
 
-def _get_git_diff(root_path: str, file_path: str, mode: str, commit: Optional[str] = None) -> Dict[str, Any]:
-    """Return a bounded read-only Git diff for a local explorer file."""
+def _get_git_diff(
+    backend: Any,
+    root_path: str,
+    file_path: str,
+    mode: str,
+    commit: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return a bounded read-only Git diff for an explorer file."""
     if mode not in {"worktree", "staged", "head", "commit"}:
         raise ValueError("Invalid Git diff mode")
     if mode == "commit":
         commit = _validated_git_commit_ref(commit)
 
-    git_context, _statuses = _get_git_context(root_path, os.path.dirname(file_path))
+    git_context, _statuses = _get_git_context(backend, root_path, backend.file_dirname(file_path))
     if not git_context.get("available"):
         raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
 
     repo_root = str(git_context["repo_root"])
-    pathspec = _git_pathspec(repo_root, file_path)
+    pathspec = backend.pathspec(repo_root, file_path)
     try:
         diff_text, truncated, raw_bytes = _bounded_git_diff(
+            backend,
             repo_root,
             _git_diff_args_for_mode(mode, pathspec, commit),
         )
@@ -4086,59 +3925,59 @@ def _get_git_diff(root_path: str, file_path: str, mode: str, commit: Optional[st
     }
 
 
-def _local_git_action_repo_root(root_path: str) -> str:
-    """Return the repository root for a local explorer git mutation, or raise."""
-    git_context, _statuses = _get_git_context(root_path, root_path)
+def _git_action_repo_root(backend: Any, root_path: str) -> str:
+    """Return the repository root for an explorer git mutation, or raise."""
+    git_context, _statuses = _get_git_context(backend, root_path, root_path)
     if not git_context.get("available"):
         raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
     return str(git_context["repo_root"])
 
 
-def _local_git_has_head(repo_root: str) -> bool:
-    """Return whether the local repository has at least one commit."""
+def _git_has_head(backend: Any, repo_root: str) -> bool:
+    """Return whether the repository has at least one commit."""
     try:
-        result = _run_git_command(["rev-parse", "--verify", "--quiet", "HEAD"], cwd=repo_root, timeout=2.0)
-    except (OSError, subprocess.TimeoutExpired):
+        result = backend.run_git(["rev-parse", "--verify", "--quiet", "HEAD"], cwd=repo_root, timeout=2.0)
+    except Exception:
         return False
     return result.returncode == 0
 
 
-def _git_stage_path(root_path: str, file_path: str) -> None:
-    """Stage one worktree path inside a local explorer repository."""
-    repo_root = _local_git_action_repo_root(root_path)
-    pathspec = _git_pathspec(repo_root, file_path)
+def _git_stage_path(backend: Any, root_path: str, file_path: str) -> None:
+    """Stage one worktree path inside an explorer repository."""
+    repo_root = _git_action_repo_root(backend, root_path)
+    pathspec = backend.pathspec(repo_root, file_path)
     try:
-        result = _run_git_write_command(["add", "--", pathspec], cwd=repo_root)
+        result = backend.run_git(["add", "--", pathspec], cwd=repo_root, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git stage timed out") from exc
     if result.returncode != 0:
         raise ValueError(_decode_git_output(result.stderr) or "Git stage failed")
 
 
-def _git_unstage_path(root_path: str, file_path: str) -> None:
-    """Unstage one path inside a local explorer repository."""
-    repo_root = _local_git_action_repo_root(root_path)
-    pathspec = _git_pathspec(repo_root, file_path)
-    if _local_git_has_head(repo_root):
+def _git_unstage_path(backend: Any, root_path: str, file_path: str) -> None:
+    """Unstage one path inside an explorer repository."""
+    repo_root = _git_action_repo_root(backend, root_path)
+    pathspec = backend.pathspec(repo_root, file_path)
+    if _git_has_head(backend, repo_root):
         args = ["reset", "--quiet", "HEAD", "--", pathspec]
     else:
         args = ["rm", "--cached", "--quiet", "--", pathspec]
     try:
-        result = _run_git_write_command(args, cwd=repo_root)
+        result = backend.run_git(args, cwd=repo_root, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git unstage timed out") from exc
     if result.returncode != 0:
         raise ValueError(_decode_git_output(result.stderr) or "Git unstage failed")
 
 
-def _git_commit(root_path: str, message: str) -> None:
-    """Commit staged changes inside a local explorer repository."""
+def _git_commit(backend: Any, root_path: str, message: str) -> None:
+    """Commit staged changes inside an explorer repository."""
     commit_message = str(message or "").strip()
     if not commit_message:
         raise ValueError("Commit message is required")
-    repo_root = _local_git_action_repo_root(root_path)
+    repo_root = _git_action_repo_root(backend, root_path)
     try:
-        result = _run_git_write_command(["commit", "-m", commit_message], cwd=repo_root, timeout=30.0)
+        result = backend.run_git(["commit", "-m", commit_message], cwd=repo_root, timeout=30.0, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git commit timed out") from exc
     if result.returncode != 0:
@@ -4149,11 +3988,11 @@ def _git_commit(root_path: str, message: str) -> None:
         )
 
 
-def _git_publish(root_path: str) -> None:
-    """Push the current branch of a local explorer repository, setting upstream if needed."""
-    repo_root = _local_git_action_repo_root(root_path)
+def _git_publish(backend: Any, root_path: str) -> None:
+    """Push the current branch of an explorer repository, setting upstream if needed."""
+    repo_root = _git_action_repo_root(backend, root_path)
     try:
-        upstream = _run_git_command(
+        upstream = backend.run_git(
             ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
             cwd=repo_root,
             timeout=3.0,
@@ -4161,264 +4000,14 @@ def _git_publish(root_path: str) -> None:
         if upstream.returncode == 0:
             push_args = ["push"]
         else:
-            branch_result = _run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root, timeout=3.0)
+            branch_result = backend.run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root, timeout=3.0)
             branch = _decode_git_output(branch_result.stdout)
             if branch_result.returncode != 0 or not branch or branch == "HEAD":
                 raise ValueError("Cannot publish a detached HEAD")
             push_args = ["push", "--set-upstream", "origin", branch]
-        result = _run_git_write_command(push_args, cwd=repo_root, timeout=120.0)
+        result = backend.run_git(push_args, cwd=repo_root, timeout=120.0, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git publish timed out") from exc
-    if result.returncode != 0:
-        raise ValueError(
-            _decode_git_output(result.stderr)
-            or _decode_git_output(result.stdout)
-            or "Git publish failed"
-        )
-
-
-def _bounded_remote_git_diff(client: Any, repo_root: str, args: List[str]) -> Tuple[str, bool, int]:
-    """Run remote Git diff and return bounded UTF-8 text output."""
-    result = _run_remote_git_command(client, args, cwd=repo_root, timeout=3.0)
-    if result.returncode != 0:
-        error = _decode_git_output(result.stderr) or "Git diff failed"
-        raise ValueError(error)
-    if b"\x00" in result.stdout:
-        raise ValueError("Git diff appears to contain binary data")
-
-    truncated = len(result.stdout) > EXPLORER_GIT_DIFF_MAX_BYTES
-    diff_bytes = result.stdout[:EXPLORER_GIT_DIFF_MAX_BYTES]
-    diff_text = diff_bytes.decode("utf-8", errors="replace")
-    lines = diff_text.splitlines(keepends=True)
-    if len(lines) > EXPLORER_GIT_DIFF_MAX_LINES:
-        diff_text = "".join(lines[:EXPLORER_GIT_DIFF_MAX_LINES])
-        truncated = True
-    return diff_text, truncated, len(result.stdout)
-
-
-def _bounded_remote_git_graph_log(client: Any, repo_root: str, pathspec: str) -> List[Dict[str, Any]]:
-    """Return a bounded remote commit graph for the explorer root scope."""
-    result = _run_remote_git_command(
-        client,
-        [
-            "log",
-            "--graph",
-            "--decorate",
-            "--oneline",
-            "--date-order",
-            f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
-            "--",
-            pathspec,
-        ],
-        cwd=repo_root,
-        timeout=3.0,
-    )
-    if result.returncode != 0:
-        return []
-    return _parse_git_graph_log(result.stdout)
-
-
-def _remote_git_commit_files_log(client: Any, repo_root: str, pathspec: str) -> Dict[str, List[Dict[str, Any]]]:
-    """Return changed files for each displayed remote commit."""
-    result = _run_remote_git_command(
-        client,
-        [
-            "log",
-            f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
-            "--format=%x1e%h",
-            "--name-status",
-            "--",
-            pathspec,
-        ],
-        cwd=repo_root,
-        timeout=3.0,
-    )
-    if result.returncode != 0:
-        return {}
-    return _parse_git_name_status_log(result.stdout)
-
-
-def _remote_commit_file_payload(
-    root_path: str,
-    repo_root: str,
-    file_entry: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    """Convert one repo-relative remote commit file to an explorer-visible payload."""
-    repo_path = str(file_entry.get("repo_path") or "")
-    absolute_path = _remote_path_join(repo_root, repo_path)
-    if not _remote_path_inside(root_path, absolute_path):
-        return None
-    payload = dict(file_entry)
-    payload["path"] = _relative_remote_explorer_path(root_path, absolute_path)
-    payload["name"] = posixpath.basename(repo_path)
-    return payload
-
-
-def _remote_explorer_git_changed_files(
-    root_path: str,
-    repo_root: str,
-    statuses: Dict[str, Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Return changed Git files visible inside the remote explorer root."""
-    changes: List[Dict[str, Any]] = []
-    for repo_path, status in sorted(statuses.items()):
-        if status.get("status") == "clean":
-            continue
-        absolute_path = _remote_path_join(repo_root, repo_path)
-        if not _remote_path_inside(root_path, absolute_path):
-            continue
-        explorer_path = _relative_remote_explorer_path(root_path, absolute_path)
-        changes.append(
-            {
-                "path": explorer_path,
-                "repo_path": repo_path,
-                "name": posixpath.basename(repo_path),
-                "git": dict(status),
-            }
-        )
-    return changes
-
-
-def _get_remote_git_repo_summary(client: Any, root_path: str) -> Dict[str, Any]:
-    """Return changed files and a bounded commit graph for a remote explorer root."""
-    git_context, statuses = _get_remote_git_context(client, root_path, root_path)
-    if not git_context.get("available"):
-        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
-
-    repo_root = str(git_context["repo_root"])
-    root_pathspec = _remote_git_pathspec(repo_root, root_path)
-    commits = _bounded_remote_git_graph_log(client, repo_root, root_pathspec)
-    commit_files = _remote_git_commit_files_log(client, repo_root, root_pathspec)
-    return {
-        "git": git_context,
-        "changes": _remote_explorer_git_changed_files(root_path, repo_root, statuses),
-        "commits": _attach_commit_files(
-            commits,
-            commit_files,
-            lambda item: _remote_commit_file_payload(root_path, repo_root, item),
-        ),
-    }
-
-
-def _get_remote_git_diff(
-    client: Any,
-    root_path: str,
-    file_path: str,
-    mode: str,
-    commit: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Return a bounded read-only Git diff for a remote explorer file."""
-    if mode not in {"worktree", "staged", "head", "commit"}:
-        raise ValueError("Invalid Git diff mode")
-    if mode == "commit":
-        commit = _validated_git_commit_ref(commit)
-
-    git_context, _statuses = _get_remote_git_context(client, root_path, _remote_path_dirname(file_path))
-    if not git_context.get("available"):
-        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
-
-    repo_root = str(git_context["repo_root"])
-    pathspec = _remote_git_pathspec(repo_root, file_path)
-    diff_text, truncated, raw_bytes = _bounded_remote_git_diff(
-        client,
-        repo_root,
-        _git_diff_args_for_mode(mode, pathspec, commit),
-    )
-    return {
-        "git": git_context,
-        "diff": diff_text,
-        "truncated": truncated,
-        "raw_bytes": raw_bytes,
-    }
-
-
-def _remote_git_action_repo_root(client: Any, root_path: str) -> str:
-    """Return the repository root for a remote explorer git mutation, or raise."""
-    git_context, _statuses = _get_remote_git_context(client, root_path, root_path)
-    if not git_context.get("available"):
-        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
-    return str(git_context["repo_root"])
-
-
-def _remote_git_has_head(client: Any, repo_root: str) -> bool:
-    """Return whether the remote repository has at least one commit."""
-    try:
-        result = _run_remote_git_command(
-            client,
-            ["rev-parse", "--verify", "--quiet", "HEAD"],
-            cwd=repo_root,
-            timeout=2.0,
-        )
-    except Exception:
-        return False
-    return result.returncode == 0
-
-
-def _remote_git_stage_path(client: Any, root_path: str, file_path: str) -> None:
-    """Stage one worktree path inside a remote explorer repository."""
-    repo_root = _remote_git_action_repo_root(client, root_path)
-    pathspec = _remote_git_pathspec(repo_root, file_path)
-    result = _run_remote_git_write_command(client, ["add", "--", pathspec], cwd=repo_root)
-    if result.returncode != 0:
-        raise ValueError(_decode_git_output(result.stderr) or "Git stage failed")
-
-
-def _remote_git_unstage_path(client: Any, root_path: str, file_path: str) -> None:
-    """Unstage one path inside a remote explorer repository."""
-    repo_root = _remote_git_action_repo_root(client, root_path)
-    pathspec = _remote_git_pathspec(repo_root, file_path)
-    if _remote_git_has_head(client, repo_root):
-        args = ["reset", "--quiet", "HEAD", "--", pathspec]
-    else:
-        args = ["rm", "--cached", "--quiet", "--", pathspec]
-    result = _run_remote_git_write_command(client, args, cwd=repo_root)
-    if result.returncode != 0:
-        raise ValueError(_decode_git_output(result.stderr) or "Git unstage failed")
-
-
-def _remote_git_commit(client: Any, root_path: str, message: str) -> None:
-    """Commit staged changes inside a remote explorer repository."""
-    commit_message = str(message or "").strip()
-    if not commit_message:
-        raise ValueError("Commit message is required")
-    repo_root = _remote_git_action_repo_root(client, root_path)
-    result = _run_remote_git_write_command(
-        client,
-        ["commit", "-m", commit_message],
-        cwd=repo_root,
-        timeout=30.0,
-    )
-    if result.returncode != 0:
-        raise ValueError(
-            _decode_git_output(result.stderr)
-            or _decode_git_output(result.stdout)
-            or "Git commit failed"
-        )
-
-
-def _remote_git_publish(client: Any, root_path: str) -> None:
-    """Push the current branch of a remote explorer repository, setting upstream if needed."""
-    repo_root = _remote_git_action_repo_root(client, root_path)
-    upstream = _run_remote_git_command(
-        client,
-        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-        cwd=repo_root,
-        timeout=3.0,
-    )
-    if upstream.returncode == 0:
-        push_args = ["push"]
-    else:
-        branch_result = _run_remote_git_command(
-            client,
-            ["rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=repo_root,
-            timeout=3.0,
-        )
-        branch = _decode_git_output(branch_result.stdout)
-        if branch_result.returncode != 0 or not branch or branch == "HEAD":
-            raise ValueError("Cannot publish a detached HEAD")
-        push_args = ["push", "--set-upstream", "origin", branch]
-    result = _run_remote_git_write_command(client, push_args, cwd=repo_root, timeout=120.0)
     if result.returncode != 0:
         raise ValueError(
             _decode_git_output(result.stderr)
@@ -5208,6 +4797,7 @@ def index():
         local_windows_shells_available=os.name == "nt",
         browser_shutdown_enabled=bool(browser_shutdown_token),
         browser_shutdown_token=browser_shutdown_token,
+        version=__version__,
     )
 
 
@@ -5220,7 +4810,8 @@ def terminals_page():
                            voice_enabled=voice_enabled,
                            voice_engine=voice_engine,
                            voice_model=_active_voice_model_name(),
-                           voice_language=voice_language)
+                           voice_language=voice_language,
+                           version=__version__)
 
 
 @app.route('/docs/images/<path:filename>')
@@ -5361,79 +4952,24 @@ def get_explorer_entries(session_id: str):
     session = session_manager.get_session(session_id)
     if session is None:
         return jsonify({"error": "Session not found"}), 404
+    requested_path = request.args["path"] if "path" in request.args else None
 
-    if _is_remote_explorer_session(session):
-        client = None
-        sftp = None
-        try:
-            client, sftp = _acquire_ssh_sftp(session)
-            root_path, current_path = _resolve_remote_explorer_paths(
-                sftp,
-                session,
-                request.args["path"] if "path" in request.args else None,
-            )
-            entries = [
-                _remote_explorer_entry_payload(root_path, current_path, entry)
-                for entry in sftp.listdir_attr(current_path)
-            ]
-            git_context, git_statuses = _get_remote_git_context(client, root_path, current_path)
-            _attach_remote_git_status_to_entries(root_path, git_context, git_statuses, entries)
-            _append_deleted_remote_git_entries(root_path, current_path, git_context, git_statuses, entries)
-            entries.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
-
-            parent_path = ""
-            if _remote_compare_path(current_path) != _remote_compare_path(root_path):
-                parent_path = _relative_remote_explorer_path(root_path, _remote_path_dirname(current_path))
-
-            return jsonify(
-                {
-                    "session_id": session.session_id,
-                    "root": root_path,
-                    "path": _relative_remote_explorer_path(root_path, current_path),
-                    "parent_path": parent_path,
-                    "git": git_context,
-                    "entries": entries,
-                }
-            )
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except _sftp_request_error_types() as exc:
-            return jsonify({"error": str(exc)}), 500
-        finally:
-            _release_ssh_sftp(session, client, sftp)
-
-    try:
-        root_path, current_path = _resolve_explorer_paths(
-            session,
-            request.args["path"] if "path" in request.args else None,
-        )
-        entries = []
-        with os.scandir(current_path) as iterator:
-            for entry in iterator:
-                entries.append(_explorer_entry_payload(root_path, entry))
-        git_context, git_statuses = _get_git_context(root_path, current_path)
-        _attach_git_status_to_entries(root_path, git_context, git_statuses, entries)
-        _append_deleted_git_entries(root_path, current_path, git_context, git_statuses, entries)
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path, current_path = backend.resolve_dir(requested_path)
+        entries = backend.list_entries(root_path, current_path)
+        git_context, git_statuses = _get_git_context(backend, root_path, current_path)
+        _attach_git_status_to_entries(backend, root_path, git_context, git_statuses, entries)
+        _append_deleted_git_entries(backend, root_path, current_path, git_context, git_statuses, entries)
         entries.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
+        return {
+            "root": root_path,
+            "path": backend.rel_explorer_path(root_path, current_path),
+            "parent_path": backend.parent_explorer_path(root_path, current_path),
+            "git": git_context,
+            "entries": entries,
+        }
 
-        parent_path = ""
-        if os.path.normcase(current_path) != os.path.normcase(root_path):
-            parent_path = _relative_explorer_path(root_path, os.path.dirname(current_path))
-
-        return jsonify(
-            {
-                "session_id": session.session_id,
-                    "root": root_path,
-                    "path": _relative_explorer_path(root_path, current_path),
-                    "parent_path": parent_path,
-                    "git": git_context,
-                    "entries": entries,
-                }
-            )
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except OSError as exc:
-        return jsonify({"error": str(exc)}), 500
+    return _explorer_route_response(session, handler)
 
 
 @app.route('/api/explorer/<session_id>/file', methods=['GET'])
@@ -5442,70 +4978,13 @@ def get_explorer_file(session_id: str):
     session = session_manager.get_session(session_id)
     if session is None:
         return jsonify({"error": "Session not found"}), 404
+    requested_path = request.args.get("path", "")
 
-    if _is_remote_explorer_session(session):
-        client = None
-        sftp = None
-        try:
-            client, sftp = _acquire_ssh_sftp(session)
-            root_path, file_path = _resolve_remote_explorer_file_path(
-                sftp,
-                session,
-                request.args.get("path", ""),
-            )
-            stat_result = sftp.stat(file_path)
-            code_language = _explorer_editor_language(file_path)
-            with sftp.open(file_path, "rb") as file_handle:
-                raw_content = file_handle.read(EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)
-
-            if _explorer_content_looks_binary(raw_content):
-                raise ValueError("Explorer file appears to be binary")
-
-            truncated = len(raw_content) > EXPLORER_FILE_PREVIEW_MAX_BYTES
-            preview_bytes = raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]
-            content = preview_bytes.decode("utf-8", errors="replace")
-            preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
-            git_context, git_statuses = _get_remote_git_context(client, root_path, _remote_path_dirname(file_path))
-            file_git = (
-                _remote_git_status_for_entry(str(git_context["repo_root"]), file_path, git_statuses)
-                if git_context.get("available")
-                else _clean_git_entry_status()
-            )
-
-            return jsonify(
-                {
-                    "session_id": session.session_id,
-                    "root": root_path,
-                    "path": _relative_remote_explorer_path(root_path, file_path),
-                    "name": posixpath.basename(_remote_path_clean(file_path)),
-                    "size": getattr(stat_result, "st_size", None),
-                    "modified": getattr(stat_result, "st_mtime", None),
-                    "encoding": "utf-8",
-                    "truncated": truncated,
-                    "content": content,
-                    "preview_type": "markdown" if preview_html is not None else None,
-                    "preview_html": preview_html,
-                    "language": code_language,
-                    "git": file_git,
-                    "git_context": git_context,
-                }
-            )
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except _sftp_request_error_types() as exc:
-            return jsonify({"error": str(exc)}), 500
-        finally:
-            _release_ssh_sftp(session, client, sftp)
-
-    try:
-        root_path, file_path = _resolve_explorer_file_path(
-            session,
-            request.args.get("path", ""),
-        )
-        stat_result = os.stat(file_path, follow_symlinks=False)
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path, file_path = backend.resolve_file(requested_path)
+        size, modified = backend.stat_file(file_path)
         code_language = _explorer_editor_language(file_path)
-        with open(file_path, "rb") as file_handle:
-            raw_content = file_handle.read(EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)
+        raw_content = backend.read_file_prefix(file_path, EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)
 
         if _explorer_content_looks_binary(raw_content):
             raise ValueError("Explorer file appears to be binary")
@@ -5514,34 +4993,45 @@ def get_explorer_file(session_id: str):
         preview_bytes = raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]
         content = preview_bytes.decode("utf-8", errors="replace")
         preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
-        git_context, git_statuses = _get_git_context(root_path, os.path.dirname(file_path))
+        git_context, git_statuses = _get_git_context(backend, root_path, backend.file_dirname(file_path))
         file_git = (
-            _git_status_for_entry(str(git_context["repo_root"]), file_path, git_statuses)
+            _git_status_for_entry(backend, str(git_context["repo_root"]), file_path, git_statuses)
             if git_context.get("available")
             else _clean_git_entry_status()
         )
+        return {
+            "root": root_path,
+            "path": backend.rel_explorer_path(root_path, file_path),
+            "name": backend.basename(file_path),
+            "size": size,
+            "modified": modified,
+            "encoding": "utf-8",
+            "truncated": truncated,
+            "content": content,
+            "preview_type": "markdown" if preview_html is not None else None,
+            "preview_html": preview_html,
+            "language": code_language,
+            "git": file_git,
+            "git_context": git_context,
+        }
 
-        return jsonify(
-            {
-                "session_id": session.session_id,
-                "root": root_path,
-                "path": _relative_explorer_path(root_path, file_path),
-                "name": os.path.basename(file_path),
-                "size": stat_result.st_size,
-                "modified": stat_result.st_mtime,
-                "encoding": "utf-8",
-                "truncated": truncated,
-                "content": content,
-                "preview_type": "markdown" if preview_html is not None else None,
-                "preview_html": preview_html,
-                "language": code_language,
-                "git": file_git,
-                "git_context": git_context,
-            }
-        )
+    return _explorer_route_response(session, handler)
+
+
+def _explorer_route_response(session: Any, handler: Any):
+    """Run one explorer Git route handler with shared backend and error mapping."""
+    error_types = (
+        _sftp_request_error_types()
+        if _is_remote_explorer_session(session)
+        else (OSError,)
+    )
+    try:
+        with _explorer_backend(session) as backend:
+            payload = handler(backend)
+        return jsonify({"session_id": session.session_id, **payload})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except OSError as exc:
+    except error_types as exc:
         return jsonify({"error": str(exc)}), 500
 
 
@@ -5551,59 +5041,21 @@ def get_explorer_git_diff(session_id: str):
     session = session_manager.get_session(session_id)
     if session is None:
         return jsonify({"error": "Session not found"}), 404
-    if _is_remote_explorer_session(session):
-        client = None
-        sftp = None
-        mode = request.args.get("mode", "worktree")
-        commit = request.args.get("commit")
-        try:
-            client, sftp = _acquire_ssh_sftp(session)
-            root_path, file_path = _resolve_remote_explorer_file_path(
-                sftp,
-                session,
-                request.args.get("path", ""),
-            )
-            diff_payload = _get_remote_git_diff(client, root_path, file_path, mode, commit)
-            return jsonify(
-                {
-                    "session_id": session.session_id,
-                    "root": root_path,
-                    "path": _relative_remote_explorer_path(root_path, file_path),
-                    "mode": mode,
-                    **diff_payload,
-                }
-            )
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except _sftp_request_error_types() as exc:
-            return jsonify({"error": str(exc)}), 500
-        finally:
-            _release_ssh_sftp(session, client, sftp)
-
     mode = request.args.get("mode", "worktree")
     commit = request.args.get("commit")
-    try:
-        root_path, file_path = _resolve_explorer_candidate_path(
-            session,
-            request.args.get("path", ""),
-            allow_empty_root=False,
-        )
-        if os.path.isdir(file_path):
-            raise ValueError("Explorer path is a directory")
-        diff_payload = _get_git_diff(root_path, file_path, mode, commit)
-        return jsonify(
-            {
-                "session_id": session.session_id,
-                "root": root_path,
-                "path": _relative_explorer_path(root_path, file_path),
-                "mode": mode,
-                **diff_payload,
-            }
-        )
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except OSError as exc:
-        return jsonify({"error": str(exc)}), 500
+    requested_path = request.args.get("path", "")
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path, file_path = backend.resolve_diff_path(requested_path)
+        diff_payload = _get_git_diff(backend, root_path, file_path, mode, commit)
+        return {
+            "root": root_path,
+            "path": backend.rel_explorer_path(root_path, file_path),
+            "mode": mode,
+            **diff_payload,
+        }
+
+    return _explorer_route_response(session, handler)
 
 
 @app.route('/api/explorer/<session_id>/git/repo', methods=['GET'])
@@ -5612,44 +5064,13 @@ def get_explorer_git_repo(session_id: str):
     session = session_manager.get_session(session_id)
     if session is None:
         return jsonify({"error": "Session not found"}), 404
-    if _is_remote_explorer_session(session):
-        client = None
-        sftp = None
-        try:
-            client, sftp = _acquire_ssh_sftp(session)
-            root_path = _remote_explorer_root_directory(session)
-            if not root_path:
-                raise ValueError("Explorer root directory is not configured")
-            root_path = sftp.normalize(root_path)
-            summary = _get_remote_git_repo_summary(client, root_path)
-            return jsonify(
-                {
-                    "session_id": session.session_id,
-                    "root": root_path,
-                    **summary,
-                }
-            )
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except _sftp_request_error_types() as exc:
-            return jsonify({"error": str(exc)}), 500
-        finally:
-            _release_ssh_sftp(session, client, sftp)
 
-    try:
-        root_path = _explorer_root_directory(session)
-        summary = _get_git_repo_summary(root_path)
-        return jsonify(
-            {
-                "session_id": session.session_id,
-                "root": root_path,
-                **summary,
-            }
-        )
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except OSError as exc:
-        return jsonify({"error": str(exc)}), 500
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path = backend.root_directory()
+        summary = _get_git_repo_summary(backend, root_path)
+        return {"root": root_path, **summary}
+
+    return _explorer_route_response(session, handler)
 
 
 @app.route('/api/explorer/<session_id>/git/stage', methods=['POST'])
@@ -5660,35 +5081,14 @@ def stage_explorer_git_file(session_id: str):
         return jsonify({"error": "Session not found"}), 404
     data = request.get_json(silent=True) or {}
     requested_path = data.get("path", "")
-    if _is_remote_explorer_session(session):
-        client = None
-        sftp = None
-        try:
-            client, sftp = _acquire_ssh_sftp(session)
-            root_path, file_path = _resolve_remote_explorer_candidate_path(
-                sftp, session, requested_path, allow_empty_root=False
-            )
-            _remote_git_stage_path(client, root_path, file_path)
-            summary = _get_remote_git_repo_summary(client, root_path)
-            return jsonify({"session_id": session.session_id, "root": root_path, **summary})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except _sftp_request_error_types() as exc:
-            return jsonify({"error": str(exc)}), 500
-        finally:
-            _release_ssh_sftp(session, client, sftp)
 
-    try:
-        root_path, file_path = _resolve_explorer_candidate_path(
-            session, requested_path, allow_empty_root=False
-        )
-        _git_stage_path(root_path, file_path)
-        summary = _get_git_repo_summary(root_path)
-        return jsonify({"session_id": session.session_id, "root": root_path, **summary})
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except OSError as exc:
-        return jsonify({"error": str(exc)}), 500
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
+        _git_stage_path(backend, root_path, file_path)
+        summary = _get_git_repo_summary(backend, root_path)
+        return {"root": root_path, **summary}
+
+    return _explorer_route_response(session, handler)
 
 
 @app.route('/api/explorer/<session_id>/git/unstage', methods=['POST'])
@@ -5699,35 +5099,14 @@ def unstage_explorer_git_file(session_id: str):
         return jsonify({"error": "Session not found"}), 404
     data = request.get_json(silent=True) or {}
     requested_path = data.get("path", "")
-    if _is_remote_explorer_session(session):
-        client = None
-        sftp = None
-        try:
-            client, sftp = _acquire_ssh_sftp(session)
-            root_path, file_path = _resolve_remote_explorer_candidate_path(
-                sftp, session, requested_path, allow_empty_root=False
-            )
-            _remote_git_unstage_path(client, root_path, file_path)
-            summary = _get_remote_git_repo_summary(client, root_path)
-            return jsonify({"session_id": session.session_id, "root": root_path, **summary})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except _sftp_request_error_types() as exc:
-            return jsonify({"error": str(exc)}), 500
-        finally:
-            _release_ssh_sftp(session, client, sftp)
 
-    try:
-        root_path, file_path = _resolve_explorer_candidate_path(
-            session, requested_path, allow_empty_root=False
-        )
-        _git_unstage_path(root_path, file_path)
-        summary = _get_git_repo_summary(root_path)
-        return jsonify({"session_id": session.session_id, "root": root_path, **summary})
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except OSError as exc:
-        return jsonify({"error": str(exc)}), 500
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
+        _git_unstage_path(backend, root_path, file_path)
+        summary = _get_git_repo_summary(backend, root_path)
+        return {"root": root_path, **summary}
+
+    return _explorer_route_response(session, handler)
 
 
 @app.route('/api/explorer/<session_id>/git/commit', methods=['POST'])
@@ -5738,34 +5117,14 @@ def commit_explorer_git(session_id: str):
         return jsonify({"error": "Session not found"}), 404
     data = request.get_json(silent=True) or {}
     message = data.get("message", "")
-    if _is_remote_explorer_session(session):
-        client = None
-        sftp = None
-        try:
-            client, sftp = _acquire_ssh_sftp(session)
-            root_path = _remote_explorer_root_directory(session)
-            if not root_path:
-                raise ValueError("Explorer root directory is not configured")
-            root_path = sftp.normalize(root_path)
-            _remote_git_commit(client, root_path, message)
-            summary = _get_remote_git_repo_summary(client, root_path)
-            return jsonify({"session_id": session.session_id, "root": root_path, **summary})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except _sftp_request_error_types() as exc:
-            return jsonify({"error": str(exc)}), 500
-        finally:
-            _release_ssh_sftp(session, client, sftp)
 
-    try:
-        root_path = _explorer_root_directory(session)
-        _git_commit(root_path, message)
-        summary = _get_git_repo_summary(root_path)
-        return jsonify({"session_id": session.session_id, "root": root_path, **summary})
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except OSError as exc:
-        return jsonify({"error": str(exc)}), 500
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path = backend.root_directory()
+        _git_commit(backend, root_path, message)
+        summary = _get_git_repo_summary(backend, root_path)
+        return {"root": root_path, **summary}
+
+    return _explorer_route_response(session, handler)
 
 
 @app.route('/api/explorer/<session_id>/git/publish', methods=['POST'])
@@ -5774,34 +5133,14 @@ def publish_explorer_git(session_id: str):
     session = session_manager.get_session(session_id)
     if session is None:
         return jsonify({"error": "Session not found"}), 404
-    if _is_remote_explorer_session(session):
-        client = None
-        sftp = None
-        try:
-            client, sftp = _acquire_ssh_sftp(session)
-            root_path = _remote_explorer_root_directory(session)
-            if not root_path:
-                raise ValueError("Explorer root directory is not configured")
-            root_path = sftp.normalize(root_path)
-            _remote_git_publish(client, root_path)
-            summary = _get_remote_git_repo_summary(client, root_path)
-            return jsonify({"session_id": session.session_id, "root": root_path, **summary})
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except _sftp_request_error_types() as exc:
-            return jsonify({"error": str(exc)}), 500
-        finally:
-            _release_ssh_sftp(session, client, sftp)
 
-    try:
-        root_path = _explorer_root_directory(session)
-        _git_publish(root_path)
-        summary = _get_git_repo_summary(root_path)
-        return jsonify({"session_id": session.session_id, "root": root_path, **summary})
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except OSError as exc:
-        return jsonify({"error": str(exc)}), 500
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path = backend.root_directory()
+        _git_publish(backend, root_path)
+        summary = _get_git_repo_summary(backend, root_path)
+        return {"root": root_path, **summary}
+
+    return _explorer_route_response(session, handler)
 
 
 @app.route('/api/sessions/active', methods=['GET'])
