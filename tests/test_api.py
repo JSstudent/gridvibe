@@ -6909,3 +6909,275 @@ class KnownHostsPersistenceTestCase(unittest.TestCase):
         api._connect_ssh_session(session.session_id, session)
 
         mock_client.load_host_keys.assert_called_once_with(self.known_hosts_path)
+
+
+class ConnectCloseToctouTestCase(unittest.TestCase):
+    """Finding 2.3 — a close during connect must not leak a live connection."""
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.known_hosts_patch = patch.object(
+            api, "KNOWN_HOSTS_PATH",
+            str(Path(self.temp_dir.name) / ".known_hosts"),
+        )
+        self.known_hosts_patch.start()
+        self.addCleanup(self.known_hosts_patch.stop)
+        api.session_manager.reset_sessions()
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+
+    def tearDown(self):
+        api.session_manager.reset_sessions()
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+
+    @patch("web.api.paramiko")
+    def test_connection_discarded_when_session_removed_mid_connect(self, mock_paramiko):
+        mock_client = MagicMock()
+        mock_paramiko.SSHClient.return_value = mock_client
+        mock_paramiko.SSHException = type("SSHException", (Exception,), {})
+        session = api.session_manager.create_session(
+            group_id="grp-race", host="127.0.0.1", directory="/tmp",
+            username="root", password="pass",
+        )
+        channel = MagicMock()
+
+        def invoke_shell(**_kwargs):
+            # Simulate a concurrent DELETE landing after the shell is opened
+            # but before the connection registry insert.
+            with api.session_manager.lock:
+                del api.session_manager.sessions[session.session_id]
+            return channel
+
+        mock_client.invoke_shell.side_effect = invoke_shell
+
+        api._connect_ssh_session(session.session_id, session)
+
+        with api.connection_lock:
+            self.assertNotIn(session.session_id, api.ssh_connections)
+            self.assertNotIn(session.session_id, api.session_output_buffers)
+        channel.close.assert_called()
+        mock_client.close.assert_called()
+
+    @patch("web.api.paramiko")
+    def test_connection_registered_when_session_still_exists(self, mock_paramiko):
+        mock_client = MagicMock()
+        mock_paramiko.SSHClient.return_value = mock_client
+        mock_paramiko.SSHException = type("SSHException", (Exception,), {})
+        session = api.session_manager.create_session(
+            group_id="grp-ok", host="127.0.0.1", directory="/tmp",
+            username="root", password="pass",
+        )
+
+        with patch.object(api, "_run_startup_sequence"), \
+                patch.object(api, "_stream_ssh_output"):
+            api._connect_ssh_session(session.session_id, session)
+
+        with api.connection_lock:
+            self.assertIn(session.session_id, api.ssh_connections)
+        self.assertEqual(
+            api.session_manager.get_session(session.session_id).status,
+            api.SessionStatus.CONNECTED,
+        )
+
+
+class EmitOutsideConnectionLockTestCase(unittest.TestCase):
+    """Finding 2.4 — terminal output is emitted without holding connection_lock."""
+
+    def setUp(self):
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+        self.addCleanup(self._clear_state)
+
+    def _clear_state(self):
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+
+    def test_stream_ssh_output_emits_without_connection_lock(self):
+        session_id = "emit-lock-ssh"
+
+        class FakeChannel:
+            def __init__(self):
+                self.closed = False
+                self._chunks = [b"hello"]
+
+            def settimeout(self, _timeout):
+                pass
+
+            def recv(self, _size):
+                if self._chunks:
+                    return self._chunks.pop(0)
+                return b""
+
+            def exit_status_ready(self):
+                return True
+
+            def close(self):
+                self.closed = True
+
+        with api.connection_lock:
+            api.ssh_connections[session_id] = {"kind": "ssh", "channel": FakeChannel()}
+
+        lock_owned_during_emit = []
+
+        def fake_emit(_event, payload, **_kwargs):
+            lock_owned_during_emit.append(api.connection_lock._is_owned())
+
+        with patch.object(api.socketio, "emit", side_effect=fake_emit):
+            api._stream_ssh_output(session_id)
+
+        self.assertEqual(lock_owned_during_emit, [False])
+        self.assertEqual(api._get_buffered_terminal_output(session_id), "")
+
+    def test_drain_until_prompt_emits_without_connection_lock(self):
+        session_id = "emit-lock-drain"
+
+        class FakePty:
+            def __init__(self):
+                self._chunks = ["booted"]
+
+            def read(self, _size):
+                return self._chunks.pop(0) if self._chunks else ""
+
+        lock_owned_during_emit = []
+
+        def fake_emit(_event, payload, **_kwargs):
+            lock_owned_during_emit.append(api.connection_lock._is_owned())
+
+        with patch.object(api.socketio, "emit", side_effect=fake_emit):
+            api._drain_until_prompt(session_id, {"pty_process": FakePty()}, timeout=1.0)
+
+        self.assertEqual(lock_owned_during_emit, [False])
+        self.assertEqual(api._get_buffered_terminal_output(session_id), "booted")
+
+
+class AgentDetectionCacheLockTestCase(unittest.TestCase):
+    """Finding 2.5 — slow detection probes run outside the cache lock."""
+
+    def setUp(self):
+        with api._agent_detection_cache_lock:
+            api._agent_detection_cache.clear()
+        self.addCleanup(self._clear_cache)
+
+    def _clear_cache(self):
+        with api._agent_detection_cache_lock:
+            api._agent_detection_cache.clear()
+
+    def test_probe_runs_unlocked_and_result_is_cached(self):
+        target = {
+            "environment_key": "windows_native",
+            "shell_kind": "cmd",
+            "distribution": "",
+            "host": "",
+            "port": 22,
+        }
+        lock_states = []
+
+        def fake_probe(_target, _binary):
+            lock_states.append(api._agent_detection_cache_lock.locked())
+            return {"found": True, "path": "C:/bin/claude"}
+
+        with patch.object(api, "_detect_agent_binary", side_effect=fake_probe) as probe:
+            first = api._detect_agent_binary_cached(target, "claude")
+            second = api._detect_agent_binary_cached(target, "claude")
+
+        self.assertEqual(lock_states, [False])
+        probe.assert_called_once()
+        self.assertEqual(first, second)
+        self.assertTrue(first["found"])
+
+
+class VoiceEngineSwitchTestCase(unittest.TestCase):
+    """Finding 2.6 — audio/stop route to the engine the recording started with."""
+
+    def setUp(self):
+        with api._active_voice_sessions_lock:
+            api._active_voice_sessions.clear()
+        self.addCleanup(self._clear_state)
+
+    def _clear_state(self):
+        with api._active_voice_sessions_lock:
+            api._active_voice_sessions.clear()
+
+    @patch("web.api.emit")
+    def test_stop_routes_to_engine_recorded_at_start(self, _mock_emit):
+        with api.app.test_request_context("/"):
+            api.request.sid = "client-1"  # type: ignore[attr-defined]
+
+            with patch.object(api, "voice_enabled", True), \
+                    patch.object(api, "voice_engine", "whisper"), \
+                    patch.object(api, "_start_whisper_voice_session") as start_whisper:
+                api.handle_voice_start({"session_id": "sess-voice"})
+            start_whisper.assert_called_once_with("sess-voice")
+
+            # The user switches the engine mid-recording; audio and stop must
+            # still route to the engine the recording started with.
+            with patch.object(api, "voice_engine", "vosk"), \
+                    patch.object(api, "_handle_whisper_audio_chunk") as whisper_audio, \
+                    patch.object(api, "_handle_vosk_audio_chunk") as vosk_audio:
+                api.handle_voice_audio({"session_id": "sess-voice", "audio": b"pcm"})
+            whisper_audio.assert_called_once_with("sess-voice", b"pcm")
+            vosk_audio.assert_not_called()
+
+            with patch.object(api, "voice_engine", "vosk"), \
+                    patch.object(api, "_stop_whisper_voice_session") as stop_whisper, \
+                    patch.object(api, "_stop_vosk_voice_session") as stop_vosk:
+                api.handle_voice_stop({"session_id": "sess-voice"})
+            stop_whisper.assert_called_once_with("sess-voice")
+            stop_vosk.assert_not_called()
+
+        with api._active_voice_sessions_lock:
+            self.assertNotIn("sess-voice", api._active_voice_sessions)
+
+    @patch("web.api.emit")
+    def test_audio_without_recorded_session_uses_configured_engine(self, _mock_emit):
+        with api.app.test_request_context("/"):
+            with patch.object(api, "voice_engine", "vosk"), \
+                    patch.object(api, "_handle_vosk_audio_chunk") as vosk_audio:
+                api.handle_voice_audio({"session_id": "sess-unknown", "audio": b"pcm"})
+            vosk_audio.assert_called_once_with("sess-unknown", b"pcm")
+
+
+class AgentInputTrackingLockTestCase(unittest.TestCase):
+    """Finding 2.10 — tracking state mutates under connection_lock and still works."""
+
+    def setUp(self):
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+
+    def test_double_interrupt_marks_agent_exited(self):
+        session = api.session_manager.create_session(
+            group_id="grp-agent", host="local", directory="/tmp",
+            startup_mode="agent", agent_selection="claude",
+        )
+        connection = {}
+
+        with patch.object(api, "_mark_runtime_agent_exited", return_value=True) as mark:
+            api._track_terminal_agent_input(session.session_id, connection, "\x03")
+            mark.assert_not_called()
+            api._track_terminal_agent_input(session.session_id, connection, "\x03")
+            mark.assert_called_once_with(session.session_id, "interrupt")
+
+    def test_typed_line_is_reconstructed_across_events(self):
+        session = api.session_manager.create_session(
+            group_id="grp-line", host="local", directory="/tmp",
+        )
+        connection = {}
+
+        api._track_terminal_agent_input(session.session_id, connection, "cla")
+        api._track_terminal_agent_input(session.session_id, connection, "ude")
+        self.assertEqual(connection["_gridvibe_input_line"], "claude")
+
+        with patch.object(api, "_agent_from_terminal_command", return_value=("claude", "claude")), \
+                patch.object(api, "_broadcast_session_status"):
+            api._track_terminal_agent_input(session.session_id, connection, "\r")
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "agent")
+        self.assertEqual(updated.agent_selection, "claude")
+        self.assertEqual(connection["_gridvibe_input_line"], "")

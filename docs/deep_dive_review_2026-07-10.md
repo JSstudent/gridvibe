@@ -286,6 +286,14 @@ the terminals page shows no layout metadata for it.
 
 Option 1 is a two-line fix; option 2 is the structurally correct one.
 
+> **✅ Implemented (2026-07-11).** Option 1: `clear_disconnected_sessions` in
+> `sessions/manager.py` now skips empty groups younger than
+> `EMPTY_GROUP_GRACE_SECONDS` (5 s). An explicit group close must still remove the
+> group immediately, so the method gained a `force_group_ids` parameter that
+> bypasses the grace period; `DELETE /api/sessions?group=<id>` passes the closed
+> group's id. Covered by `EmptyGroupGracePeriodTestCase` in
+> `tests/test_session_manager.py`.
+
 ### 2.3 Connect-vs-close TOCTOU can leak a live SSH client / PTY — **Medium**
 
 **Location:** `web/api.py:4570-4578` (`_connect_ssh_session`), `:4678-4686` (`_connect_local_session`)
@@ -320,6 +328,14 @@ if stale:
 `connection_lock` here is safe because no code path takes the two locks in the opposite order —
 worth a comment at both lock definitions.)
 
+> **✅ Implemented (2026-07-11).** Both `_connect_ssh_session` and
+> `_connect_local_session` now re-validate the session inside `connection_lock` and
+> only insert into `ssh_connections` when it still exists; a stale connection is
+> shut down after the lock is released. Lock-ordering comments added at both the
+> `connection_lock` and `SessionManager.lock` definitions (verified: nothing takes
+> the locks in the opposite order — `register_callback` is unused outside manager
+> tests). Covered by `ConnectCloseToctouTestCase` in `tests/test_api.py`.
+
 ### 2.4 `socketio.emit` happens while holding `connection_lock` — **Medium**
 
 **Location:** `web/api.py` — `_drain_until_prompt` (:2519-2526), `_stream_ssh_output`
@@ -342,6 +358,15 @@ if output:
 The replay-vs-live ordering concern in `handle_join_session` can be preserved by capturing the
 buffer snapshot under the lock and emitting after, since `join_room` already happened under the
 lock (late chunks arrive after the replay by construction of the room membership).
+
+> **✅ Implemented (2026-07-11).** All five sites now cache under the lock (via
+> `_cache_terminal_output`, which takes `connection_lock` itself) and emit outside
+> it: `_drain_until_prompt`, `_stream_ssh_output`, the three `_stream_local_output`
+> branches, and `handle_join_session` (buffer snapshot + `join_room` under the
+> lock, replay emit after). Accepted trade-off: a client joining in the window
+> between a pump's cache and its emit can receive that chunk twice (once in the
+> replay, once live) — cosmetic and rare, vs. one wedged websocket stalling every
+> pane. Covered by `EmitOutsideConnectionLockTestCase` in `tests/test_api.py`.
 
 ### 2.5 Agent binary detection runs a subprocess while holding the global cache lock — **Medium**
 
@@ -367,6 +392,12 @@ return detection
 Duplicate concurrent probes for the *same* key are acceptable (idempotent, cached afterwards);
 if not, keep a per-key `threading.Lock` in a second dict.
 
+> **✅ Implemented (2026-07-11).** `_detect_agent_binary_cached` now uses the
+> check / compute-outside / re-store pattern, so concurrent preflights probe in
+> parallel instead of serializing behind `_agent_detection_cache_lock`. Duplicate
+> concurrent probes for the same key were accepted as per the note above. Covered
+> by `AgentDetectionCacheLockTestCase` in `tests/test_api.py`.
+
 ### 2.6 Voice engine may differ between start / audio / stop — **Low**
 
 **Location:** `web/api.py:6728-6789` (`handle_voice_start/audio/stop` all re-read the
@@ -380,6 +411,12 @@ start overwrites it.
 **Proposed implementation.** Record the engine per active voice session at start
 (`_active_voice_sessions[session_id] = engine`) and dispatch `voice_audio`/`voice_stop` based
 on the recorded value, deleting the entry on stop. ~10 lines.
+
+> **✅ Implemented (2026-07-11).** As proposed: `handle_voice_start` records the
+> engine in a new `_active_voice_sessions` dict (guarded by
+> `_active_voice_sessions_lock`); `voice_audio` reads it and `voice_stop` pops it,
+> both falling back to the configured engine for unknown sessions. Covered by
+> `VoiceEngineSwitchTestCase` in `tests/test_api.py`.
 
 ### 2.7 Whisper model instance survives settings changes — **Medium**
 
@@ -424,6 +461,12 @@ with self.lock:
     self.sessions[session_id] = session
 ```
 
+> **✅ Implemented (2026-07-11).** New `SessionManager._generate_session_id`
+> (retry-on-collision, caller holds the lock); both `create_session` and
+> `append_session_to_group` now generate the id and insert the session under a
+> single `self.lock` hold. Covered by `SessionIdCollisionTestCase` in
+> `tests/test_session_manager.py`.
+
 ### 2.9 `active_launch_options` mutated per-request without a lock — **Low**
 
 **Location:** `web/api.py:945-949, 5656-5662`
@@ -435,6 +478,12 @@ layout/count pair — cosmetic, but easy to harden.
 **Proposed implementation.** Replace wholesale instead of updating in place:
 `active_launch_options = {**active_launch_options, ...}` assigned to a module global (atomic
 reference swap), or guard with a small lock.
+
+> **✅ Implemented (2026-07-11).** `create_sessions` now swaps the module global
+> atomically (`global` + dict rebuild), and the three multi-key readers
+> (`_get_group_response_meta` and the two group-less `GET /api/sessions` payload
+> branches) snapshot the reference into a local before subscripting, so each
+> response reads one consistent dict.
 
 ### 2.10 Runtime agent tracking mutates connection-dict state outside `connection_lock` — **Low** *(new 2026-07-11)*
 
@@ -456,6 +505,14 @@ per-keystroke hot path).
 work inside is trivial string handling, so lock hold time stays negligible), or key the
 line-reconstruction state per client (`(request.sid, session_id)`) so concurrent writers never
 share a buffer. Batchable with 2.9 into whichever PR touches `handle_terminal_input` next.
+
+> **✅ Implemented (2026-07-11).** First option: `_track_terminal_agent_input` now
+> does all `_gridvibe_*` read-modify-writes (interrupt counters and input-line
+> reconstruction) inside one `connection_lock` hold, while
+> `_mark_runtime_agent_exited`, the metadata promotion, and status broadcasts run
+> after the lock is released (keeping emits out of the lock per 2.4). The
+> per-keystroke `get_session` call noted above remains. Covered by
+> `AgentInputTrackingLockTestCase` in `tests/test_api.py`.
 
 ---
 
@@ -1486,7 +1543,9 @@ posture paragraph.
 4. **Concurrency hardening:** 2.3 + 2.4 together (both are about `connection_lock` discipline —
    re-validate inside the lock, emit outside it), then 2.2 (empty-group deletion race) and 2.5
    (agent detection outside the cache lock), with the low-severity 2.6/2.8/2.9/2.10 batched
-   into whichever PR touches their files anyway.
+   into whichever PR touches their files anyway. ✅ **All eight implemented 2026-07-11**
+   (2.2, 2.3, 2.4, 2.5, 2.6, 2.8, 2.9, 2.10 — see the per-finding notes above; 2.1 and 2.7
+   were already done in the quick-wins pass, so section 2 is now fully closed).
 5. **Structural:** 6.1 (explorer backend abstraction — slots in naturally on top of the 3.1
    connection pool) → 6.2 (module split) → 3.5/6.4 (template/shared-JS extraction, which also
    unblocks 6.5's function decomposition) → 6.3/6.6 as small cleanups along the way, each step

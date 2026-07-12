@@ -1698,9 +1698,13 @@ def _detect_agent_binary_cached(target: Dict[str, Any], binary: str) -> Dict[str
                 return dict(cached_payload)
             _agent_detection_cache.pop(key, None)
 
-        detection = _detect_agent_binary(target, binary)
+    # Probe outside the lock: the subprocess can take up to ~8s (WSL) and must
+    # not serialize concurrent preflights for other agents/rows. Duplicate
+    # concurrent probes for the same key are idempotent and cached afterwards.
+    detection = _detect_agent_binary(target, binary)
+    with _agent_detection_cache_lock:
         _agent_detection_cache[key] = (time.monotonic(), dict(detection))
-        return detection
+    return detection
 
 
 def _check_install_requirement(requirement: Dict[str, Any], target: Dict[str, Any]) -> Tuple[bool, str]:
@@ -2002,6 +2006,10 @@ session_output_buffers: Dict[str, Deque[str]] = {}
 TERMINAL_OUTPUT_BUFFER_MAX_CHARS = 50000
 client_joined_sessions: Dict[str, set[str]] = {}
 _MAX_TRACKED_SOCKET_CLIENTS = 1000
+# Lock ordering: connection_lock may be taken before session_manager.lock
+# (e.g. re-validating a session inside the lock in the connectors), never the
+# other way around — nothing may call into connection_lock while holding
+# session_manager.lock.
 connection_lock = threading.RLock()
 folder_dialog_lock = threading.Lock()
 
@@ -2199,10 +2207,11 @@ def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
     """Return layout metadata for one session group."""
     group = session_manager.get_group(group_id)
     if not group:
+        launch_options = active_launch_options
         return {
             "group": None,
-            "layout": active_launch_options["layout"],
-            "connection_mode": active_launch_options["connection_mode"],
+            "layout": launch_options["layout"],
+            "connection_mode": launch_options["connection_mode"],
             "terminal_count": 0,
             "workspace_layout": None,
             "surface_mode": app_surface_mode,
@@ -2516,13 +2525,14 @@ def _drain_until_prompt(
             return
 
         if output:
-            with connection_lock:
-                _cache_terminal_output(session_id, output)
-                socketio.emit(
-                    'terminal_output',
-                    {'session_id': session_id, 'data': output},
-                    room=session_id  # type: ignore
-                )
+            _cache_terminal_output(session_id, output)
+            # Emit outside connection_lock: a slow client write must not stall
+            # every other terminal's pump behind the global lock.
+            socketio.emit(
+                'terminal_output',
+                {'session_id': session_id, 'data': output},
+                room=session_id  # type: ignore
+            )
             time.sleep(0.15)
             return
 
@@ -2605,13 +2615,14 @@ def _stream_ssh_output(session_id: str):
                 break
 
             output = data.decode("utf-8", errors="ignore")
-            with connection_lock:
-                _cache_terminal_output(session_id, output)
-                socketio.emit(
-                    'terminal_output',
-                    {'session_id': session_id, 'data': output},
-                    room=session_id # type: ignore
-                )
+            _cache_terminal_output(session_id, output)
+            # Emit outside connection_lock: a slow client write must not stall
+            # every other terminal's pump behind the global lock.
+            socketio.emit(
+                'terminal_output',
+                {'session_id': session_id, 'data': output},
+                room=session_id # type: ignore
+            )
     except Exception as e:
         session = session_manager.get_session(session_id)
         if session and _is_explorer_session(session):
@@ -2658,13 +2669,12 @@ def _stream_local_output(session_id: str):
                     break
 
                 if output:
-                    with connection_lock:
-                        _cache_terminal_output(session_id, output)
-                        socketio.emit(
-                            'terminal_output',
-                            {'session_id': session_id, 'data': output},
-                            room=session_id # type: ignore
-                        )
+                    _cache_terminal_output(session_id, output)
+                    socketio.emit(
+                        'terminal_output',
+                        {'session_id': session_id, 'data': output},
+                        room=session_id # type: ignore
+                    )
                     continue
 
                 try:
@@ -2682,13 +2692,12 @@ def _stream_local_output(session_id: str):
                     if ready:
                         output = os.read(master_fd, 4096).decode("utf-8", errors="ignore")
                         if output:
-                            with connection_lock:
-                                _cache_terminal_output(session_id, output)
-                                socketio.emit(
-                                    'terminal_output',
-                                    {'session_id': session_id, 'data': output},
-                                    room=session_id # type: ignore
-                                )
+                            _cache_terminal_output(session_id, output)
+                            socketio.emit(
+                                'terminal_output',
+                                {'session_id': session_id, 'data': output},
+                                room=session_id # type: ignore
+                            )
                         continue
                 except OSError:
                     break
@@ -2707,13 +2716,12 @@ def _stream_local_output(session_id: str):
             output = read1(4096) if read1 is not None else stdout_handle.read(1)
             if output:
                 chunk = output.decode("utf-8", errors="ignore")
-                with connection_lock:
-                    _cache_terminal_output(session_id, chunk)
-                    socketio.emit(
-                        'terminal_output',
-                        {'session_id': session_id, 'data': chunk},
-                        room=session_id # type: ignore
-                    )
+                _cache_terminal_output(session_id, chunk)
+                socketio.emit(
+                    'terminal_output',
+                    {'session_id': session_id, 'data': chunk},
+                    room=session_id # type: ignore
+                )
                 continue
 
             if process is not None and process.poll() is not None:
@@ -4829,44 +4837,54 @@ def _track_terminal_agent_input(
 ) -> None:
     """Track submitted input lines and promote recognized agent commands to runtime metadata."""
     text = _TERMINAL_INPUT_ESCAPE_SEQUENCE.sub("", str(input_data or ""))
-    current_line = str(connection.get("_gridvibe_input_line") or "")
     submitted_lines = []
+    exit_reason = None
 
     session = session_manager.get_session(session_id)
-    if session and session.startup_mode == "agent":
-        if "\x04" in text:
-            _mark_runtime_agent_exited(session_id, "end-of-input")
-            connection["_gridvibe_input_line"] = ""
-            return
-        if "\x03" in text:
-            agent_key = str(session.agent_selection or "").strip().lower()
-            now = time.monotonic()
-            last_interrupt = float(connection.get("_gridvibe_agent_interrupt_at") or 0.0)
-            interrupt_count = (
-                int(connection.get("_gridvibe_agent_interrupt_count") or 0) + 1
-                if now - last_interrupt <= 2.0
-                else 1
-            )
-            connection["_gridvibe_agent_interrupt_at"] = now
-            connection["_gridvibe_agent_interrupt_count"] = interrupt_count
-            if agent_key == "codex" or interrupt_count >= 2:
-                _mark_runtime_agent_exited(session_id, "interrupt")
+
+    # The _gridvibe_* tracking keys are shared across Socket.IO handler
+    # threads (two windows may drive the same session), so read-modify-write
+    # them only under connection_lock; the string handling inside is trivial.
+    # Metadata updates and broadcasts happen after the lock is released.
+    with connection_lock:
+        if session and session.startup_mode == "agent":
+            if "\x04" in text:
                 connection["_gridvibe_input_line"] = ""
-                return
+                exit_reason = "end-of-input"
+            elif "\x03" in text:
+                agent_key = str(session.agent_selection or "").strip().lower()
+                now = time.monotonic()
+                last_interrupt = float(connection.get("_gridvibe_agent_interrupt_at") or 0.0)
+                interrupt_count = (
+                    int(connection.get("_gridvibe_agent_interrupt_count") or 0) + 1
+                    if now - last_interrupt <= 2.0
+                    else 1
+                )
+                connection["_gridvibe_agent_interrupt_at"] = now
+                connection["_gridvibe_agent_interrupt_count"] = interrupt_count
+                if agent_key == "codex" or interrupt_count >= 2:
+                    connection["_gridvibe_input_line"] = ""
+                    exit_reason = "interrupt"
 
-    for character in text:
-        if character in {"\r", "\n"}:
-            if current_line.strip():
-                submitted_lines.append(current_line)
-            current_line = ""
-        elif character in {"\b", "\x7f"}:
-            current_line = current_line[:-1]
-        elif character in {"\x03", "\x15"}:
-            current_line = ""
-        elif character.isprintable() or character == "\t":
-            current_line = (current_line + character)[-_MAX_TRACKED_TERMINAL_COMMAND_LENGTH:]
+        if exit_reason is None:
+            current_line = str(connection.get("_gridvibe_input_line") or "")
+            for character in text:
+                if character in {"\r", "\n"}:
+                    if current_line.strip():
+                        submitted_lines.append(current_line)
+                    current_line = ""
+                elif character in {"\b", "\x7f"}:
+                    current_line = current_line[:-1]
+                elif character in {"\x03", "\x15"}:
+                    current_line = ""
+                elif character.isprintable() or character == "\t":
+                    current_line = (current_line + character)[-_MAX_TRACKED_TERMINAL_COMMAND_LENGTH:]
+            connection["_gridvibe_input_line"] = current_line
 
-    connection["_gridvibe_input_line"] = current_line
+    if exit_reason is not None:
+        _mark_runtime_agent_exited(session_id, exit_reason)
+        return
+
     for submitted_line in submitted_lines:
         if submitted_line.strip().lower() in {"/exit", "/quit"}:
             if _mark_runtime_agent_exited(session_id, "exit command"):
@@ -5008,14 +5026,17 @@ def _connect_ssh_session(session_id: str, session: Any):
             "channel": channel,
         }
 
-        if session_manager.get_session(session_id) is None:
+        # Re-validate inside the lock so a concurrent close cannot slip between
+        # the session check and the registry insert (which would leak the client).
+        with connection_lock:
+            stale = session_manager.get_session(session_id) is None
+            if not stale:
+                ssh_connections[session_id] = connection
+                session_output_buffers[session_id] = deque()
+        if stale:
             logger.info("[%s] Session was removed before SSH startup completed", session_id)
             _shutdown_connection(connection)
             return
-
-        with connection_lock:
-            ssh_connections[session_id] = connection
-            session_output_buffers[session_id] = deque()
 
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         _broadcast_session_status(session_id)
@@ -5116,14 +5137,17 @@ def _connect_local_session(session_id: str, session: Any):
                 "launch_cwd_applied": bool(launch_cwd or wsl_startup_directory),
             }
 
-        if session_manager.get_session(session_id) is None:
+        # Re-validate inside the lock so a concurrent close cannot slip between
+        # the session check and the registry insert (which would leak the PTY).
+        with connection_lock:
+            stale = session_manager.get_session(session_id) is None
+            if not stale:
+                ssh_connections[session_id] = connection
+                session_output_buffers[session_id] = deque()
+        if stale:
             logger.info("[%s] Session was removed before local shell startup completed", session_id)
             _shutdown_connection(connection)
             return
-
-        with connection_lock:
-            ssh_connections[session_id] = connection
-            session_output_buffers[session_id] = deque()
 
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         _broadcast_session_status(session_id)
@@ -5317,12 +5341,13 @@ def get_sessions():
     if group_id:
         payload.update(_get_group_response_meta(group_id))
     else:
+        launch_options = active_launch_options
         payload.update(
             {
                 "group": None,
-                "layout": active_launch_options["layout"],
-                "connection_mode": active_launch_options["connection_mode"],
-                "terminal_count": active_launch_options["terminal_count"],
+                "layout": launch_options["layout"],
+                "connection_mode": launch_options["connection_mode"],
+                "terminal_count": launch_options["terminal_count"],
                 "workspace_layout": None,
                 "surface_mode": app_surface_mode,
             }
@@ -5792,11 +5817,12 @@ def get_active_sessions():
         meta = _get_group_response_meta(group_id)
     else:
         sessions = session_manager.get_active_sessions()
+        launch_options = active_launch_options
         meta = {
             "group": None,
-            "layout": active_launch_options["layout"],
-            "connection_mode": active_launch_options["connection_mode"],
-            "terminal_count": active_launch_options["terminal_count"],
+            "layout": launch_options["layout"],
+            "connection_mode": launch_options["connection_mode"],
+            "terminal_count": launch_options["terminal_count"],
             "workspace_layout": None,
         }
     return jsonify({
@@ -6018,6 +6044,7 @@ def create_sessions():
         ]
     }
     """
+    global active_launch_options
     try:
         data = request.get_json()
         logger.info(f"POST /api/sessions  body={data}")
@@ -6100,13 +6127,14 @@ def create_sessions():
 
         launch_warnings = _sanitize_agent_launch_commands(connection_mode, prepared_sessions)
 
-        active_launch_options.update(
-            {
-                "connection_mode": connection_mode,
-                "layout": layout,
-                "terminal_count": len(prepared_sessions),
-            }
-        )
+        # Atomic reference swap instead of in-place update so concurrent
+        # readers never observe a half-updated layout/count pair.
+        active_launch_options = {
+            **active_launch_options,
+            "connection_mode": connection_mode,
+            "layout": layout,
+            "terminal_count": len(prepared_sessions),
+        }
 
         if stable_group_id:
             _replace_group_sessions(stable_group_id)
@@ -6468,7 +6496,9 @@ def close_all_sessions():
             session_manager.close_session(session.session_id)
             _close_ssh_connection(session.session_id, clear_buffer=True)
 
-        session_manager.clear_disconnected_sessions()
+        # The user explicitly closed this group, so it must not survive on the
+        # empty-group grace period.
+        session_manager.clear_disconnected_sessions(force_group_ids={group_id})
         _broadcast_session_groups_updated("group_closed")
         return jsonify({"message": "Session group closed successfully", "group_id": group_id})
 
@@ -6540,16 +6570,18 @@ def handle_join_session(data):
             joined_sessions.add(session_id)
         join_room(session_id)
         logger.info(f"Client {request.sid} joined session {session_id}") # type: ignore
+        # Snapshot the replay buffer while still holding the lock; the emit
+        # happens outside it so a slow client cannot stall other terminals.
+        # join_room already happened under the lock, so any output cached after
+        # this point reaches the client live, after the replay.
         buffered_output = _get_buffered_terminal_output(session_id) if should_replay_buffer else ""
 
-        if buffered_output:
-            # Serialize replay with live output streaming so startup output is not
-            # delivered once from the buffer and again from the active stream.
-            buffered_output = _TERMINAL_QUERY_RE.sub('', buffered_output)
-            emit('terminal_output', {
-                'session_id': session_id,
-                'data': buffered_output
-            })
+    if buffered_output:
+        buffered_output = _TERMINAL_QUERY_RE.sub('', buffered_output)
+        emit('terminal_output', {
+            'session_id': session_id,
+            'data': buffered_output
+        })
 
 
 @socketio.on('leave_session')
@@ -6653,6 +6685,10 @@ _whisper_model_params = None
 _whisper_model_lock = threading.Lock()
 _whisper_audio_buffers: Dict[str, bytearray] = {}
 _whisper_audio_lock = threading.Lock()
+# Engine each active recording started with, so audio/stop keep routing to it
+# even if the user switches engines in App Settings mid-recording.
+_active_voice_sessions: Dict[str, str] = {}
+_active_voice_sessions_lock = threading.Lock()
 
 
 def _whisper_engine_available() -> bool:
@@ -7199,7 +7235,11 @@ def handle_voice_start(data):
         emit('voice_status', {'status': 'error', 'message': 'Missing session_id'})
         return
 
-    if voice_engine == 'whisper':
+    engine = 'whisper' if voice_engine == 'whisper' else 'vosk'
+    with _active_voice_sessions_lock:
+        _active_voice_sessions[session_id] = engine
+
+    if engine == 'whisper':
         _start_whisper_voice_session(session_id)
         return
 
@@ -7217,7 +7257,10 @@ def handle_voice_audio(data):
     if not session_id or not audio:
         return
 
-    if voice_engine == 'whisper':
+    with _active_voice_sessions_lock:
+        engine = _active_voice_sessions.get(session_id, voice_engine)
+
+    if engine == 'whisper':
         _handle_whisper_audio_chunk(session_id, audio)
         return
 
@@ -7236,7 +7279,10 @@ def handle_voice_stop(data):
     if not session_id:
         return
 
-    if voice_engine == 'whisper':
+    with _active_voice_sessions_lock:
+        engine = _active_voice_sessions.pop(session_id, voice_engine)
+
+    if engine == 'whisper':
         _stop_whisper_voice_session(session_id)
     else:
         _stop_vosk_voice_session(session_id)
