@@ -7,25 +7,10 @@
 
 
 
-    function syncNativeTheme(resolvedTheme) {
-        try {
-            const bridge = window.pywebview?.api;
-            if (bridge?.set_native_theme) {
-                bridge.set_native_theme(resolvedTheme).catch(error => {
-                    console.error('[GridVibe Sessions] native theme sync failed:', error);
-                });
-            }
-        } catch (error) {
-            console.error('[GridVibe Sessions] native theme sync failed:', error);
-        }
-    }
-
-    function applyTheme(theme) {
-        const preference = normalizeThemePreference(theme);
-        const resolved = resolveTheme(preference);
-        document.documentElement.setAttribute('data-theme', resolved);
-        document.documentElement.setAttribute('data-theme-preference', preference);
-        try { localStorage.setItem(THEME_STORAGE_KEY, preference); } catch (_) {}
+    /* Theme helpers live in shared.js; this hook adds the terminals-specific
+       behaviour (topbar toggle label + default-explorer theme sync). Cycling
+       the theme here now persists it via /api/app-config like the launcher. */
+    function onThemeApplied(preference) {
         const btn = document.getElementById('themeToggleBtn');
         if (btn) {
             btn.textContent =
@@ -33,7 +18,6 @@
                 : preference === 'dark' ? '🌙 Dark'
                 : '◐ System';
         }
-        syncNativeTheme(resolved);
         syncDefaultExplorerThemes();
     }
 
@@ -41,33 +25,7 @@
         return document.documentElement.getAttribute('data-theme') || resolveTheme(getStoredTheme() || 'system');
     }
 
-    function cycleTheme() {
-        const current = getStoredTheme() || 'system';
-        const nextTheme =
-            current === 'system' ? 'light'
-            : current === 'light' ? 'dark'
-            : 'system';
-        applyTheme(nextTheme);
-    }
-
-    (function initTheme() {
-        applyTheme(getStoredTheme() || 'system');
-        window.addEventListener('pywebviewready', () => {
-            syncNativeTheme(document.documentElement.getAttribute('data-theme') || resolveTheme(getStoredTheme() || 'system'));
-        });
-        const mediaQuery = window.matchMedia('(prefers-color-scheme: light)');
-        const listener = () => {
-            const themePreference = document.documentElement.getAttribute('data-theme-preference') || getStoredTheme() || 'system';
-            if (themePreference === 'system') {
-                applyTheme('system');
-            }
-        };
-        if (typeof mediaQuery.addEventListener === 'function') {
-            mediaQuery.addEventListener('change', listener);
-        } else if (typeof mediaQuery.addListener === 'function') {
-            mediaQuery.addListener(listener);
-        }
-    })();
+    initTheme();
 
     function normalizeSurfaceMode(mode) {
         return mode === 'max' ? 'max' : 'normal';
@@ -967,24 +925,6 @@
 
 
 
-    function joinDirectories(baseDir, childDir, mode) {
-        const rawBase = String(baseDir || '').trim();
-        const base = rawBase === '/' ? '/' : rawBase.replace(/[\\/]+$/, '');
-        const child = String(childDir || '').trim().replace(/^[\\/]+/, '');
-        if (!base) {
-            return child;
-        }
-        if (!child) {
-            return base;
-        }
-
-        const separator = mode === 'wsl' && base.includes('\\') && !base.includes('/') ? '\\' : '/';
-        const normalizedChild = child.replace(/[\\/]+/g, separator);
-        return `${base}${separator}${normalizedChild}`;
-    }
-
-
-
 
     function buildSavedSessionLaunchName(savedSession, config) {
         const sessionId = String(savedSession?.id || '').trim();
@@ -1010,35 +950,6 @@
         return `Session ${new Date().toLocaleTimeString()}`;
     }
 
-    function buildSavedSessionTags(session) {
-        const tags = [];
-        const sessionId = String(session?.id || '').trim();
-        if (session?.is_default) {
-            tags.push('<span class="saved-session-tag">Default</span>');
-        }
-        if (sessionId && savedSessionIdFromGroupId(activeGroupId) === sessionId) {
-            tags.push('<span class="saved-session-tag current">Current</span>');
-        }
-        return tags.join('');
-    }
-
-    function buildSavedSessionCard(session) {
-        return `
-            <button type="button" class="saved-session-item" data-session-id="${escHtml(session.id)}">
-                <span class="saved-session-content">
-                    <span class="saved-session-topline">
-                        <span class="saved-session-name">${escHtml(session.name)}</span>
-                        <span class="saved-session-tags">${buildSavedSessionTags(session)}</span>
-                    </span>
-                    <span class="saved-session-meta">
-                        ${escHtml(getConnectionModeLabel(session.connection_mode))} &bull; ${escHtml(String(session.terminal_count))} terminal${session.terminal_count === 1 ? '' : 's'} &bull; ${escHtml(session.layout)}
-                    </span>
-                    <span class="saved-session-id">Updated ${escHtml(session.updated_at)} &bull; ${escHtml(session.id)}</span>
-                </span>
-            </button>
-        `;
-    }
-
     function closeSavedSessionModal(result = null) {
         const modal = document.getElementById('savedSessionsModal');
         modal.classList.remove('visible');
@@ -1057,7 +968,9 @@
         const modal = document.getElementById('savedSessionsModal');
         const list = document.getElementById('savedSessionsList');
         const footerCopy = document.getElementById('savedSessionsFooterCopy');
-        list.innerHTML = sessions.map(session => buildSavedSessionCard(session)).join('');
+        list.innerHTML = sessions.map(session => buildSavedSessionCard(session, {
+            currentSavedSessionId: savedSessionIdFromGroupId(activeGroupId)
+        })).join('');
         footerCopy.textContent = sessions.length
             ? ''
             : 'No saved sessions found.';
@@ -3701,6 +3614,41 @@
     /* ─────────────────────────────────────────────
        Build the grid from a sessions array (once)
     ───────────────────────────────────────────── */
+    function createPaneInstance(session) {
+        if (isExplorerSession(session)) {
+            return {
+                _session: session,
+                _paneType: 'explorer',
+                _attached: false,
+                _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
+                _explorerGitSidebarOpen: Boolean(session.explorer_git_open)
+            };
+        }
+        if (isBrowserSession(session)) {
+            return { _session: session, _paneType: 'browser', _attached: false };
+        }
+        return makeTerminal();
+    }
+
+    /* Header buttons must not start a card drag or steal terminal focus. */
+    function wireCardButton(card, selector, onClick) {
+        const button = card.querySelector(selector);
+        if (!button) {
+            return null;
+        }
+        button.draggable = false;
+        button.addEventListener('mousedown', event => {
+            event.preventDefault();
+            event.stopPropagation();
+        });
+        button.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            onClick(event);
+        });
+        return button;
+    }
+
     function buildGrid(sessions, layout) {
         const grid  = document.getElementById('terminalsGrid');
         const count = sessions.length;
@@ -3722,42 +3670,49 @@
         grid.innerHTML = '';
 
         sessions.forEach((session, i) => {
-            const isExplorer = isExplorerSession(session);
-            const isBrowser = isBrowserSession(session);
-            /* create pane instance */
-            const t = isExplorer
-                ? {
-                    _session: session,
-                    _paneType: 'explorer',
-                    _attached: false,
-                    _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
-                    _explorerGitSidebarOpen: Boolean(session.explorer_git_open)
-                }
-                : (isBrowser
-                    ? { _session: session, _paneType: 'browser', _attached: false }
-                    : makeTerminal());
+            const t = createPaneInstance(session);
             t._session = session;
             terminals.push(t);
             sessionIds.push(null);
 
-            /* card HTML */
-            const card = document.createElement('div');
-            card.className = `terminal-container ${isExplorer ? 'explorer-pane' : ''} ${isBrowser ? 'browser-pane' : ''}`.trim();
-            card.id = `tc-${i}`;
-            card.dataset.slot = String(i);
-            const explorerThemeKey = session.session_id || `${activeGroupId || 'group'}:${i}`;
-            const initialExplorerTheme = getExplorerTheme(explorerThemeKey);
-            if (isExplorer) {
-                card.dataset.explorerThemeKey = explorerThemeKey;
-                card.dataset.explorerThemeSource = hasExplorerThemeOverride(explorerThemeKey) ? 'override' : 'default';
-                if (card.dataset.explorerThemeSource === 'override') {
-                    card.dataset.explorerTheme = initialExplorerTheme;
-                }
+            const card = buildPaneCard(session, i);
+            wirePaneControls(card, i);
+            grid.appendChild(card);
+        });
+
+        /* wire up terminal input events now that DOM elements exist */
+        terminals.forEach((t, i) => wirePaneInputForwarding(t, i));
+
+        document.getElementById('emptyState').classList.remove('visible');
+        gridBuilt = true;
+        visibleGroupId = activeGroupId;
+        updateSessionChrome(count, activeGroupId);
+        updateAllSplitButtonStates();
+        renderResizeHandles();
+    }
+
+    /* Card DOM for one pane (terminal / explorer / browser); wiring happens
+       in wirePaneControls so this stays a pure element builder. */
+    function buildPaneCard(session, i) {
+        const isExplorer = isExplorerSession(session);
+        const isBrowser = isBrowserSession(session);
+        const card = document.createElement('div');
+        card.className = `terminal-container ${isExplorer ? 'explorer-pane' : ''} ${isBrowser ? 'browser-pane' : ''}`.trim();
+        card.id = `tc-${i}`;
+        card.dataset.slot = String(i);
+        const explorerThemeKey = session.session_id || `${activeGroupId || 'group'}:${i}`;
+        const initialExplorerTheme = getExplorerTheme(explorerThemeKey);
+        if (isExplorer) {
+            card.dataset.explorerThemeKey = explorerThemeKey;
+            card.dataset.explorerThemeSource = hasExplorerThemeOverride(explorerThemeKey) ? 'override' : 'default';
+            if (card.dataset.explorerThemeSource === 'override') {
+                card.dataset.explorerTheme = initialExplorerTheme;
             }
-            const sessionColour = tabColourForGroup(activeGroupId);
-            card.style.setProperty('--session-color', sessionColour);
-            card.style.setProperty('--session-color-dim', hexToRgba(sessionColour, 0.45));
-            card.innerHTML = `
+        }
+        const sessionColour = tabColourForGroup(activeGroupId);
+        card.style.setProperty('--session-color', sessionColour);
+        card.style.setProperty('--session-color-dim', hexToRgba(sessionColour, 0.45));
+        card.innerHTML = `
                 <div class="terminal-header">
                     <div class="terminal-info">
                         <span class="terminal-name" id="tname-${i}">
@@ -3920,250 +3875,87 @@
                     </div>
                 </div>
             `;
-            wireCardDragAndDrop(card, card.querySelector('.terminal-header'));
-            const refreshButton = card.querySelector(`[data-terminal-refresh="${i}"]`);
-            if (refreshButton) {
-                refreshButton.draggable = false;
-                refreshButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                refreshButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    refreshTerminalDisplay(i);
-                });
-            }
-            const browserOpenButton = card.querySelector(`[data-browser-open="${i}"]`);
-            if (browserOpenButton) {
-                browserOpenButton.draggable = false;
-                browserOpenButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                browserOpenButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    openBrowserPaneExternally(i);
-                });
-            }
-            const browserUrlInput = card.querySelector(`[data-browser-url="${i}"]`);
-            if (browserUrlInput) {
-                browserUrlInput.addEventListener('keydown', event => {
-                    if (event.key !== 'Enter') {
-                        return;
-                    }
-                    event.preventDefault();
-                    event.stopPropagation();
-                    navigateBrowserPane(i, browserUrlInput.value);
-                });
-                browserUrlInput.addEventListener('blur', () => {
-                    navigateBrowserPane(i, browserUrlInput.value);
-                });
-            }
-            const browserFrame = card.querySelector(`#browser-frame-${i}`);
-            if (browserFrame) {
-                browserFrame.addEventListener('load', () => {
-                    document.getElementById(`ph-${i}`)?.remove();
-                });
-            }
-            const browserModeButton = card.querySelector(`[data-session-browser-toggle="${i}"]`);
-            if (browserModeButton) {
-                browserModeButton.draggable = false;
-                browserModeButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                browserModeButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    switchSessionBrowserMode(i);
-                });
-            }
-            const modeToggleButton = card.querySelector(`[data-session-mode-toggle="${i}"]`);
-            if (modeToggleButton) {
-                modeToggleButton.draggable = false;
-                modeToggleButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                modeToggleButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    switchSessionPaneMode(i);
-                });
-            }
-            const splitButton = card.querySelector(`[data-terminal-split="${i}"]`);
-            if (splitButton) {
-                splitButton.draggable = false;
-                splitButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                splitButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    splitTerminalPane(i);
-                });
-            }
-            const unsplitButton = card.querySelector(`[data-terminal-unsplit="${i}"]`);
-            if (unsplitButton) {
-                unsplitButton.draggable = false;
-                unsplitButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                unsplitButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    closeSplitPane(i);
-                });
-            }
-            const explorerThemeButton = card.querySelector(`[data-explorer-theme-toggle="${i}"]`);
-            if (explorerThemeButton) {
-                explorerThemeButton.draggable = false;
-                updateExplorerThemeButton(explorerThemeButton, card.dataset.explorerTheme || 'dark');
-                explorerThemeButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                explorerThemeButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    toggleExplorerTheme(i);
-                });
-            }
-            const clearButton = card.querySelector(`[data-terminal-clear="${i}"]`);
-            if (clearButton) {
-                clearButton.draggable = false;
-                clearButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                clearButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    clearTerminalDisplay(i);
-                });
-            }
-            const closeButton = card.querySelector(`[data-terminal-close="${i}"]`);
-            if (closeButton) {
-                closeButton.draggable = false;
-                closeButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                closeButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    closeTerminalPane(i);
-                });
-            }
-            const voiceButton= card.querySelector(`[data-terminal-voice="${i}"]`);
-            if (voiceButton) {
-                voiceButton.draggable = false;
-                voiceButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                voiceButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    _voiceLog('Mic button clicked', {
-                        terminalIndex: i,
-                        sessionId: sessionIds[i] || null,
-                        recording: Boolean(_voiceState[i]?.recording),
-                        activeIndex: _voiceActiveIndex,
-                        isTrusted: event.isTrusted
-                    });
-                    _toggleVoice(i);
-                });
-            }
-            _syncVoiceControls(i);
-            const explorerRefreshButton = card.querySelector(`[data-explorer-refresh="${i}"]`);
-            if (explorerRefreshButton) {
-                explorerRefreshButton.draggable = false;
-                explorerRefreshButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                explorerRefreshButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    refreshTerminalDisplay(i);
-                });
-            }
-            const explorerUpButton = card.querySelector(`[data-explorer-up="${i}"]`);
-            if (explorerUpButton) {
-                explorerUpButton.draggable = false;
-                explorerUpButton.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                explorerUpButton.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    const pane = terminals[i];
-                    const targetPath = pane?._explorerMode === 'file'
-                        ? (pane._explorerPath || '')
-                        : (pane?._explorerParentPath || '');
-                    loadExplorerPane(i, targetPath);
-                });
-            }
-            const explorerGitToggle = card.querySelector(`[data-explorer-git-toggle="${i}"]`);
-            if (explorerGitToggle) {
-                explorerGitToggle.draggable = false;
-                explorerGitToggle.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                explorerGitToggle.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    toggleExplorerGitSidebar(i);
-                });
-            }
-            const explorerTreeToggle = card.querySelector(`[data-explorer-tree-toggle="${i}"]`);
-            if (explorerTreeToggle) {
-                explorerTreeToggle.draggable = false;
-                explorerTreeToggle.addEventListener('mousedown', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                });
-                explorerTreeToggle.addEventListener('click', event => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    toggleExplorerTreeSidebar(i);
-                });
-            }
-            grid.appendChild(card);
-        });
+        return card;
+    }
 
-        /* wire up terminal input events now that DOM elements exist */
-        terminals.forEach((t, i) => {
-            if (!t?.term) {
-                return;
-            }
-            t.term.onData(data => {
-                _focusedTerminalIndex = i;
-                const sid = sessionIds[i];
-                if (sid && socket) socket.emit('terminal_input', { session_id: sid, data });
+    /* Control wiring for one pane card (delegates to wireCardButton for the
+       shared drag/focus-guard behaviour). */
+    function wirePaneControls(card, i) {
+        wireCardDragAndDrop(card, card.querySelector('.terminal-header'));
+        wireCardButton(card, `[data-terminal-refresh="${i}"]`, () => refreshTerminalDisplay(i));
+        wireCardButton(card, `[data-browser-open="${i}"]`, () => openBrowserPaneExternally(i));
+        const browserUrlInput = card.querySelector(`[data-browser-url="${i}"]`);
+        if (browserUrlInput) {
+            browserUrlInput.addEventListener('keydown', event => {
+                if (event.key !== 'Enter') {
+                    return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                navigateBrowserPane(i, browserUrlInput.value);
             });
-            const card = document.getElementById(`tc-${i}`);
-            if (card) {
-                card.addEventListener('pointerdown', () => {
-                    _focusedTerminalIndex = i;
-                });
-            }
+            browserUrlInput.addEventListener('blur', () => {
+                navigateBrowserPane(i, browserUrlInput.value);
+            });
+        }
+        const browserFrame = card.querySelector(`#browser-frame-${i}`);
+        if (browserFrame) {
+            browserFrame.addEventListener('load', () => {
+                document.getElementById(`ph-${i}`)?.remove();
+            });
+        }
+        wireCardButton(card, `[data-session-browser-toggle="${i}"]`, () => switchSessionBrowserMode(i));
+        wireCardButton(card, `[data-session-mode-toggle="${i}"]`, () => switchSessionPaneMode(i));
+        wireCardButton(card, `[data-terminal-split="${i}"]`, () => splitTerminalPane(i));
+        wireCardButton(card, `[data-terminal-unsplit="${i}"]`, () => closeSplitPane(i));
+        const explorerThemeButton = wireCardButton(
+            card, `[data-explorer-theme-toggle="${i}"]`, () => toggleExplorerTheme(i)
+        );
+        if (explorerThemeButton) {
+            updateExplorerThemeButton(explorerThemeButton, card.dataset.explorerTheme || 'dark');
+        }
+        wireCardButton(card, `[data-terminal-clear="${i}"]`, () => clearTerminalDisplay(i));
+        wireCardButton(card, `[data-terminal-close="${i}"]`, () => closeTerminalPane(i));
+        wireCardButton(card, `[data-terminal-voice="${i}"]`, event => {
+            _voiceLog('Mic button clicked', {
+                terminalIndex: i,
+                sessionId: sessionIds[i] || null,
+                recording: Boolean(_voiceState[i]?.recording),
+                activeIndex: _voiceActiveIndex,
+                isTrusted: event.isTrusted
+            });
+            _toggleVoice(i);
         });
+        _syncVoiceControls(i);
+        wireCardButton(card, `[data-explorer-refresh="${i}"]`, () => refreshTerminalDisplay(i));
+        wireCardButton(card, `[data-explorer-up="${i}"]`, () => {
+            const pane = terminals[i];
+            const targetPath = pane?._explorerMode === 'file'
+                ? (pane._explorerPath || '')
+                : (pane?._explorerParentPath || '');
+            loadExplorerPane(i, targetPath);
+        });
+        wireCardButton(card, `[data-explorer-git-toggle="${i}"]`, () => toggleExplorerGitSidebar(i));
+        wireCardButton(card, `[data-explorer-tree-toggle="${i}"]`, () => toggleExplorerTreeSidebar(i));
+    }
 
-        document.getElementById('emptyState').classList.remove('visible');
-        gridBuilt = true;
-        visibleGroupId = activeGroupId;
-        updateSessionChrome(count, activeGroupId);
-        updateAllSplitButtonStates();
-        renderResizeHandles();
-
+    /* Forward keystrokes and pointer focus for a terminal pane once its DOM
+       elements exist. */
+    function wirePaneInputForwarding(t, i) {
+        if (!t?.term) {
+            return;
+        }
+        t.term.onData(data => {
+            _focusedTerminalIndex = i;
+            const sid = sessionIds[i];
+            if (sid && socket) socket.emit('terminal_input', { session_id: sid, data });
+        });
+        const card = document.getElementById(`tc-${i}`);
+        if (card) {
+            card.addEventListener('pointerdown', () => {
+                _focusedTerminalIndex = i;
+            });
+        }
     }
 
     function remapCardIndexAttributes(card, sourceIndex, targetIndex) {
@@ -5786,77 +5578,13 @@
         _clearVoicePreview(index);
 
         let stream = null;
-        let audioCtx = null;
-        let source = null;
-        let workletNode = null;
-        let sink = null;
-        let selectedDeviceId = _voicePrefs.deviceId;
-        let appliedConstraints = requestedConstraints;
-        let fallbackMessage = '';
+        let pipeline = null;
+        let acquisition = null;
 
         try {
-            try {
-                _voiceLog('Requesting microphone access', {
-                    terminalIndex: index,
-                    sessionId: sid,
-                    requestedConstraints
-                });
-                stream = await navigator.mediaDevices.getUserMedia({ audio: requestedConstraints });
-                _voiceLog('Microphone access granted', {
-                    terminalIndex: index,
-                    sessionId: sid,
-                    trackCount: stream.getAudioTracks().length
-                });
-            } catch (err) {
-                if (
-                    selectedDeviceId &&
-                    (err?.name === 'NotFoundError' || err?.name === 'OverconstrainedError')
-                ) {
-                    _voiceLog('Selected microphone unavailable, retrying with browser default device', {
-                        terminalIndex: index,
-                        sessionId: sid,
-                        selectedDeviceId,
-                        errorName: err?.name,
-                        errorMessage: err?.message || String(err)
-                    });
-                    fallbackMessage = 'Selected microphone was unavailable, so capture fell back to the browser default input.';
-                    selectedDeviceId = '';
-                    appliedConstraints = _getVoiceConstraints({ ..._voicePrefs, deviceId: '' }, { includeDevice: false });
-                    stream = await navigator.mediaDevices.getUserMedia({ audio: appliedConstraints });
-                    _voiceLog('Fallback microphone access granted', {
-                        terminalIndex: index,
-                        sessionId: sid,
-                        appliedConstraints
-                    });
-                } else if (isPywebviewAvailable() && err?.name !== 'NotAllowedError') {
-                    _voiceLog('Constrained capture failed in pywebview, retrying with bare {audio: true}', {
-                        terminalIndex: index,
-                        sessionId: sid,
-                        errorName: err?.name,
-                        errorMessage: err?.message || String(err),
-                        originalConstraints: appliedConstraints
-                    });
-                    try {
-                        appliedConstraints = true;
-                        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                        fallbackMessage = `Capture profile constraints were not supported by this WebView2 environment (${err?.name || 'error'}). Fell back to unconstrained capture.`;
-                        _voiceLog('Bare audio capture succeeded in pywebview fallback', {
-                            terminalIndex: index,
-                            sessionId: sid
-                        });
-                    } catch (bareErr) {
-                        _voiceLog('Bare audio capture also failed', {
-                            terminalIndex: index,
-                            sessionId: sid,
-                            errorName: bareErr?.name,
-                            errorMessage: bareErr?.message || String(bareErr)
-                        });
-                        throw bareErr;
-                    }
-                } else {
-                    throw err;
-                }
-            }
+            acquisition = await _acquireMicStream(index, sid, requestedConstraints);
+            ({ stream } = acquisition);
+            const { appliedConstraints, selectedDeviceId, fallbackMessage } = acquisition;
 
             const track = stream.getAudioTracks()[0];
             const capabilities = track?.getCapabilities ? track.getCapabilities() : null;
@@ -5869,34 +5597,8 @@
                 trackSettings
             });
 
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)({
-                latencyHint: 'interactive'
-            });
-            _voiceLog('AudioContext created for voice capture', {
-                terminalIndex: index,
-                sessionId: sid,
-                audioContextState: audioCtx.state,
-                sampleRate: audioCtx.sampleRate
-            });
-            await audioCtx.audioWorklet.addModule(VOICE_WORKLET_MODULE_URL);
-            _voiceLog('Voice worklet module loaded', {
-                terminalIndex: index,
-                sessionId: sid,
-                moduleUrl: VOICE_WORKLET_MODULE_URL
-            });
-            source = audioCtx.createMediaStreamSource(stream);
-            workletNode = new AudioWorkletNode(audioCtx, 'gridvibe-voice-processor', {
-                numberOfInputs: 1,
-                numberOfOutputs: 1,
-                channelCount: 1,
-                outputChannelCount: [1],
-                processorOptions: {
-                    targetSampleRate: VOICE_TARGET_SAMPLE_RATE,
-                    chunkSize: VOICE_CHUNK_SIZE
-                }
-            });
-            sink = audioCtx.createGain();
-            sink.gain.value = 0;
+            pipeline = await _createVoicePipeline(index, sid, stream);
+            const { audioCtx, source, workletNode, sink } = pipeline;
 
             const state = {
                 stream,
@@ -5922,41 +5624,7 @@
                 pendingFlush: null
             };
 
-            workletNode.port.onmessage = event => {
-                const currentState = _voiceState[index];
-                if (!currentState) return;
-                const message = event.data || {};
-                if (message.type === 'audio' && currentState.recording) {
-                    socket.emit('voice_audio', {
-                        session_id: sid,
-                        audio: message.audio
-                    });
-                    return;
-                }
-                if (message.type === 'format') {
-                    currentState.format = {
-                        sourceSampleRate: message.sourceSampleRate,
-                        targetSampleRate: message.targetSampleRate,
-                        chunkSize: message.chunkSize
-                    };
-                    _voiceLog('Voice worklet reported format', {
-                        terminalIndex: index,
-                        sessionId: sid,
-                        format: currentState.format
-                    });
-                    _applyVoiceStateDiagnostics(index);
-                    return;
-                }
-                if (
-                    message.type === 'flush-complete' &&
-                    currentState.pendingFlush &&
-                    currentState.pendingFlush.flushId === message.flushId
-                ) {
-                    const { resolve } = currentState.pendingFlush;
-                    currentState.pendingFlush = null;
-                    resolve();
-                }
-            };
+            _wireVoiceWorkletMessages(index, sid, workletNode);
 
             _voiceLog('Emitting voice_start to server', {
                 terminalIndex: index,
@@ -6000,25 +5668,9 @@
             console.error(`${VOICE_LOG_PREFIX} Voice input error:`, err, {
                 terminalIndex: index,
                 sessionId: sid || null,
-                requestedConstraints: appliedConstraints
+                requestedConstraints: acquisition?.appliedConstraints ?? requestedConstraints
             });
-            if (workletNode) {
-                try { workletNode.disconnect(); } catch (_) {}
-            }
-            if (source) {
-                try { source.disconnect(); } catch (_) {}
-            }
-            if (sink) {
-                try { sink.disconnect(); } catch (_) {}
-            }
-            if (audioCtx) {
-                try { await audioCtx.close(); } catch (_) {}
-            }
-            if (stream) {
-                stream.getTracks().forEach(track => {
-                    try { track.stop(); } catch (_) {}
-                });
-            }
+            await _teardownVoicePipeline(stream, pipeline);
             _updateVoiceBtn(index, false);
             _setVoiceBtnsDisabled(-1);
             const errName = err?.name ? `[${err.name}] ` : '';
@@ -6029,6 +5681,175 @@
                     ? `Voice capture failed: ${errName}${errMessage}. Native pywebview mode is less reliable for microphone capture; if this persists, use browser mode.`
                     : `Voice capture failed: ${errName}${errMessage}`
             );
+        }
+    }
+
+    /* Open the microphone with the configured constraints, falling back to
+       the browser-default device or (under pywebview) unconstrained capture
+       when the selected device or profile is not usable. */
+    async function _acquireMicStream(index, sid, requestedConstraints) {
+        let selectedDeviceId = _voicePrefs.deviceId;
+        let appliedConstraints = requestedConstraints;
+        let fallbackMessage = '';
+        let stream = null;
+
+        try {
+            _voiceLog('Requesting microphone access', {
+                terminalIndex: index,
+                sessionId: sid,
+                requestedConstraints
+            });
+            stream = await navigator.mediaDevices.getUserMedia({ audio: requestedConstraints });
+            _voiceLog('Microphone access granted', {
+                terminalIndex: index,
+                sessionId: sid,
+                trackCount: stream.getAudioTracks().length
+            });
+        } catch (err) {
+            if (
+                selectedDeviceId &&
+                (err?.name === 'NotFoundError' || err?.name === 'OverconstrainedError')
+            ) {
+                _voiceLog('Selected microphone unavailable, retrying with browser default device', {
+                    terminalIndex: index,
+                    sessionId: sid,
+                    selectedDeviceId,
+                    errorName: err?.name,
+                    errorMessage: err?.message || String(err)
+                });
+                fallbackMessage = 'Selected microphone was unavailable, so capture fell back to the browser default input.';
+                selectedDeviceId = '';
+                appliedConstraints = _getVoiceConstraints({ ..._voicePrefs, deviceId: '' }, { includeDevice: false });
+                stream = await navigator.mediaDevices.getUserMedia({ audio: appliedConstraints });
+                _voiceLog('Fallback microphone access granted', {
+                    terminalIndex: index,
+                    sessionId: sid,
+                    appliedConstraints
+                });
+            } else if (isPywebviewAvailable() && err?.name !== 'NotAllowedError') {
+                _voiceLog('Constrained capture failed in pywebview, retrying with bare {audio: true}', {
+                    terminalIndex: index,
+                    sessionId: sid,
+                    errorName: err?.name,
+                    errorMessage: err?.message || String(err),
+                    originalConstraints: appliedConstraints
+                });
+                try {
+                    appliedConstraints = true;
+                    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    fallbackMessage = `Capture profile constraints were not supported by this WebView2 environment (${err?.name || 'error'}). Fell back to unconstrained capture.`;
+                    _voiceLog('Bare audio capture succeeded in pywebview fallback', {
+                        terminalIndex: index,
+                        sessionId: sid
+                    });
+                } catch (bareErr) {
+                    _voiceLog('Bare audio capture also failed', {
+                        terminalIndex: index,
+                        sessionId: sid,
+                        errorName: bareErr?.name,
+                        errorMessage: bareErr?.message || String(bareErr)
+                    });
+                    throw bareErr;
+                }
+            } else {
+                throw err;
+            }
+        }
+
+        return { stream, appliedConstraints, selectedDeviceId, fallbackMessage };
+    }
+
+    /* Build the AudioContext → worklet → muted-sink capture pipeline. */
+    async function _createVoicePipeline(index, sid, stream) {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+            latencyHint: 'interactive'
+        });
+        _voiceLog('AudioContext created for voice capture', {
+            terminalIndex: index,
+            sessionId: sid,
+            audioContextState: audioCtx.state,
+            sampleRate: audioCtx.sampleRate
+        });
+        await audioCtx.audioWorklet.addModule(VOICE_WORKLET_MODULE_URL);
+        _voiceLog('Voice worklet module loaded', {
+            terminalIndex: index,
+            sessionId: sid,
+            moduleUrl: VOICE_WORKLET_MODULE_URL
+        });
+        const source = audioCtx.createMediaStreamSource(stream);
+        const workletNode = new AudioWorkletNode(audioCtx, 'gridvibe-voice-processor', {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            channelCount: 1,
+            outputChannelCount: [1],
+            processorOptions: {
+                targetSampleRate: VOICE_TARGET_SAMPLE_RATE,
+                chunkSize: VOICE_CHUNK_SIZE
+            }
+        });
+        const sink = audioCtx.createGain();
+        sink.gain.value = 0;
+        return { audioCtx, source, workletNode, sink };
+    }
+
+    /* Route worklet messages: audio chunks to the server, format reports to
+       the diagnostics panel, flush confirmations to the pending waiter. */
+    function _wireVoiceWorkletMessages(index, sid, workletNode) {
+        workletNode.port.onmessage = event => {
+            const currentState = _voiceState[index];
+            if (!currentState) return;
+            const message = event.data || {};
+            if (message.type === 'audio' && currentState.recording) {
+                socket.emit('voice_audio', {
+                    session_id: sid,
+                    audio: message.audio
+                });
+                return;
+            }
+            if (message.type === 'format') {
+                currentState.format = {
+                    sourceSampleRate: message.sourceSampleRate,
+                    targetSampleRate: message.targetSampleRate,
+                    chunkSize: message.chunkSize
+                };
+                _voiceLog('Voice worklet reported format', {
+                    terminalIndex: index,
+                    sessionId: sid,
+                    format: currentState.format
+                });
+                _applyVoiceStateDiagnostics(index);
+                return;
+            }
+            if (
+                message.type === 'flush-complete' &&
+                currentState.pendingFlush &&
+                currentState.pendingFlush.flushId === message.flushId
+            ) {
+                const { resolve } = currentState.pendingFlush;
+                currentState.pendingFlush = null;
+                resolve();
+            }
+        };
+    }
+
+    /* Best-effort teardown when capture start fails partway through. */
+    async function _teardownVoicePipeline(stream, pipeline) {
+        if (pipeline?.workletNode) {
+            try { pipeline.workletNode.disconnect(); } catch (_) {}
+        }
+        if (pipeline?.source) {
+            try { pipeline.source.disconnect(); } catch (_) {}
+        }
+        if (pipeline?.sink) {
+            try { pipeline.sink.disconnect(); } catch (_) {}
+        }
+        if (pipeline?.audioCtx) {
+            try { await pipeline.audioCtx.close(); } catch (_) {}
+        }
+        if (stream) {
+            stream.getTracks().forEach(track => {
+                try { track.stop(); } catch (_) {}
+            });
         }
     }
 
@@ -6861,14 +6682,6 @@
     /* ─────────────────────────────────────────────
        Helpers
     ───────────────────────────────────────────── */
-    function escHtml(str) {
-        return String(str)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
-    }
-
     function formatExplorerSize(value) {
         if (value === null || value === undefined) {
             return '';

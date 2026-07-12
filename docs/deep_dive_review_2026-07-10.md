@@ -1144,6 +1144,29 @@ incrementally (one module per PR), running `make check` between steps.
 > tests patch on `web.api`), so the next tranche should be `config.py`, then
 > `explorer.py` (helpers + pool), then `terminal_io.py`/`voice.py`/`app.py`.
 
+> **⚠️ Partially implemented (2026-07-12, later the same day) — second tranche.** The two
+> next modules named above landed:
+> - `web/config.py` — `load_config`/`save_config`/`_merge_dicts`, `WHISPER_MODEL_OPTIONS`,
+>   `_normalize_surface_mode`, and a `RuntimeConfig` class whose singleton `runtime_config`
+>   replaces the former 14 config-backed module globals (`app_config`, `ssh_config`,
+>   `max_sessions`, `app_theme`, the voice settings, …). `web/api.py` reads
+>   `runtime_config.<name>` everywhere (91 call sites rewritten), and
+>   `api._refresh_runtime_config()` delegates to `runtime_config.refresh()`. Tests patch
+>   attributes on `api.runtime_config` (same object as `web.config.runtime_config`) and
+>   path constants on `web.config`. Covered by `RuntimeConfigExtractionTestCase`.
+> - `web/hostkeys.py` — `KNOWN_HOSTS_PATH` + `_load_persistent_host_keys` (finding 1.4),
+>   shared by terminal SSH code in `web.api` and the explorer pool without a cycle.
+> - `web/explorer.py` (~1,700 lines) — session classification, explorer path resolution,
+>   both explorer backends from 6.1, the single parameterised Git helper set, and the SSH
+>   client pool from 3.1. Its only project dependencies are `web.config` and
+>   `web.hostkeys`, so no `web.api` cycle. Covered by `ExplorerModuleExtractionTestCase`;
+>   the pool/known-hosts tests now target `web.explorer`/`web.hostkeys` directly.
+>
+> `web.api` re-exports all moved names, so `main.py`, the launcher, and the root shims are
+> untouched; `web/api.py` shrank 6,646 → ~4,830 lines. Remaining tranches (the only step-5
+> work left): `terminal_io.py`, `voice.py`, `saved_sessions.py`/`agents.py`, and `app.py`
+> (Flask/SocketIO creation) — no longer blocked on anything, just not yet extracted.
+
 ### 6.3 `create_session` and `append_session_to_group` duplicate a 19-parameter signature — **Low**
 
 **Location:** `sessions/manager.py:161-300`
@@ -1218,6 +1241,30 @@ page script. This pairs naturally with 3.5 (extracting page JS to static files).
 > card/modal builders. Reconciling those drifted copies (deciding the canonical
 > behaviour for each) is the remaining half of this finding.
 
+> **✅ Implemented (2026-07-12, later the same day).** The drifted copies are reconciled
+> into `shared.js`; canonical-behaviour decisions:
+> - `escHtml` — launcher's null-safe variant (`String(value ?? '')`); the terminals copy
+>   rendered `null`/`undefined` literally.
+> - `joinDirectories` — behaviourally identical copies (the launcher had a dead duplicate
+>   branch); the terminals form won.
+> - Theme management — `syncNativeTheme` (generic `[GridVibe]` log prefix), `applyTheme`,
+>   `persistThemePreference`, `cycleTheme`, and `initTheme` live in `shared.js`. Pages
+>   declare optional hooks looked up at call time (`onThemeApplied`, `onThemeCycled`,
+>   `onThemePersisted`) for page-specific behaviour, and call `initTheme()` from their own
+>   script so their hoisted hook declarations exist first. Deliberate behaviour change:
+>   cycling the theme from a terminals window now persists it via `/api/app-config` like
+>   the launcher (previously it only changed localStorage).
+> - Saved-session cards — one `buildSavedSessionCard(session, { selectable,
+>   currentSavedSessionId })` + `buildSavedSessionTags(session, currentSavedSessionId)`;
+>   each page passes its own notion of "current". The modal *shells* stay page-local by
+>   design: the launcher dialog has import/delete modes with a footer action, the
+>   terminals dialog has an "open now" checkbox — different dialogs sharing the card
+>   renderer.
+>
+> Locked in by `test_shared_helpers_are_not_redefined_by_page_scripts` in
+> `ExtractedFrontendAssetsTestCase` (each reconciled helper defined exactly once, in
+> `shared.js`).
+
 ### 6.5 Monster functions in terminals.html — **Medium**
 
 **Location:** `templates/terminals.html` — `buildGrid` (:6651-7095, ~445 lines),
@@ -1236,6 +1283,23 @@ one function. Both are effectively untestable and are where regressions cluster.
 - `_startVoice` → `acquireMicStream(prefs)`, `createVoicePipeline(stream, onChunk)`,
   `renderVoiceDiagnostics(...)` (exists), with `_startVoice` orchestrating.
 No behaviour change; do it as part of the JS extraction (3.5) so the new files start reviewable.
+
+> **✅ Implemented (2026-07-12).** In `web/static/js/terminals.js`:
+> - `buildGrid` (445 → 41 lines) now loops over `createPaneInstance(session)` (pane object
+>   factory), `buildPaneCard(session, i)` (pure card-DOM builder), and
+>   `wirePaneControls(card, i)`; a `wireCardButton(card, selector, onClick)` helper
+>   collapses the previously repeated draggable/mousedown/click guard pattern (~13 copies),
+>   and `wirePaneInputForwarding(t, i)` wires terminal keystroke/focus forwarding.
+> - `_startVoice` (308 → 166 lines, the rest being genuine orchestration: precondition
+>   checks, state assembly, success/error UI) delegates to `_acquireMicStream` (getUserMedia
+>   with the device-fallback and pywebview-bare-capture cascades), `_createVoicePipeline`
+>   (AudioContext → worklet → muted sink), `_wireVoiceWorkletMessages`, and
+>   `_teardownVoicePipeline` (best-effort cleanup on partial failure).
+>
+> No behaviour change. `initialLoad` and the explorer render helpers mentioned in the
+> problem statement were outside the proposal's scope and stay as they are. Locked in by
+> `test_terminals_monster_functions_are_decomposed` in `ExtractedFrontendAssetsTestCase`
+> (helpers exist exactly once + line-count regression guard on both orchestrators).
 
 ### 6.6 Two similarly-named git runners already caused a production TypeError — **Medium**
 
@@ -1628,6 +1692,13 @@ posture paragraph.
    (`paths`/`secrets`/`selfupdate`, next is `config.py`); 6.4 lifted all still-identical
    helpers into `shared.js` (drifted copies remain page-local); 6.5 (function decomposition
    inside `terminals.js`) is now unblocked but not started.
+   ✅ **Second pass, 2026-07-12 (later the same day):** 6.4 and 6.5 are now fully done
+   (drifted JS copies reconciled with page hooks; `buildGrid`/`_startVoice` decomposed),
+   and 6.2 landed its second tranche (`web/config.py` with the `RuntimeConfig` object,
+   `web/hostkeys.py`, and the ~1,700-line `web/explorer.py`; `web/api.py` is down to
+   ~4,830 lines). The only step-5 work remaining is 6.2's final tranches
+   (`terminal_io.py` / `voice.py` / `saved_sessions.py`+`agents.py` / `app.py`), which are
+   now unblocked. Suite green (378 tests) and `ruff` clean after each tranche.
 6. **Correctness & config cleanups:** 4.7 + 4.8 together (CLI-vs-config precedence and the vosk
    port key are both config-resolution fixes; 5.7's shared `run_server` is the natural home for
    4.7), then 4.3/4.6/4.9/4.10 and the log polish 9.2/9.3 as one sweep.

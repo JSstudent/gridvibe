@@ -3,6 +3,32 @@ Last updated: 2026-07-12
 
 ## Open Issues
 
+### Issue ID: ISSUE-2026-015
+- Title: Persist open explorer tabs in saved sessions
+- Priority: Low
+- Status: Open
+- Area: `web/static/js/terminals.js`, `web/static/js/launcher.js`, `web/api.py`, `sessions/manager.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `session`, `launcher`, `settings`, `tests`
+- Reported: 2026-07-12
+
+Description:
+The tabbed explorer viewer tracked in ISSUE-2026-014 also needs to participate in saved-session persistence. Without explicit tab state in the saved preset, users who save a configured workspace from the active-session Save Session dropdown or resave it through launcher settings would lose their open reference files and active explorer tab when they relaunch that session.
+
+Steps to reproduce:
+1. Open a session containing an Explorer pane and, once the ISSUE-2026-014 tabbed viewer is available, open multiple files as pinned tabs and select one of them.
+2. Save the workspace through the active-session Save Session dropdown, or open the preset in the launcher and save its settings again.
+3. Relaunch the saved session and observe that the preset schema has no explorer-tab state from which to restore the previously open files and active tab.
+
+Expected behavior:
+Both saved-session workflows should retain each Explorer pane's open file tabs, their stable order, and the active tab. Relaunching the preset should safely restore readable tabs under the pane's current explorer root while preserving the permanent dynamic-preview behavior defined by ISSUE-2026-014.
+
+Actual behavior / logs:
+Code inspection confirms `buildWorkspaceTerminalEntry()` in `web/static/js/terminals.js` serializes an Explorer pane's directory plus `explorer_tree_open` and `explorer_git_open`, but no open-file or active-tab state. `collectFormConfig()` in `web/static/js/launcher.js` forwards terminal drafts and geometry only, while `_normalize_terminal_entries()` and `_normalize_workspace_layout()` in `web/api.py` have no fields for explorer tabs. `TerminalSession` in `sessions/manager.py` likewise retains explorer root/sidebar state but cannot carry tab metadata into a relaunched workspace. ISSUE-2026-014 defines the new tab model but does not cover saved-session round-tripping.
+
+### Proposed solution:
+After defining the per-pane tab model for ISSUE-2026-014, add bounded saved-session fields for the ordered pinned file paths and active tab identity. Capture them in `buildWorkspaceTerminalEntry()` for active-workspace saves; preserve them when launcher settings load and resave an existing preset even though the launcher does not edit file tabs directly; validate and normalize them in `web/api.py`; and carry them through `TerminalSession` responses so `web/static/js/terminals.js` can restore them after the explorer pane initializes. Store normalized paths relative to the saved explorer root where practical, cap tab counts and path lengths, ignore missing, unsupported, duplicate, or out-of-root files without failing session launch, and never persist file contents or writable state. Add focused tests in `tests/test_api.py` for both save entry points, ordering and active-tab round-trips, backward compatibility, root changes, unsafe paths, missing/unsupported files, deduplication, limits, and local/SSH parity.
+
 ### Issue ID: ISSUE-2026-014
 - Title: Replace explorer directory view with tabbed file viewer
 - Priority: Low

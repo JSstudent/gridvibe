@@ -53,82 +53,25 @@
         }
     }
 
-    function syncNativeTheme(resolvedTheme) {
-        try {
-            const bridge = window.pywebview?.api;
-            if (bridge?.set_native_theme) {
-                bridge.set_native_theme(resolvedTheme).catch(error => {
-                    console.error('[GridVibe Launcher] native theme sync failed:', error);
-                });
-            }
-        } catch (error) {
-            console.error('[GridVibe Launcher] native theme sync failed:', error);
-        }
-    }
-
-    function applyTheme(theme) {
-        const preference = normalizeThemePreference(theme);
-        const resolved = resolveTheme(preference);
-        document.documentElement.setAttribute('data-theme', resolved);
-        document.documentElement.setAttribute('data-theme-preference', preference);
-        try { localStorage.setItem(THEME_STORAGE_KEY, preference); } catch (_) {}
+    /* Theme helpers live in shared.js; these hooks add the launcher-specific
+       behaviour (settings controls + appSettings mirror). */
+    function onThemeApplied(preference) {
         updateThemeControls(preference);
-        syncNativeTheme(resolved);
     }
 
-    async function persistThemePreference(theme) {
-        try {
-            const response = await fetch('/api/app-config', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    appearance: {
-                        theme: normalizeThemePreference(theme)
-                    }
-                })
-            });
-            if (!response.ok) {
-                return;
-            }
-            const data = await response.json();
-            if (data?.appearance?.theme) {
-                appSettings.appearance.theme = data.appearance.theme;
-                applyTheme(data.appearance.theme);
-            }
-        } catch (_error) {}
-    }
-
-    function cycleTheme() {
-        const current = getStoredTheme() || 'system';
-        const nextTheme =
-            current === 'system' ? 'light'
-            : current === 'light' ? 'dark'
-            : 'system';
-        applyTheme(nextTheme);
+    function onThemeCycled(nextTheme) {
         if (appSettings?.appearance) {
             appSettings.appearance.theme = nextTheme;
         }
-        persistThemePreference(nextTheme);
     }
 
-    (function initTheme() {
-        applyTheme(getStoredTheme() || 'system');
-        window.addEventListener('pywebviewready', () => {
-            syncNativeTheme(document.documentElement.getAttribute('data-theme') || resolveTheme(getStoredTheme() || 'system'));
-        });
-        const mediaQuery = window.matchMedia('(prefers-color-scheme: light)');
-        const listener = () => {
-            const themePreference = document.documentElement.getAttribute('data-theme-preference') || getStoredTheme() || 'system';
-            if (themePreference === 'system') {
-                applyTheme('system');
-            }
-        };
-        if (typeof mediaQuery.addEventListener === 'function') {
-            mediaQuery.addEventListener('change', listener);
-        } else if (typeof mediaQuery.addListener === 'function') {
-            mediaQuery.addListener(listener);
+    function onThemePersisted(data) {
+        if (appSettings?.appearance && data?.appearance?.theme) {
+            appSettings.appearance.theme = data.appearance.theme;
         }
-    })();
+    }
+
+    initTheme();
 
     window.name = 'gridvibe-launcher';
     const MAX_SESSIONS = Number(document.querySelector('.shell').dataset.maxSessions || 4);
@@ -306,14 +249,6 @@
         });
     });
 
-    function escHtml(value) {
-        return String(value ?? '')
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
-    }
-
 
     function defaultLayoutForCount(count) {
         if (count <= 1) {
@@ -429,25 +364,6 @@
 
 
 
-    function joinDirectories(baseDir, childDir, mode) {
-        const rawBase = String(baseDir || '').trim();
-        const base = rawBase === '/' ? '/' : rawBase.replace(/[\\/]+$/, '');
-        const child = String(childDir || '').trim().replace(/^[\\/]+/, '');
-        if (!base) {
-            return child;
-        }
-        if (!child) {
-            return base;
-        }
-
-        const separator = mode === 'wsl' && base.includes('\\') && !base.includes('/') ? '\\' : '/';
-        const normalizedChild = child.replace(/[\\/]+/g, separator);
-        if (/^[A-Za-z]:$/.test(base)) {
-            return `${base}${separator}${normalizedChild}`;
-        }
-        return `${base}${separator}${normalizedChild}`;
-    }
-
     function getDisplaySubdirectory(directory, defaultDir, mode) {
         const rawDirectory = String(directory || '').trim();
         const baseDirectory = String(defaultDir || '').trim();
@@ -487,48 +403,6 @@
     }
 
 
-
-    function buildSavedSessionTags(session) {
-        const tags = [];
-        if (session.is_default) {
-            tags.push('<span class="saved-session-tag">Default</span>');
-        }
-        if (session.id === activeSavedSessionId) {
-            tags.push('<span class="saved-session-tag current">Current</span>');
-        }
-        return tags.join('');
-    }
-
-    function buildSavedSessionCard(session, options = {}) {
-        const selectable = Boolean(options.selectable);
-        const content = `
-            <span class="saved-session-content">
-                <span class="saved-session-topline">
-                    <span class="saved-session-name">${escHtml(session.name)}</span>
-                    <span class="saved-session-tags">${buildSavedSessionTags(session)}</span>
-                </span>
-                <span class="saved-session-meta">
-                    ${escHtml(getConnectionModeLabel(session.connection_mode))} • ${escHtml(String(session.terminal_count))} terminal${session.terminal_count === 1 ? '' : 's'} • ${escHtml(session.layout)}
-                </span>
-                <span class="saved-session-id">Updated ${escHtml(session.updated_at)} • ${escHtml(session.id)}</span>
-            </span>
-        `;
-
-        if (selectable) {
-            return `
-                <label class="saved-session-item saved-session-selectable" data-session-id="${escHtml(session.id)}">
-                    <input type="checkbox" class="saved-session-checkbox" value="${escHtml(session.id)}">
-                    ${content}
-                </label>
-            `;
-        }
-
-        return `
-            <button type="button" class="saved-session-item" data-session-id="${escHtml(session.id)}">
-                ${content}
-            </button>
-        `;
-    }
 
     function persistActiveSavedSessionMeta() {
         try {
@@ -2263,7 +2137,10 @@
         footerCopy.textContent = isDeleteMode
             ? 'Select one or more sessions to delete.'
             : '';
-        list.innerHTML = sessions.map(session => buildSavedSessionCard(session, { selectable: isDeleteMode })).join('');
+        list.innerHTML = sessions.map(session => buildSavedSessionCard(session, {
+            selectable: isDeleteMode,
+            currentSavedSessionId: activeSavedSessionId
+        })).join('');
 
         modal.classList.add('visible');
         modal.setAttribute('aria-hidden', 'false');
