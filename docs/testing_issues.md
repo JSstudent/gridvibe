@@ -1,7 +1,59 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-11
+Last updated: 2026-07-12
 
 ## Open Issues
+
+### Issue ID: ISSUE-2026-014
+- Title: Replace explorer directory view with tabbed file viewer
+- Priority: Low
+- Status: Open
+- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `terminal`, `tests`
+- Reported: 2026-07-12
+
+Description:
+Explorer mode should use its existing file tree for navigation and dedicate the main pane to read-only file viewing. The current main pane duplicates directory-browsing behavior and can display only one opened file at a time, so users cannot keep several reference files open while moving through the tree.
+
+Steps to reproduce:
+1. Open a GridVibe pane in Explorer startup mode and expose its Files tree.
+2. Select files and directories in the tree and inspect the main explorer pane.
+3. Observe that the main pane starts as a directory listing, a file replaces that listing with a single view and Back button, and file-tree rows have no `+` action for opening closable file tabs.
+
+Expected behavior:
+Explorer mode should always show a read-only file-viewer workspace. Its first tab should be a permanent, non-closable dynamic preview that initially says `Select a file to view` and updates whenever the user clicks a readable file in the tree. Each readable file row should also have a small `+` button that opens the file in a separate closable tab. The file-tab strip should sit above the existing file header/Back-button row, pinned tabs should remain open while the user browses, and closing the active pinned tab should return focus to a sensible remaining tab, including the permanent preview.
+
+Actual behavior / logs:
+Code inspection confirms `renderExplorerDirectoryRows()` in `web/static/js/terminals.js` renders the main pane as a directory/file list, and `wireExplorerDirectoryRows()` navigates folders or replaces that list through `openExplorerFile()`. The Files tree separately renders file rows through `explorerTreeRowHtml()`, but each file has only the main `data-explorer-tree-file` click target; only directories receive a secondary action, currently `Open folder in the explorer list`. `renderExplorerFile()` then replaces the main pane with one editor and Back button. There is no persistent file-tab collection, non-closable preview tab, close action, or empty viewer state.
+
+### Proposed solution:
+Refactor the Explorer client state and rendering in `web/static/js/terminals.js` so the Files tree is the navigation surface and the main content is a permanent viewer. Add a per-pane tab model with one reserved dynamic-preview tab plus deduplicated pinned tabs keyed by normalized file path. A normal readable-file click should load into the preview tab; an accessible `+` control on that file's tree row should stop propagation and open or focus a pinned, closable tab. Render the tab strip above the existing editor header, prevent closing the preview tab, define focus selection after closing a pinned tab, preserve appropriate per-tab file/view/search/scroll state, and clear stale tabs safely when the explorer session or root changes. Remove the directory-list/open-folder dependency from the main viewer while retaining tree expansion, Git information, refresh behavior, supported-file validation, local/SSH parity, and the read-only guarantee. Add styles in `web/static/css/terminals.css` and focused rendered-template tests in `tests/test_api.py` for the empty state, preview replacement, `+` event isolation, tab deduplication and closing, active-tab fallback, mode/root resets, refresh, and unsupported files.
+
+### Issue ID: ISSUE-2026-013
+- Title: Add per-agent auto-mode toggles to terminal settings
+- Priority: Low
+- Status: Open
+- Area: `web/static/js/launcher.js`, `web/api.py`, `sessions/manager.py`, `tests/test_api.py`, `tests/test_session_manager.py`
+- Assignee: Unassigned
+- Tags: `terminal`, `settings`, `launcher`, `session`, `tests`
+- Reported: 2026-07-12
+
+Description:
+Agent-mode terminal settings need an auto-mode toggle tied to the selected agent. GridVibe currently launches built-in agents with their base command only, requiring users who want unattended edit/approval behavior to add flags manually or use a custom command instead of the normal agent selection flow.
+
+Steps to reproduce:
+1. In the GridVibe launcher, set a terminal's Startup Mode to Agent and select a supported agent such as Claude.
+2. Inspect the agent settings, enable the desired launch configuration, and launch the session.
+3. Observe that no auto-mode toggle is available and Claude starts as `claude` rather than, for example, `claude --enable-auto-mode`.
+
+Expected behavior:
+Agent mode should expose an Auto mode toggle for the corresponding selected agent. When enabled, GridVibe should launch that agent with its registered auto-edit/approval option, such as `claude --enable-auto-mode`; when disabled, it should retain the current base command. The setting should remain scoped per terminal, use only flags supported by the selected agent, and round-trip through launcher drafts, saved sessions, and active workspace Save Session behavior.
+
+Actual behavior / logs:
+Code inspection confirms `buildTerminalInitialCommand()` in `web/static/js/launcher.js` returns either the selected built-in agent key or the custom-agent text verbatim. `collectTerminalDrafts()` stores agent selection metadata but has no auto-mode field, `TerminalSession` in `sessions/manager.py` has no corresponding persisted property, and `_run_startup_sequence()` in `web/api.py` sends `session.initial_command` unchanged. The agent settings UI therefore has no way to represent or consistently restore an agent-specific auto-mode choice.
+
+### Proposed solution:
+Add a per-terminal boolean such as `agent_auto_mode` to the launcher draft, saved-session normalization, workspace serialization, `TerminalSession`, and API responses. Define supported auto-mode arguments in the existing agent registry or another single backend-owned mapping instead of hard-coding one generic flag for every CLI. Update the agent settings row in `web/static/js/launcher.js` to show an accessible toggle only when the selected built-in agent has a registered option, recompute visibility and help text when the selection changes, and keep custom-agent behavior explicit rather than silently modifying arbitrary commands. Compose the final startup command from the validated selected-agent metadata and mapped argument without duplicating flags, while keeping preflight detection based on the base agent executable. Add focused tests in `tests/test_api.py` and `tests/test_session_manager.py` for enabled/disabled command construction, unsupported and custom agents, save/load/workspace round-trips, SSH and local launches, and backward compatibility for saved sessions without the new field.
 
 ## Closed Issues
 
