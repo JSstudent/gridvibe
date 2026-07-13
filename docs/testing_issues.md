@@ -1,7 +1,85 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-12
+Last updated: 2026-07-13
 
 ## Open Issues
+
+### Issue ID: ISSUE-2026-018
+- Title: Add a revert action for unstaged Git changes
+- Priority: Low
+- Status: Open
+- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `web/api.py`, `web/explorer.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `git`, `flask`, `tests`
+- Reported: 2026-07-13
+
+Description:
+The Explorer Git sidebar lists unstaged changes but does not provide a way to discard a file's working-tree changes. Users who review an unwanted edit in GridVibe must leave the workspace and run a Git command elsewhere, interrupting the built-in review and staging flow.
+
+Steps to reproduce:
+1. Open an Explorer pane rooted in a Git repository and modify a tracked file without staging the latest edit.
+2. Open the Git sidebar and locate the file under `Changes`.
+3. Observe that the row offers Stage and Open containing folder actions, but no Revert or Discard action.
+
+Expected behavior:
+Each eligible tracked file under `Changes` should expose a clearly labeled Revert action. After an explicit confirmation, GridVibe should discard only that file's unstaged working-tree changes, preserve any already staged version of the file, refresh the Git summary and open diff, and report failures without hiding the existing changes. Untracked and conflicted files must not be silently deleted or overwritten; they should either omit the action or use a distinct, strongly confirmed workflow.
+
+Actual behavior / logs:
+Code inspection confirms `renderExplorerGitFileRows()` in `web/static/js/terminals.js` renders a `+` Stage button for rows under `Changes` and an Open containing folder button, while the staged section receives a separate Unstage action. The client has `explorerGitStageFile()` and `explorerGitUnstageFile()`, and `web/api.py` exposes stage and unstage routes, but there is no revert/discard/restore control, handler, or API route in `web/static/js/terminals.js`, `web/api.py`, or `web/explorer.py`.
+
+### Proposed solution:
+Add an accessible Revert button to eligible tracked rows rendered by `renderExplorerGitFileRows()` and require a confirmation that names the affected path and explains that unstaged edits will be lost. Add a narrowly scoped Explorer Git API route in `web/api.py` backed by a helper in `web/explorer.py` that reuses the existing root/path validation and performs the equivalent of `git restore --worktree -- <pathspec>`, so partially staged files revert to their index version without altering staged content. Return an updated repository summary and refresh any active file/diff view after success. Disable or omit the action for conflicts and untracked files unless a separate deletion workflow with stronger confirmation is deliberately added. Preserve local/SSH parity and add focused tests in `tests/test_api.py` for modified and deleted tracked files, partially staged files, unsafe/out-of-root paths, conflicts, untracked files, cancellation, Git failures, refreshed status, and rendered control wiring.
+
+### Issue ID: ISSUE-2026-017
+- Title: Improve Markdown preview visual hierarchy and callouts
+- Priority: Cosmetic
+- Status: Open
+- Area: `web/static/css/terminals.css`, `web/explorer.py`, `web/static/js/terminals.js`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `markdown`, `tests`
+- Reported: 2026-07-13
+
+Description:
+Markdown previews are functional but visually plain, making headings, lists, notes, and other document structure harder to scan than they should be. The weak hierarchy is especially noticeable in longer README and documentation files, where users depend on highlighted titles, distinct bullet levels, and visible note or warning blocks.
+
+Steps to reproduce:
+1. Open an Explorer pane and select a Markdown file containing multiple heading levels, nested bullet or numbered lists, blockquotes, and note-like content.
+2. Switch from Source to Preview.
+3. Observe that the content has basic spacing and code/table treatment, but headings, list levels, and note content have limited visual distinction.
+
+Expected behavior:
+Markdown Preview should present a polished, theme-aware document surface with clearly differentiated heading levels, readable paragraph width and spacing, visible ordered/unordered list markers and nesting, styled links and separators, and distinctive accessible callouts for notes, tips, warnings, and important information. The result should remain readable in light and dark themes and at every supported editor zoom level.
+
+Actual behavior / logs:
+Code inspection confirms `web/static/css/terminals.css` gives `.explorer-markdown-preview` basic padding, font sizing, and line height; applies only margin and line-height rules to `h1` through `h3`; gives lists only a shared bottom margin; and renders all blockquotes with one muted left-border style. `_render_markdown_preview()` in `web/explorer.py` supports common Markdown extensions and sanitized semantic HTML, but it does not define a dedicated note/callout representation. Existing tests verify sanitized Markdown and fenced-code language hints, not the visual hierarchy or callout styling requested here.
+
+### Proposed solution:
+Create a cohesive Markdown preview theme in `web/static/css/terminals.css`: constrain readable line length where space permits; give `h1` through `h6` progressively distinct size, weight, color, spacing, and divider treatment; style nested list indentation and markers; and refine links, horizontal rules, tables, task items, images, inline code, and fenced blocks with the existing explorer theme variables. Define and document one note syntax, preferably GitHub-style `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, and `[!CAUTION]` blockquotes, then extend the sanitized rendering path in `web/explorer.py` or a bounded client postprocessor in `web/static/js/terminals.js` to emit safe semantic callout classes and icons/labels. Maintain sanitization, keyboard selection, search highlighting, zoom behavior, narrow-pane wrapping, and light/dark contrast. Add focused API/template tests for every supported heading/list/callout form, sanitizer restrictions, nested content, theme classes, and regression coverage for existing code blocks, tables, footnotes, and raw-HTML handling.
+
+### Issue ID: ISSUE-2026-016
+- Title: Markdown preview links do not open explorer tabs
+- Priority: Medium
+- Status: Open
+- Area: `web/static/js/terminals.js`, `web/explorer.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `markdown`, `terminal`, `tests`
+- Reported: 2026-07-13
+
+Description:
+Links rendered inside a Markdown file preview do not participate in Explorer navigation. Relative documentation links are effectively broken in the terminal workspace, and clicking them does not open the linked Markdown file in a new Explorer tab. This is a companion requirement to the tabbed file viewer in ISSUE-2026-014; any pinned link-opened tabs should also use the persistence model tracked in ISSUE-2026-015.
+
+Steps to reproduce:
+1. In an Explorer pane, open a Markdown file that contains a relative link to another readable Markdown file, such as `[Guide](docs/guide.md)`.
+2. Switch to Preview and click the rendered `Guide` link.
+3. Observe that GridVibe does not resolve the target relative to the current file or open it as a new closable Markdown tab in the Explorer pane.
+
+Expected behavior:
+Clicking an internal Markdown-to-Markdown link should resolve the target relative to the source document, validate it against the active Explorer root, and open or focus it as a new closable pinned tab using the model defined by ISSUE-2026-014. Fragment links should focus the corresponding heading, duplicate targets should reuse their existing tab, and external or unsupported links should follow an explicit safe behavior without navigating the GridVibe session page away.
+
+Actual behavior / logs:
+Code inspection confirms `_render_markdown_preview()` in `web/explorer.py` preserves sanitized `href` attributes on anchors. `renderExplorerFile()` in `web/static/js/terminals.js` assigns that HTML directly to the preview and wires code highlighting, editor tabs, zoom, and search, but it does not install a Markdown-link click handler or resolve link paths against the current file. The browser therefore receives raw relative URLs in the `/terminals` document context, and no Explorer file-tab action is invoked.
+
+### Proposed solution:
+Implement delegated anchor handling on each `.explorer-markdown-preview` after the tab model from ISSUE-2026-014 is available. Classify links before acting: keep same-document fragments inside the active preview; resolve relative Markdown targets against the current file's directory; normalize and validate decoded paths within the Explorer root; and call the shared pinned-tab open/focus primitive rather than the legacy single-file replacement flow. Preserve URL fragments so the destination tab can scroll to a sanitized heading target. Define safe behavior for `http`/`https`, `mailto`, unsupported local formats, missing files, traversal attempts, encoded separators, absolute paths, and SSH explorers; external links must not replace the GridVibe workspace and should use appropriate opener isolation. If ISSUE-2026-015 is implemented, link-opened pinned tabs should serialize identically to tabs opened with the tree `+` action. Add focused tests in `tests/test_api.py` for relative, parent-relative, fragment-only, duplicate, external, missing, unsupported, out-of-root, encoded, local, and SSH targets plus event isolation and tab persistence integration.
 
 ### Issue ID: ISSUE-2026-015
 - Title: Persist open explorer tabs in saved sessions

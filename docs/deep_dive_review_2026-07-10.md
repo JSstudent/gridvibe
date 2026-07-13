@@ -1167,6 +1167,38 @@ incrementally (one module per PR), running `make check` between steps.
 > work left): `terminal_io.py`, `voice.py`, `saved_sessions.py`/`agents.py`, and `app.py`
 > (Flask/SocketIO creation) — no longer blocked on anything, just not yet extracted.
 
+> **✅ Implemented (2026-07-13) — final tranches; finding closed.** The remaining five
+> modules landed, completing the split proposed above:
+> - `web/app.py` — Flask app + SocketIO creation, `_resolve_secret_key`,
+>   `_resolve_cors_origins`, the cross-origin write guard (1.2), and the shared
+>   `SessionManager` singleton.
+> - `web/saved_sessions.py` — session-config normalization (`_normalize_session_config`,
+>   layout/startup-mode/browser-URL normalizers, workspace merge) and the
+>   `saved_sessions.json` persistence flows (load/save/upsert/delete/last-used).
+> - `web/agents.py` — agent registry, the four detection probes with their result cache
+>   (2.5's check/compute/re-store pattern preserved), preflight payloads, launch-command
+>   sanitizing, SSH ping/TCP probes, WSL distro inspection, and the shell-quoting helpers.
+> - `web/terminal_io.py` — the connection registry (`ssh_connections`, replay buffers,
+>   `connection_lock` with its lock-ordering comment), output pumps (`_stream_ssh_output`,
+>   `_stream_local_output`), startup sequence, resize/input plumbing, runtime agent-command
+>   tracking (2.10), and the SSH/local/WSL connectors.
+> - `web/voice.py` — vosk-service lifecycle, per-session Vosk WebSocket connections, the
+>   lazily rebuilt faster-whisper model (2.7), audio buffering/transcription, voice prefs,
+>   and the optional `websocket-client`/`numpy`/`faster-whisper` imports.
+>
+> `web/api.py` is now ~1,800 lines of HTTP routes, Socket.IO handlers, and app-config
+> helpers, importing (and re-exporting with `# noqa: F401` blocks) every moved name, so
+> `main.py`, `web/webview_launcher.py`, and the root shims are untouched. Flask routes and
+> Socket.IO event handlers stay in `web.api` and delegate to the new modules (the
+> `explorer/` sub-package variant from the sketch was not needed — `web/explorer.py`
+> already covers it). Tests that patch internals moved with their code (patching
+> `web.terminal_io` / `web.voice` / `web.agents` / `web.saved_sessions` directly, same
+> pattern as the earlier tranches); shared mutable state is re-exported by object identity
+> so in-place mutation through `api.<name>` still works. Covered by
+> `FinalModuleSplitTestCase` in `tests/test_api.py` (re-export identity per module,
+> `__module__` ownership checks, and the entry-point import contract). Suite green
+> (385 tests, 1 skip) and `ruff` clean.
+
 ### 6.3 `create_session` and `append_session_to_group` duplicate a 19-parameter signature — **Low**
 
 **Location:** `sessions/manager.py:161-300`
@@ -1699,9 +1731,17 @@ posture paragraph.
    ~4,830 lines). The only step-5 work remaining is 6.2's final tranches
    (`terminal_io.py` / `voice.py` / `saved_sessions.py`+`agents.py` / `app.py`), which are
    now unblocked. Suite green (378 tests) and `ruff` clean after each tranche.
+   ✅ **Step 5 completed 2026-07-13:** 6.2's final tranches landed (`web/app.py`,
+   `web/saved_sessions.py`, `web/agents.py`, `web/terminal_io.py`, `web/voice.py`;
+   `web/api.py` is now a ~1,800-line routes/handlers module — see the 6.2 note). All of
+   step 5 (6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 3.5) is now closed. Suite green (385 tests,
+   1 skip) and `ruff` clean.
 6. **Correctness & config cleanups:** 4.7 + 4.8 together (CLI-vs-config precedence and the vosk
    port key are both config-resolution fixes; 5.7's shared `run_server` is the natural home for
-   4.7), then 4.3/4.6/4.9/4.10 and the log polish 9.2/9.3 as one sweep.
+   4.7 — note `web/config.py` is now importable without Flask, so 4.8's step 3 is a one-line
+   import in `vosk_service.py`), then 4.3/4.6/4.9 and the log polish 9.2/9.3 as one sweep
+   (4.10 already resolved with 6.1), plus 1.1's deferred step 3 (room-scoping the global
+   `session_status` broadcast) — the one open sub-item left from an otherwise closed finding.
 7. **Dead-code sweep:** 5.1–5.6 in one or two commits validated by `make check` (5.1's useful
    keys graduate into features 10.2 instead of being deleted).
 8. **Style/theming:** 7.1 (shared design tokens — pairs with the 3.5/6.4 extraction, do them in

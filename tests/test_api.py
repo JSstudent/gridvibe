@@ -15,10 +15,15 @@ from unittest.mock import ANY, MagicMock, patch
 
 import api
 from gridvibe_version import __version__
+from web import agents as web_agents
+from web import app as web_app
 from web import config as web_config
 from web import explorer as web_explorer
 from web import hostkeys as web_hostkeys
+from web import saved_sessions as web_saved_sessions
 from web import selfupdate
+from web import terminal_io as web_terminal_io
+from web import voice as web_voice
 
 
 class FakeSftp:
@@ -118,7 +123,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.config_path_patch.start()
         self.saved_sessions_path = Path(self.temp_dir.name) / "saved_sessions.json"
         self.saved_sessions_patch = patch.object(
-            api,
+            web_saved_sessions,
             "SAVED_SESSIONS_PATH",
             str(self.saved_sessions_path),
         )
@@ -141,7 +146,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             api._vosk_ws_connections.clear()
         with api._whisper_audio_lock:
             api._whisper_audio_buffers.clear()
-        api._whisper_model_instance = None
+        web_voice._whisper_model_instance = None
         cfg = api.load_config()
         self._saved_appearance = json.loads(json.dumps(cfg.get("appearance", {})))
         self._saved_voice_input = json.loads(json.dumps(cfg.get("voice_input", {})))
@@ -210,7 +215,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             api._vosk_ws_connections.clear()
         with api._whisper_audio_lock:
             api._whisper_audio_buffers.clear()
-        api._whisper_model_instance = None
+        web_voice._whisper_model_instance = None
         cfg = api.load_config()
         cfg["appearance"] = self._saved_appearance
         cfg["voice_input"] = self._saved_voice_input
@@ -1462,8 +1467,8 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_voice_status_endpoint_reports_missing_whisper_dependency(self):
         with patch.object(api.runtime_config, "voice_engine", "whisper"), patch.object(
-            api, "WhisperModel", None
-        ), patch.object(api, "np", object()):
+            web_voice, "WhisperModel", None
+        ), patch.object(web_voice, "np", object()):
             response = self.client.get("/api/voice-status")
 
         self.assertEqual(response.status_code, 200)
@@ -1546,7 +1551,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_agent_preflight_endpoint_returns_installed_when_binary_exists(self):
         with patch.object(
-            api,
+            web_agents,
             "_detect_agent_binary",
             return_value={
                 "found": True,
@@ -1574,7 +1579,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_agent_preflight_endpoint_returns_missing_with_install_guidance(self):
         with patch.object(
-            api,
+            web_agents,
             "_detect_agent_binary",
             return_value={
                 "found": False,
@@ -1583,7 +1588,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "error": "",
             },
         ), patch.object(
-            api,
+            web_agents,
             "_select_install_option",
             return_value=(
                 {"label": "npm", "command": "npm install -g @kilocode/cli", "manual_only": False},
@@ -1608,7 +1613,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_agent_preflight_endpoint_treats_wsl_install_prerequisites_as_advisory(self):
         with patch.object(
-            api,
+            web_agents,
             "_detect_agent_binary",
             return_value={
                 "found": False,
@@ -1617,14 +1622,14 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "error": "",
             },
         ), patch.object(
-            api,
+            web_agents,
             "_select_install_option",
             return_value=(
                 {"label": "npm", "command": "npm install -g @kilocode/cli", "manual_only": False},
                 ["npm is required for the Linux or WSL install path."],
             ),
         ), patch.object(
-            api,
+            web_agents,
             "_resolve_agent_target",
             return_value={
                 "connection_mode": "wsl",
@@ -1655,7 +1660,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_agent_preflight_endpoint_returns_manual_install_for_detect_only_ssh_targets(self):
         with patch.object(
-            api,
+            web_agents,
             "_detect_agent_binary",
             return_value={
                 "found": False,
@@ -1686,7 +1691,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_agent_preflight_endpoint_reuses_recent_local_detection(self):
         with patch.object(
-            api,
+            web_agents,
             "_detect_agent_binary",
             return_value={
                 "found": True,
@@ -1695,7 +1700,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "error": "",
             },
         ) as detect_agent_binary, patch.object(
-            api,
+            web_agents,
             "_select_install_option",
             return_value=({}, []),
         ):
@@ -1747,8 +1752,8 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_detect_wsl_command_accepts_alias_probe_output(self):
         completed = SimpleNamespace(returncode=0, stdout="__TF_FOUND__\n__TF_KIND__:alias\n__TF_PATH__:\n__TF_HEAD__:\n", stderr="")
 
-        with patch.object(api.os, "name", "nt"), patch.object(api, "_find_wsl_executable", return_value="wsl.exe"), patch.object(
-            api.subprocess,
+        with patch.object(api.os, "name", "nt"), patch.object(web_agents, "_find_wsl_executable", return_value="wsl.exe"), patch.object(
+            web_agents.subprocess,
             "run",
             return_value=completed,
         ) as run_mock:
@@ -1776,7 +1781,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             AutoAddPolicy=MagicMock(return_value=object()),
         )
 
-        with patch.object(api, "paramiko", fake_paramiko):
+        with patch.object(web_agents, "paramiko", fake_paramiko):
             detected = api._detect_ssh_command(
                 "copilot",
                 {"host": "example.com", "username": "ubuntu", "password": "", "port": 22},
@@ -1818,7 +1823,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         }
 
         with patch.object(
-            api,
+            web_agents,
             "_agent_preflight_payload",
             return_value={
                 "status": "check_failed",
@@ -1846,8 +1851,8 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_ssh_ping_endpoint_returns_icmp_success(self):
         completed = SimpleNamespace(returncode=0, stdout="Reply from 10.0.0.20: time=12.3 ms", stderr="")
 
-        with patch.object(api.shutil, "which", return_value="/bin/ping"), patch.object(
-            api.subprocess,
+        with patch.object(web_agents.shutil, "which", return_value="/bin/ping"), patch.object(
+            web_agents.subprocess,
             "run",
             return_value=completed,
         ) as run_command:
@@ -1873,8 +1878,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         connection.__enter__.return_value = connection
         connection.__exit__.return_value = False
 
-        with patch.object(api.shutil, "which", return_value=None), patch.object(
-            api.socket,
+        with patch.object(web_agents.shutil, "which", return_value=None), patch.object(
+            web_agents.socket,
             "create_connection",
             return_value=connection,
         ) as create_connection:
@@ -2192,7 +2197,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         }
 
         with patch.object(api.socketio, "start_background_task") as replacement_start_task, patch.object(
-            api,
+            web_terminal_io,
             "_close_ssh_connection",
             wraps=api._close_ssh_connection,
         ) as close_connection:
@@ -4843,7 +4848,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "_send_connection_input") as send_input:
+            with patch.object(web_terminal_io, "_send_connection_input") as send_input:
                 with patch.object(api.time, "sleep") as sleep:
                     api._run_startup_sequence(connection, session)
 
@@ -4864,7 +4869,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "_send_connection_input") as send_input:
+            with patch.object(web_terminal_io, "_send_connection_input") as send_input:
                 with patch.object(api.time, "sleep") as sleep:
                     api._run_startup_sequence(connection, session)
 
@@ -4893,7 +4898,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         session = SimpleNamespace(directory='C:\\repo path', initial_command='codex')
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "_send_connection_input") as send_input:
+            with patch.object(web_terminal_io, "_send_connection_input") as send_input:
                 with patch.object(api.time, "sleep") as sleep:
                     api._run_startup_sequence(connection, session)
 
@@ -4918,7 +4923,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "_send_connection_input") as send_input:
+            with patch.object(web_terminal_io, "_send_connection_input") as send_input:
                 with patch.object(api.time, "sleep") as sleep:
                     api._run_startup_sequence(connection, session)
 
@@ -4938,7 +4943,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "_send_connection_input") as send_input:
+            with patch.object(web_terminal_io, "_send_connection_input") as send_input:
                 with patch.object(api.time, "sleep") as sleep:
                     api._run_startup_sequence(connection, session)
 
@@ -4993,8 +4998,8 @@ class ApiRoutesTestCase(unittest.TestCase):
             stderr="",
         )
 
-        with patch.object(api, "_find_wsl_executable", return_value="wsl.exe"):
-            with patch.object(api.subprocess, "run", return_value=completed) as run_command:
+        with patch.object(web_agents, "_find_wsl_executable", return_value="wsl.exe"):
+            with patch.object(web_agents.subprocess, "run", return_value=completed) as run_command:
                 snapshot = api._inspect_wsl_distributions()
 
         distros = snapshot["distros"]
@@ -5020,8 +5025,8 @@ class ApiRoutesTestCase(unittest.TestCase):
             stderr="",
         )
 
-        with patch.object(api, "_find_wsl_executable", return_value="wsl.exe"):
-            with patch.object(api.subprocess, "run", return_value=completed):
+        with patch.object(web_agents, "_find_wsl_executable", return_value="wsl.exe"):
+            with patch.object(web_agents.subprocess, "run", return_value=completed):
                 response = self.client.get("/api/wsl-distros")
 
         self.assertEqual(response.status_code, 200)
@@ -5034,7 +5039,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_build_local_command_uses_wsl_without_distribution_when_blank(self):
         session = SimpleNamespace(use_wsl=True, username="devuser")
 
-        with patch.object(api, "_find_wsl_executable", return_value="wsl.exe"):
+        with patch.object(web_terminal_io, "_find_wsl_executable", return_value="wsl.exe"):
             command = api._build_local_command(session, resolved_distribution="")
 
         self.assertEqual(command[0], "wsl.exe")
@@ -5092,7 +5097,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         connection = {}
 
-        with patch.object(api, "_broadcast_session_status") as broadcast:
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
             api._track_terminal_agent_input(session.session_id, connection, "co")
             api._track_terminal_agent_input(session.session_id, connection, "dex --full-auto\r")
 
@@ -5122,7 +5127,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             initial_command_mode="agent",
         )
 
-        with patch.object(api, "_broadcast_session_status") as broadcast:
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
             api._track_terminal_agent_input(session.session_id, {}, "claudx\be\r")
 
         updated = api.session_manager.get_session(session.session_id)
@@ -5149,7 +5154,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             initial_command="codex",
         )
 
-        with patch.object(api, "_broadcast_session_status") as broadcast:
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
             api._track_terminal_agent_input(session.session_id, {}, "\x03")
 
         updated = api.session_manager.get_session(session.session_id)
@@ -5177,7 +5182,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             initial_command="claude",
         )
 
-        with patch.object(api, "_broadcast_session_status") as broadcast:
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
             api._track_terminal_agent_input(session.session_id, {}, "/exit\r")
 
         updated = api.session_manager.get_session(session.session_id)
@@ -5195,7 +5200,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_build_local_command_uses_wsl_startup_directory_when_available(self):
         session = SimpleNamespace(use_wsl=True, username="devuser")
 
-        with patch.object(api, "_find_wsl_executable", return_value="wsl.exe"):
+        with patch.object(web_terminal_io, "_find_wsl_executable", return_value="wsl.exe"):
             command = api._build_local_command(
                 session,
                 resolved_distribution="Ubuntu",
@@ -5241,13 +5246,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         fake_process = object()
 
         with patch.object(api.os, "name", "nt"), patch.object(
-            api, "_find_wsl_executable", return_value="wsl.exe"
+            web_terminal_io, "_find_wsl_executable", return_value="wsl.exe"
         ):
-            with patch.object(api, "WinPtyProcess") as winpty:
-                with patch.object(api, "_broadcast_session_status"):
-                    with patch.object(api, "_stream_local_output"):
-                        with patch.object(api, "_run_startup_sequence"):
-                            with patch.object(api, "_drain_until_prompt"):
+            with patch.object(web_terminal_io, "WinPtyProcess") as winpty:
+                with patch.object(web_terminal_io, "_broadcast_session_status"):
+                    with patch.object(web_terminal_io, "_stream_local_output"):
+                        with patch.object(web_terminal_io, "_run_startup_sequence"):
+                            with patch.object(web_terminal_io, "_drain_until_prompt"):
                                 with patch.object(api.session_manager, "update_session_status"):
                                     winpty.spawn.return_value = fake_process
                                     api._connect_local_session("abc123", session)
@@ -5272,10 +5277,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         fake_process = object()
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "WinPtyProcess") as winpty:
-                with patch.object(api, "_broadcast_session_status"):
-                    with patch.object(api, "_stream_local_output"):
-                        with patch.object(api, "_run_startup_sequence"):
+            with patch.object(web_terminal_io, "WinPtyProcess") as winpty:
+                with patch.object(web_terminal_io, "_broadcast_session_status"):
+                    with patch.object(web_terminal_io, "_stream_local_output"):
+                        with patch.object(web_terminal_io, "_run_startup_sequence"):
                             with patch.object(api.session_manager, "update_session_status"):
                                 winpty.spawn.return_value = fake_process
                                 api._connect_local_session("abc123", session)
@@ -5294,8 +5299,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "WinPtyProcess", None):
-                with patch.object(api, "_broadcast_session_status"):
+            with patch.object(web_terminal_io, "WinPtyProcess", None):
+                with patch.object(web_terminal_io, "_broadcast_session_status"):
                     api._connect_local_session("abc123", session)
 
         stored = api.session_manager.get_session("abc123")
@@ -5704,8 +5709,8 @@ class ApiRoutesTestCase(unittest.TestCase):
             SimpleNamespace(language="en"),
         )
 
-        with patch.object(api, "_ensure_whisper_model", return_value=mock_model), patch.object(
-            api, "_pcm16le_to_float32", return_value="audio-array"
+        with patch.object(web_voice, "_ensure_whisper_model", return_value=mock_model), patch.object(
+            web_voice, "_pcm16le_to_float32", return_value="audio-array"
         ):
             socket_client.emit("voice_start", {"session_id": "session-whisper"})
             start_events = socket_client.get_received()
@@ -5938,7 +5943,7 @@ class SshConnectionErrorPathTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -5955,7 +5960,7 @@ class SshConnectionErrorPathTestCase(unittest.TestCase):
             api.ssh_connections.clear()
             api.session_output_buffers.clear()
 
-    @patch("web.api.paramiko")
+    @patch("web.terminal_io.paramiko")
     def test_ssh_connect_failure_closes_client_once(self, mock_paramiko):
         mock_client = MagicMock()
         mock_paramiko.SSHClient.return_value = mock_client
@@ -5980,7 +5985,7 @@ class VoskStartupTimeoutTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -5990,21 +5995,21 @@ class VoskStartupTimeoutTestCase(unittest.TestCase):
     def tearDown(self):
         self.saved_sessions_patch.stop
 
-    @patch("web.api._wait_for_vosk_ready", return_value=False)
-    @patch("web.api._vosk_service_reachable", return_value=False)
-    @patch("web.api.subprocess.Popen")
+    @patch("web.voice._wait_for_vosk_ready", return_value=False)
+    @patch("web.voice._vosk_service_reachable", return_value=False)
+    @patch("web.voice.subprocess.Popen")
     def test_vosk_timeout_waits_after_kill(self, mock_popen, _mock_reachable, _mock_ready):
         mock_process = MagicMock()
         mock_process.poll.return_value = None
         mock_process.pid = 99999
         mock_popen.return_value = mock_process
 
-        original = api._vosk_process
+        original = web_voice._vosk_process
         try:
-            api._vosk_process = None
+            web_voice._vosk_process = None
             result = api._ensure_vosk_service()
         finally:
-            api._vosk_process = original
+            web_voice._vosk_process = original
 
         self.assertFalse(result)
         mock_process.kill.assert_called_once()
@@ -6018,7 +6023,7 @@ class SshConnectExceptionHandlingTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -6035,7 +6040,7 @@ class SshConnectExceptionHandlingTestCase(unittest.TestCase):
             api.ssh_connections.clear()
             api.session_output_buffers.clear()
 
-    @patch("web.api.paramiko")
+    @patch("web.terminal_io.paramiko")
     def test_ssh_connect_catches_os_error(self, mock_paramiko):
         mock_client = MagicMock()
         mock_paramiko.SSHClient.return_value = mock_client
@@ -6052,7 +6057,7 @@ class SshConnectExceptionHandlingTestCase(unittest.TestCase):
         s = api.session_manager.get_session(session.session_id)
         self.assertEqual(s.status, api.SessionStatus.ERROR)
 
-    @patch("web.api.paramiko")
+    @patch("web.terminal_io.paramiko")
     def test_ssh_connect_does_not_swallow_unexpected_errors(self, mock_paramiko):
         mock_client = MagicMock()
         mock_paramiko.SSHClient.return_value = mock_client
@@ -6076,7 +6081,7 @@ class SessionOutputBufferTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -6162,9 +6167,9 @@ class SshSftpPoolTestCase(unittest.TestCase):
         self.addCleanup(api._evict_all_pooled_ssh_clients)
 
     def _fake_client(self, active=True):
-        if api.paramiko is None:
+        if web_explorer.paramiko is None:
             self.skipTest("paramiko is not installed")
-        client = api.paramiko.SSHClient()
+        client = web_explorer.paramiko.SSHClient()
         transport = MagicMock()
         transport.is_active.return_value = active
         client.get_transport = MagicMock(return_value=transport)
@@ -6351,7 +6356,7 @@ class SessionStatusBroadcastRaceTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api,
+            web_saved_sessions,
             "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
@@ -6421,7 +6426,7 @@ class VoiceStartRaceTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -6436,9 +6441,9 @@ class VoiceStartRaceTestCase(unittest.TestCase):
             api._vosk_ws_connections.clear()
             api._vosk_session_locks.clear()
 
-    @patch("web.api.emit")
-    @patch("web.api._ensure_vosk_service", return_value=True)
-    @patch("web.api.ws_client")
+    @patch("web.voice.emit")
+    @patch("web.voice._ensure_vosk_service", return_value=True)
+    @patch("web.voice.ws_client")
     def test_voice_start_stores_connection_under_lock(self, mock_ws_client, _mock_ensure, _mock_emit):
         mock_ws = MagicMock()
         mock_ws_client.create_connection.return_value = mock_ws
@@ -6449,9 +6454,9 @@ class VoiceStartRaceTestCase(unittest.TestCase):
             self.assertIn("sess-01", api._vosk_ws_connections)
             self.assertIs(api._vosk_ws_connections["sess-01"], mock_ws)
 
-    @patch("web.api.emit")
-    @patch("web.api._ensure_vosk_service", return_value=True)
-    @patch("web.api.ws_client")
+    @patch("web.voice.emit")
+    @patch("web.voice._ensure_vosk_service", return_value=True)
+    @patch("web.voice.ws_client")
     def test_voice_start_closes_leaked_ws_on_concurrent_store(self, mock_ws_client, _mock_ensure, _mock_emit):
         """Simulate a concurrent writer that stored a connection between our pop and store."""
         leaked_ws = MagicMock()
@@ -6467,10 +6472,10 @@ class VoiceStartRaceTestCase(unittest.TestCase):
         with api._vosk_lock:
             self.assertIs(api._vosk_ws_connections["sess-02"], new_ws)
 
-    @patch("web.api.emit")
-    @patch("web.api._restart_vosk_service", return_value=True)
-    @patch("web.api._ensure_vosk_service", return_value=True)
-    @patch("web.api.ws_client")
+    @patch("web.voice.emit")
+    @patch("web.voice._restart_vosk_service", return_value=True)
+    @patch("web.voice._ensure_vosk_service", return_value=True)
+    @patch("web.voice.ws_client")
     def test_retry_closes_first_ws_before_creating_second(self, mock_ws_client, _mock_ensure, _mock_restart, _mock_emit):
         """Issue 12 — first connection stored then fails; retry must close it."""
         first_ws = MagicMock()
@@ -6502,7 +6507,7 @@ class LocalPtyStreamTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -6517,8 +6522,8 @@ class LocalPtyStreamTestCase(unittest.TestCase):
             api.ssh_connections.clear()
             api.session_output_buffers.clear()
 
-    @patch("web.api._broadcast_session_status")
-    @patch("web.api.session_manager")
+    @patch("web.terminal_io._broadcast_session_status")
+    @patch("web.terminal_io.session_manager")
     @patch("select.select", return_value=([999], [], []))
     @patch("os.read", side_effect=OSError(9, "Bad file descriptor"))
     def test_stream_local_output_handles_closed_master_fd(
@@ -6545,8 +6550,8 @@ class LocalPtyStreamTestCase(unittest.TestCase):
             session_id, api.SessionStatus.DISCONNECTED
         )
 
-    @patch("web.api._broadcast_session_status")
-    @patch("web.api.session_manager")
+    @patch("web.terminal_io._broadcast_session_status")
+    @patch("web.terminal_io.session_manager")
     def test_stream_local_output_fallback_reads_chunks_via_read1(
         self, mock_session_mgr, _mock_broadcast
     ):
@@ -6636,8 +6641,8 @@ class SshStreamBlockingRecvTestCase(unittest.TestCase):
         def close(self):
             self.closed = True
 
-    @patch("web.api._broadcast_session_status")
-    @patch("web.api.session_manager")
+    @patch("web.terminal_io._broadcast_session_status")
+    @patch("web.terminal_io.session_manager")
     def test_stream_ssh_output_sets_recv_timeout_and_survives_timeouts(
         self, mock_session_mgr, _mock_broadcast
     ):
@@ -6666,8 +6671,8 @@ class SshStreamBlockingRecvTestCase(unittest.TestCase):
         with api.connection_lock:
             self.assertNotIn(session_id, api.ssh_connections)
 
-    @patch("web.api._broadcast_session_status")
-    @patch("web.api.session_manager")
+    @patch("web.terminal_io._broadcast_session_status")
+    @patch("web.terminal_io.session_manager")
     def test_stream_ssh_output_exits_on_exit_status_after_timeout(
         self, mock_session_mgr, _mock_broadcast
     ):
@@ -6842,7 +6847,7 @@ class VoiceAudioRaceTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -6857,7 +6862,7 @@ class VoiceAudioRaceTestCase(unittest.TestCase):
             api._vosk_ws_connections.clear()
             api._vosk_session_locks.clear()
 
-    @patch("web.api.emit")
+    @patch("web.voice.emit")
     def test_voice_audio_handles_ws_closed_between_lock_and_send(self, mock_emit):
         session_id = "voice-race-01"
         mock_ws = MagicMock()
@@ -6881,7 +6886,7 @@ class VoiceAudioRaceTestCase(unittest.TestCase):
         self.assertTrue(len(error_events) > 0)
         self.assertEqual(error_events[0][0][1]['status'], 'error')
 
-    @patch("web.api.emit")
+    @patch("web.voice.emit")
     def test_voice_audio_dropped_when_no_connection(self, mock_emit):
         api._handle_vosk_audio_chunk("voice-no-conn", b"\x00\x01\x02\x03")
 
@@ -6940,7 +6945,7 @@ class CrossOriginWriteGuardTestCase(unittest.TestCase):
         self.config_path_patch.start()
         self.addCleanup(self.config_path_patch.stop)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -7074,7 +7079,7 @@ class KnownHostsPersistenceTestCase(unittest.TestCase):
 
         mock_client.load_host_keys.assert_called_once_with(self.known_hosts_path)
 
-    @patch("web.api.paramiko")
+    @patch("web.terminal_io.paramiko")
     def test_connect_ssh_session_loads_known_hosts(self, mock_paramiko):
         mock_client = MagicMock()
         mock_paramiko.SSHClient.return_value = mock_client
@@ -7113,7 +7118,7 @@ class ConnectCloseToctouTestCase(unittest.TestCase):
             api.ssh_connections.clear()
             api.session_output_buffers.clear()
 
-    @patch("web.api.paramiko")
+    @patch("web.terminal_io.paramiko")
     def test_connection_discarded_when_session_removed_mid_connect(self, mock_paramiko):
         mock_client = MagicMock()
         mock_paramiko.SSHClient.return_value = mock_client
@@ -7141,7 +7146,7 @@ class ConnectCloseToctouTestCase(unittest.TestCase):
         channel.close.assert_called()
         mock_client.close.assert_called()
 
-    @patch("web.api.paramiko")
+    @patch("web.terminal_io.paramiko")
     def test_connection_registered_when_session_still_exists(self, mock_paramiko):
         mock_client = MagicMock()
         mock_paramiko.SSHClient.return_value = mock_client
@@ -7151,8 +7156,8 @@ class ConnectCloseToctouTestCase(unittest.TestCase):
             username="root", password="pass",
         )
 
-        with patch.object(api, "_run_startup_sequence"), \
-                patch.object(api, "_stream_ssh_output"):
+        with patch.object(web_terminal_io, "_run_startup_sequence"), \
+                patch.object(web_terminal_io, "_stream_ssh_output"):
             api._connect_ssh_session(session.session_id, session)
 
         with api.connection_lock:
@@ -7261,7 +7266,7 @@ class AgentDetectionCacheLockTestCase(unittest.TestCase):
             lock_states.append(api._agent_detection_cache_lock.locked())
             return {"found": True, "path": "C:/bin/claude"}
 
-        with patch.object(api, "_detect_agent_binary", side_effect=fake_probe) as probe:
+        with patch.object(web_agents, "_detect_agent_binary", side_effect=fake_probe) as probe:
             first = api._detect_agent_binary_cached(target, "claude")
             second = api._detect_agent_binary_cached(target, "claude")
 
@@ -7336,7 +7341,7 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
         )
         connection = {}
 
-        with patch.object(api, "_mark_runtime_agent_exited", return_value=True) as mark:
+        with patch.object(web_terminal_io, "_mark_runtime_agent_exited", return_value=True) as mark:
             api._track_terminal_agent_input(session.session_id, connection, "\x03")
             mark.assert_not_called()
             api._track_terminal_agent_input(session.session_id, connection, "\x03")
@@ -7352,8 +7357,8 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
         api._track_terminal_agent_input(session.session_id, connection, "ude")
         self.assertEqual(connection["_gridvibe_input_line"], "claude")
 
-        with patch.object(api, "_agent_from_terminal_command", return_value=("claude", "claude")), \
-                patch.object(api, "_broadcast_session_status"):
+        with patch.object(web_terminal_io, "_agent_from_terminal_command", return_value=("claude", "claude")), \
+                patch.object(web_terminal_io, "_broadcast_session_status"):
             api._track_terminal_agent_input(session.session_id, connection, "\r")
 
         updated = api.session_manager.get_session(session.session_id)
@@ -7470,3 +7475,122 @@ class ExplorerModuleExtractionTestCase(unittest.TestCase):
             web_explorer._load_persistent_host_keys,
             web_hostkeys._load_persistent_host_keys,
         )
+
+
+class FinalModuleSplitTestCase(unittest.TestCase):
+    """Finding 6.2 — final tranches: app/saved_sessions/agents/terminal_io/voice."""
+
+    def test_app_module_owns_the_flask_and_socketio_singletons(self):
+        self.assertIs(api.app, web_app.app)
+        self.assertIs(api.socketio, web_app.socketio)
+        self.assertIs(api.session_manager, web_app.session_manager)
+        self.assertIs(api._resolve_cors_origins, web_app._resolve_cors_origins)
+        self.assertIs(api._reject_cross_origin_writes, web_app._reject_cross_origin_writes)
+
+    def test_api_reexports_the_saved_sessions_module_objects(self):
+        for name in (
+            "SAVED_SESSIONS_PATH",
+            "DEFAULT_SAVED_SESSION_ID",
+            "DEFAULT_BROWSER_URL",
+            "_normalize_session_config",
+            "_merge_workspace_session_config",
+            "_load_saved_sessions_payload",
+            "load_session_config",
+            "load_saved_sessions",
+            "save_saved_sessions",
+            "upsert_saved_session",
+            "delete_saved_sessions",
+            "set_last_saved_session",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(api, name), getattr(web_saved_sessions, name))
+
+    def test_api_reexports_the_agents_module_objects(self):
+        for name in (
+            "AGENT_REGISTRY",
+            "AGENT_REGISTRY_PATH",
+            "_agent_detection_cache",
+            "_agent_detection_cache_lock",
+            "_agent_options",
+            "_agent_preflight_payload",
+            "_detect_agent_binary_cached",
+            "_find_wsl_executable",
+            "_inspect_wsl_distributions",
+            "_ping_ssh_target",
+            "_powershell_single_quote",
+            "_sanitize_agent_launch_commands",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(api, name), getattr(web_agents, name))
+
+    def test_api_reexports_the_terminal_io_module_objects(self):
+        for name in (
+            "ssh_connections",
+            "session_output_buffers",
+            "client_joined_sessions",
+            "connection_lock",
+            "TERMINAL_OUTPUT_BUFFER_MAX_CHARS",
+            "SSH_STREAM_RECV_TIMEOUT",
+            "WINDOWS_DEVICE_ATTRIBUTES_RESPONSE",
+            "_broadcast_session_status",
+            "_broadcast_session_groups_updated",
+            "_cache_terminal_output",
+            "_close_ssh_connection",
+            "_close_all_ssh_connections",
+            "_connect_session",
+            "_replace_group_sessions",
+            "_run_startup_sequence",
+            "_send_connection_input",
+            "_stream_ssh_output",
+            "_stream_local_output",
+            "_track_terminal_agent_input",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(api, name), getattr(web_terminal_io, name))
+
+    def test_api_reexports_the_voice_module_objects(self):
+        for name in (
+            "VOICE_PREFS_VALID_KEYS",
+            "_active_voice_sessions",
+            "_active_voice_sessions_lock",
+            "_vosk_ws_connections",
+            "_vosk_lock",
+            "_whisper_audio_buffers",
+            "_ensure_vosk_service",
+            "_stop_vosk_service",
+            "_ensure_whisper_model",
+            "_start_vosk_voice_session",
+            "_start_whisper_voice_session",
+            "_stop_vosk_voice_session",
+            "_stop_whisper_voice_session",
+            "_vosk_engine_available",
+            "_whisper_engine_available",
+            "_load_voice_prefs",
+            "_save_voice_prefs",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(api, name), getattr(web_voice, name))
+
+    def test_moved_functions_are_defined_in_their_new_modules(self):
+        for func, module_name in (
+            (api._normalize_session_config, "web.saved_sessions"),
+            (api._agent_preflight_payload, "web.agents"),
+            (api._connect_ssh_session, "web.terminal_io"),
+            (api._start_vosk_voice_session, "web.voice"),
+            (api._reject_cross_origin_writes, "web.app"),
+        ):
+            with self.subTest(module=module_name):
+                self.assertEqual(func.__module__, module_name)
+
+    def test_entry_point_contract_still_importable_from_web_api(self):
+        # main.py and web/webview_launcher.py import exactly these names.
+        for name in (
+            "app",
+            "socketio",
+            "session_manager",
+            "load_config",
+            "configure_browser_shutdown",
+            "_stop_vosk_service",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(api, name))
