@@ -1486,6 +1486,22 @@ without rewriting thousands of selector rules. Decide deliberately which identit
 one accent + one success/danger/warning set everywhere). The intentional exception —
 `--t-terminal-bg` staying dark in light theme — should get a comment.
 
+> **✅ Implemented (2026-07-13).** New `web/static/css/tokens.css` defines the shared
+> palette (`--gv-bg-app/accent/accent-hover/accent-soft/success/success-hover/danger/warning`
+> plus `--gv-radius-s/m/l`) with a `[data-theme="light"]` override block, and is linked
+> before the page stylesheet on both pages. `launcher.css` maps
+> `--accent/--accent-strong/--accent-soft/--danger/--success/--warning/--border-active`
+> onto the tokens (its light-theme duplicates removed), and `terminals.css` maps
+> `--t-bg/--t-accent/--t-accent-hover/--t-success/--t-success-hover`. The terminals
+> identity won as recommended: the unified accent is `#00d9ff` (light `#087f9b`) — every
+> `#4cc9f0`/`rgba(76, 201, 240, …)` literal in `launcher.css` was rewritten to the new
+> accent — while the unified success set is `#22c55e`/`#16a34a` (the launcher's green;
+> `#18b66a`/`#14955a` are gone). The terminal canvas exception is now explicit: pinned
+> `--t-terminal-bg/fg/cursor/selection` literals with a comment in both theme blocks
+> (they feed xterm via 7.3's `getComputedStyle` wiring). Radius tokens are wired into
+> `.card` and the shared launcher button rule (same values as before). Covered by
+> `StyleThemingTestCase` in `tests/test_api.py`.
+
 ### 7.2 Mixed icon language: emoji vs SVG vs text glyphs — **Low**
 
 **Location:** `templates/index.html:2287-2289, 2343` (💾 📂 🗑 🌙); `templates/terminals.html:2797`
@@ -1501,6 +1517,22 @@ elsewhere (Feather-style, `stroke="currentColor"`, `stroke-width 1.8-2`): save �
 import → folder-open, delete → trash, theme → sun/moon SVG pair, clear → an eraser/ban icon,
 fullscreen → expand arrows. All already match the established `btn-icon` sizing. Keep the
 `title`/`aria-label` attributes that are already present.
+
+> **✅ Implemented (2026-07-13).** All the listed emoji/text glyphs are now Feather-style
+> inline SVGs (`stroke="currentColor"`, `aria-hidden`, existing `title`/`aria-label`
+> kept): save → floppy, import → folder, delete → trash, mic-refresh → the same
+> rotate-arrow already used by `checkUpdatesBtn`. The theme toggle on both pages renders
+> through a new shared `themeToggleButtonHtml()` in `shared.js` (sun/moon/monitor SVG +
+> label, replacing the ☀️/🌙/◐ `textContent` branches in `launcher.js`/`terminals.js`).
+> In `terminals.js`, new `TERMINAL_REFRESH_ICON`/`TERMINAL_CLEAR_ICON` (rotate-arrow /
+> eraser) constants replace `↻`/`🧹` in `buildGrid`, the explorer bars, and
+> `setTerminalActionState`'s busy-state restore, and
+> `FULLSCREEN_ENTER_ICON`/`FULLSCREEN_EXIT_ICON` (expand/contract arrows) replace
+> `&#9974;`/`&#10005;` in the template and `updateFullscreenButton`. Sizing rules added
+> for `.ghost-btn svg`, `.theme-toggle-icon`, `.fullscreen-icon`, and
+> `.terminal-action-btn/.explorer-refresh svg`. The voice 🎤, mode-toggle ☾, close ×, and
+> explorer ↑ glyphs were not part of this finding and are unchanged. Covered by
+> `StyleThemingTestCase` in `tests/test_api.py`.
 
 ### 7.3 Hardcoded colors that ignore the theme system — **Low**
 
@@ -1519,6 +1551,17 @@ fullscreen → expand arrows. All already match the established `btn-icon` sizin
 use `stroke="currentColor"` + a `.settings-window-btn { color: var(--t-accent); }` rule; derive
 the xterm theme from computed CSS variables so 7.1's unification automatically restyles the
 terminal cursor/selection.
+
+> **✅ Implemented (2026-07-13).** All four spots fixed as proposed. The settings-window
+> SVG strokes are `currentColor` with `color: var(--t-accent)` on the button (its glow
+> filter now derives from `currentColor` too). `.browser-close-btn` builds its red from
+> `var(--danger)` via `color-mix()`, which also gives it a correct light-theme rendering.
+> The tooltip arrow uses `var(--bg-deep)` to match its bubble, with a new
+> `[data-theme="light"]` arrow override matching the light bubble background.
+> `makeTerminal()` reads the xterm theme from the computed
+> `--t-terminal-bg/fg/cursor/selection` custom properties (added in 7.1) instead of
+> literals, so a token change restyles the terminal canvas automatically. Covered by
+> `StyleThemingTestCase` in `tests/test_api.py`.
 
 ---
 
@@ -1883,6 +1926,15 @@ posture paragraph.
    green (414 tests, 1 skip) and `ruff` clean.
 8. **Style/theming:** 7.1 (shared design tokens — pairs with the 3.5/6.4 extraction, do them in
    the same PR series), then 7.2/7.3 as low-risk follow-ups.
+   ✅ **Step 8 completed 2026-07-13** (see the per-finding notes above): 7.1 landed the
+   shared `web/static/css/tokens.css` (one accent `#00d9ff`, one success/danger/warning
+   set, radius tokens) with both page stylesheets mapping their variables onto it; 7.2
+   replaced every listed emoji/text-glyph button with stroke-style SVGs, including a
+   shared `themeToggleButtonHtml()` in `shared.js` and icon constants in `terminals.js`;
+   7.3 tokenised the settings-window SVG, `.browser-close-btn`, and the tooltip arrow,
+   and `makeTerminal()` now derives the xterm theme from the `--t-terminal-*` CSS
+   variables. New `StyleThemingTestCase` (12 tests) in `tests/test_api.py`. Suite green
+   (426 tests, 1 skip) and `ruff` clean.
 9. **UX/features:** 8.1 and 8.4 first (close confirmation, reconnect affordance — the two
    Medium UX gaps), then 8.2/8.3/8.5 polish, and 10.3–10.7 as individually scoped follow-ups
    (10.2 is now done; 10.3 depends on 3.6's vendored assets; 10.7 completes 1.4's host-key

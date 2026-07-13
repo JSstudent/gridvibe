@@ -1255,8 +1255,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('title="Enter fullscreen"', html)
         self.assertIn('aria-label="Enter fullscreen"', html)
         self.assertIn('aria-pressed="false"', html)
-        self.assertIn('>&#9974;</button>', html)
-        self.assertIn("button.innerHTML = active ? '&#10005;' : '&#9974;';", html)
+        self.assertIn('class="fullscreen-icon"', html)
+        self.assertIn("button.innerHTML = active ? FULLSCREEN_EXIT_ICON : FULLSCREEN_ENTER_ICON;", html)
         self.assertIn("button.title = label;", html)
         self.assertIn("button.setAttribute('aria-label', label);", html)
         self.assertIn("button.setAttribute('aria-pressed', active ? 'true' : 'false');", html)
@@ -7766,3 +7766,131 @@ class DeadCodeSweepTestCase(unittest.TestCase):
         self.assertIn("terminalFontFamily", terminals_js)
         # The old hardcoded literals are gone.
         self.assertNotIn("fontSize      : 13", terminals_js)
+
+
+class StyleThemingTestCase(unittest.TestCase):
+    """Deep-dive step 8 — style/theming (findings 7.1, 7.2, 7.3)."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    # ── 7.1: shared design tokens ───────────────────────────────────────────
+
+    def test_tokens_stylesheet_defines_shared_palette(self):
+        tokens = self._static("css/tokens.css")
+        for token in (
+            "--gv-bg-app", "--gv-accent", "--gv-accent-hover", "--gv-accent-soft",
+            "--gv-success", "--gv-success-hover", "--gv-danger", "--gv-warning",
+            "--gv-radius-s", "--gv-radius-m", "--gv-radius-l",
+        ):
+            self.assertIn(f"{token}:", tokens)
+        self.assertIn('[data-theme="light"]', tokens)
+
+    def test_both_pages_load_tokens_before_their_page_stylesheet(self):
+        for route, page_css in (("/", "css/launcher.css"),
+                                ("/terminals", "css/terminals.css")):
+            html = self.client.get(route).get_data(as_text=True)
+            self.assertIn("css/tokens.css", html)
+            self.assertLess(html.index("css/tokens.css"), html.index(page_css))
+
+    def test_page_palettes_map_onto_shared_tokens(self):
+        launcher_css = self._static("css/launcher.css")
+        for mapping in ("--accent: var(--gv-accent)",
+                        "--accent-strong: var(--gv-accent-hover)",
+                        "--danger: var(--gv-danger)",
+                        "--success: var(--gv-success)",
+                        "--warning: var(--gv-warning)"):
+            self.assertIn(mapping, launcher_css)
+        terminals_css = self._static("css/terminals.css")
+        for mapping in ("--t-bg: var(--gv-bg-app)",
+                        "--t-accent: var(--gv-accent)",
+                        "--t-accent-hover: var(--gv-accent-hover)",
+                        "--t-success: var(--gv-success)",
+                        "--t-success-hover: var(--gv-success-hover)"):
+            self.assertIn(mapping, terminals_css)
+
+    def test_old_divergent_palette_literals_are_gone(self):
+        launcher_css = self._static("css/launcher.css")
+        self.assertNotIn("#4cc9f0", launcher_css)
+        self.assertNotIn("rgba(76, 201, 240", launcher_css)
+        terminals_css = self._static("css/terminals.css")
+        self.assertNotIn("#18b66a", terminals_css)
+        self.assertNotIn("#14955a", terminals_css)
+
+    def test_terminal_canvas_stays_dark_in_light_theme(self):
+        terminals_css = self._static("css/terminals.css")
+        light_block = terminals_css.split('[data-theme="light"]', 1)[1]
+        for pinned in ("--t-terminal-bg: #0d0d0d",
+                       "--t-terminal-fg: #e0e0e0",
+                       "--t-terminal-cursor: #00d9ff"):
+            self.assertIn(pinned, light_block)
+
+    # ── 7.2: one SVG icon language instead of emoji/text glyphs ─────────────
+
+    def test_launcher_page_has_no_emoji_button_glyphs(self):
+        html = self.client.get("/").get_data(as_text=True)
+        for glyph in ("\U0001f4be", "\U0001f4c2", "\U0001f5d1", "\U0001f319", "↻"):
+            self.assertNotIn(glyph, html)
+
+    def test_terminals_page_has_no_emoji_or_text_glyph_buttons(self):
+        html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertNotIn("\U0001f319", html)
+        self.assertNotIn("&#9974;", html)
+        terminals_js = self._static("js/terminals.js")
+        self.assertNotIn("\U0001f9f9", terminals_js)
+        self.assertNotIn("↻", terminals_js)
+        self.assertNotIn("&#9974;", terminals_js)
+        for icon in ("TERMINAL_REFRESH_ICON", "TERMINAL_CLEAR_ICON",
+                     "FULLSCREEN_ENTER_ICON", "FULLSCREEN_EXIT_ICON"):
+            self.assertIn(icon, terminals_js)
+
+    def test_theme_toggle_uses_shared_svg_helper(self):
+        shared_js = self._static("js/shared.js")
+        self.assertIn("function themeToggleButtonHtml", shared_js)
+        self.assertIn("theme-toggle-icon", shared_js)
+        for page_js in ("js/launcher.js", "js/terminals.js"):
+            body = self._static(page_js)
+            self.assertIn("themeToggleButtonHtml", body)
+            self.assertNotIn("\U0001f319", body)
+
+    # ── 7.3: theme-ignoring hardcoded colors replaced with tokens ───────────
+
+    def test_settings_window_icon_uses_current_color(self):
+        html = self.client.get("/terminals").get_data(as_text=True)
+        for literal in ("#06263a", "#5eefff", "#63f6ff", "#6dfcff", "#4fd6ff"):
+            self.assertNotIn(literal, html)
+        terminals_css = self._static("css/terminals.css")
+        block = re.search(r"\.settings-window-btn \{.*?\}", terminals_css,
+                          re.DOTALL).group(0)
+        self.assertIn("color: var(--t-accent)", block)
+
+    def test_browser_close_button_uses_danger_token(self):
+        launcher_css = self._static("css/launcher.css")
+        for literal in ("#ff8a94", "#ff6b75", "rgba(181, 35, 49"):
+            self.assertNotIn(literal, launcher_css)
+        block = re.search(r"\.browser-close-btn \{.*?\}", launcher_css,
+                          re.DOTALL).group(0)
+        self.assertIn("var(--danger)", block)
+
+    def test_tooltip_arrow_follows_bubble_token(self):
+        launcher_css = self._static("css/launcher.css")
+        self.assertNotIn("rgba(16, 21, 39", launcher_css)
+        self.assertIn("border-color: var(--bg-deep) transparent", launcher_css)
+        self.assertIn('[data-theme="light"] .button-tooltip-bubble::after',
+                      launcher_css)
+
+    def test_xterm_theme_derived_from_css_variables(self):
+        terminals_js = self._static("js/terminals.js")
+        for var_name in ("--t-terminal-bg", "--t-terminal-fg",
+                         "--t-terminal-cursor", "--t-terminal-selection"):
+            self.assertIn(var_name, terminals_js)
+        self.assertNotIn("background          : '#0d0d0d'", terminals_js)
+        self.assertNotIn("cursor              : '#00d9ff'", terminals_js)

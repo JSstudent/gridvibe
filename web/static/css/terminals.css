@@ -1,10 +1,18 @@
         :root {
-            --t-bg: #0d0d0d;
+            /* Palette colors come from the shared tokens.css (deep-dive 7.1). */
+            --t-bg: var(--gv-bg-app);
             --t-topbar: #161616;
             --t-tabs-bg: #121212;
             --t-card: #141414;
             --t-card-header: #1e1e1e;
+            /* Terminal canvas colors stay on the dark palette in every theme
+               (deliberate — see the light-theme block below), so they are
+               pinned literals rather than switching tokens. xterm reads them
+               via getComputedStyle in makeTerminal(). */
             --t-terminal-bg: #0d0d0d;
+            --t-terminal-fg: #e0e0e0;
+            --t-terminal-cursor: #00d9ff;
+            --t-terminal-selection: rgba(0, 217, 255, 0.25);
             --t-border: #2a2a2a;
             --t-border-dim: #232323;
             --t-border-card: #272727;
@@ -13,10 +21,10 @@
             --t-text-secondary: #bdbdbd;
             --t-text-muted: #555;
             --t-text-placeholder: #666;
-            --t-accent: #00d9ff;
-            --t-accent-hover: #00b8d9;
-            --t-success: #18b66a;
-            --t-success-hover: #14955a;
+            --t-accent: var(--gv-accent);
+            --t-accent-hover: var(--gv-accent-hover);
+            --t-success: var(--gv-success);
+            --t-success-hover: var(--gv-success-hover);
             --t-btn-bg: #181818;
             --t-btn-text: #cfcfcf;
             --t-btn-hover-bg: #202020;
@@ -66,12 +74,18 @@
         }
 
         [data-theme="light"] {
-            --t-bg: #f0f2f5;
+            /* --t-bg / accent / success follow tokens.css [data-theme="light"]. */
             --t-topbar: #ffffff;
             --t-tabs-bg: #f8f9fa;
             --t-card: #ffffff;
             --t-card-header: #f3f4f6;
+            /* Deliberate exception (deep-dive 7.1): the terminal canvas keeps
+               the dark palette on the light theme, so these stay pinned to
+               the dark values above. */
             --t-terminal-bg: #0d0d0d;
+            --t-terminal-fg: #e0e0e0;
+            --t-terminal-cursor: #00d9ff;
+            --t-terminal-selection: rgba(0, 217, 255, 0.25);
             --t-border: #b7c0cc;
             --t-border-dim: #cfd6df;
             --t-border-card: #b7c0cc;
@@ -80,10 +94,6 @@
             --t-text-secondary: #1f2937;
             --t-text-muted: #4b5563;
             --t-text-placeholder: #6b7280;
-            --t-accent: #087f9b;
-            --t-accent-hover: #0e7490;
-            --t-success: #047857;
-            --t-success-hover: #059669;
             --t-btn-bg: #f3f4f6;
             --t-btn-text: #1f2937;
             --t-btn-hover-bg: #e5e7eb;
@@ -785,6 +795,8 @@
             padding: 0;
             border: 1px solid var(--t-border-tab);
             background: var(--t-btn-bg);
+            /* The icon strokes use currentColor so they follow the theme. */
+            color: var(--t-accent);
         }
         .settings-window-btn:hover {
             border-color: var(--t-accent);
@@ -838,12 +850,29 @@
             width: 24px;
             height: 24px;
             display: block;
-            filter: drop-shadow(0 0 5px rgba(0, 217, 255, 0.32));
+            filter: drop-shadow(0 0 5px color-mix(in srgb, currentColor 32%, transparent));
         }
         .refresh-all-icon {
             width: 18px;
             height: 18px;
             display: block;
+        }
+        .fullscreen-icon {
+            width: 16px;
+            height: 16px;
+            display: block;
+        }
+        .theme-toggle-icon {
+            width: 14px;
+            height: 14px;
+            vertical-align: -2px;
+            margin-right: 4px;
+        }
+        .terminal-action-btn svg,
+        .explorer-refresh svg {
+            width: 13px;
+            height: 13px;
+            vertical-align: -2px;
         }
 
         /* ── Grid area ── */

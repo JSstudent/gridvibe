@@ -43,10 +43,7 @@
         const btn = document.getElementById('themeToggleBtnIndex');
         const select = document.getElementById('appTheme');
         if (btn) {
-            btn.textContent =
-                preference === 'light' ? '☀️ Light'
-                : preference === 'dark' ? '🌙 Dark'
-                : '◐ System';
+            btn.innerHTML = themeToggleButtonHtml(preference);
         }
         if (select && select.value !== preference) {
             select.value = preference;

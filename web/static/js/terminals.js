@@ -3,6 +3,13 @@
     const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';
     const DEFAULT_SAVED_SESSION_ID = 'default-session';
 
+    /* Stroke-style button icons (finding 7.2) — replace the old refresh/clear/
+       fullscreen text glyphs so every action button shares one SVG icon language. */
+    const TERMINAL_REFRESH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><polyline points="21 3 21 9 15 9"></polyline></svg>';
+    const TERMINAL_CLEAR_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"></path><path d="M22 21H7"></path><path d="m5 11 9 9"></path></svg>';
+    const FULLSCREEN_ENTER_ICON = '<svg class="fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>';
+    const FULLSCREEN_EXIT_ICON = '<svg class="fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>';
+
 
 
 
@@ -13,10 +20,7 @@
     function onThemeApplied(preference) {
         const btn = document.getElementById('themeToggleBtn');
         if (btn) {
-            btn.textContent =
-                preference === 'light' ? '☀️ Light'
-                : preference === 'dark' ? '🌙 Dark'
-                : '◐ System';
+            btn.innerHTML = themeToggleButtonHtml(preference);
         }
         syncDefaultExplorerThemes();
     }
@@ -3088,16 +3092,20 @@
     ───────────────────────────────────────────── */
     function makeTerminal() {
         const _ds = document.body.dataset;
+        /* The xterm theme follows the CSS custom properties (finding 7.3), so
+           a tokens.css change restyles the terminal canvas automatically. */
+        const _css = getComputedStyle(document.body);
+        const cssColor = (name, fallback) => (_css.getPropertyValue(name) || '').trim() || fallback;
         const term = new Terminal({
             cursorBlink   : true,
             fontSize      : Number(_ds.terminalFontSize) || 14,
             fontFamily    : _ds.terminalFontFamily || 'Consolas, Monaco, "Courier New", monospace',
             copyOnSelect  : true,
             theme: {
-                background          : '#0d0d0d',
-                foreground          : '#e0e0e0',
-                cursor              : '#00d9ff',
-                selectionBackground : 'rgba(0,217,255,.25)'
+                background          : cssColor('--t-terminal-bg', '#0d0d0d'),
+                foreground          : cssColor('--t-terminal-fg', '#e0e0e0'),
+                cursor              : cssColor('--t-terminal-cursor', '#00d9ff'),
+                selectionBackground : cssColor('--t-terminal-selection', 'rgba(0,217,255,.25)')
             }
         });
         const fitAddon = new FitAddon.FitAddon();
@@ -3149,7 +3157,7 @@
 
         if (refreshButton) {
             refreshButton.disabled = isBusy;
-            refreshButton.textContent = action === 'refresh' ? 'Refreshing…' : '↻';
+            refreshButton.innerHTML = action === 'refresh' ? 'Refreshing…' : TERMINAL_REFRESH_ICON;
         }
 
         if (explorerRefreshButton) {
@@ -3159,7 +3167,7 @@
 
         if (clearButton) {
             clearButton.disabled = isBusy;
-            clearButton.textContent = action === 'clear' ? 'Clearing…' : '🧹';
+            clearButton.innerHTML = action === 'clear' ? 'Clearing…' : TERMINAL_CLEAR_ICON;
         }
 
     }
@@ -3735,7 +3743,7 @@
                             data-terminal-refresh="${i}"
                             title="${isBrowser ? 'Reload browser pane' : 'Reset this terminal view and replay recent output'}"
                         >
-                            ↻
+                            ${TERMINAL_REFRESH_ICON}
                         </button>
                         ${!isBrowser ? `
                         <button
@@ -3804,7 +3812,7 @@
                             data-terminal-clear="${i}"
                             title="Clear this terminal and purge its replay buffer"
                         >
-                            🧹
+                            ${TERMINAL_CLEAR_ICON}
                         </button>
                         <div class="voice-control" data-terminal-voice-control="${i}" ${_voiceServiceStatus.enabled ? '' : 'hidden'}>
                             <button
@@ -3848,7 +3856,7 @@
                         ` : (isExplorer ? `
                             <div class="explorer-surface" id="explorer-${i}">
                                 <div class="explorer-bar">
-                                     <button type="button" class="explorer-refresh" id="explorer-refresh-${i}" data-explorer-refresh="${i}" title="Refresh explorer" aria-label="Refresh explorer">↻</button>
+                                     <button type="button" class="explorer-refresh" id="explorer-refresh-${i}" data-explorer-refresh="${i}" title="Refresh explorer" aria-label="Refresh explorer">${TERMINAL_REFRESH_ICON}</button>
                                      <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
                                      <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${i}" data-explorer-tree-toggle="${i}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                                      <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
@@ -4567,7 +4575,7 @@
             <div class="terminal-surface">
                 <div class="explorer-surface" id="explorer-${index}">
                     <div class="explorer-bar">
-                        <button type="button" class="explorer-refresh" id="explorer-refresh-${index}" data-explorer-refresh="${index}" title="Refresh explorer" aria-label="Refresh explorer">↻</button>
+                        <button type="button" class="explorer-refresh" id="explorer-refresh-${index}" data-explorer-refresh="${index}" title="Refresh explorer" aria-label="Refresh explorer">${TERMINAL_REFRESH_ICON}</button>
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
                         <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${index}" data-explorer-tree-toggle="${index}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                         <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
@@ -6407,7 +6415,7 @@
         const isBrowserFullscreen = Boolean(document.fullscreenElement);
         const active = isPywebviewAvailable() ? nativeFullscreen : isBrowserFullscreen;
         const label = active ? 'Exit fullscreen' : 'Enter fullscreen';
-        button.innerHTML = active ? '&#10005;' : '&#9974;';
+        button.innerHTML = active ? FULLSCREEN_EXIT_ICON : FULLSCREEN_ENTER_ICON;
         button.title = label;
         button.setAttribute('aria-label', label);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
