@@ -20,7 +20,13 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 from main import setup_logging
-from web.api import app, configure_browser_shutdown, load_config, session_manager, socketio
+from web.api import (
+    configure_browser_shutdown,
+    load_config,
+    resolve_server_settings,
+    run_server,
+    session_manager,
+)
 
 try:
     import webview
@@ -894,15 +900,8 @@ def _start_restart_shutdown_thread(
 
 
 def _run_server(host: str, port: int, debug: bool):
-    """Run the Flask-SocketIO server."""
-    socketio.run(
-        app,
-        host=host,
-        port=port,
-        debug=debug,
-        use_reloader=False,
-        allow_unsafe_werkzeug=True,
-    )
+    """Run the shared Flask-SocketIO server entry point."""
+    run_server(host, port, debug)
 
 
 def main():
@@ -919,17 +918,23 @@ def main():
             "native requires pywebview; browser opens the system browser only"
         ),
     )
-    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=5050, help="Port to bind to")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--host", default=None, help="Host to bind to (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=None, help="Port to bind to (default: 5050)")
+    parser.add_argument(
+        "--debug",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable debug mode",
+    )
     parser.add_argument("--config", default="config.json", help="Path to configuration file")
     args = parser.parse_args()
     configure_browser_shutdown(args.mode == "browser")
 
+    # Explicit CLI flags win over config values (finding 4.7)
     config = load_config(args.config) if os.path.exists(args.config) else {}
-    host = config.get("server", {}).get("host", args.host)
-    port = config.get("server", {}).get("port", args.port)
-    debug = config.get("server", {}).get("debug", args.debug)
+    host, port, debug = resolve_server_settings(
+        config, host=args.host, port=args.port, debug=args.debug
+    )
     window_host = _resolve_window_host(host)
     base_url = f"http://{window_host}:{port}"
 

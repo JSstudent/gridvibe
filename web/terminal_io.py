@@ -75,11 +75,17 @@ connection_lock = threading.RLock()
 
 
 def _broadcast_session_status(session_id: str):
-    """Emit the latest session status to connected clients."""
+    """Emit the latest session status to clients joined to the session room.
+
+    Room-scoped (finding 1.1 step 3) so status payloads are not broadcast to
+    every connected socket; clients join the room via `join_session` for each
+    pane they display, and `join_session` itself replies with the current
+    status.
+    """
     with session_manager.lock:
         session = session_manager.sessions.get(session_id)
         if session:
-            socketio.emit('session_status', session.to_dict())
+            socketio.emit('session_status', session.to_dict(), room=session_id)
 
 
 def _broadcast_session_groups_updated(reason: str = ""):

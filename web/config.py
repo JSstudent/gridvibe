@@ -11,7 +11,7 @@ import logging
 import os
 import threading
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from web.paths import BASE_DIR
 
@@ -112,6 +112,28 @@ def save_config(config: Dict[str, Any], config_path: Optional[str] = None):
             except OSError:
                 pass
             raise
+
+
+def resolve_server_settings(
+    config: Dict[str, Any],
+    *,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    debug: Optional[bool] = None,
+) -> Tuple[str, int, bool]:
+    """Resolve the server host/port/debug settings for an entry point.
+
+    Explicit CLI flags (non-None arguments) beat `config.json` values, which
+    beat the built-in defaults — the conventional precedence (finding 4.7).
+    Entry points pass ``None`` for flags the user did not supply.
+    """
+    server_config = config.get("server", {}) if isinstance(config, dict) else {}
+    if not isinstance(server_config, dict):
+        server_config = {}
+    resolved_host = host if host is not None else server_config.get("host", "127.0.0.1")
+    resolved_port = port if port is not None else server_config.get("port", 5050)
+    resolved_debug = debug if debug is not None else server_config.get("debug", False)
+    return str(resolved_host), int(resolved_port), bool(resolved_debug)
 
 
 def _normalize_surface_mode(value: Any, default: str = "normal") -> str:

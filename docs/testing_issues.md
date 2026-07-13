@@ -3,6 +3,58 @@ Last updated: 2026-07-13
 
 ## Open Issues
 
+### Issue ID: ISSUE-2026-020
+- Title: Large log previews discard the newest entries
+- Priority: Medium
+- Status: Open
+- Area: `web/api.py`, `web/explorer.py`, `web/static/js/terminals.js`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `logging`, `flask`, `ui`, `tests`
+- Reported: 2026-07-13
+
+Description:
+Explorer text previews are capped at 1 MiB and retain the beginning of an oversized file. For append-oriented files such as logs, this discards the newest and usually most relevant entries, so users cannot inspect current failures or recent activity from GridVibe. The only workaround is to leave the Explorer and use an external tailing or paging tool.
+
+Steps to reproduce:
+1. Create a `.log` file larger than 1 MiB with distinguishable markers near its beginning and end.
+2. Open the file from a GridVibe Explorer pane.
+3. Observe that the beginning marker is present, the end marker is absent, and the preview is reported as truncated.
+
+Expected behavior:
+GridVibe should support a larger but still bounded text-preview limit where practical. When a log or other append-oriented file must be truncated, the preview should discard content from the beginning and retain the newest content at the end. The UI should clearly identify the retained range, and non-log files should have an explicit, predictable head/tail policy rather than silently losing the most useful section.
+
+Actual behavior / logs:
+Code inspection confirms `EXPLORER_FILE_PREVIEW_MAX_BYTES` in `web/explorer.py` is fixed at `1024 * 1024`. `get_explorer_file()` in `web/api.py` calls `backend.read_file_prefix(file_path, EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)` and slices `raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]`, so every oversized preview starts at byte zero. `test_explorer_file_truncates_large_text_preview()` in `tests/test_api.py` checks only that truncation occurred and that the returned length equals the cap; it does not verify which end of the file is retained.
+
+### Proposed solution:
+Make the preview byte limit a validated, bounded setting or raise it to a measured safe value, while preserving protections against browser stalls and excessive local or SFTP reads. Add a ranged/tail-read operation to the local and SFTP explorer backends and use it for `.log` and any explicitly classified append-oriented formats so truncated previews retain the last configured bytes. Consider exposing a Head/Tail selector for other oversized text files, with a documented default appropriate to their type. Return range metadata such as retained start/end bytes and total size, and update `web/static/js/terminals.js` to show a clear message such as `Showing the last 1 MiB` instead of only a generic truncation warning. Handle UTF-8 and line boundaries so a tail read does not begin with a broken character or misleading partial line. Add focused tests in `tests/test_api.py` for retained end markers, excluded start markers, files exactly at the limit, multibyte and long-line boundaries, local/SFTP parity, range metadata, configured-limit validation, and client messaging, while keeping search and highlighting bounded to the returned preview.
+
+### Issue ID: ISSUE-2026-019
+- Title: Add floating waveform indicator while voice input is recording
+- Priority: Low
+- Status: Open
+- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `voice`, `ui`, `terminal`, `accessibility`, `tests`
+- Reported: 2026-07-13
+
+Description:
+Voice capture does not provide a prominent workspace-level indication that the microphone is actively recording. The only visual feedback is a small state change on the microphone button in the active terminal header, which can be easy to miss when recording is triggered by a push-to-talk keybind or when attention is elsewhere in the workspace. Users therefore cannot confidently tell at a glance whether GridVibe is listening.
+
+Steps to reproduce:
+1. Enable voice input, configure push-to-talk and a keybind, and open a terminal session.
+2. Start voice capture from the terminal microphone control, or press and hold the configured push-to-talk keybind.
+3. Observe that the microphone button receives a small red pulse while recording, but no floating waveform or other prominent recording indicator appears over the workspace.
+
+Expected behavior:
+Whenever microphone capture is active, whether initiated by a press-and-hold GUI microphone interaction or the configured push-to-talk keybind, GridVibe should show a compact floating waveform-style indicator in a consistent, unobtrusive workspace position. It should appear only after capture actually starts, remain visible for the full recording, clearly identify the recording state, and disappear promptly on release, stop, cancellation, backend error, or teardown.
+
+Actual behavior / logs:
+Code inspection confirms `_updateVoiceBtn()` in `web/static/js/terminals.js` only toggles the `recording` class and title on the per-terminal microphone button. `web/static/css/terminals.css` renders that class as a red button with a small pulsing box shadow. The push-to-talk listeners call `_startVoice()` on matching `keydown` and `_stopVoice()` on `keyup`, but neither path creates or synchronizes a page-level recording overlay or waveform. The GUI microphone control is currently wired as a click-to-toggle action rather than a press-and-hold interaction.
+
+### Proposed solution:
+Add one reusable, fixed-position voice-recording overlay managed by the shared capture lifecycle in `web/static/js/terminals.js` and styled in `web/static/css/terminals.css`. Show it only once `_startVoice()` has established an active recording state, and hide it from every `_stopVoice()`, permission-denial, backend-error, session-switch, disconnect, and teardown path. Render a clear microphone/`Recording` label plus animated waveform bars; where practical, drive the bars from a bounded `AnalyserNode` attached to the existing audio graph, with a lightweight deterministic animation as a fallback. Make the overlay non-blocking, theme-aware, responsive, and accessible with status semantics, sufficient contrast, and a `prefers-reduced-motion` treatment. Add pointer down/up/cancel handling for the requested hold-to-talk GUI interaction while preserving accessible keyboard activation and defining how it coexists with the existing click-to-toggle behavior. Ensure the single-active-terminal rule prevents duplicate overlays and that rapid key or pointer release during asynchronous startup cannot leave a stale indicator. Add focused rendered-template tests in `tests/test_api.py` for GUI hold and keybind start/stop wiring, successful-start timing, every cleanup path, repeated-key suppression, terminal switching, reduced-motion/accessibility hooks, and absence of duplicate overlays.
+
 ### Issue ID: ISSUE-2026-018
 - Title: Add a revert action for unstaged Git changes
 - Priority: Low

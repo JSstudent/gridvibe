@@ -1196,7 +1196,6 @@
 
     function setLocalRepoPath(path) {
         const input = document.getElementById('wsl_default_dir');
-        const display = document.getElementById('wsl_default_dir_display');
         if (!input) {
             return;
         }
@@ -1205,11 +1204,6 @@
         const resolved = normalized === '~' ? '' : normalized;
         input.value = resolved;
         input.title = resolved;
-        if (display) {
-            display.textContent = resolved || 'Select a folder on your local drive';
-            display.classList.toggle('empty', !resolved);
-            display.title = resolved;
-        }
     }
 
     function applyModeInputs(values) {
@@ -2468,6 +2462,7 @@
             return;
         }
 
+        const originalButtonHtml = button.innerHTML;
         button.disabled = true;
         button.textContent = 'Launching...';
 
@@ -2519,12 +2514,12 @@
                         window.open(targetUrl, 'gridvibe-sessions');
                     }
                     button.disabled = false;
-                    button.textContent = 'Launch Terminals';
+                    button.innerHTML = originalButtonHtml;
                 }, 450);
             }
         } catch (error) {
             button.disabled = false;
-            button.textContent = 'Launch Terminals';
+            button.innerHTML = originalButtonHtml;
             showMessage(`Launch failed: ${error.message}`, 'error');
         }
     }

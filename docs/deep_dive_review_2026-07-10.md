@@ -140,6 +140,16 @@ binding does not protect against the user's own browser.
 > setups. Flagged as breaking in `CHANGELOG.md`. Step 3 (room-scoping `session_status`) was
 > **not** done. Covered by `CorsOriginDefaultsTestCase` in `tests/test_api.py`.
 
+> **✅ Step 3 completed (2026-07-13).** `_broadcast_session_status` (now in
+> `web/terminal_io.py`) emits `session_status` with `room=session_id`, so status payloads
+> only reach clients that joined the session via `join_session` (which itself still replies
+> with the current status to the joiner). The terminals page's initial-load join loop no
+> longer skips explorer/browser panes — they have no output stream but need the room-scoped
+> status updates (mode-switch reconciliation, placeholder removal, explorer sync). Covered
+> by `SessionStatusRoomScopeTestCase` (joined client receives, bystander socket does not)
+> and `test_terminals_joins_rooms_for_every_pane` in `tests/test_api.py`. Finding 1.1 is
+> now fully closed.
+
 ### 1.2 No Origin/CSRF guard on state-changing HTTP endpoints — **High**
 
 **Location:** all `POST`/`DELETE` routes in `web/api.py` — notably `/api/sessions` (launch with
@@ -799,6 +809,12 @@ button.innerHTML = originalHtml;            // in both reset paths
 (There are two reset sites — success `setTimeout` and the `catch` — update both, or extract a
 `resetLaunchButton()` helper.)
 
+> **✅ Implemented (2026-07-13).** `launchSessions` in `web/static/js/launcher.js` captures
+> `button.innerHTML` before disabling and restores it at both reset sites, so the CTA keeps
+> its "Launch Workspace →" markup after a launch. The stale `'Launch Terminals'` label is
+> gone; locked in by `test_launcher_button_and_dead_display_fixes_locked_in` in
+> `tests/test_api.py`.
+
 ### 4.4 Save Session uses `window.prompt`, which WebView2 blocks — **High**
 
 **Location:** `templates/index.html:4765-4799` (`saveCurrentConfig`)
@@ -857,6 +873,11 @@ element was removed in an earlier refactor. Dead branch executed on every path c
 
 **Proposed implementation.** Delete the `display` lookup and the `if (display) {...}` block.
 
+> **✅ Implemented (2026-07-13).** The dead `wsl_default_dir_display` lookup and its
+> `if (display)` block were removed from `setLocalRepoPath` (now in
+> `web/static/js/launcher.js`); no reference to the element remains. Locked in by
+> `test_launcher_button_and_dead_display_fixes_locked_in` in `tests/test_api.py`.
+
 ### 4.7 `config.json` silently overrides explicit CLI flags — **Medium**
 
 **Location:** `main.py:104-107`, duplicated in `web/webview_launcher.py:929-932`
@@ -879,6 +900,14 @@ port = args.port if args.port is not None else config.get("server", {}).get("por
 Same for `--host` and `--debug` (use `default=None` + `action=argparse.BooleanOptionalAction`
 or a tri-state). Apply in both entry points (or better: extract one shared
 `resolve_server_settings(args)` helper, see 5.7).
+
+> **✅ Implemented (2026-07-13).** As proposed: both entry points (`main.py`,
+> `web/webview_launcher.py`) now parse `--host`/`--port` with `default=None` and `--debug`
+> with `argparse.BooleanOptionalAction` (tri-state, adds `--no-debug`), and resolve the
+> final values through a shared `resolve_server_settings(config, *, host, port, debug)` in
+> `web/config.py` — explicit CLI flags beat `config.json`, which beats the built-in
+> defaults. `main.py`'s logging setup now also uses the *resolved* debug flag instead of
+> the raw CLI flag. Covered by `ResolveServerSettingsTestCase` in `tests/test_main.py`.
 
 ### 4.8 Vosk service port is configured in two disconnected keys — **Medium**
 
@@ -903,6 +932,15 @@ ignores `default_config.json`, unlike every other config consumer.
    is heavy — instead replicate the two-file merge in ~6 lines, or move `load_config` into a
    tiny `utils/config.py` both can import).
 
+> **✅ Implemented (2026-07-13).** `vosk_service_url` is the single source of truth:
+> `services/vosk_service.py` now imports the Flask-free `web.config.load_config` (layered
+> `default_config.json` + `config.json` merge, fixing the step-3 gap) and parses the port
+> from the URL with `urllib.parse.urlparse`. `vosk_service_port` was removed from
+> `default_config.json`; when the key is still present in a user's `config.json` it logs a
+> deprecation warning and is honoured only if the URL carries no port. The example config
+> in `docs/voice_guideline.md` was updated. Covered by `VoskServiceConfigTestCase` in the
+> new `tests/test_vosk_service.py`.
+
 ### 4.9 `cleanup.py` deletes live logs, and has leftover/odd semantics — **Low**
 
 **Location:** `utils/cleanup.py`
@@ -922,6 +960,15 @@ what `make clean` / `make clear-logs` already do): `DIR_PATTERNS = {"__pycache__
 rather than unlinking. Update the banner to "GridVibe Cleanup". Alternatively, deprecate
 `cleanup.py` entirely in favour of the Makefile targets, keeping the root shim printing a
 pointer message.
+
+> **✅ Implemented (2026-07-13).** `utils/cleanup.py` was rewritten with explicit pattern
+> lists: `DIR_PATTERNS` (`__pycache__`, removed recursively), `FILE_PATTERNS`
+> (`*.pyc`/`*.pyo`, deleted — files only, so a *directory* named like the pattern is no
+> longer `rmtree`'d), and `TRUNCATE_PATTERNS` (`*.log`, emptied in place so the live
+> `logs/gridvibe.log` held open by `RotatingFileHandler` survives). Banner now reads
+> "GridVibe Cleanup" and the unused `DESTRUCTIVE_PATTERNS` is gone (the 5.4 item for this
+> file). Dry-run/`--confirm` semantics and the root shim are unchanged. Covered by
+> `CleanupTestCase` in the new `tests/test_cleanup.py`.
 
 ### 4.10 Misindented `return jsonify` block in `get_explorer_entries` — **Low**
 
@@ -997,6 +1044,9 @@ and the associated tests. If status hooks are wanted later, Socket.IO broadcast 
 **Proposed implementation.** Delete each; none has behavioural impact. (Batchable into one
 "dead code sweep" commit validated by `make check`.)
 
+> **⚠️ Partially resolved (2026-07-13).** The `DESTRUCTIVE_PATTERNS` item disappeared with
+> the 4.9 rewrite of `utils/cleanup.py`. The other three items remain.
+
 ### 5.5 `set_native_theme(theme)` ignores its argument — **Low**
 
 **Location:** `web/webview_launcher.py:558-562`; called from both templates' `syncNativeTheme`
@@ -1042,6 +1092,14 @@ documented shim path) can refuse to start under newer Werkzeug while `python mai
 **Proposed implementation.** Single `run_server(host, port, debug, *, use_reloader=False)` in
 `web/api.py` with all flags; `main.py` and the launcher call it. Also the config-vs-CLI
 resolution (finding 4.7) should live in this one place.
+
+> **✅ Implemented (2026-07-13).** As proposed: `web/api.py`'s `run_server` gained
+> `use_reloader=False` and `allow_unsafe_werkzeug=True`, and is now the only place that
+> calls `socketio.run`; `main.py` calls it directly and the launcher's `_run_server`
+> delegates to it (so `python api.py` no longer refuses to start under newer Werkzeug).
+> The config-vs-CLI resolution lives in the shared `resolve_server_settings` (finding 4.7).
+> Covered by `SharedRunServerTestCase` in `tests/test_api.py` (full flag set + both entry
+> points sharing the same function object).
 
 ---
 
@@ -1559,6 +1617,13 @@ file_handler.addFilter(_StripAnsi())
 ```
 (Console keeps colours; the file becomes grep-friendly.)
 
+> **✅ Implemented (2026-07-13).** `main.py`'s `setup_logging` adds a `_StripAnsiFilter` to
+> the file handler only. It strips from the fully formatted message
+> (`record.getMessage()` + `record.args = None`) because werkzeug carries the coloured
+> request line in `record.args`, not `record.msg`; the console handler is registered first,
+> so terminal output keeps its colours. Covered by `LogPolishTestCase` and the extended
+> `setup_logging` test in `tests/test_main.py`.
+
 ### 9.3 `/api/voice-status` polling escapes the poll-suppression filter — **Low**
 
 **Evidence.** Dozens of `GET /api/voice-status` 200 lines; the terminals page refreshes it on
@@ -1569,6 +1634,11 @@ every window focus/pageshow.
 _POLL_RE = re.compile(r'"GET /api/(sessions|session-groups|voice-status)(\?[^ ]*)? HTTP/[\d.]+" 2\d\d')
 ```
 (If 3.4 lands, revisit whether the filter is needed at all.)
+
+> **✅ Implemented (2026-07-13).** `_POLL_RE` in `main.py` now also matches
+> `/api/voice-status`. The filter itself stays (see the 3.4 note: push-triggered refreshes
+> still issue the same reconciliation GETs). Covered by `LogPolishTestCase` in
+> `tests/test_main.py`.
 
 **Also noted:** the four `TypeError: _run_git_command() missing … 'cwd'` tracebacks from
 2026-07-04 are already fixed in the current source (`perform_self_update` now uses
@@ -1742,6 +1812,15 @@ posture paragraph.
    import in `vosk_service.py`), then 4.3/4.6/4.9 and the log polish 9.2/9.3 as one sweep
    (4.10 already resolved with 6.1), plus 1.1's deferred step 3 (room-scoping the global
    `session_status` broadcast) — the one open sub-item left from an otherwise closed finding.
+   ✅ **Step 6 completed 2026-07-13** (see the per-finding notes above): 4.7 landed with
+   5.7's shared `run_server` + a new `resolve_server_settings` in `web/config.py`; 4.8
+   made `vosk_service_url` the single port source (with a deprecated-key fallback);
+   4.3/4.6 fixed the launcher JS; 4.9 rewrote `utils/cleanup.py` (also closing 5.4's
+   `DESTRUCTIVE_PATTERNS` item); 9.2/9.3 landed the ANSI strip filter and the extended
+   poll-suppression regex; and 1.1's step 3 room-scoped the `session_status` broadcast,
+   fully closing finding 1.1. New test files `tests/test_cleanup.py` and
+   `tests/test_vosk_service.py` plus new cases in `tests/test_main.py`/`tests/test_api.py`.
+   Suite green (407 tests, 1 skip) and `ruff` clean.
 7. **Dead-code sweep:** 5.1–5.6 in one or two commits validated by `make check` (5.1's useful
    keys graduate into features 10.2 instead of being deleted).
 8. **Style/theming:** 7.1 (shared design tokens — pairs with the 3.5/6.4 extraction, do them in

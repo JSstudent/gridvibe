@@ -71,6 +71,7 @@ from web.config import (
     _merge_dicts,
     _normalize_surface_mode,
     load_config,
+    resolve_server_settings,  # noqa: F401 - re-exported for the entry points
     runtime_config,
     save_config,
 )
@@ -1789,10 +1790,28 @@ def handle_voice_stop(data):
 
 # ==================== Main Entry Point ====================
 
-def run_server(host: str = "127.0.0.1", port: int = 5050, debug: bool = False):
-    """Run the Flask-SocketIO server."""
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 5050,
+    debug: bool = False,
+    *,
+    use_reloader: bool = False,
+):
+    """Run the Flask-SocketIO server.
+
+    The single server entry point shared by `main.py`, the desktop launcher,
+    and the `python api.py` shim (finding 5.7), so flags like
+    `allow_unsafe_werkzeug` cannot drift between them.
+    """
     logger.info(f"Starting GridVibe server on {host}:{port}")
-    socketio.run(app, host=host, port=port, debug=debug)
+    socketio.run(
+        app,
+        host=host,
+        port=port,
+        debug=debug,
+        use_reloader=use_reloader,
+        allow_unsafe_werkzeug=True,
+    )
 
 
 if __name__ == '__main__':

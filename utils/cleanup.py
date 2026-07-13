@@ -1,3 +1,12 @@
+"""Cache/temp file cleanup utility.
+
+Removes Python bytecode caches and empties log files. Logs are truncated
+rather than deleted because the running server holds ``logs/gridvibe.log``
+open through a ``RotatingFileHandler`` (deleting it fails on Windows and
+silently unlinks the active log on POSIX).
+"""
+
+import fnmatch
 import os
 import shutil
 import sys
@@ -5,69 +14,91 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
-DESTRUCTIVE_PATTERNS = []
+# Directories removed recursively when their *name* matches.
+DIR_PATTERNS = ("__pycache__",)
 
-CLEANUP_PATTERNS = [
-    "__pycache__",
-    "*.pyc",
-    "*.pyo",
-    "*.log",
-]
+# Files deleted when their name matches.
+FILE_PATTERNS = ("*.pyc", "*.pyo")
 
+# Files truncated (not deleted) when their name matches.
+TRUNCATE_PATTERNS = ("*.log",)
 
 SKIP_DIRS = {".venv", ".git", "node_modules"}
 
 
-def find_and_remove(pattern, is_dir=False, dry_run=True, verbose=True):
-    removed = []
+def _walk_project():
+    """Yield (root_path, dirnames, filenames) below PROJECT_ROOT, pruning SKIP_DIRS."""
     for root, dirs, files in os.walk(PROJECT_ROOT, topdown=True):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        root_path = Path(root)
+        yield Path(root), dirs, files
 
-        for d in list(dirs):
-            if d == pattern or (pattern.startswith("*") and d.endswith(pattern[1:])):
-                full_path = root_path / d
-                try:
-                    if dry_run:
-                        if verbose:
-                            print(f"[DRY-RUN] Would remove: {full_path}")
-                        removed.append(full_path)
-                    else:
-                        shutil.rmtree(full_path)
-                        if verbose:
-                            print(f"Removed: {full_path}")
-                        removed.append(full_path)
-                    if is_dir:
-                        dirs.remove(d)
-                except Exception as e:
-                    print(f"Error removing {full_path}: {e}")
 
-        if not pattern.startswith("*"):
-            continue
-
-        for f in list(files):
-            if f.endswith(pattern[1:]):
-                full_path = root_path / f
-                try:
-                    if dry_run:
-                        if verbose:
-                            print(f"[DRY-RUN] Would remove: {full_path}")
-                        removed.append(full_path)
-                    else:
-                        full_path.unlink()
-                        if verbose:
-                            print(f"Removed: {full_path}")
-                        removed.append(full_path)
-                except Exception as e:
-                    print(f"Error removing {full_path}: {e}")
-
+def remove_matching_dirs(patterns, dry_run=True, verbose=True):
+    """Recursively remove directories whose name matches any pattern."""
+    removed = []
+    for root_path, dirs, _files in _walk_project():
+        for name in list(dirs):
+            if not any(fnmatch.fnmatch(name, pattern) for pattern in patterns):
+                continue
+            full_path = root_path / name
+            dirs.remove(name)  # don't descend into a directory we remove
+            try:
+                if not dry_run:
+                    shutil.rmtree(full_path)
+                if verbose:
+                    prefix = "[DRY-RUN] Would remove" if dry_run else "Removed"
+                    print(f"{prefix}: {full_path}")
+                removed.append(full_path)
+            except Exception as e:
+                print(f"Error removing {full_path}: {e}")
     return removed
+
+
+def remove_matching_files(patterns, dry_run=True, verbose=True):
+    """Delete files whose name matches any pattern."""
+    removed = []
+    for root_path, _dirs, files in _walk_project():
+        for name in files:
+            if not any(fnmatch.fnmatch(name, pattern) for pattern in patterns):
+                continue
+            full_path = root_path / name
+            try:
+                if not dry_run:
+                    full_path.unlink()
+                if verbose:
+                    prefix = "[DRY-RUN] Would remove" if dry_run else "Removed"
+                    print(f"{prefix}: {full_path}")
+                removed.append(full_path)
+            except Exception as e:
+                print(f"Error removing {full_path}: {e}")
+    return removed
+
+
+def truncate_matching_files(patterns, dry_run=True, verbose=True):
+    """Empty files whose name matches any pattern, keeping the file itself."""
+    truncated = []
+    for root_path, _dirs, files in _walk_project():
+        for name in files:
+            if not any(fnmatch.fnmatch(name, pattern) for pattern in patterns):
+                continue
+            full_path = root_path / name
+            try:
+                if not dry_run:
+                    with open(full_path, "w", encoding="utf-8"):
+                        pass
+                if verbose:
+                    prefix = "[DRY-RUN] Would truncate" if dry_run else "Truncated"
+                    print(f"{prefix}: {full_path}")
+                truncated.append(full_path)
+            except Exception as e:
+                print(f"Error truncating {full_path}: {e}")
+    return truncated
 
 
 def cleanup(dry_run=True, verbose=True):
     if verbose:
         print("=" * 50)
-        print("Terminal Flow Cleanup")
+        print("GridVibe Cleanup")
         print("=" * 50)
         if dry_run:
             print("Running in DRY-RUN mode.")
@@ -76,16 +107,15 @@ def cleanup(dry_run=True, verbose=True):
 
     if verbose:
         print("\n--- Removing __pycache__ directories ---")
-    find_and_remove("__pycache__", is_dir=True, dry_run=dry_run, verbose=verbose)
+    remove_matching_dirs(DIR_PATTERNS, dry_run=dry_run, verbose=verbose)
 
     if verbose:
-        print("\n--- Removing .pyc files ---")
-    find_and_remove("*.pyc", dry_run=dry_run, verbose=verbose)
-    find_and_remove("*.pyo", dry_run=dry_run, verbose=verbose)
+        print("\n--- Removing .pyc/.pyo files ---")
+    remove_matching_files(FILE_PATTERNS, dry_run=dry_run, verbose=verbose)
 
     if verbose:
-        print("\n--- Removing log files ---")
-    find_and_remove("*.log", dry_run=dry_run, verbose=verbose)
+        print("\n--- Truncating log files ---")
+    truncate_matching_files(TRUNCATE_PATTERNS, dry_run=dry_run, verbose=verbose)
 
     if verbose:
         print("\n" + "=" * 50)
@@ -103,4 +133,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

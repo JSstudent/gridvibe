@@ -6300,10 +6300,10 @@
             }
 
             if (!usingCurrentView && !restoredFromCache && socket) {
+                /* Every pane joins its session room — including explorer and
+                   browser panes, which have no output stream but still need
+                   the room-scoped session_status updates. */
                 data.sessions.forEach(session => {
-                    if (isExplorerSession(session) || isBrowserSession(session)) {
-                        return;
-                    }
                     socket.emit('join_session', { session_id: session.session_id });
                 });
             }

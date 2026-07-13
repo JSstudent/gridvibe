@@ -6349,6 +6349,83 @@ class SessionGroupsUpdatedBroadcastTestCase(unittest.TestCase):
         self.assertIn("all_closed", self._received_reasons(socket_client))
 
 
+class SessionStatusRoomScopeTestCase(unittest.TestCase):
+    """Deep-dive 1.1 step 3 — session_status is emitted to the session room only."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+
+    def _socket_client(self):
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+        self.addCleanup(socket_client.disconnect)
+        socket_client.get_received()
+        return socket_client
+
+    def test_broadcast_reaches_joined_clients_only(self):
+        api.session_manager.create_group(
+            name="Scoped",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-scoped",
+        )
+        session = api.session_manager.create_session(
+            group_id="group-scoped",
+            host="10.0.0.12",
+            directory="/tmp/project",
+        )
+
+        joined_client = self._socket_client()
+        bystander_client = self._socket_client()
+        joined_client.emit("join_session", {"session_id": session.session_id})
+        joined_client.get_received()  # drain the join reply
+
+        api._broadcast_session_status(session.session_id)
+
+        joined_events = [
+            event for event in joined_client.get_received()
+            if event["name"] == "session_status"
+        ]
+        bystander_events = [
+            event for event in bystander_client.get_received()
+            if event["name"] == "session_status"
+        ]
+        self.assertEqual(len(joined_events), 1)
+        self.assertEqual(
+            joined_events[0]["args"][0]["session_id"], session.session_id
+        )
+        self.assertEqual(bystander_events, [])
+
+
+class SharedRunServerTestCase(unittest.TestCase):
+    """Deep-dive 5.7 — one server entry point with a consistent flag set."""
+
+    def test_run_server_passes_the_full_flag_set(self):
+        with patch.object(api.socketio, "run") as mock_run:
+            api.run_server("192.0.2.1", 8080, True)
+        mock_run.assert_called_once_with(
+            api.app,
+            host="192.0.2.1",
+            port=8080,
+            debug=True,
+            use_reloader=False,
+            allow_unsafe_werkzeug=True,
+        )
+
+    def test_entry_points_share_the_api_run_server(self):
+        import main as main_module
+        import web.webview_launcher as launcher_module
+
+        self.assertIs(main_module.run_server, api.run_server)
+        self.assertIs(launcher_module.run_server, api.run_server)
+
+
 class SessionStatusBroadcastRaceTestCase(unittest.TestCase):
     """Issue 7 — verify status emission is serialized with session removal."""
 
@@ -6804,6 +6881,29 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         for page in (launcher, terminals):
             self.assertIn("function onThemeApplied(", page)
             self.assertIn("initTheme();", page)
+
+    def test_launcher_button_and_dead_display_fixes_locked_in(self):
+        """Findings 4.3/4.6 — launch button restores its markup; dead node gone."""
+        launcher = self.client.get("/static/js/launcher.js").get_data(as_text=True)
+        # 4.6 — the wsl_default_dir_display element no longer exists anywhere.
+        self.assertNotIn("wsl_default_dir_display", launcher)
+        # 4.3 — the button restores its captured markup instead of renaming
+        # itself to the old 'Launch Terminals' label.
+        self.assertNotIn("Launch Terminals", launcher)
+        self.assertIn("originalButtonHtml", launcher)
+
+    def test_terminals_joins_rooms_for_every_pane(self):
+        """Finding 1.1 step 3 — room-scoped session_status requires explorer
+        and browser panes to join their session rooms like terminal panes."""
+        terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+        join_calls = terminals.count("socket.emit('join_session'")
+        self.assertGreaterEqual(join_calls, 4)
+        # The initial-load join loop must not filter sessions by pane type.
+        load_join = terminals[terminals.index("data.sessions.forEach(session => {"):]
+        load_join = load_join[:load_join.index("});")]
+        self.assertNotIn("isExplorerSession", load_join)
+        self.assertNotIn("isBrowserSession", load_join)
+        self.assertIn("socket.emit('join_session'", load_join)
 
     def test_terminals_monster_functions_are_decomposed(self):
         """Finding 6.5 — buildGrid/_startVoice delegate to focused helpers."""

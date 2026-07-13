@@ -22,6 +22,13 @@ import json
 import logging
 import os
 import sys
+from urllib.parse import urlparse
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from web.config import load_config  # noqa: E402 - Flask-free config module
 
 logger = logging.getLogger("vosk-service")
 
@@ -31,21 +38,41 @@ DEFAULT_SAMPLE_RATE = 16000
 
 
 def _load_config_defaults():
-    """Read voice_input settings from config.json if available."""
-    config_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"
-    )
+    """Read voice_input settings from the layered GridVibe config.
+
+    `voice_input.vosk_service_url` is the single source of truth for the port
+    (the API dials the same URL), so the service and the API can no longer
+    desync. The removed `vosk_service_port` key is honoured as a deprecated
+    fallback when the URL carries no port.
+    """
     port = DEFAULT_PORT
     model_name = DEFAULT_MODEL
-    if os.path.exists(config_path):
+    try:
+        voice = load_config().get("voice_input", {})
+    except Exception:
+        logger.warning("Could not load GridVibe config; using built-in defaults.")
+        return port, model_name
+
+    model_name = voice.get("vosk_model", DEFAULT_MODEL)
+    try:
+        url_port = urlparse(str(voice.get("vosk_service_url") or "")).port
+    except ValueError:
+        url_port = None
+
+    legacy_port = voice.get("vosk_service_port")
+    if legacy_port is not None:
+        logger.warning(
+            "voice_input.vosk_service_port is deprecated and will be ignored in a "
+            "future release; set the port in voice_input.vosk_service_url instead."
+        )
+
+    if url_port:
+        port = url_port
+    elif legacy_port is not None:
         try:
-            with open(config_path, "r") as f:
-                cfg = json.load(f)
-            voice = cfg.get("voice_input", {})
-            port = voice.get("vosk_service_port", DEFAULT_PORT)
-            model_name = voice.get("vosk_model", DEFAULT_MODEL)
-        except Exception:
-            pass
+            port = int(legacy_port)
+        except (TypeError, ValueError):
+            port = DEFAULT_PORT
     return port, model_name
 
 
@@ -101,6 +128,11 @@ async def main(port, model_name):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
+
     cfg_port, cfg_model = _load_config_defaults()
 
     parser = argparse.ArgumentParser(
@@ -115,11 +147,6 @@ if __name__ == "__main__":
         help=f"Vosk model name (default: {cfg_model})",
     )
     args = parser.parse_args()
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    )
 
     try:
         asyncio.run(main(args.port, args.model))
