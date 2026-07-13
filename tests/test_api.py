@@ -5810,7 +5810,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function normalizeThemePreference(", html)
         self.assertIn("function applyTheme(", html)
         self.assertIn("function syncNativeTheme(", html)
-        self.assertIn("bridge.set_native_theme(resolvedTheme)", html)
+        self.assertIn("bridge.set_native_theme()", html)
         self.assertIn("function cycleTheme()", html)
         self.assertIn("prefers-color-scheme", html)
 
@@ -5849,7 +5849,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function normalizeThemePreference(", html)
         self.assertIn("function applyTheme(", html)
         self.assertIn("function syncNativeTheme(", html)
-        self.assertIn("bridge.set_native_theme(resolvedTheme)", html)
+        self.assertIn("bridge.set_native_theme()", html)
         self.assertIn("function cycleTheme()", html)
         self.assertIn("prefers-color-scheme", html)
 
@@ -7694,3 +7694,75 @@ class FinalModuleSplitTestCase(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 self.assertTrue(hasattr(api, name))
+
+
+class DeadCodeSweepTestCase(unittest.TestCase):
+    """Deep-dive step 7 — dead-code sweep (findings 5.1–5.6) and 10.2 font wiring."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    # ── 5.2: /api/sessions/active endpoint removed ─────────────────────────
+
+    def test_sessions_active_endpoint_removed(self):
+        response = self.client.get("/api/sessions/active")
+        self.assertEqual(response.status_code, 404)
+
+    # ── 5.3: SessionManager callback registry removed ──────────────────────
+
+    def test_session_manager_has_no_callback_registry(self):
+        from sessions.manager import SessionManager
+        mgr = SessionManager()
+        self.assertFalse(hasattr(mgr, "_session_callbacks"))
+        self.assertFalse(hasattr(mgr, "register_callback"))
+        self.assertFalse(hasattr(mgr, "_notify_callbacks"))
+
+    # ── 5.4: get_active_session_count removed ──────────────────────────────
+
+    def test_get_active_session_count_removed(self):
+        from sessions.manager import SessionManager
+        self.assertFalse(hasattr(SessionManager, "get_active_session_count"))
+
+    # ── 5.4: section-title SVGs removed from launcher ──────────────────────
+
+    def test_section_title_svgs_removed_from_launcher(self):
+        html = self.client.get("/").get_data(as_text=True)
+        import re as _re
+        section_title_blocks = _re.findall(
+            r'<div class="section-title">.*?</div>', html, _re.DOTALL
+        )
+        for block in section_title_blocks:
+            self.assertNotIn("<svg", block,
+                             "section-title should not contain hidden SVGs")
+
+    # ── 5.6: t-menu-btn removed from launcher card HTML ────────────────────
+
+    def test_t_menu_btn_removed(self):
+        launcher_js = self.client.get("/static/js/launcher.js").get_data(as_text=True)
+        self.assertNotIn("t-menu-btn", launcher_js)
+        launcher_css = self.client.get("/static/css/launcher.css").get_data(as_text=True)
+        self.assertNotIn(".t-menu-btn", launcher_css)
+
+    # ── 10.2: terminal font settings wired through to terminals page ────────
+
+    def test_terminal_font_settings_in_terminals_page_body(self):
+        orig_size = api.runtime_config.terminal_font_size
+        orig_family = api.runtime_config.terminal_font_family
+        api.runtime_config.terminal_font_size = 18
+        api.runtime_config.terminal_font_family = "JetBrains Mono, monospace"
+        try:
+            html = self.client.get("/terminals").get_data(as_text=True)
+        finally:
+            api.runtime_config.terminal_font_size = orig_size
+            api.runtime_config.terminal_font_family = orig_family
+        self.assertIn('data-terminal-font-size="18"', html)
+        self.assertIn("JetBrains Mono", html)
+
+    def test_makeTerminal_reads_font_from_dataset(self):
+        terminals_js = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+        # Dataset properties are read.
+        self.assertIn("terminalFontSize", terminals_js)
+        self.assertIn("terminalFontFamily", terminals_js)
+        # The old hardcoded literals are gone.
+        self.assertNotIn("fontSize      : 13", terminals_js)

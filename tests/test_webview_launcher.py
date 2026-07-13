@@ -362,7 +362,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
         )
         refresh.assert_called_once_with(1234)
 
-    def test_set_native_theme_keeps_registered_windows_dark(self):
+    def test_set_native_theme_always_dark_regardless_of_argument(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
         launcher_window = _ExplodingWindow()
         session_window = _ExplodingWindow()
@@ -376,16 +376,17 @@ class WebviewLauncherTestCase(unittest.TestCase):
             "_apply_windows_native_frame_theme",
             return_value=True,
         ) as apply_theme:
+            # Argument is intentionally ignored — frame is always dark.
             result = api_bridge.set_native_theme("light")
+            result_no_arg = api_bridge.set_native_theme()
 
         self.assertEqual(result, {"ok": True, "theme": "dark", "applied": True})
-        self.assertEqual(
-            apply_theme.call_args_list,
-            [
+        self.assertEqual(result_no_arg, {"ok": True, "theme": "dark", "applied": True})
+        for c in apply_theme.call_args_list:
+            self.assertIn(c, [
                 call(launcher_window, "dark"),
                 call(session_window, "dark"),
-            ],
-        )
+            ])
 
     def test_last_window_close_exits_app(self):
         self.assertTrue(

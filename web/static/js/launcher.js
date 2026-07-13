@@ -1759,7 +1759,6 @@
                         <span class="t-badge">T${index + 1}</span>
                         <input class="t-title" type="text" value="${escHtml(terminal.title || `Terminal ${index + 1}`)}" placeholder="Terminal ${index + 1}" aria-label="Terminal ${index + 1} title">
                         <span class="t-status-dot"></span>
-                        <button type="button" class="t-menu-btn" title="Options">⋮</button>
                     </div>
                     <div class="t-fields">
                         <div class="field">

@@ -476,10 +476,6 @@
             letter-spacing: 1px;
         }
 
-        .section-title svg {
-            display: none;
-        }
-
         .message {
             min-height: 0;
             margin-bottom: 8px;
@@ -1612,16 +1608,6 @@
             height: 8px;
             border-radius: 50%;
             background: var(--success);
-        }
-
-        .t-menu-btn {
-            background: none;
-            border: none;
-            color: var(--muted);
-            cursor: pointer;
-            padding: 2px;
-            font-size: 1rem;
-            line-height: 1;
         }
 
         .t-fields {

@@ -36,19 +36,12 @@ except ImportError:  # pragma: no cover - optional dependency at runtime
 logger = logging.getLogger(__name__)
 
 
-_NATIVE_FRAME_THEME = "dark"
-_NATIVE_FRAME_THEMES = {
-    _NATIVE_FRAME_THEME: {
-        "caption": "#111827",
-        "text": "#f8fafc",
-        "border": "#1f2937",
-    },
-}
+_NATIVE_FRAME_COLORS = {"caption": "#111827", "text": "#f8fafc", "border": "#1f2937"}
 
 
 def _apply_windows_dark_frame_attributes(hwnd: int) -> bool:
     """Apply the complete dark DWM frame attribute set to a Windows HWND."""
-    colors = _NATIVE_FRAME_THEMES[_NATIVE_FRAME_THEME]
+    colors = _NATIVE_FRAME_COLORS
     applied = [
         _set_dwm_window_attribute(hwnd, 19, 1),
         _set_dwm_window_attribute(hwnd, 20, 1),
@@ -561,9 +554,8 @@ class GridVibeApi:
             applied = self._apply_native_frame_theme(self._session_window, "session") or applied
         return applied
 
-    def set_native_theme(self, theme: str):
-        """Accept app theme updates while keeping the native window frame dark."""
-        self._native_theme = _NATIVE_FRAME_THEME
+    def set_native_theme(self, _theme=None):
+        """Re-apply the permanent dark native frame; the app theme argument is intentionally ignored."""
         applied = self._apply_native_frame_theme_to_windows()
         return {"ok": True, "theme": self._native_theme, "applied": applied}
 

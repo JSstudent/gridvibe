@@ -137,11 +137,11 @@
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;');
     }
-    function syncNativeTheme(resolvedTheme) {
+    function syncNativeTheme() {
         try {
             const bridge = window.pywebview?.api;
             if (bridge?.set_native_theme) {
-                bridge.set_native_theme(resolvedTheme).catch(error => {
+                bridge.set_native_theme().catch(error => {
                     console.error('[GridVibe] native theme sync failed:', error);
                 });
             }

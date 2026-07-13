@@ -5,15 +5,12 @@
     "debug": false
   },
   "ssh": {
-    "default_username": "root",
     "default_port": 22,
     "connection_timeout": 30,
     "keepalive_interval": 60
   },
   "terminal": {
     "max_sessions": 8,
-    "default_rows": 24,
-    "default_cols": 80,
     "font_family": "Consolas, Monaco, 'Courier New', monospace",
     "font_size": 14
   },

@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -124,11 +124,9 @@ class SessionManager:
         """Initialize the session manager."""
         self.sessions: Dict[str, TerminalSession] = {}
         self.groups: Dict[str, SessionGroup] = {}
-        # RLock: re-entrant so callbacks can be called while lock is held.
         # Lock ordering: web/api.py's connection_lock may be held while taking
         # this lock; code holding this lock must never take connection_lock.
         self.lock = threading.RLock()
-        self._session_callbacks: Dict[str, List[Callable]] = {}
 
     def create_group(
         self,
@@ -406,9 +404,6 @@ class SessionManager:
                 if status == SessionStatus.CONNECTED:
                     session.connected_at = time.time()
 
-                # Notify callbacks
-                self._notify_callbacks(session_id, status)
-
                 return True
 
         return False
@@ -427,10 +422,6 @@ class SessionManager:
             if session_id in self.sessions:
                 session = self.sessions[session_id]
                 session.status = SessionStatus.DISCONNECTED
-
-                # Notify callbacks
-                self._notify_callbacks(session_id, SessionStatus.DISCONNECTED)
-
                 logger.info(f"Closed session {session_id}")
                 return True
 
@@ -476,45 +467,18 @@ class SessionManager:
         ]
         for session_id in session_ids:
             self.sessions.pop(session_id, None)
-            self._session_callbacks.pop(session_id, None)
         return session_ids
 
     def reset_sessions(self):
-        """Remove all tracked sessions and callbacks."""
+        """Remove all tracked sessions."""
         with self.lock:
             self.sessions.clear()
             self.groups.clear()
-            self._session_callbacks.clear()
-
-    def register_callback(
-        self,
-        session_id: str,
-        callback: Callable[[SessionStatus], None]
-    ):
-        """Register a callback for session status changes."""
-        with self.lock:
-            if session_id not in self._session_callbacks:
-                self._session_callbacks[session_id] = []
-            self._session_callbacks[session_id].append(callback)
-
-    def _notify_callbacks(self, session_id: str, status: SessionStatus):
-        """Notify registered callbacks of status change.
-        NOTE: always called while self.lock is already held — do not re-acquire."""
-        callbacks = list(self._session_callbacks.get(session_id, []))
-        for callback in callbacks:
-            try:
-                callback(status)
-            except Exception as e:
-                logger.error(f"Callback error: {e}")
 
     def get_session_count(self) -> int:
         """Get total number of sessions."""
         with self.lock:
             return len(self.sessions)
-
-    def get_active_session_count(self) -> int:
-        """Get number of active sessions."""
-        return len(self.get_active_sessions())
 
     def clear_disconnected_sessions(self, force_group_ids: Optional[Iterable[str]] = None):
         """Remove disconnected sessions from the manager.
@@ -530,11 +494,6 @@ class SessionManager:
             ]
             for sid in disconnected:
                 del self.sessions[sid]
-
-            # Also clean up callbacks
-            for sid in disconnected:
-                if sid in self._session_callbacks:
-                    del self._session_callbacks[sid]
 
             active_group_counts: Dict[str, int] = {}
             for session in self.sessions.values():

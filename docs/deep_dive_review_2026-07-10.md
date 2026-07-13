@@ -1006,6 +1006,13 @@ them see no effect. `font_size` describes genuinely useful behaviour (see featur
 `ssh.default_username` overlaps with the per-saved-session username and should be removed;
 `default_rows/cols` are superseded by the fit addon and should be removed.
 
+> **✅ Implemented (2026-07-13).** `ssh.default_username`, `terminal.default_rows`, and
+> `terminal.default_cols` removed from `default_config.json` (flagged in `CHANGELOG.md`).
+> `terminal.font_size` and `terminal.font_family` graduated to feature 10.2 (see below):
+> both are now read by `RuntimeConfig` in `web/config.py` and passed to every xterm
+> instance at page load, so changing either key in `config.json` takes effect on next
+> terminal page open. Covered by `DeadCodeSweepTestCase` in `tests/test_api.py`.
+
 ### 5.2 `/api/sessions/active` has no frontend callers — **Low**
 
 **Location:** `web/api.py:5349-5373`
@@ -1015,6 +1022,10 @@ tests. It duplicates `/api/sessions` filtering logic and is one more surface to 
 
 **Proposed implementation.** Delete the route and its tests, or — if it is considered public
 API for external tooling — document it in the README API table so it stops looking accidental.
+
+> **✅ Implemented (2026-07-13).** Route removed from `web/api.py`; `GET /api/sessions/active`
+> now returns 404. No test cases existed for this route; a `test_sessions_active_endpoint_removed`
+> regression guard was added to `DeadCodeSweepTestCase` in `tests/test_api.py`.
 
 ### 5.3 `SessionManager`'s callback registry is dead — **Low**
 
@@ -1031,6 +1042,13 @@ cleanup in `_remove_group_sessions_locked` / `reset_sessions` / `clear_disconnec
 and the associated tests. If status hooks are wanted later, Socket.IO broadcast in
 `_broadcast_session_status` already fills that role at the web layer.
 
+> **✅ Implemented (2026-07-13).** `_session_callbacks`, `register_callback`, and
+> `_notify_callbacks` removed from `sessions/manager.py`; the five call/cleanup sites
+> removed; `Callable` dropped from the import. The two test methods that exercised callback
+> behaviour were trimmed to cover only the status-update and cleanup core. `Callable` is no
+> longer imported. Covered by `test_session_manager_has_no_callback_registry` in
+> `DeadCodeSweepTestCase`.
+
 ### 5.4 Assorted dead fragments — **Low**
 
 **Locations / items.**
@@ -1044,8 +1062,15 @@ and the associated tests. If status hooks are wanted later, Socket.IO broadcast 
 **Proposed implementation.** Delete each; none has behavioural impact. (Batchable into one
 "dead code sweep" commit validated by `make check`.)
 
-> **⚠️ Partially resolved (2026-07-13).** The `DESTRUCTIVE_PATTERNS` item disappeared with
-> the 4.9 rewrite of `utils/cleanup.py`. The other three items remain.
+> **✅ Fully resolved (2026-07-13).** `DESTRUCTIVE_PATTERNS` gone with the 4.9 rewrite;
+> the remaining three items are now closed:
+> - `_NATIVE_FRAME_THEMES` dict + `_NATIVE_FRAME_THEME` constant inlined into a plain
+>   `_NATIVE_FRAME_COLORS` dict in `web/webview_launcher.py`.
+> - `get_active_session_count` removed from `sessions/manager.py`.
+> - Three hidden SVGs deleted from the `section-title` divs in `templates/index.html`;
+>   the dead `.section-title svg { display: none; }` CSS rule removed from
+>   `web/static/css/launcher.css`. Covered by `test_section_title_svgs_removed_from_launcher`
+>   in `DeadCodeSweepTestCase`.
 
 ### 5.5 `set_native_theme(theme)` ignores its argument — **Low**
 
@@ -1065,6 +1090,12 @@ around a light-themed page.
   text `#111827`, border `#e5e7eb`), honour the parameter, and set DWM attribute 20 to 0 for
   light mode.
 
+> **✅ Implemented (2026-07-13).** Always-dark option chosen: `set_native_theme` signature
+> changed to `(self, _theme=None)` with a comment; `syncNativeTheme` in `web/static/js/shared.js`
+> now calls `bridge.set_native_theme()` with no argument. `_NATIVE_FRAME_THEMES` and
+> `_NATIVE_FRAME_THEME` removed (part of the 5.4 inline). Covered by
+> `test_set_native_theme_always_dark_regardless_of_argument` in `tests/test_webview_launcher.py`.
+
 ### 5.6 The `⋮` Options button on launcher terminal cards does nothing — **Low**
 
 **Location:** `templates/index.html:4519` (`.t-menu-btn`, `title="Options"`) — no event handler
@@ -1078,6 +1109,11 @@ button improvement): a small popover with **Duplicate terminal** (copy this row'
 the next slot), **Reset to defaults**, and **Move left/right** (reorder drafts). All three
 operate purely on `collectTerminalDrafts()` + `buildTerminalRows()`, so no backend work is
 needed. Removal is a one-line change if the menu isn't wanted.
+
+> **✅ Implemented (2026-07-13).** Button removed from the terminal card template in
+> `web/static/js/launcher.js`; `.t-menu-btn` CSS block removed from
+> `web/static/css/launcher.css`. Covered by `test_t_menu_btn_removed` in
+> `DeadCodeSweepTestCase`.
 
 ### 5.7 Three near-identical server-run entry points — **Low**
 
@@ -1685,6 +1721,16 @@ terminal font; today `makeTerminal()` hardcodes 13 px Consolas.
 3. Optional stretch: Ctrl+scroll / Ctrl+±  per-pane zoom (`term.options.fontSize = n; fit()`),
    mirroring the explorer's existing editor zoom controls (`stepExplorerEditorFontSize`).
 
+> **✅ Implemented (2026-07-13).** Steps 1 and 2 done as part of the dead-code sweep (5.1):
+> `RuntimeConfig` in `web/config.py` now reads `terminal.font_size` (clamped ≥ 6, default 14)
+> and `terminal.font_family` (default `Consolas, Monaco, 'Courier New', monospace`);
+> `terminals_page()` passes them as `terminal_font_size`/`terminal_font_family` template
+> variables rendered as `data-terminal-font-size` / `data-terminal-font-family` on `<body>`;
+> `makeTerminal()` in `web/static/js/terminals.js` reads both from `document.body.dataset`
+> with the appropriate fallbacks. Step 3 (per-pane zoom) remains open. Covered by
+> `test_terminal_font_settings_in_terminals_page_body` and
+> `test_makeTerminal_reads_font_from_dataset` in `DeadCodeSweepTestCase` (`tests/test_api.py`).
+
 ### 10.3 Terminal search and clickable links (xterm addons)
 
 **Motivation.** Panes routinely hold build output and agent logs; today there is no way to
@@ -1823,8 +1869,21 @@ posture paragraph.
    Suite green (407 tests, 1 skip) and `ruff` clean.
 7. **Dead-code sweep:** 5.1–5.6 in one or two commits validated by `make check` (5.1's useful
    keys graduate into features 10.2 instead of being deleted).
+   ✅ **Step 7 completed 2026-07-13** (see the per-finding notes above): removed
+   `ssh.default_username`, `terminal.default_rows/cols` from `default_config.json`; wired
+   `terminal.font_size`/`font_family` through `RuntimeConfig` → template data-attributes →
+   `makeTerminal()` (10.2 steps 1+2); deleted `/api/sessions/active` route; stripped the
+   `SessionManager` callback registry (`_session_callbacks`, `register_callback`,
+   `_notify_callbacks`) and its five call/cleanup sites; inlined `_NATIVE_FRAME_THEMES` into
+   a plain `_NATIVE_FRAME_COLORS` dict and removed `get_active_session_count`; deleted 3
+   section-title SVGs from `templates/index.html` + their dead CSS hide-rule; renamed
+   `set_native_theme(theme)` → `(self, _theme=None)` and stopped passing the resolved theme
+   from JS; removed the inert `⋮` Options button + `.t-menu-btn` CSS from the launcher card.
+   Covered by the new `DeadCodeSweepTestCase` (7 assertions) in `tests/test_api.py`. Suite
+   green (414 tests, 1 skip) and `ruff` clean.
 8. **Style/theming:** 7.1 (shared design tokens — pairs with the 3.5/6.4 extraction, do them in
    the same PR series), then 7.2/7.3 as low-risk follow-ups.
 9. **UX/features:** 8.1 and 8.4 first (close confirmation, reconnect affordance — the two
-   Medium UX gaps), then 8.2/8.3/8.5 polish, and 10.2–10.7 as individually scoped follow-ups
-   (10.3 depends on 3.6's vendored assets; 10.7 completes 1.4's host-key story).
+   Medium UX gaps), then 8.2/8.3/8.5 polish, and 10.3–10.7 as individually scoped follow-ups
+   (10.2 is now done; 10.3 depends on 3.6's vendored assets; 10.7 completes 1.4's host-key
+   story).

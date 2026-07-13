@@ -155,6 +155,8 @@ class RuntimeConfig:
         self.app_config: Dict[str, Any] = {}
         self.ssh_config: Dict[str, Any] = {}
         self.max_sessions = 4
+        self.terminal_font_size = 14
+        self.terminal_font_family = "Consolas, Monaco, 'Courier New', monospace"
         self.app_theme = "system"
         self.app_surface_mode = "normal"
         self.voice_enabled = True
@@ -172,7 +174,15 @@ class RuntimeConfig:
         """Reload the config-backed settings from disk."""
         self.app_config = load_config()
         self.ssh_config = self.app_config.get("ssh", {})
-        self.max_sessions = self.app_config.get("terminal", {}).get("max_sessions", 4)
+        terminal_config = self.app_config.get("terminal", {})
+        self.max_sessions = terminal_config.get("max_sessions", 4)
+        try:
+            self.terminal_font_size = max(6, int(terminal_config.get("font_size", 14)))
+        except (ValueError, TypeError):
+            self.terminal_font_size = 14
+        self.terminal_font_family = str(
+            terminal_config.get("font_family", "Consolas, Monaco, 'Courier New', monospace")
+        ).strip() or "Consolas, Monaco, 'Courier New', monospace"
         appearance_config = self.app_config.get("appearance", {})
         app_theme = str(appearance_config.get("theme", "system")).strip().lower()
         if app_theme not in {"system", "light", "dark"}:

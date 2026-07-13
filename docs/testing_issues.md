@@ -3,6 +3,32 @@ Last updated: 2026-07-13
 
 ## Open Issues
 
+### Issue ID: ISSUE-2026-021
+- Title: Appearance theme changes do not reach open session windows
+- Priority: Medium
+- Status: Open
+- Area: `web/static/js/shared.js`, `web/static/js/launcher.js`, `web/static/js/terminals.js`, `web/api.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `settings`, `launcher`, `session`, `ui`, `theme`, `tests`
+- Reported: 2026-07-13
+
+Description:
+Changing the Appearance theme to Light or Dark in launcher settings updates the launcher but does not update an already-open session window. The application can therefore display mismatched themes across its two primary windows until the session page is reloaded or its theme is changed separately, making the global appearance setting behave like a launcher-only preference.
+
+Steps to reproduce:
+1. Start GridVibe with the launcher and at least one session window open.
+2. In launcher App Settings, change Appearance from Dark to Light or from Light to Dark and save.
+3. Observe that the launcher applies the selected theme while the open session window remains on its previous theme.
+
+Expected behavior:
+The saved Light, Dark, or System appearance preference should be global to GridVibe. Saving it from the launcher should immediately apply the resolved theme to the launcher and every open session window, and newly opened or reconnected session windows should initialize from the same persisted preference. This content-theme synchronization is distinct from the intentionally dark native Windows title-bar policy documented by closed ISSUE-2026-009.
+
+Actual behavior / logs:
+Code inspection confirms `saveAppSettings()` in `web/static/js/launcher.js` applies the returned theme locally through `applyAppSettings(data)`, then calls `notifyAppConfigUpdated(data)`. That cross-window payload contains only `workspace.surface_mode`, not `appearance.theme`. The backend `_broadcast_app_config_update()` in `web/api.py` likewise emits only `workspace.surface_mode`, and all BroadcastChannel, storage-event, and Socket.IO handlers in `web/static/js/terminals.js` call `applyAppConfigSurfaceMode()` without applying a theme. Shared `applyTheme()` writes `gridvibe.theme` to local storage, but `initTheme()` does not register a storage listener, so an already-open session document does not react to the launcher write. Existing tests assert surface-mode propagation and basic theme controls, but do not cover live theme synchronization between windows.
+
+### Proposed solution:
+Define one normalized app-config update contract containing `appearance.theme` alongside `workspace.surface_mode`, and emit it consistently from both `notifyAppConfigUpdated()` and `_broadcast_app_config_update()`. Replace or extend the session-side surface-only handler with an idempotent app-config handler that calls `applyTheme()` for a valid `system`, `light`, or `dark` preference and continues applying surface mode. Keep BroadcastChannel, storage-event, and Socket.IO delivery paths aligned, avoid rebroadcast or local-storage feedback loops, and make duplicate deliveries harmless. On session-window focus, visibility restoration, or socket reconnect, reconcile against `/api/app-config` or the authoritative stored preference so updates missed while disconnected are recovered. Preserve System-mode media-query behavior and the native-title-bar policy from ISSUE-2026-009. Add focused tests in `tests/test_api.py` for backend payload contents, launcher notification contents, live BroadcastChannel/storage/Socket.IO application, multiple open session windows, duplicate and malformed messages, reconnect/focus reconciliation, Light/Dark/System transitions, and newly opened session initialization.
+
 ### Issue ID: ISSUE-2026-020
 - Title: Large log previews discard the newest entries
 - Priority: Medium

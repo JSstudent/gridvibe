@@ -13,6 +13,8 @@
     data-voice-model="{{ voice_model | e }}"
     data-voice-language="{{ voice_language | e }}"
     data-voice-worklet-url="{{ url_for('static', filename='voice-capture-worklet.js') }}"
+    data-terminal-font-size="{{ terminal_font_size }}"
+    data-terminal-font-family="{{ terminal_font_family | e }}"
 >
 
 <!-- Top bar -->

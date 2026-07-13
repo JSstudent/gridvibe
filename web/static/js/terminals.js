@@ -3087,10 +3087,11 @@
        Xterm factory
     ───────────────────────────────────────────── */
     function makeTerminal() {
+        const _ds = document.body.dataset;
         const term = new Terminal({
             cursorBlink   : true,
-            fontSize      : 13,
-            fontFamily    : 'Consolas, Monaco, "Courier New", monospace',
+            fontSize      : Number(_ds.terminalFontSize) || 14,
+            fontFamily    : _ds.terminalFontFamily || 'Consolas, Monaco, "Courier New", monospace',
             copyOnSelect  : true,
             theme: {
                 background          : '#0d0d0d',

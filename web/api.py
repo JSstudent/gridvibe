@@ -458,6 +458,8 @@ def terminals_page():
                            voice_engine=runtime_config.voice_engine,
                            voice_model=_active_voice_model_name(),
                            voice_language=runtime_config.voice_language,
+                           terminal_font_size=runtime_config.terminal_font_size,
+                           terminal_font_family=runtime_config.terminal_font_family,
                            version=__version__)
 
 
@@ -788,34 +790,6 @@ def publish_explorer_git(session_id: str):
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
-
-
-@app.route('/api/sessions/active', methods=['GET'])
-def get_active_sessions():
-    """Get all active sessions."""
-    group_id = _resolve_group_id()
-    if group_id:
-        sessions = [
-            session
-            for session in session_manager.get_group_sessions(group_id)
-            if session.status == SessionStatus.CONNECTED
-        ]
-        meta = _get_group_response_meta(group_id)
-    else:
-        sessions = session_manager.get_active_sessions()
-        launch_options = active_launch_options
-        meta = {
-            "group": None,
-            "layout": launch_options["layout"],
-            "connection_mode": launch_options["connection_mode"],
-            "terminal_count": launch_options["terminal_count"],
-            "workspace_layout": None,
-        }
-    return jsonify({
-        "sessions": [s.to_dict() for s in sessions],
-        "count": len(sessions),
-        **meta,
-    })
 
 
 @app.route('/api/session-groups', methods=['GET'])
