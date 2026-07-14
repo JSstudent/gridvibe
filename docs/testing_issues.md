@@ -3,6 +3,58 @@ Last updated: 2026-07-14
 
 ## Open Issues
 
+### Issue ID: ISSUE-2026-024
+- Title: File and Git trees lack file type icons
+- Priority: Cosmetic
+- Status: Open
+- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `git`, `tests`
+- Reported: 2026-07-14
+
+Description:
+The Explorer Files tree and Git sidebar do not show recognizable file type icons before filenames. Files in the Files tree all use the same generic document icon, while changed and committed file rows in the Git sidebar have no file icon at all. Compared with the extension-aware leading icons in the provided reference, this makes mixed Python, JavaScript, JSON, Markdown, configuration, and other file lists slower to scan visually.
+
+Steps to reproduce:
+1. Open an Explorer pane on a repository containing several recognizable file types, such as `.py`, `.js`, `.json`, `.md`, and configuration files.
+2. Expand the Files tree, then open the Git sidebar and inspect changed files or files listed beneath a commit.
+3. Observe that Files tree rows share one generic file icon and Git file rows show only Git status plus the filename, without a file type icon before the name.
+
+Expected behavior:
+Both the Files tree and every Git file list should place a compact, extension- or filename-aware file type icon immediately before each filename, with a consistent fallback icon for unknown types. Folder icons, Git status badges, indentation, action buttons, and accessible filenames should remain intact.
+
+Actual behavior / logs:
+Code inspection confirms `explorerTreeRowHtml()` renders every non-directory entry with the single `EXPLORER_FILE_ICON` constant. `renderExplorerGitFileRows()` renders a Git status badge followed directly by `.explorer-diff-commit-file-path` and does not insert any file icon. GridVibe already has `EXPLORER_LANGUAGE_BY_EXTENSION`, `EXPLORER_LANGUAGE_BY_FILENAME`, and `explorerCodeLanguage()` for classifying common file types, but that classification is not reused by either tree to select an icon. Existing tests verify language detection and generic Explorer/Git rendering hooks but do not cover type-aware icons or consistent placement before filenames.
+
+### Proposed solution:
+Add one shared client-side helper in `web/static/js/terminals.js`, such as `explorerFileTypeIconHtml(path)`, that reuses the existing filename and extension classification and returns a stable icon key with a generic-file fallback. Render its output before `.explorer-tree-name` in `explorerTreeRowHtml()` and before `.explorer-diff-commit-file-path` in `renderExplorerGitFileRows()`, including staged, unstaged, conflicted, untracked, deleted, renamed, and commit-history rows. Use locally defined or vendored stroke-style SVG assets with `currentColor`, theme-token-based colors, `aria-hidden="true"`, and no CDN, emoji, or text-glyph dependency; preserve the existing folder icon for directories. Add compact alignment and sizing rules in `web/static/css/terminals.css` so icons do not disrupt tree indentation, Git status badges, ellipsis behavior, or narrow sidebars. Add focused rendered-template tests in `tests/test_api.py` for representative extensions and special filenames, unknown fallbacks, both tree renderers, placement before filenames, accessibility, local/SSH parity, and action-button layout.
+
+### Issue ID: ISSUE-2026-023
+- Title: Git change rows open source instead of diff view
+- Priority: Low
+- Status: Open
+- Area: `web/static/js/terminals.js`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `git`, `tests`
+- Reported: 2026-07-14
+
+Description:
+Clicking a file under either `Changes` or `Staged Changes` in the Explorer Git sidebar opens the file in its normal source view instead of taking the user directly to the available diff view. This adds an unnecessary navigation step to the primary Git review workflow and makes the changed-file rows behave differently from commit-history file rows, which already open directly into a diff.
+
+Steps to reproduce:
+1. Open an Explorer pane rooted in a Git repository and create at least one unstaged tracked change and one staged change.
+2. Open the Git sidebar and click a filename under `Changes`, then repeat with a filename under `Staged Changes`.
+3. Observe that each file opens with Source selected and requires a second click on Diff before its changes are shown.
+
+Expected behavior:
+Clicking a filename under `Changes` or `Staged Changes` should open that file with Diff selected and immediately load the appropriate Git diff. The existing Stage, Unstage, and Open containing folder controls should keep their current independent actions.
+
+Actual behavior / logs:
+Code inspection confirms `renderExplorerGitFileRows()` gives non-commit changed-file rows a `data-explorer-git-open-file` action. Its click handler calls `explorerGitOpenFile()`, which invokes `openExplorerFile(index, path)` without the supported `openDiff` option. `renderExplorerFile()` therefore selects `source` as the initial file view; it selects `diff` only when `openDiff` or `diffCommit` is supplied. By contrast, `explorerGitOpenCommitDiff()` already passes `openDiff: true` for commit-history files. Existing rendered-template tests verify that the Git sidebar and diff controls are present but do not assert the initial view selected after clicking staged or unstaged rows.
+
+### Proposed solution:
+Update the changed-file click path in `web/static/js/terminals.js` to call the shared `openExplorerFile()` flow with `openDiff: true`. Preserve which section originated the click so tracked files under `Changes` can request the worktree diff and files under `Staged Changes` can request the staged diff through the existing Git diff modes; this avoids showing unrelated hunks when one file has both staged and unstaged changes. Keep event isolation for Stage, Unstage, and Open containing folder buttons, and define graceful behavior for untracked, deleted, renamed, conflicted, and diff-load failure cases without leaving the file viewer unusable. Add focused tests in `tests/test_api.py` for staged, unstaged, and partially staged rows, initial Diff selection, the requested diff mode, commit-history behavior, action-button isolation, and fallback/error handling.
+
 ### Issue ID: ISSUE-2026-022
 - Title: Closing a terminal expands unrelated panes in complex split layouts
 - Priority: Medium

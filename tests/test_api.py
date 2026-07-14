@@ -20,6 +20,7 @@ from web import app as web_app
 from web import config as web_config
 from web import explorer as web_explorer
 from web import hostkeys as web_hostkeys
+from web import runtime_state as web_runtime_state
 from web import saved_sessions as web_saved_sessions
 from web import selfupdate
 from web import terminal_io as web_terminal_io
@@ -8332,3 +8333,487 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         self.assertIn('aria-describedby="saveAppSettingsTip"', button_tag)
         self.assertIn('id="saveAppSettingsTip"', html)
 
+
+
+class HostKeyPolicyTestCase(unittest.TestCase):
+    """Deep-dive 10.7 — configurable SSH host-key verification policy."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.config_path = Path(self.temp_dir.name) / "config.json"
+        patcher = patch.object(web_config, "CONFIG_PATH", str(self.config_path))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        api._refresh_runtime_config()
+        self.addCleanup(api._refresh_runtime_config)
+        self.known_hosts = Path(self.temp_dir.name) / ".known_hosts"
+        kh_patcher = patch.object(web_hostkeys, "KNOWN_HOSTS_PATH", str(self.known_hosts))
+        kh_patcher.start()
+        self.addCleanup(kh_patcher.stop)
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_runtime_config_normalizes_host_key_policy(self):
+        for raw, expected in (
+            ("strict", "strict"),
+            ("KNOWN-HOSTS", "known-hosts"),
+            ("auto-add", "auto-add"),
+            ("nonsense", "auto-add"),
+            (None, "auto-add"),
+        ):
+            with self.subTest(raw=raw):
+                ssh_config = {} if raw is None else {"host_key_policy": raw}
+                self.config_path.write_text(json.dumps({"ssh": ssh_config}), encoding="utf-8")
+                api._refresh_runtime_config()
+                self.assertEqual(api.runtime_config.ssh_host_key_policy, expected)
+
+    def test_default_config_ships_auto_add_policy(self):
+        default_config = json.loads(
+            Path(web_config.DEFAULT_CONFIG_PATH).read_text(encoding="utf-8")
+        )
+        self.assertEqual(default_config["ssh"]["host_key_policy"], "auto-add")
+
+    def test_auto_add_policy_keeps_todays_behaviour(self):
+        client = MagicMock()
+        fake_paramiko = MagicMock()
+        api._apply_host_key_policy(client, fake_paramiko, "auto-add")
+        client.set_missing_host_key_policy.assert_called_once_with(
+            fake_paramiko.AutoAddPolicy.return_value
+        )
+        client.load_host_keys.assert_called_once_with(str(self.known_hosts))
+        client.load_system_host_keys.assert_not_called()
+
+    def test_known_hosts_policy_warns_then_delegates_to_auto_add(self):
+        client = MagicMock()
+        fake_paramiko = MagicMock()
+        api._apply_host_key_policy(client, fake_paramiko, "known-hosts")
+        policy = client.set_missing_host_key_policy.call_args[0][0]
+        self.assertIsInstance(policy, web_hostkeys._WarnNewHostKeyPolicy)
+        with self.assertLogs("web.hostkeys", level="WARNING") as logs:
+            policy.missing_host_key(client, "host.example", object())
+        self.assertTrue(any("host.example" in line for line in logs.output))
+        fake_paramiko.AutoAddPolicy.return_value.missing_host_key.assert_called_once()
+
+    def test_strict_policy_rejects_unknown_hosts_and_loads_user_known_hosts(self):
+        user_known_hosts = Path(self.temp_dir.name) / "user_known_hosts"
+        user_known_hosts.write_text("", encoding="utf-8")
+        ukh_patcher = patch.object(
+            web_hostkeys, "USER_KNOWN_HOSTS_PATH", str(user_known_hosts)
+        )
+        ukh_patcher.start()
+        self.addCleanup(ukh_patcher.stop)
+        client = MagicMock()
+        fake_paramiko = MagicMock()
+        api._apply_host_key_policy(client, fake_paramiko, "strict")
+        client.set_missing_host_key_policy.assert_called_once_with(
+            fake_paramiko.RejectPolicy.return_value
+        )
+        client.load_host_keys.assert_called_once_with(str(self.known_hosts))
+        client.load_system_host_keys.assert_called_once_with(str(user_known_hosts))
+
+    def test_policy_defaults_to_runtime_config_value(self):
+        self.config_path.write_text(
+            json.dumps({"ssh": {"host_key_policy": "strict"}}), encoding="utf-8"
+        )
+        api._refresh_runtime_config()
+        client = MagicMock()
+        fake_paramiko = MagicMock()
+        missing_user_path = str(Path(self.temp_dir.name) / "missing")
+        with patch.object(web_hostkeys, "USER_KNOWN_HOSTS_PATH", missing_user_path):
+            api._apply_host_key_policy(client, fake_paramiko)
+        client.set_missing_host_key_policy.assert_called_once_with(
+            fake_paramiko.RejectPolicy.return_value
+        )
+        client.load_system_host_keys.assert_not_called()
+
+    def test_all_three_ssh_entry_points_share_the_policy_helper(self):
+        self.assertIs(
+            web_terminal_io._apply_host_key_policy,
+            web_hostkeys._apply_host_key_policy,
+        )
+        self.assertIs(
+            web_explorer._apply_host_key_policy,
+            web_hostkeys._apply_host_key_policy,
+        )
+        self.assertIs(
+            web_agents._apply_host_key_policy,
+            web_hostkeys._apply_host_key_policy,
+        )
+
+    def test_app_config_endpoint_round_trips_host_key_policy(self):
+        response = self.client.get("/api/app-config")
+        self.assertEqual(response.get_json()["ssh"]["host_key_policy"], "auto-add")
+
+        response = self.client.post(
+            "/api/app-config", json={"ssh": {"host_key_policy": "strict"}}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["ssh"]["host_key_policy"], "strict")
+        self.assertEqual(api.load_config()["ssh"]["host_key_policy"], "strict")
+        self.assertEqual(api.runtime_config.ssh_host_key_policy, "strict")
+
+        # invalid values keep the current policy instead of weakening it
+        response = self.client.post(
+            "/api/app-config", json={"ssh": {"host_key_policy": "yolo"}}
+        )
+        self.assertEqual(response.get_json()["ssh"]["host_key_policy"], "strict")
+
+    def test_launcher_ships_host_key_policy_select(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="appSshHostKeyPolicy"', html)
+        for value in ("auto-add", "known-hosts", "strict"):
+            self.assertIn(f'value="{value}"', html)
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("host_key_policy", launcher_js)
+        self.assertIn("appSshHostKeyPolicy", launcher_js)
+
+
+class ExplorerDownloadTestCase(unittest.TestCase):
+    """Deep-dive 10.6 — explorer file download stays inside the read-only contract."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+
+    def _create_local_explorer_session(self):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(self.root),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        return response.get_json()["sessions"][0]["session_id"]
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_download_returns_attachment_including_binary_files(self):
+        payload = b"\x00\x01binary\xffdata"
+        (self.root / "artifact.bin").write_bytes(payload)
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/download?path=artifact.bin"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_data(), payload)
+        disposition = response.headers.get("Content-Disposition", "")
+        self.assertIn("attachment", disposition)
+        self.assertIn("artifact.bin", disposition)
+        response.close()
+
+    def test_download_unknown_session_returns_404(self):
+        response = self.client.get("/api/explorer/missing/download?path=x")
+        self.assertEqual(response.status_code, 404)
+
+    def test_download_rejects_paths_outside_the_root(self):
+        (self.root / "inside.txt").write_text("ok", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/download?path=../outside.txt"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_download_rejects_files_over_the_size_cap(self):
+        (self.root / "big.log").write_bytes(b"x" * 64)
+        session_id = self._create_local_explorer_session()
+        with patch.object(api, "EXPLORER_DOWNLOAD_MAX_BYTES", 16):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/download?path=big.log"
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("limit", response.get_json()["error"])
+
+    def test_download_never_touches_git_or_write_helpers(self):
+        (self.root / "read.txt").write_text("read only", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        with patch.object(web_explorer, "_run_git_command") as run_git:
+            response = self.client.get(
+                f"/api/explorer/{session_id}/download?path=read.txt"
+            )
+        self.assertEqual(response.status_code, 200)
+        run_git.assert_not_called()
+        response.close()
+
+    def test_file_viewer_ships_download_button(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function downloadExplorerFile(index)", terminals_js)
+        self.assertIn("data-explorer-download", terminals_js)
+        self.assertIn("/download?path=", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".explorer-download-btn", terminals_css)
+
+    def test_native_window_downloads_route_through_the_bridge(self):
+        # WebView2 drops anchor downloads, so the native window must use the
+        # pywebview save_download bridge instead of the <a download> click.
+        terminals_js = self._static("js/terminals.js")
+        download_fn = terminals_js[
+            terminals_js.index("async function downloadExplorerFile"):
+            terminals_js.index("function getDownloadBaseName")
+        ]
+        self.assertIn("isPywebviewAvailable()", download_fn)
+        self.assertIn("window.pywebview.api.save_download", download_fn)
+        # both paths give a visible result the user asked for
+        self.assertIn("showTerminalToast", download_fn)
+
+    def test_download_shows_a_success_toast(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function showTerminalToast(message, type", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".terminal-toast", terminals_css)
+        self.assertIn(".terminal-toast.success", terminals_css)
+
+
+class TerminalSearchWebLinksTestCase(unittest.TestCase):
+    """Deep-dive 10.3 — terminal scrollback search + clickable links."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_terminals_page_loads_vendored_addons(self):
+        html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertNotIn("cdn.jsdelivr.net", html)
+        self.assertIn("/static/vendor/xterm-addon-search.min.js", html)
+        self.assertIn("/static/vendor/xterm-addon-web-links.min.js", html)
+
+    def test_vendored_addons_are_served(self):
+        search_js = self._static("vendor/xterm-addon-search.min.js")
+        self.assertIn("SearchAddon", search_js)
+        links_js = self._static("vendor/xterm-addon-web-links.min.js")
+        self.assertIn("WebLinksAddon", links_js)
+
+    def test_make_terminal_loads_search_and_web_links_addons(self):
+        terminals_js = self._static("js/terminals.js")
+        make_terminal = terminals_js[
+            terminals_js.index("function makeTerminal"):
+            terminals_js.index("function emitTerminalResize")
+        ]
+        self.assertIn("new SearchAddon.SearchAddon()", make_terminal)
+        self.assertIn("new WebLinksAddon.WebLinksAddon(", make_terminal)
+        self.assertIn("attachCustomKeyEventHandler", make_terminal)
+        self.assertIn("searchAddon", make_terminal)
+
+    def test_search_overlay_wiring_and_shortcut(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function openTerminalSearch(index)", terminals_js)
+        self.assertIn("function closeTerminalSearch(index)", terminals_js)
+        self.assertIn("function findTerminalSearchTargetIndex()", terminals_js)
+        self.assertIn("findPrevious", terminals_js)
+        self.assertIn("{ incremental: true }", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".terminal-search-overlay", terminals_css)
+        self.assertIn(".terminal-search-input", terminals_css)
+
+
+class BroadcastInputTestCase(unittest.TestCase):
+    """Deep-dive 10.4 — broadcast typing to all plain terminal panes."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_topbar_ships_broadcast_toggle(self):
+        html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertIn('id="broadcastBtn"', html)
+        self.assertIn("toggleBroadcastInput()", html)
+        self.assertIn('aria-pressed="false"', html)
+
+    def test_input_forwarding_goes_through_the_broadcast_helper(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function forwardTerminalInput(index, data)", terminals_js)
+        # both onData wiring sites (grid build + split panes) share the helper
+        self.assertEqual(
+            terminals_js.count("onData(data => forwardTerminalInput("), 2
+        )
+        # explorer/browser panes are skipped (no `term`)
+        forward_fn = terminals_js[
+            terminals_js.index("function forwardTerminalInput"):
+            terminals_js.index("function wirePaneInputForwarding")
+        ]
+        self.assertIn("terminals[otherIndex]?.term", forward_fn)
+
+    def test_broadcast_auto_disables_on_group_switch_and_idle(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("BROADCAST_IDLE_TIMEOUT_MS = 10 * 60 * 1000", terminals_js)
+        switch_fn = terminals_js[
+            terminals_js.index("async function switchGroup"):
+            terminals_js.index("Status refresh (no grid rebuild)")
+        ]
+        self.assertIn("setBroadcastInput(false)", switch_fn)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".broadcast-btn.active", terminals_css)
+        self.assertIn("#terminalsGrid.broadcast-input", terminals_css)
+
+
+class RuntimeStateRestoreTestCase(unittest.TestCase):
+    """Deep-dive 10.5 — workspace-shape snapshot + restore after restart."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def _launch_explorer_group(self, name="Workspace"):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": name,
+                "sessions": [
+                    {
+                        "directory": str(self.repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        return response.get_json()["group_id"]
+
+    def test_launch_persists_a_password_free_snapshot(self):
+        self._launch_explorer_group()
+        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(snapshot["groups"]), 1)
+        group = snapshot["groups"][0]
+        self.assertEqual(group["name"], "Workspace")
+        self.assertEqual(group["connection_mode"], "wsl")
+        self.assertEqual(len(group["sessions"]), 1)
+        session = group["sessions"][0]
+        self.assertEqual(session["startup_mode"], "explorer")
+        self.assertNotIn("password", session)
+
+    def test_runtime_state_is_only_restorable_without_active_groups(self):
+        self._launch_explorer_group()
+        response = self.client.get("/api/runtime-state")
+        payload = response.get_json()
+        self.assertFalse(payload["restorable"])
+        self.assertEqual(payload["active_group_count"], 1)
+
+        # simulate a backend restart: in-memory groups vanish, the file stays
+        api.session_manager.reset_sessions()
+        response = self.client.get("/api/runtime-state")
+        payload = response.get_json()
+        self.assertTrue(payload["restorable"])
+        self.assertEqual(len(payload["groups"]), 1)
+
+    def test_replaying_the_snapshot_relaunches_the_group(self):
+        self._launch_explorer_group()
+        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
+        api.session_manager.reset_sessions()
+
+        group = snapshot["groups"][0]
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "sessions": group["sessions"],
+                "connection_mode": group["connection_mode"],
+                "layout": group["layout"],
+                "workspace_layout": group["workspace_layout"],
+                "surface_mode": group["surface_mode"],
+                "session_name": group["name"],
+                "saved_session_id": group["saved_session_id"],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        restored = response.get_json()
+        self.assertEqual(restored["group"]["name"], "Workspace")
+        self.assertEqual(restored["sessions"][0]["startup_mode"], "explorer")
+
+    def test_closing_the_group_empties_the_snapshot(self):
+        group_id = self._launch_explorer_group()
+        response = self.client.delete(f"/api/sessions?group={group_id}")
+        self.assertEqual(response.status_code, 200)
+        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(snapshot["groups"], [])
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+
+    def test_stale_or_missing_snapshots_are_not_restorable(self):
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+        stale = {
+            "version": 1,
+            "saved_at": time.time() - web_runtime_state.RUNTIME_STATE_MAX_AGE_SECONDS - 60,
+            "groups": [{"name": "old"}],
+        }
+        self.state_path.write_text(json.dumps(stale), encoding="utf-8")
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+        self.state_path.write_text("not json", encoding="utf-8")
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+
+    def test_delete_endpoint_dismisses_the_snapshot(self):
+        self._launch_explorer_group()
+        api.session_manager.reset_sessions()
+        response = self.client.delete("/api/runtime-state")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(self.state_path.exists())
+        payload = self.client.get("/api/runtime-state").get_json()
+        self.assertFalse(payload["restorable"])
+
+    def test_launcher_ships_restore_banner(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="restoreWorkspaceBanner"', html)
+        self.assertIn("restorePreviousWorkspace()", html)
+        self.assertIn("dismissRestoreBanner()", html)
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("async function checkRestorableWorkspace()", launcher_js)
+        self.assertIn("async function restorePreviousWorkspace()", launcher_js)
+        self.assertIn("fetch('/api/runtime-state', { method: 'DELETE' })", launcher_js)
+        launcher_css = self._static("css/launcher.css")
+        self.assertIn(".restore-banner", launcher_css)

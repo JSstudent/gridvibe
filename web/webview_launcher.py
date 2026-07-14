@@ -7,8 +7,10 @@ back to the system browser if pywebview is missing.
 
 import argparse
 import ctypes
+import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -16,7 +18,7 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 from main import setup_logging
@@ -585,6 +587,69 @@ class GridVibeApi:
             path = str(selected or "").strip()
 
         return {"ok": True, "path": path}
+
+    def save_download(self, download_url, filename=""):
+        """Save an in-app file download to disk via a native Save dialog.
+
+        WebView2 silently drops programmatic ``<a download>`` clicks (the same
+        class of limitation as ``window.prompt``/``confirm``), so the terminals
+        page routes explorer downloads here when running in the native window.
+        The bytes are fetched from the local server over its own HTTP endpoint,
+        so the endpoint's root-confinement and size-cap checks still apply.
+        """
+        window = self._session_window or self._window
+        if window is None or webview is None:
+            return {"ok": False, "error": "Window is not ready"}
+
+        relative_url = str(download_url or "").strip()
+        # Only ever fetch the app's own explorer download endpoint — never an
+        # arbitrary URL handed in from the page.
+        if not relative_url.startswith("/api/explorer/") or "/download" not in relative_url:
+            return {"ok": False, "error": "Unsupported download request"}
+
+        safe_name = os.path.basename(str(filename or "").strip()) or "download"
+
+        try:
+            selected = window.create_file_dialog(
+                webview.SAVE_DIALOG,
+                save_filename=safe_name,
+            )
+        except Exception as exc:
+            logger.warning("Native save dialog failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+        if not selected:
+            return {"ok": False, "cancelled": True}
+        if isinstance(selected, (list, tuple)):
+            destination = str(selected[0] or "").strip()
+        else:
+            destination = str(selected or "").strip()
+        if not destination:
+            return {"ok": False, "cancelled": True}
+
+        request_url = f"{self._base_url}{relative_url}"
+        try:
+            with urlopen(request_url, timeout=120) as response:
+                with open(destination, "wb") as handle:
+                    shutil.copyfileobj(response, handle)
+        except HTTPError as exc:
+            message = exc.read().decode("utf-8", errors="ignore") if exc.fp else ""
+            try:
+                message = json.loads(message).get("error", message)
+            except Exception:
+                pass
+            logger.warning("Download request failed (%s): %s", exc.code, message)
+            return {"ok": False, "error": message or f"Download failed ({exc.code})"}
+        except (URLError, OSError) as exc:
+            logger.warning("Could not save download to %s: %s", destination, exc)
+            try:
+                if os.path.exists(destination) and os.path.getsize(destination) == 0:
+                    os.remove(destination)
+            except OSError:
+                pass
+            return {"ok": False, "error": str(exc)}
+
+        return {"ok": True, "path": destination}
 
     def _bring_to_front(self, window, window_name: str = "window"):
         """Bring a pywebview window forward using the safest available call."""

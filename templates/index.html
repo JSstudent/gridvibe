@@ -40,6 +40,14 @@
     </div>
 </header>
 
+<div id="restoreWorkspaceBanner" class="restore-banner" hidden>
+    <span id="restoreWorkspaceText" class="restore-banner-text">Previous workspace found.</span>
+    <div class="restore-banner-actions">
+        <button class="ghost-btn" type="button" id="restoreWorkspaceBtn" onclick="restorePreviousWorkspace()">Restore</button>
+        <button class="ghost-btn" type="button" onclick="dismissRestoreBanner()">Dismiss</button>
+    </div>
+</div>
+
 <div class="shell" data-max-sessions="{{ max_sessions }}">
     <section class="column column-left">
         <div class="card terminal-layout-card">
@@ -221,6 +229,14 @@
                 <select id="appSurfaceMode">
                     <option value="normal">Normal surface</option>
                     <option value="max">Max surface</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>SSH Host Keys</label>
+                <select id="appSshHostKeyPolicy" aria-label="SSH host key verification policy">
+                    <option value="auto-add">Auto-add (accept new hosts)</option>
+                    <option value="known-hosts">Known hosts (warn on new hosts)</option>
+                    <option value="strict">Strict (reject unknown hosts)</option>
                 </select>
             </div>
             <div class="voice-settings-panel">

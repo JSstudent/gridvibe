@@ -239,7 +239,8 @@ This keeps first-use convenience but detects key *changes* on later connections.
 > `BadHostKeyException` (a `SSHException`, surfaced through the existing error path) when a
 > known host presents a different key. Load failures degrade gracefully to today's behaviour
 > with a warning. Covered by `KnownHostsPersistenceTestCase` in `tests/test_api.py`.
-> Feature 10.7 (configurable strict mode) remains open.
+> Feature 10.7 (configurable strict mode) remained open at the time; it landed 2026-07-14
+> (see 10.7), fully closing the host-key story.
 
 ---
 
@@ -1836,6 +1837,19 @@ version, and the explorer pane already establishes the search-UI pattern
 The existing global-shortcut router (`isEditableShortcutTarget`, `findExplorerSearchTargetIndex`)
 is the right place to hook the keybinding.
 
+> **✅ Implemented (2026-07-14).** `xterm-addon-search@0.13.0` and
+> `xterm-addon-web-links@0.9.0` are vendored in `web/static/vendor/` (table in its
+> `README.md` updated) and loaded by `templates/terminals.html`. `makeTerminal()` in
+> `web/static/js/terminals.js` loads both addons (`typeof` guards keep terminals working if
+> a stale cached page misses a vendor script; the web-links addon opens URIs via
+> `window.open(uri, '_blank', 'noopener')`) and registers an `attachCustomKeyEventHandler`
+> that hands `Ctrl+Shift+F` to a new document-level shortcut. That shortcut opens a
+> per-pane `.terminal-search-overlay` (input + prev/next/close, mirroring the explorer
+> search controls' styling and `findTerminalSearchTargetIndex` focus resolution):
+> Enter/Shift+Enter → `searchAddon.findNext/findPrevious`, typing searches incrementally,
+> Escape closes and refocuses the terminal. Covered by `TerminalSearchWebLinksTestCase`
+> in `tests/test_api.py`.
+
 ### 10.4 Broadcast input to all panes ("synchronized typing")
 
 **Motivation.** The core multi-terminal workflow (same command on N hosts / N worktrees) is
@@ -1856,6 +1870,15 @@ iTerm2 broadcast) has this. It fits the existing architecture with almost no bac
    ```
 3. Auto-disable on group switch and after 10 min idle as a safety.
 
+> **✅ Implemented (2026-07-14).** Frontend-only, as proposed. A `broadcastBtn` toggle in
+> the terminals topbar drives `setBroadcastInput`; while active, the button and every
+> plain terminal pane get an accent border (`#terminalsGrid.broadcast-input`) as the
+> loud visual state. Both `onData` wiring sites (grid build + split panes) now share one
+> `forwardTerminalInput(index, data)` helper, which mirrors keystrokes to every other
+> pane that has a `term` (explorer/browser panes are skipped). Broadcast auto-disables
+> on group switch (`switchGroup`) and after 10 minutes without input
+> (`BROADCAST_IDLE_TIMEOUT_MS`). Covered by `BroadcastInputTestCase` in `tests/test_api.py`.
+
 ### 10.5 Session restore after backend restart
 
 **Motivation.** Today a GridVibe restart (including the self-update restart flow!) drops all
@@ -1873,6 +1896,22 @@ groups; the user rebuilds their workspace by hand. Live shells can't survive, bu
 This dovetails with the existing `saved-session-<id>` stable group IDs, which were clearly
 designed with relaunch-idempotency in mind.
 
+> **✅ Implemented (2026-07-14).** New `web/runtime_state.py` persists the workspace shape
+> to `runtime_state.json` (gitignored): `_broadcast_session_groups_updated` in
+> `web/terminal_io.py` — already fired on every launch/split/close/reorder — now also calls
+> `save_workspace_snapshot(session_manager)`, so the snapshot is derived from *live* state
+> (groups + per-session launch config via `_SESSION_SNAPSHOT_FIELDS`; passwords are never
+> written). `GET /api/runtime-state` returns the snapshot with a `restorable` flag (true
+> only when it is < 12 h old, has groups, and no groups are currently active — i.e. after a
+> restart); `DELETE /api/runtime-state` dismisses it. The launcher shows a
+> `restoreWorkspaceBanner` ("Previous workspace found — restore N sessions?") whose Restore
+> button replays each snapshot group through the normal `POST /api/sessions` launch path
+> (stable `saved-session-<id>` group ids keep the replay idempotent) and then focuses the
+> terminals window; Dismiss clears the snapshot. Closing a group/all sessions rewrites the
+> snapshot accordingly, so an intentionally emptied workspace is not offered for restore.
+> Shell history/processes stay out of scope as proposed. Covered by
+> `RuntimeStateRestoreTestCase` in `tests/test_api.py`.
+
 ### 10.6 Explorer file download (read-only compatible)
 
 **Motivation.** The explorer is deliberately read-only for mutations, but *downloading* a file
@@ -1888,6 +1927,34 @@ is a read. Users inspecting a remote log or artifact currently can't save it.
 3. Document in CLAUDE.md/README that the read-only contract covers *mutations*, and download is
    read-scope.
 
+> **✅ Implemented (2026-07-14).** `GET /api/explorer/<session_id>/download?path=…` in
+> `web/api.py` resolves through the shared explorer backend (`backend.resolve_file`, so root
+> confinement is identical to the preview route), rejects files over
+> `EXPLORER_DOWNLOAD_MAX_BYTES` (100 MB) with 400, allows binaries (no
+> `_explorer_content_looks_binary` check — it's a download, not a render), and responds via
+> `send_file(as_attachment=True)`. The file is buffered inside the backend context because
+> the pooled SSH client is released when the context exits (streaming after release would
+> race the pool) — the size cap bounds that buffer. Frontend: a download icon button in the
+> file viewer's toolbar (`downloadExplorerFile` clicks a temporary `<a download>` link).
+> Per-row hover actions were deliberately skipped: directory rows are single `<button>`
+> elements, and nesting another interactive control inside them is invalid HTML — the
+> toolbar button covers the flow. CLAUDE.md and README now state that the read-only
+> contract covers mutations and download is read-scope. Covered by
+> `ExplorerDownloadTestCase` in `tests/test_api.py`.
+>
+> **Native-window follow-up (2026-07-14).** The first cut used an `<a download>.click()`,
+> which works in the browser but is silently dropped by WebView2 in the native desktop
+> window (the same limitation class as `window.prompt`/`confirm`) — so downloads did
+> nothing there. `downloadExplorerFile` now detects the native window
+> (`isPywebviewAvailable()`) and routes through a new `save_download(url, filename)` bridge
+> method on `GridVibeApi` (`web/webview_launcher.py`): it opens a native `SAVE_DIALOG`, then
+> fetches the file from the local server's own download endpoint and writes it to the chosen
+> path (reusing the endpoint keeps the root-confinement + size-cap checks in one place; the
+> bridge rejects any URL that isn't the explorer download route). Both paths now surface a
+> transient success/error `showTerminalToast` so the download is visibly acknowledged.
+> Covered by `SaveDownloadBridgeTestCase` in `tests/test_webview_launcher.py` and extra
+> assertions in `ExplorerDownloadTestCase`.
+
 ### 10.7 Strict host-key verification mode
 
 **Motivation.** Completes 1.4 for security-conscious users without changing defaults.
@@ -1901,6 +1968,23 @@ is a read. Users inspecting a remote log or artifact currently can't save it.
   (which, with 8.4, gains a Retry button).
 Settings UI: a select in App Settings under a new "SSH" section. Flag in README's security
 posture paragraph.
+
+> **✅ Implemented (2026-07-14).** `ssh.host_key_policy` (`"auto-add"` default, shipped in
+> `default_config.json`) is normalized by `RuntimeConfig` (`HOST_KEY_POLICY_OPTIONS` in
+> `web/config.py`) and applied by a new shared `_apply_host_key_policy(client, paramiko)`
+> in `web/hostkeys.py`, used by all three SSH entry points (`_connect_ssh_session`,
+> `_open_ssh_sftp`, `_detect_ssh_command`). Semantics: `auto-add` keeps today's behaviour
+> (silent accept + `.known_hosts` persistence from 1.4, changed keys still rejected);
+> `known-hosts` is the same but logs a warning per newly accepted key
+> (`_WarnNewHostKeyPolicy` — a changed key already raises before the missing-key policy is
+> consulted, so "warn on change but proceed" was tightened to "warn on *new*, reject
+> changed"); `strict` uses `paramiko.RejectPolicy()` after loading the project
+> `.known_hosts` plus the user's `~/.ssh/known_hosts`, and failures surface through the
+> existing error placeholder with its 8.4 Retry button. Settings UI: an "SSH Host Keys"
+> select in launcher App Settings, round-tripped through `/api/app-config`
+> (`_public_app_config` / `_normalize_app_config_update`). Flagged in README's security
+> posture list. This completes 1.4's host-key story. Covered by `HostKeyPolicyTestCase`
+> in `tests/test_api.py`.
 
 ---
 
@@ -2006,3 +2090,18 @@ posture paragraph.
    6-second auto-clear; 8.5 dropped the doubled native `title` tooltip. All of section 8 is
    now closed; 10.3–10.7 remain as the step's follow-ups. New `UxInteractionButtonsTestCase`
    (10 tests) in `tests/test_api.py`. Suite green (451 tests, 1 skip) and `ruff` clean.
+   ✅ **Step 9 completed 2026-07-14 — review fully implemented** (see the per-finding notes
+   above): the five remaining features landed in one pass. 10.7 added the shared
+   `_apply_host_key_policy` in `web/hostkeys.py` + `ssh.host_key_policy` config/App-Settings
+   select (completing 1.4); 10.6 added `GET /api/explorer/<id>/download` (100 MB cap,
+   read-scope, binaries allowed) + a file-viewer download button; 10.3 vendored the xterm
+   search/web-links addons and added the `Ctrl+Shift+F` per-pane search overlay; 10.4 added
+   the topbar Broadcast toggle with the shared `forwardTerminalInput` helper and
+   group-switch/10-min-idle auto-disable; 10.5 added `web/runtime_state.py`
+   (`runtime_state.json` snapshot refreshed from `_broadcast_session_groups_updated`), the
+   `/api/runtime-state` GET/DELETE routes, and the launcher's restore banner. New test
+   classes `HostKeyPolicyTestCase`, `ExplorerDownloadTestCase`,
+   `TerminalSearchWebLinksTestCase`, `BroadcastInputTestCase`, and
+   `RuntimeStateRestoreTestCase` (29 tests) in `tests/test_api.py`. Suite green
+   (480 tests, 1 skip) and `ruff` clean. With this, every finding in sections 1–10 of this
+   review is implemented or explicitly closed.

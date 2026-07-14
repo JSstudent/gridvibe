@@ -9,6 +9,7 @@
     const TERMINAL_CLEAR_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"></path><path d="M22 21H7"></path><path d="m5 11 9 9"></path></svg>';
     const FULLSCREEN_ENTER_ICON = '<svg class="fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>';
     const FULLSCREEN_EXIT_ICON = '<svg class="fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>';
+    const EXPLORER_DOWNLOAD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
 
 
 
@@ -3219,7 +3220,32 @@
         });
         const fitAddon = new FitAddon.FitAddon();
         term.loadAddon(fitAddon);
-        return { term, fitAddon };
+        /* Search + clickable links (finding 10.3). The addons are vendored like
+           xterm itself; the typeof guards keep terminals working if a stale
+           cached page misses one of the new vendor scripts. */
+        let searchAddon = null;
+        if (typeof SearchAddon !== 'undefined') {
+            searchAddon = new SearchAddon.SearchAddon();
+            term.loadAddon(searchAddon);
+        }
+        if (typeof WebLinksAddon !== 'undefined') {
+            term.loadAddon(new WebLinksAddon.WebLinksAddon((event, uri) => {
+                window.open(uri, '_blank', 'noopener');
+            }));
+        }
+        term.attachCustomKeyEventHandler(event => {
+            /* Hand Ctrl+Shift+F to the document-level search-overlay shortcut
+               instead of letting xterm swallow it. */
+            if (event.type === 'keydown'
+                && (event.ctrlKey || event.metaKey)
+                && event.shiftKey
+                && !event.altKey
+                && event.code === 'KeyF') {
+                return false;
+            }
+            return true;
+        });
+        return { term, fitAddon, searchAddon };
     }
 
     function emitTerminalResize(index, force = false) {
@@ -4060,15 +4086,70 @@
 
     /* Forward keystrokes and pointer focus for a terminal pane once its DOM
        elements exist. */
+    /* ── Broadcast input (finding 10.4) ──
+       When active, keystrokes typed into one plain terminal pane are mirrored
+       to every other plain terminal pane in the group (explorer/browser panes
+       are skipped — they have no terminal). Frontend-only: the backend's
+       terminal_input handler already targets one session per event. */
+    let broadcastInputActive = false;
+    let _broadcastIdleTimer = null;
+    const BROADCAST_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+    function _noteBroadcastActivity() {
+        clearTimeout(_broadcastIdleTimer);
+        _broadcastIdleTimer = setTimeout(() => setBroadcastInput(false), BROADCAST_IDLE_TIMEOUT_MS);
+    }
+
+    function setBroadcastInput(active) {
+        broadcastInputActive = Boolean(active);
+        const button = document.getElementById('broadcastBtn');
+        if (button) {
+            button.classList.toggle('active', broadcastInputActive);
+            button.setAttribute('aria-pressed', broadcastInputActive ? 'true' : 'false');
+            const label = broadcastInputActive
+                ? 'Broadcast typing is on — keystrokes go to every terminal pane'
+                : 'Broadcast typing to all terminal panes';
+            button.title = label;
+            button.setAttribute('aria-label', label);
+        }
+        document.getElementById('terminalsGrid')?.classList.toggle('broadcast-input', broadcastInputActive);
+        if (broadcastInputActive) {
+            _noteBroadcastActivity();
+        } else {
+            clearTimeout(_broadcastIdleTimer);
+        }
+    }
+
+    function toggleBroadcastInput() {
+        setBroadcastInput(!broadcastInputActive);
+    }
+
+    function forwardTerminalInput(index, data) {
+        _focusedTerminalIndex = index;
+        if (!socket) {
+            return;
+        }
+        const sid = sessionIds[index];
+        if (sid) socket.emit('terminal_input', { session_id: sid, data });
+        if (!broadcastInputActive) {
+            return;
+        }
+        _noteBroadcastActivity();
+        sessionIds.forEach((otherSid, otherIndex) => {
+            /* Only mirror into plain terminal panes (explorer/browser panes
+               have no `term`). */
+            if (otherIndex === index || !otherSid || !terminals[otherIndex]?.term) {
+                return;
+            }
+            socket.emit('terminal_input', { session_id: otherSid, data });
+        });
+    }
+
     function wirePaneInputForwarding(t, i) {
         if (!t?.term) {
             return;
         }
-        t.term.onData(data => {
-            _focusedTerminalIndex = i;
-            const sid = sessionIds[i];
-            if (sid && socket) socket.emit('terminal_input', { session_id: sid, data });
-        });
+        t.term.onData(data => forwardTerminalInput(i, data));
         const card = document.getElementById(`tc-${i}`);
         if (card) {
             card.addEventListener('pointerdown', () => {
@@ -4265,11 +4346,7 @@
             return;
         }
 
-        terminal.term.onData(data => {
-            _focusedTerminalIndex = index;
-            const sid = sessionIds[index];
-            if (sid && socket) socket.emit('terminal_input', { session_id: sid, data });
-        });
+        terminal.term.onData(data => forwardTerminalInput(index, data));
         const card = document.getElementById(`tc-${index}`);
         if (card) {
             card.addEventListener('pointerdown', () => {
@@ -6312,6 +6389,115 @@
         event.stopPropagation();
     });
 
+    /* Ctrl+Shift+F opens the scrollback search overlay on the focused terminal
+       pane (finding 10.3); makeTerminal's custom key handler keeps xterm from
+       consuming the shortcut first. */
+    function isTerminalSearchablePane(pane) {
+        return Boolean(pane?.term && pane?.searchAddon);
+    }
+
+    function findTerminalSearchTargetIndex() {
+        const activeCard = document.activeElement?.closest?.('.terminal-container');
+        const activeSlot = activeCard ? Number(activeCard.dataset.slot) : -1;
+        if (Number.isInteger(activeSlot) && isTerminalSearchablePane(terminals[activeSlot])) {
+            return activeSlot;
+        }
+        if (_focusedTerminalIndex !== -1 && isTerminalSearchablePane(terminals[_focusedTerminalIndex])) {
+            return _focusedTerminalIndex;
+        }
+        return -1;
+    }
+
+    function wireTerminalSearchOverlay(index, overlay) {
+        const input = overlay.querySelector(`[data-terminal-search-input="${index}"]`);
+        const findNext = () => {
+            const query = input?.value || '';
+            if (query) terminals[index]?.searchAddon?.findNext(query);
+        };
+        const findPrevious = () => {
+            const query = input?.value || '';
+            if (query) terminals[index]?.searchAddon?.findPrevious(query);
+        };
+        input?.addEventListener('keydown', event => {
+            event.stopPropagation();
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                if (event.shiftKey) findPrevious(); else findNext();
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                closeTerminalSearch(index);
+            }
+        });
+        input?.addEventListener('input', () => {
+            const query = input.value || '';
+            if (query) {
+                terminals[index]?.searchAddon?.findNext(query, { incremental: true });
+            }
+        });
+        overlay.querySelector(`[data-terminal-search-prev="${index}"]`)
+            ?.addEventListener('click', findPrevious);
+        overlay.querySelector(`[data-terminal-search-next="${index}"]`)
+            ?.addEventListener('click', findNext);
+        overlay.querySelector(`[data-terminal-search-close="${index}"]`)
+            ?.addEventListener('click', () => closeTerminalSearch(index));
+    }
+
+    function openTerminalSearch(index) {
+        const pane = terminals[index];
+        const wrapper = document.getElementById(`tw-${index}`);
+        if (!pane || !wrapper || !isTerminalSearchablePane(pane)) {
+            return false;
+        }
+        let overlay = wrapper.querySelector('.terminal-search-overlay');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.className = 'terminal-search-overlay';
+            overlay.innerHTML = `
+                <input
+                    type="search"
+                    class="terminal-search-input"
+                    data-terminal-search-input="${index}"
+                    placeholder="Find in terminal"
+                    autocomplete="off"
+                    spellcheck="false"
+                    aria-label="Find in terminal scrollback"
+                >
+                <button type="button" class="explorer-search-btn" data-terminal-search-prev="${index}" title="Previous match (Shift+Enter)" aria-label="Previous match">↑</button>
+                <button type="button" class="explorer-search-btn" data-terminal-search-next="${index}" title="Next match (Enter)" aria-label="Next match">↓</button>
+                <button type="button" class="explorer-search-btn" data-terminal-search-close="${index}" title="Close search (Escape)" aria-label="Close search">×</button>
+            `;
+            wrapper.appendChild(overlay);
+            wireTerminalSearchOverlay(index, overlay);
+        }
+        overlay.hidden = false;
+        const input = overlay.querySelector('input');
+        input?.focus();
+        input?.select();
+        return true;
+    }
+
+    function closeTerminalSearch(index) {
+        const wrapper = document.getElementById(`tw-${index}`);
+        const overlay = wrapper?.querySelector('.terminal-search-overlay');
+        if (overlay) {
+            overlay.hidden = true;
+        }
+        terminals[index]?.searchAddon?.clearDecorations?.();
+        terminals[index]?.term?.focus();
+    }
+
+    document.addEventListener('keydown', event => {
+        if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey || event.code !== 'KeyF') {
+            return;
+        }
+        const index = findTerminalSearchTargetIndex();
+        if (index === -1 || !openTerminalSearch(index)) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+    });
+
     function isEditableShortcutTarget(target) {
         if (!(target instanceof Element)) {
             return false;
@@ -6934,6 +7120,8 @@
             return;
         }
 
+        /* Safety: broadcast typing never survives a group switch. */
+        setBroadcastInput(false);
         activeGroupId = groupId;
         syncLocationToGroup(activeGroupId);
         renderSessionTabs();
@@ -9767,6 +9955,68 @@
         </svg>
     `;
 
+    let _terminalToastTimer = null;
+
+    /* Small transient toast for feedback that has no dedicated surface (e.g.
+       a completed download). Auto-dismisses; announced via role="status". */
+    function showTerminalToast(message, type = '') {
+        let toast = document.getElementById('terminalToast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'terminalToast';
+            toast.className = 'terminal-toast';
+            toast.setAttribute('role', 'status');
+            toast.setAttribute('aria-live', 'polite');
+            document.body.appendChild(toast);
+        }
+        toast.textContent = message;
+        toast.className = `terminal-toast${type ? ` ${type}` : ''} visible`;
+        clearTimeout(_terminalToastTimer);
+        _terminalToastTimer = setTimeout(() => {
+            toast.classList.remove('visible');
+        }, 4000);
+    }
+
+    async function downloadExplorerFile(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId || pane._explorerMode !== 'file') {
+            return;
+        }
+        const path = pane._explorerFilePath || '';
+        const fileName = pane._explorerFileName || 'download';
+        const url = `/api/explorer/${encodeURIComponent(sessionId)}/download?path=${encodeURIComponent(path)}`;
+
+        /* WebView2 silently ignores programmatic <a download> clicks, so in the
+           native window route the save through the pywebview bridge (native
+           Save dialog + server-side fetch). In the browser the anchor works. */
+        if (isPywebviewAvailable() && window.pywebview.api.save_download) {
+            try {
+                const result = await window.pywebview.api.save_download(url, fileName);
+                if (result?.ok) {
+                    showTerminalToast(`Saved ${getDownloadBaseName(result.path) || fileName}`, 'success');
+                } else if (!result?.cancelled) {
+                    showTerminalToast(`Download failed: ${result?.error || 'unknown error'}`, 'error');
+                }
+            } catch (error) {
+                showTerminalToast(`Download failed: ${error?.message || error}`, 'error');
+            }
+            return;
+        }
+
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        showTerminalToast(`Downloading ${fileName}…`, 'success');
+    }
+
+    function getDownloadBaseName(fullPath) {
+        return String(fullPath || '').split(/[\\/]/).pop() || '';
+    }
+
     function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '' } = {}) {
         const pane = terminals[index];
         const list = document.getElementById(`explorer-list-${index}`);
@@ -9806,6 +10056,7 @@
         pane._attached = true;
         pane._explorerMode = 'file';
         pane._explorerFilePath = path;
+        pane._explorerFileName = fileName;
         pane._explorerFileContent = data.content || '';
         pane._explorerFileLanguage = codeLanguage;
         pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
@@ -9851,6 +10102,7 @@
                         <span class="explorer-zoom-value" data-explorer-zoom-value="${index}"></span>
                         <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">+</button>
                     </div>
+                    <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
                     <div class="explorer-editor-search" data-explorer-search="${index}">
                         <input
                             type="search"
@@ -9888,6 +10140,12 @@
         if (backButton) {
             backButton.addEventListener('click', () => {
                 loadExplorerPane(index, pane._explorerPath || '');
+            });
+        }
+        const downloadButton = list.querySelector(`[data-explorer-download="${index}"]`);
+        if (downloadButton) {
+            downloadButton.addEventListener('click', () => {
+                downloadExplorerFile(index);
             });
         }
         list.querySelectorAll('[data-explorer-file-view]').forEach(button => {

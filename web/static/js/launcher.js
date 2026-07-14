@@ -94,6 +94,9 @@
         workspace: Object.freeze({
             surface_mode: 'normal'
         }),
+        ssh: Object.freeze({
+            host_key_policy: 'auto-add'
+        }),
         voice_input: Object.freeze({
             enabled: true,
             engine: 'vosk',
@@ -459,6 +462,7 @@
     function applyAppSettings(data) {
         const appearance = data?.appearance || {};
         const workspace = data?.workspace || {};
+        const ssh = data?.ssh || {};
         const voiceInput = data?.voice_input || {};
         appSettings = {
             appearance: {
@@ -468,6 +472,10 @@
             workspace: {
                 ...DEFAULT_APP_SETTINGS.workspace,
                 ...workspace
+            },
+            ssh: {
+                ...DEFAULT_APP_SETTINGS.ssh,
+                ...ssh
             },
             voice_input: {
                 ...DEFAULT_APP_SETTINGS.voice_input,
@@ -502,9 +510,11 @@
     function syncAppSettingsForm() {
         const appearance = appSettings.appearance || DEFAULT_APP_SETTINGS.appearance;
         const workspace = appSettings.workspace || DEFAULT_APP_SETTINGS.workspace;
+        const ssh = appSettings.ssh || DEFAULT_APP_SETTINGS.ssh;
         const voice = appSettings.voice_input || DEFAULT_APP_SETTINGS.voice_input;
         const themeInput = document.getElementById('appTheme');
         const surfaceModeInput = document.getElementById('appSurfaceMode');
+        const sshHostKeyPolicyInput = document.getElementById('appSshHostKeyPolicy');
         const enabledInput = document.getElementById('appVoiceEnabled');
         const engineInput = document.getElementById('appVoiceEngine');
         const languageInput = document.getElementById('appVoiceLanguage');
@@ -515,6 +525,11 @@
 
         if (themeInput) themeInput.value = appearance.theme || DEFAULT_APP_SETTINGS.appearance.theme;
         if (surfaceModeInput) surfaceModeInput.value = workspace.surface_mode === 'max' ? 'max' : 'normal';
+        if (sshHostKeyPolicyInput) {
+            sshHostKeyPolicyInput.value = ['auto-add', 'known-hosts', 'strict'].includes(ssh.host_key_policy)
+                ? ssh.host_key_policy
+                : DEFAULT_APP_SETTINGS.ssh.host_key_policy;
+        }
         if (enabledInput) enabledInput.checked = Boolean(voice.enabled);
         if (engineInput) engineInput.value = voice.engine === 'whisper' ? 'whisper' : 'vosk';
         if (languageInput) languageInput.value = voice.language || DEFAULT_APP_SETTINGS.voice_input.language;
@@ -673,6 +688,9 @@
             },
             workspace: {
                 surface_mode: document.getElementById('appSurfaceMode')?.value === 'max' ? 'max' : 'normal'
+            },
+            ssh: {
+                host_key_policy: document.getElementById('appSshHostKeyPolicy')?.value || DEFAULT_APP_SETTINGS.ssh.host_key_policy
             },
             voice_input: {
                 enabled: Boolean(document.getElementById('appVoiceEnabled')?.checked),
@@ -2392,6 +2410,84 @@
         }
     }
 
+    /* ── Restore previous workspace (feature 10.5) ──
+       The backend snapshots the workspace shape on every group change; after a
+       restart the launcher offers to replay it through the normal launch path.
+       Passwords are never persisted — restored SSH panes use key auth or fail
+       into the error placeholder (which has a Retry button). */
+    let restorableWorkspaceGroups = [];
+
+    async function checkRestorableWorkspace() {
+        const banner = document.getElementById('restoreWorkspaceBanner');
+        if (!banner) return;
+        const response = await fetch('/api/runtime-state');
+        const data = await response.json();
+        if (!response.ok || !data.restorable || !Array.isArray(data.groups) || !data.groups.length) {
+            return;
+        }
+        restorableWorkspaceGroups = data.groups;
+        const groupCount = data.groups.length;
+        const paneCount = data.groups.reduce(
+            (total, group) => total + (Array.isArray(group.sessions) ? group.sessions.length : 0),
+            0
+        );
+        const text = document.getElementById('restoreWorkspaceText');
+        if (text) {
+            text.textContent = `Previous workspace found — restore ${groupCount} session${groupCount === 1 ? '' : 's'} (${paneCount} pane${paneCount === 1 ? '' : 's'})? Live shells do not survive a restart; this relaunches the same layout.`;
+        }
+        banner.hidden = false;
+    }
+
+    function dismissRestoreBanner() {
+        const banner = document.getElementById('restoreWorkspaceBanner');
+        if (banner) banner.hidden = true;
+        restorableWorkspaceGroups = [];
+        fetch('/api/runtime-state', { method: 'DELETE' }).catch(() => {});
+    }
+
+    async function restorePreviousWorkspace() {
+        if (!restorableWorkspaceGroups.length) return;
+        const button = document.getElementById('restoreWorkspaceBtn');
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Restoring…';
+        }
+        let restored = 0;
+        try {
+            for (const group of restorableWorkspaceGroups) {
+                const response = await fetch('/api/sessions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sessions: Array.isArray(group.sessions) ? group.sessions : [],
+                        connection_mode: group.connection_mode,
+                        layout: group.layout,
+                        workspace_layout: group.workspace_layout,
+                        surface_mode: group.surface_mode,
+                        session_name: group.name,
+                        saved_session_id: group.saved_session_id || ''
+                    })
+                });
+                if (response.ok) restored += 1;
+            }
+            document.getElementById('restoreWorkspaceBanner')?.setAttribute('hidden', '');
+            restorableWorkspaceGroups = [];
+            if (restored > 0) {
+                showMessage(`Restored ${restored} session${restored === 1 ? '' : 's'} from the previous workspace.`, 'success');
+                await viewActiveTerminals({ preventDefault: () => {} });
+            } else {
+                showMessage('Could not restore the previous workspace.', 'error');
+            }
+        } catch (error) {
+            showMessage(`Workspace restore failed: ${error.message}`, 'error');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = 'Restore';
+            }
+        }
+    }
+
     async function launchSessions() {
         const config = collectFormConfig();
         const button = document.getElementById('launchBtn');
@@ -2546,6 +2642,7 @@
     loadPersistedConfig(true);
     loadAppSettings().catch(() => {});
     loadVoicePrefs().catch(() => {});
+    checkRestorableWorkspace().catch(() => {});
     updateHeaderBadges();
 
     function updateHeaderBadges() {

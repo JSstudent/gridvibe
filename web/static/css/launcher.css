@@ -405,6 +405,31 @@
             padding: 16px 20px;
         }
 
+        /* Restore-previous-workspace banner (feature 10.5). */
+        .restore-banner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin: 14px 20px 0;
+            padding: 10px 16px;
+            border: 1px solid var(--accent);
+            border-radius: var(--gv-radius-m, 10px);
+            background: var(--accent-soft);
+            color: var(--text);
+            font-size: .85rem;
+        }
+
+        .restore-banner[hidden] {
+            display: none;
+        }
+
+        .restore-banner-actions {
+            display: flex;
+            gap: 8px;
+            flex: 0 0 auto;
+        }
+
         .column {
             min-height: 0;
             display: grid;

@@ -8,6 +8,8 @@ served locally so GridVibe works fully offline (see deep-dive finding 3.6).
 | `xterm.css` | xterm | 5.3.0 | https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css | MIT |
 | `xterm.min.js` | xterm | 5.3.0 | https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js | MIT |
 | `xterm-addon-fit.min.js` | xterm-addon-fit | 0.8.0 | https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js | MIT |
+| `xterm-addon-search.min.js` | xterm-addon-search | 0.13.0 | https://cdn.jsdelivr.net/npm/xterm-addon-search@0.13.0/lib/xterm-addon-search.min.js | MIT |
+| `xterm-addon-web-links.min.js` | xterm-addon-web-links | 0.9.0 | https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js | MIT |
 | `socket.io.min.js` | socket.io-client | 4.7.2 | https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js | MIT |
 
 To upgrade, download the new pinned version from the same URL pattern, replace the

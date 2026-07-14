@@ -3,6 +3,7 @@ Web API for GridVibe frontend integration.
 Provides REST endpoints and WebSocket support for terminal sessions.
 """
 
+import io
 import logging
 import os
 import re
@@ -11,7 +12,7 @@ import time
 import uuid
 from typing import Any, Dict, Optional
 
-from flask import jsonify, render_template, request, send_from_directory
+from flask import jsonify, render_template, request, send_file, send_from_directory
 from flask_socketio import emit, join_room, leave_room
 
 from gridvibe_version import __version__
@@ -66,6 +67,7 @@ from web.app import (  # noqa: F401 - re-exported for backwards compatibility
     socketio,
 )
 from web.config import (
+    HOST_KEY_POLICY_OPTIONS,
     WHISPER_MODEL_OPTIONS,
     _config_lock,
     _merge_dicts,
@@ -110,9 +112,15 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _sftp_request_error_types,
 )
 from web.hostkeys import (  # noqa: F401 - re-exported for backwards compatibility
+    _apply_host_key_policy,
     _load_persistent_host_keys,
 )
 from web.paths import BASE_DIR
+from web.runtime_state import (  # noqa: F401 - save_workspace_snapshot re-exported
+    clear_runtime_state,
+    load_restorable_workspace,
+    save_workspace_snapshot,
+)
 from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compatibility
     DEFAULT_BROWSER_URL,
     DEFAULT_SAVED_SESSION_ID,
@@ -275,6 +283,9 @@ def _public_app_config() -> Dict[str, Any]:
         "workspace": {
             "surface_mode": runtime_config.app_surface_mode,
         },
+        "ssh": {
+            "host_key_policy": runtime_config.ssh_host_key_policy,
+        },
         "voice_input": {
             "enabled": runtime_config.voice_enabled,
             "engine": runtime_config.voice_engine,
@@ -318,6 +329,15 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
         workspace = {}
     surface_mode = _normalize_surface_mode(workspace.get("surface_mode"), runtime_config.app_surface_mode)
 
+    ssh_settings = payload.get("ssh")
+    if not isinstance(ssh_settings, dict):
+        ssh_settings = {}
+    host_key_policy = str(
+        ssh_settings.get("host_key_policy", runtime_config.ssh_host_key_policy)
+    ).strip().lower()
+    if host_key_policy not in HOST_KEY_POLICY_OPTIONS:
+        host_key_policy = runtime_config.ssh_host_key_policy
+
     voice_input = payload.get("voice_input")
     if not isinstance(voice_input, dict):
         voice_input = {}
@@ -344,6 +364,9 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
         },
         "workspace": {
             "surface_mode": surface_mode,
+        },
+        "ssh": {
+            "host_key_policy": host_key_policy,
         },
         "voice_input": {
             "enabled": bool(voice_input.get("enabled", runtime_config.voice_enabled)),
@@ -670,6 +693,46 @@ def get_explorer_file(session_id: str):
     return _explorer_route_response(session, handler)
 
 
+# Downloading is a read, so it stays inside the explorer's read-only contract
+# (which covers filesystem *mutations*); the cap keeps one request from
+# buffering an arbitrarily large remote file in memory.
+EXPLORER_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024
+
+
+@app.route('/api/explorer/<session_id>/download', methods=['GET'])
+def download_explorer_file(session_id: str):
+    """Send one explorer file as an attachment (read-only; binaries allowed)."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    requested_path = request.args.get("path", "")
+    error_types = (
+        _sftp_request_error_types()
+        if _is_remote_explorer_session(session)
+        else (OSError,)
+    )
+    try:
+        with _explorer_backend(session) as backend:
+            _root_path, file_path = backend.resolve_file(requested_path)
+            size, _modified = backend.stat_file(file_path)
+            if size is not None and size > EXPLORER_DOWNLOAD_MAX_BYTES:
+                return jsonify({"error": "File exceeds the 100 MB download limit"}), 400
+            raw_content = backend.read_file_prefix(file_path, EXPLORER_DOWNLOAD_MAX_BYTES + 1)
+            if len(raw_content) > EXPLORER_DOWNLOAD_MAX_BYTES:
+                return jsonify({"error": "File exceeds the 100 MB download limit"}), 400
+            filename = backend.basename(file_path) or "download"
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except error_types as exc:
+        return jsonify({"error": str(exc)}), 500
+    return send_file(
+        io.BytesIO(raw_content),
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/octet-stream",
+    )
+
+
 def _explorer_route_response(session: Any, handler: Any):
     """Run one explorer Git route handler with shared backend and error mapping."""
     error_types = (
@@ -813,6 +876,26 @@ def reorder_session_groups():
     groups = [group.to_dict() for group in session_manager.reorder_groups(group_ids)]
     _broadcast_session_groups_updated("reordered")
     return jsonify({"groups": groups, "count": len(groups)})
+
+
+@app.route('/api/runtime-state', methods=['GET'])
+def get_runtime_state():
+    """Return the restorable previous-workspace snapshot, if any (10.5)."""
+    snapshot = load_restorable_workspace()
+    active_groups = session_manager.get_all_groups()
+    return jsonify({
+        "restorable": bool(snapshot) and not active_groups,
+        "saved_at": snapshot.get("saved_at") if snapshot else None,
+        "groups": snapshot.get("groups", []) if snapshot else [],
+        "active_group_count": len(active_groups),
+    })
+
+
+@app.route('/api/runtime-state', methods=['DELETE'])
+def dismiss_runtime_state():
+    """Discard the previous-workspace snapshot (the user dismissed restore)."""
+    clear_runtime_state()
+    return jsonify({"message": "Previous workspace snapshot cleared"})
 
 
 @app.route('/api/session-config', methods=['GET'])

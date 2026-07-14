@@ -21,6 +21,8 @@ DEFAULT_CONFIG_PATH = os.path.join(BASE_DIR, "default_config.json")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 _config_lock = threading.RLock()
 
+HOST_KEY_POLICY_OPTIONS = ("auto-add", "known-hosts", "strict")
+
 WHISPER_MODEL_OPTIONS = {
     "tiny.en",
     "tiny",
@@ -154,6 +156,7 @@ class RuntimeConfig:
     def __init__(self):
         self.app_config: Dict[str, Any] = {}
         self.ssh_config: Dict[str, Any] = {}
+        self.ssh_host_key_policy = "auto-add"
         self.max_sessions = 4
         self.terminal_font_size = 14
         self.terminal_font_family = "Consolas, Monaco, 'Courier New', monospace"
@@ -174,6 +177,10 @@ class RuntimeConfig:
         """Reload the config-backed settings from disk."""
         self.app_config = load_config()
         self.ssh_config = self.app_config.get("ssh", {})
+        host_key_policy = str(self.ssh_config.get("host_key_policy", "auto-add")).strip().lower()
+        if host_key_policy not in HOST_KEY_POLICY_OPTIONS:
+            host_key_policy = "auto-add"
+        self.ssh_host_key_policy = host_key_policy
         terminal_config = self.app_config.get("terminal", {})
         self.max_sessions = terminal_config.get("max_sessions", 4)
         try:

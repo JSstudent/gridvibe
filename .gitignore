@@ -37,6 +37,7 @@ logs/
 # Local session state
 saved_sessions.json
 saved_sessions*.json
+runtime_state.json
 gridvibe.log
 .encryption_key
 .known_hosts

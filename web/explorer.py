@@ -20,7 +20,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from web.config import runtime_config
-from web.hostkeys import _load_persistent_host_keys
+from web.hostkeys import (  # noqa: F401 - _load_persistent_host_keys re-exported
+    _apply_host_key_policy,
+    _load_persistent_host_keys,
+)
 
 try:
     import paramiko
@@ -1473,8 +1476,7 @@ def _open_ssh_sftp(session: Any) -> Tuple[Any, Any]:
         raise RuntimeError("Paramiko is not installed. Run `pip install -r requirements.txt`.")
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    _load_persistent_host_keys(client)
+    _apply_host_key_policy(client, paramiko)
     client.connect(
         hostname=session.host,
         port=session.port,

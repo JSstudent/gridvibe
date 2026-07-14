@@ -19,7 +19,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from web.config import _load_json_file, runtime_config
-from web.hostkeys import _load_persistent_host_keys
+from web.hostkeys import _apply_host_key_policy
 from web.paths import BASE_DIR
 from web.saved_sessions import _normalize_connection_mode
 
@@ -608,8 +608,7 @@ def _detect_ssh_command(binary: str, target: Dict[str, Any]) -> Dict[str, Any]:
     client = None
     try:
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        _load_persistent_host_keys(client)
+        _apply_host_key_policy(client, paramiko)
         client.connect(
             hostname=host,
             port=port,

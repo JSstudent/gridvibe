@@ -30,7 +30,8 @@ from web.explorer import (
     _evict_pooled_ssh_client,
     _is_explorer_session,
 )
-from web.hostkeys import _load_persistent_host_keys
+from web.hostkeys import _apply_host_key_policy
+from web.runtime_state import save_workspace_snapshot
 
 try:
     import pty
@@ -93,8 +94,11 @@ def _broadcast_session_groups_updated(reason: str = ""):
 
     Lets the frontend refresh on push instead of relying on its old 3-second
     reconciliation poll (that poll now only runs as a slow fallback while the
-    Socket.IO connection is down).
+    Socket.IO connection is down). Every group change also refreshes the
+    restore-after-restart snapshot (feature 10.5), so the persisted workspace
+    shape always matches the live groups.
     """
+    save_workspace_snapshot(session_manager)
     socketio.emit('session_groups_updated', {"reason": reason})
 
 
@@ -868,8 +872,7 @@ def _connect_ssh_session(session_id: str, session: Any):
     client = None
     try:
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        _load_persistent_host_keys(client)
+        _apply_host_key_policy(client, paramiko)
         logger.info(
             f"[{session_id}] paramiko.connect hostname={session.host} port={session.port}"
             f" user={session.username} password={'***' if session.password else None}"

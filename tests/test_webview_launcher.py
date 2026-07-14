@@ -1,8 +1,11 @@
+import io
 import os
 import signal
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
+from urllib.error import HTTPError
 
 from web import webview_launcher
 
@@ -759,3 +762,72 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertEqual(helper_command[0], webview_launcher.sys.executable)
         self.assertIn("WaitForSingleObject", helper_command[2])
         self.assertIn("DETACHED_PROCESS", helper_command[2])
+
+
+class SaveDownloadBridgeTestCase(unittest.TestCase):
+    """Native-window explorer download bridge (WebView2 blocks anchor downloads)."""
+
+    def _make_api_with_window(self, dialog_result):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = Mock()
+        window.create_file_dialog.return_value = dialog_result
+        api_bridge._attach_session_window(window)
+        return api_bridge, window
+
+    def test_rejects_urls_outside_the_explorer_download_endpoint(self):
+        api_bridge, window = self._make_api_with_window("C:/tmp/out.bin")
+        with patch.object(webview_launcher, "webview", Mock()):
+            result = api_bridge.save_download("/api/app-config", "x")
+        self.assertFalse(result["ok"])
+        window.create_file_dialog.assert_not_called()
+
+    def test_cancelled_dialog_returns_cancelled(self):
+        api_bridge, _ = self._make_api_with_window(None)
+        with patch.object(webview_launcher, "webview", Mock()):
+            result = api_bridge.save_download(
+                "/api/explorer/abc/download?path=a.txt", "a.txt"
+            )
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["cancelled"])
+
+    def test_saves_fetched_bytes_to_the_chosen_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "saved.bin")
+            api_bridge, window = self._make_api_with_window(dest)
+            fake_webview = Mock()
+            payload = b"\x00binary\xffcontent"
+            with patch.object(webview_launcher, "webview", fake_webview), patch.object(
+                webview_launcher, "urlopen", return_value=io.BytesIO(payload)
+            ) as urlopen:
+                result = api_bridge.save_download(
+                    "/api/explorer/abc/download?path=x.bin", "x.bin"
+                )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["path"], dest)
+            self.assertEqual(Path(dest).read_bytes(), payload)
+            window.create_file_dialog.assert_called_once_with(
+                fake_webview.SAVE_DIALOG, save_filename="x.bin"
+            )
+            urlopen.assert_called_once()
+            self.assertIn(
+                "http://127.0.0.1:5050/api/explorer/abc/download",
+                urlopen.call_args.args[0],
+            )
+
+    def test_http_error_surfaces_the_server_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "saved.bin")
+            api_bridge, _ = self._make_api_with_window(dest)
+            body = io.BytesIO(b'{"error": "File exceeds the 100 MB download limit"}')
+            http_error = HTTPError(
+                "http://127.0.0.1:5050/x", 400, "Bad Request", {}, body
+            )
+            with patch.object(webview_launcher, "webview", Mock()), patch.object(
+                webview_launcher, "urlopen", side_effect=http_error
+            ):
+                result = api_bridge.save_download(
+                    "/api/explorer/abc/download?path=big.log", "big.log"
+                )
+            self.assertFalse(result["ok"])
+            self.assertIn("100 MB", result["error"])
+            self.assertFalse(os.path.exists(dest))
