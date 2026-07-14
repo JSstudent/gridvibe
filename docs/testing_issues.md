@@ -3,6 +3,33 @@ Last updated: 2026-07-14
 
 ## Open Issues
 
+### Issue ID: ISSUE-2026-022
+- Title: Closing a terminal expands unrelated panes in complex split layouts
+- Priority: Medium
+- Status: Open
+- Area: `web/static/js/terminals.js`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `terminal`, `ui`, `resize`, `tests`
+- Reported: 2026-07-14
+
+Description:
+Closing a terminal pane in a workspace with an asymmetric or multi-neighbor split can resize multiple unrelated panes instead of only expanding the single neighbor that shares the longest border with the closed pane. This disrupts the workspace layout and is especially visible when the user has manually resized panes to specific proportions.
+
+Steps to reproduce:
+1. Open a GridVibe session with three or more terminal panes in an asymmetric split — for example, one wide pane below two side-by-side panes (T-shape), or one tall pane beside two stacked panes (L-shape).
+2. Optionally, drag the resize handles to set non-uniform pane sizes.
+3. Close one of the panes that borders multiple others (e.g., the wide bottom pane that shares border with both top-left and top-right).
+4. Observe that more than one remaining pane changes size, rather than only the single neighbor with the longest shared border.
+
+Expected behavior:
+Closing a terminal pane should expand exactly one neighbor — the pane that shares the longest border with the closed pane. All other panes should remain at their exact previous sizes and proportions. Only when no single neighbor can absorb the closed rect without overlapping other panes should multiple panes be involved, and even then the set should be minimized to the smallest valid side group.
+
+Actual behavior / logs:
+Code inspection confirms `buildTerminalCloseRectsBySessionId` in `web/static/js/terminals.js` has two paths. The primary path (`findTerminalCloseNeighbor` + `canAbsorbClosedRect`) correctly expands only one neighbor, but it requires the union of the neighbor's rect and the closed rect to form a clean non-overlapping rectangle. In complex or asymmetric layouts this condition often fails, and the code falls back to `terminalCloseSideGroups` + `buildTerminalCloseRectsForSideGroup`. In this fallback, every pane in the winning side group is expanded via `expandRectIntoClosedSide` — not only the pane with the longest shared border. For example, closing the bottom pane of a T-shaped layout (two panes above, one wide pane below) causes both top panes to grow downward, even though only the one with the greater shared border was expected to expand. Existing tests in `tests/test_api.py` only assert that the relevant function names appear in the rendered HTML; no behavioral tests cover multi-neighbor close scenarios or verify that non-targeted panes retain their rects.
+
+### Proposed solution:
+Refine the side-group fallback in `buildTerminalCloseRectsForSideGroup` (and its callers) so that when a full-side expansion is necessary, preference is given to the single pane in the group with the greatest shared border rather than expanding all contacts uniformly. If expanding only that one pane still satisfies the overlap and area invariants, use the single-pane expansion. Only fall back to the full side-group expansion when the single-pane attempt fails the overlap or area check. Additionally, preserve the existing `splitColumnWeights` and `splitRowWeights` correctly when the grid column or row count changes after a close, so panes outside the expansion retain their user-set proportions. Add focused behavioral tests in `tests/test_api.py` for: T-shaped and L-shaped three-pane closes, four-pane grid closes, asymmetric closes where one candidate has a clearly longer shared border, and confirmation that non-targeted panes' grid column/row assignments and rect values are unchanged after a close.
+
 ### Issue ID: ISSUE-2026-020
 - Title: Large log previews discard the newest entries
 - Priority: Medium
