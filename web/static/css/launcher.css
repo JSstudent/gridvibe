@@ -751,23 +751,6 @@
             flex-wrap: wrap;
         }
 
-        .toolbar-status {
-            flex-basis: 100%;
-            min-height: 0;
-            color: var(--muted);
-            font-size: 0.76rem;
-            line-height: 1.35;
-        }
-
-        .toolbar-status:empty {
-            display: none;
-        }
-
-        .toolbar-status.success { color: var(--success); }
-        .toolbar-status.error { color: var(--danger); }
-        .toolbar-status.info { color: var(--accent); }
-        .toolbar-status.warning { color: var(--warning); }
-
         .ghost-btn {
             padding: 9px 14px;
             font-size: 0.82rem;
@@ -1722,6 +1705,13 @@
 
         .action-btn .arrow {
             font-size: 1.1rem;
+        }
+
+        .action-btn .action-btn-spinner { display: none; }
+        .action-btn.loading .arrow { display: none; }
+        .action-btn.loading .action-btn-spinner {
+            display: inline-block;
+            animation: tf-spin 0.9s linear infinite;
         }
 
         .secondary-link {

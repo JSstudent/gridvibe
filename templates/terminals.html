@@ -193,6 +193,24 @@
     </div>
 </div>
 
+<div id="closeSessionConfirmModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="closeSessionConfirmTitle">
+        <div class="modal-head">
+            <div>
+                <div id="closeSessionConfirmTitle" class="modal-title">Close session?</div>
+                <div id="closeSessionConfirmCopy" class="modal-copy"></div>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <div class="modal-copy">Live terminals are memory-only and cannot be recovered.</div>
+            <div class="modal-actions-buttons">
+                <button id="closeSessionConfirmCancel" class="btn btn-neutral" type="button">Cancel</button>
+                <button id="closeSessionConfirmAccept" class="btn btn-danger" type="button">Close session</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="{{ url_for('static', filename='vendor/xterm.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/xterm-addon-fit.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/socket.io.min.js') }}"></script>

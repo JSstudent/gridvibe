@@ -6890,10 +6890,11 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         launcher = self.client.get("/static/js/launcher.js").get_data(as_text=True)
         # 4.6 — the wsl_default_dir_display element no longer exists anywhere.
         self.assertNotIn("wsl_default_dir_display", launcher)
-        # 4.3 — the button restores its captured markup instead of renaming
-        # itself to the old 'Launch Terminals' label.
+        # 4.3 — the button never renames itself to the old 'Launch Terminals'
+        # label; since 8.2 it toggles a .loading class instead of rewriting
+        # its markup at all.
         self.assertNotIn("Launch Terminals", launcher)
-        self.assertIn("originalButtonHtml", launcher)
+        self.assertIn("setLaunchButtonLoading", launcher)
 
     def test_terminals_joins_rooms_for_every_pane(self):
         """Finding 1.1 step 3 — room-scoped session_status requires explorer
@@ -8132,6 +8133,12 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         self.assertIn("pointer-events: none;", overlay_block)
         self.assertIn("var(--gv-danger)", overlay_block)
         self.assertIn("var(--t-voice-bg)", overlay_block)
+        # centered over the workspace, with a slight pulse
+        self.assertIn("top: 50%;", overlay_block)
+        self.assertIn("left: 50%;", overlay_block)
+        self.assertIn("transform: translate(-50%, -50%);", overlay_block)
+        self.assertIn("animation: voice-overlay-pulse", overlay_block)
+        self.assertIn("@keyframes voice-overlay-pulse", terminals_css)
         self.assertIn(".voice-overlay-bar", terminals_css)
         self.assertIn("@keyframes voice-overlay-bounce", terminals_css)
 
@@ -8168,3 +8175,160 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
             keyup_idx:terminals_js.index("function _updateVoiceBtn(index, recording)")
         ]
         self.assertIn("_pttStopRequested = true;", keyup_block)
+
+
+class UxInteractionButtonsTestCase(unittest.TestCase):
+    """Deep-dive step 9 — UX/interaction gaps (findings 8.1–8.5)."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def _make_session(self, status, error_message=None):
+        api.session_manager.create_group(
+            name="Retry",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-retry",
+        )
+        session = api.session_manager.create_session(
+            group_id="group-retry",
+            host="10.0.0.5",
+            directory="/srv",
+        )
+        api.session_manager.update_session_status(session.session_id, status, error_message)
+        return session
+
+    # ── 8.4: POST /api/sessions/<id>/reconnect ──────────────────────────────
+
+    def test_reconnect_unknown_session_returns_404(self):
+        response = self.client.post("/api/sessions/missing/reconnect")
+        self.assertEqual(response.status_code, 404)
+
+    def test_reconnect_rejects_sessions_that_are_not_errored_or_disconnected(self):
+        session = self._make_session(api.SessionStatus.CONNECTED)
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post(f"/api/sessions/{session.session_id}/reconnect")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("connected", response.get_json()["error"])
+        start_task.assert_not_called()
+        self.assertEqual(
+            api.session_manager.get_session(session.session_id).status,
+            api.SessionStatus.CONNECTED,
+        )
+
+    def test_reconnect_resets_errored_session_and_restarts_connect(self):
+        session = self._make_session(api.SessionStatus.ERROR, "Authentication failed")
+        api._cache_terminal_output(session.session_id, "stale output")
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post(f"/api/sessions/{session.session_id}/reconnect")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["status"], "pending")
+        self.assertIsNone(body["error_message"])
+        self.assertEqual(api._get_buffered_terminal_output(session.session_id), "")
+        start_task.assert_called_once_with(api._connect_session, session.session_id)
+
+    def test_reconnect_accepts_disconnected_sessions(self):
+        session = self._make_session(api.SessionStatus.DISCONNECTED)
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post(f"/api/sessions/{session.session_id}/reconnect")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "pending")
+        start_task.assert_called_once_with(api._connect_session, session.session_id)
+
+    # ── 8.4 frontend: retry affordance in error/disconnected placeholders ───
+
+    def test_placeholders_offer_retry_and_call_reconnect_endpoint(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function showPlaceholderDisconnected", terminals_js)
+        self.assertIn("async function retrySessionConnection(index)", terminals_js)
+        self.assertIn("/reconnect", terminals_js)
+        self.assertIn("ph-retry-btn", terminals_js)
+        # explorer/browser panes have no live connection, so no retry overlay
+        self.assertIn("function isRetryableDisconnect(session)", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".placeholder .ph-retry-btn", terminals_css)
+        self.assertIn("pointer-events: auto", terminals_css)
+        self.assertIn(".placeholder.ph-disconnected", terminals_css)
+
+    # ── 8.1: closing a session tab asks for confirmation ────────────────────
+
+    def test_terminals_page_ships_close_session_confirm_modal(self):
+        html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertIn('id="closeSessionConfirmModal"', html)
+        self.assertIn('id="closeSessionConfirmAccept"', html)
+        self.assertIn('id="closeSessionConfirmCancel"', html)
+
+    def test_close_session_group_gates_on_confirmation(self):
+        terminals_js = self._static("js/terminals.js")
+        close_fn = terminals_js[
+            terminals_js.index("async function closeSessionGroup"):
+            terminals_js.index("async function closeCurrentSession")
+        ]
+        self.assertIn("await confirmCloseSessionGroup(groupId)", close_fn)
+        confirm_fn = terminals_js[
+            terminals_js.index("async function confirmCloseSessionGroup"):
+            terminals_js.index("function buildSavedSessionLaunchPayload")
+        ]
+        # groups with no connected terminals close without the dialog
+        self.assertIn("session.status === 'connected'", confirm_fn)
+        self.assertIn("connectedCount === 0", confirm_fn)
+        # Escape / backdrop / Cancel all resolve to "keep the session"
+        self.assertIn("closeCloseSessionConfirmModal(false)", terminals_js)
+        self.assertIn("closeCloseSessionConfirmModal(true)", terminals_js)
+
+    # ── 8.2: launch CTA keeps its structure and gains a spinner ─────────────
+
+    def test_launch_button_uses_loading_class_not_text_mutation(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('class="action-btn-label"', html)
+        self.assertIn('class="action-btn-spinner"', html)
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("function setLaunchButtonLoading(button, loading)", launcher_js)
+        self.assertNotIn("button.textContent = 'Launching...'", launcher_js)
+        self.assertNotIn("originalButtonHtml", launcher_js)
+        launcher_css = self._static("css/launcher.css")
+        self.assertIn(".action-btn.loading .arrow { display: none; }", launcher_css)
+        self.assertIn(".action-btn.loading .action-btn-spinner", launcher_css)
+
+    # ── 8.3: one update-status area with an auto-clear ──────────────────────
+
+    def test_update_status_renders_in_one_place_and_auto_clears(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertNotIn('id="updateStatus"', html)
+        self.assertIn('id="quickUpdateStatus"', html)
+        launcher_js = self._static("js/launcher.js")
+        self.assertNotIn("getElementById('updateStatus')", launcher_js)
+        set_fn = launcher_js[
+            launcher_js.index("function setUpdateStatus"):
+            launcher_js.index("function applyAppSettings")
+        ]
+        self.assertIn("quickUpdateStatus", set_fn)
+        self.assertIn("6000", set_fn)
+        launcher_css = self._static("css/launcher.css")
+        self.assertNotIn(".toolbar-status", launcher_css)
+
+    # ── 8.5: save-settings button keeps only the custom tooltip ─────────────
+
+    def test_save_settings_button_has_single_tooltip(self):
+        html = self.client.get("/").get_data(as_text=True)
+        btn_start = html.index('id="saveAppSettingsBtn"')
+        button_tag = html[html.rindex("<button", 0, btn_start):html.index(">", btn_start) + 1]
+        self.assertNotIn("title=", button_tag)
+        self.assertIn('aria-describedby="saveAppSettingsTip"', button_tag)
+        self.assertIn('id="saveAppSettingsTip"', html)
+

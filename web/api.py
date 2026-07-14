@@ -1256,6 +1256,27 @@ def split_session(session_id: str):
     ), 201
 
 
+@app.route('/api/sessions/<session_id>/reconnect', methods=['POST'])
+def reconnect_session(session_id: str):
+    """Retry the connection of an errored or disconnected session in place."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    if session.status not in (SessionStatus.ERROR, SessionStatus.DISCONNECTED):
+        return jsonify(
+            {"error": f"Session is {session.status.value}; only errored or disconnected sessions can reconnect"}
+        ), 409
+
+    logger.info("Reconnect requested session_id=%s previous_status=%s", session_id, session.status.value)
+    _close_ssh_connection(session_id, clear_buffer=True)
+    session_manager.update_session_status(session_id, SessionStatus.PENDING)
+    _broadcast_session_status(session_id)
+    socketio.start_background_task(_connect_session, session_id)
+
+    return jsonify(session_manager.get_session(session_id).to_dict())
+
+
 @app.route('/api/sessions/<session_id>/mode', methods=['POST'])
 def change_session_mode(session_id: str):
     """Switch one pane between terminal, file explorer, and browser modes."""

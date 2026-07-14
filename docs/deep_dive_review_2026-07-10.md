@@ -814,6 +814,10 @@ button.innerHTML = originalHtml;            // in both reset paths
 > its "Launch Workspace →" markup after a launch. The stale `'Launch Terminals'` label is
 > gone; locked in by `test_launcher_button_and_dead_display_fixes_locked_in` in
 > `tests/test_api.py`.
+>
+> **Superseded (2026-07-14)** by 8.2's structural fix: the button markup is never rewritten
+> at all — `setLaunchButtonLoading` toggles a `.loading` class and only updates the
+> `.action-btn-label` span text.
 
 ### 4.4 Save Session uses `window.prompt`, which WebView2 blocks — **High**
 
@@ -1583,6 +1587,15 @@ with the existing modal shell (a small "Close session?" dialog with Close/Cancel
 to only prompt when the group has ≥1 `connected` terminal. A "hold to close" affordance
 (mousedown 600 ms with progress ring) is a good pointer-only alternative that needs no dialog.
 
+> **✅ Implemented (2026-07-14).** `templates/terminals.html` gained a `closeSessionConfirmModal`
+> built on the existing modal shell (no `confirm()`, so no WebView2 problem). `closeSessionGroup`
+> in `web/static/js/terminals.js` now awaits `confirmCloseSessionGroup(groupId)`, which fetches
+> the group's sessions and only prompts when ≥1 terminal is `connected` — dead groups still close
+> with one click, and a failed status lookup falls back to asking (the safe default). The dialog
+> names the group, its terminal count, and the connected count; Cancel/Escape/backdrop all keep
+> the session, and Cancel gets initial focus. Covered by `UxInteractionButtonsTestCase` in
+> `tests/test_api.py`.
+
 ### 8.2 Launch button gives weak in-flight feedback — **Low**
 
 **Location:** `templates/index.html:5182-5240`
@@ -1606,6 +1619,13 @@ already exists (`:820-822`, `tf-spin`) but is unused here.
 JS toggles `classList.add('loading')` instead of rewriting `textContent`, which also fixes 4.3
 structurally.
 
+> **✅ Implemented (2026-07-14).** As proposed: `#launchBtn` in `templates/index.html` is now
+> structured as `.action-btn-label` + `.arrow` + an `.action-btn-spinner` SVG, and
+> `setLaunchButtonLoading(button, loading)` in `web/static/js/launcher.js` toggles a `.loading`
+> class (spinner spins via the existing `tf-spin` keyframes, arrow hides) and only swaps the
+> label span's text — the button's markup is never rewritten, closing 4.3 structurally.
+> Covered by `UxInteractionButtonsTestCase` in `tests/test_api.py`.
+
 ### 8.3 Update status is rendered twice with identical text — **Low**
 
 **Location:** `templates/index.html:3199-3212` (`setUpdateStatus` writes both `#updateStatus`
@@ -1618,6 +1638,13 @@ the two locations imply different scopes they don't have.
 trigger updates/settings) and drop `#updateStatus` + the `.toolbar-status` markup; or keep the
 toolbar one and drop the quick one. One-location messaging with a fade-out after ~6 s
 (`setTimeout(() => status.textContent = '', 6000)`) is the cleanest.
+
+> **✅ Implemented (2026-07-14).** Kept `#quickUpdateStatus` (it sits beside the buttons that
+> trigger updates/settings) and dropped `#updateStatus` from `templates/index.html` plus the
+> now-dead `.toolbar-status` CSS block from `web/static/css/launcher.css`. `setUpdateStatus`
+> in `web/static/js/launcher.js` writes one location and auto-clears it after 6 s (the timer
+> resets on every new message so in-flight updates aren't cut short). Covered by
+> `UxInteractionButtonsTestCase` in `tests/test_api.py`.
 
 ### 8.4 Errored / disconnected panes offer no retry — **Medium** (also a feature)
 
@@ -1637,6 +1664,20 @@ panes' state.
    disconnected state) that calls the endpoint and restores the "Connecting…" placeholder.
    The existing `session_status` socket flow then reattaches the terminal automatically.
 
+> **✅ Implemented (2026-07-14).** Backend: `POST /api/sessions/<session_id>/reconnect` in
+> `web/api.py` — 404 for unknown sessions, 409 unless the session is `error`/`disconnected`,
+> then closes any lingering connection + clears the output buffer (`_close_ssh_connection`),
+> resets status to `PENDING`, broadcasts, and `start_background_task(_connect_session, …)`.
+> Frontend: `showPlaceholderError` and the new `showPlaceholderDisconnected` in
+> `web/static/js/terminals.js` render a `Retry connection` button (`retrySessionConnection`
+> swaps in the "Connecting…" spinner, resets the stale xterm, and calls the endpoint); the
+> disconnected overlay is wired into `initialLoad`, `refreshSessions`, and the
+> `session_status` handler, gated by `isRetryableDisconnect` so explorer/browser panes are
+> excluded, and a reconnected attached pane drops the overlay. Error/disconnected
+> placeholders got an opaque `--t-terminal-bg` backdrop and a pointer-events-enabled retry
+> button in `web/static/css/terminals.css`. Covered by `UxInteractionButtonsTestCase`
+> (4 endpoint tests + asset assertions) in `tests/test_api.py`.
+
 ### 8.5 Save-settings button shows two tooltips at once — **Low**
 
 **Location:** `templates/index.html:2523-2524`
@@ -1647,6 +1688,11 @@ with the same sentence.
 
 **Proposed implementation.** Remove the `title` attribute (the bubble is
 `role="tooltip"` + `aria-describedby`, so accessibility is preserved).
+
+> **✅ Implemented (2026-07-14).** As proposed: the `title` attribute is gone from
+> `#saveAppSettingsBtn` in `templates/index.html`; the `.button-tooltip-bubble` with
+> `role="tooltip"` + `aria-describedby` remains the single tooltip. Covered by
+> `UxInteractionButtonsTestCase` in `tests/test_api.py`.
 
 ---
 
@@ -1951,3 +1997,12 @@ posture paragraph.
    Medium UX gaps), then 8.2/8.3/8.5 polish, and 10.3–10.7 as individually scoped follow-ups
    (10.2 is now done; 10.3 depends on 3.6's vendored assets; 10.7 completes 1.4's host-key
    story).
+   ✅ **Step 9 (8.x tranche) completed 2026-07-14** (see the per-finding notes above): 8.4
+   landed `POST /api/sessions/<session_id>/reconnect` plus `Retry connection` buttons in the
+   error and new disconnected pane placeholders; 8.1 added the `closeSessionConfirmModal`
+   gate to `closeSessionGroup` (prompting only when the group has ≥1 connected terminal);
+   8.2 restructured `#launchBtn` (label/arrow/spinner spans + `.loading` class, structurally
+   closing 4.3); 8.3 collapsed the duplicate update status to `#quickUpdateStatus` with a
+   6-second auto-clear; 8.5 dropped the doubled native `title` tooltip. All of section 8 is
+   now closed; 10.3–10.7 remain as the step's follow-ups. New `UxInteractionButtonsTestCase`
+   (10 tests) in `tests/test_api.py`. Suite green (451 tests, 1 skip) and `ruff` clean.

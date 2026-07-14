@@ -435,18 +435,24 @@
         message.className = `message ${type}`.trim();
     }
 
+    let updateStatusClearTimer = null;
+
     function setUpdateStatus(text, type = '') {
-        const status = document.getElementById('updateStatus');
-        const quickStatus = document.getElementById('quickUpdateStatus');
+        const status = document.getElementById('quickUpdateStatus');
         if (!status) {
             return;
         }
 
         status.textContent = text;
-        status.className = `toolbar-status ${type}`.trim();
-        if (quickStatus) {
-            quickStatus.textContent = text;
-            quickStatus.className = `inline-status ${type}`.trim();
+        status.className = `inline-status ${type}`.trim();
+
+        window.clearTimeout(updateStatusClearTimer);
+        updateStatusClearTimer = null;
+        if (text) {
+            updateStatusClearTimer = window.setTimeout(() => {
+                status.textContent = '';
+                status.className = 'inline-status';
+            }, 6000);
         }
     }
 
@@ -2461,9 +2467,7 @@
             return;
         }
 
-        const originalButtonHtml = button.innerHTML;
-        button.disabled = true;
-        button.textContent = 'Launching...';
+        setLaunchButtonLoading(button, true);
 
         try {
             const response = await fetch('/api/sessions', {
@@ -2512,14 +2516,23 @@
                     } else {
                         window.open(targetUrl, 'gridvibe-sessions');
                     }
-                    button.disabled = false;
-                    button.innerHTML = originalButtonHtml;
+                    setLaunchButtonLoading(button, false);
                 }, 450);
             }
         } catch (error) {
-            button.disabled = false;
-            button.innerHTML = originalButtonHtml;
+            setLaunchButtonLoading(button, false);
             showMessage(`Launch failed: ${error.message}`, 'error');
+        }
+    }
+
+    /* Toggle the launch CTA's loading state via classes instead of rewriting
+       the button's markup, so the label/arrow structure survives a launch. */
+    function setLaunchButtonLoading(button, loading) {
+        button.disabled = loading;
+        button.classList.toggle('loading', loading);
+        const label = button.querySelector('.action-btn-label');
+        if (label) {
+            label.textContent = loading ? 'Launching…' : 'Launch Workspace';
         }
     }
 

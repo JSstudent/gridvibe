@@ -79,7 +79,6 @@
                     <button class="ghost-btn" type="button" onclick="importSavedSession()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>Import Session</button>
                     <button class="ghost-btn danger-btn" type="button" onclick="deleteSavedSessions()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>Delete Sessions</button>
                 </div>
-                <div id="updateStatus" class="toolbar-status"></div>
             </div>
 
             <div class="mode-toggle">
@@ -122,7 +121,13 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
                     View Active Terminals
                 </a>
-                <button id="launchBtn" type="button" class="action-btn" onclick="launchSessions()">Launch Workspace <span class="arrow">→</span></button>
+                <button id="launchBtn" type="button" class="action-btn" onclick="launchSessions()">
+                    <span class="action-btn-label">Launch Workspace</span>
+                    <span class="arrow" aria-hidden="true">→</span>
+                    <svg class="action-btn-spinner" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+                        <path d="M12 2a10 10 0 1 0 10 10"/>
+                    </svg>
+                </button>
             </div>
             <div class="action-bar-right">
                 <div id="themeControl" class="quick-controls">
@@ -332,7 +337,7 @@
         <div class="modal-actions app-settings-actions">
             <div class="modal-actions-buttons">
                 <div class="button-tooltip">
-                    <button id="saveAppSettingsBtn" class="ghost-btn" type="button" onclick="saveAppSettings()" aria-describedby="saveAppSettingsTip" title="Saves to config.json. If that file is missing, GridVibe falls back to default_config.json.">Save Settings</button>
+                    <button id="saveAppSettingsBtn" class="ghost-btn" type="button" onclick="saveAppSettings()" aria-describedby="saveAppSettingsTip">Save Settings</button>
                     <div id="saveAppSettingsTip" class="button-tooltip-bubble" role="tooltip">Saves to <code>config.json</code>. If that file is missing, GridVibe falls back to the committed <code>default_config.json</code>.</div>
                 </div>
                 <button class="ghost-btn" type="button" onclick="closeAppSettingsModal()">Cancel</button>

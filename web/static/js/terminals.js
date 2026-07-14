@@ -342,6 +342,7 @@
     let pendingModeSwitchSessionIds = new Set();
     let savedSessionResolver = null;
     let saveSessionAsResolver = null;
+    let closeSessionConfirmResolver = null;
     const MAX_SPLIT_TERMINALS = Math.min(8, Number(MAX_SESSIONS || 8));
     const MIN_SPLIT_COLS = 8;
     const MIN_SPLIT_ROWS = 8;
@@ -1058,6 +1059,61 @@
         });
     }
 
+    function closeCloseSessionConfirmModal(result = false) {
+        const modal = document.getElementById('closeSessionConfirmModal');
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+
+        if (closeSessionConfirmResolver) {
+            const resolver = closeSessionConfirmResolver;
+            closeSessionConfirmResolver = null;
+            resolver(result);
+        }
+    }
+
+    function openCloseSessionConfirmModal(group, connectedCount, totalCount) {
+        const modal = document.getElementById('closeSessionConfirmModal');
+        const copy = document.getElementById('closeSessionConfirmCopy');
+        const name = group?.name || group?.group_id || 'this session';
+        const terminalNoun = totalCount === 1 ? 'terminal' : 'terminals';
+        copy.textContent = totalCount > 0
+            ? `Close "${name}" and its ${totalCount} ${terminalNoun} (${connectedCount} connected)?`
+            : `Close "${name}"?`;
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            document.getElementById('closeSessionConfirmCancel').focus();
+        }, 0);
+
+        return new Promise(resolve => {
+            closeSessionConfirmResolver = resolve;
+        });
+    }
+
+    /* One misclick on a tab's × must not silently kill live terminals
+       (sessions are memory-only), so closing a group with ≥1 connected
+       terminal asks first. Dead groups close without the dialog. */
+    async function confirmCloseSessionGroup(groupId) {
+        let sessions = [];
+        try {
+            const response = await fetch(getSessionApiPath(groupId));
+            const data = await response.json();
+            if (response.ok && Array.isArray(data.sessions)) {
+                sessions = data.sessions;
+            }
+        } catch (_) {
+            /* Status lookup failed — fall through and ask, the safe default. */
+        }
+
+        const connectedCount = sessions.filter(session => session.status === 'connected').length;
+        if (sessions.length > 0 && connectedCount === 0) {
+            return true;
+        }
+
+        return openCloseSessionConfirmModal(getGroupById(groupId), connectedCount, sessions.length);
+    }
+
     function buildSavedSessionLaunchPayload(savedSession) {
         const config = savedSession?.config || {};
         const sshConfig = config.ssh || {};
@@ -1247,6 +1303,20 @@
         });
     });
 
+    document.getElementById('closeSessionConfirmModal').addEventListener('click', event => {
+        if (event.target.id === 'closeSessionConfirmModal') {
+            closeCloseSessionConfirmModal(false);
+        }
+    });
+
+    document.getElementById('closeSessionConfirmCancel').addEventListener('click', () => {
+        closeCloseSessionConfirmModal(false);
+    });
+
+    document.getElementById('closeSessionConfirmAccept').addEventListener('click', () => {
+        closeCloseSessionConfirmModal(true);
+    });
+
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             closeSessionsMenu();
@@ -1255,6 +1325,9 @@
             }
             if (document.getElementById('saveSessionAsModal').classList.contains('visible')) {
                 closeSaveSessionAsModal();
+            }
+            if (document.getElementById('closeSessionConfirmModal').classList.contains('visible')) {
+                closeCloseSessionConfirmModal(false);
             }
         }
     });
@@ -6509,6 +6582,8 @@
                     attachedIndices.push(i);
                 } else if (session.status === 'error') {
                     showPlaceholderError(i, session.error_message || 'Connection failed');
+                } else if (isRetryableDisconnect(session)) {
+                    showPlaceholderDisconnected(i);
                 }
             });
 
@@ -6588,12 +6663,38 @@
     }
 
     /* ─────────────────────────────────────────────
-       Show error message inside a terminal pane
+       Show error / disconnected / retry states inside a terminal pane
     ───────────────────────────────────────────── */
-    function showPlaceholderError(index, msg) {
-        const ph = document.getElementById(`ph-${index}`);
+    /* Explorer and browser panes have no live connection to retry. */
+    function isRetryableDisconnect(session) {
+        return session.status === 'disconnected'
+            && !isExplorerSession(session)
+            && !isBrowserSession(session);
+    }
+
+    function ensurePanePlaceholder(index) {
+        let ph = document.getElementById(`ph-${index}`);
+        if (!ph) {
+            const wrapper = document.getElementById(`tw-${index}`);
+            if (!wrapper) return null;
+            ph = document.createElement('div');
+            ph.className = 'placeholder';
+            ph.id = `ph-${index}`;
+            wrapper.appendChild(ph);
+        }
+        return ph;
+    }
+
+    function showPlaceholderRetryState(index, { stateClass, title, message }) {
+        const ph = ensurePanePlaceholder(index);
         if (!ph) return;
-        ph.classList.add('ph-error');
+        const renderedState = `${stateClass}|${message}`;
+        if (ph.dataset.retryState === renderedState) {
+            return;
+        }
+        ph.dataset.retryState = renderedState;
+        ph.classList.remove('ph-error', 'ph-disconnected');
+        ph.classList.add(stateClass);
         ph.innerHTML = `
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none"
                  stroke="currentColor" stroke-width="1.5">
@@ -6601,8 +6702,59 @@
                 <line x1="12" y1="8" x2="12" y2="12"/>
                 <line x1="12" y1="16" x2="12.01" y2="16"/>
             </svg>
-            <strong>Connection Error</strong>
-            <span style="color:#aaa;word-break:break-all">${escHtml(msg)}</span>`;
+            <strong>${title}</strong>
+            <span style="color:#aaa;word-break:break-all">${escHtml(message)}</span>
+            <button type="button" class="btn btn-neutral ph-retry-btn" data-retry-session="${index}">
+                Retry connection
+            </button>`;
+        ph.querySelector(`[data-retry-session="${index}"]`)
+            .addEventListener('click', () => retrySessionConnection(index));
+    }
+
+    function showPlaceholderError(index, msg) {
+        showPlaceholderRetryState(index, {
+            stateClass: 'ph-error',
+            title: 'Connection Error',
+            message: msg
+        });
+    }
+
+    function showPlaceholderDisconnected(index, msg = 'The connection ended.') {
+        showPlaceholderRetryState(index, {
+            stateClass: 'ph-disconnected',
+            title: 'Disconnected',
+            message: msg
+        });
+    }
+
+    function showPlaceholderConnecting(index) {
+        const ph = ensurePanePlaceholder(index);
+        if (!ph) return;
+        delete ph.dataset.retryState;
+        ph.classList.remove('ph-error', 'ph-disconnected');
+        ph.innerHTML = `
+            <div class="spinner"></div>
+            <span style="font-size:.78rem">Connecting…</span>`;
+    }
+
+    async function retrySessionConnection(index) {
+        const sessionId = sessionIds[index];
+        if (!sessionId) return;
+        showPlaceholderConnecting(index);
+        try {
+            const response = await fetch(
+                `/api/sessions/${encodeURIComponent(sessionId)}/reconnect`,
+                { method: 'POST' }
+            );
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Reconnect failed with status ${response.status}`);
+            }
+            /* Discard the dead connection's output before the fresh stream lands. */
+            terminals[index]?.term?.reset?.();
+        } catch (e) {
+            showPlaceholderError(index, e.message);
+        }
     }
 
     async function loadSessionGroups() {
@@ -6851,6 +7003,8 @@
                     redrawAttachedTerminals([i], { forceResize: true });
                 } else if (session.status === 'error' && !terminals[i]?._attached) {
                     showPlaceholderError(i, session.error_message || 'Connection failed');
+                } else if (isRetryableDisconnect(session)) {
+                    showPlaceholderDisconnected(i);
                 }
             });
         } catch (e) {
@@ -6863,6 +7017,10 @@
     ───────────────────────────────────────────── */
     async function closeSessionGroup(groupId = activeGroupId) {
         if (!groupId) {
+            return;
+        }
+
+        if (!(await confirmCloseSessionGroup(groupId))) {
             return;
         }
 
@@ -10116,9 +10274,14 @@
                 attachTerminal(index);
                 redrawAttachedTerminals([index], { forceResize: true });
             } else if (session.status === 'connected') {
+                /* A reconnected pane keeps its attached xterm; drop any
+                   error/disconnected overlay left behind by the retry flow. */
+                document.getElementById(`ph-${index}`)?.remove();
                 scheduleFit(index);
             } else if (session.status === 'error') {
                 showPlaceholderError(index, session.error_message || 'Connection failed');
+            } else if (isRetryableDisconnect(session)) {
+                showPlaceholderDisconnected(index);
             }
         });
 
