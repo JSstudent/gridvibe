@@ -1287,7 +1287,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function setupAppConfigUpdateListeners()", html)
         self.assertIn("setupAppConfigUpdateListeners();", html)
         self.assertIn("socket.on('app_config_updated'", html)
-        self.assertIn("applyAppConfigSurfaceMode(message || {});", html)
+        self.assertIn("applyAppConfigUpdate(message || {});", html)
 
     def test_terminals_page_exposes_collapsible_topbar(self):
         response = self.client.get("/terminals")
@@ -1527,6 +1527,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         emit.assert_called_with(
             "app_config_updated",
             {
+                "appearance": {
+                    "theme": "light",
+                },
                 "workspace": {
                     "surface_mode": "max",
                 },
@@ -7894,3 +7897,274 @@ class StyleThemingTestCase(unittest.TestCase):
             self.assertIn(var_name, terminals_js)
         self.assertNotIn("background          : '#0d0d0d'", terminals_js)
         self.assertNotIn("cursor              : '#00d9ff'", terminals_js)
+
+
+class ThemeSyncTestCase(unittest.TestCase):
+    """ISSUE-2026-021 — appearance theme changes reach open session windows."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    # ── backend contract ─────────────────────────────────────────────────────
+
+    def test_backend_broadcast_carries_theme_alongside_surface_mode(self):
+        cfg = api.load_config()
+        saved_appearance = json.loads(json.dumps(cfg.get("appearance", {})))
+        saved_workspace = json.loads(json.dumps(cfg.get("workspace", {})))
+        try:
+            with patch.object(api.socketio, "emit") as emit:
+                response = self.client.post(
+                    "/api/app-config",
+                    json={
+                        "appearance": {"theme": "dark"},
+                        "workspace": {"surface_mode": "normal"},
+                    },
+                )
+            self.assertEqual(response.status_code, 200)
+            emit.assert_called_once()
+            event, payload = emit.call_args[0]
+            self.assertEqual(event, "app_config_updated")
+            self.assertEqual(payload["appearance"]["theme"], "dark")
+            self.assertEqual(payload["workspace"]["surface_mode"], "normal")
+        finally:
+            cfg = api.load_config()
+            cfg["appearance"] = saved_appearance
+            cfg["workspace"] = saved_workspace
+            api.save_config(cfg)
+            api._refresh_runtime_config()
+
+    # ── launcher-side contract ───────────────────────────────────────────────
+
+    def test_launcher_notification_payload_includes_theme(self):
+        launcher_js = self._static("js/launcher.js")
+        notify = launcher_js[
+            launcher_js.index("function notifyAppConfigUpdated(appSettings)"):
+            launcher_js.index("async function loadAppSettings()")
+        ]
+        self.assertIn(
+            "theme: normalizeThemePreference(appSettings?.appearance?.theme)",
+            notify,
+        )
+        self.assertIn(
+            "surface_mode: appSettings?.workspace?.surface_mode === 'max' ? 'max' : 'normal'",
+            notify,
+        )
+
+    # ── session-side application ─────────────────────────────────────────────
+
+    def test_terminals_app_config_handler_applies_theme_and_surface_mode(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function applyAppConfigUpdate(message)", terminals_js)
+        self.assertIn("applyAppConfigTheme(message);", terminals_js)
+        self.assertIn("applyAppConfigSurfaceMode(message);", terminals_js)
+
+    def test_terminals_wires_all_three_delivery_paths_to_the_handler(self):
+        terminals_js = self._static("js/terminals.js")
+        # BroadcastChannel
+        self.assertIn("applyAppConfigUpdate(event.data || {});", terminals_js)
+        # storage event
+        self.assertIn("applyAppConfigUpdate(JSON.parse(event.newValue));", terminals_js)
+        # Socket.IO
+        self.assertIn("socket.on('app_config_updated'", terminals_js)
+        self.assertIn("applyAppConfigUpdate(message || {});", terminals_js)
+        # the old surface-only wiring must not linger on any path
+        self.assertNotIn("applyAppConfigSurfaceMode(event.data || {});", terminals_js)
+        self.assertNotIn("applyAppConfigSurfaceMode(message || {});", terminals_js)
+
+    def test_theme_application_is_validated_and_idempotent(self):
+        terminals_js = self._static("js/terminals.js")
+        theme_fn = terminals_js[
+            terminals_js.index("function applyAppConfigTheme(message)"):
+            terminals_js.index("function applyAppConfigUpdate(message)")
+        ]
+        self.assertIn("['system', 'light', 'dark'].includes(theme)", theme_fn)
+        self.assertIn("data-theme-preference", theme_fn)
+        self.assertIn("if (theme !== current)", theme_fn)
+        self.assertIn("applyTheme(theme);", theme_fn)
+
+    def test_terminals_reconciles_theme_on_reconnect_focus_and_pageshow(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("async function reconcileAppConfigTheme()", terminals_js)
+        reconcile_fn = terminals_js[
+            terminals_js.index("async function reconcileAppConfigTheme()"):
+            terminals_js.index("function setupAppConfigUpdateListeners()")
+        ]
+        self.assertIn("fetch('/api/app-config')", reconcile_fn)
+        self.assertIn("applyAppConfigTheme(await response.json());", reconcile_fn)
+        # reconnect path (guarded by the not-first-connect flag)
+        connect_handler = terminals_js[
+            terminals_js.index("let hadSocketConnection = false;"):
+            terminals_js.index("socket.on('voice_result'")
+        ]
+        self.assertIn("reconcileAppConfigTheme();", connect_handler)
+        # focus / pageshow recovery
+        focus_wiring = terminals_js[
+            terminals_js.index("window.addEventListener('focus'"):
+            terminals_js.index("document.addEventListener('fullscreenchange'")
+        ]
+        self.assertEqual(focus_wiring.count("reconcileAppConfigTheme();"), 2)
+
+    def test_shared_init_theme_reacts_to_cross_window_storage_writes(self):
+        shared_js = self._static("js/shared.js")
+        init_theme = shared_js[
+            shared_js.index("function initTheme()"):
+            shared_js.index("function buildSavedSessionTags(")
+        ]
+        self.assertIn("event.key !== THEME_STORAGE_KEY", init_theme)
+        self.assertIn("normalizeThemePreference(event.newValue)", init_theme)
+        # loop-safety guard: only apply when the preference actually changed
+        self.assertIn(
+            "preference !== document.documentElement.getAttribute('data-theme-preference')",
+            init_theme,
+        )
+        # System-mode media-query behaviour must survive the new listener
+        self.assertIn("prefers-color-scheme: light", init_theme)
+
+
+class VoiceRecordingOverlayTestCase(unittest.TestCase):
+    """ISSUE-2026-019 — floating waveform indicator while voice is recording."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_overlay_markup_is_accessible_and_singleton(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("const VOICE_OVERLAY_ID = 'voiceRecordingOverlay';", terminals_js)
+        show_fn = terminals_js[
+            terminals_js.index("function _showVoiceRecordingOverlay(index)"):
+            terminals_js.index("function _hideVoiceRecordingOverlay()")
+        ]
+        self.assertIn("overlay.setAttribute('role', 'status');", show_fn)
+        self.assertIn("overlay.setAttribute('aria-live', 'polite');", show_fn)
+        self.assertIn('aria-hidden="true"', show_fn)
+        self.assertIn(">Recording</span>", show_fn)
+        # reuse the single element instead of stacking duplicates
+        self.assertIn("if (!overlay) {", show_fn)
+        self.assertIn("document.getElementById(VOICE_OVERLAY_ID)", show_fn)
+
+    def test_overlay_appears_only_after_capture_actually_starts(self):
+        terminals_js = self._static("js/terminals.js")
+        show_fn = terminals_js[
+            terminals_js.index("function _showVoiceRecordingOverlay(index)"):
+            terminals_js.index("function _hideVoiceRecordingOverlay()")
+        ]
+        # rapid-release guard: no overlay when the state was torn down mid-start
+        self.assertIn("if (!_voiceState[index]?.recording) {", show_fn)
+        start_fn = terminals_js[
+            terminals_js.index("async function _startVoice(index)"):
+            terminals_js.index("async function _acquireMicStream(")
+        ]
+        self.assertLess(
+            start_fn.index("_voiceState[index] = state;"),
+            start_fn.index("_showVoiceRecordingOverlay(index);"),
+        )
+
+    def test_overlay_hidden_from_every_cleanup_path(self):
+        terminals_js = self._static("js/terminals.js")
+        # start failure (permission denial / backend error)
+        start_fn = terminals_js[
+            terminals_js.index("async function _startVoice(index)"):
+            terminals_js.index("async function _acquireMicStream(")
+        ]
+        catch_block = start_fn[start_fn.index("} catch (err) {"):]
+        self.assertIn("_hideVoiceRecordingOverlay();", catch_block)
+        # every stop path (toggle, PTT release, hold release, voice_status
+        # error, _stopAllVoice on session switch/teardown) funnels here
+        stop_fn = terminals_js[
+            terminals_js.index("async function _stopVoice(index"):
+            terminals_js.index("async function _stopAllVoice()")
+        ]
+        self.assertIn("_hideVoiceRecordingOverlay();", stop_fn)
+        self.assertIn("_stopAllVoice();", terminals_js)
+
+    def test_waveform_uses_analyser_with_fallback_and_stale_loop_guard(self):
+        terminals_js = self._static("js/terminals.js")
+        animation_fn = terminals_js[
+            terminals_js.index("function _startVoiceOverlayAnimation(index, overlay)"):
+            terminals_js.index("function _stopVoiceOverlayAnimation()")
+        ]
+        self.assertIn("createAnalyser()", animation_fn)
+        self.assertIn("getByteFrequencyData(data)", animation_fn)
+        self.assertIn("requestAnimationFrame(tick)", animation_fn)
+        # stale loops from a superseded capture must stop themselves
+        self.assertIn("_voiceOverlayAnimation !== animation", animation_fn)
+        # deterministic fallback when no analyser is available
+        self.assertIn("voice-overlay-fallback", animation_fn)
+        stop_animation_fn = terminals_js[
+            terminals_js.index("function _stopVoiceOverlayAnimation()"):
+            terminals_js.index("const VOICE_HOLD_TO_TALK_MS")
+        ]
+        self.assertIn("cancelAnimationFrame", stop_animation_fn)
+        self.assertIn("animation.source.disconnect(animation.analyser);", stop_animation_fn)
+
+    def test_reduced_motion_disables_the_animations(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function _prefersReducedMotion()", terminals_js)
+        self.assertIn("prefers-reduced-motion: reduce", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        reduced_block = terminals_css[
+            terminals_css.index("@media (prefers-reduced-motion: reduce)"):
+        ]
+        self.assertIn("animation: none !important;", reduced_block)
+
+    def test_overlay_styles_are_fixed_nonblocking_and_theme_aware(self):
+        terminals_css = self._static("css/terminals.css")
+        overlay_block = re.search(
+            r"\.voice-recording-overlay \{.*?\}", terminals_css, re.DOTALL
+        ).group(0)
+        self.assertIn("position: fixed;", overlay_block)
+        self.assertIn("pointer-events: none;", overlay_block)
+        self.assertIn("var(--gv-danger)", overlay_block)
+        self.assertIn("var(--t-voice-bg)", overlay_block)
+        self.assertIn(".voice-overlay-bar", terminals_css)
+        self.assertIn("@keyframes voice-overlay-bounce", terminals_css)
+
+    def test_hold_to_talk_pointer_wiring_preserves_click_toggle(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("_wireVoiceHoldToTalk(card, i);", terminals_js)
+        hold_fn = terminals_js[
+            terminals_js.index("function _wireVoiceHoldToTalk(card, index)"):
+            terminals_js.index("/* ── Push-to-talk ── */")
+        ]
+        self.assertIn("addEventListener('pointerdown'", hold_fn)
+        self.assertIn("addEventListener('pointerup', endHold);", hold_fn)
+        self.assertIn("addEventListener('pointercancel', endHold);", hold_fn)
+        self.assertIn("setPointerCapture(event.pointerId);", hold_fn)
+        self.assertIn("VOICE_HOLD_TO_TALK_MS", hold_fn)
+        # a completed hold swallows the trailing click so it cannot re-toggle
+        self.assertIn("suppressClick", hold_fn)
+        self.assertIn("event.stopPropagation();", hold_fn)
+        # release during the async start stops capture once it settles
+        self.assertIn("holdStopRequested = true;", hold_fn)
+
+    def test_push_to_talk_rapid_release_cannot_leave_a_stale_recording(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("let _pttStopRequested = false;", terminals_js)
+        keydown_idx = terminals_js.index(
+            "if (!_voicePrefs.pttEnabled || !_voicePrefs.pttKeybind) return;"
+        )
+        keyup_idx = terminals_js.index("if (!_pttActive) return;")
+        keydown_block = terminals_js[keydown_idx:keyup_idx]
+        self.assertIn(
+            "if (_pttStopRequested && _voiceState[index]?.recording) {", keydown_block
+        )
+        keyup_block = terminals_js[
+            keyup_idx:terminals_js.index("function _updateVoiceBtn(index, recording)")
+        ]
+        self.assertIn("_pttStopRequested = true;", keyup_block)

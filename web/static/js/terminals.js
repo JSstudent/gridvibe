@@ -113,12 +113,48 @@
         applySurfaceMode(mode === 'max', { persist: true, refit: true });
     }
 
+    function applyAppConfigTheme(message) {
+        const theme = message?.appearance?.theme;
+        if (!['system', 'light', 'dark'].includes(theme)) {
+            return;
+        }
+        /* Idempotent: skip when the preference is already active so duplicate
+           deliveries (BroadcastChannel + storage + socket) are harmless. */
+        const current = document.documentElement.getAttribute('data-theme-preference');
+        if (theme !== current) {
+            applyTheme(theme);
+        }
+    }
+
+    /* One normalized app-config update contract for every delivery path
+       (BroadcastChannel, storage event, Socket.IO): apply the global theme
+       preference and the workspace surface mode (ISSUE-2026-021). */
+    function applyAppConfigUpdate(message) {
+        if (!message || typeof message !== 'object') {
+            return;
+        }
+        applyAppConfigTheme(message);
+        applyAppConfigSurfaceMode(message);
+    }
+
+    /* Recover app-config changes missed while this window was hidden or its
+       socket was disconnected. */
+    async function reconcileAppConfigTheme() {
+        try {
+            const response = await fetch('/api/app-config');
+            if (!response.ok) {
+                return;
+            }
+            applyAppConfigTheme(await response.json());
+        } catch (_error) {}
+    }
+
     function setupAppConfigUpdateListeners() {
         if ('BroadcastChannel' in window) {
             try {
                 const channel = new BroadcastChannel(APP_CONFIG_BROADCAST_CHANNEL);
                 channel.onmessage = event => {
-                    applyAppConfigSurfaceMode(event.data || {});
+                    applyAppConfigUpdate(event.data || {});
                 };
             } catch (_error) {}
         }
@@ -129,7 +165,7 @@
             }
 
             try {
-                applyAppConfigSurfaceMode(JSON.parse(event.newValue));
+                applyAppConfigUpdate(JSON.parse(event.newValue));
             } catch (_error) {}
         });
     }
@@ -3935,6 +3971,7 @@
             });
             _toggleVoice(i);
         });
+        _wireVoiceHoldToTalk(card, i);
         _syncVoiceControls(i);
         wireCardButton(card, `[data-explorer-refresh="${i}"]`, () => refreshTerminalDisplay(i));
         wireCardButton(card, `[data-explorer-up="${i}"]`, () => {
@@ -5661,6 +5698,7 @@
                 capabilities
             };
             _updateVoiceBtn(index, true);
+            _showVoiceRecordingOverlay(index);
             _setVoiceBtnsDisabled(index);
             _applyVoiceStateDiagnostics(index);
             _setVoicePanelStatus(
@@ -5680,6 +5718,7 @@
                 requestedConstraints: acquisition?.appliedConstraints ?? requestedConstraints
             });
             await _teardownVoicePipeline(stream, pipeline);
+            _hideVoiceRecordingOverlay();
             _updateVoiceBtn(index, false);
             _setVoiceBtnsDisabled(-1);
             const errName = err?.name ? `[${err.name}] ` : '';
@@ -5896,6 +5935,7 @@
         });
 
         state.recording = false;
+        _hideVoiceRecordingOverlay();
         await _flushVoiceWorklet(index, state);
 
         const sid = state.sessionId || sessionIds[index];
@@ -5936,9 +5976,196 @@
         }
     }
 
+    /* ── Floating recording indicator (ISSUE-2026-019) ──
+       One fixed-position, non-blocking overlay shared by every capture path
+       (mic toggle, hold-to-talk, push-to-talk keybind). Shown only after
+       _startVoice() has established an active recording state; hidden from
+       every _stopVoice(), start-failure, and teardown path. */
+    const VOICE_OVERLAY_ID = 'voiceRecordingOverlay';
+    const VOICE_OVERLAY_BAR_COUNT = 5;
+    const VOICE_OVERLAY_MIC_ICON = '<svg class="voice-overlay-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>';
+    let _voiceOverlayAnimation = null;
+
+    function _prefersReducedMotion() {
+        try {
+            return Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches);
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function _showVoiceRecordingOverlay(index) {
+        if (!_voiceState[index]?.recording) {
+            return; /* capture already stopped while startup was in flight */
+        }
+        let overlay = document.getElementById(VOICE_OVERLAY_ID);
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = VOICE_OVERLAY_ID;
+            overlay.className = 'voice-recording-overlay';
+            overlay.setAttribute('role', 'status');
+            overlay.setAttribute('aria-live', 'polite');
+            const bars = Array.from(
+                { length: VOICE_OVERLAY_BAR_COUNT },
+                () => '<span class="voice-overlay-bar"></span>'
+            ).join('');
+            overlay.innerHTML = `${VOICE_OVERLAY_MIC_ICON}<span class="voice-overlay-label">Recording</span><span class="voice-overlay-bars" aria-hidden="true">${bars}</span>`;
+            document.body.appendChild(overlay);
+        }
+        overlay.classList.remove('voice-overlay-fallback');
+        _startVoiceOverlayAnimation(index, overlay);
+    }
+
+    function _hideVoiceRecordingOverlay() {
+        _stopVoiceOverlayAnimation();
+        document.getElementById(VOICE_OVERLAY_ID)?.remove();
+    }
+
+    /* Drive the bars from a small AnalyserNode fanned out from the live
+       capture source; fall back to the deterministic CSS animation when the
+       analyser cannot be created, and stay static under reduced motion. */
+    function _startVoiceOverlayAnimation(index, overlay) {
+        _stopVoiceOverlayAnimation();
+        if (_prefersReducedMotion()) {
+            return;
+        }
+        const state = _voiceState[index];
+        let analyser = null;
+        try {
+            if (state?.audioCtx && state?.source) {
+                analyser = state.audioCtx.createAnalyser();
+                analyser.fftSize = 64;
+                analyser.smoothingTimeConstant = 0.6;
+                state.source.connect(analyser);
+            }
+        } catch (_) {
+            analyser = null;
+        }
+        if (!analyser) {
+            overlay.classList.add('voice-overlay-fallback');
+            return;
+        }
+        const bars = overlay.querySelectorAll('.voice-overlay-bar');
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        const animation = { frameId: 0, analyser, source: state.source };
+        const tick = () => {
+            if (_voiceOverlayAnimation !== animation) {
+                return; /* a newer capture (or a stop) superseded this loop */
+            }
+            analyser.getByteFrequencyData(data);
+            bars.forEach((bar, barIndex) => {
+                const bin = data[Math.floor(((barIndex + 1) * data.length) / (bars.length + 1))] || 0;
+                const scale = 0.25 + (bin / 255) * 0.75;
+                bar.style.transform = `scaleY(${scale.toFixed(3)})`;
+            });
+            animation.frameId = window.requestAnimationFrame(tick);
+        };
+        _voiceOverlayAnimation = animation;
+        animation.frameId = window.requestAnimationFrame(tick);
+    }
+
+    function _stopVoiceOverlayAnimation() {
+        const animation = _voiceOverlayAnimation;
+        if (!animation) {
+            return;
+        }
+        _voiceOverlayAnimation = null;
+        if (animation.frameId) {
+            window.cancelAnimationFrame(animation.frameId);
+        }
+        try { animation.source.disconnect(animation.analyser); } catch (_) {}
+    }
+
+    /* Press-and-hold on the mic button records while held (mirroring the
+       push-to-talk keybind); a quick click keeps the existing click-to-toggle
+       behaviour. Keyboard activation still fires plain click → toggle. */
+    const VOICE_HOLD_TO_TALK_MS = 350;
+
+    function _wireVoiceHoldToTalk(card, index) {
+        const button = card.querySelector(`[data-terminal-voice="${index}"]`);
+        const control = card.querySelector(`[data-terminal-voice-control="${index}"]`);
+        if (!button || !control) {
+            return;
+        }
+
+        let holdTimer = null;
+        let holdActive = false;
+        let holdStarting = false;
+        let holdStopRequested = false;
+        let suppressClick = false;
+
+        const clearHoldTimer = () => {
+            if (holdTimer !== null) {
+                window.clearTimeout(holdTimer);
+                holdTimer = null;
+            }
+        };
+
+        button.addEventListener('pointerdown', event => {
+            if (event.button !== 0 || button.disabled || _voiceState[index]?.recording) {
+                return;
+            }
+            try { button.setPointerCapture(event.pointerId); } catch (_) {}
+            holdStopRequested = false;
+            clearHoldTimer();
+            holdTimer = window.setTimeout(async () => {
+                holdTimer = null;
+                holdActive = true;
+                suppressClick = true;
+                holdStarting = true;
+                try {
+                    if (_voiceActiveIndex !== -1 && _voiceActiveIndex !== index) {
+                        await _stopVoice(_voiceActiveIndex);
+                    }
+                    if (!_voiceState[index]?.recording) {
+                        await _startVoice(index);
+                    }
+                } finally {
+                    holdStarting = false;
+                }
+                if (holdStopRequested) {
+                    holdStopRequested = false;
+                    if (_voiceState[index]?.recording) {
+                        await _stopVoice(index);
+                    }
+                }
+            }, VOICE_HOLD_TO_TALK_MS);
+        });
+
+        const endHold = async () => {
+            clearHoldTimer();
+            if (!holdActive) {
+                return;
+            }
+            holdActive = false;
+            if (holdStarting) {
+                /* release raced the async start — stop as soon as it settles */
+                holdStopRequested = true;
+                return;
+            }
+            if (_voiceState[index]?.recording) {
+                await _stopVoice(index);
+            }
+        };
+        button.addEventListener('pointerup', endHold);
+        button.addEventListener('pointercancel', endHold);
+
+        /* A completed hold already stopped capture on release; swallow the
+           click that follows pointerup so it cannot re-toggle recording.
+           Capture phase on the wrapper runs before the button's listener. */
+        control.addEventListener('click', event => {
+            if (suppressClick) {
+                suppressClick = false;
+                event.preventDefault();
+                event.stopPropagation();
+            }
+        }, true);
+    }
+
     /* ── Push-to-talk ── */
     let _pttActive = false;
     let _pttProcessing = false;
+    let _pttStopRequested = false;
 
     function _matchesPttKeybind(event, keybind) {
         if (!keybind) return false;
@@ -6045,6 +6272,7 @@
         event.preventDefault();
         _pttActive = true;
         _pttProcessing = true;
+        _pttStopRequested = false;
 
         try {
             const index = _voiceActiveIndex !== -1 ? _voiceActiveIndex : _findPttTerminalIndex();
@@ -6052,8 +6280,14 @@
             if (!_voiceState[index]?.recording) {
                 await _startVoice(index);
             }
+            /* The key was released while the async start was in flight —
+               stop immediately so no stale capture/indicator survives. */
+            if (_pttStopRequested && _voiceState[index]?.recording) {
+                await _stopVoice(index);
+            }
         } finally {
             _pttProcessing = false;
+            _pttStopRequested = false;
         }
     });
 
@@ -6063,6 +6297,10 @@
 
         event.preventDefault();
         _pttActive = false;
+        if (_pttProcessing) {
+            _pttStopRequested = true;
+            return;
+        }
         _pttProcessing = true;
 
         try {
@@ -9885,7 +10123,7 @@
         });
 
         socket.on('app_config_updated', (message) => {
-            applyAppConfigSurfaceMode(message || {});
+            applyAppConfigUpdate(message || {});
         });
 
         socket.on('session_groups_updated', () => {
@@ -9901,6 +10139,7 @@
                 return;
             }
             scheduleStatusRefresh();
+            reconcileAppConfigTheme();
         });
 
         /* ── Voice transcription results ── */
@@ -9956,9 +10195,11 @@
     });
     window.addEventListener('focus', () => {
         _loadVoiceServiceStatus();
+        reconcileAppConfigTheme();
     });
     window.addEventListener('pageshow', () => {
         _loadVoiceServiceStatus();
+        reconcileAppConfigTheme();
     });
     document.addEventListener('fullscreenchange', updateFullscreenButton);
     /* ─────────────────────────────────────────────

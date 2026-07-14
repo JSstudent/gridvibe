@@ -1935,6 +1935,18 @@ posture paragraph.
    and `makeTerminal()` now derives the xterm theme from the `--t-terminal-*` CSS
    variables. New `StyleThemingTestCase` (12 tests) in `tests/test_api.py`. Suite green
    (426 tests, 1 skip) and `ruff` clean.
+   ✅ **Step 8 UI follow-up, 2026-07-14:** two theming/UI issues from
+   `docs/testing_issues.md` were closed in the same area: ISSUE-2026-021 (the
+   cross-window app-config contract — launcher `notifyAppConfigUpdated()`, backend
+   `_broadcast_app_config_update()`, and the terminals-page BroadcastChannel/storage/
+   Socket.IO handlers — now carries and applies `appearance.theme` alongside
+   `workspace.surface_mode`, with `/api/app-config` reconciliation on reconnect/focus
+   and a cross-window `gridvibe.theme` storage listener in `shared.js`) and
+   ISSUE-2026-019 (a floating, accessible, theme-aware voice-recording waveform
+   overlay driven by an `AnalyserNode` with CSS fallback, plus hold-to-talk pointer
+   handling on the mic button). New `ThemeSyncTestCase` (7 tests) and
+   `VoiceRecordingOverlayTestCase` (8 tests) in `tests/test_api.py`. Suite green
+   (441 tests, 1 skip) and `ruff` clean.
 9. **UX/features:** 8.1 and 8.4 first (close confirmation, reconnect affordance — the two
    Medium UX gaps), then 8.2/8.3/8.5 polish, and 10.3–10.7 as individually scoped follow-ups
    (10.2 is now done; 10.3 depends on 3.6's vendored assets; 10.7 completes 1.4's host-key

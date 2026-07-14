@@ -215,6 +215,19 @@
         window.addEventListener('pywebviewready', () => {
             syncNativeTheme(document.documentElement.getAttribute('data-theme') || resolveTheme(getStoredTheme() || 'system'));
         });
+        /* Another same-origin window (launcher ↔ session) changed the stored
+           preference — mirror it here. Safe from feedback loops: applyTheme's
+           setItem with an unchanged value fires no storage event, and the
+           already-applied guard below skips redundant work (ISSUE-2026-021). */
+        window.addEventListener('storage', event => {
+            if (event.key !== THEME_STORAGE_KEY || !event.newValue) {
+                return;
+            }
+            const preference = normalizeThemePreference(event.newValue);
+            if (preference !== document.documentElement.getAttribute('data-theme-preference')) {
+                applyTheme(preference);
+            }
+        });
         const mediaQuery = window.matchMedia('(prefers-color-scheme: light)');
         const listener = () => {
             const themePreference = document.documentElement.getAttribute('data-theme-preference') || getStoredTheme() || 'system';

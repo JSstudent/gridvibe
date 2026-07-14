@@ -682,6 +682,9 @@
 
     function notifyAppConfigUpdated(appSettings) {
         const payload = {
+            appearance: {
+                theme: normalizeThemePreference(appSettings?.appearance?.theme)
+            },
             workspace: {
                 surface_mode: appSettings?.workspace?.surface_mode === 'max' ? 'max' : 'normal'
             },

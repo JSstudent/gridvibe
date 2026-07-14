@@ -1,33 +1,7 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-13
+Last updated: 2026-07-14
 
 ## Open Issues
-
-### Issue ID: ISSUE-2026-021
-- Title: Appearance theme changes do not reach open session windows
-- Priority: Medium
-- Status: Open
-- Area: `web/static/js/shared.js`, `web/static/js/launcher.js`, `web/static/js/terminals.js`, `web/api.py`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `settings`, `launcher`, `session`, `ui`, `theme`, `tests`
-- Reported: 2026-07-13
-
-Description:
-Changing the Appearance theme to Light or Dark in launcher settings updates the launcher but does not update an already-open session window. The application can therefore display mismatched themes across its two primary windows until the session page is reloaded or its theme is changed separately, making the global appearance setting behave like a launcher-only preference.
-
-Steps to reproduce:
-1. Start GridVibe with the launcher and at least one session window open.
-2. In launcher App Settings, change Appearance from Dark to Light or from Light to Dark and save.
-3. Observe that the launcher applies the selected theme while the open session window remains on its previous theme.
-
-Expected behavior:
-The saved Light, Dark, or System appearance preference should be global to GridVibe. Saving it from the launcher should immediately apply the resolved theme to the launcher and every open session window, and newly opened or reconnected session windows should initialize from the same persisted preference. This content-theme synchronization is distinct from the intentionally dark native Windows title-bar policy documented by closed ISSUE-2026-009.
-
-Actual behavior / logs:
-Code inspection confirms `saveAppSettings()` in `web/static/js/launcher.js` applies the returned theme locally through `applyAppSettings(data)`, then calls `notifyAppConfigUpdated(data)`. That cross-window payload contains only `workspace.surface_mode`, not `appearance.theme`. The backend `_broadcast_app_config_update()` in `web/api.py` likewise emits only `workspace.surface_mode`, and all BroadcastChannel, storage-event, and Socket.IO handlers in `web/static/js/terminals.js` call `applyAppConfigSurfaceMode()` without applying a theme. Shared `applyTheme()` writes `gridvibe.theme` to local storage, but `initTheme()` does not register a storage listener, so an already-open session document does not react to the launcher write. Existing tests assert surface-mode propagation and basic theme controls, but do not cover live theme synchronization between windows.
-
-### Proposed solution:
-Define one normalized app-config update contract containing `appearance.theme` alongside `workspace.surface_mode`, and emit it consistently from both `notifyAppConfigUpdated()` and `_broadcast_app_config_update()`. Replace or extend the session-side surface-only handler with an idempotent app-config handler that calls `applyTheme()` for a valid `system`, `light`, or `dark` preference and continues applying surface mode. Keep BroadcastChannel, storage-event, and Socket.IO delivery paths aligned, avoid rebroadcast or local-storage feedback loops, and make duplicate deliveries harmless. On session-window focus, visibility restoration, or socket reconnect, reconcile against `/api/app-config` or the authoritative stored preference so updates missed while disconnected are recovered. Preserve System-mode media-query behavior and the native-title-bar policy from ISSUE-2026-009. Add focused tests in `tests/test_api.py` for backend payload contents, launcher notification contents, live BroadcastChannel/storage/Socket.IO application, multiple open session windows, duplicate and malformed messages, reconnect/focus reconciliation, Light/Dark/System transitions, and newly opened session initialization.
 
 ### Issue ID: ISSUE-2026-020
 - Title: Large log previews discard the newest entries
@@ -54,32 +28,6 @@ Code inspection confirms `EXPLORER_FILE_PREVIEW_MAX_BYTES` in `web/explorer.py` 
 
 ### Proposed solution:
 Make the preview byte limit a validated, bounded setting or raise it to a measured safe value, while preserving protections against browser stalls and excessive local or SFTP reads. Add a ranged/tail-read operation to the local and SFTP explorer backends and use it for `.log` and any explicitly classified append-oriented formats so truncated previews retain the last configured bytes. Consider exposing a Head/Tail selector for other oversized text files, with a documented default appropriate to their type. Return range metadata such as retained start/end bytes and total size, and update `web/static/js/terminals.js` to show a clear message such as `Showing the last 1 MiB` instead of only a generic truncation warning. Handle UTF-8 and line boundaries so a tail read does not begin with a broken character or misleading partial line. Add focused tests in `tests/test_api.py` for retained end markers, excluded start markers, files exactly at the limit, multibyte and long-line boundaries, local/SFTP parity, range metadata, configured-limit validation, and client messaging, while keeping search and highlighting bounded to the returned preview.
-
-### Issue ID: ISSUE-2026-019
-- Title: Add floating waveform indicator while voice input is recording
-- Priority: Low
-- Status: Open
-- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `voice`, `ui`, `terminal`, `accessibility`, `tests`
-- Reported: 2026-07-13
-
-Description:
-Voice capture does not provide a prominent workspace-level indication that the microphone is actively recording. The only visual feedback is a small state change on the microphone button in the active terminal header, which can be easy to miss when recording is triggered by a push-to-talk keybind or when attention is elsewhere in the workspace. Users therefore cannot confidently tell at a glance whether GridVibe is listening.
-
-Steps to reproduce:
-1. Enable voice input, configure push-to-talk and a keybind, and open a terminal session.
-2. Start voice capture from the terminal microphone control, or press and hold the configured push-to-talk keybind.
-3. Observe that the microphone button receives a small red pulse while recording, but no floating waveform or other prominent recording indicator appears over the workspace.
-
-Expected behavior:
-Whenever microphone capture is active, whether initiated by a press-and-hold GUI microphone interaction or the configured push-to-talk keybind, GridVibe should show a compact floating waveform-style indicator in a consistent, unobtrusive workspace position. It should appear only after capture actually starts, remain visible for the full recording, clearly identify the recording state, and disappear promptly on release, stop, cancellation, backend error, or teardown.
-
-Actual behavior / logs:
-Code inspection confirms `_updateVoiceBtn()` in `web/static/js/terminals.js` only toggles the `recording` class and title on the per-terminal microphone button. `web/static/css/terminals.css` renders that class as a red button with a small pulsing box shadow. The push-to-talk listeners call `_startVoice()` on matching `keydown` and `_stopVoice()` on `keyup`, but neither path creates or synchronizes a page-level recording overlay or waveform. The GUI microphone control is currently wired as a click-to-toggle action rather than a press-and-hold interaction.
-
-### Proposed solution:
-Add one reusable, fixed-position voice-recording overlay managed by the shared capture lifecycle in `web/static/js/terminals.js` and styled in `web/static/css/terminals.css`. Show it only once `_startVoice()` has established an active recording state, and hide it from every `_stopVoice()`, permission-denial, backend-error, session-switch, disconnect, and teardown path. Render a clear microphone/`Recording` label plus animated waveform bars; where practical, drive the bars from a bounded `AnalyserNode` attached to the existing audio graph, with a lightweight deterministic animation as a fallback. Make the overlay non-blocking, theme-aware, responsive, and accessible with status semantics, sufficient contrast, and a `prefers-reduced-motion` treatment. Add pointer down/up/cancel handling for the requested hold-to-talk GUI interaction while preserving accessible keyboard activation and defining how it coexists with the existing click-to-toggle behavior. Ensure the single-active-terminal rule prevents duplicate overlays and that rapid key or pointer release during asynchronous startup cannot leave a stale indicator. Add focused rendered-template tests in `tests/test_api.py` for GUI hold and keybind start/stop wiring, successful-start timing, every cleanup path, repeated-key suppression, terminal switching, reduced-motion/accessibility hooks, and absence of duplicate overlays.
 
 ### Issue ID: ISSUE-2026-018
 - Title: Add a revert action for unstaged Git changes
@@ -238,6 +186,66 @@ Code inspection confirms `buildTerminalInitialCommand()` in `web/static/js/launc
 Add a per-terminal boolean such as `agent_auto_mode` to the launcher draft, saved-session normalization, workspace serialization, `TerminalSession`, and API responses. Define supported auto-mode arguments in the existing agent registry or another single backend-owned mapping instead of hard-coding one generic flag for every CLI. Update the agent settings row in `web/static/js/launcher.js` to show an accessible toggle only when the selected built-in agent has a registered option, recompute visibility and help text when the selection changes, and keep custom-agent behavior explicit rather than silently modifying arbitrary commands. Compose the final startup command from the validated selected-agent metadata and mapped argument without duplicating flags, while keeping preflight detection based on the base agent executable. Add focused tests in `tests/test_api.py` and `tests/test_session_manager.py` for enabled/disabled command construction, unsupported and custom agents, save/load/workspace round-trips, SSH and local launches, and backward compatibility for saved sessions without the new field.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-021
+- Title: Appearance theme changes do not reach open session windows
+- Priority: Medium
+- Status: Closed
+- Area: `web/static/js/shared.js`, `web/static/js/launcher.js`, `web/static/js/terminals.js`, `web/api.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `settings`, `launcher`, `session`, `ui`, `theme`, `tests`
+- Reported: 2026-07-13
+- Closed: 2026-07-14
+
+Description:
+Changing the Appearance theme to Light or Dark in launcher settings updates the launcher but does not update an already-open session window. The application can therefore display mismatched themes across its two primary windows until the session page is reloaded or its theme is changed separately, making the global appearance setting behave like a launcher-only preference.
+
+Steps to reproduce:
+1. Start GridVibe with the launcher and at least one session window open.
+2. In launcher App Settings, change Appearance from Dark to Light or from Light to Dark and save.
+3. Observe that the launcher applies the selected theme while the open session window remains on its previous theme.
+
+Expected behavior:
+The saved Light, Dark, or System appearance preference should be global to GridVibe. Saving it from the launcher should immediately apply the resolved theme to the launcher and every open session window, and newly opened or reconnected session windows should initialize from the same persisted preference. This content-theme synchronization is distinct from the intentionally dark native Windows title-bar policy documented by closed ISSUE-2026-009.
+
+Actual behavior / logs:
+Code inspection confirmed `saveAppSettings()` in `web/static/js/launcher.js` applied the returned theme locally through `applyAppSettings(data)`, then called `notifyAppConfigUpdated(data)` with a cross-window payload containing only `workspace.surface_mode`, not `appearance.theme`. The backend `_broadcast_app_config_update()` in `web/api.py` likewise emitted only `workspace.surface_mode`, and all BroadcastChannel, storage-event, and Socket.IO handlers in `web/static/js/terminals.js` called `applyAppConfigSurfaceMode()` without applying a theme. Shared `applyTheme()` wrote `gridvibe.theme` to local storage, but `initTheme()` registered no storage listener, so an already-open session document did not react to the launcher write.
+
+### Proposed solution:
+Define one normalized app-config update contract containing `appearance.theme` alongside `workspace.surface_mode`, and emit it consistently from both `notifyAppConfigUpdated()` and `_broadcast_app_config_update()`. Replace or extend the session-side surface-only handler with an idempotent app-config handler that calls `applyTheme()` for a valid `system`, `light`, or `dark` preference and continues applying surface mode. Keep BroadcastChannel, storage-event, and Socket.IO delivery paths aligned, avoid rebroadcast or local-storage feedback loops, and make duplicate deliveries harmless. On session-window focus, visibility restoration, or socket reconnect, reconcile against `/api/app-config` or the authoritative stored preference so updates missed while disconnected are recovered. Preserve System-mode media-query behavior and the native-title-bar policy from ISSUE-2026-009.
+
+Resolution:
+`notifyAppConfigUpdated()` in `web/static/js/launcher.js` and `_broadcast_app_config_update()` in `web/api.py` now emit one normalized payload carrying `appearance.theme` alongside `workspace.surface_mode`. `web/static/js/terminals.js` routes all three delivery paths (BroadcastChannel, storage event, Socket.IO `app_config_updated`) through a new `applyAppConfigUpdate()` handler whose theme step validates against `system`/`light`/`dark` and skips already-applied preferences, so duplicate or malformed deliveries are harmless; the surface-mode step is unchanged. Session windows additionally reconcile the theme against `/api/app-config` on socket reconnect and on window `focus`/`pageshow`, recovering updates missed while disconnected, and `initTheme()` in `web/static/js/shared.js` now applies cross-window `gridvibe.theme` storage writes (loop-safe: an unchanged `setItem` fires no storage event and an already-applied guard skips redundant work). System-mode media-query behavior and the permanently dark native title bar from ISSUE-2026-009 are preserved. Covered by `ThemeSyncTestCase` in `tests/test_api.py` (backend payload, launcher notification contents, all three session-side delivery paths, validation/idempotence, reconnect/focus/pageshow reconciliation, and the shared storage listener).
+
+### Issue ID: ISSUE-2026-019
+- Title: Add floating waveform indicator while voice input is recording
+- Priority: Low
+- Status: Closed
+- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `voice`, `ui`, `terminal`, `accessibility`, `tests`
+- Reported: 2026-07-13
+- Closed: 2026-07-14
+
+Description:
+Voice capture does not provide a prominent workspace-level indication that the microphone is actively recording. The only visual feedback is a small state change on the microphone button in the active terminal header, which can be easy to miss when recording is triggered by a push-to-talk keybind or when attention is elsewhere in the workspace. Users therefore cannot confidently tell at a glance whether GridVibe is listening.
+
+Steps to reproduce:
+1. Enable voice input, configure push-to-talk and a keybind, and open a terminal session.
+2. Start voice capture from the terminal microphone control, or press and hold the configured push-to-talk keybind.
+3. Observe that the microphone button receives a small red pulse while recording, but no floating waveform or other prominent recording indicator appears over the workspace.
+
+Expected behavior:
+Whenever microphone capture is active, whether initiated by a press-and-hold GUI microphone interaction or the configured push-to-talk keybind, GridVibe should show a compact floating waveform-style indicator in a consistent, unobtrusive workspace position. It should appear only after capture actually starts, remain visible for the full recording, clearly identify the recording state, and disappear promptly on release, stop, cancellation, backend error, or teardown.
+
+Actual behavior / logs:
+Code inspection confirmed `_updateVoiceBtn()` in `web/static/js/terminals.js` only toggled the `recording` class and title on the per-terminal microphone button, rendered by `web/static/css/terminals.css` as a red button with a small pulsing box shadow. The push-to-talk listeners called `_startVoice()` on matching `keydown` and `_stopVoice()` on `keyup`, but neither path created or synchronized a page-level recording overlay or waveform, and the GUI microphone control was wired as click-to-toggle only.
+
+### Proposed solution:
+Add one reusable, fixed-position voice-recording overlay managed by the shared capture lifecycle in `web/static/js/terminals.js` and styled in `web/static/css/terminals.css`. Show it only once `_startVoice()` has established an active recording state, and hide it from every `_stopVoice()`, permission-denial, backend-error, session-switch, disconnect, and teardown path. Render a clear microphone/`Recording` label plus animated waveform bars; where practical, drive the bars from a bounded `AnalyserNode` attached to the existing audio graph, with a lightweight deterministic animation as a fallback. Make the overlay non-blocking, theme-aware, responsive, and accessible with status semantics, sufficient contrast, and a `prefers-reduced-motion` treatment. Add pointer down/up/cancel handling for the requested hold-to-talk GUI interaction while preserving accessible keyboard activation and defining how it coexists with the existing click-to-toggle behavior. Ensure the single-active-terminal rule prevents duplicate overlays and that rapid key or pointer release during asynchronous startup cannot leave a stale indicator.
+
+Resolution:
+`web/static/js/terminals.js` now manages a single fixed-position `#voiceRecordingOverlay` (`role="status"`, `aria-live="polite"`, mic SVG + `Recording` label + five waveform bars) from the shared capture lifecycle: `_showVoiceRecordingOverlay()` runs only after `_startVoice()` has stored an active recording state (a guard skips the overlay if a rapid release already tore that state down), and `_hideVoiceRecordingOverlay()` runs from `_stopVoice()` — which every stop path funnels through: mic toggle, push-to-talk release, hold release, `voice_status` backend errors, and `_stopAllVoice()` on session switch and grid teardown — plus the `_startVoice()` failure path (permission denial, pipeline errors). The bars are driven by a bounded `AnalyserNode` (fftSize 64) fanned out from the live capture source with a stale-loop token guard, falling back to a deterministic CSS animation when no analyser is available and staying static under `prefers-reduced-motion`. The mic button gained pointer down/up/cancel hold-to-talk (350 ms threshold, pointer capture, and capture-phase click suppression so a completed hold cannot re-toggle) coexisting with the existing click-to-toggle and keyboard activation, and both the hold and the push-to-talk keybind now request a deferred stop when released during asynchronous startup, so no stale capture or indicator survives. Styles in `web/static/css/terminals.css` are theme-aware (`--gv-danger`, `--t-voice-bg`) and non-blocking (`pointer-events: none`). Covered by `VoiceRecordingOverlayTestCase` in `tests/test_api.py`.
 
 ### Issue ID: ISSUE-2026-012
 - Title: Session tab switching resets terminal scroll positions

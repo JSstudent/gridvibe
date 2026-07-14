@@ -292,6 +292,9 @@ def _broadcast_app_config_update():
     socketio.emit(
         "app_config_updated",
         {
+            "appearance": {
+                "theme": runtime_config.app_theme,
+            },
             "workspace": {
                 "surface_mode": runtime_config.app_surface_mode,
             },
