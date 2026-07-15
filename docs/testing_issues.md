@@ -1,7 +1,163 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-14
+Last updated: 2026-07-15
 
 ## Open Issues
+
+### Issue ID: ISSUE-2026-030
+- Title: Add user-customizable Markdown preview appearance and presets
+- Priority: Low
+- Status: Open
+- Area: `web/static/css/terminals.css`, `web/static/js/terminals.js`, `web/explorer.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `markdown`, `settings`, `ui`, `tests`
+- Reported: 2026-07-15
+
+Description:
+The Explorer Markdown preview renders with a single fixed appearance and offers no way for users to customize how it looks — font family, text size, or background/reading surface — or to pick from ready-made presets. Users who read long documentation in GridVibe cannot switch to a serif or paper/sepia reading surface, a high-contrast surface, or a larger reading font. This is a user-facing customization request and is distinct from ISSUE-2026-017, which covers developer-defined default visual hierarchy and note callouts rather than user-selectable appearance.
+
+Steps to reproduce:
+1. Open an Explorer pane and select a Markdown file, then switch from Source to Preview.
+2. Inspect the preview toolbar/header for any font, background, theme, or preset controls.
+3. Observe that the preview always uses one fixed font and background, with only the shared editor zoom available, and no preset or reading-surface options.
+
+Expected behavior:
+Markdown Preview should let the user adjust its appearance — at minimum a small set of presets (for example default, paper/sepia, high-contrast, and a serif/reading variant) and/or explicit font-family and font-size controls. The chosen appearance should apply immediately to the active preview, remain within GridVibe's theme tokens, coexist with light/dark themes and the existing zoom control, persist across previews, and never weaken Markdown sanitization or the read-only guarantee.
+
+Actual behavior / logs:
+Code inspection confirms `web/static/css/terminals.css` styles `.explorer-markdown-preview` with fixed padding, font, and background rules, and there is no client control, setting, or CSS-variable hook that lets the user change the preview font, background, or reading surface. `_render_markdown_preview()` in `web/explorer.py` emits sanitized semantic HTML but carries no appearance metadata. No `RuntimeConfig`/`/api/app-config` field or local preference stores a Markdown-preview appearance choice.
+
+### Proposed solution:
+Add a compact, accessible appearance control to the Markdown preview surface in `web/static/js/terminals.js` (a preset selector, optionally with font-family and font-size adjusters) and drive it through preset classes plus CSS custom properties on `.explorer-markdown-preview` defined from `tokens.css` in `web/static/css/terminals.css`, so no hardcoded palette literals are introduced. Persist the selection (a bounded local preference or an `/api/app-config`/`RuntimeConfig` field wired end to end), apply it idempotently to newly opened previews, and keep it compatible with light/dark themes, the existing zoom control, narrow panes, and `prefers-reduced-motion`. Preserve the sanitized rendering path in `web/explorer.py` and the read-only contract; do not couple this to the callout work in ISSUE-2026-017 beyond sharing tokens. Add focused tests in `tests/test_api.py` for preset class emission, persisted-preference round-trip and validation, token-only styling, theme/zoom coexistence, and default fallback.
+
+### Issue ID: ISSUE-2026-029
+- Title: Settings UI omits terminal config (font family, size, max sessions)
+- Priority: Low
+- Status: Open
+- Area: `templates/index.html`, `web/static/js/launcher.js`, `web/api.py`, `web/config.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `settings`, `launcher`, `terminal`, `flask`, `tests`
+- Reported: 2026-07-15
+
+Description:
+`default_config.json` exposes a `terminal` block (`max_sessions`, `font_family`, `font_size`) that is loaded into `RuntimeConfig` and applied to the xterm workspace, but the App Settings modal provides no controls for any of it. Users can change theme, workspace surface mode, SSH host-key policy, and voice options from the UI, yet can only change the terminal font family, font size, or maximum session count by hand-editing `config.json` and restarting, which is not discoverable and inconsistent with the other runtime settings.
+
+Steps to reproduce:
+1. Launch GridVibe and open App Settings from the launcher.
+2. Inspect the available settings fields.
+3. Observe controls for Appearance theme, workspace surface mode, SSH host-key policy, and voice input, but none for terminal font family, terminal font size, or maximum sessions, even though these exist in `default_config.json`.
+
+Expected behavior:
+App Settings should surface the terminal configuration already backed by `RuntimeConfig` — terminal font family, terminal font size, and maximum sessions — with validated, bounded inputs. Saving should round-trip through `/api/app-config` and `RuntimeConfig`, persist to `config.json`, and apply to the launcher and open/newly launched session windows the same way theme changes already propagate.
+
+Actual behavior / logs:
+Code inspection confirms the App Settings modal in `templates/index.html` renders only `appTheme`, `appSurfaceMode`, `appSshHostKeyPolicy`, and the voice fields. `collectAppSettings()`/`saveAppSettings()` in `web/static/js/launcher.js` gather only `appearance`, `workspace`, `ssh`, and `voice_input`. `_normalize_app_config_update()` in `web/api.py` whitelists exactly those sections and never reads or writes a `terminal` block, while `web/config.py` (`RuntimeConfig`) loads `terminal.max_sessions`, `terminal.font_size`, and `terminal.font_family`, and `web/api.py` already passes `terminal_font_size`/`terminal_font_family` into the terminals template. The values are therefore file-only with no UI or API write path.
+
+### Proposed solution:
+Add terminal fields to the App Settings modal in `templates/index.html`, extend `collectAppSettings()` in `web/static/js/launcher.js` to include a `terminal` section, and add a validated `terminal` branch to `_normalize_app_config_update()` in `web/api.py` (bounded font size, non-empty font-family string, `max_sessions` clamped to a safe range) that persists through the existing config-save flow. Reuse the established app-config update contract so the change reaches open session windows, and confirm `RuntimeConfig` reload applies the new values. Guard against invalid/oversized input and preserve backward compatibility for configs without user-set terminal fields. Add focused tests in `tests/test_api.py` for normalization bounds, whitelist acceptance, persistence, and modal/collect wiring.
+
+### Issue ID: ISSUE-2026-028
+- Title: Explorer file tree has no right-click "Copy path" context menu
+- Priority: Low
+- Status: Open
+- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `tests`
+- Reported: 2026-07-15
+
+Description:
+The Explorer Files tree and Git file rows provide no right-click context menu, so there is no built-in way to copy a file's path from the tree. Users who want a file's absolute or repository-relative path must retype it or derive it manually, which is slow for deep trees and inconsistent with the copy affordances already available in the terminal.
+
+Steps to reproduce:
+1. Open an Explorer pane and expand the Files tree (and open the Git sidebar).
+2. Right-click a file row in the tree or a changed-file row in the Git sidebar.
+3. Observe that only the browser's native context menu appears; there is no GridVibe "Copy path" action.
+
+Expected behavior:
+Right-clicking a Files-tree row (and ideally a Git file row) should open an in-page GridVibe context menu offering at least "Copy path" (absolute) and, where meaningful, "Copy relative path". Selecting an entry should copy the value to the clipboard with a graceful fallback, using a theme-aware, keyboard-accessible menu that dismisses on outside click or Escape, while preserving the read-only guarantee for local explorer panes.
+
+Actual behavior / logs:
+Code inspection confirms the only `contextmenu` listener in `web/static/js/terminals.js` is attached to the xterm `term.element` (for terminal copy/paste); the explorer tree and Git rows install no `contextmenu` handler and expose no copy-path action. A clipboard helper already exists (`navigator.clipboard.writeText(...)` with a `_copyTextFallback(text)` path used for terminal copy), but it is not reused for explorer paths.
+
+### Proposed solution:
+Add a delegated `contextmenu` handler on the explorer tree and Git-sidebar containers in `web/static/js/terminals.js` that renders an in-page context menu (not `window.prompt`/`confirm`/`alert`, which WebView2 blocks) with Copy path and Copy relative path actions. Resolve absolute and root-relative paths from the existing row dataset, reuse the current clipboard helper plus `_copyTextFallback`, and keep the menu theme-token-styled in `web/static/css/terminals.css`, keyboard-navigable, and dismissible on outside click/Escape. Preserve local/SSH parity and the read-only contract (copy is a read). Add focused rendered-template and behavioral tests in `tests/test_api.py` for menu wiring, absolute/relative path values, keyboard/dismiss behavior, and clipboard fallback.
+
+### Issue ID: ISSUE-2026-027
+- Title: Closing a terminal resets explorer/browser pane state in the group
+- Priority: Medium
+- Status: Open
+- Area: `web/static/js/terminals.js`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `terminal`, `file-explorer`, `session`, `ui`, `tests`
+- Reported: 2026-07-15
+
+Description:
+Closing a single terminal pane in a session group rebuilds the entire visible group, which discards the client-only state of every other pane. Explorer panes lose their open file/preview, expanded Files tree, and open Git sidebar; browser-preview panes reload. Only pane geometry is preserved. The practical impact is that closing one terminal wipes unrelated reference views the user had set up in the same group.
+
+Steps to reproduce:
+1. Open a session group with a terminal pane plus an Explorer pane; in the Explorer pane open a file/preview, expand a few Files-tree folders, and open the Git sidebar (optionally add a browser-preview pane at a scrolled URL).
+2. Close the terminal pane with its `×` button.
+3. Observe that the Explorer pane returns to a plain directory listing with collapsed trees and closed Git sidebar, and any browser pane reloads, even though those panes were not closed.
+
+Expected behavior:
+Closing a terminal should remove only that pane and expand its neighbor into the freed space, while every other pane retains its exact state — Explorer panes keep their open file/preview, expanded tree, and Git sidebar; browser panes keep their URL and scroll — matching how a single split add/remove leaves untouched panes alone.
+
+Actual behavior / logs:
+Code inspection confirms `closeTerminalPane()` in `web/static/js/terminals.js` computes `restoreRectsBySessionId` via `buildTerminalCloseRectsBySessionId(plan)`, sets `pendingSplitRestore` with only `groupId`, `rectsBySessionId`, and `originalSplitSlotCount`, then calls `await initialLoad()`. `initialLoad()` tears down and reconstructs the whole visible group's grid, so panes are recreated from server session metadata; `pendingSplitRestore` restores only geometry, not the explorer/browser client state, which is never captured.
+
+### Proposed solution:
+Avoid the full-grid `initialLoad()` rebuild for a single non-last-pane close in `web/static/js/terminals.js`. Prefer an in-place path that removes only the closed card and reflows neighbor geometry (mirroring the incremental approach used when splitting) so sibling panes and their DOM/state survive untouched. If a rebuild is unavoidable, capture and restore each surviving pane's explorer state (open file/tab, tree-open set, Git sidebar visibility, scroll) and browser state (URL, scroll) across the reload alongside the existing rect restore. Preserve the neighbor-fill/longest-shared-border behavior, the read-only guarantee, and last-pane close semantics. Add focused tests in `tests/test_api.py` covering a terminal close in a mixed group that asserts surviving explorer/browser panes retain open file, expanded tree, Git sidebar, and geometry.
+
+### Issue ID: ISSUE-2026-026
+- Title: Voice transcription ignores Broadcast typing and reaches one terminal
+- Priority: Medium
+- Status: Open
+- Area: `web/static/js/terminals.js`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `voice`, `terminal`, `socketio`, `tests`
+- Reported: 2026-07-15
+
+Description:
+When Broadcast typing is enabled, keyboard input is mirrored to every plain terminal pane, but voice transcription is not. A final voice transcript is delivered only to the single terminal that was recording, so users who expect voice dictation to broadcast to all panes (the way typing does) silently reach just one terminal.
+
+Steps to reproduce:
+1. Open a session group with two or more plain terminal panes and enable Broadcast typing.
+2. Start voice capture on one terminal (mic button or push-to-talk), speak, and let the final transcript commit.
+3. Observe that only the recording terminal receives the transcribed text, while the other broadcast panes receive nothing.
+
+Expected behavior:
+While Broadcast typing is active, a committed voice transcript should be mirrored to every participating plain terminal pane, consistent with how keyboard input is broadcast. Interim (non-final) preview text should remain on the recording pane only, and explorer/browser panes should continue to be excluded.
+
+Actual behavior / logs:
+Code inspection confirms the `voice_result` Socket.IO handler in `web/static/js/terminals.js` calls `_sendToTerminal(index, text)` on the final transcript, and `_sendToTerminal()` emits `terminal_input` to the single `sessionIds[index]` only. Unlike `forwardTerminalInput()`, which mirrors to all plain panes when `broadcastInputActive` (skipping panes without a `term`), the voice path has no broadcast branch, and `_voiceActiveIndex` restricts recording to one terminal, so the transcript never fans out.
+
+### Proposed solution:
+Route the committed voice transcript through the same broadcast mirroring used for keyboard input. When `broadcastInputActive`, have the `voice_result` final branch fan the text out to every plain terminal pane (reusing `forwardTerminalInput()`'s pane filter that skips the source pane and any pane without a `term`, i.e. explorer/browser panes) and note broadcast activity via `_noteBroadcastActivity()`; keep interim previews on the recording pane only. Ensure a single emit per target with no duplication to the recording pane. Add focused tests in `tests/test_api.py` for broadcast-on final fan-out, broadcast-off single delivery, interim-preview isolation, and explorer/browser exclusion.
+
+### Issue ID: ISSUE-2026-025
+- Title: Highlight the currently active terminal pane
+- Priority: Low
+- Status: Open
+- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `terminal`, `ui`, `accessibility`, `tests`
+- Reported: 2026-07-15
+
+Description:
+GridVibe does not visually identify the terminal pane that is currently selected for input. In a multi-pane workspace, users must infer the input target from browser focus alone. This is noticeably inconsistent with Broadcast typing mode, which gives every participating plain terminal pane a clear accent border, and makes it easier to send a command to the wrong terminal.
+
+Steps to reproduce:
+1. Open a GridVibe session group with two or more plain terminal panes.
+2. Click or type in one terminal pane, then inspect the panes' borders and headers.
+3. Observe that the input-target pane has no persistent active/selected visual treatment; enable Broadcast typing to see the existing accent-border treatment applied to all participating panes.
+
+Expected behavior:
+Exactly one eligible terminal pane should have a clear, theme-aware active/selected treatment whenever it is the current input target. The treatment should be comparable in prominence to the broadcast border while remaining distinguishable from broadcast mode, and it should update for pointer, keyboard, programmatic focus, terminal search close/return-focus, pane creation, removal, and session-group switching.
+
+Actual behavior / logs:
+Code inspection confirms `forwardTerminalInput()` and the terminal-card `pointerdown` listeners update `_focusedTerminalIndex`, which is also used to choose keyboard-search and push-to-talk targets. Neither path adds a class, ARIA state, or other visible marker to the corresponding `.terminal-container`. In contrast, `setBroadcastInput()` toggles `broadcast-input` on `#terminalsGrid`, and the `.broadcast-input .terminal-container:not(.explorer-pane):not(.browser-pane)` CSS rule applies `var(--t-accent)` border and inset shadow to every participating terminal. Existing tests cover broadcast-mode class and CSS hooks but do not cover visible single-pane selection state.
+
+### Proposed solution:
+Add one centralized client-side helper in `web/static/js/terminals.js`, such as `setFocusedTerminal(index)`, that validates the target, updates `_focusedTerminalIndex`, and toggles a semantic class (for example, `terminal-active`) plus appropriate accessibility state on the relevant terminal card while clearing it from other panes. Route existing pointer, terminal input, focus, focus-restoration, split, close, and group-switch paths through that helper; define a safe fallback target when the selected pane is removed or no plain terminal remains. Add a token-based active-pane style in `web/static/css/terminals.css` that remains visually distinct when Broadcast typing is enabled, avoids hardcoded colors, and preserves explorer/browser exclusions. Add focused rendered-template and behavioral tests in `tests/test_api.py` for pointer and keyboard selection, focus transitions, group switches, split/close fallback, broadcast coexistence, one-active-pane enforcement, and accessible state updates.
 
 ### Issue ID: ISSUE-2026-024
 - Title: File and Git trees lack file type icons
