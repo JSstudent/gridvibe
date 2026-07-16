@@ -3,6 +3,32 @@ Last updated: 2026-07-16
 
 ## Open Issues
 
+### Issue ID: ISSUE-2026-034
+- Title: Committing via Git sidebar does not reload the Files tree
+- Priority: Low
+- Status: Open
+- Area: `web/static/js/terminals.js`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `git`, `ui`, `tests`
+- Reported: 2026-07-16
+
+Description:
+After a successful commit through the Explorer Git sidebar, the Files tree sidebar is not reloaded and the main pane is not refreshed in tabbed viewer mode. The user must manually trigger a refresh to see the updated working-tree state in the Files tree. The Git status panel itself does update correctly — `performExplorerGitAction` sets `pane._explorerGitRepo` from the backend response and immediately calls `renderExplorerGitPanels` — but `reloadExplorerTree` is never called from that path, leaving the Files tree stale after the commit.
+
+Steps to reproduce:
+1. Open a GridVibe Explorer pane on a Git repository, expand the Files tree, and open the Git sidebar.
+2. Stage one or more changes and commit them via the Commit button in the Git sidebar.
+3. Observe that the Git sidebar updates (staged changes become empty) but the Files tree is not reloaded; any file or directory changes introduced by the commit are not reflected until the user manually refreshes the Explorer pane.
+
+Expected behavior:
+A successful commit should trigger a reload of the Files tree (via `reloadExplorerTree`) so the tree reflects the post-commit working-tree state without requiring manual intervention. In tabbed file viewer mode (the default since ISSUE-2026-014), the currently open file or diff view should also be refreshed to avoid showing stale staged-change hunks for the just-committed files.
+
+Actual behavior / logs:
+Code inspection confirms `performExplorerGitAction` in `web/static/js/terminals.js` (line 8993) sets `pane._explorerGitRepo = data` and calls `renderExplorerGitPanels(index)` on success, which correctly re-renders the Git sidebar. However, `reloadExplorerTree(index)` (line 8938) — which drops cached children and refetches visible tree nodes — is never called. Additionally, `loadExplorerPane` is only called when `pane._explorerMode === 'directory'` (line 9023–9025); since ISSUE-2026-014 made the tabbed file viewer the default mode, this condition is rarely true, so the main pane is also not refreshed. The backend `commit_explorer_git` (web/api.py:847) already returns an updated `_get_git_repo_summary` payload, so no new backend work is needed.
+
+### Proposed solution:
+In `performExplorerGitAction` in `web/static/js/terminals.js`, after a successful commit (i.e., when `succeeded` is true and `endpoint === 'commit'`), call `reloadExplorerTree(index)` to reload the Files tree. `reloadExplorerTree` already guards on `pane._explorerTreeSidebarOpen` internally, so calling it unconditionally is safe. Additionally, consider refreshing any open file or diff view for the committed paths in the tabbed viewer by calling `updateExplorerFileInPlace` or equivalent; at minimum, clear `_explorerDiffContent` so a stale staged diff is not shown after the commit clears the staging area. Add focused tests in `tests/test_api.py` for: post-commit tree reload wiring, reload skipped when tree sidebar is closed, and Git sidebar state reset after commit.
+
 ### Issue ID: ISSUE-2026-033
 - Title: Markdown preview appearance not saved with session presets or restore snapshot
 - Priority: Low
