@@ -194,6 +194,17 @@
             --explorer-open-folder-bg: #10283d;
             --explorer-open-folder-border: #2a5b83;
             --explorer-open-folder-hover-bg: #17456b;
+            /* File-type icon tints (ISSUE-2026-024); centralized like the git
+               lanes so tree/Git rows stay token-driven, not inline literals. */
+            --explorer-icon-code: #6cb6ff;
+            --explorer-icon-shell: #7ee787;
+            --explorer-icon-data: #e3b341;
+            --explorer-icon-markup: #f0883e;
+            --explorer-icon-style: #d2a8ff;
+            --explorer-icon-markdown: #79c0ff;
+            --explorer-icon-config: #a3b1c2;
+            --explorer-icon-sql: #56d4dd;
+            --explorer-icon-log: #f778ba;
         }
 
         [data-theme="light"],
@@ -208,6 +219,15 @@
             --explorer-open-folder-bg: #e5f2ff;
             --explorer-open-folder-border: #9dc9ee;
             --explorer-open-folder-hover-bg: #cee6fb;
+            --explorer-icon-code: #0969da;
+            --explorer-icon-shell: #1a7f37;
+            --explorer-icon-data: #9a6700;
+            --explorer-icon-markup: #bc4c00;
+            --explorer-icon-style: #8250df;
+            --explorer-icon-markdown: #0550ae;
+            --explorer-icon-config: #57606a;
+            --explorer-icon-sql: #0f7c8a;
+            --explorer-icon-log: #bf3989;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1871,6 +1891,20 @@
             color: var(--explorer-file);
         }
 
+        /* Type-aware tints (ISSUE-2026-024). Placed after `.explorer-icon.file`
+           so equal-specificity type rules win; unknown types keep the base
+           `--explorer-file` color via the `doc` glyph. */
+        .explorer-icon.type-code { color: var(--explorer-icon-code); }
+        .explorer-icon.type-shell { color: var(--explorer-icon-shell); }
+        .explorer-icon.type-data { color: var(--explorer-icon-data); }
+        .explorer-icon.type-markup { color: var(--explorer-icon-markup); }
+        .explorer-icon.type-style { color: var(--explorer-icon-style); }
+        .explorer-icon.type-markdown { color: var(--explorer-icon-markdown); }
+        .explorer-icon.type-config { color: var(--explorer-icon-config); }
+        .explorer-icon.type-sql { color: var(--explorer-icon-sql); }
+        .explorer-icon.type-log { color: var(--explorer-icon-log); }
+        .explorer-icon.type-doc { color: var(--explorer-file); }
+
         .explorer-git-badge {
             display: inline-flex;
             align-items: center;
@@ -2086,6 +2120,30 @@
         .explorer-git-unstage-btn:hover,
         .explorer-git-unstage-btn:focus-visible {
             background: var(--explorer-open-folder-hover-bg);
+            outline: none;
+        }
+
+        .explorer-git-revert-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            border-color: var(--explorer-open-folder-border);
+            background: var(--explorer-open-folder-bg);
+            color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-git-revert-btn .explorer-btn-icon {
+            width: 14px;
+            height: 14px;
+            display: block;
+        }
+
+        .explorer-git-revert-btn:hover,
+        .explorer-git-revert-btn:focus-visible {
+            background: var(--explorer-open-folder-hover-bg);
+            color: var(--gv-danger);
             outline: none;
         }
 
@@ -2455,12 +2513,22 @@
 
         .explorer-diff-commit-file {
             display: grid;
-            grid-template-columns: 22px minmax(0, 1fr) auto;
+            grid-template-columns: 22px 18px minmax(0, 1fr) auto;
             align-items: center;
             gap: 6px;
             padding: 4px 10px 4px 7px;
             font: inherit;
             font-size: .7rem;
+        }
+
+        .explorer-diff-commit-file .explorer-icon {
+            width: 18px;
+            height: 18px;
+        }
+
+        .explorer-diff-commit-file .explorer-icon svg {
+            width: 15px;
+            height: 15px;
         }
 
         button.explorer-diff-commit-file {
@@ -2870,6 +2938,36 @@
         }
         #term-ctx-menu button:hover { background: var(--t-ctx-hover); }
         #term-ctx-menu button .shortcut { color: var(--t-text-muted); font-size: .76rem; }
+
+        /* Explorer copy-path context menu (ISSUE-2026-028). */
+        #explorer-ctx-menu {
+            position: fixed;
+            z-index: 9999;
+            background: var(--t-ctx-bg);
+            border: 1px solid var(--t-ctx-border);
+            border-radius: 6px;
+            padding: 4px 0;
+            min-width: 158px;
+            box-shadow: 0 4px 18px rgba(0, 0, 0, .6);
+            font-size: .82rem;
+        }
+        #explorer-ctx-menu button {
+            display: block;
+            width: 100%;
+            padding: 7px 14px;
+            background: none;
+            border: none;
+            color: var(--t-text);
+            text-align: left;
+            cursor: pointer;
+            white-space: nowrap;
+            font: inherit;
+        }
+        #explorer-ctx-menu button:hover,
+        #explorer-ctx-menu button:focus-visible {
+            background: var(--t-ctx-hover);
+            outline: none;
+        }
 
         /* placeholder states */
         .placeholder {

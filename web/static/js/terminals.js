@@ -344,6 +344,7 @@
     let savedSessionResolver = null;
     let saveSessionAsResolver = null;
     let closeSessionConfirmResolver = null;
+    let genericConfirmResolver = null;
     const MAX_SPLIT_TERMINALS = Math.min(8, Number(MAX_SESSIONS || 8));
     const MIN_SPLIT_COLS = 8;
     const MIN_SPLIT_ROWS = 8;
@@ -1092,6 +1093,48 @@
         });
     }
 
+    function closeGenericConfirmModal(result = false) {
+        const modal = document.getElementById('genericConfirmModal');
+        if (!modal) {
+            return;
+        }
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+        if (genericConfirmResolver) {
+            const resolver = genericConfirmResolver;
+            genericConfirmResolver = null;
+            resolver(result);
+        }
+    }
+
+    /* Reusable in-page confirm shell for irreversible actions (WebView2 blocks
+       window.confirm). Resolves true on accept, false on cancel/dismiss. */
+    function openGenericConfirmModal({ title = 'Are you sure?', copy = '', note = '', confirmLabel = 'Confirm', danger = false } = {}) {
+        const modal = document.getElementById('genericConfirmModal');
+        if (!modal) {
+            return Promise.resolve(false);
+        }
+        closeGenericConfirmModal(false);
+        document.getElementById('genericConfirmTitle').textContent = title;
+        document.getElementById('genericConfirmCopy').textContent = copy;
+        const noteEl = document.getElementById('genericConfirmNote');
+        noteEl.textContent = note || '';
+        noteEl.hidden = !note;
+        const acceptButton = document.getElementById('genericConfirmAccept');
+        acceptButton.textContent = confirmLabel;
+        acceptButton.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`;
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            document.getElementById('genericConfirmCancel').focus();
+        }, 0);
+
+        return new Promise(resolve => {
+            genericConfirmResolver = resolve;
+        });
+    }
+
     /* One misclick on a tab's × must not silently kill live terminals
        (sessions are memory-only), so closing a group with ≥1 connected
        terminal asks first. Dead groups close without the dialog. */
@@ -1318,6 +1361,20 @@
         closeCloseSessionConfirmModal(true);
     });
 
+    document.getElementById('genericConfirmModal').addEventListener('click', event => {
+        if (event.target.id === 'genericConfirmModal') {
+            closeGenericConfirmModal(false);
+        }
+    });
+
+    document.getElementById('genericConfirmCancel').addEventListener('click', () => {
+        closeGenericConfirmModal(false);
+    });
+
+    document.getElementById('genericConfirmAccept').addEventListener('click', () => {
+        closeGenericConfirmModal(true);
+    });
+
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             closeSessionsMenu();
@@ -1329,6 +1386,9 @@
             }
             if (document.getElementById('closeSessionConfirmModal').classList.contains('visible')) {
                 closeCloseSessionConfirmModal(false);
+            }
+            if (document.getElementById('genericConfirmModal').classList.contains('visible')) {
+                closeGenericConfirmModal(false);
             }
         }
     });
@@ -7517,6 +7577,73 @@
         return explorerPathExtension(path) === '.txt' ? 'Text file' : 'Text file';
     }
 
+    /* Reuse the existing language classifiers to pick a compact leading icon for
+       tree and Git rows. Categories map to token-driven colors + a distinct
+       stroke glyph so mixed file lists are quick to scan; unknown types fall
+       back to the plain document glyph. */
+    const EXPLORER_FILE_ICON_CATEGORY_BY_LANGUAGE = Object.freeze({
+        javascript: 'code',
+        typescript: 'code',
+        python: 'code',
+        ruby: 'code',
+        go: 'code',
+        rust: 'code',
+        java: 'code',
+        c: 'code',
+        cpp: 'code',
+        csharp: 'code',
+        php: 'code',
+        swift: 'code',
+        kotlin: 'code',
+        lua: 'code',
+        shell: 'shell',
+        powershell: 'shell',
+        batch: 'shell',
+        json: 'data',
+        jsonl: 'data',
+        yaml: 'data',
+        toml: 'data',
+        ini: 'data',
+        html: 'markup',
+        xml: 'markup',
+        css: 'style',
+        markdown: 'markdown',
+        config: 'config',
+        dotenv: 'config',
+        gitignore: 'config',
+        dockerfile: 'config',
+        makefile: 'config',
+        sql: 'sql',
+        log: 'log',
+        text: 'doc'
+    });
+
+    const EXPLORER_FILE_ICON_GLYPHS = Object.freeze({
+        doc: '<path d="M6 3.5h7.2L18.5 8.8V19.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z"/><path d="M12.8 3.6V8a1 1 0 0 0 1 1h4"/><path d="M8 13h6"/><path d="M8 16h6"/>',
+        code: '<path d="M9.3 8.5 6 12l3.3 3.5"/><path d="M14.7 8.5 18 12l-3.3 3.5"/><path d="M13.2 6.5 10.8 17.5"/>',
+        shell: '<rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M7 9.8 9.6 12 7 14.2"/><path d="M12.5 14.5h4.5"/>',
+        data: '<path d="M10.2 4.8c-2 0-2.4 1.2-2.4 3S7.4 11 6 12c1.4 1 1.8 1.4 1.8 3.2s.4 4 2.4 4"/><path d="M13.8 4.8c2 0 2.4 1.2 2.4 3S16.6 11 18 12c-1.4 1-1.8 1.4-1.8 3.2s-.4 4-2.4 4"/>',
+        markup: '<path d="M9 8 4.5 12 9 16"/><path d="M15 8 19.5 12 15 16"/>',
+        style: '<path d="M9.8 4.5 7.8 19.5"/><path d="M16.2 4.5 14.2 19.5"/><path d="M5.5 9.2h13"/><path d="M5 14.8h13"/>',
+        markdown: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M6.5 15V9l2.6 3 2.6-3v6"/><path d="M15.6 9v4.4"/><path d="M13.9 12.1 15.6 14l1.7-1.9"/>',
+        config: '<circle cx="12" cy="12" r="3"/><path d="M12 4v2.2M12 17.8V20M4 12h2.2M17.8 12H20M6.3 6.3l1.6 1.6M16.1 16.1l1.6 1.6M17.7 6.3l-1.6 1.6M7.9 16.1l-1.6 1.6"/>',
+        sql: '<ellipse cx="12" cy="6" rx="6.3" ry="2.5"/><path d="M5.7 6v6c0 1.4 2.8 2.5 6.3 2.5s6.3-1.1 6.3-2.5V6"/><path d="M5.7 12v6c0 1.4 2.8 2.5 6.3 2.5s6.3-1.1 6.3-2.5v-6"/>',
+        log: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M7.5 9h2M7.5 12h2M7.5 15h2"/><path d="M12 9h4.5M12 12h4.5M12 15h3"/>'
+    });
+
+    function explorerFileTypeCategory(path, language = '') {
+        const detected = normalizeExplorerLanguage(language) || explorerCodeLanguage(path);
+        return EXPLORER_FILE_ICON_CATEGORY_BY_LANGUAGE[detected] || 'doc';
+    }
+
+    function explorerFileTypeIconHtml(path, language = '') {
+        const category = explorerFileTypeCategory(path, language);
+        const glyph = EXPLORER_FILE_ICON_GLYPHS[category] || EXPLORER_FILE_ICON_GLYPHS.doc;
+        return `<span class="explorer-icon file type-${category}" aria-hidden="true">`
+            + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" '
+            + `stroke-linecap="round" stroke-linejoin="round" focusable="false">${glyph}</svg></span>`;
+    }
+
     function explorerFileMetaParts(data, fileType) {
         const size = formatExplorerSize(data.size) || 'Unknown size';
         const modified = formatExplorerDate(data.modified);
@@ -7919,8 +8046,8 @@
         summary.title = git?.error || (git?.repo_root || text);
     }
 
-    function explorerDiffCacheKey(path, commit) {
-        return `${String(path || '')}\n${String(commit || '')}`;
+    function explorerDiffCacheKey(path, commit, mode = '') {
+        return `${String(path || '')}\n${String(commit || '')}\n${String(mode || '')}`;
     }
 
     function explorerDiffSidebarStatusHtml(git) {
@@ -7933,11 +8060,15 @@
         return slashIndex > 0 ? cleaned.slice(0, slashIndex) : '';
     }
 
-    function explorerGitOpenFile(index, path) {
+    function explorerGitOpenFile(index, path, diffMode = 'worktree') {
         if (!path) {
             return;
         }
-        openExplorerFile(index, path);
+        // Changed-file rows jump straight to the diff view (ISSUE-2026-023).
+        // 'worktree' shows unstaged hunks, 'staged' shows the indexed hunks, so
+        // a partially staged file never surfaces the other section's changes.
+        const mode = diffMode === 'staged' ? 'staged' : 'worktree';
+        openExplorerFile(index, path, { openDiff: true, diffMode: mode });
     }
 
     async function explorerGitOpenCommitDiff(index, path, commit) {
@@ -8031,6 +8162,13 @@
         return { staged, unstaged };
     }
 
+    function explorerGitCanRevert(status) {
+        // Only tracked worktree changes can be discarded with git restore;
+        // untracked and conflicted files are intentionally excluded so nothing
+        // is silently deleted or overwritten (ISSUE-2026-018).
+        return ['modified', 'deleted', 'renamed'].includes(status || '');
+    }
+
     function renderExplorerGitFileRows(index, files, options = {}) {
         const entries = Array.isArray(files) ? files : [];
         if (!entries.length) {
@@ -8038,22 +8176,31 @@
         }
         const commitHash = options.commitHash || '';
         const action = options.action || '';
+        // Staged rows diff against HEAD (index hunks); everything else shows the
+        // worktree hunks so a partially staged file never leaks the wrong side.
+        const diffMode = action === 'unstage' ? 'staged' : 'worktree';
         return entries.map(file => {
             const path = file.path || file.repo_path || '';
+            const status = (file.git && file.git.status) || '';
             const pathAction = commitHash
                 ? `data-explorer-git-open-commit-diff="${escHtml(path)}" data-explorer-git-commit="${escHtml(commitHash)}"`
-                : `data-explorer-git-open-file="${escHtml(path)}"`;
+                : `data-explorer-git-open-file="${escHtml(path)}" data-explorer-git-diff-mode="${escHtml(diffMode)}"`;
             let actionButton = '';
             if (action === 'stage') {
                 actionButton = `<button type="button" class="explorer-search-btn explorer-git-stage-btn" data-explorer-git-stage="${escHtml(path)}" title="Stage changes" aria-label="Stage changes">+</button>`;
             } else if (action === 'unstage') {
                 actionButton = `<button type="button" class="explorer-search-btn explorer-git-unstage-btn" data-explorer-git-unstage="${escHtml(path)}" title="Unstage changes" aria-label="Unstage changes">−</button>`;
             }
+            const revertButton = (action === 'stage' && explorerGitCanRevert(status))
+                ? `<button type="button" class="explorer-search-btn explorer-git-revert-btn" data-explorer-git-revert="${escHtml(path)}" title="Discard changes (revert)" aria-label="Discard changes (revert)">${EXPLORER_GIT_REVERT_ICON}</button>`
+                : '';
             return `
-                <div class="explorer-diff-commit-file" title="${escHtml(path)}">
+                <div class="explorer-diff-commit-file" title="${escHtml(path)}" data-explorer-copy-path="${escHtml(path)}">
                     ${explorerDiffSidebarStatusHtml(file.git)}
+                    ${explorerFileTypeIconHtml(path)}
                     <button type="button" class="explorer-diff-commit-file-path" ${pathAction}>${escHtml(path || file.name || 'Changed file')}</button>
                     <span class="explorer-diff-commit-file-actions">
+                        ${revertButton}
                         ${actionButton}
                         <button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">↪</button>
                     </span>
@@ -8062,12 +8209,139 @@
         }).join('');
     }
 
+    /* ─────────────────────────────────────────────
+       Explorer copy-path context menu (ISSUE-2026-028)
+       Delegated on the tree + Git panels so right-clicking any file row offers
+       an in-page (WebView2-safe) Copy path / Copy relative path menu. Copy is a
+       read, so this stays inside the read-only explorer contract.
+    ───────────────────────────────────────────── */
+    function explorerRootDirectory(index) {
+        const session = terminals[index]?._session || {};
+        return session.explorer_root_directory || session.directory || '';
+    }
+
+    function explorerJoinRootPath(root, relativePath) {
+        const rel = String(relativePath || '').replace(/^[\\/]+/, '');
+        const base = String(root || '');
+        if (!base) {
+            return rel;
+        }
+        // Match the root's separator style so a copied Windows path is not
+        // mangled with forward slashes (and remote/POSIX roots stay POSIX).
+        const usesBackslash = base.includes('\\') && !base.includes('/');
+        const separator = usesBackslash ? '\\' : '/';
+        const trimmedBase = base.replace(/[\\/]+$/, '') || base;
+        if (!rel) {
+            return trimmedBase;
+        }
+        const nativeRel = usesBackslash ? rel.replace(/\//g, '\\') : rel.replace(/\\/g, '/');
+        return `${trimmedBase}${separator}${nativeRel}`;
+    }
+
+    function dismissExplorerContextMenu() {
+        document.getElementById('explorer-ctx-menu')?.remove();
+        document.removeEventListener('keydown', _explorerContextMenuKeydown, true);
+        document.removeEventListener('mousedown', _explorerContextMenuOutside, true);
+    }
+
+    function _explorerContextMenuOutside(event) {
+        const menu = document.getElementById('explorer-ctx-menu');
+        if (!menu || !menu.contains(event.target)) {
+            dismissExplorerContextMenu();
+        }
+    }
+
+    function _explorerContextMenuKeydown(event) {
+        const menu = document.getElementById('explorer-ctx-menu');
+        if (!menu) {
+            return;
+        }
+        const items = Array.from(menu.querySelectorAll('button'));
+        if (!items.length) {
+            return;
+        }
+        const currentIndex = items.indexOf(document.activeElement);
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            dismissExplorerContextMenu();
+        } else if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            items[(currentIndex + 1) % items.length].focus();
+        } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            items[(currentIndex - 1 + items.length) % items.length].focus();
+        } else if (event.key === 'Tab') {
+            event.preventDefault();
+        }
+    }
+
+    function showExplorerContextMenu(x, y, items) {
+        dismissExplorerContextMenu();
+        const menu = document.createElement('div');
+        menu.id = 'explorer-ctx-menu';
+        menu.setAttribute('role', 'menu');
+        items.forEach(({ label, action }) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.setAttribute('role', 'menuitem');
+            button.textContent = label;
+            button.addEventListener('click', () => {
+                action();
+                dismissExplorerContextMenu();
+            });
+            menu.appendChild(button);
+        });
+        menu.style.visibility = 'hidden';
+        document.body.appendChild(menu);
+
+        const rect = menu.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        menu.style.left = `${Math.max(8, Math.min(x, vw - rect.width - 8))}px`;
+        menu.style.top = `${Math.max(8, Math.min(y, vh - rect.height - 8))}px`;
+        menu.style.visibility = 'visible';
+        menu.querySelector('button')?.focus();
+
+        // Defer the outside-dismiss listener so the opening interaction does not
+        // immediately close the menu.
+        window.setTimeout(() => {
+            document.addEventListener('mousedown', _explorerContextMenuOutside, true);
+        }, 0);
+        document.addEventListener('keydown', _explorerContextMenuKeydown, true);
+    }
+
+    function handleExplorerCopyPathMenu(event, index) {
+        const row = event.target.closest('[data-explorer-copy-path]');
+        if (!row) {
+            return;
+        }
+        event.preventDefault();
+        const relativePath = row.dataset.explorerCopyPath || '';
+        const absolutePath = explorerJoinRootPath(explorerRootDirectory(index), relativePath);
+        const items = [
+            { label: 'Copy path', action: () => _copyText(absolutePath || relativePath) },
+        ];
+        if (relativePath) {
+            items.push({ label: 'Copy relative path', action: () => _copyText(relativePath) });
+        }
+        showExplorerContextMenu(event.clientX, event.clientY, items);
+    }
+
+    function wireExplorerCopyPathMenu(panel, index) {
+        if (!panel || panel.dataset.copyPathMenuWired === 'true') {
+            return;
+        }
+        panel.dataset.copyPathMenuWired = 'true';
+        panel.addEventListener('contextmenu', event => handleExplorerCopyPathMenu(event, index));
+    }
+
     function renderExplorerGitPanel(index) {
         const pane = terminals[index];
         const panel = document.getElementById(`explorer-git-panel-${index}`);
         if (!pane || !panel) {
             return;
         }
+        wireExplorerCopyPathMenu(panel, index);
         if (pane._explorerGitRepoLoading) {
             panel.innerHTML = '<div class="explorer-diff-sidebar-empty">Loading repository...</div>';
             return;
@@ -8151,6 +8425,12 @@
                 explorerGitUnstageFile(index, button.dataset.explorerGitUnstage || '');
             });
         });
+        panel.querySelectorAll('[data-explorer-git-revert]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                explorerGitRevertFile(index, button.dataset.explorerGitRevert || '');
+            });
+        });
         const publishButton = panel.querySelector('[data-explorer-git-publish]');
         if (publishButton) {
             publishButton.addEventListener('click', () => explorerGitPublish(index));
@@ -8161,7 +8441,11 @@
         }
         panel.querySelectorAll('[data-explorer-git-open-file]').forEach(button => {
             button.addEventListener('click', () => {
-                explorerGitOpenFile(index, button.dataset.explorerGitOpenFile || '');
+                explorerGitOpenFile(
+                    index,
+                    button.dataset.explorerGitOpenFile || '',
+                    button.dataset.explorerGitDiffMode || 'worktree',
+                );
             });
         });
         panel.querySelectorAll('[data-explorer-git-open-commit-diff]').forEach(button => {
@@ -8500,10 +8784,10 @@
             : '';
 
         return `
-            <div class="explorer-tree-row${active ? ' active' : ''}">
+            <div class="explorer-tree-row${active ? ' active' : ''}" data-explorer-copy-path="${escHtml(path)}">
                 <button type="button" class="explorer-tree-main" ${action} style="padding-left:${7 + depth * EXPLORER_TREE_INDENT_PX}px" title="${escHtml(path)}">
                     <span class="explorer-tree-chevron" aria-hidden="true">${chevron}</span>
-                    ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
+                    ${isDirectory ? EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(entry.name || path)}
                     <span class="explorer-tree-name">${escHtml(entry.name || path)}</span>
                 </button>
                 ${badge}
@@ -8546,6 +8830,7 @@
         if (!pane || !panel) {
             return;
         }
+        wireExplorerCopyPathMenu(panel, index);
 
         ensureExplorerTreeState(pane);
         panel.innerHTML = `
@@ -8733,6 +9018,32 @@
         performExplorerGitAction(index, 'unstage', { path });
     }
 
+    /* Discarding working-tree edits is irreversible, so it goes through the
+       in-page confirm shell (WebView2 blocks window.confirm) before the
+       narrow git-restore route runs; a reverted open file reloads in place. */
+    async function explorerGitRevertFile(index, path) {
+        if (!path) {
+            return;
+        }
+        const confirmed = await openGenericConfirmModal({
+            title: 'Discard changes?',
+            copy: `Discard the unstaged changes in "${path}"?`,
+            note: 'This unstaged edit will be lost. Any staged version of the file is kept.',
+            confirmLabel: 'Discard changes',
+            danger: true,
+        });
+        if (!confirmed) {
+            return;
+        }
+        const reverted = await performExplorerGitAction(index, 'revert', { path });
+        if (reverted) {
+            const pane = terminals[index];
+            if (pane && pane._explorerMode === 'file' && pane._explorerFilePath === path) {
+                await openExplorerFile(index, path, { showLoading: false, preserveScroll: true });
+            }
+        }
+    }
+
     async function explorerGitCommit(index) {
         const pane = terminals[index];
         if (!pane) {
@@ -8911,7 +9222,11 @@
         const code = document.getElementById(`explorer-diff-code-${index}`);
         const diffPath = pane?._explorerFilePath || '';
         const commit = pane?._explorerDiffCommit || '';
-        const cacheKey = explorerDiffCacheKey(diffPath, commit);
+        // Changed-file rows request a section-specific diff (worktree vs staged)
+        // so a partially staged file never shows the other section's hunks;
+        // commit-history rows and legacy callers fall back to the HEAD diff.
+        const diffMode = commit ? 'commit' : (pane?._explorerDiffMode || 'head');
+        const cacheKey = explorerDiffCacheKey(diffPath, commit, diffMode);
         if (!pane || !sessionId || !diffPath || !code) {
             renderExplorerDiff(index);
             return;
@@ -8925,7 +9240,7 @@
         try {
             const params = new URLSearchParams({
                 path: diffPath,
-                mode: commit ? 'commit' : 'head'
+                mode: diffMode
             });
             if (commit) {
                 params.set('commit', commit);
@@ -9461,7 +9776,7 @@
                 data-explorer-path="${escHtml(entry.path || '')}"
                 ${isDeleted ? 'disabled' : ''}
             >
-                ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
+                ${isDirectory ? EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(name || entry.path)}
                 ${explorerGitBadgeHtml(entry.git)}
                 <span class="explorer-name">${explorerMarkedEscHtml(name, 0, nameRanges)}</span>
                 <span class="explorer-meta">${escHtml(size)}</span>
@@ -9924,14 +10239,6 @@
         </span>
     `;
 
-    const EXPLORER_FILE_ICON = `
-        <span class="explorer-icon file" aria-hidden="true">
-            <svg viewBox="0 0 24 24" focusable="false">
-                <path fill="currentColor" d="M6.75 3A2.75 2.75 0 0 0 4 5.75v12.5A2.75 2.75 0 0 0 6.75 21h10.5A2.75 2.75 0 0 0 20 18.25V8.62a2.75 2.75 0 0 0-.8-1.94L16.32 3.8A2.75 2.75 0 0 0 14.38 3H6.75ZM5.5 5.75c0-.69.56-1.25 1.25-1.25H14V8c0 1.1.9 2 2 2h2.5v8.25c0 .69-.56 1.25-1.25 1.25H6.75c-.69 0-1.25-.56-1.25-1.25V5.75Zm10 0 1.94 1.94c.23.23.4.5.49.81H16a.5.5 0 0 1-.5-.5V5.75Z"/>
-            </svg>
-        </span>
-    `;
-
     const EXPLORER_TREE_TOGGLE_ICON = `
         <svg class="explorer-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
             fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -9952,6 +10259,14 @@
             <circle cx="18.5" cy="5" r="2.25"/>
             <path d="M5.5 7.25v9.5"/>
             <path d="M18.5 7.25v1.5a4 4 0 0 1-4 4h-5a4 4 0 0 0-4 4"/>
+        </svg>
+    `;
+
+    const EXPLORER_GIT_REVERT_ICON = `
+        <svg class="explorer-btn-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+            fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 5.5v4.5h4.5"/>
+            <path d="M5.4 13.5a7 7 0 1 0 1.7-6.4L5 10"/>
         </svg>
     `;
 
@@ -10017,7 +10332,7 @@
         return String(fullPath || '').split(/[\\/]/).pop() || '';
     }
 
-    function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '' } = {}) {
+    function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '', diffMode = '' } = {}) {
         const pane = terminals[index];
         const list = document.getElementById(`explorer-list-${index}`);
         if (!pane || !list) {
@@ -10030,13 +10345,19 @@
         const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
         const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
         const requestedDiffCommit = String(diffCommit || '');
+        const requestedDiffMode = requestedDiffCommit ? '' : String(diffMode || '');
         const hasGitDiff = explorerHasGitDiff(data.git) || Boolean(requestedDiffCommit);
         const metaParts = explorerFileMetaParts(data, fileType);
         const previousPath = pane._explorerFilePath || '';
         const keepDiffSplit = hasGitDiff && (
             Boolean(openDiff)
             || Boolean(requestedDiffCommit)
-            || (previousPath === path && pane._explorerDiffSplit && pane._explorerDiffCommit === requestedDiffCommit)
+            || (
+                previousPath === path
+                && pane._explorerDiffSplit
+                && pane._explorerDiffCommit === requestedDiffCommit
+                && (pane._explorerDiffMode || '') === requestedDiffMode
+            )
         );
         const initialFileView = keepDiffSplit ? 'diff' : 'source';
         const searchState = ensureExplorerSearchState(pane, 'file');
@@ -10067,6 +10388,7 @@
         pane._explorerDiffContent = '';
         pane._explorerDiffSplit = keepDiffSplit;
         pane._explorerDiffCommit = requestedDiffCommit;
+        pane._explorerDiffMode = requestedDiffMode;
         pane._explorerLastFileView = pane._explorerLastFileView === 'preview' && hasPreview ? 'preview' : 'source';
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
@@ -10264,6 +10586,7 @@
         pane._explorerDiffContent = '';
         pane._explorerDiffSplit = true;
         pane._explorerDiffCommit = commit;
+        pane._explorerDiffMode = '';
         pane._explorerLastFileView = 'source';
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
@@ -10328,7 +10651,7 @@
         return true;
     }
 
-    async function openExplorerFile(index, path, { showLoading = true, preserveScroll = false, openDiff = false, diffCommit = '' } = {}) {
+    async function openExplorerFile(index, path, { showLoading = true, preserveScroll = false, openDiff = false, diffCommit = '', diffMode = '' } = {}) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !isExplorerSession(pane._session) || !sessionId || !path) {
@@ -10356,7 +10679,7 @@
             ) {
                 return true;
             }
-            const rendered = renderExplorerFile(index, data, { scrollState, openDiff, diffCommit });
+            const rendered = renderExplorerFile(index, data, { scrollState, openDiff, diffCommit, diffMode });
             if (rendered) {
                 revealExplorerTreePath(index);
             }

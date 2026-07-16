@@ -988,7 +988,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorer-diff-split", html)
         self.assertIn("split-diff", html)
         self.assertIn("new URLSearchParams({", html)
-        self.assertIn("mode: commit ? 'commit' : 'head'", html)
+        self.assertIn("const diffMode = commit ? 'commit' : (pane?._explorerDiffMode || 'head');", html)
+        self.assertIn("mode: diffMode", html)
         self.assertIn("params.set('commit', commit);", html)
         self.assertIn("${explorerGitBadgeHtml(entry.git)}", html)
         self.assertIn("data-explorer-git-stage", html)
@@ -3171,6 +3172,230 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("inside the configured root", response.get_json()["error"])
+
+    def _init_committed_repo(self, name: str = "repo") -> Path:
+        repo_dir = Path(self.temp_dir.name) / name
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        return repo_dir
+
+    def test_explorer_git_diff_distinguishes_worktree_and_staged(self):
+        # ISSUE-2026-023: a partially staged file must expose its worktree hunks
+        # and its staged hunks separately, never mixed.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nSTAGED\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        readme.write_text("# Project\nSTAGED\nWORKTREE\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        worktree = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "worktree"},
+        )
+        staged = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "staged"},
+        )
+
+        self.assertEqual(worktree.status_code, 200)
+        self.assertEqual(staged.status_code, 200)
+        worktree_payload = worktree.get_json()
+        staged_payload = staged.get_json()
+        self.assertEqual(worktree_payload["mode"], "worktree")
+        self.assertIn("+WORKTREE", worktree_payload["diff"])
+        self.assertNotIn("+STAGED", worktree_payload["diff"])
+        self.assertEqual(staged_payload["mode"], "staged")
+        self.assertIn("+STAGED", staged_payload["diff"])
+        self.assertNotIn("+WORKTREE", staged_payload["diff"])
+
+    def test_explorer_git_revert_discards_worktree_changes(self):
+        # ISSUE-2026-018: discard an unstaged tracked edit.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\n\nunwanted\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "README.md"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\n")
+        paths = {change["path"] for change in response.get_json()["changes"]}
+        self.assertNotIn("README.md", paths)
+
+    def test_explorer_git_revert_preserves_staged_version(self):
+        # ISSUE-2026-018: reverting a partially staged file keeps its staged copy
+        # and only discards the later worktree edit.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nSTAGED\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        readme.write_text("# Project\nSTAGED\nWORKTREE\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "README.md"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\nSTAGED\n")
+        changes = {change["path"]: change for change in response.get_json()["changes"]}
+        self.assertEqual(changes["README.md"]["git"]["index_status"], "M")
+        self.assertEqual(changes["README.md"]["git"]["worktree_status"], ".")
+
+    def test_explorer_git_revert_restores_deleted_tracked_file(self):
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.unlink()
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "README.md"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(readme.exists())
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\n")
+
+    def test_explorer_git_revert_rejects_untracked_file(self):
+        repo_dir = self._init_committed_repo()
+        untracked = repo_dir / "scratch.txt"
+        untracked.write_text("keep me\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "scratch.txt"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("untracked", response.get_json()["error"].lower())
+        self.assertTrue(untracked.exists())
+
+    def test_explorer_git_revert_rejects_staged_only_file(self):
+        # Worktree already matches the index: nothing to discard, and staged
+        # content must never be touched.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nSTAGED\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "README.md"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no unstaged changes", response.get_json()["error"].lower())
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\nSTAGED\n")
+
+    def test_explorer_git_revert_rejects_path_outside_root(self):
+        repo_dir = self._init_committed_repo()
+        outside_file = Path(self.temp_dir.name) / "outside.txt"
+        outside_file.write_text("secret\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "../outside.txt"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("inside the configured root", response.get_json()["error"])
+        self.assertTrue(outside_file.exists())
+
+    def test_terminals_page_explorer_file_type_icons_are_present(self):
+        # ISSUE-2026-024
+        response = self.client.get("/terminals")
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function explorerFileTypeIconHtml(path, language", html)
+        self.assertIn("function explorerFileTypeCategory(path, language", html)
+        self.assertIn("EXPLORER_FILE_ICON_CATEGORY_BY_LANGUAGE", html)
+        self.assertIn("EXPLORER_FILE_ICON_GLYPHS", html)
+        self.assertIn('class="explorer-icon file type-${category}" aria-hidden="true"', html)
+        self.assertIn("|| EXPLORER_FILE_ICON_GLYPHS.doc", html)
+        # Rendered in the tree, Git and directory renderers.
+        self.assertIn("EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(entry.name || path)", html)
+        self.assertIn("EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(name || entry.path)", html)
+        self.assertIn("${explorerFileTypeIconHtml(path)}", html)
+        # Icon precedes the Git file name.
+        self.assertLess(
+            html.index("${explorerFileTypeIconHtml(path)}"),
+            html.index('class="explorer-diff-commit-file-path"'),
+        )
+        # Token-driven tints, no inline palette literals.
+        self.assertIn(".explorer-icon.type-code { color: var(--explorer-icon-code); }", html)
+        self.assertIn(".explorer-icon.type-doc { color: var(--explorer-file); }", html)
+        self.assertIn("--explorer-icon-code:", html)
+        self.assertIn("--explorer-icon-data:", html)
+
+    def test_terminals_page_explorer_copy_path_menu_is_present(self):
+        # ISSUE-2026-028
+        response = self.client.get("/terminals")
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("data-explorer-copy-path", html)
+        self.assertIn("function wireExplorerCopyPathMenu(panel, index)", html)
+        self.assertIn("function handleExplorerCopyPathMenu(event, index)", html)
+        self.assertIn("function showExplorerContextMenu(x, y, items)", html)
+        self.assertIn("function explorerJoinRootPath(root, relativePath)", html)
+        self.assertIn("label: 'Copy path'", html)
+        self.assertIn("label: 'Copy relative path'", html)
+        self.assertIn("_copyText(absolutePath || relativePath)", html)
+        self.assertIn("_copyText(relativePath)", html)
+        self.assertIn("function dismissExplorerContextMenu()", html)
+        self.assertIn("_explorerContextMenuKeydown", html)
+        self.assertIn("event.key === 'ArrowDown'", html)
+        self.assertIn("wireExplorerCopyPathMenu(panel, index);", html)
+        self.assertIn("#explorer-ctx-menu", html)
+
+    def test_terminals_page_explorer_git_rows_open_diff_view(self):
+        # ISSUE-2026-023
+        response = self.client.get("/terminals")
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function explorerGitOpenFile(index, path, diffMode = 'worktree')", html)
+        self.assertIn("openExplorerFile(index, path, { openDiff: true, diffMode: mode });", html)
+        self.assertIn("data-explorer-git-diff-mode", html)
+        self.assertIn("const diffMode = action === 'unstage' ? 'staged' : 'worktree';", html)
+        self.assertIn("button.dataset.explorerGitDiffMode || 'worktree'", html)
+        # Diff-mode is threaded through the shared open path.
+        self.assertIn("pane._explorerDiffMode = requestedDiffMode;", html)
+        self.assertIn("const diffMode = commit ? 'commit' : (pane?._explorerDiffMode || 'head');", html)
+        # Commit-history rows keep their own diff path; action buttons stay isolated.
+        self.assertIn("async function explorerGitOpenCommitDiff(index, path, commit)", html)
+        self.assertIn("explorerGitStageFile(index, button.dataset.explorerGitStage || '');", html)
+
+    def test_terminals_page_explorer_git_revert_controls_are_present(self):
+        # ISSUE-2026-018
+        response = self.client.get("/terminals")
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("data-explorer-git-revert", html)
+        self.assertIn("explorer-git-revert-btn", html)
+        self.assertIn("function explorerGitCanRevert(status)", html)
+        self.assertIn("['modified', 'deleted', 'renamed'].includes(status", html)
+        self.assertIn("action === 'stage' && explorerGitCanRevert(status)", html)
+        self.assertIn("async function explorerGitRevertFile(index, path)", html)
+        self.assertIn("explorerGitRevertFile(index, button.dataset.explorerGitRevert || '');", html)
+        self.assertIn("performExplorerGitAction(index, 'revert', { path })", html)
+        # Irreversible action uses the in-page confirm shell, not window.confirm.
+        self.assertIn("function openGenericConfirmModal(", html)
+        self.assertIn('id="genericConfirmModal"', html)
+        self.assertIn("title: 'Discard changes?'", html)
+        self.assertIn(".explorer-git-revert-btn", html)
 
     def test_parse_git_graph_log_skips_connector_only_lines(self):
         commits = web_explorer._parse_git_graph_log(

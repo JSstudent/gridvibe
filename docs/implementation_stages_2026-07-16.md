@@ -16,7 +16,7 @@ depend on them. Within a stage, issues share files and can be built together.
 
 | Stage | Theme | Issues |
 | --- | --- | --- |
-| 1 | Explorer tree rows & Git sidebar | 024, 028, 023, 018 |
+| 1 ✅ | Explorer tree rows & Git sidebar (**done 2026-07-16**) | 024, 028, 023, 018 |
 | 2 | Explorer tabbed file viewer (foundational) | 014, 016, 015 |
 | 3 | Markdown preview presentation | 017, 030 |
 | 4 | Explorer large-file / log preview | 020 |
@@ -24,23 +24,27 @@ depend on them. Within a stage, issues share files and can be built together.
 | 6 | Terminal input focus & targeting | 025, 026 |
 | 7 | Settings & launcher configuration | 029, 013, 031 |
 
-All 17 open issues are covered. Stages 1, 3, 5, 6, 7 are independent of each
-other and can be scheduled in any order. Stage 2 is the largest refactor and
-several other items relate to it (see **Cross-stage dependencies**).
+All 17 issues are covered; **Stage 1 (024, 028, 023, 018) is now implemented and
+closed**, leaving 13 open. Stages 1, 3, 5, 6, 7 are independent of each other and
+can be scheduled in any order. Stage 2 is the largest refactor and several other
+items relate to it (see **Cross-stage dependencies**).
 
 ---
 
 ## Stage 1 — Explorer tree rows & Git sidebar
+
+> **Status: Implemented (2026-07-16).** All four issues below are closed. See
+> **Implementation notes** at the end of this section for what shipped.
 
 **Goal:** finish the per-row Explorer experience — file-type recognition,
 right-click actions, and a complete Git review/staging workflow — while all the
 code that renders tree and Git rows is open in one pass.
 
 **Issues**
-- **ISSUE-2026-024** — File and Git trees lack file type icons
-- **ISSUE-2026-028** — Explorer file tree has no right-click "Copy path" context menu
-- **ISSUE-2026-023** — Git change rows open source instead of diff view
-- **ISSUE-2026-018** — Add a revert action for unstaged Git changes
+- **ISSUE-2026-024** — File and Git trees lack file type icons ✅
+- **ISSUE-2026-028** — Explorer file tree has no right-click "Copy path" context menu ✅
+- **ISSUE-2026-023** — Git change rows open source instead of diff view ✅
+- **ISSUE-2026-018** — Add a revert action for unstaged Git changes ✅
 
 **Shared surface**
 - `web/static/js/terminals.js`: `explorerTreeRowHtml()`,
@@ -73,6 +77,48 @@ mutation and stays inside the existing narrow Git exception. Do not broaden file
 mutations.
 
 **Sizing:** Medium. Mostly client rendering + one new backend route.
+
+**Implementation notes (2026-07-16)**
+1. **024 — file-type icons.** Added a shared `explorerFileTypeIconHtml(path)` in
+   `web/static/js/terminals.js` that reuses `explorerCodeLanguage()` /
+   `normalizeExplorerLanguage()` to map a file to one of ten categories
+   (`code`, `shell`, `data`, `markup`, `style`, `markdown`, `config`, `sql`,
+   `log`, `doc`) and renders a distinct stroke-style `currentColor` SVG glyph
+   (`aria-hidden="true"`, generic `doc` fallback for unknown types). It is
+   rendered before the name in `explorerTreeRowHtml()`,
+   `renderExplorerGitFileRows()` (including staged/unstaged and commit-history
+   rows) and `explorerDirectoryRowHtml()`. Per-category tints are new
+   `--explorer-icon-*` tokens defined once per theme in `terminals.css` (mirrors
+   the `--git-lane-*` pattern; no inline palette literals). The now-unused
+   `EXPLORER_FILE_ICON` constant was removed.
+2. **028 — copy-path context menu.** A delegated `contextmenu` handler
+   (`wireExplorerCopyPathMenu`) on the tree and Git panels opens an in-page
+   `#explorer-ctx-menu` (WebView2-safe, no `window.*`) offering **Copy path**
+   (absolute, joined against the pane's explorer root with the root's separator
+   style) and **Copy relative path**, reusing the existing `_copyText` helper.
+   Rows carry `data-explorer-copy-path`; the menu is keyboard-navigable
+   (Arrow/Escape), dismisses on outside click, and stays inside the read-only
+   contract (copy is a read).
+3. **023 — changed rows open the diff.** `explorerGitOpenFile()` now opens with
+   `openDiff: true` and a section-specific `diffMode` (`worktree` for **Changes**,
+   `staged` for **Staged Changes**), threaded through `openExplorerFile()` →
+   `renderExplorerFile()` → `loadExplorerDiff()` (cache key + `?mode=` include
+   the mode) so a partially staged file never shows the other section's hunks.
+   Commit-history rows keep their existing commit-diff path.
+4. **018 — revert unstaged changes.** New `_git_revert_path()` in
+   `web/explorer.py` (equivalent to `git restore --worktree -- <path>`, run with
+   `GIT_TERMINAL_PROMPT=0`) backing `POST /api/explorer/<id>/git/revert` in
+   `web/api.py`. It preserves any staged copy, and refuses untracked, conflicted,
+   and no-unstaged-change paths. The client adds a Revert button to eligible
+   tracked rows under **Changes** (`explorerGitCanRevert` → modified/deleted/
+   renamed only) that goes through a new reusable in-page confirm shell
+   (`openGenericConfirmModal` / `#genericConfirmModal`) before calling the route
+   and reloading the open file/diff.
+
+Tests: `tests/test_api.py` gained behavioral coverage (worktree-vs-staged diff
+separation; revert discard / staged-preservation / deleted-restore /
+untracked-refusal / staged-only-refusal / out-of-root rejection) plus
+rendered-template assertions for all four issues.
 
 ---
 

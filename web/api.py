@@ -94,6 +94,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _get_git_repo_summary,
     _git_commit,
     _git_publish,
+    _git_revert_path,
     _git_stage_path,
     _git_status_for_entry,
     _git_unstage_path,
@@ -818,6 +819,24 @@ def unstage_explorer_git_file(session_id: str):
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
         _git_unstage_path(backend, root_path, file_path)
+        summary = _get_git_repo_summary(backend, root_path)
+        return {"root": root_path, **summary}
+
+    return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/git/revert', methods=['POST'])
+def revert_explorer_git_file(session_id: str):
+    """Discard one tracked file's unstaged worktree changes (git restore --worktree)."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    data = request.get_json(silent=True) or {}
+    requested_path = data.get("path", "")
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
+        _git_revert_path(backend, root_path, file_path)
         summary = _get_git_repo_summary(backend, root_path)
         return {"root": root_path, **summary}
 

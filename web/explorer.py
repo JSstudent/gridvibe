@@ -1343,6 +1343,57 @@ def _git_unstage_path(backend: Any, root_path: str, file_path: str) -> None:
         raise ValueError(_decode_git_output(result.stderr) or "Git unstage failed")
 
 
+_GIT_UNMERGED_STATUS_CODES = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
+
+
+def _git_revert_path(backend: Any, root_path: str, file_path: str) -> None:
+    """Discard one tracked file's unstaged worktree changes.
+
+    Runs the equivalent of ``git restore --worktree -- <path>``, which restores
+    the worktree copy from the index, so any already-staged version of the file
+    is preserved. Untracked and conflicted files are refused rather than being
+    silently deleted or overwritten, and a file with no unstaged change is a
+    clear error instead of a no-op that would look like a broken action.
+    """
+    repo_root = _git_action_repo_root(backend, root_path)
+    pathspec = backend.pathspec(repo_root, file_path)
+    try:
+        status = backend.run_git(
+            ["status", "--porcelain", "--", pathspec], cwd=repo_root, timeout=5.0
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git revert timed out") from exc
+    if status.returncode != 0:
+        raise ValueError(_decode_git_output(status.stderr) or "Git revert failed")
+
+    # Decode without stripping so the leading porcelain XY status columns (e.g.
+    # " M" for a worktree-only change) survive; _decode_git_output strips.
+    raw_status = status.stdout.decode("utf-8", errors="replace")
+    entries = [line for line in raw_status.splitlines() if line.strip()]
+    if not entries:
+        raise ValueError("No unstaged changes to revert")
+    code = entries[0][:2]
+    if code == "??":
+        raise ValueError("Untracked files cannot be reverted")
+    if code in _GIT_UNMERGED_STATUS_CODES or "U" in code:
+        raise ValueError("Resolve merge conflicts before reverting")
+    if code[1:2] in {" ", "."}:
+        # Only the index differs (a staged-but-clean-worktree file); there is
+        # nothing to discard and reverting must never touch staged content.
+        raise ValueError("No unstaged changes to revert")
+
+    try:
+        result = backend.run_git(["restore", "--worktree", "--", pathspec], cwd=repo_root, write=True)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git revert timed out") from exc
+    if result.returncode != 0:
+        raise ValueError(
+            _decode_git_output(result.stderr)
+            or _decode_git_output(result.stdout)
+            or "Git revert failed"
+        )
+
+
 def _git_commit(backend: Any, root_path: str, message: str) -> None:
     """Commit staged changes inside an explorer repository."""
     commit_message = str(message or "").strip()

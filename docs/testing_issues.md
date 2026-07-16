@@ -81,32 +81,6 @@ Code inspection confirms the App Settings modal in `templates/index.html` render
 ### Proposed solution:
 Add terminal fields to the App Settings modal in `templates/index.html`, extend `collectAppSettings()` in `web/static/js/launcher.js` to include a `terminal` section, and add a validated `terminal` branch to `_normalize_app_config_update()` in `web/api.py` (bounded font size, non-empty font-family string, `max_sessions` clamped to a safe range) that persists through the existing config-save flow. Reuse the established app-config update contract so the change reaches open session windows, and confirm `RuntimeConfig` reload applies the new values. Guard against invalid/oversized input and preserve backward compatibility for configs without user-set terminal fields. Add focused tests in `tests/test_api.py` for normalization bounds, whitelist acceptance, persistence, and modal/collect wiring.
 
-### Issue ID: ISSUE-2026-028
-- Title: Explorer file tree has no right-click "Copy path" context menu
-- Priority: Low
-- Status: Open
-- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `ui`, `tests`
-- Reported: 2026-07-15
-
-Description:
-The Explorer Files tree and Git file rows provide no right-click context menu, so there is no built-in way to copy a file's path from the tree. Users who want a file's absolute or repository-relative path must retype it or derive it manually, which is slow for deep trees and inconsistent with the copy affordances already available in the terminal.
-
-Steps to reproduce:
-1. Open an Explorer pane and expand the Files tree (and open the Git sidebar).
-2. Right-click a file row in the tree or a changed-file row in the Git sidebar.
-3. Observe that only the browser's native context menu appears; there is no GridVibe "Copy path" action.
-
-Expected behavior:
-Right-clicking a Files-tree row (and ideally a Git file row) should open an in-page GridVibe context menu offering at least "Copy path" (absolute) and, where meaningful, "Copy relative path". Selecting an entry should copy the value to the clipboard with a graceful fallback, using a theme-aware, keyboard-accessible menu that dismisses on outside click or Escape, while preserving the read-only guarantee for local explorer panes.
-
-Actual behavior / logs:
-Code inspection confirms the only `contextmenu` listener in `web/static/js/terminals.js` is attached to the xterm `term.element` (for terminal copy/paste); the explorer tree and Git rows install no `contextmenu` handler and expose no copy-path action. A clipboard helper already exists (`navigator.clipboard.writeText(...)` with a `_copyTextFallback(text)` path used for terminal copy), but it is not reused for explorer paths.
-
-### Proposed solution:
-Add a delegated `contextmenu` handler on the explorer tree and Git-sidebar containers in `web/static/js/terminals.js` that renders an in-page context menu (not `window.prompt`/`confirm`/`alert`, which WebView2 blocks) with Copy path and Copy relative path actions. Resolve absolute and root-relative paths from the existing row dataset, reuse the current clipboard helper plus `_copyTextFallback`, and keep the menu theme-token-styled in `web/static/css/terminals.css`, keyboard-navigable, and dismissible on outside click/Escape. Preserve local/SSH parity and the read-only contract (copy is a read). Add focused rendered-template and behavioral tests in `tests/test_api.py` for menu wiring, absolute/relative path values, keyboard/dismiss behavior, and clipboard fallback.
-
 ### Issue ID: ISSUE-2026-027
 - Title: Closing a terminal resets explorer/browser pane state in the group
 - Priority: Medium
@@ -185,58 +159,6 @@ Code inspection confirms `forwardTerminalInput()` and the terminal-card `pointer
 ### Proposed solution:
 Add one centralized client-side helper in `web/static/js/terminals.js`, such as `setFocusedTerminal(index)`, that validates the target, updates `_focusedTerminalIndex`, and toggles a semantic class (for example, `terminal-active`) plus appropriate accessibility state on the relevant terminal card while clearing it from other panes. Route existing pointer, terminal input, focus, focus-restoration, split, close, and group-switch paths through that helper; define a safe fallback target when the selected pane is removed or no plain terminal remains. Add a token-based active-pane style in `web/static/css/terminals.css` that remains visually distinct when Broadcast typing is enabled, avoids hardcoded colors, and preserves explorer/browser exclusions. Add focused rendered-template and behavioral tests in `tests/test_api.py` for pointer and keyboard selection, focus transitions, group switches, split/close fallback, broadcast coexistence, one-active-pane enforcement, and accessible state updates.
 
-### Issue ID: ISSUE-2026-024
-- Title: File and Git trees lack file type icons
-- Priority: Cosmetic
-- Status: Open
-- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `ui`, `git`, `tests`
-- Reported: 2026-07-14
-
-Description:
-The Explorer Files tree and Git sidebar do not show recognizable file type icons before filenames. Files in the Files tree all use the same generic document icon, while changed and committed file rows in the Git sidebar have no file icon at all. Compared with the extension-aware leading icons in the provided reference, this makes mixed Python, JavaScript, JSON, Markdown, configuration, and other file lists slower to scan visually.
-
-Steps to reproduce:
-1. Open an Explorer pane on a repository containing several recognizable file types, such as `.py`, `.js`, `.json`, `.md`, and configuration files.
-2. Expand the Files tree, then open the Git sidebar and inspect changed files or files listed beneath a commit.
-3. Observe that Files tree rows share one generic file icon and Git file rows show only Git status plus the filename, without a file type icon before the name.
-
-Expected behavior:
-Both the Files tree and every Git file list should place a compact, extension- or filename-aware file type icon immediately before each filename, with a consistent fallback icon for unknown types. Folder icons, Git status badges, indentation, action buttons, and accessible filenames should remain intact.
-
-Actual behavior / logs:
-Code inspection confirms `explorerTreeRowHtml()` renders every non-directory entry with the single `EXPLORER_FILE_ICON` constant. `renderExplorerGitFileRows()` renders a Git status badge followed directly by `.explorer-diff-commit-file-path` and does not insert any file icon. GridVibe already has `EXPLORER_LANGUAGE_BY_EXTENSION`, `EXPLORER_LANGUAGE_BY_FILENAME`, and `explorerCodeLanguage()` for classifying common file types, but that classification is not reused by either tree to select an icon. Existing tests verify language detection and generic Explorer/Git rendering hooks but do not cover type-aware icons or consistent placement before filenames.
-
-### Proposed solution:
-Add one shared client-side helper in `web/static/js/terminals.js`, such as `explorerFileTypeIconHtml(path)`, that reuses the existing filename and extension classification and returns a stable icon key with a generic-file fallback. Render its output before `.explorer-tree-name` in `explorerTreeRowHtml()` and before `.explorer-diff-commit-file-path` in `renderExplorerGitFileRows()`, including staged, unstaged, conflicted, untracked, deleted, renamed, and commit-history rows. Use locally defined or vendored stroke-style SVG assets with `currentColor`, theme-token-based colors, `aria-hidden="true"`, and no CDN, emoji, or text-glyph dependency; preserve the existing folder icon for directories. Add compact alignment and sizing rules in `web/static/css/terminals.css` so icons do not disrupt tree indentation, Git status badges, ellipsis behavior, or narrow sidebars. Add focused rendered-template tests in `tests/test_api.py` for representative extensions and special filenames, unknown fallbacks, both tree renderers, placement before filenames, accessibility, local/SSH parity, and action-button layout.
-
-### Issue ID: ISSUE-2026-023
-- Title: Git change rows open source instead of diff view
-- Priority: Low
-- Status: Open
-- Area: `web/static/js/terminals.js`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `ui`, `git`, `tests`
-- Reported: 2026-07-14
-
-Description:
-Clicking a file under either `Changes` or `Staged Changes` in the Explorer Git sidebar opens the file in its normal source view instead of taking the user directly to the available diff view. This adds an unnecessary navigation step to the primary Git review workflow and makes the changed-file rows behave differently from commit-history file rows, which already open directly into a diff.
-
-Steps to reproduce:
-1. Open an Explorer pane rooted in a Git repository and create at least one unstaged tracked change and one staged change.
-2. Open the Git sidebar and click a filename under `Changes`, then repeat with a filename under `Staged Changes`.
-3. Observe that each file opens with Source selected and requires a second click on Diff before its changes are shown.
-
-Expected behavior:
-Clicking a filename under `Changes` or `Staged Changes` should open that file with Diff selected and immediately load the appropriate Git diff. The existing Stage, Unstage, and Open containing folder controls should keep their current independent actions.
-
-Actual behavior / logs:
-Code inspection confirms `renderExplorerGitFileRows()` gives non-commit changed-file rows a `data-explorer-git-open-file` action. Its click handler calls `explorerGitOpenFile()`, which invokes `openExplorerFile(index, path)` without the supported `openDiff` option. `renderExplorerFile()` therefore selects `source` as the initial file view; it selects `diff` only when `openDiff` or `diffCommit` is supplied. By contrast, `explorerGitOpenCommitDiff()` already passes `openDiff: true` for commit-history files. Existing rendered-template tests verify that the Git sidebar and diff controls are present but do not assert the initial view selected after clicking staged or unstaged rows.
-
-### Proposed solution:
-Update the changed-file click path in `web/static/js/terminals.js` to call the shared `openExplorerFile()` flow with `openDiff: true`. Preserve which section originated the click so tracked files under `Changes` can request the worktree diff and files under `Staged Changes` can request the staged diff through the existing Git diff modes; this avoids showing unrelated hunks when one file has both staged and unstaged changes. Keep event isolation for Stage, Unstage, and Open containing folder buttons, and define graceful behavior for untracked, deleted, renamed, conflicted, and diff-load failure cases without leaving the file viewer unusable. Add focused tests in `tests/test_api.py` for staged, unstaged, and partially staged rows, initial Diff selection, the requested diff mode, commit-history behavior, action-button isolation, and fallback/error handling.
-
 ### Issue ID: ISSUE-2026-022
 - Title: Closing a terminal expands unrelated panes in complex split layouts
 - Priority: Medium
@@ -289,32 +211,6 @@ Code inspection confirms `EXPLORER_FILE_PREVIEW_MAX_BYTES` in `web/explorer.py` 
 
 ### Proposed solution:
 Make the preview byte limit a validated, bounded setting or raise it to a measured safe value, while preserving protections against browser stalls and excessive local or SFTP reads. Add a ranged/tail-read operation to the local and SFTP explorer backends and use it for `.log` and any explicitly classified append-oriented formats so truncated previews retain the last configured bytes. Consider exposing a Head/Tail selector for other oversized text files, with a documented default appropriate to their type. Return range metadata such as retained start/end bytes and total size, and update `web/static/js/terminals.js` to show a clear message such as `Showing the last 1 MiB` instead of only a generic truncation warning. Handle UTF-8 and line boundaries so a tail read does not begin with a broken character or misleading partial line. Add focused tests in `tests/test_api.py` for retained end markers, excluded start markers, files exactly at the limit, multibyte and long-line boundaries, local/SFTP parity, range metadata, configured-limit validation, and client messaging, while keeping search and highlighting bounded to the returned preview.
-
-### Issue ID: ISSUE-2026-018
-- Title: Add a revert action for unstaged Git changes
-- Priority: Low
-- Status: Open
-- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `web/api.py`, `web/explorer.py`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `ui`, `git`, `flask`, `tests`
-- Reported: 2026-07-13
-
-Description:
-The Explorer Git sidebar lists unstaged changes but does not provide a way to discard a file's working-tree changes. Users who review an unwanted edit in GridVibe must leave the workspace and run a Git command elsewhere, interrupting the built-in review and staging flow.
-
-Steps to reproduce:
-1. Open an Explorer pane rooted in a Git repository and modify a tracked file without staging the latest edit.
-2. Open the Git sidebar and locate the file under `Changes`.
-3. Observe that the row offers Stage and Open containing folder actions, but no Revert or Discard action.
-
-Expected behavior:
-Each eligible tracked file under `Changes` should expose a clearly labeled Revert action. After an explicit confirmation, GridVibe should discard only that file's unstaged working-tree changes, preserve any already staged version of the file, refresh the Git summary and open diff, and report failures without hiding the existing changes. Untracked and conflicted files must not be silently deleted or overwritten; they should either omit the action or use a distinct, strongly confirmed workflow.
-
-Actual behavior / logs:
-Code inspection confirms `renderExplorerGitFileRows()` in `web/static/js/terminals.js` renders a `+` Stage button for rows under `Changes` and an Open containing folder button, while the staged section receives a separate Unstage action. The client has `explorerGitStageFile()` and `explorerGitUnstageFile()`, and `web/api.py` exposes stage and unstage routes, but there is no revert/discard/restore control, handler, or API route in `web/static/js/terminals.js`, `web/api.py`, or `web/explorer.py`.
-
-### Proposed solution:
-Add an accessible Revert button to eligible tracked rows rendered by `renderExplorerGitFileRows()` and require a confirmation that names the affected path and explains that unstaged edits will be lost. Add a narrowly scoped Explorer Git API route in `web/api.py` backed by a helper in `web/explorer.py` that reuses the existing root/path validation and performs the equivalent of `git restore --worktree -- <pathspec>`, so partially staged files revert to their index version without altering staged content. Return an updated repository summary and refresh any active file/diff view after success. Disable or omit the action for conflicts and untracked files unless a separate deletion workflow with stronger confirmation is deliberately added. Preserve local/SSH parity and add focused tests in `tests/test_api.py` for modified and deleted tracked files, partially staged files, unsafe/out-of-root paths, conflicts, untracked files, cancellation, Git failures, refreshed status, and rendered control wiring.
 
 ### Issue ID: ISSUE-2026-017
 - Title: Improve Markdown preview visual hierarchy and callouts
@@ -447,6 +343,126 @@ Code inspection confirms `buildTerminalInitialCommand()` in `web/static/js/launc
 Add a per-terminal boolean such as `agent_auto_mode` to the launcher draft, saved-session normalization, workspace serialization, `TerminalSession`, and API responses. Define supported auto-mode arguments in the existing agent registry or another single backend-owned mapping instead of hard-coding one generic flag for every CLI. Update the agent settings row in `web/static/js/launcher.js` to show an accessible toggle only when the selected built-in agent has a registered option, recompute visibility and help text when the selection changes, and keep custom-agent behavior explicit rather than silently modifying arbitrary commands. Compose the final startup command from the validated selected-agent metadata and mapped argument without duplicating flags, while keeping preflight detection based on the base agent executable. Add focused tests in `tests/test_api.py` and `tests/test_session_manager.py` for enabled/disabled command construction, unsupported and custom agents, save/load/workspace round-trips, SSH and local launches, and backward compatibility for saved sessions without the new field.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-028
+- Title: Explorer file tree has no right-click "Copy path" context menu
+- Priority: Low
+- Status: Closed
+- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `tests`
+- Reported: 2026-07-15
+- Closed: 2026-07-16
+
+Description:
+The Explorer Files tree and Git file rows provide no right-click context menu, so there is no built-in way to copy a file's path from the tree. Users who want a file's absolute or repository-relative path must retype it or derive it manually, which is slow for deep trees and inconsistent with the copy affordances already available in the terminal.
+
+Steps to reproduce:
+1. Open an Explorer pane and expand the Files tree (and open the Git sidebar).
+2. Right-click a file row in the tree or a changed-file row in the Git sidebar.
+3. Observe that only the browser's native context menu appears; there is no GridVibe "Copy path" action.
+
+Expected behavior:
+Right-clicking a Files-tree row (and ideally a Git file row) should open an in-page GridVibe context menu offering at least "Copy path" (absolute) and, where meaningful, "Copy relative path". Selecting an entry should copy the value to the clipboard with a graceful fallback, using a theme-aware, keyboard-accessible menu that dismisses on outside click or Escape, while preserving the read-only guarantee for local explorer panes.
+
+Actual behavior / logs:
+Code inspection confirms the only `contextmenu` listener in `web/static/js/terminals.js` is attached to the xterm `term.element` (for terminal copy/paste); the explorer tree and Git rows install no `contextmenu` handler and expose no copy-path action. A clipboard helper already exists (`navigator.clipboard.writeText(...)` with a `_copyTextFallback(text)` path used for terminal copy), but it is not reused for explorer paths.
+
+### Proposed solution:
+Add a delegated `contextmenu` handler on the explorer tree and Git-sidebar containers in `web/static/js/terminals.js` that renders an in-page context menu (not `window.prompt`/`confirm`/`alert`, which WebView2 blocks) with Copy path and Copy relative path actions. Resolve absolute and root-relative paths from the existing row dataset, reuse the current clipboard helper plus `_copyTextFallback`, and keep the menu theme-token-styled in `web/static/css/terminals.css`, keyboard-navigable, and dismissible on outside click/Escape. Preserve local/SSH parity and the read-only contract (copy is a read). Add focused rendered-template and behavioral tests in `tests/test_api.py` for menu wiring, absolute/relative path values, keyboard/dismiss behavior, and clipboard fallback.
+
+Resolution:
+A delegated `contextmenu` handler (`wireExplorerCopyPathMenu`) on the file-tree and Git panels now opens an in-page `#explorer-ctx-menu` (no `window.prompt/confirm/alert`; WebView2-safe) with **Copy path** (absolute) and **Copy relative path** actions. Rows carry `data-explorer-copy-path`; the absolute path is derived by joining the relative path against the pane's explorer root using the root's separator style, and both actions reuse the existing `_copyText` clipboard helper. The menu is theme-token styled, keyboard navigable (Arrow keys), and dismisses on Escape or outside click, staying within the read-only contract (copy is a read). Covered by `test_terminals_page_explorer_copy_path_menu_is_present` in `tests/test_api.py`.
+
+### Issue ID: ISSUE-2026-024
+- Title: File and Git trees lack file type icons
+- Priority: Cosmetic
+- Status: Closed
+- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `git`, `tests`
+- Reported: 2026-07-14
+- Closed: 2026-07-16
+
+Description:
+The Explorer Files tree and Git sidebar do not show recognizable file type icons before filenames. Files in the Files tree all use the same generic document icon, while changed and committed file rows in the Git sidebar have no file icon at all. Compared with the extension-aware leading icons in the provided reference, this makes mixed Python, JavaScript, JSON, Markdown, configuration, and other file lists slower to scan visually.
+
+Steps to reproduce:
+1. Open an Explorer pane on a repository containing several recognizable file types, such as `.py`, `.js`, `.json`, `.md`, and configuration files.
+2. Expand the Files tree, then open the Git sidebar and inspect changed files or files listed beneath a commit.
+3. Observe that Files tree rows share one generic file icon and Git file rows show only Git status plus the filename, without a file type icon before the name.
+
+Expected behavior:
+Both the Files tree and every Git file list should place a compact, extension- or filename-aware file type icon immediately before each filename, with a consistent fallback icon for unknown types. Folder icons, Git status badges, indentation, action buttons, and accessible filenames should remain intact.
+
+Actual behavior / logs:
+Code inspection confirms `explorerTreeRowHtml()` renders every non-directory entry with the single `EXPLORER_FILE_ICON` constant. `renderExplorerGitFileRows()` renders a Git status badge followed directly by `.explorer-diff-commit-file-path` and does not insert any file icon. GridVibe already has `EXPLORER_LANGUAGE_BY_EXTENSION`, `EXPLORER_LANGUAGE_BY_FILENAME`, and `explorerCodeLanguage()` for classifying common file types, but that classification is not reused by either tree to select an icon. Existing tests verify language detection and generic Explorer/Git rendering hooks but do not cover type-aware icons or consistent placement before filenames.
+
+### Proposed solution:
+Add one shared client-side helper in `web/static/js/terminals.js`, such as `explorerFileTypeIconHtml(path)`, that reuses the existing filename and extension classification and returns a stable icon key with a generic-file fallback. Render its output before `.explorer-tree-name` in `explorerTreeRowHtml()` and before `.explorer-diff-commit-file-path` in `renderExplorerGitFileRows()`, including staged, unstaged, conflicted, untracked, deleted, renamed, and commit-history rows. Use locally defined or vendored stroke-style SVG assets with `currentColor`, theme-token-based colors, `aria-hidden="true"`, and no CDN, emoji, or text-glyph dependency; preserve the existing folder icon for directories. Add compact alignment and sizing rules in `web/static/css/terminals.css` so icons do not disrupt tree indentation, Git status badges, ellipsis behavior, or narrow sidebars. Add focused rendered-template tests in `tests/test_api.py` for representative extensions and special filenames, unknown fallbacks, both tree renderers, placement before filenames, accessibility, local/SSH parity, and action-button layout.
+
+Resolution:
+Added a shared `explorerFileTypeIconHtml(path)` in `web/static/js/terminals.js` that reuses the existing `explorerCodeLanguage()`/`normalizeExplorerLanguage()` classifiers to map each file to one of ten categories (`code`, `shell`, `data`, `markup`, `style`, `markdown`, `config`, `sql`, `log`, `doc`) and returns a distinct stroke-style `currentColor` SVG glyph with a generic `doc` fallback and `aria-hidden="true"`. It renders before the name in `explorerTreeRowHtml()`, `renderExplorerGitFileRows()` (staged, unstaged, and commit-history rows) and `explorerDirectoryRowHtml()`; folder rows keep `EXPLORER_FOLDER_ICON`. Per-category tints are new `--explorer-icon-*` variables defined once per theme in `web/static/css/terminals.css` (same pattern as `--git-lane-*`, no inline palette literals), and Git rows gained a dedicated icon grid column. The now-unused `EXPLORER_FILE_ICON` constant was removed. Covered by `test_terminals_page_explorer_file_type_icons_are_present` in `tests/test_api.py`.
+
+### Issue ID: ISSUE-2026-023
+- Title: Git change rows open source instead of diff view
+- Priority: Low
+- Status: Closed
+- Area: `web/static/js/terminals.js`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `git`, `tests`
+- Reported: 2026-07-14
+- Closed: 2026-07-16
+
+Description:
+Clicking a file under either `Changes` or `Staged Changes` in the Explorer Git sidebar opens the file in its normal source view instead of taking the user directly to the available diff view. This adds an unnecessary navigation step to the primary Git review workflow and makes the changed-file rows behave differently from commit-history file rows, which already open directly into a diff.
+
+Steps to reproduce:
+1. Open an Explorer pane rooted in a Git repository and create at least one unstaged tracked change and one staged change.
+2. Open the Git sidebar and click a filename under `Changes`, then repeat with a filename under `Staged Changes`.
+3. Observe that each file opens with Source selected and requires a second click on Diff before its changes are shown.
+
+Expected behavior:
+Clicking a filename under `Changes` or `Staged Changes` should open that file with Diff selected and immediately load the appropriate Git diff. The existing Stage, Unstage, and Open containing folder controls should keep their current independent actions.
+
+Actual behavior / logs:
+Code inspection confirms `renderExplorerGitFileRows()` gives non-commit changed-file rows a `data-explorer-git-open-file` action. Its click handler calls `explorerGitOpenFile()`, which invokes `openExplorerFile(index, path)` without the supported `openDiff` option. `renderExplorerFile()` therefore selects `source` as the initial file view; it selects `diff` only when `openDiff` or `diffCommit` is supplied. By contrast, `explorerGitOpenCommitDiff()` already passes `openDiff: true` for commit-history files. Existing rendered-template tests verify that the Git sidebar and diff controls are present but do not assert the initial view selected after clicking staged or unstaged rows.
+
+### Proposed solution:
+Update the changed-file click path in `web/static/js/terminals.js` to call the shared `openExplorerFile()` flow with `openDiff: true`. Preserve which section originated the click so tracked files under `Changes` can request the worktree diff and files under `Staged Changes` can request the staged diff through the existing Git diff modes; this avoids showing unrelated hunks when one file has both staged and unstaged changes. Keep event isolation for Stage, Unstage, and Open containing folder buttons, and define graceful behavior for untracked, deleted, renamed, conflicted, and diff-load failure cases without leaving the file viewer unusable. Add focused tests in `tests/test_api.py` for staged, unstaged, and partially staged rows, initial Diff selection, the requested diff mode, commit-history behavior, action-button isolation, and fallback/error handling.
+
+Resolution:
+`explorerGitOpenFile()` now opens changed-file rows straight into the diff view with `openDiff: true` and a section-specific `diffMode` — `worktree` for rows under **Changes**, `staged` for rows under **Staged Changes** — passed via `data-explorer-git-diff-mode`. The mode is threaded through `openExplorerFile()` → `renderExplorerFile()` (`pane._explorerDiffMode`) → `loadExplorerDiff()`, whose cache key and `?mode=` query now include it, so a partially staged file never shows the other section's hunks. Commit-history rows keep their existing commit-diff path, and Stage/Unstage/Open-folder buttons keep their isolated actions. Covered by `test_explorer_git_diff_distinguishes_worktree_and_staged` and `test_terminals_page_explorer_git_rows_open_diff_view` in `tests/test_api.py`.
+
+### Issue ID: ISSUE-2026-018
+- Title: Add a revert action for unstaged Git changes
+- Priority: Low
+- Status: Closed
+- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `web/api.py`, `web/explorer.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `git`, `flask`, `tests`
+- Reported: 2026-07-13
+- Closed: 2026-07-16
+
+Description:
+The Explorer Git sidebar lists unstaged changes but does not provide a way to discard a file's working-tree changes. Users who review an unwanted edit in GridVibe must leave the workspace and run a Git command elsewhere, interrupting the built-in review and staging flow.
+
+Steps to reproduce:
+1. Open an Explorer pane rooted in a Git repository and modify a tracked file without staging the latest edit.
+2. Open the Git sidebar and locate the file under `Changes`.
+3. Observe that the row offers Stage and Open containing folder actions, but no Revert or Discard action.
+
+Expected behavior:
+Each eligible tracked file under `Changes` should expose a clearly labeled Revert action. After an explicit confirmation, GridVibe should discard only that file's unstaged working-tree changes, preserve any already staged version of the file, refresh the Git summary and open diff, and report failures without hiding the existing changes. Untracked and conflicted files must not be silently deleted or overwritten; they should either omit the action or use a distinct, strongly confirmed workflow.
+
+Actual behavior / logs:
+Code inspection confirms `renderExplorerGitFileRows()` in `web/static/js/terminals.js` renders a `+` Stage button for rows under `Changes` and an Open containing folder button, while the staged section receives a separate Unstage action. The client has `explorerGitStageFile()` and `explorerGitUnstageFile()`, and `web/api.py` exposes stage and unstage routes, but there is no revert/discard/restore control, handler, or API route in `web/static/js/terminals.js`, `web/api.py`, or `web/explorer.py`.
+
+### Proposed solution:
+Add an accessible Revert button to eligible tracked rows rendered by `renderExplorerGitFileRows()` and require a confirmation that names the affected path and explains that unstaged edits will be lost. Add a narrowly scoped Explorer Git API route in `web/api.py` backed by a helper in `web/explorer.py` that reuses the existing root/path validation and performs the equivalent of `git restore --worktree -- <pathspec>`, so partially staged files revert to their index version without altering staged content. Return an updated repository summary and refresh any active file/diff view after success. Disable or omit the action for conflicts and untracked files unless a separate deletion workflow with stronger confirmation is deliberately added. Preserve local/SSH parity and add focused tests in `tests/test_api.py` for modified and deleted tracked files, partially staged files, unsafe/out-of-root paths, conflicts, untracked files, cancellation, Git failures, refreshed status, and rendered control wiring.
+
+Resolution:
+Added `_git_revert_path()` in `web/explorer.py` (equivalent to `git restore --worktree -- <path>`, run with `GIT_TERMINAL_PROMPT=0`) behind a new `POST /api/explorer/<id>/git/revert` route in `web/api.py`. It restores the worktree copy from the index so any staged version is preserved, and refuses untracked, conflicted, and no-unstaged-change paths (parsing porcelain status without stripping the leading XY columns). The Git sidebar renders a Revert button on eligible tracked rows under **Changes** only (`explorerGitCanRevert` → modified/deleted/renamed), which routes through a new reusable in-page confirm shell (`openGenericConfirmModal` / `#genericConfirmModal`) before calling the route and reloading the open file/diff. Covered by the `test_explorer_git_revert_*` behavioral tests and `test_terminals_page_explorer_git_revert_controls_are_present` in `tests/test_api.py`.
 
 ### Issue ID: ISSUE-2026-021
 - Title: Appearance theme changes do not reach open session windows

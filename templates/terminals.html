@@ -221,6 +221,24 @@
     </div>
 </div>
 
+<div id="genericConfirmModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="genericConfirmTitle">
+        <div class="modal-head">
+            <div>
+                <div id="genericConfirmTitle" class="modal-title">Are you sure?</div>
+                <div id="genericConfirmCopy" class="modal-copy"></div>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <div id="genericConfirmNote" class="modal-copy" hidden></div>
+            <div class="modal-actions-buttons">
+                <button id="genericConfirmCancel" class="btn btn-neutral" type="button">Cancel</button>
+                <button id="genericConfirmAccept" class="btn btn-danger" type="button">Confirm</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="{{ url_for('static', filename='vendor/xterm.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/xterm-addon-fit.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/xterm-addon-search.min.js') }}"></script>
