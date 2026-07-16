@@ -238,84 +238,6 @@ Code inspection confirms `web/static/css/terminals.css` gives `.explorer-markdow
 ### Proposed solution:
 Create a cohesive Markdown preview theme in `web/static/css/terminals.css`: constrain readable line length where space permits; give `h1` through `h6` progressively distinct size, weight, color, spacing, and divider treatment; style nested list indentation and markers; and refine links, horizontal rules, tables, task items, images, inline code, and fenced blocks with the existing explorer theme variables. Define and document one note syntax, preferably GitHub-style `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, and `[!CAUTION]` blockquotes, then extend the sanitized rendering path in `web/explorer.py` or a bounded client postprocessor in `web/static/js/terminals.js` to emit safe semantic callout classes and icons/labels. Maintain sanitization, keyboard selection, search highlighting, zoom behavior, narrow-pane wrapping, and light/dark contrast. Add focused API/template tests for every supported heading/list/callout form, sanitizer restrictions, nested content, theme classes, and regression coverage for existing code blocks, tables, footnotes, and raw-HTML handling.
 
-### Issue ID: ISSUE-2026-016
-- Title: Markdown preview links do not open explorer tabs
-- Priority: Medium
-- Status: Open
-- Area: `web/static/js/terminals.js`, `web/explorer.py`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `ui`, `markdown`, `terminal`, `tests`
-- Reported: 2026-07-13
-
-Description:
-Links rendered inside a Markdown file preview do not participate in Explorer navigation. Relative documentation links are effectively broken in the terminal workspace, and clicking them does not open the linked Markdown file in a new Explorer tab. This is a companion requirement to the tabbed file viewer in ISSUE-2026-014; any pinned link-opened tabs should also use the persistence model tracked in ISSUE-2026-015.
-
-Steps to reproduce:
-1. In an Explorer pane, open a Markdown file that contains a relative link to another readable Markdown file, such as `[Guide](docs/guide.md)`.
-2. Switch to Preview and click the rendered `Guide` link.
-3. Observe that GridVibe does not resolve the target relative to the current file or open it as a new closable Markdown tab in the Explorer pane.
-
-Expected behavior:
-Clicking an internal Markdown-to-Markdown link should resolve the target relative to the source document, validate it against the active Explorer root, and open or focus it as a new closable pinned tab using the model defined by ISSUE-2026-014. Fragment links should focus the corresponding heading, duplicate targets should reuse their existing tab, and external or unsupported links should follow an explicit safe behavior without navigating the GridVibe session page away.
-
-Actual behavior / logs:
-Code inspection confirms `_render_markdown_preview()` in `web/explorer.py` preserves sanitized `href` attributes on anchors. `renderExplorerFile()` in `web/static/js/terminals.js` assigns that HTML directly to the preview and wires code highlighting, editor tabs, zoom, and search, but it does not install a Markdown-link click handler or resolve link paths against the current file. The browser therefore receives raw relative URLs in the `/terminals` document context, and no Explorer file-tab action is invoked.
-
-### Proposed solution:
-Implement delegated anchor handling on each `.explorer-markdown-preview` after the tab model from ISSUE-2026-014 is available. Classify links before acting: keep same-document fragments inside the active preview; resolve relative Markdown targets against the current file's directory; normalize and validate decoded paths within the Explorer root; and call the shared pinned-tab open/focus primitive rather than the legacy single-file replacement flow. Preserve URL fragments so the destination tab can scroll to a sanitized heading target. Define safe behavior for `http`/`https`, `mailto`, unsupported local formats, missing files, traversal attempts, encoded separators, absolute paths, and SSH explorers; external links must not replace the GridVibe workspace and should use appropriate opener isolation. If ISSUE-2026-015 is implemented, link-opened pinned tabs should serialize identically to tabs opened with the tree `+` action. Add focused tests in `tests/test_api.py` for relative, parent-relative, fragment-only, duplicate, external, missing, unsupported, out-of-root, encoded, local, and SSH targets plus event isolation and tab persistence integration.
-
-### Issue ID: ISSUE-2026-015
-- Title: Persist open explorer tabs in saved sessions
-- Priority: Low
-- Status: Open
-- Area: `web/static/js/terminals.js`, `web/static/js/launcher.js`, `web/api.py`, `sessions/manager.py`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `session`, `launcher`, `settings`, `tests`
-- Reported: 2026-07-12
-
-Description:
-The tabbed explorer viewer tracked in ISSUE-2026-014 also needs to participate in saved-session persistence. Without explicit tab state in the saved preset, users who save a configured workspace from the active-session Save Session dropdown or resave it through launcher settings would lose their open reference files and active explorer tab when they relaunch that session.
-
-Steps to reproduce:
-1. Open a session containing an Explorer pane and, once the ISSUE-2026-014 tabbed viewer is available, open multiple files as pinned tabs and select one of them.
-2. Save the workspace through the active-session Save Session dropdown, or open the preset in the launcher and save its settings again.
-3. Relaunch the saved session and observe that the preset schema has no explorer-tab state from which to restore the previously open files and active tab.
-
-Expected behavior:
-Both saved-session workflows should retain each Explorer pane's open file tabs, their stable order, and the active tab. Relaunching the preset should safely restore readable tabs under the pane's current explorer root while preserving the permanent dynamic-preview behavior defined by ISSUE-2026-014.
-
-Actual behavior / logs:
-Code inspection confirms `buildWorkspaceTerminalEntry()` in `web/static/js/terminals.js` serializes an Explorer pane's directory plus `explorer_tree_open` and `explorer_git_open`, but no open-file or active-tab state. `collectFormConfig()` in `web/static/js/launcher.js` forwards terminal drafts and geometry only, while `_normalize_terminal_entries()` and `_normalize_workspace_layout()` in `web/api.py` have no fields for explorer tabs. `TerminalSession` in `sessions/manager.py` likewise retains explorer root/sidebar state but cannot carry tab metadata into a relaunched workspace. ISSUE-2026-014 defines the new tab model but does not cover saved-session round-tripping.
-
-### Proposed solution:
-After defining the per-pane tab model for ISSUE-2026-014, add bounded saved-session fields for the ordered pinned file paths and active tab identity. Capture them in `buildWorkspaceTerminalEntry()` for active-workspace saves; preserve them when launcher settings load and resave an existing preset even though the launcher does not edit file tabs directly; validate and normalize them in `web/api.py`; and carry them through `TerminalSession` responses so `web/static/js/terminals.js` can restore them after the explorer pane initializes. Store normalized paths relative to the saved explorer root where practical, cap tab counts and path lengths, ignore missing, unsupported, duplicate, or out-of-root files without failing session launch, and never persist file contents or writable state. Add focused tests in `tests/test_api.py` for both save entry points, ordering and active-tab round-trips, backward compatibility, root changes, unsafe paths, missing/unsupported files, deduplication, limits, and local/SSH parity.
-
-### Issue ID: ISSUE-2026-014
-- Title: Replace explorer directory view with tabbed file viewer
-- Priority: Low
-- Status: Open
-- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `ui`, `terminal`, `tests`
-- Reported: 2026-07-12
-
-Description:
-Explorer mode should use its existing file tree for navigation and dedicate the main pane to read-only file viewing. The current main pane duplicates directory-browsing behavior and can display only one opened file at a time, so users cannot keep several reference files open while moving through the tree.
-
-Steps to reproduce:
-1. Open a GridVibe pane in Explorer startup mode and expose its Files tree.
-2. Select files and directories in the tree and inspect the main explorer pane.
-3. Observe that the main pane starts as a directory listing, a file replaces that listing with a single view and Back button, and file-tree rows have no `+` action for opening closable file tabs.
-
-Expected behavior:
-Explorer mode should always show a read-only file-viewer workspace. Its first tab should be a permanent, non-closable dynamic preview that initially says `Select a file to view` and updates whenever the user clicks a readable file in the tree. Each readable file row should also have a small `+` button that opens the file in a separate closable tab. The file-tab strip should sit above the existing file header/Back-button row, pinned tabs should remain open while the user browses, and closing the active pinned tab should return focus to a sensible remaining tab, including the permanent preview.
-
-Actual behavior / logs:
-Code inspection confirms `renderExplorerDirectoryRows()` in `web/static/js/terminals.js` renders the main pane as a directory/file list, and `wireExplorerDirectoryRows()` navigates folders or replaces that list through `openExplorerFile()`. The Files tree separately renders file rows through `explorerTreeRowHtml()`, but each file has only the main `data-explorer-tree-file` click target; only directories receive a secondary action, currently `Open folder in the explorer list`. `renderExplorerFile()` then replaces the main pane with one editor and Back button. There is no persistent file-tab collection, non-closable preview tab, close action, or empty viewer state.
-
-### Proposed solution:
-Refactor the Explorer client state and rendering in `web/static/js/terminals.js` so the Files tree is the navigation surface and the main content is a permanent viewer. Add a per-pane tab model with one reserved dynamic-preview tab plus deduplicated pinned tabs keyed by normalized file path. A normal readable-file click should load into the preview tab; an accessible `+` control on that file's tree row should stop propagation and open or focus a pinned, closable tab. Render the tab strip above the existing editor header, prevent closing the preview tab, define focus selection after closing a pinned tab, preserve appropriate per-tab file/view/search/scroll state, and clear stale tabs safely when the explorer session or root changes. Remove the directory-list/open-folder dependency from the main viewer while retaining tree expansion, Git information, refresh behavior, supported-file validation, local/SSH parity, and the read-only guarantee. Add styles in `web/static/css/terminals.css` and focused rendered-template tests in `tests/test_api.py` for the empty state, preview replacement, `+` event isolation, tab deduplication and closing, active-tab fallback, mode/root resets, refresh, and unsupported files.
-
 ### Issue ID: ISSUE-2026-013
 - Title: Add per-agent auto-mode toggles to terminal settings
 - Priority: Low
@@ -343,6 +265,87 @@ Code inspection confirms `buildTerminalInitialCommand()` in `web/static/js/launc
 Add a per-terminal boolean such as `agent_auto_mode` to the launcher draft, saved-session normalization, workspace serialization, `TerminalSession`, and API responses. Define supported auto-mode arguments in the existing agent registry or another single backend-owned mapping instead of hard-coding one generic flag for every CLI. Update the agent settings row in `web/static/js/launcher.js` to show an accessible toggle only when the selected built-in agent has a registered option, recompute visibility and help text when the selection changes, and keep custom-agent behavior explicit rather than silently modifying arbitrary commands. Compose the final startup command from the validated selected-agent metadata and mapped argument without duplicating flags, while keeping preflight detection based on the base agent executable. Add focused tests in `tests/test_api.py` and `tests/test_session_manager.py` for enabled/disabled command construction, unsupported and custom agents, save/load/workspace round-trips, SSH and local launches, and backward compatibility for saved sessions without the new field.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-014
+- Title: Replace explorer directory view with tabbed file viewer
+- Priority: Low
+- Status: Closed
+- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `terminal`, `tests`
+- Reported: 2026-07-12
+- Closed: 2026-07-16
+
+Description:
+Explorer mode should use its existing file tree for navigation and dedicate the main pane to read-only file viewing. The current main pane duplicates directory-browsing behavior and can display only one opened file at a time, so users cannot keep several reference files open while moving through the tree.
+
+Steps to reproduce:
+1. Open a GridVibe pane in Explorer startup mode and expose its Files tree.
+2. Select files and directories in the tree and inspect the main explorer pane.
+3. Observe that the main pane starts as a directory listing, a file replaces that listing with a single view and Back button, and file-tree rows have no `+` action for opening closable file tabs.
+
+Expected behavior:
+Explorer mode should always show a read-only file-viewer workspace. Its first tab should be a permanent, non-closable dynamic preview that initially says `Select a file to view` and updates whenever the user clicks a readable file in the tree. Each readable file row should also have a small `+` button that opens the file in a separate closable tab. The file-tab strip should sit above the existing file header/Back-button row, pinned tabs should remain open while the user browses, and closing the active pinned tab should return focus to a sensible remaining tab, including the permanent preview.
+
+Actual behavior / logs:
+Code inspection confirms `renderExplorerDirectoryRows()` in `web/static/js/terminals.js` renders the main pane as a directory/file list, and `wireExplorerDirectoryRows()` navigates folders or replaces that list through `openExplorerFile()`. The Files tree separately renders file rows through `explorerTreeRowHtml()`, but each file has only the main `data-explorer-tree-file` click target; only directories receive a secondary action, currently `Open folder in the explorer list`. `renderExplorerFile()` then replaces the main pane with one editor and Back button. There is no persistent file-tab collection, non-closable preview tab, close action, or empty viewer state.
+
+Resolution:
+`explorer-list-<index>` now hosts a stable shell — an `.explorer-tab-strip` above an `.explorer-viewer` body — created lazily by `explorerEnsureViewerShell()`, so the main pane is always the read-only viewer. A per-pane tab model (`pane._explorerTabs` + `pane._explorerActiveTabId`, seeded by `ensureExplorerTabState()`) keeps one permanent non-closable **Preview** tab (`EXPLORER_PREVIEW_TAB_ID`) plus deduplicated pinned tabs keyed by `explorerNormalizeTabPath()` and capped at `EXPLORER_MAX_PINNED_TABS` (12). `explorerAssignOpenTab()` sends a plain tree/file click to the Preview tab and a new `+` control on file rows (`data-explorer-tree-open-tab`) to a pinned tab. `renderExplorerTabStrip()` renders/wires the strip above the file header; `activateExplorerTab()`/`closeExplorerTab()` switch and close tabs (closing the active pinned tab falls back to its left neighbour, ultimately the Preview tab, which cannot be closed). First show routes through `openExplorerViewer()` — the empty **"Select a file to view"** state with the Files tree auto-opened for navigation — and directory browsing still works but lives inside the Preview tab so the Stage-1 directory-search subsystem is unchanged. Covered by `test_terminals_page_explorer_uses_tabbed_file_viewer` in `tests/test_api.py`.
+
+### Issue ID: ISSUE-2026-016
+- Title: Markdown preview links do not open explorer tabs
+- Priority: Medium
+- Status: Closed
+- Area: `web/static/js/terminals.js`, `web/explorer.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `markdown`, `terminal`, `tests`
+- Reported: 2026-07-13
+- Closed: 2026-07-16
+
+Description:
+Links rendered inside a Markdown file preview do not participate in Explorer navigation. Relative documentation links are effectively broken in the terminal workspace, and clicking them does not open the linked Markdown file in a new Explorer tab. This is a companion requirement to the tabbed file viewer in ISSUE-2026-014; any pinned link-opened tabs should also use the persistence model tracked in ISSUE-2026-015.
+
+Steps to reproduce:
+1. In an Explorer pane, open a Markdown file that contains a relative link to another readable Markdown file, such as `[Guide](docs/guide.md)`.
+2. Switch to Preview and click the rendered `Guide` link.
+3. Observe that GridVibe does not resolve the target relative to the current file or open it as a new closable Markdown tab in the Explorer pane.
+
+Expected behavior:
+Clicking an internal Markdown-to-Markdown link should resolve the target relative to the source document, validate it against the active Explorer root, and open or focus it as a new closable pinned tab using the model defined by ISSUE-2026-014. Fragment links should focus the corresponding heading, duplicate targets should reuse their existing tab, and external or unsupported links should follow an explicit safe behavior without navigating the GridVibe session page away.
+
+Actual behavior / logs:
+Code inspection confirms `_render_markdown_preview()` in `web/explorer.py` preserves sanitized `href` attributes on anchors. `renderExplorerFile()` in `web/static/js/terminals.js` assigns that HTML directly to the preview and wires code highlighting, editor tabs, zoom, and search, but it does not install a Markdown-link click handler or resolve link paths against the current file. The browser therefore receives raw relative URLs in the `/terminals` document context, and no Explorer file-tab action is invoked.
+
+Resolution:
+`wireExplorerMarkdownLinks()` installs a delegated click handler on each `.explorer-markdown-preview` (in both `renderExplorerFile()` and the in-place refresh path). `explorerClassifyLink()` classifies fragment / external / mailto / unsupported / relative links; `explorerResolveRelativePath()` resolves a relative link against the current file and rejects `..` traversal above the Explorer root plus drive-letter/scheme paths. Fragment-only links scroll to the heading via `explorerScrollPreviewToHeading()`; relative links open a deduplicated pinned tab through the shared primitive (`openExplorerFile(..., { pinned: true })`) and carry their fragment to scroll the destination; external `http(s)` links open isolated via `window.open(..., 'noopener,noreferrer')` and never navigate the session page away, while `mailto:` uses the default handler and unsupported schemes are ignored. Covered by `test_terminals_page_explorer_markdown_links_open_tabs` in `tests/test_api.py`.
+
+### Issue ID: ISSUE-2026-015
+- Title: Persist open explorer tabs in saved sessions
+- Priority: Low
+- Status: Closed
+- Area: `web/static/js/terminals.js`, `web/static/js/launcher.js`, `web/saved_sessions.py`, `sessions/manager.py`, `web/runtime_state.py`, `tests/test_api.py`, `tests/test_session_manager.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `session`, `launcher`, `settings`, `tests`
+- Reported: 2026-07-12
+- Closed: 2026-07-16
+
+Description:
+The tabbed explorer viewer tracked in ISSUE-2026-014 also needs to participate in saved-session persistence. Without explicit tab state in the saved preset, users who save a configured workspace from the active-session Save Session dropdown or resave it through launcher settings would lose their open reference files and active explorer tab when they relaunch that session.
+
+Steps to reproduce:
+1. Open a session containing an Explorer pane and, once the ISSUE-2026-014 tabbed viewer is available, open multiple files as pinned tabs and select one of them.
+2. Save the workspace through the active-session Save Session dropdown, or open the preset in the launcher and save its settings again.
+3. Relaunch the saved session and observe that the preset schema has no explorer-tab state from which to restore the previously open files and active tab.
+
+Expected behavior:
+Both saved-session workflows should retain each Explorer pane's open file tabs, their stable order, and the active tab. Relaunching the preset should safely restore readable tabs under the pane's current explorer root while preserving the permanent dynamic-preview behavior defined by ISSUE-2026-014.
+
+Actual behavior / logs:
+Code inspection confirms `buildWorkspaceTerminalEntry()` in `web/static/js/terminals.js` serializes an Explorer pane's directory plus `explorer_tree_open` and `explorer_git_open`, but no open-file or active-tab state. `collectFormConfig()` in `web/static/js/launcher.js` forwards terminal drafts and geometry only, while `_normalize_terminal_entries()` and `_normalize_workspace_layout()` in `web/api.py` have no fields for explorer tabs. `TerminalSession` in `sessions/manager.py` likewise retains explorer root/sidebar state but cannot carry tab metadata into a relaunched workspace. ISSUE-2026-014 defines the new tab model but does not cover saved-session round-tripping.
+
+Resolution:
+Two bounded fields — `explorer_open_tabs` (ordered pinned paths) and `explorer_active_tab` — now thread end to end. `explorerSerializeTabs()` / `buildWorkspaceTerminalEntry()` capture them for active-workspace saves; `web/static/js/launcher.js` carries them invisibly through the terminal row dataset (`data-explorer-open-tabs` + `parseExplorerOpenTabsDataset()`) so resaving a preset preserves them without the launcher editing tabs. `web/saved_sessions.py` validates them (`_normalize_explorer_open_tabs` / `_normalize_explorer_active_tab`: forward-slash normalization, `..`/drive/scheme rejection, dedup, `EXPLORER_MAX_OPEN_TABS` cap, active-tab-must-be-open) in `_normalize_terminal_entries` and gates them to explorer panes in `_merge_workspace_session_config`. `TerminalSession` (`sessions/manager.py`) and the runtime-state snapshot (`web/runtime_state.py`) carry them into a relaunched workspace, where `restoreExplorerPersistedTabs()` reopens readable tabs and activates the saved one — missing/out-of-root paths are ignored without failing launch, and no file contents or writable state are persisted. Covered by `test_workspace_save_round_trips_explorer_open_tabs`, `test_normalize_terminal_entries_*`, and `test_terminals_page_explorer_persists_open_tabs` / `test_launcher_round_trips_explorer_open_tabs` in `tests/test_api.py`, plus `test_create_sessions_carries_explorer_open_tabs` in `tests/test_session_manager.py`.
 
 ### Issue ID: ISSUE-2026-028
 - Title: Explorer file tree has no right-click "Copy path" context menu

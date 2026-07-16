@@ -151,6 +151,38 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertTrue(sessions[0].to_dict()["explorer_tree_open"])
         self.assertTrue(sessions[0].to_dict()["explorer_git_open"])
 
+    def test_create_sessions_carries_explorer_open_tabs(self):
+        """ISSUE-2026-015: TerminalSession persists open explorer tabs metadata."""
+        sessions = self.manager.create_sessions(
+            [
+                {
+                    "mode": "wsl",
+                    "directory": "C:\\repo",
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                    "explorer_root_directory": "C:\\repo",
+                    "explorer_open_tabs": ["docs/a.md", "b.md"],
+                    "explorer_active_tab": "b.md",
+                }
+            ],
+            group_id="group-tabs",
+        )
+
+        self.assertEqual(sessions[0].explorer_open_tabs, ["docs/a.md", "b.md"])
+        self.assertEqual(sessions[0].explorer_active_tab, "b.md")
+        self.assertEqual(sessions[0].to_dict()["explorer_open_tabs"], ["docs/a.md", "b.md"])
+        self.assertEqual(sessions[0].to_dict()["explorer_active_tab"], "b.md")
+
+    def test_create_sessions_defaults_explorer_tabs_when_absent(self):
+        """Backward compatibility: sessions without tab metadata get safe defaults."""
+        sessions = self.manager.create_sessions(
+            [{"mode": "ssh", "host": "h", "directory": "/repo", "startup_mode": "explorer"}],
+            group_id="group-notabs",
+        )
+
+        self.assertEqual(sessions[0].explorer_open_tabs, [])
+        self.assertEqual(sessions[0].explorer_active_tab, "")
+
     def test_create_sessions_supports_agent_metadata(self):
         sessions = self.manager.create_sessions(
             [

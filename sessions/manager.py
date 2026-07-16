@@ -50,6 +50,8 @@ class TerminalSession:
     explorer_root_directory: Optional[str] = None
     explorer_tree_open: bool = False
     explorer_git_open: bool = False
+    explorer_open_tabs: List[str] = field(default_factory=list)
+    explorer_active_tab: str = ""
     status: SessionStatus = SessionStatus.PENDING
     created_at: float = field(default_factory=time.time)
     connected_at: Optional[float] = None
@@ -77,6 +79,8 @@ class TerminalSession:
             "explorer_root_directory": self.explorer_root_directory,
             "explorer_tree_open": self.explorer_tree_open,
             "explorer_git_open": self.explorer_git_open,
+            "explorer_open_tabs": list(self.explorer_open_tabs),
+            "explorer_active_tab": self.explorer_active_tab,
             "status": self.status.value,
             "created_at": self.created_at,
             "connected_at": self.connected_at,
@@ -259,6 +263,8 @@ class SessionManager:
                     explorer_root_directory=config.get("explorer_root_directory"),
                     explorer_tree_open=bool(config.get("explorer_tree_open")),
                     explorer_git_open=bool(config.get("explorer_git_open")),
+                    explorer_open_tabs=list(config.get("explorer_open_tabs") or []),
+                    explorer_active_tab=str(config.get("explorer_active_tab") or ""),
                 )
                 created.append(session)
             except Exception as e:
@@ -292,6 +298,8 @@ class SessionManager:
             "explorer_root_directory",
             "explorer_tree_open",
             "explorer_git_open",
+            "explorer_open_tabs",
+            "explorer_active_tab",
         }
         with self.lock:
             session = self.sessions.get(session_id)

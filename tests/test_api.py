@@ -921,7 +921,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         self.assertIn("function renderExplorerDirectoryOpenError(index, message)", html)
         self.assertIn("renderExplorerDirectoryRows(index);", html)
-        self.assertIn("list.prepend(notice);", html)
+        self.assertIn("viewer.prepend(notice);", html)
         self.assertIn("const wasDirectoryOpen = pane._explorerMode === 'directory';", html)
         self.assertIn("if (showLoading && !wasDirectoryOpen)", html)
         self.assertIn("renderExplorerDirectoryOpenError(index, error.message || 'Failed to open file.');", html)
@@ -1024,6 +1024,96 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
         self.assertIn(".filter(entry => !entry.deleted)", html)
+
+    def test_terminals_page_explorer_uses_tabbed_file_viewer(self):
+        """ISSUE-2026-014: main pane is a persistent tabbed read-only viewer."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Per-pane tab model: one permanent Preview tab plus pinned tabs.
+        self.assertIn("const EXPLORER_PREVIEW_TAB_ID = '__preview__';", html)
+        self.assertIn("function ensureExplorerTabState(pane)", html)
+        self.assertIn("function renderExplorerTabStrip(index)", html)
+        self.assertIn("function activateExplorerTab(index, id)", html)
+        self.assertIn("function closeExplorerTab(index, id)", html)
+        self.assertIn("function openExplorerViewer(index)", html)
+        self.assertIn(
+            "function explorerAssignOpenTab(pane, path, { pinned = false, tab = '' } = {})",
+            html,
+        )
+        # The permanent Preview tab cannot be closed.
+        self.assertIn("if (!pane || id === EXPLORER_PREVIEW_TAB_ID) {", html)
+        # Empty state before any file is selected.
+        self.assertIn("Select a file to view", html)
+        # Stable shell: tab strip above the file header/viewer body.
+        self.assertIn('class="explorer-tab-strip"', html)
+        self.assertIn('id="explorer-viewer-${index}"', html)
+        self.assertIn("data-explorer-tab-open", html)
+        self.assertIn("data-explorer-tab-close", html)
+        # A `+` control on each tree file row opens a pinned tab (event-isolated).
+        self.assertIn("data-explorer-tree-open-tab", html)
+        self.assertIn(
+            "openExplorerFile(index, button.dataset.explorerTreeOpenTab || '', { pinned: true });",
+            html,
+        )
+        # First show routes through the viewer, not a directory listing.
+        self.assertIn("return openExplorerViewer(index);", html)
+        # Styling hooks (token-driven, no palette literals).
+        self.assertIn(".explorer-tab-strip {", html)
+        self.assertIn(".explorer-empty-viewer {", html)
+
+    def test_terminals_page_explorer_markdown_links_open_tabs(self):
+        """ISSUE-2026-016: Markdown preview links resolve and open explorer tabs."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function wireExplorerMarkdownLinks(index, preview)", html)
+        self.assertIn("function explorerClassifyLink(href)", html)
+        self.assertIn("function explorerResolveRelativePath(baseFilePath, href)", html)
+        self.assertIn("function explorerScrollPreviewToHeading(preview, fragment)", html)
+        # Relative Markdown links open as a pinned tab.
+        self.assertIn("openExplorerFile(index, resolved.path, { pinned: true })", html)
+        # Fragment-only links scroll within the current preview.
+        self.assertIn("explorerScrollPreviewToHeading(preview, info.fragment);", html)
+        # External links open isolated and never navigate the session page away.
+        self.assertIn("window.open(info.href, '_blank', 'noopener,noreferrer');", html)
+        # mailto is left to the default handler.
+        self.assertIn("if (info.type === 'mailto') {", html)
+        # Traversal above the Explorer root is rejected.
+        self.assertIn("if (!segments.length) {", html)
+        self.assertIn("if (segment.includes(':')) {", html)
+        # Wired into both the full render and in-place refresh preview paths.
+        self.assertEqual(html.count("wireExplorerMarkdownLinks(index, preview);"), 2)
+
+    def test_terminals_page_explorer_persists_open_tabs(self):
+        """ISSUE-2026-015: open tabs serialize into and restore from a session."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function explorerSerializeTabs(pane)", html)
+        self.assertIn("function persistExplorerTabsToSession(index)", html)
+        self.assertIn("function restoreExplorerPersistedTabs(index)", html)
+        self.assertIn("explorer_open_tabs: explorerTabs.open_tabs,", html)
+        self.assertIn("explorer_active_tab: explorerTabs.active_tab,", html)
+        self.assertIn("Array.isArray(session.explorer_open_tabs)", html)
+        self.assertIn("restoreExplorerPersistedTabs(index);", html)
+        # Bounded pinned-tab count shared with the backend cap.
+        self.assertIn("const EXPLORER_MAX_PINNED_TABS = 12;", html)
+
+    def test_launcher_round_trips_explorer_open_tabs(self):
+        """ISSUE-2026-015: launcher carries open tabs through without editing them."""
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function parseExplorerOpenTabsDataset(value)", html)
+        self.assertIn("data-explorer-open-tabs=", html)
+        self.assertIn("data-explorer-active-tab=", html)
+        self.assertIn("explorer_open_tabs: commandMode === 'explorer'", html)
+        self.assertIn("explorer_open_tabs: terminal.startup_mode === 'explorer'", html)
 
     def test_terminals_page_explorer_sidebar_supports_tree_and_git_together(self):
         response = self.client.get("/terminals")
@@ -4259,6 +4349,123 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(config["terminals"][1]["initial_command"], api.DEFAULT_BROWSER_URL)
         self.assertEqual(config["layout"], "vertical")
         self.assertEqual(config["workspace_layout"]["split_slot_rects"][0]["w"], 3)
+
+    def test_normalize_terminal_entries_bounds_explorer_open_tabs(self):
+        """ISSUE-2026-015: normalize/de-dupe/reject unsafe persisted tab paths."""
+        entries = [
+            {
+                "startup_mode": "explorer",
+                "explorer_open_tabs": [
+                    "docs/a.md",
+                    "docs/a.md",          # duplicate dropped
+                    "../secret.txt",      # traversal dropped
+                    "C:/abs.txt",         # drive-absolute dropped
+                    "sub\\b.md",          # backslashes normalized
+                    "",                   # empty dropped
+                ],
+                "explorer_active_tab": "sub/b.md",
+            }
+        ]
+
+        normalized = web_saved_sessions._normalize_terminal_entries(entries)
+
+        self.assertEqual(normalized[0]["explorer_open_tabs"], ["docs/a.md", "sub/b.md"])
+        self.assertEqual(normalized[0]["explorer_active_tab"], "sub/b.md")
+
+    def test_normalize_terminal_entries_drops_active_tab_not_open(self):
+        """An active tab that is not among the open tabs falls back to empty."""
+        entries = [
+            {
+                "startup_mode": "explorer",
+                "explorer_open_tabs": ["a.md"],
+                "explorer_active_tab": "b.md",
+            }
+        ]
+
+        normalized = web_saved_sessions._normalize_terminal_entries(entries)
+
+        self.assertEqual(normalized[0]["explorer_active_tab"], "")
+
+    def test_normalize_terminal_entries_caps_open_tab_count(self):
+        entries = [
+            {
+                "startup_mode": "explorer",
+                "explorer_open_tabs": [f"file{i}.md" for i in range(30)],
+            }
+        ]
+
+        normalized = web_saved_sessions._normalize_terminal_entries(entries)
+
+        self.assertEqual(
+            len(normalized[0]["explorer_open_tabs"]),
+            web_saved_sessions.EXPLORER_MAX_OPEN_TABS,
+        )
+
+    def test_normalize_terminal_entries_defaults_missing_explorer_tabs(self):
+        """Backward compatibility: presets without the field normalize cleanly."""
+        normalized = web_saved_sessions._normalize_terminal_entries(
+            [{"startup_mode": "explorer"}]
+        )
+
+        self.assertEqual(normalized[0]["explorer_open_tabs"], [])
+        self.assertEqual(normalized[0]["explorer_active_tab"], "")
+
+    def test_workspace_save_round_trips_explorer_open_tabs(self):
+        """ISSUE-2026-015: active-workspace save persists explorer tabs, gated to explorer panes."""
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "explorer-tabs",
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "vertical",
+                    "ssh": {"host": "example.com", "username": "ubuntu", "port": 22, "default_dir": "/repo"},
+                    "terminals": [
+                        {"title": "Files", "directory": "repo", "startup_mode": "explorer"},
+                        {"title": "Shell", "directory": "repo", "startup_mode": "terminal"},
+                    ],
+                },
+            },
+        ).get_json()
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "vertical",
+                    "terminals": [
+                        {
+                            "title": "Files",
+                            "directory": "repo",
+                            "startup_mode": "explorer",
+                            "explorer_open_tabs": ["docs/a.md", "docs/a.md", "../escape.md"],
+                            "explorer_active_tab": "docs/a.md",
+                        },
+                        {
+                            "title": "Shell",
+                            "directory": "repo",
+                            "startup_mode": "terminal",
+                            "explorer_open_tabs": ["should-not-persist.md"],
+                            "explorer_active_tab": "should-not-persist.md",
+                        },
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        config = response.get_json()["config"]
+        self.assertEqual(config["terminals"][0]["explorer_open_tabs"], ["docs/a.md"])
+        self.assertEqual(config["terminals"][0]["explorer_active_tab"], "docs/a.md")
+        # Non-explorer panes never carry file tabs.
+        self.assertEqual(config["terminals"][1]["explorer_open_tabs"], [])
+        self.assertEqual(config["terminals"][1]["explorer_active_tab"], "")
 
     def test_workspace_save_as_clones_source_directories_before_applying_modes(self):
         original = self.client.post(

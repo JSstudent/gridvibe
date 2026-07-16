@@ -17,17 +17,16 @@ depend on them. Within a stage, issues share files and can be built together.
 | Stage | Theme | Issues |
 | --- | --- | --- |
 | 1 ✅ | Explorer tree rows & Git sidebar (**done 2026-07-16**) | 024, 028, 023, 018 |
-| 2 | Explorer tabbed file viewer (foundational) | 014, 016, 015 |
+| 2 ✅ | Explorer tabbed file viewer (**done 2026-07-16**) | 014, 016, 015 |
 | 3 | Markdown preview presentation | 017, 030 |
 | 4 | Explorer large-file / log preview | 020 |
 | 5 | Terminal close & layout integrity | 022, 027 |
 | 6 | Terminal input focus & targeting | 025, 026 |
 | 7 | Settings & launcher configuration | 029, 013, 031 |
 
-All 17 issues are covered; **Stage 1 (024, 028, 023, 018) is now implemented and
-closed**, leaving 13 open. Stages 1, 3, 5, 6, 7 are independent of each other and
-can be scheduled in any order. Stage 2 is the largest refactor and several other
-items relate to it (see **Cross-stage dependencies**).
+All 17 issues are covered; **Stage 1 (024, 028, 023, 018) and Stage 2 (014, 016,
+015) are now implemented and closed**, leaving 10 open. Stages 3, 5, 6, 7 are
+independent of each other and can be scheduled in any order.
 
 ---
 
@@ -124,13 +123,16 @@ rendered-template assertions for all four issues.
 
 ## Stage 2 — Explorer tabbed file viewer (foundational)
 
+> **Status: Implemented (2026-07-16).** All three issues below are closed. See
+> **Implementation notes** at the end of this section for what shipped.
+
 **Goal:** turn the Explorer main pane into a persistent tabbed read-only viewer.
 This is the spine that two other issues explicitly build on.
 
 **Issues**
-- **ISSUE-2026-014** — Replace explorer directory view with tabbed file viewer *(must land first)*
-- **ISSUE-2026-016** — Markdown preview links do not open explorer tabs *(depends on 014's tab primitive)*
-- **ISSUE-2026-015** — Persist open explorer tabs in saved sessions *(depends on 014's tab model)*
+- **ISSUE-2026-014** — Replace explorer directory view with tabbed file viewer ✅
+- **ISSUE-2026-016** — Markdown preview links do not open explorer tabs ✅
+- **ISSUE-2026-015** — Persist open explorer tabs in saved sessions ✅
 
 **Shared surface**
 - `web/static/js/terminals.js`: `renderExplorerDirectoryRows()`,
@@ -157,6 +159,55 @@ This is the spine that two other issues explicitly build on.
 **Ordering inside the stage:** 014 → then 016 and 015 in parallel.
 
 **Sizing:** Large. 014 is a real refactor of the main pane; budget accordingly.
+
+**Implementation notes (2026-07-16)**
+1. **014 — tabbed viewer.** `explorer-list-<index>` now holds a stable shell —
+   an `.explorer-tab-strip` above an `.explorer-viewer` body — created lazily by
+   `explorerEnsureViewerShell()`. A per-pane tab model (`pane._explorerTabs` +
+   `pane._explorerActiveTabId`, seeded by `ensureExplorerTabState()`) has one
+   permanent non-closable **Preview** tab (`EXPLORER_PREVIEW_TAB_ID`) plus
+   deduplicated pinned tabs keyed by `explorerNormalizeTabPath()`.
+   `explorerAssignOpenTab()` routes a plain tree click into the Preview tab and a
+   `+` action (new `data-explorer-tree-open-tab` control on file rows) or Markdown
+   link into a pinned tab (capped at `EXPLORER_MAX_PINNED_TABS = 12`).
+   `renderExplorerTabStrip()` renders/wires the strip; `activateExplorerTab()` /
+   `closeExplorerTab()` switch and close (closing the active pinned tab falls back
+   to its left neighbour, ultimately the Preview tab). First show routes through
+   `openExplorerViewer()` (empty **"Select a file to view"** state + auto-opened
+   Files tree) instead of a directory listing; `renderExplorerFile()`,
+   `renderExplorerCommitDiffFile()`, `renderExplorerDirectoryRows()`, and
+   `renderExplorerMessage()` now render into the viewer body and keep the strip in
+   sync. Directory browsing still works but lives inside the Preview tab, so the
+   Stage-1 directory-search subsystem is unchanged.
+2. **016 — Markdown link navigation.** `wireExplorerMarkdownLinks()` installs a
+   delegated click handler on each `.explorer-markdown-preview`.
+   `explorerClassifyLink()` splits fragment / external / mailto / unsupported /
+   relative; `explorerResolveRelativePath()` resolves a relative link against the
+   current file and rejects `..` traversal above the Explorer root and drive /
+   scheme paths. Relative links open a pinned tab via the shared primitive
+   (`openExplorerFile(..., { pinned: true })`) and fragments scroll to the heading
+   (`explorerScrollPreviewToHeading()`); external `http(s)` links open isolated
+   with `window.open(..., 'noopener,noreferrer')` and never navigate the session
+   page away.
+3. **015 — saved-session persistence.** New bounded fields `explorer_open_tabs`
+   (ordered pinned paths) and `explorer_active_tab` thread end to end:
+   `explorerSerializeTabs()` / `buildWorkspaceTerminalEntry()` capture them for
+   active-workspace saves; `web/static/js/launcher.js` carries them invisibly
+   through the terminal row dataset (`parseExplorerOpenTabsDataset()`) so resaving
+   a preset preserves them; `web/saved_sessions.py`
+   (`_normalize_explorer_open_tabs` / `_normalize_explorer_active_tab`,
+   `_normalize_terminal_entries`, `_merge_workspace_session_config`) validate,
+   de-duplicate, cap, and gate them to explorer panes; `TerminalSession`
+   (`sessions/manager.py`) and the runtime-state snapshot
+   (`web/runtime_state.py`) carry them into a relaunched workspace, where
+   `restoreExplorerPersistedTabs()` reopens readable tabs and activates the saved
+   one — missing/out-of-root paths are ignored without failing launch.
+
+Tests: `tests/test_api.py` gained rendered-template coverage for the tabbed
+viewer, Markdown-link handling, and tab persistence, plus behavioral coverage for
+open-tab normalization (dedup / traversal / cap / active-tab validation) and a
+workspace-save round-trip; `tests/test_session_manager.py` covers
+`TerminalSession` carrying the new fields (and defaulting when absent).
 
 ---
 

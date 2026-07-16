@@ -25,6 +25,53 @@ SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
 DEFAULT_SAVED_SESSION_ID = "default-session"
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
 
+# Explorer tabbed viewer persistence bounds (ISSUE-2026-015).
+EXPLORER_MAX_OPEN_TABS = 12
+EXPLORER_MAX_TAB_PATH_LENGTH = 4096
+
+
+def _normalize_explorer_tab_path(value: Any) -> str:
+    """Normalize one persisted explorer tab path (root-relative, no traversal).
+
+    Returns "" for absolute paths, drive letters, ``..`` traversal, or anything
+    over the length cap, so an unsafe or out-of-root entry is dropped rather
+    than restored.
+    """
+    text = str(value or "").replace("\\", "/").strip()
+    if not text or len(text) > EXPLORER_MAX_TAB_PATH_LENGTH:
+        return ""
+    segments: List[str] = []
+    for segment in text.split("/"):
+        if segment in ("", "."):
+            continue
+        if segment == ".." or ":" in segment:
+            return ""
+        segments.append(segment)
+    return "/".join(segments)
+
+
+def _normalize_explorer_open_tabs(value: Any) -> List[str]:
+    """Bound and de-duplicate the persisted list of open explorer tab paths."""
+    if not isinstance(value, list):
+        return []
+    result: List[str] = []
+    seen = set()
+    for item in value:
+        path = _normalize_explorer_tab_path(item)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        result.append(path)
+        if len(result) >= EXPLORER_MAX_OPEN_TABS:
+            break
+    return result
+
+
+def _normalize_explorer_active_tab(value: Any, open_tabs: List[str]) -> str:
+    """Keep the active tab only when it points at one of the open tabs."""
+    path = _normalize_explorer_tab_path(value)
+    return path if path in open_tabs else ""
+
 
 def _default_terminal_entries():
     """Build default per-terminal settings."""
@@ -39,6 +86,8 @@ def _default_terminal_entries():
             "custom_agent": "",
             "explorer_tree_open": False,
             "explorer_git_open": False,
+            "explorer_open_tabs": [],
+            "explorer_active_tab": "",
             "distribution": "",
             "use_wsl": False,
             "use_powershell": False,
@@ -209,6 +258,7 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
         if raw_startup_mode is None:
             raw_startup_mode = "agent" if entry.get("initial_command_mode") == "agent" else "terminal"
         startup_mode = _normalize_startup_mode(raw_startup_mode, connection_mode)
+        open_tabs = _normalize_explorer_open_tabs(entry.get("explorer_open_tabs"))
         normalized.append(
             {
                 "title": str(entry.get("title") or f"Terminal {index + 1}"),
@@ -220,6 +270,8 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
                 "custom_agent": str(entry.get("custom_agent") or ""),
                 "explorer_tree_open": bool(entry.get("explorer_tree_open")),
                 "explorer_git_open": bool(entry.get("explorer_git_open")),
+                "explorer_open_tabs": open_tabs,
+                "explorer_active_tab": _normalize_explorer_active_tab(entry.get("explorer_active_tab"), open_tabs),
                 "distribution": str(entry.get("distribution") or ""),
                 "use_wsl": bool(entry.get("use_wsl")) and not use_powershell,
                 "use_powershell": use_powershell,
@@ -323,6 +375,12 @@ def _merge_workspace_session_config(
         )
         saved_terminal["explorer_git_open"] = (
             startup_mode == "explorer" and workspace_terminal["explorer_git_open"]
+        )
+        saved_terminal["explorer_open_tabs"] = (
+            workspace_terminal["explorer_open_tabs"] if startup_mode == "explorer" else []
+        )
+        saved_terminal["explorer_active_tab"] = (
+            workspace_terminal["explorer_active_tab"] if startup_mode == "explorer" else ""
         )
 
         # Browser panes need a valid URL, but navigation performed in the live

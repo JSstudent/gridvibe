@@ -1814,14 +1814,130 @@
 
         .explorer-list {
             min-height: 0;
+            overflow: hidden;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+        }
+
+        /* Persistent tab strip above the file header/Back row (ISSUE-2026-014). */
+        .explorer-tab-strip {
+            display: flex;
+            align-items: stretch;
+            gap: 2px;
+            min-height: 0;
+            padding: 4px 6px 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            border-bottom: 1px solid var(--explorer-row-border);
+            background: var(--explorer-bar-bg);
+            scrollbar-width: thin;
+        }
+
+        .explorer-tab {
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            max-width: 200px;
+            border: 1px solid transparent;
+            border-bottom: none;
+            border-radius: 6px 6px 0 0;
+            background: transparent;
+            color: var(--explorer-muted);
+        }
+
+        .explorer-tab.active {
+            border-color: var(--explorer-row-border);
+            background: var(--explorer-bg);
+            color: var(--explorer-text);
+        }
+
+        .explorer-tab-main {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+            max-width: 180px;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+            font: inherit;
+            font-size: .72rem;
+            padding: 6px 4px 6px 8px;
+        }
+
+        .explorer-tab-main .explorer-icon {
+            width: 16px;
+            height: 16px;
+            flex: none;
+        }
+
+        .explorer-tab-main .explorer-icon svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        .explorer-tab-name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .explorer-tab.active .explorer-tab-name {
+            font-weight: 600;
+        }
+
+        .explorer-tab-close {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            margin-right: 5px;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: var(--explorer-muted);
+            cursor: pointer;
+            font-size: .95rem;
+            line-height: 1;
+        }
+
+        .explorer-tab-close:hover {
+            background: var(--explorer-row-hover);
+            color: var(--explorer-text);
+        }
+
+        .explorer-tab:hover:not(.active) {
+            color: var(--explorer-text);
+        }
+
+        .explorer-tab-main:focus-visible,
+        .explorer-tab-close:focus-visible {
+            outline: 2px solid var(--t-accent);
+            outline-offset: -2px;
+        }
+
+        .explorer-viewer {
+            min-height: 0;
             overflow: auto;
             display: grid;
             align-content: start;
         }
 
-        .explorer-list.file-view {
+        .explorer-list.file-view .explorer-viewer {
             overflow: hidden;
             align-content: stretch;
+        }
+
+        .explorer-empty-viewer {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            padding: 24px;
+            color: var(--explorer-muted);
+            font-size: .82rem;
         }
 
         .explorer-row {

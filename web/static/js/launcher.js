@@ -83,6 +83,8 @@
         custom_agent: '',
         explorer_tree_open: false,
         explorer_git_open: false,
+        explorer_open_tabs: [],
+        explorer_active_tab: '',
         distribution: '',
         use_wsl: false,
         use_powershell: false
@@ -958,6 +960,21 @@
         return parsed.href;
     }
 
+    /* Explorer file tabs are not editable in the launcher form; they are
+       carried invisibly through the terminal row dataset so resaving a preset
+       preserves them (ISSUE-2026-015). */
+    function parseExplorerOpenTabsDataset(value) {
+        if (!value) {
+            return [];
+        }
+        try {
+            const parsed = JSON.parse(value);
+            return Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string') : [];
+        } catch (_) {
+            return [];
+        }
+    }
+
     function collectTerminalDrafts() {
         const rows = Array.from(document.querySelectorAll('.t-row'));
         if (!rows.length) {
@@ -984,6 +1001,8 @@
                     : '',
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
+                explorer_open_tabs: commandMode === 'explorer' ? parseExplorerOpenTabsDataset(row.dataset.explorerOpenTabs) : [],
+                explorer_active_tab: commandMode === 'explorer' ? (row.dataset.explorerActiveTab || '') : '',
                 distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
                 use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
                     ? Boolean(row.querySelector('.t-use-wsl')?.checked)
@@ -1778,6 +1797,8 @@
                     data-command-mode="${escHtml(commandUi.mode)}"
                     data-explorer-tree-open="${terminal.explorer_tree_open ? 'true' : 'false'}"
                     data-explorer-git-open="${terminal.explorer_git_open ? 'true' : 'false'}"
+                    data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
+                    data-explorer-active-tab="${escHtml(terminal.explorer_active_tab || '')}"
                 >
                     <div class="t-row-head">
                         <span class="t-badge">T${index + 1}</span>
@@ -2534,6 +2555,12 @@
                     explorer_git_open: terminal.startup_mode === 'explorer'
                         ? Boolean(terminal.explorer_git_open)
                         : false,
+                    explorer_open_tabs: terminal.startup_mode === 'explorer' && Array.isArray(terminal.explorer_open_tabs)
+                        ? terminal.explorer_open_tabs
+                        : [],
+                    explorer_active_tab: terminal.startup_mode === 'explorer'
+                        ? (terminal.explorer_active_tab || '')
+                        : '',
                     startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
                         ? terminal.startup_mode
                         : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')

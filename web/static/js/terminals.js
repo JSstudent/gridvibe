@@ -1203,6 +1203,8 @@
                 custom_agent: startupMode === 'agent' ? (terminal?.custom_agent || '') : '',
                 explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_tree_open) : false,
                 explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_git_open) : false,
+                explorer_open_tabs: startupMode === 'explorer' && Array.isArray(terminal?.explorer_open_tabs) ? terminal.explorer_open_tabs : [],
+                explorer_active_tab: startupMode === 'explorer' ? (terminal?.explorer_active_tab || '') : '',
                 startup_mode: startupMode
             };
 
@@ -1505,6 +1507,9 @@
         const selectedDirectory = startupMode === 'explorer'
             ? (session.explorer_root_directory || session.directory || '')
             : (session.directory || '');
+        const explorerTabs = startupMode === 'explorer' && terminal
+            ? explorerSerializeTabs(terminal)
+            : { open_tabs: [], active_tab: '' };
 
         return {
             title: session.title || `Terminal ${index + 1}`,
@@ -1516,6 +1521,8 @@
             custom_agent: commandMode === 'agent' ? (session.custom_agent || '') : '',
             explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?._explorerTreeSidebarOpen) : false,
             explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
+            explorer_open_tabs: explorerTabs.open_tabs,
+            explorer_active_tab: explorerTabs.active_tab,
             distribution: connectionMode === 'wsl' ? (session.distribution || '') : '',
             use_wsl: connectionMode === 'wsl' ? Boolean(session.use_wsl) : false,
             use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false
@@ -7956,16 +7963,18 @@
 
     function renderExplorerMessage(index, message) {
         const list = document.getElementById(`explorer-list-${index}`);
-        if (list) {
+        const viewer = explorerEnsureViewerShell(index);
+        if (list && viewer) {
             list.classList.remove('file-view');
-            list.innerHTML = `<div class="explorer-message">${escHtml(message)}</div>`;
+            viewer.innerHTML = `<div class="explorer-message">${escHtml(message)}</div>`;
+            renderExplorerTabStrip(index);
         }
     }
 
     function renderExplorerDirectoryOpenError(index, message) {
         const pane = terminals[index];
-        const list = document.getElementById(`explorer-list-${index}`);
-        if (!pane || !list || pane._explorerMode !== 'directory') {
+        const viewer = explorerEnsureViewerShell(index);
+        if (!pane || !viewer || pane._explorerMode !== 'directory') {
             renderExplorerMessage(index, message);
             return;
         }
@@ -7974,7 +7983,7 @@
         const notice = document.createElement('div');
         notice.className = 'explorer-message explorer-file-open-error';
         notice.textContent = message;
-        list.prepend(notice);
+        viewer.prepend(notice);
     }
 
     function explorerGitStatusLabel(git) {
@@ -8782,6 +8791,9 @@
         const openFolder = isDirectory
             ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">↪</button>`
             : '';
+        const openTab = isDirectory
+            ? ''
+            : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">+</button>`;
 
         return `
             <div class="explorer-tree-row${active ? ' active' : ''}" data-explorer-copy-path="${escHtml(path)}">
@@ -8792,6 +8804,7 @@
                 </button>
                 ${badge}
                 ${openFolder}
+                ${openTab}
             </div>
         `;
     }
@@ -8853,6 +8866,12 @@
             button.addEventListener('click', event => {
                 event.stopPropagation();
                 loadExplorerPane(index, button.dataset.explorerTreeOpenFolder || '');
+            });
+        });
+        panel.querySelectorAll('[data-explorer-tree-open-tab]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                openExplorerFile(index, button.dataset.explorerTreeOpenTab || '', { pinned: true });
             });
         });
     }
@@ -9786,17 +9805,17 @@
     }
 
     function wireExplorerDirectoryRows(index) {
-        const list = document.getElementById(`explorer-list-${index}`);
-        if (!list) {
+        const viewer = document.getElementById(`explorer-viewer-${index}`);
+        if (!viewer) {
             return;
         }
 
-        list.querySelectorAll('.explorer-row.directory').forEach(button => {
+        viewer.querySelectorAll('.explorer-row.directory').forEach(button => {
             button.addEventListener('click', () => {
                 loadExplorerPane(index, button.dataset.explorerPath || '');
             });
         });
-        list.querySelectorAll('.explorer-row.file').forEach(button => {
+        viewer.querySelectorAll('.explorer-row.file').forEach(button => {
             button.addEventListener('click', () => {
                 openExplorerFile(index, button.dataset.explorerPath || '');
             });
@@ -9805,8 +9824,8 @@
 
     function renderExplorerDirectoryRows(index) {
         const pane = terminals[index];
-        const list = document.getElementById(`explorer-list-${index}`);
-        if (!pane || !list) {
+        const viewer = explorerEnsureViewerShell(index);
+        if (!pane || !viewer) {
             return;
         }
 
@@ -9824,11 +9843,11 @@
         state.activeIndex = matchCount ? Math.min(Number(state.activeIndex || 0), matchCount - 1) : 0;
 
         if (!entries.length && !query) {
-            list.innerHTML = '<div class="explorer-message">Directory is empty.</div>';
+            viewer.innerHTML = '<div class="explorer-message">Directory is empty.</div>';
         } else if (!visibleEntries.length) {
-            list.innerHTML = `<div class="explorer-message">No files or folders match "${escHtml(query)}".</div>`;
+            viewer.innerHTML = `<div class="explorer-message">No files or folders match "${escHtml(query)}".</div>`;
         } else {
-            list.innerHTML = visibleEntries
+            viewer.innerHTML = visibleEntries
                 .map((entry, entryIndex) => explorerDirectoryRowHtml(entry, query, Boolean(normalizedQuery) && entryIndex === state.activeIndex))
                 .join('');
             wireExplorerDirectoryRows(index);
@@ -10332,12 +10351,489 @@
         return String(fullPath || '').split(/[\\/]/).pop() || '';
     }
 
-    function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '', diffMode = '' } = {}) {
-        const pane = terminals[index];
+    /* ─────────────────────────────────────────────
+       Explorer tabbed viewer (ISSUE-2026-014)
+       The main pane is always a read-only viewer with a persistent tab strip:
+       one permanent dynamic "Preview" tab plus deduplicated pinned tabs keyed
+       by normalized path. The Files tree is the navigation surface.
+    ───────────────────────────────────────────── */
+    const EXPLORER_PREVIEW_TAB_ID = '__preview__';
+    const EXPLORER_MAX_PINNED_TABS = 12;
+    const EXPLORER_MAX_TAB_PATH_LENGTH = 4096;
+
+    function explorerBaseName(path) {
+        return String(path || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
+    }
+
+    /* Normalize a path into a stable dedup key: forward slashes, no leading or
+       trailing slash, collapsed separators. Empty for unusable input. */
+    function explorerNormalizeTabPath(path) {
+        const value = String(path == null ? '' : path).replace(/\\/g, '/').trim();
+        if (!value || value.length > EXPLORER_MAX_TAB_PATH_LENGTH) {
+            return '';
+        }
+        return value.replace(/\/{2,}/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
+    }
+
+    function ensureExplorerTabState(pane) {
+        if (!Array.isArray(pane._explorerTabs) || !pane._explorerTabs.length) {
+            pane._explorerTabs = [{ id: EXPLORER_PREVIEW_TAB_ID, pinned: false, path: '', name: '' }];
+        }
+        if (!pane._explorerActiveTabId || !pane._explorerTabs.some(tab => tab.id === pane._explorerActiveTabId)) {
+            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+        }
+        return pane._explorerTabs;
+    }
+
+    function explorerPreviewTab(pane) {
+        ensureExplorerTabState(pane);
+        return pane._explorerTabs.find(tab => tab.id === EXPLORER_PREVIEW_TAB_ID) || pane._explorerTabs[0];
+    }
+
+    function explorerFindTab(pane, id) {
+        ensureExplorerTabState(pane);
+        return pane._explorerTabs.find(tab => tab.id === id) || null;
+    }
+
+    function explorerActiveTab(pane) {
+        ensureExplorerTabState(pane);
+        return explorerFindTab(pane, pane._explorerActiveTabId) || explorerPreviewTab(pane);
+    }
+
+    function explorerTabLabel(tab) {
+        if (!tab) {
+            return 'Preview';
+        }
+        if (tab.id === EXPLORER_PREVIEW_TAB_ID) {
+            return tab.path ? (explorerBaseName(tab.path) || 'Preview') : 'Preview';
+        }
+        return tab.name || explorerBaseName(tab.path) || 'File';
+    }
+
+    /* Choose (and if needed create) the tab a file should load into. A `+`
+       action or Markdown link pins a deduplicated tab; a plain click reuses the
+       active pinned tab when it already shows that path, otherwise the permanent
+       Preview tab. */
+    function explorerAssignOpenTab(pane, path, { pinned = false, tab = '' } = {}) {
+        ensureExplorerTabState(pane);
+        const key = explorerNormalizeTabPath(path);
+        const name = explorerBaseName(path);
+
+        if (tab) {
+            const existing = explorerFindTab(pane, tab);
+            if (existing) {
+                existing.path = path;
+                existing.name = name;
+                pane._explorerActiveTabId = existing.id;
+                return existing;
+            }
+        }
+
+        if (pinned && key) {
+            let pinnedTab = pane._explorerTabs.find(entry => entry.pinned && explorerNormalizeTabPath(entry.path) === key);
+            if (!pinnedTab) {
+                const pinnedCount = pane._explorerTabs.filter(entry => entry.pinned).length;
+                if (pinnedCount >= EXPLORER_MAX_PINNED_TABS) {
+                    const oldest = pane._explorerTabs.findIndex(entry => entry.pinned && entry.id !== pane._explorerActiveTabId);
+                    if (oldest !== -1) {
+                        pane._explorerTabs.splice(oldest, 1);
+                    }
+                }
+                pinnedTab = { id: key, pinned: true, path, name };
+                pane._explorerTabs.push(pinnedTab);
+            } else {
+                pinnedTab.path = path;
+                pinnedTab.name = name;
+            }
+            pane._explorerActiveTabId = pinnedTab.id;
+            return pinnedTab;
+        }
+
+        const active = explorerActiveTab(pane);
+        if (key && active && active.pinned && explorerNormalizeTabPath(active.path) === key) {
+            active.path = path;
+            active.name = name;
+            return active;
+        }
+        const preview = explorerPreviewTab(pane);
+        preview.path = path;
+        preview.name = name;
+        pane._explorerActiveTabId = preview.id;
+        return preview;
+    }
+
+    function explorerEnsureViewerShell(index) {
         const list = document.getElementById(`explorer-list-${index}`);
-        if (!pane || !list) {
+        if (!list) {
+            return null;
+        }
+        let viewer = document.getElementById(`explorer-viewer-${index}`);
+        if (!viewer) {
+            list.innerHTML =
+                `<div class="explorer-tab-strip" id="explorer-tabs-${index}" role="tablist" aria-label="Open files"></div>`
+                + `<div class="explorer-viewer" id="explorer-viewer-${index}"></div>`;
+            viewer = document.getElementById(`explorer-viewer-${index}`);
+        }
+        return viewer;
+    }
+
+    function explorerViewerEl(index) {
+        return explorerEnsureViewerShell(index);
+    }
+
+    function renderExplorerTabStrip(index) {
+        const pane = terminals[index];
+        const strip = document.getElementById(`explorer-tabs-${index}`);
+        if (!pane || !strip) {
+            return;
+        }
+        const tabs = ensureExplorerTabState(pane);
+        const activeId = pane._explorerActiveTabId;
+        strip.innerHTML = tabs.map(tab => {
+            const active = tab.id === activeId;
+            const isPreview = tab.id === EXPLORER_PREVIEW_TAB_ID;
+            const label = explorerTabLabel(tab);
+            const icon = (!isPreview || tab.path) ? explorerFileTypeIconHtml(tab.path || label) : '';
+            const closeButton = isPreview
+                ? ''
+                : `<button type="button" class="explorer-tab-close" data-explorer-tab-close="${escHtml(tab.id)}" title="Close tab" aria-label="Close ${escHtml(label)}">×</button>`;
+            return `
+                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}" data-explorer-tab="${escHtml(tab.id)}" title="${escHtml(tab.path || label)}">
+                    <button type="button" class="explorer-tab-main" data-explorer-tab-open="${escHtml(tab.id)}">
+                        ${icon}
+                        <span class="explorer-tab-name">${escHtml(label)}</span>
+                    </button>
+                    ${closeButton}
+                </div>
+            `;
+        }).join('');
+
+        strip.querySelectorAll('[data-explorer-tab-open]').forEach(button => {
+            button.addEventListener('click', () => activateExplorerTab(index, button.dataset.explorerTabOpen || ''));
+        });
+        strip.querySelectorAll('[data-explorer-tab-close]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                closeExplorerTab(index, button.dataset.explorerTabClose || '');
+            });
+        });
+    }
+
+    function renderExplorerViewerEmpty(index) {
+        const pane = terminals[index];
+        const viewer = explorerEnsureViewerShell(index);
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!pane || !viewer) {
+            return;
+        }
+        list?.classList.remove('file-view');
+        clearExplorerDirectorySearchControls(index);
+        const preview = explorerPreviewTab(pane);
+        preview.path = '';
+        preview.name = '';
+        pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+        pane._explorerMode = 'viewer';
+        pane._explorerFilePath = '';
+        viewer.innerHTML = '<div class="explorer-empty-viewer"><span>Select a file to view</span></div>';
+        renderExplorerTabStrip(index);
+    }
+
+    /* Render whatever the active tab should show: its file, the browsed
+       directory listing (Preview tab), or the empty state. */
+    function renderExplorerActiveTab(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const tab = explorerActiveTab(pane);
+        if (tab.path) {
+            openExplorerFile(index, tab.path, { tab: tab.id });
+            return;
+        }
+        if (pane._explorerMode === 'directory' && Array.isArray(pane._explorerEntries)) {
+            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+            renderExplorerDirectorySearchControls(index);
+            renderExplorerDirectoryRows(index);
+            renderExplorerTabStrip(index);
+            return;
+        }
+        renderExplorerViewerEmpty(index);
+    }
+
+    function activateExplorerTab(index, id) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const tab = explorerFindTab(pane, id);
+        if (!tab) {
+            return;
+        }
+        pane._explorerActiveTabId = tab.id;
+        renderExplorerActiveTab(index);
+        renderExplorerTabStrip(index);
+        persistExplorerTabsToSession(index);
+    }
+
+    function closeExplorerTab(index, id) {
+        const pane = terminals[index];
+        if (!pane || id === EXPLORER_PREVIEW_TAB_ID) {
+            return;
+        }
+        ensureExplorerTabState(pane);
+        const position = pane._explorerTabs.findIndex(tab => tab.id === id);
+        if (position === -1) {
+            return;
+        }
+        const wasActive = pane._explorerActiveTabId === id;
+        pane._explorerTabs.splice(position, 1);
+        if (wasActive) {
+            const fallback = pane._explorerTabs[Math.max(0, position - 1)] || explorerPreviewTab(pane);
+            activateExplorerTab(index, fallback.id);
+        } else {
+            renderExplorerTabStrip(index);
+            persistExplorerTabsToSession(index);
+        }
+    }
+
+    /* Entry point when an explorer pane first shows: empty read-only viewer with
+       the Files tree opened for navigation, plus any persisted tabs restored. */
+    function openExplorerViewer(index) {
+        const pane = terminals[index];
+        if (!pane) {
             return false;
         }
+        ensureExplorerTabState(pane);
+        pane._attached = true;
+        document.getElementById(`ph-${index}`)?.remove();
+        renderExplorerViewerEmpty(index);
+        if (!pane._explorerTreeSidebarOpen && !pane._explorerGitSidebarOpen) {
+            setExplorerTreeSidebarOpen(index, true);
+        }
+        restoreExplorerPersistedTabs(index);
+        return true;
+    }
+
+    /* ── Markdown preview link navigation (ISSUE-2026-016) ──
+       Relative Markdown links resolve against the current file and open as a
+       pinned tab; fragments scroll to the heading; external links open in an
+       isolated window without navigating the session page away. */
+    function explorerClassifyLink(href) {
+        const trimmed = String(href == null ? '' : href).trim();
+        if (!trimmed) {
+            return { type: 'ignore' };
+        }
+        if (trimmed.startsWith('#')) {
+            return { type: 'fragment', fragment: trimmed.slice(1) };
+        }
+        if (/^\/\//.test(trimmed)) {
+            return { type: 'external', href: `https:${trimmed}` };
+        }
+        if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
+            if (/^https?:/i.test(trimmed)) {
+                return { type: 'external', href: trimmed };
+            }
+            if (/^mailto:/i.test(trimmed)) {
+                return { type: 'mailto' };
+            }
+            return { type: 'unsupported' };
+        }
+        return { type: 'relative', href: trimmed };
+    }
+
+    /* Resolve a relative link against the source file, rejecting anything that
+       escapes the Explorer root. Returns { path, fragment } or null. */
+    function explorerResolveRelativePath(baseFilePath, href) {
+        const hashIndex = href.indexOf('#');
+        const fragment = hashIndex >= 0 ? href.slice(hashIndex + 1) : '';
+        let rel = hashIndex >= 0 ? href.slice(0, hashIndex) : href;
+        if (!rel) {
+            return { path: explorerNormalizeTabPath(baseFilePath), fragment };
+        }
+        try {
+            rel = decodeURIComponent(rel);
+        } catch (_) {
+            return null;
+        }
+        rel = rel.replace(/\\/g, '/');
+        const absolute = rel.startsWith('/');
+        const baseSegments = absolute
+            ? []
+            : String(baseFilePath || '').replace(/\\/g, '/').split('/').slice(0, -1);
+        const segments = baseSegments.filter(Boolean);
+        for (const segment of rel.split('/')) {
+            if (segment === '' || segment === '.') {
+                continue;
+            }
+            if (segment === '..') {
+                if (!segments.length) {
+                    return null;
+                }
+                segments.pop();
+                continue;
+            }
+            if (segment.includes(':')) {
+                return null;
+            }
+            segments.push(segment);
+        }
+        const path = segments.join('/');
+        return path ? { path, fragment } : null;
+    }
+
+    function explorerHeadingSlug(text) {
+        return String(text || '')
+            .toLowerCase()
+            .trim()
+            .replace(/[^\w\s-]/g, '')
+            .replace(/\s+/g, '-');
+    }
+
+    function explorerScrollPreviewToHeading(preview, fragment) {
+        if (!preview || !fragment) {
+            return;
+        }
+        let target = null;
+        try {
+            target = preview.querySelector(`#${CSS.escape(fragment)}`);
+        } catch (_) {
+            target = null;
+        }
+        if (!target) {
+            const slug = explorerHeadingSlug(fragment);
+            target = Array.from(preview.querySelectorAll('h1, h2, h3, h4, h5, h6'))
+                .find(heading => explorerHeadingSlug(heading.textContent) === slug) || null;
+        }
+        if (target) {
+            target.scrollIntoView({ block: 'start' });
+        }
+    }
+
+    function wireExplorerMarkdownLinks(index, preview) {
+        if (!preview || preview.dataset.mdLinksBound) {
+            return;
+        }
+        preview.dataset.mdLinksBound = 'true';
+        preview.addEventListener('click', event => {
+            const anchor = event.target.closest('a[href]');
+            if (!anchor || !preview.contains(anchor)) {
+                return;
+            }
+            const info = explorerClassifyLink(anchor.getAttribute('href') || '');
+            if (info.type === 'fragment') {
+                event.preventDefault();
+                explorerScrollPreviewToHeading(preview, info.fragment);
+                return;
+            }
+            if (info.type === 'external') {
+                event.preventDefault();
+                window.open(info.href, '_blank', 'noopener,noreferrer');
+                return;
+            }
+            if (info.type === 'mailto') {
+                return;
+            }
+            if (info.type !== 'relative') {
+                event.preventDefault();
+                return;
+            }
+            event.preventDefault();
+            const pane = terminals[index];
+            const resolved = explorerResolveRelativePath(pane?._explorerFilePath || '', info.href);
+            if (!resolved || !resolved.path) {
+                return;
+            }
+            Promise.resolve(openExplorerFile(index, resolved.path, { pinned: true })).then(opened => {
+                if (opened && resolved.fragment) {
+                    requestAnimationFrame(() => {
+                        const nextPreview = document.getElementById(`explorer-preview-${index}`);
+                        if (nextPreview) {
+                            explorerScrollPreviewToHeading(nextPreview, resolved.fragment);
+                        }
+                    });
+                }
+            });
+        });
+    }
+
+    /* ── Saved-session tab persistence (ISSUE-2026-015) ── */
+    function explorerSerializeTabs(pane) {
+        ensureExplorerTabState(pane);
+        const openTabs = [];
+        const seen = new Set();
+        pane._explorerTabs.forEach(tab => {
+            if (!tab.pinned) {
+                return;
+            }
+            const key = explorerNormalizeTabPath(tab.path);
+            if (!key || seen.has(key)) {
+                return;
+            }
+            seen.add(key);
+            openTabs.push(tab.path);
+        });
+        const active = explorerActiveTab(pane);
+        const activeTab = active && active.pinned ? explorerNormalizeTabPath(active.path) : '';
+        return {
+            open_tabs: openTabs.slice(0, EXPLORER_MAX_PINNED_TABS),
+            active_tab: activeTab
+        };
+    }
+
+    function persistExplorerTabsToSession(index) {
+        const pane = terminals[index];
+        if (!pane || !pane._session) {
+            return;
+        }
+        const serialized = explorerSerializeTabs(pane);
+        pane._session.explorer_open_tabs = serialized.open_tabs;
+        pane._session.explorer_active_tab = serialized.active_tab;
+    }
+
+    function restoreExplorerPersistedTabs(index) {
+        const pane = terminals[index];
+        if (!pane || pane._explorerTabsRestored) {
+            return;
+        }
+        pane._explorerTabsRestored = true;
+        const session = pane._session || {};
+        const rawTabs = Array.isArray(session.explorer_open_tabs) ? session.explorer_open_tabs : [];
+        if (!rawTabs.length) {
+            return;
+        }
+        ensureExplorerTabState(pane);
+        const seen = new Set();
+        rawTabs.forEach(raw => {
+            const path = String(raw == null ? '' : raw);
+            const key = explorerNormalizeTabPath(path);
+            if (!key || seen.has(key)) {
+                return;
+            }
+            if (pane._explorerTabs.filter(tab => tab.pinned).length >= EXPLORER_MAX_PINNED_TABS) {
+                return;
+            }
+            seen.add(key);
+            pane._explorerTabs.push({ id: key, pinned: true, path, name: explorerBaseName(path) });
+        });
+        const activeKey = explorerNormalizeTabPath(session.explorer_active_tab || '');
+        const activeTab = activeKey
+            ? pane._explorerTabs.find(tab => tab.pinned && explorerNormalizeTabPath(tab.path) === activeKey)
+            : null;
+        if (activeTab) {
+            activateExplorerTab(index, activeTab.id);
+        } else {
+            renderExplorerTabStrip(index);
+        }
+    }
+
+    function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '', diffMode = '', tab = '', pinned = false } = {}) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        const viewer = explorerEnsureViewerShell(index);
+        if (!pane || !list || !viewer) {
+            return false;
+        }
+        explorerAssignOpenTab(pane, data.path || '', { pinned, tab });
 
         const path = data.path || '';
         const fileName = data.name || path || 'File';
@@ -10404,7 +10900,7 @@
             upButton.disabled = false;
         }
 
-        list.innerHTML = `
+        viewer.innerHTML = `
             <div class="explorer-editor">
                 <div class="explorer-editor-header">
                     <button type="button" class="explorer-editor-back" data-explorer-editor-back="${index}">Back</button>
@@ -10456,6 +10952,7 @@
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
             highlightExplorerPreviewCode(preview);
+            wireExplorerMarkdownLinks(index, preview);
         }
 
         const backButton = list.querySelector(`[data-explorer-editor-back="${index}"]`);
@@ -10486,6 +10983,8 @@
         wireExplorerSearchControls(index);
         applyExplorerSearch(index);
         restoreExplorerFileScroll(index, scrollState);
+        renderExplorerTabStrip(index);
+        persistExplorerTabsToSession(index);
         return true;
     }
 
@@ -10530,6 +11029,7 @@
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
             highlightExplorerPreviewCode(preview);
+            wireExplorerMarkdownLinks(index, preview);
         }
         if (diffPanel && hasGitDiff) {
             renderExplorerDiff(index);
@@ -10565,7 +11065,8 @@
     function renderExplorerCommitDiffFile(index, path, commit) {
         const pane = terminals[index];
         const list = document.getElementById(`explorer-list-${index}`);
-        if (!pane || !list || !path || !commit) {
+        const viewer = explorerEnsureViewerShell(index);
+        if (!pane || !list || !viewer || !path || !commit) {
             return false;
         }
 
@@ -10573,6 +11074,7 @@
         const codeLanguage = explorerCodeLanguage(path);
         clearExplorerDirectorySearchControls(index);
         cancelExplorerSearch(index);
+        explorerAssignOpenTab(pane, path, {});
 
         pane._attached = true;
         pane._explorerMode = 'file';
@@ -10600,7 +11102,7 @@
             upButton.disabled = false;
         }
 
-        list.innerHTML = `
+        viewer.innerHTML = `
             <div class="explorer-editor">
                 <div class="explorer-editor-header">
                     <button type="button" class="explorer-editor-back" data-explorer-editor-back="${index}">Back</button>
@@ -10648,10 +11150,11 @@
         });
         wireExplorerSearchControls(index);
         loadExplorerDiff(index);
+        renderExplorerTabStrip(index);
         return true;
     }
 
-    async function openExplorerFile(index, path, { showLoading = true, preserveScroll = false, openDiff = false, diffCommit = '', diffMode = '' } = {}) {
+    async function openExplorerFile(index, path, { showLoading = true, preserveScroll = false, openDiff = false, diffCommit = '', diffMode = '', pinned = false, tab = '' } = {}) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !isExplorerSession(pane._session) || !sessionId || !path) {
@@ -10679,7 +11182,7 @@
             ) {
                 return true;
             }
-            const rendered = renderExplorerFile(index, data, { scrollState, openDiff, diffCommit, diffMode });
+            const rendered = renderExplorerFile(index, data, { scrollState, openDiff, diffCommit, diffMode, pinned, tab });
             if (rendered) {
                 revealExplorerTreePath(index);
             }
@@ -10701,6 +11204,10 @@
         let refreshed = false;
         if (pane?._explorerMode === 'file' && pane._explorerFilePath) {
             refreshed = await openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });
+        } else if (pane?._explorerMode === 'viewer') {
+            /* Empty Preview tab: nothing to reload in the viewer body; the tree
+               and Git sidebars refresh below. */
+            refreshed = true;
         } else {
             refreshed = await loadExplorerPane(index, null, { force: true });
         }
@@ -10718,7 +11225,12 @@
         if (pane?._explorerMode === 'file' && pane._explorerFilePath) {
             return true;
         }
-        return loadExplorerPane(index);
+        if (pane?._attached) {
+            return true;
+        }
+        /* First show: the read-only tabbed viewer with an empty Preview tab and
+           the Files tree opened for navigation (ISSUE-2026-014). */
+        return openExplorerViewer(index);
     }
 
     async function loadExplorerPane(index, path = null, { force = false, showLoading = true } = {}) {
@@ -10765,6 +11277,13 @@
             if (isNavigation) {
                 resetExplorerDirectorySearch(pane);
             }
+            /* Directory browsing lives in the permanent Preview tab; pinned file
+               tabs are untouched by navigation (ISSUE-2026-014). */
+            ensureExplorerTabState(pane);
+            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+            const previewTab = explorerPreviewTab(pane);
+            previewTab.path = '';
+            previewTab.name = '';
             document.getElementById(`ph-${index}`)?.remove();
             updateExplorerGitSummary(index, data.git || null);
             renderExplorerDirectorySearchControls(index);
@@ -10786,6 +11305,7 @@
             list.classList.remove('file-view');
             wireExplorerSearchControls(index);
             applyExplorerSearch(index, { resetActive: true });
+            renderExplorerTabStrip(index);
             return true;
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer load failed:', error);
