@@ -10,6 +10,9 @@
     const FULLSCREEN_ENTER_ICON = '<svg class="fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>';
     const FULLSCREEN_EXIT_ICON = '<svg class="fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>';
     const EXPLORER_DOWNLOAD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
+    // Markdown preview appearance control (ISSUE-2026-030): a stroke-style "type"
+    // glyph opens the preset/font popover.
+    const EXPLORER_MD_APPEARANCE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 7 4 4 20 4 20 7"></polyline><line x1="9" y1="20" x2="15" y2="20"></line><line x1="12" y1="4" x2="12" y2="20"></line></svg>';
 
 
 
@@ -9423,6 +9426,215 @@
         applyExplorerEditorFontSize(index);
     }
 
+    // ── Markdown preview appearance (ISSUE-2026-030) ─────────────────────────
+    // Two orthogonal axes: a reading-surface preset and a font family. Both are
+    // bounded allowlists persisted in localStorage and applied idempotently to
+    // every open preview via preset classes + CSS custom properties (defined
+    // from tokens in terminals.css), so no palette literals live in JS.
+    const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast'];
+    const EXPLORER_MD_FONTS = ['system', 'serif', 'mono'];
+    const EXPLORER_MD_PRESET_DEFAULT = 'default';
+    const EXPLORER_MD_FONT_DEFAULT = 'system';
+    const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';
+    const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';
+    const EXPLORER_MD_PRESET_LABELS = {
+        default: 'Default',
+        paper: 'Paper',
+        contrast: 'High contrast',
+    };
+    const EXPLORER_MD_FONT_LABELS = {
+        system: 'System',
+        serif: 'Serif',
+        mono: 'Monospace',
+    };
+
+    function readExplorerMarkdownPref(key, allowed, fallback) {
+        let stored = '';
+        try {
+            stored = window.localStorage.getItem(key) || '';
+        } catch (err) {
+            stored = '';
+        }
+        return allowed.includes(stored) ? stored : fallback;
+    }
+
+    function explorerMarkdownAppearance() {
+        return {
+            preset: readExplorerMarkdownPref(
+                EXPLORER_MD_PRESET_KEY, EXPLORER_MD_PRESETS, EXPLORER_MD_PRESET_DEFAULT
+            ),
+            font: readExplorerMarkdownPref(
+                EXPLORER_MD_FONT_KEY, EXPLORER_MD_FONTS, EXPLORER_MD_FONT_DEFAULT
+            ),
+        };
+    }
+
+    function applyExplorerMarkdownAppearanceToElement(preview, appearance) {
+        if (!preview) {
+            return;
+        }
+        const { preset, font } = appearance || explorerMarkdownAppearance();
+        EXPLORER_MD_PRESETS.forEach(name => preview.classList.remove(`md-preset-${name}`));
+        EXPLORER_MD_FONTS.forEach(name => preview.classList.remove(`md-font-${name}`));
+        preview.classList.add(`md-preset-${preset}`);
+        preview.classList.add(`md-font-${font}`);
+        preview.dataset.mdPreset = preset;
+        preview.dataset.mdFont = font;
+    }
+
+    function applyExplorerMarkdownAppearanceToAll() {
+        const appearance = explorerMarkdownAppearance();
+        document.querySelectorAll('.explorer-markdown-preview').forEach(preview => {
+            applyExplorerMarkdownAppearanceToElement(preview, appearance);
+        });
+    }
+
+    function setExplorerMarkdownAppearance(patch) {
+        const current = explorerMarkdownAppearance();
+        const next = {
+            preset: EXPLORER_MD_PRESETS.includes(patch?.preset) ? patch.preset : current.preset,
+            font: EXPLORER_MD_FONTS.includes(patch?.font) ? patch.font : current.font,
+        };
+        try {
+            window.localStorage.setItem(EXPLORER_MD_PRESET_KEY, next.preset);
+            window.localStorage.setItem(EXPLORER_MD_FONT_KEY, next.font);
+        } catch (err) {
+            // Non-fatal: appearance still applies to the live DOM this session.
+        }
+        applyExplorerMarkdownAppearanceToAll();
+        refreshExplorerMarkdownAppearanceMenu();
+        return next;
+    }
+
+    function dismissExplorerMarkdownAppearanceMenu() {
+        const menu = document.getElementById('explorer-md-menu');
+        if (menu) {
+            const anchor = document.querySelector('[data-explorer-md-appearance][aria-expanded="true"]');
+            anchor?.setAttribute('aria-expanded', 'false');
+            menu.remove();
+        }
+        document.removeEventListener('keydown', _explorerMarkdownMenuKeydown, true);
+        document.removeEventListener('mousedown', _explorerMarkdownMenuOutside, true);
+    }
+
+    function _explorerMarkdownMenuOutside(event) {
+        const menu = document.getElementById('explorer-md-menu');
+        const anchor = document.querySelector('[data-explorer-md-appearance][aria-expanded="true"]');
+        if (menu && !menu.contains(event.target) && !anchor?.contains(event.target)) {
+            dismissExplorerMarkdownAppearanceMenu();
+        }
+    }
+
+    function _explorerMarkdownMenuKeydown(event) {
+        const menu = document.getElementById('explorer-md-menu');
+        if (!menu) {
+            return;
+        }
+        const items = Array.from(menu.querySelectorAll('button'));
+        if (!items.length) {
+            return;
+        }
+        const currentIndex = items.indexOf(document.activeElement);
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            dismissExplorerMarkdownAppearanceMenu();
+        } else if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            items[(currentIndex + 1) % items.length].focus();
+        } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            items[(currentIndex - 1 + items.length) % items.length].focus();
+        } else if (event.key === 'Tab') {
+            event.preventDefault();
+        }
+    }
+
+    function refreshExplorerMarkdownAppearanceMenu() {
+        const menu = document.getElementById('explorer-md-menu');
+        if (!menu) {
+            return;
+        }
+        const appearance = explorerMarkdownAppearance();
+        menu.querySelectorAll('[data-md-preset]').forEach(button => {
+            button.setAttribute('aria-checked', button.dataset.mdPreset === appearance.preset ? 'true' : 'false');
+        });
+        menu.querySelectorAll('[data-md-font]').forEach(button => {
+            button.setAttribute('aria-checked', button.dataset.mdFont === appearance.font ? 'true' : 'false');
+        });
+    }
+
+    function buildExplorerMarkdownMenuGroup(labelText, options, activeValue, datasetKey, onSelect) {
+        const group = document.createElement('div');
+        group.className = 'explorer-md-menu-group';
+        group.setAttribute('role', 'group');
+        group.setAttribute('aria-label', labelText);
+        const label = document.createElement('span');
+        label.className = 'explorer-md-menu-label';
+        label.textContent = labelText;
+        group.appendChild(label);
+        options.forEach(({ value, label: optionLabel }) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.setAttribute('role', 'menuitemradio');
+            button.dataset[datasetKey] = value;
+            button.setAttribute('aria-checked', value === activeValue ? 'true' : 'false');
+            const text = document.createElement('span');
+            text.textContent = optionLabel;
+            button.appendChild(text);
+            button.addEventListener('click', () => onSelect(value));
+            group.appendChild(button);
+        });
+        return group;
+    }
+
+    function showExplorerMarkdownAppearanceMenu(anchor) {
+        dismissExplorerMarkdownAppearanceMenu();
+        if (!anchor) {
+            return;
+        }
+        const appearance = explorerMarkdownAppearance();
+        const menu = document.createElement('div');
+        menu.id = 'explorer-md-menu';
+        menu.setAttribute('role', 'menu');
+        menu.setAttribute('aria-label', 'Markdown preview appearance');
+        menu.appendChild(buildExplorerMarkdownMenuGroup(
+            'Theme',
+            EXPLORER_MD_PRESETS.map(value => ({ value, label: EXPLORER_MD_PRESET_LABELS[value] })),
+            appearance.preset,
+            'mdPreset',
+            value => setExplorerMarkdownAppearance({ preset: value })
+        ));
+        menu.appendChild(buildExplorerMarkdownMenuGroup(
+            'Font',
+            EXPLORER_MD_FONTS.map(value => ({ value, label: EXPLORER_MD_FONT_LABELS[value] })),
+            appearance.font,
+            'mdFont',
+            value => setExplorerMarkdownAppearance({ font: value })
+        ));
+
+        menu.style.visibility = 'hidden';
+        document.body.appendChild(menu);
+        const anchorRect = anchor.getBoundingClientRect();
+        const menuRect = menu.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        let left = anchorRect.right - menuRect.width;
+        let top = anchorRect.bottom + 4;
+        if (top + menuRect.height > vh - 8) {
+            top = Math.max(8, anchorRect.top - menuRect.height - 4);
+        }
+        menu.style.left = `${Math.max(8, Math.min(left, vw - menuRect.width - 8))}px`;
+        menu.style.top = `${Math.max(8, top)}px`;
+        menu.style.visibility = 'visible';
+        anchor.setAttribute('aria-expanded', 'true');
+        menu.querySelector('button[aria-checked="true"]')?.focus();
+
+        window.setTimeout(() => {
+            document.addEventListener('mousedown', _explorerMarkdownMenuOutside, true);
+        }, 0);
+        document.addEventListener('keydown', _explorerMarkdownMenuKeydown, true);
+    }
+
     function activeExplorerFileView(index) {
         const list = document.getElementById(`explorer-list-${index}`);
         const activeButton = list?.querySelector('[data-explorer-file-view][aria-selected="true"]');
@@ -10920,6 +11132,7 @@
                         <span class="explorer-zoom-value" data-explorer-zoom-value="${index}"></span>
                         <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">+</button>
                     </div>
+                    ${hasPreview ? `<button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Markdown appearance" aria-label="Markdown preview appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>` : ''}
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
                     <div class="explorer-editor-search" data-explorer-search="${index}">
                         <input
@@ -10953,6 +11166,18 @@
             preview.innerHTML = pane._explorerPreviewHtml;
             highlightExplorerPreviewCode(preview);
             wireExplorerMarkdownLinks(index, preview);
+            applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
+        }
+
+        const appearanceButton = list.querySelector(`[data-explorer-md-appearance="${index}"]`);
+        if (appearanceButton) {
+            appearanceButton.addEventListener('click', () => {
+                if (document.getElementById('explorer-md-menu')) {
+                    dismissExplorerMarkdownAppearanceMenu();
+                } else {
+                    showExplorerMarkdownAppearanceMenu(appearanceButton);
+                }
+            });
         }
 
         const backButton = list.querySelector(`[data-explorer-editor-back="${index}"]`);
@@ -11030,6 +11255,7 @@
             preview.innerHTML = pane._explorerPreviewHtml;
             highlightExplorerPreviewCode(preview);
             wireExplorerMarkdownLinks(index, preview);
+            applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
         }
         if (diffPanel && hasGitDiff) {
             renderExplorerDiff(index);

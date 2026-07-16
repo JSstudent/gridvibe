@@ -1161,6 +1161,56 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("function setExplorerMarkdownSourceCollapsed", html)
         self.assertNotIn("pane._explorerSourceCollapsed", html)
 
+    def test_terminals_page_markdown_preview_hierarchy_and_callouts(self):
+        """ISSUE-2026-017: preview CSS gives headings/callouts a token-driven theme."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Full heading hierarchy is styled (not just h1-h3 as before).
+        self.assertIn(".explorer-markdown-preview h6 {", html)
+        # Callout blocks and their title row are styled.
+        self.assertIn(".explorer-markdown-preview .md-callout {", html)
+        self.assertIn(".explorer-markdown-preview .md-callout-title {", html)
+        self.assertIn(".explorer-markdown-preview .md-callout-note {", html)
+        self.assertIn(".explorer-markdown-preview .md-callout-caution {", html)
+        # Callout accents come from per-theme tokens, not inline palette literals.
+        self.assertIn("--md-callout-accent: var(--explorer-callout-note);", html)
+        self.assertIn("--explorer-callout-note: #4493f8;", html)
+        self.assertIn("--explorer-callout-caution: #cf222e;", html)
+
+    def test_terminals_page_markdown_appearance_presets(self):
+        """ISSUE-2026-030: preview offers persisted preset/font appearance controls."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Appearance model + popover control functions exist.
+        self.assertIn("function explorerMarkdownAppearance()", html)
+        self.assertIn("function setExplorerMarkdownAppearance(patch)", html)
+        self.assertIn("function applyExplorerMarkdownAppearanceToElement(preview, appearance)", html)
+        self.assertIn("function showExplorerMarkdownAppearanceMenu(anchor)", html)
+        # Bounded allowlists and persisted preference keys.
+        self.assertIn("const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast'];", html)
+        self.assertIn("const EXPLORER_MD_FONTS = ['system', 'serif', 'mono'];", html)
+        self.assertIn("const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';", html)
+        self.assertIn("const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';", html)
+        # Header control is present and gated to previewable files.
+        self.assertIn('data-explorer-md-appearance="${index}"', html)
+        # Appearance is applied idempotently on both preview render paths.
+        self.assertEqual(
+            html.count(
+                "applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());"
+            ),
+            2,
+        )
+        # Preset/font classes and their token-driven surfaces exist in CSS.
+        self.assertIn(".explorer-markdown-preview.md-preset-paper {", html)
+        self.assertIn(".explorer-markdown-preview.md-preset-contrast {", html)
+        self.assertIn(".explorer-markdown-preview.md-font-serif {", html)
+        self.assertIn("--md-preview-surface: var(--md-preset-paper-bg);", html)
+        self.assertIn("--md-preset-paper-bg: #f4ecd8;", html)
+
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
 
@@ -3899,6 +3949,83 @@ class ApiRoutesTestCase(unittest.TestCase):
             '<img alt="Markdown image" src="https://example.com/image.png">',
             preview_html,
         )
+
+    def test_markdown_preview_renders_github_callouts(self):
+        """ISSUE-2026-017: [!TYPE] blockquotes become semantic callout blocks."""
+        cases = {
+            "note": "Note",
+            "tip": "Tip",
+            "important": "Important",
+            "warning": "Warning",
+            "caution": "Caution",
+        }
+        for kind, label in cases.items():
+            with self.subTest(kind=kind):
+                html = web_explorer._render_markdown_preview(
+                    f"> [!{kind.upper()}]\n> Body text for {kind}.\n"
+                )
+                self.assertIn(f'<div class="md-callout md-callout-{kind}">', html)
+                # Accessible label + stroke-style icon in the title row.
+                self.assertIn('<p class="md-callout-title">', html)
+                self.assertIn(f'<span class="md-callout-label">{label}</span>', html)
+                self.assertIn('class="md-callout-icon"', html)
+                self.assertIn('stroke="currentColor"', html)
+                # Body content is preserved; the raw marker text is consumed.
+                self.assertIn(f"Body text for {kind}.", html)
+                self.assertNotIn(f"[!{kind.upper()}]", html)
+                # The blockquote wrapper is replaced, not kept alongside.
+                self.assertNotIn("<blockquote>", html)
+
+    def test_markdown_preview_leaves_plain_blockquote_untouched(self):
+        """ISSUE-2026-017: only [!TYPE] blockquotes convert; quotes stay quotes."""
+        # A separating paragraph keeps the two blockquotes distinct (adjacent
+        # blockquotes otherwise merge into one in Python-Markdown).
+        html = web_explorer._render_markdown_preview(
+            "> Just an ordinary quote.\n\nMiddle paragraph.\n\n> [!NOTE]\n> A real note.\n"
+        )
+        self.assertIn("<blockquote>", html)
+        self.assertIn("Just an ordinary quote.", html)
+        self.assertIn('<div class="md-callout md-callout-note">', html)
+        # An unknown admonition keyword is not treated as a callout.
+        unknown = web_explorer._render_markdown_preview("> [!HINT]\n> Not supported.\n")
+        self.assertNotIn("md-callout", unknown)
+        self.assertIn("[!HINT]", unknown)
+
+    def test_markdown_preview_callout_sanitizes_body_and_keeps_nested_content(self):
+        """ISSUE-2026-017: callout bodies stay sanitized and keep rich content."""
+        html = web_explorer._render_markdown_preview(
+            "> [!WARNING]\n"
+            "> <script>alert('xss')</script> **stay safe**\n"
+            ">\n"
+            "> - first\n"
+            "> - second\n"
+        )
+        self.assertIn('<div class="md-callout md-callout-warning">', html)
+        # Sanitization (bleach) still runs before augmentation.
+        self.assertNotIn("<script", html)
+        self.assertIn("<strong>stay safe</strong>", html)
+        # Nested list inside the callout is preserved as its body.
+        self.assertIn("<li>first</li>", html)
+        self.assertIn("<li>second</li>", html)
+
+    def test_explorer_file_endpoint_emits_callout_html(self):
+        """ISSUE-2026-017: callouts reach the client through preview_html."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text(
+            "# Doc\n\n> [!TIP]\n> Helpful hint.\n", encoding="utf-8"
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        preview_html = file_response.get_json()["preview_html"]
+        self.assertIn('<div class="md-callout md-callout-tip">', preview_html)
+        self.assertIn("Helpful hint.", preview_html)
 
     def test_explorer_file_does_not_preview_non_markdown_text(self):
         repo_dir = Path(self.temp_dir.name) / "repo"

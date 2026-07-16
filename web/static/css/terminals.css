@@ -205,6 +205,18 @@
             --explorer-icon-config: #a3b1c2;
             --explorer-icon-sql: #56d4dd;
             --explorer-icon-log: #f778ba;
+            /* Markdown callout accents/tints (ISSUE-2026-017); token-driven so
+               the preview rules stay literal-free like the git lanes above. */
+            --explorer-callout-note: #4493f8;
+            --explorer-callout-note-bg: #121d2f;
+            --explorer-callout-tip: #3fb950;
+            --explorer-callout-tip-bg: #0f1f16;
+            --explorer-callout-important: #a371f7;
+            --explorer-callout-important-bg: #1d1530;
+            --explorer-callout-warning: #d29922;
+            --explorer-callout-warning-bg: #241c10;
+            --explorer-callout-caution: #f85149;
+            --explorer-callout-caution-bg: #2b1211;
         }
 
         [data-theme="light"],
@@ -228,6 +240,35 @@
             --explorer-icon-config: #57606a;
             --explorer-icon-sql: #0f7c8a;
             --explorer-icon-log: #bf3989;
+            --explorer-callout-note: #0969da;
+            --explorer-callout-note-bg: #ddf4ff;
+            --explorer-callout-tip: #1a7f37;
+            --explorer-callout-tip-bg: #dafbe1;
+            --explorer-callout-important: #8250df;
+            --explorer-callout-important-bg: #fbefff;
+            --explorer-callout-warning: #9a6700;
+            --explorer-callout-warning-bg: #fff8c5;
+            --explorer-callout-caution: #cf222e;
+            --explorer-callout-caution-bg: #ffebe9;
+        }
+
+        /* Markdown preview reading-surface presets (ISSUE-2026-030). Paper and
+           high-contrast are intentionally fixed surfaces independent of the app
+           light/dark theme (deliberate exception, same spirit as the pinned
+           terminal canvas in deep-dive 7.1); literals stay confined here. */
+        :root,
+        [data-theme="dark"],
+        [data-theme="light"],
+        .explorer-pane[data-explorer-theme="dark"],
+        .explorer-pane[data-explorer-theme="light"] {
+            --md-preset-paper-bg: #f4ecd8;
+            --md-preset-paper-ink: #433422;
+            --md-preset-paper-muted: #6b5a43;
+            --md-preset-paper-border: #d9c9a8;
+            --md-preset-contrast-bg: #000000;
+            --md-preset-contrast-ink: #ffffff;
+            --md-preset-contrast-muted: #d0d0d0;
+            --md-preset-contrast-border: #ffffff;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -2288,7 +2329,8 @@
             cursor: default;
         }
 
-        .explorer-download-btn {
+        .explorer-download-btn,
+        .explorer-md-appearance-btn {
             width: 28px;
             height: 28px;
             display: inline-flex;
@@ -2302,7 +2344,9 @@
             flex: 0 0 auto;
         }
 
-        .explorer-download-btn:hover {
+        .explorer-download-btn:hover,
+        .explorer-md-appearance-btn:hover,
+        .explorer-md-appearance-btn[aria-expanded="true"] {
             color: var(--t-accent);
         }
 
@@ -2340,7 +2384,8 @@
             color: var(--gv-danger);
         }
 
-        .explorer-download-btn svg {
+        .explorer-download-btn svg,
+        .explorer-md-appearance-btn svg {
             width: 14px;
             height: 14px;
         }
@@ -2923,23 +2968,102 @@
         }
 
         .explorer-markdown-preview {
-            padding: 14px 18px 28px;
-            color: var(--explorer-text);
-            background: var(--explorer-bg);
+            /* Appearance surface (ISSUE-2026-030): preset classes remap these
+               custom properties; defaults track the explorer theme tokens. */
+            --md-preview-surface: var(--explorer-bg);
+            --md-preview-ink: var(--explorer-text);
+            --md-preview-muted: var(--explorer-muted);
+            --md-preview-border: var(--explorer-row-border);
+            --md-preview-rule: var(--explorer-border);
+            --md-preview-font: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+            --md-preview-measure: 46rem;
+            padding: 16px 20px 32px;
+            color: var(--md-preview-ink);
+            background: var(--md-preview-surface);
+            font-family: var(--md-preview-font);
             font-size: var(--explorer-editor-font-size, .86rem);
-            line-height: 1.55;
+            line-height: 1.6;
+        }
+
+        .explorer-markdown-preview > * {
+            max-width: var(--md-preview-measure);
+        }
+
+        /* Reading-surface presets (ISSUE-2026-030). */
+        .explorer-markdown-preview.md-preset-paper {
+            --md-preview-surface: var(--md-preset-paper-bg);
+            --md-preview-ink: var(--md-preset-paper-ink);
+            --md-preview-muted: var(--md-preset-paper-muted);
+            --md-preview-border: var(--md-preset-paper-border);
+            --md-preview-rule: var(--md-preset-paper-border);
+        }
+
+        .explorer-markdown-preview.md-preset-contrast {
+            --md-preview-surface: var(--md-preset-contrast-bg);
+            --md-preview-ink: var(--md-preset-contrast-ink);
+            --md-preview-muted: var(--md-preset-contrast-muted);
+            --md-preview-border: var(--md-preset-contrast-border);
+            --md-preview-rule: var(--md-preset-contrast-border);
+        }
+
+        /* Font-family presets (ISSUE-2026-030); font names are not palette. */
+        .explorer-markdown-preview.md-font-system {
+            --md-preview-font: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+        }
+
+        .explorer-markdown-preview.md-font-serif {
+            --md-preview-font: Georgia, 'Times New Roman', 'Iowan Old Style', serif;
+        }
+
+        .explorer-markdown-preview.md-font-mono {
+            --md-preview-font: Consolas, Monaco, 'Courier New', monospace;
         }
 
         .explorer-markdown-preview h1,
         .explorer-markdown-preview h2,
-        .explorer-markdown-preview h3 {
-            margin: 1.15em 0 .5em;
-            line-height: 1.2;
+        .explorer-markdown-preview h3,
+        .explorer-markdown-preview h4,
+        .explorer-markdown-preview h5,
+        .explorer-markdown-preview h6 {
+            margin: 1.4em 0 .55em;
+            line-height: 1.25;
+            font-weight: 700;
+            color: var(--md-preview-ink);
+        }
+
+        .explorer-markdown-preview h1 {
+            font-size: 1.75em;
+            padding-bottom: .3em;
+            border-bottom: 1px solid var(--md-preview-rule);
+        }
+
+        .explorer-markdown-preview h2 {
+            font-size: 1.4em;
+            padding-bottom: .25em;
+            border-bottom: 1px solid var(--md-preview-rule);
+        }
+
+        .explorer-markdown-preview h3 { font-size: 1.2em; }
+        .explorer-markdown-preview h4 { font-size: 1.05em; }
+
+        .explorer-markdown-preview h5 {
+            font-size: .95em;
+            color: var(--md-preview-muted);
+        }
+
+        .explorer-markdown-preview h6 {
+            font-size: .88em;
+            color: var(--md-preview-muted);
+            text-transform: uppercase;
+            letter-spacing: .04em;
         }
 
         .explorer-markdown-preview h1:first-child,
         .explorer-markdown-preview h2:first-child,
         .explorer-markdown-preview h3:first-child,
+        .explorer-markdown-preview h4:first-child,
+        .explorer-markdown-preview h5:first-child,
+        .explorer-markdown-preview h6:first-child,
         .explorer-markdown-preview p:first-child {
             margin-top: 0;
         }
@@ -2949,8 +3073,49 @@
         .explorer-markdown-preview ol,
         .explorer-markdown-preview blockquote,
         .explorer-markdown-preview pre,
-        .explorer-markdown-preview table {
+        .explorer-markdown-preview table,
+        .explorer-markdown-preview dl {
             margin: 0 0 .9em;
+        }
+
+        .explorer-markdown-preview ul,
+        .explorer-markdown-preview ol {
+            padding-left: 1.6em;
+        }
+
+        .explorer-markdown-preview li { margin: .2em 0; }
+        .explorer-markdown-preview li > ul,
+        .explorer-markdown-preview li > ol { margin: .2em 0; }
+        .explorer-markdown-preview ul { list-style: disc; }
+        .explorer-markdown-preview ul ul { list-style: circle; }
+        .explorer-markdown-preview ul ul ul { list-style: square; }
+        .explorer-markdown-preview ol { list-style: decimal; }
+
+        .explorer-markdown-preview li > input[type="checkbox"] {
+            margin: 0 .45em 0 -1.3em;
+            vertical-align: middle;
+        }
+
+        .explorer-markdown-preview a {
+            color: var(--git-lane-0);
+            text-decoration: none;
+        }
+
+        .explorer-markdown-preview a:hover,
+        .explorer-markdown-preview a:focus-visible {
+            text-decoration: underline;
+        }
+
+        .explorer-markdown-preview hr {
+            height: 1px;
+            margin: 1.4em 0;
+            border: 0;
+            background: var(--md-preview-rule);
+        }
+
+        .explorer-markdown-preview img {
+            max-width: 100%;
+            height: auto;
         }
 
         .explorer-markdown-preview code,
@@ -2959,18 +3124,20 @@
         }
 
         .explorer-markdown-preview code {
-            border: 1px solid var(--explorer-row-border);
+            border: 1px solid var(--md-preview-border);
             border-radius: 4px;
             padding: 1px 4px;
-            background: var(--explorer-bar-bg);
+            /* Neutral translucent tint so code adapts to any preset surface
+               (same overlay idiom as the menu shadows below). */
+            background: rgba(128, 128, 128, .14);
         }
 
         .explorer-markdown-preview pre {
             overflow: auto;
             padding: 10px 12px;
-            border: 1px solid var(--explorer-row-border);
+            border: 1px solid var(--md-preview-border);
             border-radius: 6px;
-            background: var(--explorer-bar-bg);
+            background: rgba(128, 128, 128, .14);
             white-space: pre-wrap;
             overflow-wrap: anywhere;
             word-break: break-word;
@@ -3000,18 +3167,18 @@
             font-size: .68rem;
             font-weight: 700;
             letter-spacing: .04em;
-            color: var(--explorer-muted);
-            background: var(--explorer-bg);
-            border: 1px solid var(--explorer-row-border);
+            color: var(--md-preview-muted);
+            background: var(--md-preview-surface);
+            border: 1px solid var(--md-preview-border);
             border-top: 0;
             border-right: 0;
             border-bottom-left-radius: 6px;
         }
 
         .explorer-markdown-preview blockquote {
-            border-left: 3px solid var(--explorer-border);
-            padding-left: 12px;
-            color: var(--explorer-muted);
+            border-left: 3px solid var(--md-preview-rule);
+            padding: .1em 0 .1em 14px;
+            color: var(--md-preview-muted);
         }
 
         .explorer-markdown-preview table {
@@ -3021,9 +3188,129 @@
 
         .explorer-markdown-preview th,
         .explorer-markdown-preview td {
-            border: 1px solid var(--explorer-row-border);
+            border: 1px solid var(--md-preview-border);
             padding: 6px 8px;
             text-align: left;
+        }
+
+        .explorer-markdown-preview th {
+            background: rgba(128, 128, 128, .14);
+            font-weight: 700;
+        }
+
+        .explorer-markdown-preview tr:nth-child(2n) td {
+            background: rgba(128, 128, 128, .07);
+        }
+
+        /* GitHub-style callouts (ISSUE-2026-017). Accent/tint come from the
+           per-theme --explorer-callout-* tokens; the markup is backend-built. */
+        .explorer-markdown-preview .md-callout {
+            margin: 0 0 1em;
+            padding: 10px 14px 2px;
+            border: 1px solid var(--md-preview-border);
+            border-left: 4px solid var(--md-callout-accent, var(--md-preview-rule));
+            border-radius: 6px;
+            background: var(--md-callout-bg, transparent);
+        }
+
+        .explorer-markdown-preview .md-callout-title {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            margin: 0 0 .5em;
+            font-weight: 700;
+            color: var(--md-callout-accent, var(--md-preview-ink));
+        }
+
+        .explorer-markdown-preview .md-callout-icon {
+            width: 1.1em;
+            height: 1.1em;
+            flex: none;
+        }
+
+        .explorer-markdown-preview .md-callout > :last-child {
+            margin-bottom: .5em;
+        }
+
+        .explorer-markdown-preview .md-callout-note {
+            --md-callout-accent: var(--explorer-callout-note);
+            --md-callout-bg: var(--explorer-callout-note-bg);
+        }
+        .explorer-markdown-preview .md-callout-tip {
+            --md-callout-accent: var(--explorer-callout-tip);
+            --md-callout-bg: var(--explorer-callout-tip-bg);
+        }
+        .explorer-markdown-preview .md-callout-important {
+            --md-callout-accent: var(--explorer-callout-important);
+            --md-callout-bg: var(--explorer-callout-important-bg);
+        }
+        .explorer-markdown-preview .md-callout-warning {
+            --md-callout-accent: var(--explorer-callout-warning);
+            --md-callout-bg: var(--explorer-callout-warning-bg);
+        }
+        .explorer-markdown-preview .md-callout-caution {
+            --md-callout-accent: var(--explorer-callout-caution);
+            --md-callout-bg: var(--explorer-callout-caution-bg);
+        }
+
+        /* Markdown appearance popover (ISSUE-2026-030). */
+        #explorer-md-menu {
+            /* Stroke-style check glyph (guardrail 7) tinted via currentColor. */
+            --explorer-md-check-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E");
+            position: fixed;
+            z-index: 9999;
+            background: var(--t-ctx-bg);
+            border: 1px solid var(--t-ctx-border);
+            border-radius: 6px;
+            padding: 6px 0;
+            min-width: 172px;
+            box-shadow: 0 4px 18px rgba(0, 0, 0, .6);
+            font-size: .82rem;
+        }
+        #explorer-md-menu .explorer-md-menu-group + .explorer-md-menu-group {
+            margin-top: 4px;
+            border-top: 1px solid var(--t-ctx-border);
+            padding-top: 4px;
+        }
+        #explorer-md-menu .explorer-md-menu-label {
+            display: block;
+            padding: 3px 14px;
+            color: var(--t-text-muted);
+            font-size: .72rem;
+            text-transform: uppercase;
+            letter-spacing: .05em;
+        }
+        #explorer-md-menu button {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 18px;
+            width: 100%;
+            padding: 6px 14px;
+            background: none;
+            border: none;
+            color: var(--t-text);
+            text-align: left;
+            cursor: pointer;
+            white-space: nowrap;
+            font: inherit;
+        }
+        #explorer-md-menu button:hover,
+        #explorer-md-menu button:focus-visible {
+            background: var(--t-ctx-hover);
+            outline: none;
+        }
+        #explorer-md-menu button[aria-checked="true"] {
+            color: var(--t-accent);
+        }
+        #explorer-md-menu button[aria-checked="true"]::after {
+            content: '';
+            width: 14px;
+            height: 14px;
+            flex: none;
+            background: currentColor;
+            -webkit-mask: var(--explorer-md-check-mask) center / contain no-repeat;
+            mask: var(--explorer-md-check-mask) center / contain no-repeat;
         }
 
         /* ── Terminal context menu ── */

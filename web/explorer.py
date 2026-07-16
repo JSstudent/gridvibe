@@ -260,6 +260,111 @@ def _explorer_content_looks_binary(raw_content: bytes) -> bool:
     return control_count / len(sample) > 0.30
 
 
+# GitHub-style admonition callouts (ISSUE-2026-017). Each label maps a
+# ``> [!TYPE]`` blockquote to a fixed CSS class + accessible heading. The set is
+# closed and backend-owned, so the augmentation below never emits user-derived
+# class names.
+GITHUB_CALLOUT_LABELS = {
+    "note": "Note",
+    "tip": "Tip",
+    "important": "Important",
+    "warning": "Warning",
+    "caution": "Caution",
+}
+
+# Stroke-style ``currentColor`` icons (deep-dive guardrail 7: no emoji/glyphs).
+# Injected only after sanitization into trusted, backend-built markup.
+_CALLOUT_ICON_SVG = {
+    "note": (
+        '<svg class="md-callout-icon" viewBox="0 0 24 24" fill="none"'
+        ' stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+        ' stroke-linejoin="round" aria-hidden="true" focusable="false">'
+        '<circle cx="12" cy="12" r="9"></circle>'
+        '<line x1="12" y1="11" x2="12" y2="16"></line>'
+        '<circle cx="12" cy="8" r="0.6" fill="currentColor" stroke="none">'
+        "</circle></svg>"
+    ),
+    "tip": (
+        '<svg class="md-callout-icon" viewBox="0 0 24 24" fill="none"'
+        ' stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+        ' stroke-linejoin="round" aria-hidden="true" focusable="false">'
+        '<path d="M9 18h6"></path><path d="M10 22h4"></path>'
+        '<path d="M12 2a7 7 0 0 0-4 12c.5.5 1 1.2 1 2h6c0-.8.5-1.5 1-2a7 7 0 0'
+        ' 0-4-12z"></path></svg>'
+    ),
+    "important": (
+        '<svg class="md-callout-icon" viewBox="0 0 24 24" fill="none"'
+        ' stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+        ' stroke-linejoin="round" aria-hidden="true" focusable="false">'
+        '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2'
+        ' 2z"></path><line x1="12" y1="8" x2="12" y2="12"></line>'
+        '<circle cx="12" cy="15" r="0.6" fill="currentColor" stroke="none">'
+        "</circle></svg>"
+    ),
+    "warning": (
+        '<svg class="md-callout-icon" viewBox="0 0 24 24" fill="none"'
+        ' stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+        ' stroke-linejoin="round" aria-hidden="true" focusable="false">'
+        '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7'
+        ' 3.9a2 2 0 0 0-3.4 0z"></path>'
+        '<line x1="12" y1="9" x2="12" y2="13"></line>'
+        '<circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none">'
+        "</circle></svg>"
+    ),
+    "caution": (
+        '<svg class="md-callout-icon" viewBox="0 0 24 24" fill="none"'
+        ' stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+        ' stroke-linejoin="round" aria-hidden="true" focusable="false">'
+        '<polygon points="7.9 2 16.1 2 22 7.9 22 16.1 16.1 22 7.9 22 2 16.1 2'
+        ' 7.9"></polygon><line x1="12" y1="8" x2="12" y2="12"></line>'
+        '<circle cx="12" cy="16" r="0.6" fill="currentColor" stroke="none">'
+        "</circle></svg>"
+    ),
+}
+
+# An innermost ``<blockquote>`` (no nested blockquote inside) produced by the
+# Markdown renderer + bleach; nested-blockquote callouts fall through unchanged.
+_CALLOUT_BLOCKQUOTE_RE = re.compile(
+    r"<blockquote>(?P<inner>(?:(?!</?blockquote>).)*?)</blockquote>",
+    re.DOTALL,
+)
+# The first paragraph of a callout blockquote starts with the ``[!TYPE]`` marker.
+_CALLOUT_MARKER_RE = re.compile(
+    r"^\s*<p>\s*\[!(?P<type>NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][^\S\n]*"
+    r"(?:<br\s*/?>)?\s*(?P<body>.*?)</p>(?P<rest>.*)$",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _augment_markdown_callouts(html: str) -> str:
+    """Rewrite ``[!TYPE]`` blockquotes into semantic callout blocks.
+
+    Runs on already-sanitized HTML, so the injected ``div``/``span``/icon markup
+    and the fixed callout classes are trusted; the blockquote body was cleaned by
+    bleach. Non-callout blockquotes are returned untouched.
+    """
+
+    def _replace(match: "re.Match[str]") -> str:
+        inner = match.group("inner")
+        marker = _CALLOUT_MARKER_RE.match(inner)
+        if not marker:
+            return match.group(0)
+        kind = marker.group("type").lower()
+        label = GITHUB_CALLOUT_LABELS[kind]
+        icon = _CALLOUT_ICON_SVG[kind]
+        body = marker.group("body")
+        rest = marker.group("rest")
+        body_html = f"<p>{body}</p>" if body.strip() else ""
+        return (
+            f'<div class="md-callout md-callout-{kind}">'
+            f'<p class="md-callout-title">{icon}'
+            f'<span class="md-callout-label">{label}</span></p>'
+            f"{body_html}{rest}</div>"
+        )
+
+    return _CALLOUT_BLOCKQUOTE_RE.sub(_replace, html)
+
+
 def _render_markdown_preview(content: str) -> Optional[str]:
     """Render Markdown to sanitized HTML without interpreting raw HTML input."""
     if markdown is None or bleach is None:
@@ -280,13 +385,16 @@ def _render_markdown_preview(content: str) -> Optional[str]:
     renderer.preprocessors.deregister("html_block")
     renderer.inlinePatterns.deregister("html")
     html = renderer.convert(content)
-    return bleach.clean(
+    sanitized = bleach.clean(
         html,
         tags=MARKDOWN_ALLOWED_TAGS,
         attributes=MARKDOWN_ALLOWED_ATTRIBUTES,
         protocols=bleach.sanitizer.ALLOWED_PROTOCOLS,
         strip=True,
     )
+    # Callout augmentation happens after sanitization so it never widens the
+    # bleach allowlist; the classes/icons it adds are backend-controlled.
+    return _augment_markdown_callouts(sanitized)
 
 
 def _resolve_explorer_candidate_path(

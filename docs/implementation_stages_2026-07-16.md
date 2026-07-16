@@ -18,15 +18,15 @@ depend on them. Within a stage, issues share files and can be built together.
 | --- | --- | --- |
 | 1 ✅ | Explorer tree rows & Git sidebar (**done 2026-07-16**) | 024, 028, 023, 018 |
 | 2 ✅ | Explorer tabbed file viewer (**done 2026-07-16**) | 014, 016, 015 |
-| 3 | Markdown preview presentation | 017, 030 |
+| 3 ✅ | Markdown preview presentation (**done 2026-07-16**) | 017, 030 |
 | 4 | Explorer large-file / log preview | 020 |
 | 5 | Terminal close & layout integrity | 022, 027 |
 | 6 | Terminal input focus & targeting | 025, 026 |
 | 7 | Settings & launcher configuration | 029, 013, 031 |
 
-All 17 issues are covered; **Stage 1 (024, 028, 023, 018) and Stage 2 (014, 016,
-015) are now implemented and closed**, leaving 10 open. Stages 3, 5, 6, 7 are
-independent of each other and can be scheduled in any order.
+All 17 issues are covered; **Stage 1 (024, 028, 023, 018), Stage 2 (014, 016,
+015), and Stage 3 (017, 030) are now implemented and closed**, leaving 8 open.
+Stages 5, 6, 7 are independent of each other and can be scheduled in any order.
 
 ---
 
@@ -213,13 +213,16 @@ workspace-save round-trip; `tests/test_session_manager.py` covers
 
 ## Stage 3 — Markdown preview presentation
 
+> **Status: Implemented (2026-07-16).** Both issues below are closed. See
+> **Implementation notes** at the end of this section for what shipped.
+
 **Goal:** make Markdown previews look polished and let users tune the reading
 surface — both changes live in `.explorer-markdown-preview` styling + the render
 path.
 
 **Issues**
-- **ISSUE-2026-017** — Improve Markdown preview visual hierarchy and callouts *(land first — defines the default surface)*
-- **ISSUE-2026-030** — Add user-customizable Markdown preview appearance and presets *(builds on 017's default)*
+- **ISSUE-2026-017** — Improve Markdown preview visual hierarchy and callouts ✅ *(landed first — defines the default surface)*
+- **ISSUE-2026-030** — Add user-customizable Markdown preview appearance and presets ✅ *(builds on 017's default)*
 
 **Shared surface**
 - `web/static/css/terminals.css`: `.explorer-markdown-preview` (headings,
@@ -241,6 +244,52 @@ contrast, and narrow-pane wrapping intact; token-only colors (no palette
 literals).
 
 **Sizing:** Medium. Mostly CSS + a small render/postprocess change.
+
+**Implementation notes (2026-07-16)**
+1. **017 — hierarchy + callouts.** `web/explorer.py` gained a bounded
+   post-sanitization step: `_render_markdown_preview()` now runs
+   `_augment_markdown_callouts()` on the already-`bleach`-cleaned HTML, rewriting
+   GitHub-style `> [!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]` blockquotes
+   into `<div class="md-callout md-callout-{type}">` blocks with an accessible
+   `md-callout-title` (stroke-`currentColor` SVG icon + label). Because the
+   transform runs *after* bleach and only injects a closed, backend-owned set of
+   class names + icons, the sanitizer allowlist is unchanged and callout bodies
+   stay sanitized; non-callout blockquotes and unknown keywords pass through
+   untouched (adjacent callouts merge in Python-Markdown — a documented authoring
+   edge case that degrades gracefully). `web/static/css/terminals.css` gives
+   `.explorer-markdown-preview` a cohesive theme: differentiated `h1`–`h6`
+   (dividers on `h1`/`h2`, muted `h5`/`h6`), nested list markers, styled links,
+   rules, tables (header tint + zebra rows), task-item and image handling, and
+   the callout blocks. Callout accents/tints are new per-theme
+   `--explorer-callout-*` tokens (mirroring the `--git-lane-*` pattern; no inline
+   palette literals), and code/blockquote/table chrome now reads the shared
+   `--md-preview-*` custom properties so it adapts to the presets below.
+2. **030 — customizable appearance + presets.** The preview surface exposes two
+   orthogonal, persisted axes driven entirely by CSS custom properties defined
+   from tokens: a **reading-surface preset** (`default`, `paper`,
+   `high-contrast`) and a **font family** (`system`, `serif`, `mono`). A new
+   header control (`data-explorer-md-appearance`, shown only for previewable
+   files) opens an in-page popover (`#explorer-md-menu`, WebView2-safe, keyboard
+   navigable with Arrow/Escape, radio `aria-checked` items, outside-click
+   dismiss) mirroring the Stage-1 context-menu pattern. `explorerMarkdownAppearance()`
+   reads a bounded `localStorage` preference (`gridvibe.mdPreviewPreset` /
+   `gridvibe.mdPreviewFont`, allowlist-validated with a safe default);
+   `setExplorerMarkdownAppearance()` persists it and applies it live to every open
+   preview via `applyExplorerMarkdownAppearanceToElement()`
+   (`md-preset-*` / `md-font-*` classes remapping `--md-preview-*`). Both preview
+   render paths (`renderExplorerFile()` and `updateExplorerFileInPlace()`) apply
+   the saved appearance idempotently, so it survives reopens and coexists with
+   the existing zoom control, search highlighting, and light/dark themes. Paper
+   and high-contrast surfaces are intentionally theme-independent reading
+   surfaces (deliberate exception, same spirit as the pinned terminal canvas in
+   deep-dive 7.1), with their literals confined to a single token block.
+
+Tests: `tests/test_api.py` gained behavioral coverage for callout emission across
+all five types, plain-blockquote/unknown-keyword pass-through, body sanitization
+with nested content, and endpoint `preview_html` delivery, plus rendered-template
+assertions for the heading/callout CSS + tokens (017) and the appearance
+functions, bounded preset/font allowlists, persisted-preference keys, header
+control, idempotent dual-path application, and token-driven preset classes (030).
 
 ---
 

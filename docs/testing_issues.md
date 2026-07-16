@@ -3,6 +3,59 @@ Last updated: 2026-07-16
 
 ## Open Issues
 
+### Issue ID: ISSUE-2026-033
+- Title: Markdown preview appearance not saved with session presets or restore snapshot
+- Priority: Low
+- Status: Open
+- Area: `web/static/js/terminals.js`, `web/saved_sessions.py`, `web/runtime_state.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `markdown`, `session`, `settings`, `tests`
+- Reported: 2026-07-16
+
+Description:
+The Markdown preview appearance preference (reading-surface preset and font family, introduced by ISSUE-2026-030) is stored exclusively in two global `localStorage` keys — `gridvibe.mdPreviewPreset` and `gridvibe.mdPreviewFont`. It is not included in the saved-session preset schema, the active-workspace Save Session serialization, or the `runtime_state.json` auto-restore snapshot. As a result: (1) a session preset opened on a different machine or after clearing browser storage silently reverts to the default appearance; (2) users who use different Markdown appearances for different work contexts cannot associate an appearance with a saved preset; and (3) the auto-restore snapshot produced on app close cannot faithfully re-apply the appearance independently of the browser's localStorage. Explorer open tabs and sidebar state (`explorer_open_tabs`, `explorer_active_tab`, `explorer_tree_open`, `explorer_git_open`) are already captured correctly in all three paths (ISSUE-2026-015) — this gap is Markdown appearance only.
+
+Steps to reproduce:
+1. Open a GridVibe Explorer pane containing a Markdown file, switch to Preview, and change the reading-surface preset (e.g., to Paper) and font (e.g., to Serif) via the appearance menu.
+2. Save the active workspace via the **Save Session** button and confirm the preset is saved.
+3. Clear the browser's `localStorage` (or open the same saved preset in a different browser/machine), then relaunch the saved session and open a Markdown preview.
+4. Observe that the preview reverts to the default appearance (System preset, system font) regardless of the saved session, because the appearance is not in the preset schema.
+
+Expected behavior:
+The Markdown preview appearance (preset and font family) should round-trip through the saved-session preset, the active-workspace Save Session flow, the launcher resave path, and the `runtime_state.json` auto-restore snapshot. Relaunching a saved session — on any machine and regardless of `localStorage` state — should restore the Markdown appearance the session was saved with.
+
+Actual behavior / logs:
+Code inspection confirms `buildWorkspaceTerminalEntry()` in `web/static/js/terminals.js` (line 1499) serializes `explorer_open_tabs` and `explorer_active_tab` but no Markdown appearance fields. `_normalize_terminal_entries()` in `web/saved_sessions.py` validates the tab fields (lines 261–274) but has no `md_preset` or `md_font` handling. `_SESSION_SNAPSHOT_FIELDS` in `web/runtime_state.py` (lines 27–46) lists all explorer fields but no Markdown appearance keys. `EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset'` and `EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont'` (terminals.js:9438–9439) are read and written only through `localStorage`, with no server-side write path.
+
+### Proposed solution:
+Add two fields — e.g. `explorer_md_preset` and `explorer_md_font` — to the saved-session terminal entry schema. In `buildWorkspaceTerminalEntry()` in `web/static/js/terminals.js`, read the current `localStorage` appearance (via the existing `explorerMarkdownAppearance()`) for explorer panes and include it in the serialized entry. In `web/saved_sessions.py`, normalize and allowlist-validate both fields (same safe-default logic as `explorerMarkdownAppearance()`: preset ∈ `{default, paper, high-contrast}`, font ∈ `{system, serif, mono}`) in `_normalize_terminal_entries()` and gate them to explorer panes in `_merge_workspace_session_config`. Add both fields to `_SESSION_SNAPSHOT_FIELDS` in `web/runtime_state.py`. On session restore in `web/static/js/terminals.js`, after the Explorer pane is initialized, apply the saved appearance via `setExplorerMarkdownAppearance()` if the session carries the field — fallback to the current `localStorage` value when the field is absent so existing presets degrade gracefully. Since the appearance is currently global (one pair of localStorage keys for all panes), the restore path should apply to the pane being opened and also update the shared `localStorage` keys for consistency; document any per-pane vs. global behaviour choice explicitly. Add focused tests in `tests/test_api.py` for: normalization and allowlist validation of both fields, non-explorer pane exclusion, saved-session round-trips, runtime-state field presence, and client restore wiring.
+
+### Issue ID: ISSUE-2026-032
+- Title: Git sidebar "Changes" header has no Stage All button
+- Priority: Low
+- Status: Open
+- Area: `web/static/js/terminals.js`, `web/api.py`, `web/explorer.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `git`, `ui`, `flask`, `tests`
+- Reported: 2026-07-16
+
+Description:
+The Git sidebar's **Changes** (unstaged) section header contains only a plain title label. There is no action to stage all uncommitted working-tree changes at once. Users must stage each file individually using the per-row `+` button, which is slow when many files are modified. The **Staged Changes** section already has a commit action in its footer; the **Changes** section has no equivalent bulk action for its header row.
+
+Steps to reproduce:
+1. Open a GridVibe Explorer pane rooted in a Git repository that has two or more modified tracked files.
+2. Open the Git sidebar and inspect the **Changes** section header row.
+3. Observe that the header contains only the "Changes" label and no "Stage All" button; each file must be staged individually with its per-row `+` button.
+
+Expected behavior:
+The **Changes** section header should include a compact "Stage All" button that stages every currently listed unstaged change in a single action (equivalent to `git add -A` scoped to the repository root). After the action completes, the Git summary should refresh and the staged files should appear under **Staged Changes**, consistent with how individual staging already works.
+
+Actual behavior / logs:
+Code inspection confirms the **Changes** section header in `renderExplorerGitSidebarContent()` (terminals.js:8411–8416) is rendered as `<div class="explorer-diff-sidebar-title">Changes</div>` with no accompanying button. `explorerGitStageFile(index, path)` (terminals.js:9029) takes a single `path` argument and delegates to `performExplorerGitAction(index, 'stage', { path })`. The backend route `POST /api/explorer/<session_id>/git/stage` (api.py:792) similarly accepts one `path` field and calls `_git_stage_path(backend, root_path, file_path)`. No `stage_all` client function, no stage-all button, and no bulk-stage endpoint exist anywhere in the codebase (confirmed by literal search).
+
+### Proposed solution:
+Add a "Stage All" button to the **Changes** header row in `renderExplorerGitSidebarContent()` in `web/static/js/terminals.js`, disabled when the unstaged list is empty or a Git action is busy. Wire it to a new client function (e.g. `explorerGitStageAll(index)`) that calls a new `POST /api/explorer/<session_id>/git/stage-all` route in `web/api.py`. The backend handler should live in `web/explorer.py` (e.g. `_git_stage_all_paths(backend, root_path)`) and run `git add -A` (or `git add .`) with `GIT_TERMINAL_PROMPT=0`, scoped to the repository root, consistent with the existing single-file stage helper. After success, return the updated repository summary and refresh the sidebar the same way individual staging does. Ensure busy-state toggling prevents overlapping actions, align the button style with the existing per-row `+` buttons and the Unstage/Commit controls, and preserve the read-only guarantee for file content. Add focused tests in `tests/test_api.py` for: the stage-all endpoint success and error paths, out-of-root/invalid session rejection, the rendered sidebar button presence, disabled state when no unstaged changes exist, and client wiring through `performExplorerGitAction`.
+
 ### Issue ID: ISSUE-2026-031
 - Title: App Settings action buttons overlap voice settings content
 - Priority: Low
@@ -28,32 +81,6 @@ Code inspection confirms `.modal-card` in `web/static/css/launcher.css` is a `gr
 
 ### Proposed solution:
 Remove or correct the `.app-settings-card .settings-grid { overflow: visible }` override in `web/static/css/launcher.css` so the App Settings body keeps the intended `overflow: auto; min-height: 0` scroll behavior at all widths, keeping the pinned action row out of the content flow. Verify the `max-height` caps and `voice-enabled` variant leave the actions fully visible with voice enabled, and confirm scroll padding does not clip focus rings. Since the same modal is the planned home for new terminal settings (ISSUE-2026-029), keep the body scroll model intact when those fields are added so a longer form does not reintroduce the overlap. Add a focused rendered-template/CSS regression test in `tests/test_api.py` asserting the App Settings body uses a scrollable overflow (not `overflow: visible`) and that the action row is a pinned grid row, covering the voice-enabled state.
-
-### Issue ID: ISSUE-2026-030
-- Title: Add user-customizable Markdown preview appearance and presets
-- Priority: Low
-- Status: Open
-- Area: `web/static/css/terminals.css`, `web/static/js/terminals.js`, `web/explorer.py`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `markdown`, `settings`, `ui`, `tests`
-- Reported: 2026-07-15
-
-Description:
-The Explorer Markdown preview renders with a single fixed appearance and offers no way for users to customize how it looks — font family, text size, or background/reading surface — or to pick from ready-made presets. Users who read long documentation in GridVibe cannot switch to a serif or paper/sepia reading surface, a high-contrast surface, or a larger reading font. This is a user-facing customization request and is distinct from ISSUE-2026-017, which covers developer-defined default visual hierarchy and note callouts rather than user-selectable appearance.
-
-Steps to reproduce:
-1. Open an Explorer pane and select a Markdown file, then switch from Source to Preview.
-2. Inspect the preview toolbar/header for any font, background, theme, or preset controls.
-3. Observe that the preview always uses one fixed font and background, with only the shared editor zoom available, and no preset or reading-surface options.
-
-Expected behavior:
-Markdown Preview should let the user adjust its appearance — at minimum a small set of presets (for example default, paper/sepia, high-contrast, and a serif/reading variant) and/or explicit font-family and font-size controls. The chosen appearance should apply immediately to the active preview, remain within GridVibe's theme tokens, coexist with light/dark themes and the existing zoom control, persist across previews, and never weaken Markdown sanitization or the read-only guarantee.
-
-Actual behavior / logs:
-Code inspection confirms `web/static/css/terminals.css` styles `.explorer-markdown-preview` with fixed padding, font, and background rules, and there is no client control, setting, or CSS-variable hook that lets the user change the preview font, background, or reading surface. `_render_markdown_preview()` in `web/explorer.py` emits sanitized semantic HTML but carries no appearance metadata. No `RuntimeConfig`/`/api/app-config` field or local preference stores a Markdown-preview appearance choice.
-
-### Proposed solution:
-Add a compact, accessible appearance control to the Markdown preview surface in `web/static/js/terminals.js` (a preset selector, optionally with font-family and font-size adjusters) and drive it through preset classes plus CSS custom properties on `.explorer-markdown-preview` defined from `tokens.css` in `web/static/css/terminals.css`, so no hardcoded palette literals are introduced. Persist the selection (a bounded local preference or an `/api/app-config`/`RuntimeConfig` field wired end to end), apply it idempotently to newly opened previews, and keep it compatible with light/dark themes, the existing zoom control, narrow panes, and `prefers-reduced-motion`. Preserve the sanitized rendering path in `web/explorer.py` and the read-only contract; do not couple this to the callout work in ISSUE-2026-017 beyond sharing tokens. Add focused tests in `tests/test_api.py` for preset class emission, persisted-preference round-trip and validation, token-only styling, theme/zoom coexistence, and default fallback.
 
 ### Issue ID: ISSUE-2026-029
 - Title: Settings UI omits terminal config (font family, size, max sessions)
@@ -212,32 +239,6 @@ Code inspection confirms `EXPLORER_FILE_PREVIEW_MAX_BYTES` in `web/explorer.py` 
 ### Proposed solution:
 Make the preview byte limit a validated, bounded setting or raise it to a measured safe value, while preserving protections against browser stalls and excessive local or SFTP reads. Add a ranged/tail-read operation to the local and SFTP explorer backends and use it for `.log` and any explicitly classified append-oriented formats so truncated previews retain the last configured bytes. Consider exposing a Head/Tail selector for other oversized text files, with a documented default appropriate to their type. Return range metadata such as retained start/end bytes and total size, and update `web/static/js/terminals.js` to show a clear message such as `Showing the last 1 MiB` instead of only a generic truncation warning. Handle UTF-8 and line boundaries so a tail read does not begin with a broken character or misleading partial line. Add focused tests in `tests/test_api.py` for retained end markers, excluded start markers, files exactly at the limit, multibyte and long-line boundaries, local/SFTP parity, range metadata, configured-limit validation, and client messaging, while keeping search and highlighting bounded to the returned preview.
 
-### Issue ID: ISSUE-2026-017
-- Title: Improve Markdown preview visual hierarchy and callouts
-- Priority: Cosmetic
-- Status: Open
-- Area: `web/static/css/terminals.css`, `web/explorer.py`, `web/static/js/terminals.js`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `ui`, `markdown`, `tests`
-- Reported: 2026-07-13
-
-Description:
-Markdown previews are functional but visually plain, making headings, lists, notes, and other document structure harder to scan than they should be. The weak hierarchy is especially noticeable in longer README and documentation files, where users depend on highlighted titles, distinct bullet levels, and visible note or warning blocks.
-
-Steps to reproduce:
-1. Open an Explorer pane and select a Markdown file containing multiple heading levels, nested bullet or numbered lists, blockquotes, and note-like content.
-2. Switch from Source to Preview.
-3. Observe that the content has basic spacing and code/table treatment, but headings, list levels, and note content have limited visual distinction.
-
-Expected behavior:
-Markdown Preview should present a polished, theme-aware document surface with clearly differentiated heading levels, readable paragraph width and spacing, visible ordered/unordered list markers and nesting, styled links and separators, and distinctive accessible callouts for notes, tips, warnings, and important information. The result should remain readable in light and dark themes and at every supported editor zoom level.
-
-Actual behavior / logs:
-Code inspection confirms `web/static/css/terminals.css` gives `.explorer-markdown-preview` basic padding, font sizing, and line height; applies only margin and line-height rules to `h1` through `h3`; gives lists only a shared bottom margin; and renders all blockquotes with one muted left-border style. `_render_markdown_preview()` in `web/explorer.py` supports common Markdown extensions and sanitized semantic HTML, but it does not define a dedicated note/callout representation. Existing tests verify sanitized Markdown and fenced-code language hints, not the visual hierarchy or callout styling requested here.
-
-### Proposed solution:
-Create a cohesive Markdown preview theme in `web/static/css/terminals.css`: constrain readable line length where space permits; give `h1` through `h6` progressively distinct size, weight, color, spacing, and divider treatment; style nested list indentation and markers; and refine links, horizontal rules, tables, task items, images, inline code, and fenced blocks with the existing explorer theme variables. Define and document one note syntax, preferably GitHub-style `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, and `[!CAUTION]` blockquotes, then extend the sanitized rendering path in `web/explorer.py` or a bounded client postprocessor in `web/static/js/terminals.js` to emit safe semantic callout classes and icons/labels. Maintain sanitization, keyboard selection, search highlighting, zoom behavior, narrow-pane wrapping, and light/dark contrast. Add focused API/template tests for every supported heading/list/callout form, sanitizer restrictions, nested content, theme classes, and regression coverage for existing code blocks, tables, footnotes, and raw-HTML handling.
-
 ### Issue ID: ISSUE-2026-013
 - Title: Add per-agent auto-mode toggles to terminal settings
 - Priority: Low
@@ -265,6 +266,60 @@ Code inspection confirms `buildTerminalInitialCommand()` in `web/static/js/launc
 Add a per-terminal boolean such as `agent_auto_mode` to the launcher draft, saved-session normalization, workspace serialization, `TerminalSession`, and API responses. Define supported auto-mode arguments in the existing agent registry or another single backend-owned mapping instead of hard-coding one generic flag for every CLI. Update the agent settings row in `web/static/js/launcher.js` to show an accessible toggle only when the selected built-in agent has a registered option, recompute visibility and help text when the selection changes, and keep custom-agent behavior explicit rather than silently modifying arbitrary commands. Compose the final startup command from the validated selected-agent metadata and mapped argument without duplicating flags, while keeping preflight detection based on the base agent executable. Add focused tests in `tests/test_api.py` and `tests/test_session_manager.py` for enabled/disabled command construction, unsupported and custom agents, save/load/workspace round-trips, SSH and local launches, and backward compatibility for saved sessions without the new field.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-017
+- Title: Improve Markdown preview visual hierarchy and callouts
+- Priority: Cosmetic
+- Status: Closed
+- Area: `web/static/css/terminals.css`, `web/explorer.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `ui`, `markdown`, `tests`
+- Reported: 2026-07-13
+- Closed: 2026-07-16
+
+Description:
+Markdown previews are functional but visually plain, making headings, lists, notes, and other document structure harder to scan than they should be. The weak hierarchy is especially noticeable in longer README and documentation files, where users depend on highlighted titles, distinct bullet levels, and visible note or warning blocks.
+
+Steps to reproduce:
+1. Open an Explorer pane and select a Markdown file containing multiple heading levels, nested bullet or numbered lists, blockquotes, and note-like content.
+2. Switch from Source to Preview.
+3. Observe that the content has basic spacing and code/table treatment, but headings, list levels, and note content have limited visual distinction.
+
+Expected behavior:
+Markdown Preview should present a polished, theme-aware document surface with clearly differentiated heading levels, readable paragraph width and spacing, visible ordered/unordered list markers and nesting, styled links and separators, and distinctive accessible callouts for notes, tips, warnings, and important information. The result should remain readable in light and dark themes and at every supported editor zoom level.
+
+Actual behavior / logs:
+Code inspection confirmed `web/static/css/terminals.css` gave `.explorer-markdown-preview` basic padding, font sizing, and line height; applied only margin and line-height rules to `h1` through `h3`; gave lists only a shared bottom margin; and rendered all blockquotes with one muted left-border style. `_render_markdown_preview()` in `web/explorer.py` supported common Markdown extensions and sanitized semantic HTML, but defined no dedicated note/callout representation.
+
+Resolution:
+`_render_markdown_preview()` in `web/explorer.py` now runs a bounded `_augment_markdown_callouts()` step on the already-`bleach`-sanitized HTML, converting GitHub-style `> [!NOTE]/[!TIP]/[!IMPORTANT]/[!WARNING]/[!CAUTION]` blockquotes into `<div class="md-callout md-callout-{type}">` blocks with an accessible `md-callout-title` (stroke-`currentColor` SVG icon + label). Because the transform runs after sanitization and only injects a closed, backend-owned set of class names and icons, the bleach allowlist is unchanged and callout bodies stay sanitized; plain blockquotes and unknown keywords pass through untouched (adjacent callouts merge in Python-Markdown — a documented authoring edge case that degrades to a plain blockquote). `web/static/css/terminals.css` gives `.explorer-markdown-preview` a cohesive theme: differentiated `h1`–`h6` (dividers on `h1`/`h2`, muted `h5`/`h6`), nested list markers, styled links/rules, tables with a header tint and zebra rows, task-item and image handling, and the callout blocks. Callout accents/tints are new per-theme `--explorer-callout-*` tokens (mirroring the `--git-lane-*` pattern; no inline palette literals), and code/blockquote/table chrome reads shared `--md-preview-*` custom properties so it adapts to the ISSUE-2026-030 presets. Covered by `test_markdown_preview_renders_github_callouts`, `test_markdown_preview_leaves_plain_blockquote_untouched`, `test_markdown_preview_callout_sanitizes_body_and_keeps_nested_content`, `test_explorer_file_endpoint_emits_callout_html`, and `test_terminals_page_markdown_preview_hierarchy_and_callouts` in `tests/test_api.py`.
+
+### Issue ID: ISSUE-2026-030
+- Title: Add user-customizable Markdown preview appearance and presets
+- Priority: Low
+- Status: Closed
+- Area: `web/static/css/terminals.css`, `web/static/js/terminals.js`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `markdown`, `settings`, `ui`, `tests`
+- Reported: 2026-07-15
+- Closed: 2026-07-16
+
+Description:
+The Explorer Markdown preview rendered with a single fixed appearance and offered no way for users to customize how it looks — font family, text size, or background/reading surface — or to pick from ready-made presets. Users who read long documentation in GridVibe could not switch to a serif or paper/sepia reading surface, a high-contrast surface, or a larger reading font. This is a user-facing customization request, distinct from ISSUE-2026-017's developer-defined default hierarchy and note callouts.
+
+Steps to reproduce:
+1. Open an Explorer pane and select a Markdown file, then switch from Source to Preview.
+2. Inspect the preview toolbar/header for any font, background, theme, or preset controls.
+3. Observe that the preview always used one fixed font and background, with only the shared editor zoom available, and no preset or reading-surface options.
+
+Expected behavior:
+Markdown Preview should let the user adjust its appearance — at minimum a small set of presets (for example default, paper/sepia, high-contrast, and a serif/reading variant) and/or explicit font-family and font-size controls. The chosen appearance should apply immediately to the active preview, remain within GridVibe's theme tokens, coexist with light/dark themes and the existing zoom control, persist across previews, and never weaken Markdown sanitization or the read-only guarantee.
+
+Actual behavior / logs:
+Code inspection confirmed `web/static/css/terminals.css` styled `.explorer-markdown-preview` with fixed padding, font, and background rules, and there was no client control, setting, or CSS-variable hook to change the preview font, background, or reading surface. `_render_markdown_preview()` in `web/explorer.py` emitted sanitized semantic HTML but carried no appearance metadata, and no `RuntimeConfig`/`/api/app-config` field or local preference stored a Markdown-preview appearance choice.
+
+Resolution:
+The preview surface now exposes two orthogonal, persisted axes driven entirely by CSS custom properties defined from tokens: a **reading-surface preset** (`default`, `paper`, `high-contrast`) and a **font family** (`system`, `serif`, `mono`). A new header control (`data-explorer-md-appearance`, shown only for previewable files) opens an in-page popover (`#explorer-md-menu`, WebView2-safe — no `window.*` — keyboard navigable with Arrow/Escape, radio `aria-checked` items, outside-click and Escape dismiss) mirroring the ISSUE-2026-028 context-menu pattern. `explorerMarkdownAppearance()` reads a bounded `localStorage` preference (`gridvibe.mdPreviewPreset` / `gridvibe.mdPreviewFont`, allowlist-validated with a safe default); `setExplorerMarkdownAppearance()` persists it and applies it live to every open preview through `applyExplorerMarkdownAppearanceToElement()` (`md-preset-*` / `md-font-*` classes remapping `--md-preview-*`). Both preview render paths (`renderExplorerFile()` and `updateExplorerFileInPlace()`) apply the saved appearance idempotently, so it survives reopens and coexists with the existing zoom control, search highlighting, and light/dark themes; paper and high-contrast are intentionally theme-independent reading surfaces with their literals confined to a single token block (no palette literals in rules). The sanitized rendering path and read-only contract are unchanged. Covered by `test_terminals_page_markdown_appearance_presets` in `tests/test_api.py`.
 
 ### Issue ID: ISSUE-2026-014
 - Title: Replace explorer directory view with tabbed file viewer
