@@ -1,7 +1,33 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-15
+Last updated: 2026-07-16
 
 ## Open Issues
+
+### Issue ID: ISSUE-2026-031
+- Title: App Settings action buttons overlap voice settings content
+- Priority: Low
+- Status: Open
+- Area: `web/static/css/launcher.css`, `templates/index.html`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `settings`, `launcher`, `ui`, `tests`
+- Reported: 2026-07-16
+
+Description:
+When voice input is enabled in the launcher App Settings modal, the pinned Save Settings and Cancel action buttons overlap the bottom of the voice settings content instead of sitting below a scrollable body. At common desktop window sizes the buttons clip into the microphone section (for example over the "Microphones loaded. Labels may stay generic until microphone permission is granted" hint), obscuring the last controls and looking broken. Because the fields backing the same modal are where new terminal configuration would be added (ISSUE-2026-029), any further growth of this modal will make the overlap worse.
+
+Steps to reproduce:
+1. Open GridVibe and open App Settings from the launcher at a normal desktop window size.
+2. Enable "Enable voice input" so the full voice settings panel (backend, model, device, compute type, microphone, push-to-talk) is shown.
+3. Observe that the Save Settings and Cancel buttons overlap the bottom of the voice content rather than resting below a scrollable settings area.
+
+Expected behavior:
+The App Settings body should scroll within the modal's fixed height while the header and the Save Settings / Cancel action row stay pinned and never overlap content. Enabling voice input (or adding more settings later) should extend the scrollable region, not push content under the action buttons.
+
+Actual behavior / logs:
+Code inspection confirms `.modal-card` in `web/static/css/launcher.css` is a `grid-template-rows: auto minmax(0, 1fr) auto` layout (header / scroll body / pinned actions), and the base `.settings-grid` scrolls via `overflow: auto; min-height: 0`. However `.app-settings-card .settings-grid` overrides this with `overflow: visible; padding-right: 0`, which disables the scroll region for the App Settings modal. With the card capped by `.app-settings-card { max-height: min(92vh, 860px) }` / `.app-settings-card.voice-enabled { max-height: min(96vh, 900px) }`, the taller voice content overflows its `1fr` track and paints under the pinned `.app-settings-actions` footer. The narrow-width breakpoint restores `.app-settings-card .settings-grid { overflow: auto }`, so the overlap is only visible at wider desktop widths with voice enabled.
+
+### Proposed solution:
+Remove or correct the `.app-settings-card .settings-grid { overflow: visible }` override in `web/static/css/launcher.css` so the App Settings body keeps the intended `overflow: auto; min-height: 0` scroll behavior at all widths, keeping the pinned action row out of the content flow. Verify the `max-height` caps and `voice-enabled` variant leave the actions fully visible with voice enabled, and confirm scroll padding does not clip focus rings. Since the same modal is the planned home for new terminal settings (ISSUE-2026-029), keep the body scroll model intact when those fields are added so a longer form does not reintroduce the overlap. Add a focused rendered-template/CSS regression test in `tests/test_api.py` asserting the App Settings body uses a scrollable overflow (not `overflow: visible`) and that the action row is a pinned grid row, covering the voice-enabled state.
 
 ### Issue ID: ISSUE-2026-030
 - Title: Add user-customizable Markdown preview appearance and presets
