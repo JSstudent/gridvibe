@@ -343,6 +343,9 @@
     let surfaceModeChangedManually = false;
     let surfaceModeAppliedGroups = new Map();
     let pendingSplitRestore = null;
+    /* Live explorer/browser client state captured before a terminal close so the
+       forced grid rebuild does not wipe sibling panes (ISSUE-2026-027). */
+    let pendingCloseClientState = null;
     let pendingModeSwitchSessionIds = new Set();
     let savedSessionResolver = null;
     let saveSessionAsResolver = null;
@@ -3060,21 +3063,17 @@
         return rect;
     }
 
-    function buildTerminalCloseRectsForSideGroup(plan, sideGroup) {
-        if (!sideGroup || sideGroup.coverage < sideGroup.sideLength) {
-            return null;
-        }
-
-        const expandingSessionIds = new Set(sideGroup.entries.map(entry => entry.sessionId));
-        const nextEntries = plan.remainingEntries.map(entry => {
-            const shouldExpand = expandingSessionIds.has(entry.sessionId);
-            return {
-                ...entry,
-                rect: shouldExpand
-                    ? expandRectIntoClosedSide(entry.rect, plan.closedRect, sideGroup.side)
-                    : entry.rect,
-            };
-        });
+    /* Expand a chosen subset of side contacts into the closed rect and return
+       the resulting rects only when the layout stays gap-free (area invariant)
+       and overlap-free; otherwise null so the caller can try another subset. */
+    function terminalCloseRectsForExpandingContacts(plan, side, contactsToExpand) {
+        const expandingSessionIds = new Set(contactsToExpand.map(entry => entry.sessionId));
+        const nextEntries = plan.remainingEntries.map(entry => ({
+            ...entry,
+            rect: expandingSessionIds.has(entry.sessionId)
+                ? expandRectIntoClosedSide(entry.rect, plan.closedRect, side)
+                : entry.rect,
+        }));
         for (let leftIndex = 0; leftIndex < nextEntries.length; leftIndex += 1) {
             for (let rightIndex = leftIndex + 1; rightIndex < nextEntries.length; rightIndex += 1) {
                 if (splitRectsOverlap(nextEntries[leftIndex].rect, nextEntries[rightIndex].rect)) {
@@ -3094,6 +3093,29 @@
             rectsBySessionId[entry.sessionId] = cloneSplitSlotRects([entry.rect])[0];
         });
         return rectsBySessionId;
+    }
+
+    function buildTerminalCloseRectsForSideGroup(plan, sideGroup) {
+        if (!sideGroup || sideGroup.coverage < sideGroup.sideLength) {
+            return null;
+        }
+
+        /* Prefer expanding only the single contact with the greatest shared
+           border, so closing a pane never resizes more neighbours than the
+           geometry requires (ISSUE-2026-022). Fall back to the full side group
+           only when the single-pane expansion would leave a gap or overlap. */
+        const rankedContacts = [...sideGroup.entries].sort((left, right) => (
+            right.sharedBorder - left.sharedBorder
+            || left.visualIndex - right.visualIndex
+        ));
+        const singleContact = rankedContacts[0];
+        if (singleContact && sideGroup.entries.length > 1) {
+            const single = terminalCloseRectsForExpandingContacts(plan, sideGroup.side, [singleContact]);
+            if (single) {
+                return single;
+            }
+        }
+        return terminalCloseRectsForExpandingContacts(plan, sideGroup.side, sideGroup.entries);
     }
 
     function buildTerminalCloseRectsBySessionId(plan) {
@@ -5169,6 +5191,8 @@
                 groupId: activeGroupId,
                 rectsBySessionId: plan.rectsBySessionId,
                 originalSplitSlotCount: plan.originalSplitSlotCount,
+                splitColumnWeights: cloneSplitTrackWeights(splitColumnWeights),
+                splitRowWeights: cloneSplitTrackWeights(splitRowWeights),
             };
             await initialLoad();
         } catch (error) {
@@ -5182,6 +5206,59 @@
                 button.textContent = '⊟';
             }
             updateAllSplitButtonStates();
+        }
+    }
+
+    /* Snapshot the live client state of every pane except the one being closed,
+       keyed by session id. Closing a terminal forces a full grid rebuild
+       (initialLoad), which would otherwise reset sibling explorer panes to a
+       plain listing and reload browser panes; re-applying this snapshot after the
+       rebuild keeps their open file, tree, Git sidebar and URL (ISSUE-2026-027). */
+    function captureSurvivingPaneClientState(closingSessionId) {
+        const stateBySessionId = {};
+        terminals.forEach((pane, index) => {
+            const sessionId = sessionIds[index];
+            if (!pane || !sessionId || sessionId === closingSessionId) {
+                return;
+            }
+            if (isExplorerSession(pane._session)) {
+                const tabs = explorerSerializeTabs(pane);
+                const previewTab = explorerPreviewTab(pane);
+                const previewActive = pane._explorerActiveTabId === EXPLORER_PREVIEW_TAB_ID;
+                stateBySessionId[sessionId] = {
+                    type: 'explorer',
+                    explorer_tree_open: Boolean(pane._explorerTreeSidebarOpen),
+                    explorer_git_open: Boolean(pane._explorerGitSidebarOpen),
+                    explorer_open_tabs: tabs.open_tabs,
+                    explorer_active_tab: tabs.active_tab,
+                    /* Only the dynamic Preview tab needs an explicit reopen; pinned
+                       tabs come back through the persisted-tab path. */
+                    explorer_preview_path: previewActive ? (previewTab?.path || '') : '',
+                    explorer_preview_view: previewActive ? (pane._explorerLastFileView || '') : '',
+                };
+            } else if (isBrowserSession(pane._session)) {
+                stateBySessionId[sessionId] = {
+                    type: 'browser',
+                    browser_url: getBrowserSessionUrl(pane._session),
+                };
+            }
+        });
+        return stateBySessionId;
+    }
+
+    /* Re-apply one surviving explorer pane's captured state after a close rebuild.
+       Tree/Git flags and pinned tabs were overlaid onto the session object, so the
+       viewer entry point restores them; the previewed file is reopened only when
+       the Preview tab was the active view. */
+    function restoreExplorerPaneFromClose(index, snapshot) {
+        syncExplorerPane(index);
+        restoreExplorerSidebarState(index);
+        if (snapshot.explorer_preview_path) {
+            const pane = terminals[index];
+            if (pane && snapshot.explorer_preview_view) {
+                pane._explorerLastFileView = snapshot.explorer_preview_view;
+            }
+            openExplorerFile(index, snapshot.explorer_preview_path, { pinned: false, showLoading: false });
         }
     }
 
@@ -5230,10 +5307,16 @@
                 return;
             }
 
+            pendingCloseClientState = {
+                groupId: activeGroupId,
+                stateBySessionId: captureSurvivingPaneClientState(plan.sessionId),
+            };
             pendingSplitRestore = {
                 groupId: activeGroupId,
                 rectsBySessionId: restoreRectsBySessionId,
                 originalSplitSlotCount: plan.originalSplitSlotCount,
+                splitColumnWeights: cloneSplitTrackWeights(splitColumnWeights),
+                splitRowWeights: cloneSplitTrackWeights(splitRowWeights),
             };
             await initialLoad();
         } catch (error) {
@@ -6779,6 +6862,30 @@
                 return;
             }
 
+            /* When this rebuild is driven by a terminal close, overlay each
+               surviving pane's captured explorer/browser state onto the fetched
+               session objects so the rebuild seeds and restores it rather than
+               resetting siblings (ISSUE-2026-027). */
+            const closeClientState = pendingCloseClientState?.groupId === requestedGroupId
+                ? pendingCloseClientState.stateBySessionId
+                : null;
+            if (closeClientState) {
+                data.sessions.forEach(entry => {
+                    const snapshot = closeClientState[entry.session_id];
+                    if (!snapshot) {
+                        return;
+                    }
+                    if (snapshot.type === 'explorer') {
+                        entry.explorer_tree_open = snapshot.explorer_tree_open;
+                        entry.explorer_git_open = snapshot.explorer_git_open;
+                        entry.explorer_open_tabs = snapshot.explorer_open_tabs;
+                        entry.explorer_active_tab = snapshot.explorer_active_tab;
+                    } else if (snapshot.type === 'browser') {
+                        entry.initial_command = snapshot.browser_url;
+                    }
+                });
+            }
+
             applyConfiguredSurfaceMode(data, { refit: gridBuilt });
             const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
             const usingCurrentView = (
@@ -6829,8 +6936,13 @@
                 if (session.status === 'connected' && isBrowserSession(session)) {
                     document.getElementById(`ph-${i}`)?.remove();
                 } else if (session.status === 'connected' && isExplorerSession(session)) {
-                    loadExplorerPane(i);
-                    restoreExplorerSidebarState(i);
+                    const closeSnapshot = closeClientState ? closeClientState[session.session_id] : null;
+                    if (closeSnapshot && closeSnapshot.type === 'explorer') {
+                        restoreExplorerPaneFromClose(i, closeSnapshot);
+                    } else {
+                        loadExplorerPane(i);
+                        restoreExplorerSidebarState(i);
+                    }
                 } else if (session.status === 'connected') {
                     if (!terminals[i]._attached) {
                         attachTerminal(i);
@@ -6855,9 +6967,17 @@
                         pendingRestore.originalSplitSlotCount || originalSplitSlotCount || data.sessions.length
                     );
                     splitSlotRects = cloneSplitSlotRects(restoredRects);
+                    /* A valid close preserves the grid's bounding box, so the
+                       pre-close track weights map 1:1 onto the reflowed grid and
+                       user-set proportions survive (ISSUE-2026-022). */
+                    splitColumnWeights = cloneSplitTrackWeights(pendingRestore.splitColumnWeights);
+                    splitRowWeights = cloneSplitTrackWeights(pendingRestore.splitRowWeights);
                     applySplitSlotGeometry({ fit: false });
                 }
                 pendingSplitRestore = null;
+            }
+            if (closeClientState) {
+                pendingCloseClientState = null;
             }
 
             updateSessionChrome(data.sessions.length, requestedGroupId);
@@ -7147,6 +7267,7 @@
         splitColumnWeights = null;
         splitRowWeights = null;
         pendingSplitRestore = null;
+        pendingCloseClientState = null;
         clearActiveGridResize();
         clearResizeHandles();
         document.getElementById('emptyState').classList.add('visible');
@@ -7654,6 +7775,31 @@
             + `stroke-linecap="round" stroke-linejoin="round" focusable="false">${glyph}</svg></span>`;
     }
 
+    /* A truncated preview keeps either the head or the tail of the file
+       (ISSUE-2026-020): logs retain their newest bytes, everything else keeps
+       its opening bytes. Report which end, and how much, was retained. */
+    function explorerPreviewTruncationLabel(data) {
+        if (!data || !data.truncated) {
+            return '';
+        }
+        const start = Number(data.preview_start_byte);
+        const end = Number(data.preview_end_byte);
+        const retained = (Number.isFinite(start) && Number.isFinite(end))
+            ? Math.max(0, end - start)
+            : NaN;
+        const total = Number(data.total_size);
+        const edge = data.preview_mode === 'tail' ? 'last' : 'first';
+        const retainedLabel = Number.isFinite(retained) ? formatExplorerSize(retained) : '';
+        const totalLabel = Number.isFinite(total) ? formatExplorerSize(total) : '';
+        if (retainedLabel && totalLabel) {
+            return `Showing the ${edge} ${retainedLabel} of ${totalLabel}`;
+        }
+        if (retainedLabel) {
+            return `Showing the ${edge} ${retainedLabel}`;
+        }
+        return 'Preview truncated';
+    }
+
     function explorerFileMetaParts(data, fileType) {
         const size = formatExplorerSize(data.size) || 'Unknown size';
         const modified = formatExplorerDate(data.modified);
@@ -7661,8 +7807,9 @@
         if (modified) {
             metaParts.push(modified);
         }
-        if (data.truncated) {
-            metaParts.push('Preview truncated');
+        const truncationLabel = explorerPreviewTruncationLabel(data);
+        if (truncationLabel) {
+            metaParts.push(truncationLabel);
         }
         return metaParts;
     }

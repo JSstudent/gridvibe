@@ -102,6 +102,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _is_explorer_session,
     _is_markdown_file,
     _is_remote_explorer_session,
+    _is_tail_preview_file,
     _release_ssh_sftp,
     _remote_explorer_root_directory,
     _remote_is_directory,
@@ -111,6 +112,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _resolve_explorer_candidate_path,
     _resolve_remote_explorer_candidate_path,
     _sftp_request_error_types,
+    read_explorer_file_preview,
 )
 from web.hostkeys import (  # noqa: F401 - re-exported for backwards compatibility
     _apply_host_key_policy,
@@ -660,13 +662,18 @@ def get_explorer_file(session_id: str):
         root_path, file_path = backend.resolve_file(requested_path)
         size, modified = backend.stat_file(file_path)
         code_language = _explorer_editor_language(file_path)
-        raw_content = backend.read_file_prefix(file_path, EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)
+        preview = read_explorer_file_preview(
+            backend,
+            file_path,
+            total_size=size,
+            tail=_is_tail_preview_file(file_path),
+        )
+        preview_bytes = preview["bytes"]
 
-        if _explorer_content_looks_binary(raw_content):
+        if _explorer_content_looks_binary(preview_bytes):
             raise ValueError("Explorer file appears to be binary")
 
-        truncated = len(raw_content) > EXPLORER_FILE_PREVIEW_MAX_BYTES
-        preview_bytes = raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]
+        truncated = preview["truncated"]
         content = preview_bytes.decode("utf-8", errors="replace")
         preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
         git_context, git_statuses = _get_git_context(backend, root_path, backend.file_dirname(file_path))
@@ -683,6 +690,10 @@ def get_explorer_file(session_id: str):
             "modified": modified,
             "encoding": "utf-8",
             "truncated": truncated,
+            "preview_mode": preview["preview_mode"],
+            "preview_start_byte": preview["preview_start_byte"],
+            "preview_end_byte": preview["preview_end_byte"],
+            "total_size": preview["total_size"],
             "content": content,
             "preview_type": "markdown" if preview_html is not None else None,
             "preview_html": preview_html,

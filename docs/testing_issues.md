@@ -1,5 +1,5 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-16
+Last updated: 2026-07-17
 
 ## Open Issues
 
@@ -134,32 +134,6 @@ Code inspection confirms the App Settings modal in `templates/index.html` render
 ### Proposed solution:
 Add terminal fields to the App Settings modal in `templates/index.html`, extend `collectAppSettings()` in `web/static/js/launcher.js` to include a `terminal` section, and add a validated `terminal` branch to `_normalize_app_config_update()` in `web/api.py` (bounded font size, non-empty font-family string, `max_sessions` clamped to a safe range) that persists through the existing config-save flow. Reuse the established app-config update contract so the change reaches open session windows, and confirm `RuntimeConfig` reload applies the new values. Guard against invalid/oversized input and preserve backward compatibility for configs without user-set terminal fields. Add focused tests in `tests/test_api.py` for normalization bounds, whitelist acceptance, persistence, and modal/collect wiring.
 
-### Issue ID: ISSUE-2026-027
-- Title: Closing a terminal resets explorer/browser pane state in the group
-- Priority: Medium
-- Status: Open
-- Area: `web/static/js/terminals.js`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `terminal`, `file-explorer`, `session`, `ui`, `tests`
-- Reported: 2026-07-15
-
-Description:
-Closing a single terminal pane in a session group rebuilds the entire visible group, which discards the client-only state of every other pane. Explorer panes lose their open file/preview, expanded Files tree, and open Git sidebar; browser-preview panes reload. Only pane geometry is preserved. The practical impact is that closing one terminal wipes unrelated reference views the user had set up in the same group.
-
-Steps to reproduce:
-1. Open a session group with a terminal pane plus an Explorer pane; in the Explorer pane open a file/preview, expand a few Files-tree folders, and open the Git sidebar (optionally add a browser-preview pane at a scrolled URL).
-2. Close the terminal pane with its `×` button.
-3. Observe that the Explorer pane returns to a plain directory listing with collapsed trees and closed Git sidebar, and any browser pane reloads, even though those panes were not closed.
-
-Expected behavior:
-Closing a terminal should remove only that pane and expand its neighbor into the freed space, while every other pane retains its exact state — Explorer panes keep their open file/preview, expanded tree, and Git sidebar; browser panes keep their URL and scroll — matching how a single split add/remove leaves untouched panes alone.
-
-Actual behavior / logs:
-Code inspection confirms `closeTerminalPane()` in `web/static/js/terminals.js` computes `restoreRectsBySessionId` via `buildTerminalCloseRectsBySessionId(plan)`, sets `pendingSplitRestore` with only `groupId`, `rectsBySessionId`, and `originalSplitSlotCount`, then calls `await initialLoad()`. `initialLoad()` tears down and reconstructs the whole visible group's grid, so panes are recreated from server session metadata; `pendingSplitRestore` restores only geometry, not the explorer/browser client state, which is never captured.
-
-### Proposed solution:
-Avoid the full-grid `initialLoad()` rebuild for a single non-last-pane close in `web/static/js/terminals.js`. Prefer an in-place path that removes only the closed card and reflows neighbor geometry (mirroring the incremental approach used when splitting) so sibling panes and their DOM/state survive untouched. If a rebuild is unavoidable, capture and restore each surviving pane's explorer state (open file/tab, tree-open set, Git sidebar visibility, scroll) and browser state (URL, scroll) across the reload alongside the existing rect restore. Preserve the neighbor-fill/longest-shared-border behavior, the read-only guarantee, and last-pane close semantics. Add focused tests in `tests/test_api.py` covering a terminal close in a mixed group that asserts surviving explorer/browser panes retain open file, expanded tree, Git sidebar, and geometry.
-
 ### Issue ID: ISSUE-2026-026
 - Title: Voice transcription ignores Broadcast typing and reaches one terminal
 - Priority: Medium
@@ -212,59 +186,6 @@ Code inspection confirms `forwardTerminalInput()` and the terminal-card `pointer
 ### Proposed solution:
 Add one centralized client-side helper in `web/static/js/terminals.js`, such as `setFocusedTerminal(index)`, that validates the target, updates `_focusedTerminalIndex`, and toggles a semantic class (for example, `terminal-active`) plus appropriate accessibility state on the relevant terminal card while clearing it from other panes. Route existing pointer, terminal input, focus, focus-restoration, split, close, and group-switch paths through that helper; define a safe fallback target when the selected pane is removed or no plain terminal remains. Add a token-based active-pane style in `web/static/css/terminals.css` that remains visually distinct when Broadcast typing is enabled, avoids hardcoded colors, and preserves explorer/browser exclusions. Add focused rendered-template and behavioral tests in `tests/test_api.py` for pointer and keyboard selection, focus transitions, group switches, split/close fallback, broadcast coexistence, one-active-pane enforcement, and accessible state updates.
 
-### Issue ID: ISSUE-2026-022
-- Title: Closing a terminal expands unrelated panes in complex split layouts
-- Priority: Medium
-- Status: Open
-- Area: `web/static/js/terminals.js`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `terminal`, `ui`, `resize`, `tests`
-- Reported: 2026-07-14
-
-Description:
-Closing a terminal pane in a workspace with an asymmetric or multi-neighbor split can resize multiple unrelated panes instead of only expanding the single neighbor that shares the longest border with the closed pane. This disrupts the workspace layout and is especially visible when the user has manually resized panes to specific proportions.
-
-Steps to reproduce:
-1. Open a GridVibe session with three or more terminal panes in an asymmetric split — for example, one wide pane below two side-by-side panes (T-shape), or one tall pane beside two stacked panes (L-shape).
-2. Optionally, drag the resize handles to set non-uniform pane sizes.
-3. Close one of the panes that borders multiple others (e.g., the wide bottom pane that shares border with both top-left and top-right).
-4. Observe that more than one remaining pane changes size, rather than only the single neighbor with the longest shared border.
-
-Expected behavior:
-Closing a terminal pane should expand exactly one neighbor — the pane that shares the longest border with the closed pane. All other panes should remain at their exact previous sizes and proportions. Only when no single neighbor can absorb the closed rect without overlapping other panes should multiple panes be involved, and even then the set should be minimized to the smallest valid side group.
-
-Actual behavior / logs:
-Code inspection confirms `buildTerminalCloseRectsBySessionId` in `web/static/js/terminals.js` has two paths. The primary path (`findTerminalCloseNeighbor` + `canAbsorbClosedRect`) correctly expands only one neighbor, but it requires the union of the neighbor's rect and the closed rect to form a clean non-overlapping rectangle. In complex or asymmetric layouts this condition often fails, and the code falls back to `terminalCloseSideGroups` + `buildTerminalCloseRectsForSideGroup`. In this fallback, every pane in the winning side group is expanded via `expandRectIntoClosedSide` — not only the pane with the longest shared border. For example, closing the bottom pane of a T-shaped layout (two panes above, one wide pane below) causes both top panes to grow downward, even though only the one with the greater shared border was expected to expand. Existing tests in `tests/test_api.py` only assert that the relevant function names appear in the rendered HTML; no behavioral tests cover multi-neighbor close scenarios or verify that non-targeted panes retain their rects.
-
-### Proposed solution:
-Refine the side-group fallback in `buildTerminalCloseRectsForSideGroup` (and its callers) so that when a full-side expansion is necessary, preference is given to the single pane in the group with the greatest shared border rather than expanding all contacts uniformly. If expanding only that one pane still satisfies the overlap and area invariants, use the single-pane expansion. Only fall back to the full side-group expansion when the single-pane attempt fails the overlap or area check. Additionally, preserve the existing `splitColumnWeights` and `splitRowWeights` correctly when the grid column or row count changes after a close, so panes outside the expansion retain their user-set proportions. Add focused behavioral tests in `tests/test_api.py` for: T-shaped and L-shaped three-pane closes, four-pane grid closes, asymmetric closes where one candidate has a clearly longer shared border, and confirmation that non-targeted panes' grid column/row assignments and rect values are unchanged after a close.
-
-### Issue ID: ISSUE-2026-020
-- Title: Large log previews discard the newest entries
-- Priority: Medium
-- Status: Open
-- Area: `web/api.py`, `web/explorer.py`, `web/static/js/terminals.js`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `logging`, `flask`, `ui`, `tests`
-- Reported: 2026-07-13
-
-Description:
-Explorer text previews are capped at 1 MiB and retain the beginning of an oversized file. For append-oriented files such as logs, this discards the newest and usually most relevant entries, so users cannot inspect current failures or recent activity from GridVibe. The only workaround is to leave the Explorer and use an external tailing or paging tool.
-
-Steps to reproduce:
-1. Create a `.log` file larger than 1 MiB with distinguishable markers near its beginning and end.
-2. Open the file from a GridVibe Explorer pane.
-3. Observe that the beginning marker is present, the end marker is absent, and the preview is reported as truncated.
-
-Expected behavior:
-GridVibe should support a larger but still bounded text-preview limit where practical. When a log or other append-oriented file must be truncated, the preview should discard content from the beginning and retain the newest content at the end. The UI should clearly identify the retained range, and non-log files should have an explicit, predictable head/tail policy rather than silently losing the most useful section.
-
-Actual behavior / logs:
-Code inspection confirms `EXPLORER_FILE_PREVIEW_MAX_BYTES` in `web/explorer.py` is fixed at `1024 * 1024`. `get_explorer_file()` in `web/api.py` calls `backend.read_file_prefix(file_path, EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)` and slices `raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]`, so every oversized preview starts at byte zero. `test_explorer_file_truncates_large_text_preview()` in `tests/test_api.py` checks only that truncation occurred and that the returned length equals the cap; it does not verify which end of the file is retained.
-
-### Proposed solution:
-Make the preview byte limit a validated, bounded setting or raise it to a measured safe value, while preserving protections against browser stalls and excessive local or SFTP reads. Add a ranged/tail-read operation to the local and SFTP explorer backends and use it for `.log` and any explicitly classified append-oriented formats so truncated previews retain the last configured bytes. Consider exposing a Head/Tail selector for other oversized text files, with a documented default appropriate to their type. Return range metadata such as retained start/end bytes and total size, and update `web/static/js/terminals.js` to show a clear message such as `Showing the last 1 MiB` instead of only a generic truncation warning. Handle UTF-8 and line boundaries so a tail read does not begin with a broken character or misleading partial line. Add focused tests in `tests/test_api.py` for retained end markers, excluded start markers, files exactly at the limit, multibyte and long-line boundaries, local/SFTP parity, range metadata, configured-limit validation, and client messaging, while keeping search and highlighting bounded to the returned preview.
-
 ### Issue ID: ISSUE-2026-013
 - Title: Add per-agent auto-mode toggles to terminal settings
 - Priority: Low
@@ -292,6 +213,88 @@ Code inspection confirms `buildTerminalInitialCommand()` in `web/static/js/launc
 Add a per-terminal boolean such as `agent_auto_mode` to the launcher draft, saved-session normalization, workspace serialization, `TerminalSession`, and API responses. Define supported auto-mode arguments in the existing agent registry or another single backend-owned mapping instead of hard-coding one generic flag for every CLI. Update the agent settings row in `web/static/js/launcher.js` to show an accessible toggle only when the selected built-in agent has a registered option, recompute visibility and help text when the selection changes, and keep custom-agent behavior explicit rather than silently modifying arbitrary commands. Compose the final startup command from the validated selected-agent metadata and mapped argument without duplicating flags, while keeping preflight detection based on the base agent executable. Add focused tests in `tests/test_api.py` and `tests/test_session_manager.py` for enabled/disabled command construction, unsupported and custom agents, save/load/workspace round-trips, SSH and local launches, and backward compatibility for saved sessions without the new field.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-020
+- Title: Large log previews discard the newest entries
+- Priority: Medium
+- Status: Closed
+- Area: `web/api.py`, `web/explorer.py`, `web/static/js/terminals.js`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `logging`, `flask`, `ui`, `tests`
+- Reported: 2026-07-13
+- Closed: 2026-07-17
+
+Description:
+Explorer text previews are capped at 1 MiB and retain the beginning of an oversized file. For append-oriented files such as logs, this discards the newest and usually most relevant entries, so users cannot inspect current failures or recent activity from GridVibe. The only workaround is to leave the Explorer and use an external tailing or paging tool.
+
+Steps to reproduce:
+1. Create a `.log` file larger than 1 MiB with distinguishable markers near its beginning and end.
+2. Open the file from a GridVibe Explorer pane.
+3. Observe that the beginning marker is present, the end marker is absent, and the preview is reported as truncated.
+
+Expected behavior:
+GridVibe should support a bounded text-preview limit that, when a log or other append-oriented file must be truncated, discards content from the beginning and retains the newest content at the end. The UI should clearly identify the retained range, and non-log files should have an explicit, predictable head/tail policy rather than silently losing the most useful section.
+
+Actual behavior / logs:
+Code inspection confirmed `EXPLORER_FILE_PREVIEW_MAX_BYTES` in `web/explorer.py` was fixed at `1024 * 1024`, and `get_explorer_file()` in `web/api.py` called `backend.read_file_prefix(file_path, EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)` then sliced `raw_content[:EXPLORER_FILE_PREVIEW_MAX_BYTES]`, so every oversized preview started at byte zero regardless of file type.
+
+Resolution:
+`web/explorer.py` gained a `read_file_suffix(file_path, max_bytes, total_size)` ranged/tail read on both the local and SFTP backends, plus a shared `read_explorer_file_preview(backend, file_path, *, total_size, tail)` that picks the head or tail window and returns byte-range metadata. `_is_tail_preview_file()` classifies append-oriented files by reusing the existing language map (`.log` → `"log"`); those, when they exceed the 1 MiB cap, retain their **last** bytes while every other oversized file keeps its opening bytes (unchanged, predictable head policy). A tail window is trimmed to a clean line + UTF-8 boundary by `_trim_tail_preview_to_boundary()` (drop the partial leading line up to the first newline, else skip leading UTF-8 continuation bytes) so a preview never begins mid-character or mid-line. `get_explorer_file()` in `web/api.py` now returns `preview_mode` (`head`/`tail`), `preview_start_byte`, `preview_end_byte`, and `total_size` alongside the existing `truncated`/`size`. In `web/static/js/terminals.js`, `explorerPreviewTruncationLabel()` turns that metadata into a precise message (`Showing the last <N> of <M>` for logs, `Showing the first <N> of <M>` otherwise) in place of the generic `Preview truncated`. Search stays bounded to the returned preview because it already operates on the delivered `content` only. Covered by `test_trim_tail_preview_to_boundary_variants`, `test_explorer_log_preview_retains_tail_and_range_metadata`, `test_explorer_non_log_preview_retains_head`, `test_explorer_preview_at_exact_limit_is_not_truncated`, `test_explorer_log_preview_tail_is_utf8_line_safe`, `test_explorer_remote_log_preview_retains_tail`, and `test_terminals_page_explorer_preview_tail_message` in `tests/test_api.py`.
+
+### Issue ID: ISSUE-2026-022
+- Title: Closing a terminal expands unrelated panes in complex split layouts
+- Priority: Medium
+- Status: Closed
+- Area: `web/static/js/terminals.js`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `terminal`, `ui`, `resize`, `tests`
+- Reported: 2026-07-14
+- Closed: 2026-07-17
+
+Description:
+Closing a terminal pane in a workspace with an asymmetric or multi-neighbor split could resize multiple unrelated panes instead of only expanding the single neighbor that shares the longest border with the closed pane, and it reset every pane's user-set proportions. This disrupted the workspace layout and was especially visible when the user had manually resized panes.
+
+Steps to reproduce:
+1. Open a GridVibe session with three or more terminal panes in an asymmetric split — for example, one wide pane below two side-by-side panes (T-shape), or one tall pane beside two stacked panes (L-shape).
+2. Optionally, drag the resize handles to set non-uniform pane sizes.
+3. Close one of the panes that borders multiple others (e.g., the wide bottom pane that shares border with both top-left and top-right).
+4. Observe that more than one remaining pane changes size, and that the surviving panes' manual proportions reset to uniform.
+
+Expected behavior:
+Closing a terminal pane should expand exactly one neighbor — the pane that shares the longest border with the closed pane — whenever geometry allows, and only fall back to a minimal side group when a single pane cannot absorb the freed rect. Panes outside the expansion should retain their exact previous sizes and user-set proportions.
+
+Actual behavior / logs:
+Code inspection confirmed the side-group fallback (`terminalCloseSideGroups` + `buildTerminalCloseRectsForSideGroup`) expanded *every* pane in the winning side group via `expandRectIntoClosedSide`, not only the pane with the longest shared border. Separately, `closeTerminalPane()`/`closeSplitPane()` set `pendingSplitRestore` with rects only, while the forced rebuild ran `buildGrid()` → `clearSplitSlotGeometry()` (which nulls `splitColumnWeights`/`splitRowWeights`); the restore never re-applied the weights, so all manual proportions reset to uniform after a close.
+
+Resolution:
+`buildTerminalCloseRectsForSideGroup()` in `web/static/js/terminals.js` now first attempts to expand only the single contact with the greatest shared border (through a shared `terminalCloseRectsForExpandingContacts()` helper that still enforces the same overlap + area invariants), and falls back to the full side-group expansion only when the single-pane attempt would leave a gap or overlap. Because a valid close preserves the grid's bounding box, the pre-close `splitColumnWeights`/`splitRowWeights` map 1:1 onto the reflowed grid: both close paths now capture them into `pendingSplitRestore` and `initialLoad()` re-applies them before `applySplitSlotGeometry()`, so panes outside the expansion keep their proportions. Covered by `test_terminals_page_close_prefers_single_neighbor_expansion` and `test_terminals_page_close_preserves_split_track_weights` in `tests/test_api.py`.
+
+### Issue ID: ISSUE-2026-027
+- Title: Closing a terminal resets explorer/browser pane state in the group
+- Priority: Medium
+- Status: Closed
+- Area: `web/static/js/terminals.js`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `terminal`, `file-explorer`, `session`, `ui`, `tests`
+- Reported: 2026-07-15
+- Closed: 2026-07-17
+
+Description:
+Closing a single terminal pane in a session group rebuilt the entire visible group, discarding the client-only state of every other pane. Explorer panes lost their open file/preview, expanded Files tree, and open Git sidebar; browser-preview panes reloaded to their launch URL. Only pane geometry was preserved, so closing one terminal wiped unrelated reference views the user had set up in the same group.
+
+Steps to reproduce:
+1. Open a session group with a terminal pane plus an Explorer pane; in the Explorer pane open a file/preview, expand a few Files-tree folders, and open the Git sidebar (optionally add a browser-preview pane).
+2. Close the terminal pane with its `×` button.
+3. Observe that the Explorer pane returns to a plain listing with collapsed trees and a closed Git sidebar, and any browser pane reloads, even though those panes were not closed.
+
+Expected behavior:
+Closing a terminal should remove only that pane and expand its neighbor into the freed space, while every other pane retains its state — Explorer panes keep their open file/preview, expanded tree, and Git sidebar; browser panes keep their URL.
+
+Actual behavior / logs:
+Code inspection confirmed `closeTerminalPane()` set `pendingSplitRestore` with geometry only and called `initialLoad()`, which tears down and reconstructs the whole group's grid from server session metadata. The surviving explorer/browser panes' live client state was never captured, so the rebuild reset explorer panes to the directory-seeded default and reloaded browser panes.
+
+Resolution:
+Because a fully general in-place close would require re-indexing every pane's DOM ids and re-wiring index-bound event handlers (effectively a rebuild), the fix captures and restores the surviving panes' live state across the existing rebuild — the sanctioned fallback in the original report. Before the rebuild, `closeTerminalPane()` calls a new `captureSurvivingPaneClientState()` that snapshots each surviving pane by session id (explorer: tree/Git sidebar flags, pinned open tabs + active tab, and the active Preview file/view; browser: live URL) into `pendingCloseClientState`. `initialLoad()` — only for that close-driven rebuild — overlays the explorer fields and browser URL onto the freshly fetched session objects so `buildGrid()`/`restoreExplorerPersistedTabs()` seed them, then routes each close-affected explorer pane through `restoreExplorerPaneFromClose()` (the tabbed viewer entry point plus a Preview-file reopen) instead of the plain-listing default. Non-close loads are unchanged (the snapshot is gated on `groupId` and cleared on consume and in `resetSessionView`). Browser scroll cannot survive a cross-origin iframe reload and is a documented limitation; URL is preserved. Covered by `test_terminals_page_close_preserves_sibling_pane_state` in `tests/test_api.py`.
 
 ### Issue ID: ISSUE-2026-017
 - Title: Improve Markdown preview visual hierarchy and callouts

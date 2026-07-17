@@ -667,6 +667,93 @@ class ApiRoutesTestCase(unittest.TestCase):
         close_plan_end = html.index("function buildCloseTerminalPlan(index)", close_plan_start)
         self.assertNotIn("fixedLayoutSlotRects(", html[close_plan_start:close_plan_end])
 
+    def test_terminals_page_close_prefers_single_neighbor_expansion(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn(
+            "function terminalCloseRectsForExpandingContacts(plan, side, contactsToExpand)",
+            html,
+        )
+        side_group_start = html.index("function buildTerminalCloseRectsForSideGroup(plan, sideGroup)")
+        side_group_end = html.index("function buildTerminalCloseRectsBySessionId(plan)", side_group_start)
+        side_group_html = html[side_group_start:side_group_end]
+        # The single greatest-shared-border contact is attempted before the whole
+        # side group, so a close never resizes more neighbours than required.
+        self.assertIn(
+            "const single = terminalCloseRectsForExpandingContacts(plan, sideGroup.side, [singleContact]);",
+            side_group_html,
+        )
+        self.assertIn("if (singleContact && sideGroup.entries.length > 1) {", side_group_html)
+        self.assertIn(
+            "return terminalCloseRectsForExpandingContacts(plan, sideGroup.side, sideGroup.entries);",
+            side_group_html,
+        )
+        # The single-pane result is still validated by the same overlap + area
+        # invariants inside the shared helper.
+        expand_start = html.index("function terminalCloseRectsForExpandingContacts(plan, side, contactsToExpand)")
+        expand_end = html.index("function buildTerminalCloseRectsForSideGroup(plan, sideGroup)", expand_start)
+        expand_html = html[expand_start:expand_end]
+        self.assertIn("splitRectsOverlap(nextEntries[leftIndex].rect, nextEntries[rightIndex].rect)", expand_html)
+        self.assertIn("if (nextArea !== previousArea + splitRectArea(plan.closedRect)) {", expand_html)
+
+    def test_terminals_page_close_preserves_split_track_weights(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Both close paths carry the pre-close track weights into the restore.
+        self.assertEqual(
+            html.count("splitColumnWeights: cloneSplitTrackWeights(splitColumnWeights),"),
+            2,
+        )
+        self.assertEqual(
+            html.count("splitRowWeights: cloneSplitTrackWeights(splitRowWeights),"),
+            2,
+        )
+        # initialLoad re-applies them onto the reflowed grid so proportions survive.
+        self.assertIn(
+            "splitColumnWeights = cloneSplitTrackWeights(pendingRestore.splitColumnWeights);",
+            html,
+        )
+        self.assertIn(
+            "splitRowWeights = cloneSplitTrackWeights(pendingRestore.splitRowWeights);",
+            html,
+        )
+
+    def test_terminals_page_close_preserves_sibling_pane_state(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("let pendingCloseClientState = null;", html)
+        self.assertIn("function captureSurvivingPaneClientState(closingSessionId)", html)
+        self.assertIn("function restoreExplorerPaneFromClose(index, snapshot)", html)
+        # The close path captures surviving pane state before the forced rebuild.
+        self.assertIn(
+            "stateBySessionId: captureSurvivingPaneClientState(plan.sessionId),",
+            html,
+        )
+        # Explorer siblings keep tree/Git sidebars and open tabs; browser siblings
+        # keep their URL — all overlaid onto the fetched session objects.
+        self.assertIn("entry.explorer_tree_open = snapshot.explorer_tree_open;", html)
+        self.assertIn("entry.explorer_git_open = snapshot.explorer_git_open;", html)
+        self.assertIn("entry.explorer_open_tabs = snapshot.explorer_open_tabs;", html)
+        self.assertIn("entry.explorer_active_tab = snapshot.explorer_active_tab;", html)
+        self.assertIn("entry.initial_command = snapshot.browser_url;", html)
+        # Close-affected explorer panes restore through the viewer, not a listing.
+        self.assertIn("restoreExplorerPaneFromClose(i, closeSnapshot);", html)
+        self.assertIn(
+            "openExplorerFile(index, snapshot.explorer_preview_path, { pinned: false, showLoading: false });",
+            html,
+        )
+        # The snapshot is only consumed for its own close-driven rebuild.
+        self.assertIn(
+            "const closeClientState = pendingCloseClientState?.groupId === requestedGroupId",
+            html,
+        )
+
     def test_terminals_page_exposes_session_mode_switch_controls(self):
         response = self.client.get("/terminals")
 
@@ -4130,6 +4217,197 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertTrue(payload["truncated"])
         self.assertEqual(len(payload["content"]), api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
         self.assertEqual(payload["size"], file_path.stat().st_size)
+
+    def test_trim_tail_preview_to_boundary_variants(self):
+        # A partial leading line is dropped up to (and including) the first newline.
+        self.assertEqual(
+            web_explorer._trim_tail_preview_to_boundary(b"rtial line\ncomplete line\n"),
+            b"complete line\n",
+        )
+        # A window whose only newline is the trailing byte keeps its content.
+        self.assertEqual(
+            web_explorer._trim_tail_preview_to_boundary(b"abc\n"),
+            b"abc\n",
+        )
+        # With no usable newline, leading UTF-8 continuation bytes are skipped so
+        # decoding never starts mid-character.
+        self.assertEqual(
+            web_explorer._trim_tail_preview_to_boundary(b"\xa9\xa9rest of line"),
+            b"rest of line",
+        )
+
+    def test_explorer_log_preview_retains_tail_and_range_metadata(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        line_bytes = 100
+        count = (api.EXPLORER_FILE_PREVIEW_MAX_BYTES // line_bytes) + 500
+
+        def make_line(i):
+            return f"L{i:08d}-" + ("x" * 89) + "\n"
+
+        self.assertEqual(len(make_line(0).encode("utf-8")), line_bytes)
+        body = "".join(make_line(i) for i in range(count))
+        file_path = repo_dir / "app.log"
+        file_path.write_text(body, encoding="utf-8")
+        total_size = file_path.stat().st_size
+        self.assertGreater(total_size, api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "app.log"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        content = payload["content"]
+        self.assertTrue(payload["truncated"])
+        self.assertEqual(payload["preview_mode"], "tail")
+        # Newest lines are retained; the oldest are discarded.
+        self.assertIn(make_line(count - 1).strip(), content)
+        self.assertNotIn("L00000000-", content)
+        # The tail starts at a clean line boundary, never mid-line.
+        self.assertTrue(content.startswith("L"))
+        # Range metadata is self-consistent and pins the retained window to the end.
+        self.assertEqual(payload["total_size"], total_size)
+        self.assertEqual(payload["preview_end_byte"], total_size)
+        self.assertEqual(
+            payload["preview_start_byte"],
+            total_size - len(content.encode("utf-8")),
+        )
+        self.assertGreater(payload["preview_start_byte"], 0)
+        self.assertLessEqual(len(content.encode("utf-8")), api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+
+    def test_explorer_non_log_preview_retains_head(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "notes.txt"
+        file_path.write_text(
+            "HEADMARKER\n" + ("y" * api.EXPLORER_FILE_PREVIEW_MAX_BYTES) + "\nTAILMARKER\n",
+            encoding="utf-8",
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "notes.txt"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        content = payload["content"]
+        self.assertTrue(payload["truncated"])
+        self.assertEqual(payload["preview_mode"], "head")
+        self.assertIn("HEADMARKER", content)
+        self.assertNotIn("TAILMARKER", content)
+        self.assertEqual(len(content), api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+        self.assertEqual(payload["preview_start_byte"], 0)
+        self.assertEqual(payload["preview_end_byte"], api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+
+    def test_explorer_preview_at_exact_limit_is_not_truncated(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "exact.log"
+        file_path.write_bytes(b"z" * api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "exact.log"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload["truncated"])
+        self.assertEqual(payload["preview_mode"], "head")
+        self.assertEqual(len(payload["content"]), api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+        self.assertEqual(payload["total_size"], api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+
+    def test_explorer_log_preview_tail_is_utf8_line_safe(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        # Two-byte characters shift byte alignment so the tail cut lands
+        # mid-character on some lines; the line-boundary trim must still yield a
+        # cleanly decodable preview with no replacement characters.
+        def make_line(i):
+            return f"café-{i:06d}-" + ("µ" * 40) + "\n"
+
+        count = (api.EXPLORER_FILE_PREVIEW_MAX_BYTES // len(make_line(0).encode("utf-8"))) + 500
+        body = "".join(make_line(i) for i in range(count))
+        file_path = repo_dir / "unicode.log"
+        file_path.write_text(body, encoding="utf-8")
+        self.assertGreater(file_path.stat().st_size, api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "unicode.log"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        content = payload["content"]
+        self.assertEqual(payload["preview_mode"], "tail")
+        self.assertNotIn("�", content)
+        self.assertTrue(content.startswith("café-"))
+        self.assertIn(make_line(count - 1).strip(), content)
+
+    def test_explorer_remote_log_preview_retains_tail(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        line_bytes = 100
+
+        def make_line(i):
+            return f"R{i:08d}-" + ("x" * 89) + "\n"
+
+        self.assertEqual(len(make_line(0).encode("utf-8")), line_bytes)
+        count = (api.EXPLORER_FILE_PREVIEW_MAX_BYTES // line_bytes) + 500
+        body = "".join(make_line(i) for i in range(count)).encode("utf-8")
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/remote.log": {"type": "file", "content": body},
+            }
+        )
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "remote.log"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        content = payload["content"]
+        self.assertTrue(payload["truncated"])
+        self.assertEqual(payload["preview_mode"], "tail")
+        self.assertIn(make_line(count - 1).strip(), content)
+        self.assertNotIn("R00000000-", content)
+        self.assertEqual(payload["total_size"], len(body))
+        self.assertEqual(payload["preview_end_byte"], len(body))
+
+    def test_terminals_page_explorer_preview_tail_message(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function explorerPreviewTruncationLabel(data)", html)
+        self.assertIn("data.preview_mode === 'tail' ? 'last' : 'first'", html)
+        self.assertIn("`Showing the ${edge} ${retainedLabel} of ${totalLabel}`", html)
+        self.assertIn("const truncationLabel = explorerPreviewTruncationLabel(data);", html)
 
     def test_explorer_file_rejects_binary_content(self):
         repo_dir = Path(self.temp_dir.name) / "repo"

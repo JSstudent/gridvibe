@@ -220,6 +220,17 @@ def _is_markdown_file(path: str) -> bool:
     return extension in MARKDOWN_PREVIEW_EXTENSIONS
 
 
+def _is_tail_preview_file(path: str) -> bool:
+    """Return whether an oversized preview should retain the file's *tail*.
+
+    Append-oriented files (logs) carry their most relevant content at the end,
+    so a truncated preview keeps the newest bytes instead of the oldest. The
+    classification reuses the existing language map (``.log`` → ``"log"``) so it
+    stays in one place.
+    """
+    return _explorer_code_language(path) == "log"
+
+
 def _explorer_code_language(path: str) -> Optional[str]:
     """Return the source language for code files shown in explorer previews."""
     filename = os.path.basename(path).lower()
@@ -258,6 +269,64 @@ def _explorer_content_looks_binary(raw_content: bytes) -> bool:
         if byte < 32 and byte not in EXPLORER_TEXT_CONTROL_BYTES
     )
     return control_count / len(sample) > 0.30
+
+
+def _trim_tail_preview_to_boundary(window: bytes) -> bytes:
+    """Drop a leading partial line / broken multibyte char from a tail window.
+
+    A tail read starts at an arbitrary byte offset, so its first line is usually
+    incomplete and may begin mid-character. Trimming to the first newline yields a
+    clean line + UTF-8 boundary; when there is no usable newline we at least skip
+    any leading UTF-8 continuation bytes so decoding never starts mid-character.
+    """
+    newline = window.find(b"\n")
+    if 0 <= newline < len(window) - 1:
+        return window[newline + 1:]
+    lead = 0
+    while lead < len(window) and (window[lead] & 0xC0) == 0x80:
+        lead += 1
+    return window[lead:]
+
+
+def read_explorer_file_preview(
+    backend: Any,
+    file_path: str,
+    *,
+    total_size: Optional[int],
+    tail: bool,
+) -> Dict[str, Any]:
+    """Read a bounded text preview, keeping the head or tail of the file.
+
+    ``tail`` append-oriented files that exceed the cap keep their newest bytes
+    (trimmed to a clean line/UTF-8 boundary); every other oversized file keeps
+    its opening bytes. The returned metadata records which end was retained and
+    the byte range so the client can message it precisely.
+    """
+    max_bytes = EXPLORER_FILE_PREVIEW_MAX_BYTES
+    if tail and total_size is not None and total_size > max_bytes:
+        window = _trim_tail_preview_to_boundary(
+            backend.read_file_suffix(file_path, max_bytes, total_size)
+        )
+        return {
+            "bytes": window,
+            "truncated": True,
+            "preview_mode": "tail",
+            "preview_start_byte": total_size - len(window),
+            "preview_end_byte": total_size,
+            "total_size": total_size,
+        }
+
+    raw_content = backend.read_file_prefix(file_path, max_bytes + 1)
+    truncated = len(raw_content) > max_bytes
+    window = raw_content[:max_bytes]
+    return {
+        "bytes": window,
+        "truncated": truncated,
+        "preview_mode": "head",
+        "preview_start_byte": 0,
+        "preview_end_byte": len(window),
+        "total_size": total_size if total_size is not None else len(raw_content),
+    }
 
 
 # GitHub-style admonition callouts (ISSUE-2026-017). Each label maps a
@@ -896,6 +965,12 @@ class _LocalExplorerBackend:
         with open(file_path, "rb") as file_handle:
             return file_handle.read(max_bytes)
 
+    def read_file_suffix(self, file_path: str, max_bytes: int, total_size: int) -> bytes:
+        start = max(0, int(total_size) - max_bytes)
+        with open(file_path, "rb") as file_handle:
+            file_handle.seek(start)
+            return file_handle.read(max_bytes)
+
     def parent_explorer_path(self, root_path: str, current_path: str) -> str:
         if os.path.normcase(current_path) == os.path.normcase(root_path):
             return ""
@@ -993,6 +1068,12 @@ class _SftpExplorerBackend:
 
     def read_file_prefix(self, file_path: str, max_bytes: int) -> bytes:
         with self.sftp.open(file_path, "rb") as file_handle:
+            return file_handle.read(max_bytes)
+
+    def read_file_suffix(self, file_path: str, max_bytes: int, total_size: int) -> bytes:
+        start = max(0, int(total_size) - max_bytes)
+        with self.sftp.open(file_path, "rb") as file_handle:
+            file_handle.seek(start)
             return file_handle.read(max_bytes)
 
     def parent_explorer_path(self, root_path: str, current_path: str) -> str:

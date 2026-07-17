@@ -19,14 +19,15 @@ depend on them. Within a stage, issues share files and can be built together.
 | 1 ✅ | Explorer tree rows & Git sidebar (**done 2026-07-16**) | 024, 028, 023, 018 |
 | 2 ✅ | Explorer tabbed file viewer (**done 2026-07-16**) | 014, 016, 015 |
 | 3 ✅ | Markdown preview presentation (**done 2026-07-16**) | 017, 030 |
-| 4 | Explorer large-file / log preview | 020 |
-| 5 | Terminal close & layout integrity | 022, 027 |
+| 4 ✅ | Explorer large-file / log preview (**done 2026-07-17**) | 020 |
+| 5 ✅ | Terminal close & layout integrity (**done 2026-07-17**) | 022, 027 |
 | 6 | Terminal input focus & targeting | 025, 026 |
 | 7 | Settings & launcher configuration | 029, 013, 031 |
 
 All 17 issues are covered; **Stage 1 (024, 028, 023, 018), Stage 2 (014, 016,
-015), and Stage 3 (017, 030) are now implemented and closed**, leaving 8 open.
-Stages 5, 6, 7 are independent of each other and can be scheduled in any order.
+015), Stage 3 (017, 030), Stage 4 (020), and Stage 5 (022, 027) are now
+implemented and closed**, leaving 5 open (Stages 6 and 7). Stages 6 and 7 are
+independent of each other and can be scheduled in any order.
 
 ---
 
@@ -295,11 +296,14 @@ control, idempotent dual-path application, and token-driven preset classes (030)
 
 ## Stage 4 — Explorer large-file / log preview
 
+> **Status: Implemented (2026-07-17).** The issue below is closed. See
+> **Implementation notes** at the end of this section for what shipped.
+
 **Goal:** stop discarding the newest content of oversized append-only files and
 give previews a predictable head/tail policy.
 
 **Issues**
-- **ISSUE-2026-020** — Large log previews discard the newest entries
+- **ISSUE-2026-020** — Large log previews discard the newest entries ✅
 
 **Shared surface**
 - `web/explorer.py`: `EXPLORER_FILE_PREVIEW_MAX_BYTES`, `read_file_prefix`
@@ -318,16 +322,55 @@ first, land 020 against the new viewer to avoid reworking the message surface.
 
 **Sizing:** Medium (backend read-range work is the bulk).
 
+**Implementation notes (2026-07-17)**
+1. **Backend read-range.** `web/explorer.py` gained a `read_file_suffix(file_path,
+   max_bytes, total_size)` ranged/tail read on both `_LocalExplorerBackend` and
+   `_SftpExplorerBackend` (seek to `total_size - max_bytes`, read forward — the
+   SFTP variant works against the `io.BytesIO` the SFTP handle exposes). A shared
+   `read_explorer_file_preview(backend, file_path, *, total_size, tail)` chooses the
+   head or tail window and returns byte-range metadata; it is the single place
+   that decides which end of an oversized file is kept.
+2. **Head/tail policy.** `_is_tail_preview_file()` classifies append-oriented
+   files by reusing the existing language map (`.log` → `"log"`), so only logs
+   keep their **newest** bytes; every other oversized text file keeps its opening
+   bytes (the explicit, predictable head policy). The 1 MiB
+   `EXPLORER_FILE_PREVIEW_MAX_BYTES` cap is unchanged (bounded, no browser-stall
+   or oversized-read regression).
+3. **UTF-8 / line safety.** `_trim_tail_preview_to_boundary()` drops a tail
+   window's partial leading line up to the first newline (and, when there is no
+   usable newline, skips leading UTF-8 continuation bytes) so a tail preview never
+   begins mid-character or mid-line.
+4. **API + client.** `get_explorer_file()` in `web/api.py` now returns
+   `preview_mode` (`head`/`tail`), `preview_start_byte`, `preview_end_byte`, and
+   `total_size` alongside the existing `truncated`/`size`. In
+   `web/static/js/terminals.js`, `explorerPreviewTruncationLabel()` turns that
+   metadata into `Showing the last <N> of <M>` for logs and `Showing the first
+   <N> of <M>` otherwise, replacing the generic `Preview truncated`. Search stays
+   bounded to the returned preview (it already operates on the delivered `content`
+   only).
+
+Tests: `tests/test_api.py` gained `test_trim_tail_preview_to_boundary_variants`
+(partial-line / trailing-newline / continuation-byte trimming),
+`test_explorer_log_preview_retains_tail_and_range_metadata` (retained end marker,
+excluded start marker, line-boundary start, self-consistent range metadata),
+`test_explorer_non_log_preview_retains_head`, `test_explorer_preview_at_exact_limit_is_not_truncated`,
+`test_explorer_log_preview_tail_is_utf8_line_safe` (multibyte boundary),
+`test_explorer_remote_log_preview_retains_tail` (SFTP parity), and
+`test_terminals_page_explorer_preview_tail_message` (client messaging).
+
 ---
 
 ## Stage 5 — Terminal close & layout integrity
+
+> **Status: Implemented (2026-07-17).** Both issues below are closed. See
+> **Implementation notes** at the end of this section for what shipped.
 
 **Goal:** make closing a terminal pane surgical — expand exactly the right
 neighbor and leave every other pane (including Explorer/browser state) untouched.
 
 **Issues**
-- **ISSUE-2026-022** — Closing a terminal expands unrelated panes in complex split layouts
-- **ISSUE-2026-027** — Closing a terminal resets explorer/browser pane state in the group
+- **ISSUE-2026-022** — Closing a terminal expands unrelated panes in complex split layouts ✅
+- **ISSUE-2026-027** — Closing a terminal resets explorer/browser pane state in the group ✅
 
 **Shared surface**
 - `web/static/js/terminals.js`: `closeTerminalPane()`,
@@ -350,6 +393,47 @@ interacts with 022's rect computation, so design them together.
    (027).
 
 **Sizing:** Medium–Large (layout math + lifecycle change; needs solid tests).
+
+**Implementation notes (2026-07-17)**
+1. **022 — single-neighbor expansion.** `buildTerminalCloseRectsForSideGroup()` in
+   `web/static/js/terminals.js` was refactored around a shared
+   `terminalCloseRectsForExpandingContacts(plan, side, contactsToExpand)` helper
+   (the overlap + gap/area invariants live there). The side-group fallback now
+   first tries expanding only the single contact with the greatest shared border
+   and uses it whenever it satisfies those invariants; it drops to the full
+   side-group expansion only when the single-pane attempt would leave a gap or
+   overlap. The primary single-neighbor path (`findTerminalCloseNeighbor` +
+   `canAbsorbClosedRect`) is unchanged.
+2. **022 — proportion preservation.** A valid close preserves the grid's bounding
+   box, so the pre-close `splitColumnWeights`/`splitRowWeights` map 1:1 onto the
+   reflowed grid. Both `closeTerminalPane()` and `closeSplitPane()` now capture
+   them into `pendingSplitRestore` (via `cloneSplitTrackWeights`), and
+   `initialLoad()` re-applies them before `applySplitSlotGeometry()` — previously
+   the `buildGrid()` → `clearSplitSlotGeometry()` teardown nulled the weights and
+   reset every surviving pane to uniform proportions.
+3. **027 — sibling state across the rebuild.** A fully general in-place close
+   would have to re-index every pane's DOM ids and re-wire its index-bound event
+   handlers (effectively a rebuild), so the sanctioned fallback from the issue was
+   taken: capture and restore the surviving panes' client state across the
+   existing rebuild. Before the rebuild, `closeTerminalPane()` calls
+   `captureSurvivingPaneClientState()` — a per-session-id snapshot of each
+   surviving explorer pane (tree/Git sidebar flags, pinned open tabs + active tab,
+   the active Preview file + view) and browser pane (live URL) — into a new
+   `pendingCloseClientState`. `initialLoad()`, **only** for that close-driven
+   rebuild (gated on `groupId`), overlays the explorer fields and browser URL onto
+   the freshly fetched session objects so `buildGrid()` and
+   `restoreExplorerPersistedTabs()` seed them, then routes each close-affected
+   explorer pane through `restoreExplorerPaneFromClose()` (tabbed-viewer entry
+   point + a Preview-file reopen) instead of the plain-listing default. The
+   snapshot is cleared on consume and in `resetSessionView()`, so non-close loads
+   are untouched. Browser scroll cannot survive a cross-origin iframe reload (a
+   documented limitation); the URL is preserved.
+
+Tests: `tests/test_api.py` gained `test_terminals_page_close_prefers_single_neighbor_expansion`
+and `test_terminals_page_close_preserves_split_track_weights` (022) plus
+`test_terminals_page_close_preserves_sibling_pane_state` (027), asserting the new
+helpers, single-pane preference, weight capture/restore, state capture, session
+overlay, and viewer-based restore are wired end to end in the served client.
 
 ---
 
