@@ -134,58 +134,6 @@ Code inspection confirms the App Settings modal in `templates/index.html` render
 ### Proposed solution:
 Add terminal fields to the App Settings modal in `templates/index.html`, extend `collectAppSettings()` in `web/static/js/launcher.js` to include a `terminal` section, and add a validated `terminal` branch to `_normalize_app_config_update()` in `web/api.py` (bounded font size, non-empty font-family string, `max_sessions` clamped to a safe range) that persists through the existing config-save flow. Reuse the established app-config update contract so the change reaches open session windows, and confirm `RuntimeConfig` reload applies the new values. Guard against invalid/oversized input and preserve backward compatibility for configs without user-set terminal fields. Add focused tests in `tests/test_api.py` for normalization bounds, whitelist acceptance, persistence, and modal/collect wiring.
 
-### Issue ID: ISSUE-2026-026
-- Title: Voice transcription ignores Broadcast typing and reaches one terminal
-- Priority: Medium
-- Status: Open
-- Area: `web/static/js/terminals.js`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `voice`, `terminal`, `socketio`, `tests`
-- Reported: 2026-07-15
-
-Description:
-When Broadcast typing is enabled, keyboard input is mirrored to every plain terminal pane, but voice transcription is not. A final voice transcript is delivered only to the single terminal that was recording, so users who expect voice dictation to broadcast to all panes (the way typing does) silently reach just one terminal.
-
-Steps to reproduce:
-1. Open a session group with two or more plain terminal panes and enable Broadcast typing.
-2. Start voice capture on one terminal (mic button or push-to-talk), speak, and let the final transcript commit.
-3. Observe that only the recording terminal receives the transcribed text, while the other broadcast panes receive nothing.
-
-Expected behavior:
-While Broadcast typing is active, a committed voice transcript should be mirrored to every participating plain terminal pane, consistent with how keyboard input is broadcast. Interim (non-final) preview text should remain on the recording pane only, and explorer/browser panes should continue to be excluded.
-
-Actual behavior / logs:
-Code inspection confirms the `voice_result` Socket.IO handler in `web/static/js/terminals.js` calls `_sendToTerminal(index, text)` on the final transcript, and `_sendToTerminal()` emits `terminal_input` to the single `sessionIds[index]` only. Unlike `forwardTerminalInput()`, which mirrors to all plain panes when `broadcastInputActive` (skipping panes without a `term`), the voice path has no broadcast branch, and `_voiceActiveIndex` restricts recording to one terminal, so the transcript never fans out.
-
-### Proposed solution:
-Route the committed voice transcript through the same broadcast mirroring used for keyboard input. When `broadcastInputActive`, have the `voice_result` final branch fan the text out to every plain terminal pane (reusing `forwardTerminalInput()`'s pane filter that skips the source pane and any pane without a `term`, i.e. explorer/browser panes) and note broadcast activity via `_noteBroadcastActivity()`; keep interim previews on the recording pane only. Ensure a single emit per target with no duplication to the recording pane. Add focused tests in `tests/test_api.py` for broadcast-on final fan-out, broadcast-off single delivery, interim-preview isolation, and explorer/browser exclusion.
-
-### Issue ID: ISSUE-2026-025
-- Title: Highlight the currently active terminal pane
-- Priority: Low
-- Status: Open
-- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `terminal`, `ui`, `accessibility`, `tests`
-- Reported: 2026-07-15
-
-Description:
-GridVibe does not visually identify the terminal pane that is currently selected for input. In a multi-pane workspace, users must infer the input target from browser focus alone. This is noticeably inconsistent with Broadcast typing mode, which gives every participating plain terminal pane a clear accent border, and makes it easier to send a command to the wrong terminal.
-
-Steps to reproduce:
-1. Open a GridVibe session group with two or more plain terminal panes.
-2. Click or type in one terminal pane, then inspect the panes' borders and headers.
-3. Observe that the input-target pane has no persistent active/selected visual treatment; enable Broadcast typing to see the existing accent-border treatment applied to all participating panes.
-
-Expected behavior:
-Exactly one eligible terminal pane should have a clear, theme-aware active/selected treatment whenever it is the current input target. The treatment should be comparable in prominence to the broadcast border while remaining distinguishable from broadcast mode, and it should update for pointer, keyboard, programmatic focus, terminal search close/return-focus, pane creation, removal, and session-group switching.
-
-Actual behavior / logs:
-Code inspection confirms `forwardTerminalInput()` and the terminal-card `pointerdown` listeners update `_focusedTerminalIndex`, which is also used to choose keyboard-search and push-to-talk targets. Neither path adds a class, ARIA state, or other visible marker to the corresponding `.terminal-container`. In contrast, `setBroadcastInput()` toggles `broadcast-input` on `#terminalsGrid`, and the `.broadcast-input .terminal-container:not(.explorer-pane):not(.browser-pane)` CSS rule applies `var(--t-accent)` border and inset shadow to every participating terminal. Existing tests cover broadcast-mode class and CSS hooks but do not cover visible single-pane selection state.
-
-### Proposed solution:
-Add one centralized client-side helper in `web/static/js/terminals.js`, such as `setFocusedTerminal(index)`, that validates the target, updates `_focusedTerminalIndex`, and toggles a semantic class (for example, `terminal-active`) plus appropriate accessibility state on the relevant terminal card while clearing it from other panes. Route existing pointer, terminal input, focus, focus-restoration, split, close, and group-switch paths through that helper; define a safe fallback target when the selected pane is removed or no plain terminal remains. Add a token-based active-pane style in `web/static/css/terminals.css` that remains visually distinct when Broadcast typing is enabled, avoids hardcoded colors, and preserves explorer/browser exclusions. Add focused rendered-template and behavioral tests in `tests/test_api.py` for pointer and keyboard selection, focus transitions, group switches, split/close fallback, broadcast coexistence, one-active-pane enforcement, and accessible state updates.
-
 ### Issue ID: ISSUE-2026-013
 - Title: Add per-agent auto-mode toggles to terminal settings
 - Priority: Low
@@ -213,6 +161,60 @@ Code inspection confirms `buildTerminalInitialCommand()` in `web/static/js/launc
 Add a per-terminal boolean such as `agent_auto_mode` to the launcher draft, saved-session normalization, workspace serialization, `TerminalSession`, and API responses. Define supported auto-mode arguments in the existing agent registry or another single backend-owned mapping instead of hard-coding one generic flag for every CLI. Update the agent settings row in `web/static/js/launcher.js` to show an accessible toggle only when the selected built-in agent has a registered option, recompute visibility and help text when the selection changes, and keep custom-agent behavior explicit rather than silently modifying arbitrary commands. Compose the final startup command from the validated selected-agent metadata and mapped argument without duplicating flags, while keeping preflight detection based on the base agent executable. Add focused tests in `tests/test_api.py` and `tests/test_session_manager.py` for enabled/disabled command construction, unsupported and custom agents, save/load/workspace round-trips, SSH and local launches, and backward compatibility for saved sessions without the new field.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-025
+- Title: Highlight the currently active terminal pane
+- Priority: Low
+- Status: Closed
+- Area: `web/static/js/terminals.js`, `web/static/css/terminals.css`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `terminal`, `ui`, `accessibility`, `tests`
+- Reported: 2026-07-15
+- Closed: 2026-07-17
+
+Description:
+GridVibe did not visually identify the terminal pane that is currently selected for input. In a multi-pane workspace, users had to infer the input target from browser focus alone. This was noticeably inconsistent with Broadcast typing mode, which gives every participating plain terminal pane a clear accent border, and made it easier to send a command to the wrong terminal.
+
+Steps to reproduce:
+1. Open a GridVibe session group with two or more plain terminal panes.
+2. Click or type in one terminal pane, then inspect the panes' borders and headers.
+3. Observe that the input-target pane has no persistent active/selected visual treatment; enable Broadcast typing to see the existing accent-border treatment applied to all participating panes.
+
+Expected behavior:
+Exactly one eligible terminal pane should have a clear, theme-aware active/selected treatment whenever it is the current input target. The treatment should be comparable in prominence to the broadcast border while remaining distinguishable from broadcast mode, and it should update for pointer, keyboard, programmatic focus, terminal search close/return-focus, pane creation, removal, and session-group switching.
+
+Actual behavior / logs:
+Code inspection confirmed `forwardTerminalInput()` and the terminal-card `pointerdown` listeners updated `_focusedTerminalIndex`, which is also used to choose keyboard-search and push-to-talk targets. Neither path added a class, ARIA state, or other visible marker to the corresponding `.terminal-container`. In contrast, `setBroadcastInput()` toggles `broadcast-input` on `#terminalsGrid`, and the `.broadcast-input .terminal-container:not(.explorer-pane):not(.browser-pane)` CSS rule applies `var(--t-accent)` border and inset shadow to every participating terminal.
+
+Resolution:
+The highlight is driven by *real DOM keyboard focus* — never by terminal output — so it can never disagree with where typing or voice actually lands. A delegated `focusin`/`focusout` pair on `document` (wired once) in `web/static/js/terminals.js` marks whichever plain terminal currently holds focus: `focusin` inside a `.terminal-container` that is not an explorer/browser pane calls `setFocusedTerminal(slot)`, and `focusout` clears the mark (`clearActiveTerminalHighlight()`) unless focus is moving to another plain terminal (whose own `focusin` repaints it). Visual state lives in `paintActiveTerminalCard(index)`, which adds `terminal-active` + `aria-current="true"` to exactly one `tc-<index>` and strips both from every other `.terminal-container` (one-active-pane enforcement); `isPlainTerminalCard()` validates explorer/browser panes out so they are never marked. Critically the highlight is **not** tied to `term.onData`: TUI apps with mouse reporting (vim, opencode, …) emit mouse-move escape sequences through `onData`, so an earlier draft that set focus from input made the highlight follow the mouse into an unfocused pane (visible on a restored split running opencode) — `forwardTerminalInput()` no longer touches selection. `_focusedTerminalIndex` now equals the highlighted pane exactly (or -1 when nothing is selected) and is the single input target for voice / push-to-talk / search; it is cleared on blur to a non-terminal, so a pane that is not visibly selected never silently receives dictation, and push-to-talk (`_findPttTerminalIndex()`) targets the focused terminal only (no fall-back to the first pane). Teardown resets it via `resetFocusedTerminal()` in `teardownCurrentGrid()`. `web/static/css/terminals.css` keeps the token-only `.terminal-container.terminal-active` treatment (a heavier 2px inset `--t-accent` ring plus an accent header rule), distinct from and prominent alongside the 1px broadcast border, with the same `:not(.explorer-pane):not(.browser-pane)` exclusions. Covered by `test_active_terminal_pane_paints_a_single_focused_card`, `test_active_terminal_pane_tracks_real_dom_focus`, `test_push_to_talk_targets_only_the_selected_terminal`, and `test_active_terminal_pane_has_distinct_token_style` in `tests/test_api.py`.
+
+### Issue ID: ISSUE-2026-026
+- Title: Voice transcription ignores Broadcast typing and reaches one terminal
+- Priority: Medium
+- Status: Closed
+- Area: `web/static/js/terminals.js`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `voice`, `terminal`, `socketio`, `tests`
+- Reported: 2026-07-15
+- Closed: 2026-07-17
+
+Description:
+When Broadcast typing was enabled, keyboard input was mirrored to every plain terminal pane, but voice transcription was not. A final voice transcript was delivered only to the single terminal that was recording, so users who expected voice dictation to broadcast to all panes (the way typing does) silently reached just one terminal.
+
+Steps to reproduce:
+1. Open a session group with two or more plain terminal panes and enable Broadcast typing.
+2. Start voice capture on one terminal (mic button or push-to-talk), speak, and let the final transcript commit.
+3. Observe that only the recording terminal receives the transcribed text, while the other broadcast panes receive nothing.
+
+Expected behavior:
+While Broadcast typing is active, a committed voice transcript should be mirrored to every participating plain terminal pane, consistent with how keyboard input is broadcast. Interim (non-final) preview text should remain on the recording pane only, and explorer/browser panes should continue to be excluded.
+
+Actual behavior / logs:
+Code inspection confirmed the `voice_result` Socket.IO handler in `web/static/js/terminals.js` called `_sendToTerminal(index, text)` on the final transcript, and `_sendToTerminal()` emits `terminal_input` to the single `sessionIds[index]` only. Unlike `forwardTerminalInput()`, which mirrors to all plain panes when `broadcastInputActive` (skipping panes without a `term`), the voice path had no broadcast branch, and `_voiceActiveIndex` restricts recording to one terminal, so the transcript never fanned out.
+
+Resolution:
+The keyboard peer fan-out was extracted from `forwardTerminalInput()` into a shared `broadcastInputToPeers(sourceIndex, data)` helper (the `broadcastInputActive` gate, `_noteBroadcastActivity()`, and the explorer/browser-skipping `terminals[otherIndex]?.term` filter now live there once). The `voice_result` final branch delivers the committed transcript to the recording pane via `_sendToTerminal()` and then calls the same `broadcastInputToPeers(index, text)`, so a dictated transcript fans out to every plain pane exactly like typing when Broadcast is on, with no duplicate to the source. Interim (non-final) previews stay isolated to the recording pane (`_showVoicePreview`). Enabling Broadcast typing also focuses a terminal immediately (`setBroadcastInput(true)` → `focusActiveOrDefaultTerminal()`, preferring the sticky `_focusedTerminalIndex`, else the first attached plain terminal), so the user can start typing without first clicking a pane. Covered by `test_voice_transcript_honours_broadcast_typing`, `test_broadcast_enable_focuses_a_terminal_for_immediate_typing`, and the updated `test_input_forwarding_goes_through_the_broadcast_helper` in `tests/test_api.py`.
 
 ### Issue ID: ISSUE-2026-020
 - Title: Large log previews discard the newest entries

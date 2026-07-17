@@ -3843,7 +3843,7 @@
         terminals  = [];
         sessionIds = [];
         gridBuilt  = false;
-        _focusedTerminalIndex = -1;
+        resetFocusedTerminal();
         visibleGroupId = '';
     }
 
@@ -4207,6 +4207,10 @@
         document.getElementById('terminalsGrid')?.classList.toggle('broadcast-input', broadcastInputActive);
         if (broadcastInputActive) {
             _noteBroadcastActivity();
+            /* Enabling broadcast should let the user start typing immediately —
+               focus a terminal now so keystrokes are captured without first
+               clicking a pane (ISSUE-2026-026 follow-up). */
+            focusActiveOrDefaultTerminal();
         } else {
             clearTimeout(_broadcastIdleTimer);
         }
@@ -4216,25 +4220,150 @@
         setBroadcastInput(!broadcastInputActive);
     }
 
-    function forwardTerminalInput(index, data) {
+    /* Mirror input into every *other* plain terminal pane while broadcast typing
+       is on (explorer/browser panes have no `term` and are skipped). Shared by
+       keyboard forwarding and committed voice transcripts (ISSUE-2026-026) so a
+       single filter governs both. */
+    function broadcastInputToPeers(sourceIndex, data) {
+        if (!broadcastInputActive || !socket) {
+            return;
+        }
+        _noteBroadcastActivity();
+        sessionIds.forEach((otherSid, otherIndex) => {
+            if (otherIndex === sourceIndex || !otherSid || !terminals[otherIndex]?.term) {
+                return;
+            }
+            socket.emit('terminal_input', { session_id: otherSid, data });
+        });
+    }
+
+    /* Active-terminal selection (ISSUE-2026-025). The highlight is driven by
+       *real DOM keyboard focus* — never by terminal output — so it can never
+       disagree with where typing (or voice) actually lands. A delegated
+       focusin/focusout pair (wired once, below) marks whichever plain terminal
+       currently holds focus and clears the mark the moment focus leaves to the
+       top bar, dead space, or an explorer/browser pane. `_focusedTerminalIndex`
+       tracks that same pane exactly (or -1 when nothing is selected) and is the
+       single input target for voice / push-to-talk / search — so a pane that is
+       not visibly selected never silently receives voice.
+
+       Critically, the highlight is NOT tied to `term.onData`: TUI apps with
+       mouse reporting (vim, opencode, …) emit mouse-move escape sequences
+       through `onData`, so driving selection from input would make the
+       highlight follow the mouse into an unfocused pane. Focus is the only
+       source of truth. */
+    function isPlainTerminalCard(card) {
+        return Boolean(
+            card
+            && card.classList.contains('terminal-container')
+            && !card.classList.contains('explorer-pane')
+            && !card.classList.contains('browser-pane')
+        );
+    }
+
+    function terminalCardSlot(card) {
+        const slot = card ? Number(card.dataset.slot) : NaN;
+        return Number.isInteger(slot) ? slot : -1;
+    }
+
+    /* Visual only: give exactly one plain terminal card the `terminal-active`
+       treatment (plus accessible state) and clear it from every other pane.
+       An invalid/missing index clears the highlight from all panes. */
+    function paintActiveTerminalCard(index) {
+        const targetCard = document.getElementById(`tc-${index}`);
+        const isTarget = isPlainTerminalCard(targetCard);
+        document.querySelectorAll('.terminal-container.terminal-active').forEach(card => {
+            if (card !== targetCard || !isTarget) {
+                card.classList.remove('terminal-active');
+                card.removeAttribute('aria-current');
+            }
+        });
+        if (isTarget) {
+            targetCard.classList.add('terminal-active');
+            targetCard.setAttribute('aria-current', 'true');
+        }
+    }
+
+    /* A plain terminal gained focus: it becomes both the input target and the
+       highlighted pane. An invalid target selects nothing. */
+    function setFocusedTerminal(index) {
+        if (!isPlainTerminalCard(document.getElementById(`tc-${index}`))) {
+            clearActiveTerminalHighlight();
+            return;
+        }
         _focusedTerminalIndex = index;
+        paintActiveTerminalCard(index);
+    }
+
+    /* Focus left every terminal (top bar / dead space / explorer / browser):
+       nothing is selected, so drop the highlight AND the input target — voice
+       and typing both go nowhere until a terminal is focused again. */
+    function clearActiveTerminalHighlight() {
+        _focusedTerminalIndex = -1;
+        paintActiveTerminalCard(-1);
+    }
+
+    /* Full reset on teardown. */
+    function resetFocusedTerminal() {
+        clearActiveTerminalHighlight();
+    }
+
+    /* Pick an attached plain terminal to receive keyboard focus, preferring the
+       current target, else the first eligible pane. Explorer/browser panes and
+       not-yet-attached panes (no `term`) are skipped. */
+    function firstAttachedPlainTerminalIndex(preferred = -1) {
+        const eligible = i => Boolean(
+            terminals[i]?.term
+            && !isExplorerSession(terminals[i]._session)
+            && !isBrowserSession(terminals[i]._session)
+        );
+        if (preferred >= 0 && eligible(preferred)) {
+            return preferred;
+        }
+        for (let i = 0; i < terminals.length; i++) {
+            if (eligible(i)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /* Give a terminal real keyboard focus so typing is captured immediately —
+       used when Broadcast typing is enabled so the user can start typing without
+       first clicking a pane (the focusin handler then highlights it). */
+    function focusActiveOrDefaultTerminal() {
+        const index = firstAttachedPlainTerminalIndex(_focusedTerminalIndex);
+        if (index !== -1) {
+            try { terminals[index].term.focus(); } catch (_) {}
+        }
+    }
+
+    /* Delegated, wired once: the terminal that holds DOM focus is the active
+       pane. focusout only clears when focus is not moving to another plain
+       terminal (whose focusin will repaint it). */
+    document.addEventListener('focusin', event => {
+        const card = event.target?.closest?.('.terminal-container');
+        if (isPlainTerminalCard(card)) {
+            setFocusedTerminal(terminalCardSlot(card));
+        }
+    });
+    document.addEventListener('focusout', event => {
+        const nextCard = event.relatedTarget?.closest?.('.terminal-container');
+        if (!isPlainTerminalCard(nextCard)) {
+            clearActiveTerminalHighlight();
+        }
+    });
+
+    function forwardTerminalInput(index, data) {
+        /* Selection is focus-driven only — never set it from `onData`, which
+           also fires for TUI mouse-tracking sequences and would make the
+           highlight follow the mouse into an unfocused pane. */
         if (!socket) {
             return;
         }
         const sid = sessionIds[index];
         if (sid) socket.emit('terminal_input', { session_id: sid, data });
-        if (!broadcastInputActive) {
-            return;
-        }
-        _noteBroadcastActivity();
-        sessionIds.forEach((otherSid, otherIndex) => {
-            /* Only mirror into plain terminal panes (explorer/browser panes
-               have no `term`). */
-            if (otherIndex === index || !otherSid || !terminals[otherIndex]?.term) {
-                return;
-            }
-            socket.emit('terminal_input', { session_id: otherSid, data });
-        });
+        broadcastInputToPeers(index, data);
     }
 
     function wirePaneInputForwarding(t, i) {
@@ -4242,12 +4371,6 @@
             return;
         }
         t.term.onData(data => forwardTerminalInput(i, data));
-        const card = document.getElementById(`tc-${i}`);
-        if (card) {
-            card.addEventListener('pointerdown', () => {
-                _focusedTerminalIndex = i;
-            });
-        }
     }
 
     function remapCardIndexAttributes(card, sourceIndex, targetIndex) {
@@ -4439,12 +4562,6 @@
         }
 
         terminal.term.onData(data => forwardTerminalInput(index, data));
-        const card = document.getElementById(`tc-${index}`);
-        if (card) {
-            card.addEventListener('pointerdown', () => {
-                _focusedTerminalIndex = index;
-            });
-        }
     }
 
     function getExplorerSelectedDirectory(index) {
@@ -6497,14 +6614,14 @@
             || (key.length === 1 ? key.toUpperCase() : key) === parts[parts.length - 1];
     }
 
+    /* Push-to-talk targets the currently selected (focused) terminal only.
+       When nothing is selected, voice goes nowhere — consistent with typing,
+       and so a not-visibly-selected pane never silently receives dictation. */
     function _findPttTerminalIndex() {
         if (_focusedTerminalIndex !== -1
             && sessionIds[_focusedTerminalIndex]
             && terminals[_focusedTerminalIndex]) {
             return _focusedTerminalIndex;
-        }
-        for (let i = 0; i < sessionIds.length; i++) {
-            if (sessionIds[i] && terminals[i]) return i;
         }
         return -1;
     }
@@ -6636,6 +6753,8 @@
             overlay.hidden = true;
         }
         terminals[index]?.searchAddon?.clearDecorations?.();
+        /* Returning focus to the terminal re-marks it active via the delegated
+           focusin handler. */
         terminals[index]?.term?.focus();
     }
 
@@ -11785,7 +11904,13 @@
             if (index === -1) return;
 
             if (isFinal && text) {
+                /* A committed transcript honours Broadcast typing the same way
+                   keyboard input does (ISSUE-2026-026): deliver to the recording
+                   pane, then fan out to every other plain pane through the shared
+                   broadcast filter. Interim previews above stay on the recording
+                   pane only. */
                 _sendToTerminal(index, text);
+                broadcastInputToPeers(index, text);
                 _clearVoicePreview(index);
             } else if (text) {
                 _showVoicePreview(index, text);

@@ -21,13 +21,13 @@ depend on them. Within a stage, issues share files and can be built together.
 | 3 ✅ | Markdown preview presentation (**done 2026-07-16**) | 017, 030 |
 | 4 ✅ | Explorer large-file / log preview (**done 2026-07-17**) | 020 |
 | 5 ✅ | Terminal close & layout integrity (**done 2026-07-17**) | 022, 027 |
-| 6 | Terminal input focus & targeting | 025, 026 |
+| 6 ✅ | Terminal input focus & targeting (**done 2026-07-17**) | 025, 026 |
 | 7 | Settings & launcher configuration | 029, 013, 031 |
 
 All 17 issues are covered; **Stage 1 (024, 028, 023, 018), Stage 2 (014, 016,
-015), Stage 3 (017, 030), Stage 4 (020), and Stage 5 (022, 027) are now
-implemented and closed**, leaving 5 open (Stages 6 and 7). Stages 6 and 7 are
-independent of each other and can be scheduled in any order.
+015), Stage 3 (017, 030), Stage 4 (020), Stage 5 (022, 027), and Stage 6 (025,
+026) are now implemented and closed**, leaving 3 open (Stage 7). Stage 7 is
+independent of the completed stages.
 
 ---
 
@@ -439,6 +439,9 @@ overlay, and viewer-based restore are wired end to end in the served client.
 
 ## Stage 6 — Terminal input focus & targeting
 
+> **Status: Implemented (2026-07-17).** Both issues below are closed. See
+> **Implementation notes** at the end of this section for what shipped.
+
 **Goal:** make the active input target visible and make voice honor the same
 broadcast rules as typing — both revolve around `_focusedTerminalIndex` and the
 input-forwarding path.
@@ -467,6 +470,62 @@ uses. Touching focus/forwarding once keeps the two consistent.
    skips explorer/browser panes); keep interim previews on the recording pane (026).
 
 **Sizing:** Small–Medium.
+
+**Implementation notes (2026-07-17)**
+1. **025 — active-pane highlight (focus-driven, never output-driven).** The
+   highlight is tied to *real DOM keyboard focus* so it can never disagree with
+   where typing or voice actually lands. A delegated `focusin`/`focusout` pair on
+   `document` (wired once) marks whichever plain terminal currently holds focus:
+   `focusin` inside a `.terminal-container` (that is not an explorer/browser pane)
+   calls `setFocusedTerminal(slot)`, and `focusout` clears the mark
+   (`clearActiveTerminalHighlight()`) unless focus is moving to another plain
+   terminal (whose own `focusin` repaints it). Visual state lives in
+   `paintActiveTerminalCard(index)` — it adds `terminal-active` +
+   `aria-current="true"` to exactly one `tc-<index>` and strips both from every
+   other `.terminal-container` (one-active-pane enforcement); `isPlainTerminalCard()`
+   validates explorer/browser panes out so they are never marked. Crucially the
+   highlight is **not** driven by `term.onData`: TUI apps with mouse reporting
+   (vim, opencode, …) emit mouse-move escape sequences through `onData`, so an
+   earlier draft that set focus from input made the highlight *follow the mouse*
+   into an unfocused pane (visible on a restored split running opencode) —
+   `forwardTerminalInput()` no longer touches selection at all. `_focusedTerminalIndex`
+   now equals the highlighted pane exactly (or -1 when nothing is selected) and is
+   the single input target for voice / push-to-talk / search; it is cleared on
+   blur to non-terminal, so a pane that is not visibly selected never silently
+   receives dictation, and push-to-talk (`_findPttTerminalIndex()`) targets the
+   focused terminal only (no fall-back to the first pane). Teardown resets it via
+   `resetFocusedTerminal()` in `teardownCurrentGrid()`. `web/static/css/terminals.css`
+   keeps the token-only `.terminal-container.terminal-active` treatment — a heavier
+   2px inset `--t-accent` ring plus an accent header rule — distinct from and
+   prominent alongside the 1px broadcast border, with the same
+   `:not(.explorer-pane):not(.browser-pane)` exclusions.
+2. **026 — voice honors broadcast.** The keyboard peer fan-out was extracted from
+   `forwardTerminalInput()` into a shared `broadcastInputToPeers(sourceIndex, data)`
+   helper (the `broadcastInputActive` gate, `_noteBroadcastActivity()`, and the
+   explorer/browser-skipping `terminals[otherIndex]?.term` filter all live there
+   once). The `voice_result` final branch now delivers the committed transcript to
+   the recording pane via `_sendToTerminal()` and then calls the same
+   `broadcastInputToPeers(index, text)`, so a dictated transcript fans out to every
+   plain pane exactly like typing when Broadcast is on, with no duplicate to the
+   source. Interim (non-final) previews stay isolated to the recording pane
+   (`_showVoicePreview`), unchanged. Enabling Broadcast typing also focuses a
+   terminal immediately (`setBroadcastInput(true)` → `focusActiveOrDefaultTerminal()`,
+   preferring the sticky `_focusedTerminalIndex`, else the first attached plain
+   terminal), so the user can start typing without first clicking a pane.
+
+Tests: `tests/test_api.py` gained `test_active_terminal_pane_paints_a_single_focused_card`
+(one-active-pane enforcement, semantic class + `aria-current`, explorer/browser
+exclusion), `test_active_terminal_pane_tracks_real_dom_focus` (delegated
+focusin/focusout wiring, clear-on-blur-to-non-terminal drops both highlight and
+input target, `forwardTerminalInput`/`onData` never touches selection, teardown
+reset), `test_push_to_talk_targets_only_the_selected_terminal` (no stale
+last-selected target), `test_broadcast_enable_focuses_a_terminal_for_immediate_typing`
+(broadcast auto-focus), `test_active_terminal_pane_has_distinct_token_style`
+(token-only accent, 2px ring vs broadcast 1px, distinct header rule), and
+`test_voice_transcript_honours_broadcast_typing` (final fan-out through the shared
+helper, interim isolation, shared-helper reuse count); the existing
+`test_input_forwarding_goes_through_the_broadcast_helper` was updated for the
+extracted `broadcastInputToPeers` helper.
 
 ---
 

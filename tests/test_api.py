@@ -9501,12 +9501,22 @@ class BroadcastInputTestCase(unittest.TestCase):
         self.assertEqual(
             terminals_js.count("onData(data => forwardTerminalInput("), 2
         )
-        # explorer/browser panes are skipped (no `term`)
+        # the peer fan-out lives in a shared helper reused by keyboard + voice
+        self.assertIn(
+            "function broadcastInputToPeers(sourceIndex, data)", terminals_js
+        )
         forward_fn = terminals_js[
             terminals_js.index("function forwardTerminalInput"):
             terminals_js.index("function wirePaneInputForwarding")
         ]
-        self.assertIn("terminals[otherIndex]?.term", forward_fn)
+        self.assertIn("broadcastInputToPeers(index, data)", forward_fn)
+        # explorer/browser panes are skipped (no `term`) in the shared helper
+        peer_fn = terminals_js[
+            terminals_js.index("function broadcastInputToPeers"):
+            terminals_js.index("function setFocusedTerminal")
+        ]
+        self.assertIn("terminals[otherIndex]?.term", peer_fn)
+        self.assertIn("if (!broadcastInputActive || !socket)", peer_fn)
 
     def test_broadcast_auto_disables_on_group_switch_and_idle(self):
         terminals_js = self._static("js/terminals.js")
@@ -9519,6 +9529,152 @@ class BroadcastInputTestCase(unittest.TestCase):
         terminals_css = self._static("css/terminals.css")
         self.assertIn(".broadcast-btn.active", terminals_css)
         self.assertIn("#terminalsGrid.broadcast-input", terminals_css)
+
+    def test_active_terminal_pane_paints_a_single_focused_card(self):
+        """ISSUE-2026-025: paintActiveTerminalCard marks exactly one plain
+        terminal card and clears the rest (one-active-pane enforcement)."""
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function paintActiveTerminalCard(index)", terminals_js)
+        paint_fn = terminals_js[
+            terminals_js.index("function paintActiveTerminalCard(index)"):
+            terminals_js.index("function setFocusedTerminal(index)")
+        ]
+        # marks the target with a semantic class + accessible state …
+        self.assertIn("targetCard.classList.add('terminal-active')", paint_fn)
+        self.assertIn("targetCard.setAttribute('aria-current', 'true')", paint_fn)
+        # … and clears it from every other pane (one-active-pane enforcement)
+        self.assertIn(
+            "document.querySelectorAll('.terminal-container.terminal-active')", paint_fn
+        )
+        self.assertIn("card.classList.remove('terminal-active')", paint_fn)
+        self.assertIn("card.removeAttribute('aria-current')", paint_fn)
+        # explorer/browser panes are never valid input targets
+        plain_fn = terminals_js[
+            terminals_js.index("function isPlainTerminalCard(card)"):
+            terminals_js.index("function terminalCardSlot(card)")
+        ]
+        self.assertIn("!card.classList.contains('explorer-pane')", plain_fn)
+        self.assertIn("!card.classList.contains('browser-pane')", plain_fn)
+
+    def test_active_terminal_pane_tracks_real_dom_focus(self):
+        """ISSUE-2026-025: the highlight is driven by actual keyboard focus via
+        a delegated focusin/focusout pair, so it can never disagree with where
+        typing lands; focus leaving to dead space / non-terminal clears it."""
+        terminals_js = self._static("js/terminals.js")
+        # delegated focus wiring (one active pane == the focused terminal)
+        self.assertIn("document.addEventListener('focusin', event =>", terminals_js)
+        self.assertIn("document.addEventListener('focusout', event =>", terminals_js)
+        focusin = terminals_js[
+            terminals_js.index("document.addEventListener('focusin', event =>"):
+            terminals_js.index("document.addEventListener('focusout', event =>")
+        ]
+        self.assertIn("event.target?.closest?.('.terminal-container')", focusin)
+        self.assertIn("setFocusedTerminal(terminalCardSlot(card))", focusin)
+        focusout = terminals_js[
+            terminals_js.index("document.addEventListener('focusout', event =>"):
+            terminals_js.index("function forwardTerminalInput")
+        ]
+        # only clear when focus is NOT moving to another plain terminal
+        self.assertIn("event.relatedTarget?.closest?.('.terminal-container')", focusout)
+        self.assertIn("if (!isPlainTerminalCard(nextCard))", focusout)
+        self.assertIn("clearActiveTerminalHighlight();", focusout)
+        # selection is NEVER driven by terminal output: forwardTerminalInput
+        # (wired to `onData`, which also fires for TUI mouse-tracking sequences)
+        # must not touch the active-pane state, or the highlight would follow the
+        # mouse into an unfocused pane.
+        forward_fn = terminals_js[
+            terminals_js.index("function forwardTerminalInput"):
+            terminals_js.index("function wirePaneInputForwarding")
+        ]
+        self.assertNotIn("setFocusedTerminal", forward_fn)
+        # clearing selection drops the input target too (no invisible target)
+        clear_fn = terminals_js[
+            terminals_js.index("function clearActiveTerminalHighlight()"):
+            terminals_js.index("function resetFocusedTerminal()")
+        ]
+        self.assertIn("_focusedTerminalIndex = -1;", clear_fn)
+        # teardown fully resets
+        self.assertIn("function resetFocusedTerminal()", terminals_js)
+        teardown = terminals_js[
+            terminals_js.index("function teardownCurrentGrid()"):
+            terminals_js.index("function teardownCurrentGrid()") + 900
+        ]
+        self.assertIn("resetFocusedTerminal();", teardown)
+
+    def test_push_to_talk_targets_only_the_selected_terminal(self):
+        """ISSUE-2026-026 follow-up: voice/PTT go to the focused (highlighted)
+        terminal only — never to a stale 'last selected' pane when nothing is
+        selected (consistent with typing)."""
+        terminals_js = self._static("js/terminals.js")
+        ptt_fn = terminals_js[
+            terminals_js.index("function _findPttTerminalIndex()"):
+            terminals_js.index("function findExplorerSearchTargetIndex()")
+        ]
+        self.assertIn("return _focusedTerminalIndex;", ptt_fn)
+        # no fall-back scan to the first terminal when nothing is selected
+        self.assertNotIn("for (let i = 0", ptt_fn)
+
+    def test_broadcast_enable_focuses_a_terminal_for_immediate_typing(self):
+        """ISSUE-2026-026 follow-up: enabling Broadcast typing focuses a terminal
+        so the user can type immediately without first clicking a pane."""
+        terminals_js = self._static("js/terminals.js")
+        set_broadcast = terminals_js[
+            terminals_js.index("function setBroadcastInput(active)"):
+            terminals_js.index("function toggleBroadcastInput()")
+        ]
+        self.assertIn("focusActiveOrDefaultTerminal();", set_broadcast)
+        focus_default = terminals_js[
+            terminals_js.index("function focusActiveOrDefaultTerminal()"):
+            terminals_js.index("function focusActiveOrDefaultTerminal()") + 400
+        ]
+        # prefers the sticky target, focuses a real attached terminal
+        self.assertIn(
+            "firstAttachedPlainTerminalIndex(_focusedTerminalIndex)", focus_default
+        )
+        self.assertIn("terminals[index].term.focus()", focus_default)
+
+    def test_active_terminal_pane_has_distinct_token_style(self):
+        """ISSUE-2026-025: the active-pane treatment is token-based and stays
+        distinguishable from broadcast typing."""
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(
+            ".terminal-container.terminal-active:not(.explorer-pane):not(.browser-pane)",
+            terminals_css,
+        )
+        active_rule_start = terminals_css.index(
+            ".terminal-container.terminal-active:not(.explorer-pane):not(.browser-pane)"
+        )
+        active_rule = terminals_css[active_rule_start:active_rule_start + 600]
+        # token-driven accent (no palette literals) …
+        self.assertIn("var(--t-accent)", active_rule)
+        # … a heavier 2px ring than the broadcast 1px inset border …
+        self.assertIn("inset 0 0 0 2px var(--t-accent)", active_rule)
+        # … plus a header accent rule that broadcast does not paint (distinct).
+        self.assertIn("inset 0 -2px 0 var(--t-accent)", active_rule)
+
+    def test_voice_transcript_honours_broadcast_typing(self):
+        """ISSUE-2026-026: a committed voice transcript fans out to every plain
+        pane through the same broadcast filter keyboard input uses; interim
+        previews stay on the recording pane only."""
+        terminals_js = self._static("js/terminals.js")
+        handler = terminals_js[
+            terminals_js.index("socket.on('voice_result'"):
+            terminals_js.index("socket.on('voice_status'")
+        ]
+        # final branch: deliver to recorder + fan out via the shared helper
+        self.assertIn("_sendToTerminal(index, text);", handler)
+        self.assertIn("broadcastInputToPeers(index, text);", handler)
+        self.assertIn("_clearVoicePreview(index);", handler)
+        # interim (non-final) previews are isolated to the recording pane
+        self.assertIn("_showVoicePreview(index, text);", handler)
+        self.assertLess(
+            handler.index("broadcastInputToPeers(index, text)"),
+            handler.index("_showVoicePreview(index, text)"),
+        )
+        # the voice path reuses the *same* peer helper as keyboard forwarding
+        self.assertEqual(
+            terminals_js.count("broadcastInputToPeers(index, "), 2
+        )
 
 
 class RuntimeStateRestoreTestCase(unittest.TestCase):

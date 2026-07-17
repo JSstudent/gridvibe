@@ -1319,6 +1319,24 @@
             box-shadow: inset 0 0 0 1px var(--t-accent);
         }
 
+        /* Active input target (ISSUE-2026-025): exactly one eligible terminal
+           pane is highlighted as the current input destination. It is kept
+           distinct from — and prominent alongside — broadcast typing above:
+           broadcast paints a 1px inset accent border on every plain pane, while
+           the active pane gets a heavier 2px accent ring plus an accent header
+           rule, so the current target stays identifiable even while broadcast is
+           on. Explorer/browser panes are never input targets and are excluded.
+           Colours come from tokens (no palette literals). */
+        .terminal-container.terminal-active:not(.explorer-pane):not(.browser-pane) {
+            border-color: var(--t-accent);
+            box-shadow: inset 0 0 0 2px var(--t-accent);
+        }
+
+        .terminal-container.terminal-active:not(.explorer-pane):not(.browser-pane) .terminal-header {
+            border-bottom-color: var(--t-accent);
+            box-shadow: inset 0 -2px 0 var(--t-accent);
+        }
+
         .terminal-search-overlay {
             position: absolute;
             top: 6px;
