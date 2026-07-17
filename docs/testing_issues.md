@@ -3,6 +3,32 @@ Last updated: 2026-07-17
 
 ## Open Issues
 
+### Issue ID: ISSUE-2026-035
+- Title: Valid UTF-8 files are rejected when preview sample splits a character
+- Priority: Medium
+- Status: Open
+- Area: `web/explorer.py`, `web/api.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `flask`, `unicode`, `tests`
+- Reported: 2026-07-17
+
+Description:
+GridVibe Explorer can reject a valid UTF-8 text or Markdown file as binary when the fixed 4,096-byte binary-detection sample ends partway through a multibyte character. The file is then unavailable in both Source and Markdown Preview even though its complete contents decode correctly as UTF-8. Whether a normal text file opens therefore depends on the byte alignment of Unicode characters near the sampling boundary.
+
+Steps to reproduce:
+1. Under an Explorer root, create a supported text file such as `boundary.md` whose bytes begin with 4,095 ASCII bytes followed by a multibyte UTF-8 character, for example `b"a" * 4095 + "─".encode("utf-8") + b"\n"`.
+2. Open `boundary.md` from the GridVibe Explorer file tree.
+3. Observe that the file is not displayed and Explorer reports `Explorer file appears to be binary`, even though decoding the complete file as strict UTF-8 succeeds.
+
+Expected behavior:
+Explorer binary detection should accept a valid UTF-8 file when only the bounded sample ends in an incomplete multibyte sequence. It should continue rejecting NUL-containing content, invalid UTF-8 sequences within the sampled data, excessive control bytes, and genuinely incomplete UTF-8 at the end of a complete short file.
+
+Actual behavior / logs:
+The verified 30,630-byte Markdown file decodes successfully in full as strict UTF-8 and contains no NUL or disallowed control bytes in the first 4 KiB. `_explorer_content_looks_binary()` in `web/explorer.py` slices `raw_content[:EXPLORER_BINARY_SAMPLE_BYTES]`, where `EXPLORER_BINARY_SAMPLE_BYTES` is 4,096, and then calls `sample.decode("utf-8")`. In the reproduced file, byte 4,095 is `E2`, the first byte of the valid three-byte sequence `E2 94 80` (`─`); the remaining two bytes fall immediately outside the sample. The bounded decode raises `UnicodeDecodeError`, the helper returns `True`, and `get_explorer_file()` in `web/api.py` converts that false positive into the 400 error `Explorer file appears to be binary`. Existing tests cover NUL bytes and internally invalid UTF-8 but not a valid multibyte sequence crossing the sample boundary.
+
+### Proposed solution:
+Update `_explorer_content_looks_binary()` in `web/explorer.py` so strict UTF-8 validation distinguishes an incomplete sequence caused only by truncating a larger sample from invalid bytes inside the sample. One safe approach is an incremental strict UTF-8 decoder with `final=False` only when `raw_content` contains bytes beyond the 4,096-byte sample, while retaining final validation for complete inputs; alternatively, extend or trim the sample to a verified code-point boundary without weakening internal-sequence checks. Keep the existing NUL and control-byte heuristics unchanged and preserve the shared local/SFTP path. Add focused regression tests in `tests/test_api.py` for a three-byte character crossing byte 4,096, valid Unicode sequences on either side of the boundary, internally invalid UTF-8 that must still be rejected, a short file ending in an incomplete sequence, and local/remote endpoint parity.
+
 ### Issue ID: ISSUE-2026-034
 - Title: Committing via Git sidebar does not reload the Files tree
 - Priority: Low
