@@ -4339,7 +4339,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         count = (api.EXPLORER_FILE_PREVIEW_MAX_BYTES // len(make_line(0).encode("utf-8"))) + 500
         body = "".join(make_line(i) for i in range(count))
         file_path = repo_dir / "unicode.log"
-        file_path.write_text(body, encoding="utf-8")
+        # Preserve LF endings on every platform so the fixed-size binary sample
+        # ends mid-character and exercises the same boundary as Ubuntu CI.
+        file_path.write_bytes(body.encode("utf-8"))
         self.assertGreater(file_path.stat().st_size, api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
         session_id = self._create_explorer_session(repo_dir)
 
@@ -4440,6 +4442,9 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(file_response.status_code, 400)
         self.assertIn("binary", file_response.get_json()["error"])
+
+    def test_explorer_binary_detection_rejects_incomplete_utf8_at_content_end(self):
+        self.assertTrue(web_explorer._explorer_content_looks_binary(b"valid text\xc2"))
 
     def test_explorer_file_rejects_unsupported_editor_format(self):
         repo_dir = Path(self.temp_dir.name) / "repo"

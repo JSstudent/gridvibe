@@ -6,6 +6,7 @@ local and SFTP explorer backends, the single set of Git helpers parameterised
 by backend, and the per-session SSH client pool (finding 3.1).
 """
 
+import codecs
 import logging
 import os
 import posixpath
@@ -260,7 +261,12 @@ def _explorer_content_looks_binary(raw_content: bytes) -> bool:
     if b"\x00" in sample:
         return True
     try:
-        sample.decode("utf-8")
+        # A capped sample can end in the middle of an otherwise valid multibyte
+        # character. Incremental decoding validates every complete sequence and
+        # defers a trailing partial sequence only when more content follows.
+        codecs.getincrementaldecoder("utf-8")(errors="strict").decode(
+            sample, final=len(raw_content) <= EXPLORER_BINARY_SAMPLE_BYTES
+        )
     except UnicodeDecodeError:
         return True
     control_count = sum(
@@ -1946,5 +1952,3 @@ def _resolve_remote_explorer_file_path(sftp: Any, session: Any, requested_path: 
     if not _remote_is_file(sftp, candidate):
         raise ValueError("Explorer path is not a file")
     return root_path, candidate
-
-
