@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GridVibe</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/launcher.css') }}?v={{ version }}">
 </head>
 <body>
@@ -39,6 +40,14 @@
     </div>
 </header>
 
+<div id="restoreWorkspaceBanner" class="restore-banner" hidden>
+    <span id="restoreWorkspaceText" class="restore-banner-text">Previous workspace found.</span>
+    <div class="restore-banner-actions">
+        <button class="ghost-btn" type="button" id="restoreWorkspaceBtn" onclick="restorePreviousWorkspace()">Restore</button>
+        <button class="ghost-btn" type="button" onclick="dismissRestoreBanner()">Dismiss</button>
+    </div>
+</div>
+
 <div class="shell" data-max-sessions="{{ max_sessions }}">
     <section class="column column-left">
         <div class="card terminal-layout-card">
@@ -46,11 +55,6 @@
             <div class="section-head">
                 <div class="section-title">
                     <span class="step-num">01</span>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <rect x="2" y="3" width="20" height="14" rx="2"></rect>
-                        <line x1="8" y1="21" x2="16" y2="21"></line>
-                        <line x1="12" y1="17" x2="12" y2="21"></line>
-                    </svg>
                     Terminal Layout
                 </div>
             </div>
@@ -76,17 +80,13 @@
             <div class="section-head">
                 <div class="section-title">
                     <span class="step-num">02</span>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>
-                    </svg>
                     Session Source
                 </div>
                 <div class="toolbar">
-                    <button class="ghost-btn" type="button" onclick="saveCurrentConfig()">💾 Save Session</button>
-                    <button class="ghost-btn" type="button" onclick="importSavedSession()">📂 Import Session</button>
-                    <button class="ghost-btn danger-btn" type="button" onclick="deleteSavedSessions()">🗑 Delete Sessions</button>
+                    <button class="ghost-btn" type="button" onclick="saveCurrentConfig()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>Save Session</button>
+                    <button class="ghost-btn" type="button" onclick="importSavedSession()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>Import Session</button>
+                    <button class="ghost-btn danger-btn" type="button" onclick="deleteSavedSessions()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>Delete Sessions</button>
                 </div>
-                <div id="updateStatus" class="toolbar-status"></div>
             </div>
 
             <div class="mode-toggle">
@@ -115,10 +115,6 @@
             <div class="section-head">
                 <div class="section-title">
                     <span class="step-num">03</span>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="4 17 10 11 4 5"></polyline>
-                        <line x1="12" y1="19" x2="20" y2="19"></line>
-                    </svg>
                     Terminal Setup
                 </div>
                 <button type="button" class="add-terminal-btn" id="addTerminalBtn" onclick="addTerminalFromButton()">+ Add Terminal</button>
@@ -133,12 +129,18 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
                     View Active Terminals
                 </a>
-                <button id="launchBtn" type="button" class="action-btn" onclick="launchSessions()">Launch Workspace <span class="arrow">→</span></button>
+                <button id="launchBtn" type="button" class="action-btn" onclick="launchSessions()">
+                    <span class="action-btn-label">Launch Workspace</span>
+                    <span class="arrow" aria-hidden="true">→</span>
+                    <svg class="action-btn-spinner" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+                        <path d="M12 2a10 10 0 1 0 10 10"/>
+                    </svg>
+                </button>
             </div>
             <div class="action-bar-right">
                 <div id="themeControl" class="quick-controls">
                     <span class="quick-controls-label">Theme</span>
-                    <button id="themeToggleBtnIndex" type="button" class="ghost-btn" onclick="cycleTheme()" style="font-size:.78rem;padding:5px 14px;">🌙 Dark</button>
+                    <button id="themeToggleBtnIndex" type="button" class="ghost-btn" onclick="cycleTheme()" style="font-size:.78rem;padding:5px 14px;"><svg class="theme-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>Dark</button>
                     <button id="checkUpdatesBtn" class="ghost-btn icon-btn" type="button" onclick="checkForUpdates()" title="Check for updates" aria-label="Check for updates">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
@@ -228,6 +230,32 @@
                     <option value="normal">Normal surface</option>
                     <option value="max">Max surface</option>
                 </select>
+            </div>
+            <div class="field">
+                <label>SSH Host Keys</label>
+                <select id="appSshHostKeyPolicy" aria-label="SSH host key verification policy">
+                    <option value="auto-add">Auto-add (accept new hosts)</option>
+                    <option value="known-hosts">Known hosts (warn on new hosts)</option>
+                    <option value="strict">Strict (reject unknown hosts)</option>
+                </select>
+            </div>
+            <div class="settings-section compact-section">
+                <div class="settings-section-title">Terminal</div>
+                <div class="settings-fields-inline">
+                    <div class="field">
+                        <label>Font Family</label>
+                        <input id="appTerminalFontFamily" type="text" placeholder="Consolas, Monaco, 'Courier New', monospace" aria-label="Terminal font family">
+                    </div>
+                    <div class="field">
+                        <label>Font Size</label>
+                        <input id="appTerminalFontSize" type="number" min="6" max="48" step="1" aria-label="Terminal font size">
+                    </div>
+                    <div class="field">
+                        <label>Max Sessions</label>
+                        <input id="appTerminalMaxSessions" type="number" min="1" max="16" step="1" aria-label="Maximum terminal sessions">
+                    </div>
+                </div>
+                <div class="settings-hint">Font changes apply to open terminal windows right away. Max sessions applies to new launches.</div>
             </div>
             <div class="voice-settings-panel">
                 <label class="check-field app-voice-enable-row">
@@ -321,7 +349,7 @@
                                         <option value="">Default input</option>
                                     </select>
                                 </div>
-                                <button id="refreshMicDevicesBtn" class="ghost-btn icon-btn" type="button" onclick="refreshLauncherMicrophones()" title="Refresh available microphones" aria-label="Refresh available microphones">↻</button>
+                                <button id="refreshMicDevicesBtn" class="ghost-btn icon-btn" type="button" onclick="refreshLauncherMicrophones()" title="Refresh available microphones" aria-label="Refresh available microphones"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><polyline points="21 3 21 9 15 9"></polyline></svg></button>
                             </div>
                             <label class="check-field compact-check">
                                 <input id="appVoicePttEnabled" type="checkbox">
@@ -343,7 +371,7 @@
         <div class="modal-actions app-settings-actions">
             <div class="modal-actions-buttons">
                 <div class="button-tooltip">
-                    <button id="saveAppSettingsBtn" class="ghost-btn" type="button" onclick="saveAppSettings()" aria-describedby="saveAppSettingsTip" title="Saves to config.json. If that file is missing, GridVibe falls back to default_config.json.">Save Settings</button>
+                    <button id="saveAppSettingsBtn" class="ghost-btn" type="button" onclick="saveAppSettings()" aria-describedby="saveAppSettingsTip">Save Settings</button>
                     <div id="saveAppSettingsTip" class="button-tooltip-bubble" role="tooltip">Saves to <code>config.json</code>. If that file is missing, GridVibe falls back to the committed <code>default_config.json</code>.</div>
                 </div>
                 <button class="ghost-btn" type="button" onclick="closeAppSettingsModal()">Cancel</button>

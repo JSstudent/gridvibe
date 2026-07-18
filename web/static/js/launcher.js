@@ -43,10 +43,7 @@
         const btn = document.getElementById('themeToggleBtnIndex');
         const select = document.getElementById('appTheme');
         if (btn) {
-            btn.textContent =
-                preference === 'light' ? '☀️ Light'
-                : preference === 'dark' ? '🌙 Dark'
-                : '◐ System';
+            btn.innerHTML = themeToggleButtonHtml(preference);
         }
         if (select && select.value !== preference) {
             select.value = preference;
@@ -86,6 +83,8 @@
         custom_agent: '',
         explorer_tree_open: false,
         explorer_git_open: false,
+        explorer_open_tabs: [],
+        explorer_active_tab: '',
         distribution: '',
         use_wsl: false,
         use_powershell: false
@@ -96,6 +95,14 @@
         }),
         workspace: Object.freeze({
             surface_mode: 'normal'
+        }),
+        ssh: Object.freeze({
+            host_key_policy: 'auto-add'
+        }),
+        terminal: Object.freeze({
+            font_family: "Consolas, Monaco, 'Courier New', monospace",
+            font_size: 14,
+            max_sessions: 4
         }),
         voice_input: Object.freeze({
             enabled: true,
@@ -438,24 +445,32 @@
         message.className = `message ${type}`.trim();
     }
 
+    let updateStatusClearTimer = null;
+
     function setUpdateStatus(text, type = '') {
-        const status = document.getElementById('updateStatus');
-        const quickStatus = document.getElementById('quickUpdateStatus');
+        const status = document.getElementById('quickUpdateStatus');
         if (!status) {
             return;
         }
 
         status.textContent = text;
-        status.className = `toolbar-status ${type}`.trim();
-        if (quickStatus) {
-            quickStatus.textContent = text;
-            quickStatus.className = `inline-status ${type}`.trim();
+        status.className = `inline-status ${type}`.trim();
+
+        window.clearTimeout(updateStatusClearTimer);
+        updateStatusClearTimer = null;
+        if (text) {
+            updateStatusClearTimer = window.setTimeout(() => {
+                status.textContent = '';
+                status.className = 'inline-status';
+            }, 6000);
         }
     }
 
     function applyAppSettings(data) {
         const appearance = data?.appearance || {};
         const workspace = data?.workspace || {};
+        const ssh = data?.ssh || {};
+        const terminal = data?.terminal || {};
         const voiceInput = data?.voice_input || {};
         appSettings = {
             appearance: {
@@ -465,6 +480,14 @@
             workspace: {
                 ...DEFAULT_APP_SETTINGS.workspace,
                 ...workspace
+            },
+            ssh: {
+                ...DEFAULT_APP_SETTINGS.ssh,
+                ...ssh
+            },
+            terminal: {
+                ...DEFAULT_APP_SETTINGS.terminal,
+                ...terminal
             },
             voice_input: {
                 ...DEFAULT_APP_SETTINGS.voice_input,
@@ -499,9 +522,15 @@
     function syncAppSettingsForm() {
         const appearance = appSettings.appearance || DEFAULT_APP_SETTINGS.appearance;
         const workspace = appSettings.workspace || DEFAULT_APP_SETTINGS.workspace;
+        const ssh = appSettings.ssh || DEFAULT_APP_SETTINGS.ssh;
+        const terminal = appSettings.terminal || DEFAULT_APP_SETTINGS.terminal;
         const voice = appSettings.voice_input || DEFAULT_APP_SETTINGS.voice_input;
         const themeInput = document.getElementById('appTheme');
         const surfaceModeInput = document.getElementById('appSurfaceMode');
+        const sshHostKeyPolicyInput = document.getElementById('appSshHostKeyPolicy');
+        const terminalFontFamilyInput = document.getElementById('appTerminalFontFamily');
+        const terminalFontSizeInput = document.getElementById('appTerminalFontSize');
+        const terminalMaxSessionsInput = document.getElementById('appTerminalMaxSessions');
         const enabledInput = document.getElementById('appVoiceEnabled');
         const engineInput = document.getElementById('appVoiceEngine');
         const languageInput = document.getElementById('appVoiceLanguage');
@@ -512,6 +541,26 @@
 
         if (themeInput) themeInput.value = appearance.theme || DEFAULT_APP_SETTINGS.appearance.theme;
         if (surfaceModeInput) surfaceModeInput.value = workspace.surface_mode === 'max' ? 'max' : 'normal';
+        if (sshHostKeyPolicyInput) {
+            sshHostKeyPolicyInput.value = ['auto-add', 'known-hosts', 'strict'].includes(ssh.host_key_policy)
+                ? ssh.host_key_policy
+                : DEFAULT_APP_SETTINGS.ssh.host_key_policy;
+        }
+        if (terminalFontFamilyInput) {
+            terminalFontFamilyInput.value = String(terminal.font_family || DEFAULT_APP_SETTINGS.terminal.font_family);
+        }
+        if (terminalFontSizeInput) {
+            const fontSize = Number(terminal.font_size);
+            terminalFontSizeInput.value = Number.isFinite(fontSize)
+                ? String(fontSize)
+                : String(DEFAULT_APP_SETTINGS.terminal.font_size);
+        }
+        if (terminalMaxSessionsInput) {
+            const maxSessions = Number(terminal.max_sessions);
+            terminalMaxSessionsInput.value = Number.isFinite(maxSessions)
+                ? String(maxSessions)
+                : String(DEFAULT_APP_SETTINGS.terminal.max_sessions);
+        }
         if (enabledInput) enabledInput.checked = Boolean(voice.enabled);
         if (engineInput) engineInput.value = voice.engine === 'whisper' ? 'whisper' : 'vosk';
         if (languageInput) languageInput.value = voice.language || DEFAULT_APP_SETTINGS.voice_input.language;
@@ -671,6 +720,17 @@
             workspace: {
                 surface_mode: document.getElementById('appSurfaceMode')?.value === 'max' ? 'max' : 'normal'
             },
+            ssh: {
+                host_key_policy: document.getElementById('appSshHostKeyPolicy')?.value || DEFAULT_APP_SETTINGS.ssh.host_key_policy
+            },
+            terminal: {
+                font_family: document.getElementById('appTerminalFontFamily')?.value.trim()
+                    || DEFAULT_APP_SETTINGS.terminal.font_family,
+                font_size: Number(document.getElementById('appTerminalFontSize')?.value)
+                    || DEFAULT_APP_SETTINGS.terminal.font_size,
+                max_sessions: Number(document.getElementById('appTerminalMaxSessions')?.value)
+                    || DEFAULT_APP_SETTINGS.terminal.max_sessions
+            },
             voice_input: {
                 enabled: Boolean(document.getElementById('appVoiceEnabled')?.checked),
                 engine: document.getElementById('appVoiceEngine')?.value || DEFAULT_APP_SETTINGS.voice_input.engine,
@@ -685,8 +745,15 @@
 
     function notifyAppConfigUpdated(appSettings) {
         const payload = {
+            appearance: {
+                theme: normalizeThemePreference(appSettings?.appearance?.theme)
+            },
             workspace: {
                 surface_mode: appSettings?.workspace?.surface_mode === 'max' ? 'max' : 'normal'
+            },
+            terminal: {
+                font_family: String(appSettings?.terminal?.font_family || DEFAULT_APP_SETTINGS.terminal.font_family),
+                font_size: Number(appSettings?.terminal?.font_size) || DEFAULT_APP_SETTINGS.terminal.font_size
             },
             timestamp: Date.now(),
             nonce: Math.random().toString(36).slice(2)
@@ -774,6 +841,15 @@
         return AGENT_OPTIONS.filter(option => option.value !== 'other').map(option => option.value);
     }
 
+    function agentAutoModeFlag(agentValue) {
+        const normalized = String(agentValue || '').trim().toLowerCase();
+        if (!normalized || normalized === 'other') {
+            return '';
+        }
+        const option = AGENT_OPTIONS.find(item => item.value === normalized);
+        return String(option?.auto_mode_flag || '').trim();
+    }
+
     function normalizeTerminalCommandUi(terminal) {
         const startupMode = String(terminal?.startup_mode || '').trim();
         const initialCommandMode = String(terminal?.initial_command_mode || '').trim();
@@ -791,6 +867,7 @@
         let agentSelection = String(terminal?.agent_selection || '').trim().toLowerCase();
         let customAgent = String(terminal?.custom_agent || '').trim();
         let commandValue = initialCommand;
+        const agentAutoMode = Boolean(terminal?.agent_auto_mode);
 
         if (mode === 'agent') {
             if (!agentSelection) {
@@ -814,7 +891,8 @@
                 mode,
                 commandValue,
                 agentSelection,
-                customAgent
+                customAgent,
+                agentAutoMode: agentAutoMode && Boolean(agentAutoModeFlag(agentSelection))
             };
         }
 
@@ -934,6 +1012,21 @@
         return parsed.href;
     }
 
+    /* Explorer file tabs are not editable in the launcher form; they are
+       carried invisibly through the terminal row dataset so resaving a preset
+       preserves them (ISSUE-2026-015). */
+    function parseExplorerOpenTabsDataset(value) {
+        if (!value) {
+            return [];
+        }
+        try {
+            const parsed = JSON.parse(value);
+            return Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string') : [];
+        } catch (_) {
+            return [];
+        }
+    }
+
     function collectTerminalDrafts() {
         const rows = Array.from(document.querySelectorAll('.t-row'));
         if (!rows.length) {
@@ -958,8 +1051,13 @@
                 custom_agent: commandMode === 'agent'
                     ? (row.querySelector('.t-agent-custom')?.value.trim() || '')
                     : '',
+                agent_auto_mode: commandMode === 'agent'
+                    && Boolean(agentAutoModeFlag(row.querySelector('.t-agent-select')?.value.trim() || ''))
+                    && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
+                explorer_open_tabs: commandMode === 'explorer' ? parseExplorerOpenTabsDataset(row.dataset.explorerOpenTabs) : [],
+                explorer_active_tab: commandMode === 'explorer' ? (row.dataset.explorerActiveTab || '') : '',
                 distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
                 use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
                     ? Boolean(row.querySelector('.t-use-wsl')?.checked)
@@ -1196,7 +1294,6 @@
 
     function setLocalRepoPath(path) {
         const input = document.getElementById('wsl_default_dir');
-        const display = document.getElementById('wsl_default_dir_display');
         if (!input) {
             return;
         }
@@ -1205,11 +1302,6 @@
         const resolved = normalized === '~' ? '' : normalized;
         input.value = resolved;
         input.title = resolved;
-        if (display) {
-            display.textContent = resolved || 'Select a folder on your local drive';
-            display.classList.toggle('empty', !resolved);
-            display.title = resolved;
-        }
     }
 
     function applyModeInputs(values) {
@@ -1436,6 +1528,7 @@
         agentField?.classList.toggle('hidden', commandMode !== 'agent');
         customAgentField?.classList.toggle('hidden', !(commandMode === 'agent' && selectedAgent === 'other'));
         browserField?.classList.toggle('hidden', commandMode !== 'browser');
+        syncTerminalAgentAutoModeState(row, commandMode, selectedAgent);
         if (commandMode !== 'agent') {
             clearAgentPreflight(row);
         }
@@ -1446,6 +1539,28 @@
             if (powershellCheckbox) powershellCheckbox.checked = false;
         }
         syncTerminalWslState(row);
+    }
+
+    function syncTerminalAgentAutoModeState(row, commandMode, selectedAgent) {
+        const autoField = row.querySelector('.t-agent-auto-field');
+        if (!autoField) {
+            return;
+        }
+        const flag = agentAutoModeFlag(selectedAgent);
+        const available = commandMode === 'agent' && Boolean(flag);
+        autoField.classList.toggle('hidden', !available);
+        const help = autoField.querySelector('.t-agent-auto-help');
+        if (help) {
+            help.textContent = available
+                ? `Launches as "${selectedAgent} ${flag}".`
+                : '';
+        }
+        if (!available) {
+            const checkbox = autoField.querySelector('.t-agent-auto-mode');
+            if (checkbox) {
+                checkbox.checked = false;
+            }
+        }
     }
 
     function resetTerminalCommandOnModeChange(row, nextMode) {
@@ -1461,6 +1576,8 @@
         if (previousMode === 'agent' && nextMode !== 'agent') {
             if (agentSelect) agentSelect.value = '';
             if (customAgentInput) customAgentInput.value = '';
+            const autoModeCheckbox = row.querySelector('.t-agent-auto-mode');
+            if (autoModeCheckbox) autoModeCheckbox.checked = false;
         }
     }
 
@@ -1760,12 +1877,13 @@
                     data-command-mode="${escHtml(commandUi.mode)}"
                     data-explorer-tree-open="${terminal.explorer_tree_open ? 'true' : 'false'}"
                     data-explorer-git-open="${terminal.explorer_git_open ? 'true' : 'false'}"
+                    data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
+                    data-explorer-active-tab="${escHtml(terminal.explorer_active_tab || '')}"
                 >
                     <div class="t-row-head">
                         <span class="t-badge">T${index + 1}</span>
                         <input class="t-title" type="text" value="${escHtml(terminal.title || `Terminal ${index + 1}`)}" placeholder="Terminal ${index + 1}" aria-label="Terminal ${index + 1} title">
                         <span class="t-status-dot"></span>
-                        <button type="button" class="t-menu-btn" title="Options">⋮</button>
                     </div>
                     <div class="t-fields">
                         <div class="field">
@@ -1801,6 +1919,13 @@
                                 </summary>
                                 <div class="agent-preflight-copy"></div>
                             </details>
+                            <label class="check-field t-agent-auto-field ${commandUi.mode === 'agent' && agentAutoModeFlag(commandUi.agentSelection) ? '' : 'hidden'}">
+                                <input class="t-agent-auto-mode" type="checkbox" ${commandUi.agentAutoMode ? 'checked' : ''} aria-label="Launch agent in auto mode">
+                                <span class="check-copy">
+                                    <strong>Auto mode</strong>
+                                    <span class="t-agent-auto-help"></span>
+                                </span>
+                            </label>
                         </div>
                         <div class="field t-agent-custom-field ${commandUi.mode === 'agent' && commandUi.agentSelection === 'other' ? '' : 'hidden'}">
                             <label>Custom Agent</label>
@@ -2393,6 +2518,84 @@
         }
     }
 
+    /* ── Restore previous workspace (feature 10.5) ──
+       The backend snapshots the workspace shape on every group change; after a
+       restart the launcher offers to replay it through the normal launch path.
+       Passwords are never persisted — restored SSH panes use key auth or fail
+       into the error placeholder (which has a Retry button). */
+    let restorableWorkspaceGroups = [];
+
+    async function checkRestorableWorkspace() {
+        const banner = document.getElementById('restoreWorkspaceBanner');
+        if (!banner) return;
+        const response = await fetch('/api/runtime-state');
+        const data = await response.json();
+        if (!response.ok || !data.restorable || !Array.isArray(data.groups) || !data.groups.length) {
+            return;
+        }
+        restorableWorkspaceGroups = data.groups;
+        const groupCount = data.groups.length;
+        const paneCount = data.groups.reduce(
+            (total, group) => total + (Array.isArray(group.sessions) ? group.sessions.length : 0),
+            0
+        );
+        const text = document.getElementById('restoreWorkspaceText');
+        if (text) {
+            text.textContent = `Previous workspace found — restore ${groupCount} session${groupCount === 1 ? '' : 's'} (${paneCount} pane${paneCount === 1 ? '' : 's'})? Live shells do not survive a restart; this relaunches the same layout.`;
+        }
+        banner.hidden = false;
+    }
+
+    function dismissRestoreBanner() {
+        const banner = document.getElementById('restoreWorkspaceBanner');
+        if (banner) banner.hidden = true;
+        restorableWorkspaceGroups = [];
+        fetch('/api/runtime-state', { method: 'DELETE' }).catch(() => {});
+    }
+
+    async function restorePreviousWorkspace() {
+        if (!restorableWorkspaceGroups.length) return;
+        const button = document.getElementById('restoreWorkspaceBtn');
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Restoring…';
+        }
+        let restored = 0;
+        try {
+            for (const group of restorableWorkspaceGroups) {
+                const response = await fetch('/api/sessions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sessions: Array.isArray(group.sessions) ? group.sessions : [],
+                        connection_mode: group.connection_mode,
+                        layout: group.layout,
+                        workspace_layout: group.workspace_layout,
+                        surface_mode: group.surface_mode,
+                        session_name: group.name,
+                        saved_session_id: group.saved_session_id || ''
+                    })
+                });
+                if (response.ok) restored += 1;
+            }
+            document.getElementById('restoreWorkspaceBanner')?.setAttribute('hidden', '');
+            restorableWorkspaceGroups = [];
+            if (restored > 0) {
+                showMessage(`Restored ${restored} session${restored === 1 ? '' : 's'} from the previous workspace.`, 'success');
+                await viewActiveTerminals({ preventDefault: () => {} });
+            } else {
+                showMessage('Could not restore the previous workspace.', 'error');
+            }
+        } catch (error) {
+            showMessage(`Workspace restore failed: ${error.message}`, 'error');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = 'Restore';
+            }
+        }
+    }
+
     async function launchSessions() {
         const config = collectFormConfig();
         const button = document.getElementById('launchBtn');
@@ -2439,6 +2642,12 @@
                     explorer_git_open: terminal.startup_mode === 'explorer'
                         ? Boolean(terminal.explorer_git_open)
                         : false,
+                    explorer_open_tabs: terminal.startup_mode === 'explorer' && Array.isArray(terminal.explorer_open_tabs)
+                        ? terminal.explorer_open_tabs
+                        : [],
+                    explorer_active_tab: terminal.startup_mode === 'explorer'
+                        ? (terminal.explorer_active_tab || '')
+                        : '',
                     startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
                         ? terminal.startup_mode
                         : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
@@ -2468,8 +2677,7 @@
             return;
         }
 
-        button.disabled = true;
-        button.textContent = 'Launching...';
+        setLaunchButtonLoading(button, true);
 
         try {
             const response = await fetch('/api/sessions', {
@@ -2518,14 +2726,23 @@
                     } else {
                         window.open(targetUrl, 'gridvibe-sessions');
                     }
-                    button.disabled = false;
-                    button.textContent = 'Launch Terminals';
+                    setLaunchButtonLoading(button, false);
                 }, 450);
             }
         } catch (error) {
-            button.disabled = false;
-            button.textContent = 'Launch Terminals';
+            setLaunchButtonLoading(button, false);
             showMessage(`Launch failed: ${error.message}`, 'error');
+        }
+    }
+
+    /* Toggle the launch CTA's loading state via classes instead of rewriting
+       the button's markup, so the label/arrow structure survives a launch. */
+    function setLaunchButtonLoading(button, loading) {
+        button.disabled = loading;
+        button.classList.toggle('loading', loading);
+        const label = button.querySelector('.action-btn-label');
+        if (label) {
+            label.textContent = loading ? 'Launching…' : 'Launch Workspace';
         }
     }
 
@@ -2539,6 +2756,7 @@
     loadPersistedConfig(true);
     loadAppSettings().catch(() => {});
     loadVoicePrefs().catch(() => {});
+    checkRestorableWorkspace().catch(() => {});
     updateHeaderBadges();
 
     function updateHeaderBadges() {

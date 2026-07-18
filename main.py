@@ -21,7 +21,7 @@ from logging.handlers import RotatingFileHandler
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from gridvibe_version import __version__ as _GRIDVIBE_VERSION
-from web.api import app, load_config, session_manager, socketio
+from web.api import load_config, resolve_server_settings, run_server, session_manager
 
 __version__ = _GRIDVIBE_VERSION
 
@@ -30,13 +30,32 @@ MAX_LOG_SIZE = 2 * 1024 * 1024  # 2 MB per file
 MAX_LOG_BACKUPS = 10
 
 # Matches reconciliation GETs from the terminals page (push-triggered status
-# refreshes plus its slow fallback poll) that would otherwise clutter the log
-_POLL_RE = re.compile(r'"GET /api/(sessions|session-groups)(\?[^ ]*)? HTTP/[\d.]+" 2\d\d')
+# refreshes plus its slow fallback poll) and the voice-status checks fired on
+# window focus that would otherwise clutter the log
+_POLL_RE = re.compile(
+    r'"GET /api/(sessions|session-groups|voice-status)(\?[^ ]*)? HTTP/[\d.]+" 2\d\d'
+)
 
 
 class _SuppressPollLogs(logging.Filter):
     def filter(self, record):
         return not _POLL_RE.search(record.getMessage())
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+class _StripAnsiFilter(logging.Filter):
+    """Strip ANSI colour codes (e.g. werkzeug's coloured status lines) so the
+    log file stays grep-friendly. Attached to the file handler only, and the
+    console handler emits first, so terminal output keeps its colours."""
+
+    def filter(self, record):
+        message = record.getMessage()
+        if "\x1b[" in message:
+            record.msg = _ANSI_RE.sub("", message)
+            record.args = None
+        return True
 
 
 def setup_logging(debug: bool = False):
@@ -61,6 +80,7 @@ def setup_logging(debug: bool = False):
         log_file, maxBytes=MAX_LOG_SIZE, backupCount=MAX_LOG_BACKUPS, encoding="utf-8"
     )
     file_handler.setFormatter(fmt)
+    file_handler.addFilter(_StripAnsiFilter())
 
     root = logging.getLogger()
     root.setLevel(level)
@@ -80,32 +100,34 @@ def main():
         description="GridVibe - Multi-Session Terminal Manager"
     )
     parser.add_argument(
-        "--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)"
+        "--host", default=None, help="Host to bind to (default: 127.0.0.1)"
     )
     parser.add_argument(
-        "--port", type=int, default=5050, help="Port to bind to (default: 5050)"
+        "--port", type=int, default=None, help="Port to bind to (default: 5050)"
     )
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument(
+        "--debug",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable debug mode",
+    )
     parser.add_argument(
         "--config", default="config.json", help="Path to configuration file"
     )
 
     args = parser.parse_args()
 
+    # Load configuration; explicit CLI flags win over config values
+    config = load_config(args.config) if os.path.exists(args.config) else {}
+    host, port, debug = resolve_server_settings(
+        config, host=args.host, port=args.port, debug=args.debug
+    )
+
     # Setup logging
-    setup_logging(args.debug)
+    setup_logging(debug)
     logger = logging.getLogger(__name__)
-
-    # Load configuration
-    config = {}
-    if os.path.exists(args.config):
-        config = load_config(args.config)
+    if config:
         logger.info(f"Loaded configuration from {args.config}")
-
-    # Get settings from config or args
-    host = config.get("server", {}).get("host", args.host)
-    port = config.get("server", {}).get("port", args.port)
-    debug = config.get("server", {}).get("debug", args.debug)
 
     # Print startup banner
     logger.info("=" * 50)
@@ -117,7 +139,7 @@ def main():
 
     # Run the server
     try:
-        socketio.run(app, host=host, port=port, debug=debug, allow_unsafe_werkzeug=True)
+        run_server(host, port, debug)
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         session_manager.close_all_sessions()

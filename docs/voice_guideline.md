@@ -78,7 +78,6 @@ Current committed defaults in `default_config.json` are:
     "enabled": true,
     "engine": "whisper",
     "vosk_service_url": "ws://localhost:2700",
-    "vosk_service_port": 2700,
     "vosk_model": "vosk-model-en-us-0.22",
     "whisper_model": "base",
     "whisper_device": "cpu",
@@ -89,6 +88,10 @@ Current committed defaults in `default_config.json` are:
 ```
 
 Important implication: the repo default is currently `whisper`, not `vosk`.
+
+`vosk_service_url` is the single source of truth for the Vosk service address: both the
+API and `services/vosk_service.py` derive the port from it. The former `vosk_service_port`
+key is deprecated — it is only honoured (with a warning) when the URL carries no port.
 
 Machine-level voice config is surfaced in the launcher app settings modal and normalized in `web/api.py`.
 

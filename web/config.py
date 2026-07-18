@@ -11,7 +11,7 @@ import logging
 import os
 import threading
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from web.paths import BASE_DIR
 
@@ -20,6 +20,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = os.path.join(BASE_DIR, "default_config.json")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 _config_lock = threading.RLock()
+
+HOST_KEY_POLICY_OPTIONS = ("auto-add", "known-hosts", "strict")
+
+# Bounds for launcher-editable terminal settings (ISSUE-2026-029). The App
+# Settings write path and RuntimeConfig.refresh() share these so a hand-edited
+# config.json and an API update normalize identically.
+TERMINAL_FONT_SIZE_MIN = 6
+TERMINAL_FONT_SIZE_MAX = 48
+TERMINAL_FONT_FAMILY_MAX_LENGTH = 160
+MAX_SESSIONS_MIN = 1
+MAX_SESSIONS_MAX = 16
+DEFAULT_TERMINAL_FONT_FAMILY = "Consolas, Monaco, 'Courier New', monospace"
 
 WHISPER_MODEL_OPTIONS = {
     "tiny.en",
@@ -114,6 +126,28 @@ def save_config(config: Dict[str, Any], config_path: Optional[str] = None):
             raise
 
 
+def resolve_server_settings(
+    config: Dict[str, Any],
+    *,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    debug: Optional[bool] = None,
+) -> Tuple[str, int, bool]:
+    """Resolve the server host/port/debug settings for an entry point.
+
+    Explicit CLI flags (non-None arguments) beat `config.json` values, which
+    beat the built-in defaults — the conventional precedence (finding 4.7).
+    Entry points pass ``None`` for flags the user did not supply.
+    """
+    server_config = config.get("server", {}) if isinstance(config, dict) else {}
+    if not isinstance(server_config, dict):
+        server_config = {}
+    resolved_host = host if host is not None else server_config.get("host", "127.0.0.1")
+    resolved_port = port if port is not None else server_config.get("port", 5050)
+    resolved_debug = debug if debug is not None else server_config.get("debug", False)
+    return str(resolved_host), int(resolved_port), bool(resolved_debug)
+
+
 def _normalize_surface_mode(value: Any, default: str = "normal") -> str:
     """Normalize workspace chrome density for terminal session windows."""
     normalized = str(value or "").strip().lower()
@@ -132,7 +166,10 @@ class RuntimeConfig:
     def __init__(self):
         self.app_config: Dict[str, Any] = {}
         self.ssh_config: Dict[str, Any] = {}
+        self.ssh_host_key_policy = "auto-add"
         self.max_sessions = 4
+        self.terminal_font_size = 14
+        self.terminal_font_family = "Consolas, Monaco, 'Courier New', monospace"
         self.app_theme = "system"
         self.app_surface_mode = "normal"
         self.voice_enabled = True
@@ -150,7 +187,28 @@ class RuntimeConfig:
         """Reload the config-backed settings from disk."""
         self.app_config = load_config()
         self.ssh_config = self.app_config.get("ssh", {})
-        self.max_sessions = self.app_config.get("terminal", {}).get("max_sessions", 4)
+        host_key_policy = str(self.ssh_config.get("host_key_policy", "auto-add")).strip().lower()
+        if host_key_policy not in HOST_KEY_POLICY_OPTIONS:
+            host_key_policy = "auto-add"
+        self.ssh_host_key_policy = host_key_policy
+        terminal_config = self.app_config.get("terminal", {})
+        try:
+            self.max_sessions = max(
+                MAX_SESSIONS_MIN,
+                min(MAX_SESSIONS_MAX, int(terminal_config.get("max_sessions", 4))),
+            )
+        except (ValueError, TypeError):
+            self.max_sessions = 4
+        try:
+            self.terminal_font_size = max(
+                TERMINAL_FONT_SIZE_MIN,
+                min(TERMINAL_FONT_SIZE_MAX, int(terminal_config.get("font_size", 14))),
+            )
+        except (ValueError, TypeError):
+            self.terminal_font_size = 14
+        self.terminal_font_family = str(
+            terminal_config.get("font_family", DEFAULT_TERMINAL_FONT_FAMILY)
+        ).strip() or DEFAULT_TERMINAL_FONT_FAMILY
         appearance_config = self.app_config.get("appearance", {})
         app_theme = str(appearance_config.get("theme", "system")).strip().lower()
         if app_theme not in {"system", "light", "dark"}:

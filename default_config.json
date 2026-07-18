@@ -5,15 +5,13 @@
     "debug": false
   },
   "ssh": {
-    "default_username": "root",
     "default_port": 22,
     "connection_timeout": 30,
-    "keepalive_interval": 60
+    "keepalive_interval": 60,
+    "host_key_policy": "auto-add"
   },
   "terminal": {
     "max_sessions": 8,
-    "default_rows": 24,
-    "default_cols": 80,
     "font_family": "Consolas, Monaco, 'Courier New', monospace",
     "font_size": 14
   },
@@ -30,7 +28,6 @@
     "enabled": true,
     "engine": "whisper",
     "vosk_service_url": "ws://localhost:2700",
-    "vosk_service_port": 2700,
     "vosk_model": "vosk-model-en-us-0.22",
     "whisper_model": "base",
     "whisper_device": "cpu",

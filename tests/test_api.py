@@ -15,10 +15,16 @@ from unittest.mock import ANY, MagicMock, patch
 
 import api
 from gridvibe_version import __version__
+from web import agents as web_agents
+from web import app as web_app
 from web import config as web_config
 from web import explorer as web_explorer
 from web import hostkeys as web_hostkeys
+from web import runtime_state as web_runtime_state
+from web import saved_sessions as web_saved_sessions
 from web import selfupdate
+from web import terminal_io as web_terminal_io
+from web import voice as web_voice
 
 
 class FakeSftp:
@@ -118,7 +124,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.config_path_patch.start()
         self.saved_sessions_path = Path(self.temp_dir.name) / "saved_sessions.json"
         self.saved_sessions_patch = patch.object(
-            api,
+            web_saved_sessions,
             "SAVED_SESSIONS_PATH",
             str(self.saved_sessions_path),
         )
@@ -141,7 +147,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             api._vosk_ws_connections.clear()
         with api._whisper_audio_lock:
             api._whisper_audio_buffers.clear()
-        api._whisper_model_instance = None
+        web_voice._whisper_model_instance = None
         cfg = api.load_config()
         self._saved_appearance = json.loads(json.dumps(cfg.get("appearance", {})))
         self._saved_voice_input = json.loads(json.dumps(cfg.get("voice_input", {})))
@@ -210,7 +216,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             api._vosk_ws_connections.clear()
         with api._whisper_audio_lock:
             api._whisper_audio_buffers.clear()
-        api._whisper_model_instance = None
+        web_voice._whisper_model_instance = None
         cfg = api.load_config()
         cfg["appearance"] = self._saved_appearance
         cfg["voice_input"] = self._saved_voice_input
@@ -661,6 +667,93 @@ class ApiRoutesTestCase(unittest.TestCase):
         close_plan_end = html.index("function buildCloseTerminalPlan(index)", close_plan_start)
         self.assertNotIn("fixedLayoutSlotRects(", html[close_plan_start:close_plan_end])
 
+    def test_terminals_page_close_prefers_single_neighbor_expansion(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn(
+            "function terminalCloseRectsForExpandingContacts(plan, side, contactsToExpand)",
+            html,
+        )
+        side_group_start = html.index("function buildTerminalCloseRectsForSideGroup(plan, sideGroup)")
+        side_group_end = html.index("function buildTerminalCloseRectsBySessionId(plan)", side_group_start)
+        side_group_html = html[side_group_start:side_group_end]
+        # The single greatest-shared-border contact is attempted before the whole
+        # side group, so a close never resizes more neighbours than required.
+        self.assertIn(
+            "const single = terminalCloseRectsForExpandingContacts(plan, sideGroup.side, [singleContact]);",
+            side_group_html,
+        )
+        self.assertIn("if (singleContact && sideGroup.entries.length > 1) {", side_group_html)
+        self.assertIn(
+            "return terminalCloseRectsForExpandingContacts(plan, sideGroup.side, sideGroup.entries);",
+            side_group_html,
+        )
+        # The single-pane result is still validated by the same overlap + area
+        # invariants inside the shared helper.
+        expand_start = html.index("function terminalCloseRectsForExpandingContacts(plan, side, contactsToExpand)")
+        expand_end = html.index("function buildTerminalCloseRectsForSideGroup(plan, sideGroup)", expand_start)
+        expand_html = html[expand_start:expand_end]
+        self.assertIn("splitRectsOverlap(nextEntries[leftIndex].rect, nextEntries[rightIndex].rect)", expand_html)
+        self.assertIn("if (nextArea !== previousArea + splitRectArea(plan.closedRect)) {", expand_html)
+
+    def test_terminals_page_close_preserves_split_track_weights(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Both close paths carry the pre-close track weights into the restore.
+        self.assertEqual(
+            html.count("splitColumnWeights: cloneSplitTrackWeights(splitColumnWeights),"),
+            2,
+        )
+        self.assertEqual(
+            html.count("splitRowWeights: cloneSplitTrackWeights(splitRowWeights),"),
+            2,
+        )
+        # initialLoad re-applies them onto the reflowed grid so proportions survive.
+        self.assertIn(
+            "splitColumnWeights = cloneSplitTrackWeights(pendingRestore.splitColumnWeights);",
+            html,
+        )
+        self.assertIn(
+            "splitRowWeights = cloneSplitTrackWeights(pendingRestore.splitRowWeights);",
+            html,
+        )
+
+    def test_terminals_page_close_preserves_sibling_pane_state(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("let pendingCloseClientState = null;", html)
+        self.assertIn("function captureSurvivingPaneClientState(closingSessionId)", html)
+        self.assertIn("function restoreExplorerPaneFromClose(index, snapshot)", html)
+        # The close path captures surviving pane state before the forced rebuild.
+        self.assertIn(
+            "stateBySessionId: captureSurvivingPaneClientState(plan.sessionId),",
+            html,
+        )
+        # Explorer siblings keep tree/Git sidebars and open tabs; browser siblings
+        # keep their URL — all overlaid onto the fetched session objects.
+        self.assertIn("entry.explorer_tree_open = snapshot.explorer_tree_open;", html)
+        self.assertIn("entry.explorer_git_open = snapshot.explorer_git_open;", html)
+        self.assertIn("entry.explorer_open_tabs = snapshot.explorer_open_tabs;", html)
+        self.assertIn("entry.explorer_active_tab = snapshot.explorer_active_tab;", html)
+        self.assertIn("entry.initial_command = snapshot.browser_url;", html)
+        # Close-affected explorer panes restore through the viewer, not a listing.
+        self.assertIn("restoreExplorerPaneFromClose(i, closeSnapshot);", html)
+        self.assertIn(
+            "openExplorerFile(index, snapshot.explorer_preview_path, { pinned: false, showLoading: false });",
+            html,
+        )
+        # The snapshot is only consumed for its own close-driven rebuild.
+        self.assertIn(
+            "const closeClientState = pendingCloseClientState?.groupId === requestedGroupId",
+            html,
+        )
+
     def test_terminals_page_exposes_session_mode_switch_controls(self):
         response = self.client.get("/terminals")
 
@@ -915,7 +1008,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         self.assertIn("function renderExplorerDirectoryOpenError(index, message)", html)
         self.assertIn("renderExplorerDirectoryRows(index);", html)
-        self.assertIn("list.prepend(notice);", html)
+        self.assertIn("viewer.prepend(notice);", html)
         self.assertIn("const wasDirectoryOpen = pane._explorerMode === 'directory';", html)
         self.assertIn("if (showLoading && !wasDirectoryOpen)", html)
         self.assertIn("renderExplorerDirectoryOpenError(index, error.message || 'Failed to open file.');", html)
@@ -982,7 +1075,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorer-diff-split", html)
         self.assertIn("split-diff", html)
         self.assertIn("new URLSearchParams({", html)
-        self.assertIn("mode: commit ? 'commit' : 'head'", html)
+        self.assertIn("const diffMode = commit ? 'commit' : (pane?._explorerDiffMode || 'head');", html)
+        self.assertIn("mode: diffMode", html)
         self.assertIn("params.set('commit', commit);", html)
         self.assertIn("${explorerGitBadgeHtml(entry.git)}", html)
         self.assertIn("data-explorer-git-stage", html)
@@ -1017,6 +1111,96 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
         self.assertIn(".filter(entry => !entry.deleted)", html)
+
+    def test_terminals_page_explorer_uses_tabbed_file_viewer(self):
+        """ISSUE-2026-014: main pane is a persistent tabbed read-only viewer."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Per-pane tab model: one permanent Preview tab plus pinned tabs.
+        self.assertIn("const EXPLORER_PREVIEW_TAB_ID = '__preview__';", html)
+        self.assertIn("function ensureExplorerTabState(pane)", html)
+        self.assertIn("function renderExplorerTabStrip(index)", html)
+        self.assertIn("function activateExplorerTab(index, id)", html)
+        self.assertIn("function closeExplorerTab(index, id)", html)
+        self.assertIn("function openExplorerViewer(index)", html)
+        self.assertIn(
+            "function explorerAssignOpenTab(pane, path, { pinned = false, tab = '' } = {})",
+            html,
+        )
+        # The permanent Preview tab cannot be closed.
+        self.assertIn("if (!pane || id === EXPLORER_PREVIEW_TAB_ID) {", html)
+        # Empty state before any file is selected.
+        self.assertIn("Select a file to view", html)
+        # Stable shell: tab strip above the file header/viewer body.
+        self.assertIn('class="explorer-tab-strip"', html)
+        self.assertIn('id="explorer-viewer-${index}"', html)
+        self.assertIn("data-explorer-tab-open", html)
+        self.assertIn("data-explorer-tab-close", html)
+        # A `+` control on each tree file row opens a pinned tab (event-isolated).
+        self.assertIn("data-explorer-tree-open-tab", html)
+        self.assertIn(
+            "openExplorerFile(index, button.dataset.explorerTreeOpenTab || '', { pinned: true });",
+            html,
+        )
+        # First show routes through the viewer, not a directory listing.
+        self.assertIn("return openExplorerViewer(index);", html)
+        # Styling hooks (token-driven, no palette literals).
+        self.assertIn(".explorer-tab-strip {", html)
+        self.assertIn(".explorer-empty-viewer {", html)
+
+    def test_terminals_page_explorer_markdown_links_open_tabs(self):
+        """ISSUE-2026-016: Markdown preview links resolve and open explorer tabs."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function wireExplorerMarkdownLinks(index, preview)", html)
+        self.assertIn("function explorerClassifyLink(href)", html)
+        self.assertIn("function explorerResolveRelativePath(baseFilePath, href)", html)
+        self.assertIn("function explorerScrollPreviewToHeading(preview, fragment)", html)
+        # Relative Markdown links open as a pinned tab.
+        self.assertIn("openExplorerFile(index, resolved.path, { pinned: true })", html)
+        # Fragment-only links scroll within the current preview.
+        self.assertIn("explorerScrollPreviewToHeading(preview, info.fragment);", html)
+        # External links open isolated and never navigate the session page away.
+        self.assertIn("window.open(info.href, '_blank', 'noopener,noreferrer');", html)
+        # mailto is left to the default handler.
+        self.assertIn("if (info.type === 'mailto') {", html)
+        # Traversal above the Explorer root is rejected.
+        self.assertIn("if (!segments.length) {", html)
+        self.assertIn("if (segment.includes(':')) {", html)
+        # Wired into both the full render and in-place refresh preview paths.
+        self.assertEqual(html.count("wireExplorerMarkdownLinks(index, preview);"), 2)
+
+    def test_terminals_page_explorer_persists_open_tabs(self):
+        """ISSUE-2026-015: open tabs serialize into and restore from a session."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function explorerSerializeTabs(pane)", html)
+        self.assertIn("function persistExplorerTabsToSession(index)", html)
+        self.assertIn("function restoreExplorerPersistedTabs(index)", html)
+        self.assertIn("explorer_open_tabs: explorerTabs.open_tabs,", html)
+        self.assertIn("explorer_active_tab: explorerTabs.active_tab,", html)
+        self.assertIn("Array.isArray(session.explorer_open_tabs)", html)
+        self.assertIn("restoreExplorerPersistedTabs(index);", html)
+        # Bounded pinned-tab count shared with the backend cap.
+        self.assertIn("const EXPLORER_MAX_PINNED_TABS = 12;", html)
+
+    def test_launcher_round_trips_explorer_open_tabs(self):
+        """ISSUE-2026-015: launcher carries open tabs through without editing them."""
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function parseExplorerOpenTabsDataset(value)", html)
+        self.assertIn("data-explorer-open-tabs=", html)
+        self.assertIn("data-explorer-active-tab=", html)
+        self.assertIn("explorer_open_tabs: commandMode === 'explorer'", html)
+        self.assertIn("explorer_open_tabs: terminal.startup_mode === 'explorer'", html)
 
     def test_terminals_page_explorer_sidebar_supports_tree_and_git_together(self):
         response = self.client.get("/terminals")
@@ -1063,6 +1247,56 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn('data-explorer-source-toggle="${index}"', html)
         self.assertNotIn("function setExplorerMarkdownSourceCollapsed", html)
         self.assertNotIn("pane._explorerSourceCollapsed", html)
+
+    def test_terminals_page_markdown_preview_hierarchy_and_callouts(self):
+        """ISSUE-2026-017: preview CSS gives headings/callouts a token-driven theme."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Full heading hierarchy is styled (not just h1-h3 as before).
+        self.assertIn(".explorer-markdown-preview h6 {", html)
+        # Callout blocks and their title row are styled.
+        self.assertIn(".explorer-markdown-preview .md-callout {", html)
+        self.assertIn(".explorer-markdown-preview .md-callout-title {", html)
+        self.assertIn(".explorer-markdown-preview .md-callout-note {", html)
+        self.assertIn(".explorer-markdown-preview .md-callout-caution {", html)
+        # Callout accents come from per-theme tokens, not inline palette literals.
+        self.assertIn("--md-callout-accent: var(--explorer-callout-note);", html)
+        self.assertIn("--explorer-callout-note: #4493f8;", html)
+        self.assertIn("--explorer-callout-caution: #cf222e;", html)
+
+    def test_terminals_page_markdown_appearance_presets(self):
+        """ISSUE-2026-030: preview offers persisted preset/font appearance controls."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Appearance model + popover control functions exist.
+        self.assertIn("function explorerMarkdownAppearance()", html)
+        self.assertIn("function setExplorerMarkdownAppearance(patch)", html)
+        self.assertIn("function applyExplorerMarkdownAppearanceToElement(preview, appearance)", html)
+        self.assertIn("function showExplorerMarkdownAppearanceMenu(anchor)", html)
+        # Bounded allowlists and persisted preference keys.
+        self.assertIn("const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast'];", html)
+        self.assertIn("const EXPLORER_MD_FONTS = ['system', 'serif', 'mono'];", html)
+        self.assertIn("const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';", html)
+        self.assertIn("const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';", html)
+        # Header control is present and gated to previewable files.
+        self.assertIn('data-explorer-md-appearance="${index}"', html)
+        # Appearance is applied idempotently on both preview render paths.
+        self.assertEqual(
+            html.count(
+                "applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());"
+            ),
+            2,
+        )
+        # Preset/font classes and their token-driven surfaces exist in CSS.
+        self.assertIn(".explorer-markdown-preview.md-preset-paper {", html)
+        self.assertIn(".explorer-markdown-preview.md-preset-contrast {", html)
+        self.assertIn(".explorer-markdown-preview.md-font-serif {", html)
+        self.assertIn("--md-preview-surface: var(--md-preset-paper-bg);", html)
+        self.assertIn("--md-preset-paper-bg: #f4ecd8;", html)
 
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
@@ -1250,8 +1484,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('title="Enter fullscreen"', html)
         self.assertIn('aria-label="Enter fullscreen"', html)
         self.assertIn('aria-pressed="false"', html)
-        self.assertIn('>&#9974;</button>', html)
-        self.assertIn("button.innerHTML = active ? '&#10005;' : '&#9974;';", html)
+        self.assertIn('class="fullscreen-icon"', html)
+        self.assertIn("button.innerHTML = active ? FULLSCREEN_EXIT_ICON : FULLSCREEN_ENTER_ICON;", html)
         self.assertIn("button.title = label;", html)
         self.assertIn("button.setAttribute('aria-label', label);", html)
         self.assertIn("button.setAttribute('aria-pressed', active ? 'true' : 'false');", html)
@@ -1282,7 +1516,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function setupAppConfigUpdateListeners()", html)
         self.assertIn("setupAppConfigUpdateListeners();", html)
         self.assertIn("socket.on('app_config_updated'", html)
-        self.assertIn("applyAppConfigSurfaceMode(message || {});", html)
+        self.assertIn("applyAppConfigUpdate(message || {});", html)
 
     def test_terminals_page_exposes_collapsible_topbar(self):
         response = self.client.get("/terminals")
@@ -1462,8 +1696,8 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_voice_status_endpoint_reports_missing_whisper_dependency(self):
         with patch.object(api.runtime_config, "voice_engine", "whisper"), patch.object(
-            api, "WhisperModel", None
-        ), patch.object(api, "np", object()):
+            web_voice, "WhisperModel", None
+        ), patch.object(web_voice, "np", object()):
             response = self.client.get("/api/voice-status")
 
         self.assertEqual(response.status_code, 200)
@@ -1522,8 +1756,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         emit.assert_called_with(
             "app_config_updated",
             {
+                "appearance": {
+                    "theme": "light",
+                },
                 "workspace": {
                     "surface_mode": "max",
+                },
+                "terminal": {
+                    "font_family": api.runtime_config.terminal_font_family,
+                    "font_size": api.runtime_config.terminal_font_size,
                 },
                 "timestamp": ANY,
             },
@@ -1546,7 +1787,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_agent_preflight_endpoint_returns_installed_when_binary_exists(self):
         with patch.object(
-            api,
+            web_agents,
             "_detect_agent_binary",
             return_value={
                 "found": True,
@@ -1574,7 +1815,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_agent_preflight_endpoint_returns_missing_with_install_guidance(self):
         with patch.object(
-            api,
+            web_agents,
             "_detect_agent_binary",
             return_value={
                 "found": False,
@@ -1583,7 +1824,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "error": "",
             },
         ), patch.object(
-            api,
+            web_agents,
             "_select_install_option",
             return_value=(
                 {"label": "npm", "command": "npm install -g @kilocode/cli", "manual_only": False},
@@ -1608,7 +1849,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_agent_preflight_endpoint_treats_wsl_install_prerequisites_as_advisory(self):
         with patch.object(
-            api,
+            web_agents,
             "_detect_agent_binary",
             return_value={
                 "found": False,
@@ -1617,14 +1858,14 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "error": "",
             },
         ), patch.object(
-            api,
+            web_agents,
             "_select_install_option",
             return_value=(
                 {"label": "npm", "command": "npm install -g @kilocode/cli", "manual_only": False},
                 ["npm is required for the Linux or WSL install path."],
             ),
         ), patch.object(
-            api,
+            web_agents,
             "_resolve_agent_target",
             return_value={
                 "connection_mode": "wsl",
@@ -1655,7 +1896,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_agent_preflight_endpoint_returns_manual_install_for_detect_only_ssh_targets(self):
         with patch.object(
-            api,
+            web_agents,
             "_detect_agent_binary",
             return_value={
                 "found": False,
@@ -1686,7 +1927,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_agent_preflight_endpoint_reuses_recent_local_detection(self):
         with patch.object(
-            api,
+            web_agents,
             "_detect_agent_binary",
             return_value={
                 "found": True,
@@ -1695,7 +1936,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "error": "",
             },
         ) as detect_agent_binary, patch.object(
-            api,
+            web_agents,
             "_select_install_option",
             return_value=({}, []),
         ):
@@ -1747,8 +1988,8 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_detect_wsl_command_accepts_alias_probe_output(self):
         completed = SimpleNamespace(returncode=0, stdout="__TF_FOUND__\n__TF_KIND__:alias\n__TF_PATH__:\n__TF_HEAD__:\n", stderr="")
 
-        with patch.object(api.os, "name", "nt"), patch.object(api, "_find_wsl_executable", return_value="wsl.exe"), patch.object(
-            api.subprocess,
+        with patch.object(api.os, "name", "nt"), patch.object(web_agents, "_find_wsl_executable", return_value="wsl.exe"), patch.object(
+            web_agents.subprocess,
             "run",
             return_value=completed,
         ) as run_mock:
@@ -1776,7 +2017,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             AutoAddPolicy=MagicMock(return_value=object()),
         )
 
-        with patch.object(api, "paramiko", fake_paramiko):
+        with patch.object(web_agents, "paramiko", fake_paramiko):
             detected = api._detect_ssh_command(
                 "copilot",
                 {"host": "example.com", "username": "ubuntu", "password": "", "port": 22},
@@ -1818,7 +2059,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         }
 
         with patch.object(
-            api,
+            web_agents,
             "_agent_preflight_payload",
             return_value={
                 "status": "check_failed",
@@ -1846,8 +2087,8 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_ssh_ping_endpoint_returns_icmp_success(self):
         completed = SimpleNamespace(returncode=0, stdout="Reply from 10.0.0.20: time=12.3 ms", stderr="")
 
-        with patch.object(api.shutil, "which", return_value="/bin/ping"), patch.object(
-            api.subprocess,
+        with patch.object(web_agents.shutil, "which", return_value="/bin/ping"), patch.object(
+            web_agents.subprocess,
             "run",
             return_value=completed,
         ) as run_command:
@@ -1873,8 +2114,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         connection.__enter__.return_value = connection
         connection.__exit__.return_value = False
 
-        with patch.object(api.shutil, "which", return_value=None), patch.object(
-            api.socket,
+        with patch.object(web_agents.shutil, "which", return_value=None), patch.object(
+            web_agents.socket,
             "create_connection",
             return_value=connection,
         ) as create_connection:
@@ -2192,7 +2433,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         }
 
         with patch.object(api.socketio, "start_background_task") as replacement_start_task, patch.object(
-            api,
+            web_terminal_io,
             "_close_ssh_connection",
             wraps=api._close_ssh_connection,
         ) as close_connection:
@@ -3163,6 +3404,230 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("inside the configured root", response.get_json()["error"])
 
+    def _init_committed_repo(self, name: str = "repo") -> Path:
+        repo_dir = Path(self.temp_dir.name) / name
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        return repo_dir
+
+    def test_explorer_git_diff_distinguishes_worktree_and_staged(self):
+        # ISSUE-2026-023: a partially staged file must expose its worktree hunks
+        # and its staged hunks separately, never mixed.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nSTAGED\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        readme.write_text("# Project\nSTAGED\nWORKTREE\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        worktree = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "worktree"},
+        )
+        staged = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "staged"},
+        )
+
+        self.assertEqual(worktree.status_code, 200)
+        self.assertEqual(staged.status_code, 200)
+        worktree_payload = worktree.get_json()
+        staged_payload = staged.get_json()
+        self.assertEqual(worktree_payload["mode"], "worktree")
+        self.assertIn("+WORKTREE", worktree_payload["diff"])
+        self.assertNotIn("+STAGED", worktree_payload["diff"])
+        self.assertEqual(staged_payload["mode"], "staged")
+        self.assertIn("+STAGED", staged_payload["diff"])
+        self.assertNotIn("+WORKTREE", staged_payload["diff"])
+
+    def test_explorer_git_revert_discards_worktree_changes(self):
+        # ISSUE-2026-018: discard an unstaged tracked edit.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\n\nunwanted\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "README.md"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\n")
+        paths = {change["path"] for change in response.get_json()["changes"]}
+        self.assertNotIn("README.md", paths)
+
+    def test_explorer_git_revert_preserves_staged_version(self):
+        # ISSUE-2026-018: reverting a partially staged file keeps its staged copy
+        # and only discards the later worktree edit.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nSTAGED\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        readme.write_text("# Project\nSTAGED\nWORKTREE\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "README.md"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\nSTAGED\n")
+        changes = {change["path"]: change for change in response.get_json()["changes"]}
+        self.assertEqual(changes["README.md"]["git"]["index_status"], "M")
+        self.assertEqual(changes["README.md"]["git"]["worktree_status"], ".")
+
+    def test_explorer_git_revert_restores_deleted_tracked_file(self):
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.unlink()
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "README.md"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(readme.exists())
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\n")
+
+    def test_explorer_git_revert_rejects_untracked_file(self):
+        repo_dir = self._init_committed_repo()
+        untracked = repo_dir / "scratch.txt"
+        untracked.write_text("keep me\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "scratch.txt"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("untracked", response.get_json()["error"].lower())
+        self.assertTrue(untracked.exists())
+
+    def test_explorer_git_revert_rejects_staged_only_file(self):
+        # Worktree already matches the index: nothing to discard, and staged
+        # content must never be touched.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nSTAGED\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "README.md"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no unstaged changes", response.get_json()["error"].lower())
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\nSTAGED\n")
+
+    def test_explorer_git_revert_rejects_path_outside_root(self):
+        repo_dir = self._init_committed_repo()
+        outside_file = Path(self.temp_dir.name) / "outside.txt"
+        outside_file.write_text("secret\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "../outside.txt"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("inside the configured root", response.get_json()["error"])
+        self.assertTrue(outside_file.exists())
+
+    def test_terminals_page_explorer_file_type_icons_are_present(self):
+        # ISSUE-2026-024
+        response = self.client.get("/terminals")
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function explorerFileTypeIconHtml(path, language", html)
+        self.assertIn("function explorerFileTypeCategory(path, language", html)
+        self.assertIn("EXPLORER_FILE_ICON_CATEGORY_BY_LANGUAGE", html)
+        self.assertIn("EXPLORER_FILE_ICON_GLYPHS", html)
+        self.assertIn('class="explorer-icon file type-${category}" aria-hidden="true"', html)
+        self.assertIn("|| EXPLORER_FILE_ICON_GLYPHS.doc", html)
+        # Rendered in the tree, Git and directory renderers.
+        self.assertIn("EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(entry.name || path)", html)
+        self.assertIn("EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(name || entry.path)", html)
+        self.assertIn("${explorerFileTypeIconHtml(path)}", html)
+        # Icon precedes the Git file name.
+        self.assertLess(
+            html.index("${explorerFileTypeIconHtml(path)}"),
+            html.index('class="explorer-diff-commit-file-path"'),
+        )
+        # Token-driven tints, no inline palette literals.
+        self.assertIn(".explorer-icon.type-code { color: var(--explorer-icon-code); }", html)
+        self.assertIn(".explorer-icon.type-doc { color: var(--explorer-file); }", html)
+        self.assertIn("--explorer-icon-code:", html)
+        self.assertIn("--explorer-icon-data:", html)
+
+    def test_terminals_page_explorer_copy_path_menu_is_present(self):
+        # ISSUE-2026-028
+        response = self.client.get("/terminals")
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("data-explorer-copy-path", html)
+        self.assertIn("function wireExplorerCopyPathMenu(panel, index)", html)
+        self.assertIn("function handleExplorerCopyPathMenu(event, index)", html)
+        self.assertIn("function showExplorerContextMenu(x, y, items)", html)
+        self.assertIn("function explorerJoinRootPath(root, relativePath)", html)
+        self.assertIn("label: 'Copy path'", html)
+        self.assertIn("label: 'Copy relative path'", html)
+        self.assertIn("_copyText(absolutePath || relativePath)", html)
+        self.assertIn("_copyText(relativePath)", html)
+        self.assertIn("function dismissExplorerContextMenu()", html)
+        self.assertIn("_explorerContextMenuKeydown", html)
+        self.assertIn("event.key === 'ArrowDown'", html)
+        self.assertIn("wireExplorerCopyPathMenu(panel, index);", html)
+        self.assertIn("#explorer-ctx-menu", html)
+
+    def test_terminals_page_explorer_git_rows_open_diff_view(self):
+        # ISSUE-2026-023
+        response = self.client.get("/terminals")
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function explorerGitOpenFile(index, path, diffMode = 'worktree')", html)
+        self.assertIn("openExplorerFile(index, path, { openDiff: true, diffMode: mode });", html)
+        self.assertIn("data-explorer-git-diff-mode", html)
+        self.assertIn("const diffMode = action === 'unstage' ? 'staged' : 'worktree';", html)
+        self.assertIn("button.dataset.explorerGitDiffMode || 'worktree'", html)
+        # Diff-mode is threaded through the shared open path.
+        self.assertIn("pane._explorerDiffMode = requestedDiffMode;", html)
+        self.assertIn("const diffMode = commit ? 'commit' : (pane?._explorerDiffMode || 'head');", html)
+        # Commit-history rows keep their own diff path; action buttons stay isolated.
+        self.assertIn("async function explorerGitOpenCommitDiff(index, path, commit)", html)
+        self.assertIn("explorerGitStageFile(index, button.dataset.explorerGitStage || '');", html)
+
+    def test_terminals_page_explorer_git_revert_controls_are_present(self):
+        # ISSUE-2026-018
+        response = self.client.get("/terminals")
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("data-explorer-git-revert", html)
+        self.assertIn("explorer-git-revert-btn", html)
+        self.assertIn("function explorerGitCanRevert(status)", html)
+        self.assertIn("['modified', 'deleted', 'renamed'].includes(status", html)
+        self.assertIn("action === 'stage' && explorerGitCanRevert(status)", html)
+        self.assertIn("async function explorerGitRevertFile(index, path)", html)
+        self.assertIn("explorerGitRevertFile(index, button.dataset.explorerGitRevert || '');", html)
+        self.assertIn("performExplorerGitAction(index, 'revert', { path })", html)
+        # Irreversible action uses the in-page confirm shell, not window.confirm.
+        self.assertIn("function openGenericConfirmModal(", html)
+        self.assertIn('id="genericConfirmModal"', html)
+        self.assertIn("title: 'Discard changes?'", html)
+        self.assertIn(".explorer-git-revert-btn", html)
+
     def test_parse_git_graph_log_skips_connector_only_lines(self):
         commits = web_explorer._parse_git_graph_log(
             b"* a1b2c3d initial\n"
@@ -3576,6 +4041,83 @@ class ApiRoutesTestCase(unittest.TestCase):
             preview_html,
         )
 
+    def test_markdown_preview_renders_github_callouts(self):
+        """ISSUE-2026-017: [!TYPE] blockquotes become semantic callout blocks."""
+        cases = {
+            "note": "Note",
+            "tip": "Tip",
+            "important": "Important",
+            "warning": "Warning",
+            "caution": "Caution",
+        }
+        for kind, label in cases.items():
+            with self.subTest(kind=kind):
+                html = web_explorer._render_markdown_preview(
+                    f"> [!{kind.upper()}]\n> Body text for {kind}.\n"
+                )
+                self.assertIn(f'<div class="md-callout md-callout-{kind}">', html)
+                # Accessible label + stroke-style icon in the title row.
+                self.assertIn('<p class="md-callout-title">', html)
+                self.assertIn(f'<span class="md-callout-label">{label}</span>', html)
+                self.assertIn('class="md-callout-icon"', html)
+                self.assertIn('stroke="currentColor"', html)
+                # Body content is preserved; the raw marker text is consumed.
+                self.assertIn(f"Body text for {kind}.", html)
+                self.assertNotIn(f"[!{kind.upper()}]", html)
+                # The blockquote wrapper is replaced, not kept alongside.
+                self.assertNotIn("<blockquote>", html)
+
+    def test_markdown_preview_leaves_plain_blockquote_untouched(self):
+        """ISSUE-2026-017: only [!TYPE] blockquotes convert; quotes stay quotes."""
+        # A separating paragraph keeps the two blockquotes distinct (adjacent
+        # blockquotes otherwise merge into one in Python-Markdown).
+        html = web_explorer._render_markdown_preview(
+            "> Just an ordinary quote.\n\nMiddle paragraph.\n\n> [!NOTE]\n> A real note.\n"
+        )
+        self.assertIn("<blockquote>", html)
+        self.assertIn("Just an ordinary quote.", html)
+        self.assertIn('<div class="md-callout md-callout-note">', html)
+        # An unknown admonition keyword is not treated as a callout.
+        unknown = web_explorer._render_markdown_preview("> [!HINT]\n> Not supported.\n")
+        self.assertNotIn("md-callout", unknown)
+        self.assertIn("[!HINT]", unknown)
+
+    def test_markdown_preview_callout_sanitizes_body_and_keeps_nested_content(self):
+        """ISSUE-2026-017: callout bodies stay sanitized and keep rich content."""
+        html = web_explorer._render_markdown_preview(
+            "> [!WARNING]\n"
+            "> <script>alert('xss')</script> **stay safe**\n"
+            ">\n"
+            "> - first\n"
+            "> - second\n"
+        )
+        self.assertIn('<div class="md-callout md-callout-warning">', html)
+        # Sanitization (bleach) still runs before augmentation.
+        self.assertNotIn("<script", html)
+        self.assertIn("<strong>stay safe</strong>", html)
+        # Nested list inside the callout is preserved as its body.
+        self.assertIn("<li>first</li>", html)
+        self.assertIn("<li>second</li>", html)
+
+    def test_explorer_file_endpoint_emits_callout_html(self):
+        """ISSUE-2026-017: callouts reach the client through preview_html."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text(
+            "# Doc\n\n> [!TIP]\n> Helpful hint.\n", encoding="utf-8"
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        preview_html = file_response.get_json()["preview_html"]
+        self.assertIn('<div class="md-callout md-callout-tip">', preview_html)
+        self.assertIn("Helpful hint.", preview_html)
+
     def test_explorer_file_does_not_preview_non_markdown_text(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -3680,6 +4222,199 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(len(payload["content"]), api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
         self.assertEqual(payload["size"], file_path.stat().st_size)
 
+    def test_trim_tail_preview_to_boundary_variants(self):
+        # A partial leading line is dropped up to (and including) the first newline.
+        self.assertEqual(
+            web_explorer._trim_tail_preview_to_boundary(b"rtial line\ncomplete line\n"),
+            b"complete line\n",
+        )
+        # A window whose only newline is the trailing byte keeps its content.
+        self.assertEqual(
+            web_explorer._trim_tail_preview_to_boundary(b"abc\n"),
+            b"abc\n",
+        )
+        # With no usable newline, leading UTF-8 continuation bytes are skipped so
+        # decoding never starts mid-character.
+        self.assertEqual(
+            web_explorer._trim_tail_preview_to_boundary(b"\xa9\xa9rest of line"),
+            b"rest of line",
+        )
+
+    def test_explorer_log_preview_retains_tail_and_range_metadata(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        line_bytes = 100
+        count = (api.EXPLORER_FILE_PREVIEW_MAX_BYTES // line_bytes) + 500
+
+        def make_line(i):
+            return f"L{i:08d}-" + ("x" * 89) + "\n"
+
+        self.assertEqual(len(make_line(0).encode("utf-8")), line_bytes)
+        body = "".join(make_line(i) for i in range(count))
+        file_path = repo_dir / "app.log"
+        file_path.write_text(body, encoding="utf-8")
+        total_size = file_path.stat().st_size
+        self.assertGreater(total_size, api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "app.log"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        content = payload["content"]
+        self.assertTrue(payload["truncated"])
+        self.assertEqual(payload["preview_mode"], "tail")
+        # Newest lines are retained; the oldest are discarded.
+        self.assertIn(make_line(count - 1).strip(), content)
+        self.assertNotIn("L00000000-", content)
+        # The tail starts at a clean line boundary, never mid-line.
+        self.assertTrue(content.startswith("L"))
+        # Range metadata is self-consistent and pins the retained window to the end.
+        self.assertEqual(payload["total_size"], total_size)
+        self.assertEqual(payload["preview_end_byte"], total_size)
+        self.assertEqual(
+            payload["preview_start_byte"],
+            total_size - len(content.encode("utf-8")),
+        )
+        self.assertGreater(payload["preview_start_byte"], 0)
+        self.assertLessEqual(len(content.encode("utf-8")), api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+
+    def test_explorer_non_log_preview_retains_head(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "notes.txt"
+        file_path.write_text(
+            "HEADMARKER\n" + ("y" * api.EXPLORER_FILE_PREVIEW_MAX_BYTES) + "\nTAILMARKER\n",
+            encoding="utf-8",
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "notes.txt"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        content = payload["content"]
+        self.assertTrue(payload["truncated"])
+        self.assertEqual(payload["preview_mode"], "head")
+        self.assertIn("HEADMARKER", content)
+        self.assertNotIn("TAILMARKER", content)
+        self.assertEqual(len(content), api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+        self.assertEqual(payload["preview_start_byte"], 0)
+        self.assertEqual(payload["preview_end_byte"], api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+
+    def test_explorer_preview_at_exact_limit_is_not_truncated(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "exact.log"
+        file_path.write_bytes(b"z" * api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "exact.log"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload["truncated"])
+        self.assertEqual(payload["preview_mode"], "head")
+        self.assertEqual(len(payload["content"]), api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+        self.assertEqual(payload["total_size"], api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+
+    def test_explorer_log_preview_tail_is_utf8_line_safe(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        # Two-byte characters shift byte alignment so the tail cut lands
+        # mid-character on some lines; the line-boundary trim must still yield a
+        # cleanly decodable preview with no replacement characters.
+        def make_line(i):
+            return f"café-{i:06d}-" + ("µ" * 40) + "\n"
+
+        count = (api.EXPLORER_FILE_PREVIEW_MAX_BYTES // len(make_line(0).encode("utf-8"))) + 500
+        body = "".join(make_line(i) for i in range(count))
+        file_path = repo_dir / "unicode.log"
+        # Preserve LF endings on every platform so the fixed-size binary sample
+        # ends mid-character and exercises the same boundary as Ubuntu CI.
+        file_path.write_bytes(body.encode("utf-8"))
+        self.assertGreater(file_path.stat().st_size, api.EXPLORER_FILE_PREVIEW_MAX_BYTES)
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "unicode.log"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        content = payload["content"]
+        self.assertEqual(payload["preview_mode"], "tail")
+        self.assertNotIn("�", content)
+        self.assertTrue(content.startswith("café-"))
+        self.assertIn(make_line(count - 1).strip(), content)
+
+    def test_explorer_remote_log_preview_retains_tail(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        line_bytes = 100
+
+        def make_line(i):
+            return f"R{i:08d}-" + ("x" * 89) + "\n"
+
+        self.assertEqual(len(make_line(0).encode("utf-8")), line_bytes)
+        count = (api.EXPLORER_FILE_PREVIEW_MAX_BYTES // line_bytes) + 500
+        body = "".join(make_line(i) for i in range(count)).encode("utf-8")
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/remote.log": {"type": "file", "content": body},
+            }
+        )
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "remote.log"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        content = payload["content"]
+        self.assertTrue(payload["truncated"])
+        self.assertEqual(payload["preview_mode"], "tail")
+        self.assertIn(make_line(count - 1).strip(), content)
+        self.assertNotIn("R00000000-", content)
+        self.assertEqual(payload["total_size"], len(body))
+        self.assertEqual(payload["preview_end_byte"], len(body))
+
+    def test_terminals_page_explorer_preview_tail_message(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function explorerPreviewTruncationLabel(data)", html)
+        self.assertIn("data.preview_mode === 'tail' ? 'last' : 'first'", html)
+        self.assertIn("`Showing the ${edge} ${retainedLabel} of ${totalLabel}`", html)
+        self.assertIn("const truncationLabel = explorerPreviewTruncationLabel(data);", html)
+
     def test_explorer_file_rejects_binary_content(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -3707,6 +4442,9 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(file_response.status_code, 400)
         self.assertIn("binary", file_response.get_json()["error"])
+
+    def test_explorer_binary_detection_rejects_incomplete_utf8_at_content_end(self):
+        self.assertTrue(web_explorer._explorer_content_looks_binary(b"valid text\xc2"))
 
     def test_explorer_file_rejects_unsupported_editor_format(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -4025,6 +4763,123 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(config["terminals"][1]["initial_command"], api.DEFAULT_BROWSER_URL)
         self.assertEqual(config["layout"], "vertical")
         self.assertEqual(config["workspace_layout"]["split_slot_rects"][0]["w"], 3)
+
+    def test_normalize_terminal_entries_bounds_explorer_open_tabs(self):
+        """ISSUE-2026-015: normalize/de-dupe/reject unsafe persisted tab paths."""
+        entries = [
+            {
+                "startup_mode": "explorer",
+                "explorer_open_tabs": [
+                    "docs/a.md",
+                    "docs/a.md",          # duplicate dropped
+                    "../secret.txt",      # traversal dropped
+                    "C:/abs.txt",         # drive-absolute dropped
+                    "sub\\b.md",          # backslashes normalized
+                    "",                   # empty dropped
+                ],
+                "explorer_active_tab": "sub/b.md",
+            }
+        ]
+
+        normalized = web_saved_sessions._normalize_terminal_entries(entries)
+
+        self.assertEqual(normalized[0]["explorer_open_tabs"], ["docs/a.md", "sub/b.md"])
+        self.assertEqual(normalized[0]["explorer_active_tab"], "sub/b.md")
+
+    def test_normalize_terminal_entries_drops_active_tab_not_open(self):
+        """An active tab that is not among the open tabs falls back to empty."""
+        entries = [
+            {
+                "startup_mode": "explorer",
+                "explorer_open_tabs": ["a.md"],
+                "explorer_active_tab": "b.md",
+            }
+        ]
+
+        normalized = web_saved_sessions._normalize_terminal_entries(entries)
+
+        self.assertEqual(normalized[0]["explorer_active_tab"], "")
+
+    def test_normalize_terminal_entries_caps_open_tab_count(self):
+        entries = [
+            {
+                "startup_mode": "explorer",
+                "explorer_open_tabs": [f"file{i}.md" for i in range(30)],
+            }
+        ]
+
+        normalized = web_saved_sessions._normalize_terminal_entries(entries)
+
+        self.assertEqual(
+            len(normalized[0]["explorer_open_tabs"]),
+            web_saved_sessions.EXPLORER_MAX_OPEN_TABS,
+        )
+
+    def test_normalize_terminal_entries_defaults_missing_explorer_tabs(self):
+        """Backward compatibility: presets without the field normalize cleanly."""
+        normalized = web_saved_sessions._normalize_terminal_entries(
+            [{"startup_mode": "explorer"}]
+        )
+
+        self.assertEqual(normalized[0]["explorer_open_tabs"], [])
+        self.assertEqual(normalized[0]["explorer_active_tab"], "")
+
+    def test_workspace_save_round_trips_explorer_open_tabs(self):
+        """ISSUE-2026-015: active-workspace save persists explorer tabs, gated to explorer panes."""
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "explorer-tabs",
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "vertical",
+                    "ssh": {"host": "example.com", "username": "ubuntu", "port": 22, "default_dir": "/repo"},
+                    "terminals": [
+                        {"title": "Files", "directory": "repo", "startup_mode": "explorer"},
+                        {"title": "Shell", "directory": "repo", "startup_mode": "terminal"},
+                    ],
+                },
+            },
+        ).get_json()
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "vertical",
+                    "terminals": [
+                        {
+                            "title": "Files",
+                            "directory": "repo",
+                            "startup_mode": "explorer",
+                            "explorer_open_tabs": ["docs/a.md", "docs/a.md", "../escape.md"],
+                            "explorer_active_tab": "docs/a.md",
+                        },
+                        {
+                            "title": "Shell",
+                            "directory": "repo",
+                            "startup_mode": "terminal",
+                            "explorer_open_tabs": ["should-not-persist.md"],
+                            "explorer_active_tab": "should-not-persist.md",
+                        },
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        config = response.get_json()["config"]
+        self.assertEqual(config["terminals"][0]["explorer_open_tabs"], ["docs/a.md"])
+        self.assertEqual(config["terminals"][0]["explorer_active_tab"], "docs/a.md")
+        # Non-explorer panes never carry file tabs.
+        self.assertEqual(config["terminals"][1]["explorer_open_tabs"], [])
+        self.assertEqual(config["terminals"][1]["explorer_active_tab"], "")
 
     def test_workspace_save_as_clones_source_directories_before_applying_modes(self):
         original = self.client.post(
@@ -4843,7 +5698,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "_send_connection_input") as send_input:
+            with patch.object(web_terminal_io, "_send_connection_input") as send_input:
                 with patch.object(api.time, "sleep") as sleep:
                     api._run_startup_sequence(connection, session)
 
@@ -4864,7 +5719,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "_send_connection_input") as send_input:
+            with patch.object(web_terminal_io, "_send_connection_input") as send_input:
                 with patch.object(api.time, "sleep") as sleep:
                     api._run_startup_sequence(connection, session)
 
@@ -4893,7 +5748,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         session = SimpleNamespace(directory='C:\\repo path', initial_command='codex')
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "_send_connection_input") as send_input:
+            with patch.object(web_terminal_io, "_send_connection_input") as send_input:
                 with patch.object(api.time, "sleep") as sleep:
                     api._run_startup_sequence(connection, session)
 
@@ -4918,7 +5773,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "_send_connection_input") as send_input:
+            with patch.object(web_terminal_io, "_send_connection_input") as send_input:
                 with patch.object(api.time, "sleep") as sleep:
                     api._run_startup_sequence(connection, session)
 
@@ -4938,7 +5793,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "_send_connection_input") as send_input:
+            with patch.object(web_terminal_io, "_send_connection_input") as send_input:
                 with patch.object(api.time, "sleep") as sleep:
                     api._run_startup_sequence(connection, session)
 
@@ -4993,8 +5848,8 @@ class ApiRoutesTestCase(unittest.TestCase):
             stderr="",
         )
 
-        with patch.object(api, "_find_wsl_executable", return_value="wsl.exe"):
-            with patch.object(api.subprocess, "run", return_value=completed) as run_command:
+        with patch.object(web_agents, "_find_wsl_executable", return_value="wsl.exe"):
+            with patch.object(web_agents.subprocess, "run", return_value=completed) as run_command:
                 snapshot = api._inspect_wsl_distributions()
 
         distros = snapshot["distros"]
@@ -5020,8 +5875,8 @@ class ApiRoutesTestCase(unittest.TestCase):
             stderr="",
         )
 
-        with patch.object(api, "_find_wsl_executable", return_value="wsl.exe"):
-            with patch.object(api.subprocess, "run", return_value=completed):
+        with patch.object(web_agents, "_find_wsl_executable", return_value="wsl.exe"):
+            with patch.object(web_agents.subprocess, "run", return_value=completed):
                 response = self.client.get("/api/wsl-distros")
 
         self.assertEqual(response.status_code, 200)
@@ -5034,7 +5889,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_build_local_command_uses_wsl_without_distribution_when_blank(self):
         session = SimpleNamespace(use_wsl=True, username="devuser")
 
-        with patch.object(api, "_find_wsl_executable", return_value="wsl.exe"):
+        with patch.object(web_terminal_io, "_find_wsl_executable", return_value="wsl.exe"):
             command = api._build_local_command(session, resolved_distribution="")
 
         self.assertEqual(command[0], "wsl.exe")
@@ -5092,7 +5947,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         connection = {}
 
-        with patch.object(api, "_broadcast_session_status") as broadcast:
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
             api._track_terminal_agent_input(session.session_id, connection, "co")
             api._track_terminal_agent_input(session.session_id, connection, "dex --full-auto\r")
 
@@ -5122,7 +5977,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             initial_command_mode="agent",
         )
 
-        with patch.object(api, "_broadcast_session_status") as broadcast:
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
             api._track_terminal_agent_input(session.session_id, {}, "claudx\be\r")
 
         updated = api.session_manager.get_session(session.session_id)
@@ -5149,7 +6004,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             initial_command="codex",
         )
 
-        with patch.object(api, "_broadcast_session_status") as broadcast:
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
             api._track_terminal_agent_input(session.session_id, {}, "\x03")
 
         updated = api.session_manager.get_session(session.session_id)
@@ -5177,7 +6032,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             initial_command="claude",
         )
 
-        with patch.object(api, "_broadcast_session_status") as broadcast:
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
             api._track_terminal_agent_input(session.session_id, {}, "/exit\r")
 
         updated = api.session_manager.get_session(session.session_id)
@@ -5195,7 +6050,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_build_local_command_uses_wsl_startup_directory_when_available(self):
         session = SimpleNamespace(use_wsl=True, username="devuser")
 
-        with patch.object(api, "_find_wsl_executable", return_value="wsl.exe"):
+        with patch.object(web_terminal_io, "_find_wsl_executable", return_value="wsl.exe"):
             command = api._build_local_command(
                 session,
                 resolved_distribution="Ubuntu",
@@ -5241,13 +6096,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         fake_process = object()
 
         with patch.object(api.os, "name", "nt"), patch.object(
-            api, "_find_wsl_executable", return_value="wsl.exe"
+            web_terminal_io, "_find_wsl_executable", return_value="wsl.exe"
         ):
-            with patch.object(api, "WinPtyProcess") as winpty:
-                with patch.object(api, "_broadcast_session_status"):
-                    with patch.object(api, "_stream_local_output"):
-                        with patch.object(api, "_run_startup_sequence"):
-                            with patch.object(api, "_drain_until_prompt"):
+            with patch.object(web_terminal_io, "WinPtyProcess") as winpty:
+                with patch.object(web_terminal_io, "_broadcast_session_status"):
+                    with patch.object(web_terminal_io, "_stream_local_output"):
+                        with patch.object(web_terminal_io, "_run_startup_sequence"):
+                            with patch.object(web_terminal_io, "_drain_until_prompt"):
                                 with patch.object(api.session_manager, "update_session_status"):
                                     winpty.spawn.return_value = fake_process
                                     api._connect_local_session("abc123", session)
@@ -5272,10 +6127,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         fake_process = object()
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "WinPtyProcess") as winpty:
-                with patch.object(api, "_broadcast_session_status"):
-                    with patch.object(api, "_stream_local_output"):
-                        with patch.object(api, "_run_startup_sequence"):
+            with patch.object(web_terminal_io, "WinPtyProcess") as winpty:
+                with patch.object(web_terminal_io, "_broadcast_session_status"):
+                    with patch.object(web_terminal_io, "_stream_local_output"):
+                        with patch.object(web_terminal_io, "_run_startup_sequence"):
                             with patch.object(api.session_manager, "update_session_status"):
                                 winpty.spawn.return_value = fake_process
                                 api._connect_local_session("abc123", session)
@@ -5294,8 +6149,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api.os, "name", "nt"):
-            with patch.object(api, "WinPtyProcess", None):
-                with patch.object(api, "_broadcast_session_status"):
+            with patch.object(web_terminal_io, "WinPtyProcess", None):
+                with patch.object(web_terminal_io, "_broadcast_session_status"):
                     api._connect_local_session("abc123", session)
 
         stored = api.session_manager.get_session("abc123")
@@ -5704,8 +6559,8 @@ class ApiRoutesTestCase(unittest.TestCase):
             SimpleNamespace(language="en"),
         )
 
-        with patch.object(api, "_ensure_whisper_model", return_value=mock_model), patch.object(
-            api, "_pcm16le_to_float32", return_value="audio-array"
+        with patch.object(web_voice, "_ensure_whisper_model", return_value=mock_model), patch.object(
+            web_voice, "_pcm16le_to_float32", return_value="audio-array"
         ):
             socket_client.emit("voice_start", {"session_id": "session-whisper"})
             start_events = socket_client.get_received()
@@ -5805,7 +6660,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function normalizeThemePreference(", html)
         self.assertIn("function applyTheme(", html)
         self.assertIn("function syncNativeTheme(", html)
-        self.assertIn("bridge.set_native_theme(resolvedTheme)", html)
+        self.assertIn("bridge.set_native_theme()", html)
         self.assertIn("function cycleTheme()", html)
         self.assertIn("prefers-color-scheme", html)
 
@@ -5844,7 +6699,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function normalizeThemePreference(", html)
         self.assertIn("function applyTheme(", html)
         self.assertIn("function syncNativeTheme(", html)
-        self.assertIn("bridge.set_native_theme(resolvedTheme)", html)
+        self.assertIn("bridge.set_native_theme()", html)
         self.assertIn("function cycleTheme()", html)
         self.assertIn("prefers-color-scheme", html)
 
@@ -5938,7 +6793,7 @@ class SshConnectionErrorPathTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -5955,7 +6810,7 @@ class SshConnectionErrorPathTestCase(unittest.TestCase):
             api.ssh_connections.clear()
             api.session_output_buffers.clear()
 
-    @patch("web.api.paramiko")
+    @patch("web.terminal_io.paramiko")
     def test_ssh_connect_failure_closes_client_once(self, mock_paramiko):
         mock_client = MagicMock()
         mock_paramiko.SSHClient.return_value = mock_client
@@ -5980,7 +6835,7 @@ class VoskStartupTimeoutTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -5990,21 +6845,21 @@ class VoskStartupTimeoutTestCase(unittest.TestCase):
     def tearDown(self):
         self.saved_sessions_patch.stop
 
-    @patch("web.api._wait_for_vosk_ready", return_value=False)
-    @patch("web.api._vosk_service_reachable", return_value=False)
-    @patch("web.api.subprocess.Popen")
+    @patch("web.voice._wait_for_vosk_ready", return_value=False)
+    @patch("web.voice._vosk_service_reachable", return_value=False)
+    @patch("web.voice.subprocess.Popen")
     def test_vosk_timeout_waits_after_kill(self, mock_popen, _mock_reachable, _mock_ready):
         mock_process = MagicMock()
         mock_process.poll.return_value = None
         mock_process.pid = 99999
         mock_popen.return_value = mock_process
 
-        original = api._vosk_process
+        original = web_voice._vosk_process
         try:
-            api._vosk_process = None
+            web_voice._vosk_process = None
             result = api._ensure_vosk_service()
         finally:
-            api._vosk_process = original
+            web_voice._vosk_process = original
 
         self.assertFalse(result)
         mock_process.kill.assert_called_once()
@@ -6018,7 +6873,7 @@ class SshConnectExceptionHandlingTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -6035,7 +6890,7 @@ class SshConnectExceptionHandlingTestCase(unittest.TestCase):
             api.ssh_connections.clear()
             api.session_output_buffers.clear()
 
-    @patch("web.api.paramiko")
+    @patch("web.terminal_io.paramiko")
     def test_ssh_connect_catches_os_error(self, mock_paramiko):
         mock_client = MagicMock()
         mock_paramiko.SSHClient.return_value = mock_client
@@ -6052,7 +6907,7 @@ class SshConnectExceptionHandlingTestCase(unittest.TestCase):
         s = api.session_manager.get_session(session.session_id)
         self.assertEqual(s.status, api.SessionStatus.ERROR)
 
-    @patch("web.api.paramiko")
+    @patch("web.terminal_io.paramiko")
     def test_ssh_connect_does_not_swallow_unexpected_errors(self, mock_paramiko):
         mock_client = MagicMock()
         mock_paramiko.SSHClient.return_value = mock_client
@@ -6076,7 +6931,7 @@ class SessionOutputBufferTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -6162,9 +7017,9 @@ class SshSftpPoolTestCase(unittest.TestCase):
         self.addCleanup(api._evict_all_pooled_ssh_clients)
 
     def _fake_client(self, active=True):
-        if api.paramiko is None:
+        if web_explorer.paramiko is None:
             self.skipTest("paramiko is not installed")
-        client = api.paramiko.SSHClient()
+        client = web_explorer.paramiko.SSHClient()
         transport = MagicMock()
         transport.is_active.return_value = active
         client.get_transport = MagicMock(return_value=transport)
@@ -6344,6 +7199,83 @@ class SessionGroupsUpdatedBroadcastTestCase(unittest.TestCase):
         self.assertIn("all_closed", self._received_reasons(socket_client))
 
 
+class SessionStatusRoomScopeTestCase(unittest.TestCase):
+    """Deep-dive 1.1 step 3 — session_status is emitted to the session room only."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+
+    def _socket_client(self):
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+        self.addCleanup(socket_client.disconnect)
+        socket_client.get_received()
+        return socket_client
+
+    def test_broadcast_reaches_joined_clients_only(self):
+        api.session_manager.create_group(
+            name="Scoped",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-scoped",
+        )
+        session = api.session_manager.create_session(
+            group_id="group-scoped",
+            host="10.0.0.12",
+            directory="/tmp/project",
+        )
+
+        joined_client = self._socket_client()
+        bystander_client = self._socket_client()
+        joined_client.emit("join_session", {"session_id": session.session_id})
+        joined_client.get_received()  # drain the join reply
+
+        api._broadcast_session_status(session.session_id)
+
+        joined_events = [
+            event for event in joined_client.get_received()
+            if event["name"] == "session_status"
+        ]
+        bystander_events = [
+            event for event in bystander_client.get_received()
+            if event["name"] == "session_status"
+        ]
+        self.assertEqual(len(joined_events), 1)
+        self.assertEqual(
+            joined_events[0]["args"][0]["session_id"], session.session_id
+        )
+        self.assertEqual(bystander_events, [])
+
+
+class SharedRunServerTestCase(unittest.TestCase):
+    """Deep-dive 5.7 — one server entry point with a consistent flag set."""
+
+    def test_run_server_passes_the_full_flag_set(self):
+        with patch.object(api.socketio, "run") as mock_run:
+            api.run_server("192.0.2.1", 8080, True)
+        mock_run.assert_called_once_with(
+            api.app,
+            host="192.0.2.1",
+            port=8080,
+            debug=True,
+            use_reloader=False,
+            allow_unsafe_werkzeug=True,
+        )
+
+    def test_entry_points_share_the_api_run_server(self):
+        import main as main_module
+        import web.webview_launcher as launcher_module
+
+        self.assertIs(main_module.run_server, api.run_server)
+        self.assertIs(launcher_module.run_server, api.run_server)
+
+
 class SessionStatusBroadcastRaceTestCase(unittest.TestCase):
     """Issue 7 — verify status emission is serialized with session removal."""
 
@@ -6351,7 +7283,7 @@ class SessionStatusBroadcastRaceTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api,
+            web_saved_sessions,
             "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
@@ -6421,7 +7353,7 @@ class VoiceStartRaceTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -6436,9 +7368,9 @@ class VoiceStartRaceTestCase(unittest.TestCase):
             api._vosk_ws_connections.clear()
             api._vosk_session_locks.clear()
 
-    @patch("web.api.emit")
-    @patch("web.api._ensure_vosk_service", return_value=True)
-    @patch("web.api.ws_client")
+    @patch("web.voice.emit")
+    @patch("web.voice._ensure_vosk_service", return_value=True)
+    @patch("web.voice.ws_client")
     def test_voice_start_stores_connection_under_lock(self, mock_ws_client, _mock_ensure, _mock_emit):
         mock_ws = MagicMock()
         mock_ws_client.create_connection.return_value = mock_ws
@@ -6449,9 +7381,9 @@ class VoiceStartRaceTestCase(unittest.TestCase):
             self.assertIn("sess-01", api._vosk_ws_connections)
             self.assertIs(api._vosk_ws_connections["sess-01"], mock_ws)
 
-    @patch("web.api.emit")
-    @patch("web.api._ensure_vosk_service", return_value=True)
-    @patch("web.api.ws_client")
+    @patch("web.voice.emit")
+    @patch("web.voice._ensure_vosk_service", return_value=True)
+    @patch("web.voice.ws_client")
     def test_voice_start_closes_leaked_ws_on_concurrent_store(self, mock_ws_client, _mock_ensure, _mock_emit):
         """Simulate a concurrent writer that stored a connection between our pop and store."""
         leaked_ws = MagicMock()
@@ -6467,10 +7399,10 @@ class VoiceStartRaceTestCase(unittest.TestCase):
         with api._vosk_lock:
             self.assertIs(api._vosk_ws_connections["sess-02"], new_ws)
 
-    @patch("web.api.emit")
-    @patch("web.api._restart_vosk_service", return_value=True)
-    @patch("web.api._ensure_vosk_service", return_value=True)
-    @patch("web.api.ws_client")
+    @patch("web.voice.emit")
+    @patch("web.voice._restart_vosk_service", return_value=True)
+    @patch("web.voice._ensure_vosk_service", return_value=True)
+    @patch("web.voice.ws_client")
     def test_retry_closes_first_ws_before_creating_second(self, mock_ws_client, _mock_ensure, _mock_restart, _mock_emit):
         """Issue 12 — first connection stored then fails; retry must close it."""
         first_ws = MagicMock()
@@ -6502,7 +7434,7 @@ class LocalPtyStreamTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -6517,8 +7449,8 @@ class LocalPtyStreamTestCase(unittest.TestCase):
             api.ssh_connections.clear()
             api.session_output_buffers.clear()
 
-    @patch("web.api._broadcast_session_status")
-    @patch("web.api.session_manager")
+    @patch("web.terminal_io._broadcast_session_status")
+    @patch("web.terminal_io.session_manager")
     @patch("select.select", return_value=([999], [], []))
     @patch("os.read", side_effect=OSError(9, "Bad file descriptor"))
     def test_stream_local_output_handles_closed_master_fd(
@@ -6545,8 +7477,8 @@ class LocalPtyStreamTestCase(unittest.TestCase):
             session_id, api.SessionStatus.DISCONNECTED
         )
 
-    @patch("web.api._broadcast_session_status")
-    @patch("web.api.session_manager")
+    @patch("web.terminal_io._broadcast_session_status")
+    @patch("web.terminal_io.session_manager")
     def test_stream_local_output_fallback_reads_chunks_via_read1(
         self, mock_session_mgr, _mock_broadcast
     ):
@@ -6636,8 +7568,8 @@ class SshStreamBlockingRecvTestCase(unittest.TestCase):
         def close(self):
             self.closed = True
 
-    @patch("web.api._broadcast_session_status")
-    @patch("web.api.session_manager")
+    @patch("web.terminal_io._broadcast_session_status")
+    @patch("web.terminal_io.session_manager")
     def test_stream_ssh_output_sets_recv_timeout_and_survives_timeouts(
         self, mock_session_mgr, _mock_broadcast
     ):
@@ -6666,8 +7598,8 @@ class SshStreamBlockingRecvTestCase(unittest.TestCase):
         with api.connection_lock:
             self.assertNotIn(session_id, api.ssh_connections)
 
-    @patch("web.api._broadcast_session_status")
-    @patch("web.api.session_manager")
+    @patch("web.terminal_io._broadcast_session_status")
+    @patch("web.terminal_io.session_manager")
     def test_stream_ssh_output_exits_on_exit_status_after_timeout(
         self, mock_session_mgr, _mock_broadcast
     ):
@@ -6800,6 +7732,30 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             self.assertIn("function onThemeApplied(", page)
             self.assertIn("initTheme();", page)
 
+    def test_launcher_button_and_dead_display_fixes_locked_in(self):
+        """Findings 4.3/4.6 — launch button restores its markup; dead node gone."""
+        launcher = self.client.get("/static/js/launcher.js").get_data(as_text=True)
+        # 4.6 — the wsl_default_dir_display element no longer exists anywhere.
+        self.assertNotIn("wsl_default_dir_display", launcher)
+        # 4.3 — the button never renames itself to the old 'Launch Terminals'
+        # label; since 8.2 it toggles a .loading class instead of rewriting
+        # its markup at all.
+        self.assertNotIn("Launch Terminals", launcher)
+        self.assertIn("setLaunchButtonLoading", launcher)
+
+    def test_terminals_joins_rooms_for_every_pane(self):
+        """Finding 1.1 step 3 — room-scoped session_status requires explorer
+        and browser panes to join their session rooms like terminal panes."""
+        terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+        join_calls = terminals.count("socket.emit('join_session'")
+        self.assertGreaterEqual(join_calls, 4)
+        # The initial-load join loop must not filter sessions by pane type.
+        load_join = terminals[terminals.index("data.sessions.forEach(session => {"):]
+        load_join = load_join[:load_join.index("});")]
+        self.assertNotIn("isExplorerSession", load_join)
+        self.assertNotIn("isBrowserSession", load_join)
+        self.assertIn("socket.emit('join_session'", load_join)
+
     def test_terminals_monster_functions_are_decomposed(self):
         """Finding 6.5 — buildGrid/_startVoice delegate to focused helpers."""
         terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
@@ -6842,7 +7798,7 @@ class VoiceAudioRaceTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -6857,7 +7813,7 @@ class VoiceAudioRaceTestCase(unittest.TestCase):
             api._vosk_ws_connections.clear()
             api._vosk_session_locks.clear()
 
-    @patch("web.api.emit")
+    @patch("web.voice.emit")
     def test_voice_audio_handles_ws_closed_between_lock_and_send(self, mock_emit):
         session_id = "voice-race-01"
         mock_ws = MagicMock()
@@ -6881,7 +7837,7 @@ class VoiceAudioRaceTestCase(unittest.TestCase):
         self.assertTrue(len(error_events) > 0)
         self.assertEqual(error_events[0][0][1]['status'], 'error')
 
-    @patch("web.api.emit")
+    @patch("web.voice.emit")
     def test_voice_audio_dropped_when_no_connection(self, mock_emit):
         api._handle_vosk_audio_chunk("voice-no-conn", b"\x00\x01\x02\x03")
 
@@ -6940,7 +7896,7 @@ class CrossOriginWriteGuardTestCase(unittest.TestCase):
         self.config_path_patch.start()
         self.addCleanup(self.config_path_patch.stop)
         self.saved_sessions_patch = patch.object(
-            api, "SAVED_SESSIONS_PATH",
+            web_saved_sessions, "SAVED_SESSIONS_PATH",
             str(Path(self.temp_dir.name) / "saved_sessions.json"),
         )
         self.saved_sessions_patch.start()
@@ -7074,7 +8030,7 @@ class KnownHostsPersistenceTestCase(unittest.TestCase):
 
         mock_client.load_host_keys.assert_called_once_with(self.known_hosts_path)
 
-    @patch("web.api.paramiko")
+    @patch("web.terminal_io.paramiko")
     def test_connect_ssh_session_loads_known_hosts(self, mock_paramiko):
         mock_client = MagicMock()
         mock_paramiko.SSHClient.return_value = mock_client
@@ -7113,7 +8069,7 @@ class ConnectCloseToctouTestCase(unittest.TestCase):
             api.ssh_connections.clear()
             api.session_output_buffers.clear()
 
-    @patch("web.api.paramiko")
+    @patch("web.terminal_io.paramiko")
     def test_connection_discarded_when_session_removed_mid_connect(self, mock_paramiko):
         mock_client = MagicMock()
         mock_paramiko.SSHClient.return_value = mock_client
@@ -7141,7 +8097,7 @@ class ConnectCloseToctouTestCase(unittest.TestCase):
         channel.close.assert_called()
         mock_client.close.assert_called()
 
-    @patch("web.api.paramiko")
+    @patch("web.terminal_io.paramiko")
     def test_connection_registered_when_session_still_exists(self, mock_paramiko):
         mock_client = MagicMock()
         mock_paramiko.SSHClient.return_value = mock_client
@@ -7151,8 +8107,8 @@ class ConnectCloseToctouTestCase(unittest.TestCase):
             username="root", password="pass",
         )
 
-        with patch.object(api, "_run_startup_sequence"), \
-                patch.object(api, "_stream_ssh_output"):
+        with patch.object(web_terminal_io, "_run_startup_sequence"), \
+                patch.object(web_terminal_io, "_stream_ssh_output"):
             api._connect_ssh_session(session.session_id, session)
 
         with api.connection_lock:
@@ -7261,7 +8217,7 @@ class AgentDetectionCacheLockTestCase(unittest.TestCase):
             lock_states.append(api._agent_detection_cache_lock.locked())
             return {"found": True, "path": "C:/bin/claude"}
 
-        with patch.object(api, "_detect_agent_binary", side_effect=fake_probe) as probe:
+        with patch.object(web_agents, "_detect_agent_binary", side_effect=fake_probe) as probe:
             first = api._detect_agent_binary_cached(target, "claude")
             second = api._detect_agent_binary_cached(target, "claude")
 
@@ -7336,7 +8292,7 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
         )
         connection = {}
 
-        with patch.object(api, "_mark_runtime_agent_exited", return_value=True) as mark:
+        with patch.object(web_terminal_io, "_mark_runtime_agent_exited", return_value=True) as mark:
             api._track_terminal_agent_input(session.session_id, connection, "\x03")
             mark.assert_not_called()
             api._track_terminal_agent_input(session.session_id, connection, "\x03")
@@ -7352,8 +8308,8 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
         api._track_terminal_agent_input(session.session_id, connection, "ude")
         self.assertEqual(connection["_gridvibe_input_line"], "claude")
 
-        with patch.object(api, "_agent_from_terminal_command", return_value=("claude", "claude")), \
-                patch.object(api, "_broadcast_session_status"):
+        with patch.object(web_terminal_io, "_agent_from_terminal_command", return_value=("claude", "claude")), \
+                patch.object(web_terminal_io, "_broadcast_session_status"):
             api._track_terminal_agent_input(session.session_id, connection, "\r")
 
         updated = api.session_manager.get_session(session.session_id)
@@ -7470,3 +8426,1750 @@ class ExplorerModuleExtractionTestCase(unittest.TestCase):
             web_explorer._load_persistent_host_keys,
             web_hostkeys._load_persistent_host_keys,
         )
+
+
+class FinalModuleSplitTestCase(unittest.TestCase):
+    """Finding 6.2 — final tranches: app/saved_sessions/agents/terminal_io/voice."""
+
+    def test_app_module_owns_the_flask_and_socketio_singletons(self):
+        self.assertIs(api.app, web_app.app)
+        self.assertIs(api.socketio, web_app.socketio)
+        self.assertIs(api.session_manager, web_app.session_manager)
+        self.assertIs(api._resolve_cors_origins, web_app._resolve_cors_origins)
+        self.assertIs(api._reject_cross_origin_writes, web_app._reject_cross_origin_writes)
+
+    def test_api_reexports_the_saved_sessions_module_objects(self):
+        for name in (
+            "SAVED_SESSIONS_PATH",
+            "DEFAULT_SAVED_SESSION_ID",
+            "DEFAULT_BROWSER_URL",
+            "_normalize_session_config",
+            "_merge_workspace_session_config",
+            "_load_saved_sessions_payload",
+            "load_session_config",
+            "load_saved_sessions",
+            "save_saved_sessions",
+            "upsert_saved_session",
+            "delete_saved_sessions",
+            "set_last_saved_session",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(api, name), getattr(web_saved_sessions, name))
+
+    def test_api_reexports_the_agents_module_objects(self):
+        for name in (
+            "AGENT_REGISTRY",
+            "AGENT_REGISTRY_PATH",
+            "_agent_detection_cache",
+            "_agent_detection_cache_lock",
+            "_agent_options",
+            "_agent_preflight_payload",
+            "_detect_agent_binary_cached",
+            "_find_wsl_executable",
+            "_inspect_wsl_distributions",
+            "_ping_ssh_target",
+            "_powershell_single_quote",
+            "_sanitize_agent_launch_commands",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(api, name), getattr(web_agents, name))
+
+    def test_api_reexports_the_terminal_io_module_objects(self):
+        for name in (
+            "ssh_connections",
+            "session_output_buffers",
+            "client_joined_sessions",
+            "connection_lock",
+            "TERMINAL_OUTPUT_BUFFER_MAX_CHARS",
+            "SSH_STREAM_RECV_TIMEOUT",
+            "WINDOWS_DEVICE_ATTRIBUTES_RESPONSE",
+            "_broadcast_session_status",
+            "_broadcast_session_groups_updated",
+            "_cache_terminal_output",
+            "_close_ssh_connection",
+            "_close_all_ssh_connections",
+            "_connect_session",
+            "_replace_group_sessions",
+            "_run_startup_sequence",
+            "_send_connection_input",
+            "_stream_ssh_output",
+            "_stream_local_output",
+            "_track_terminal_agent_input",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(api, name), getattr(web_terminal_io, name))
+
+    def test_api_reexports_the_voice_module_objects(self):
+        for name in (
+            "VOICE_PREFS_VALID_KEYS",
+            "_active_voice_sessions",
+            "_active_voice_sessions_lock",
+            "_vosk_ws_connections",
+            "_vosk_lock",
+            "_whisper_audio_buffers",
+            "_ensure_vosk_service",
+            "_stop_vosk_service",
+            "_ensure_whisper_model",
+            "_start_vosk_voice_session",
+            "_start_whisper_voice_session",
+            "_stop_vosk_voice_session",
+            "_stop_whisper_voice_session",
+            "_vosk_engine_available",
+            "_whisper_engine_available",
+            "_load_voice_prefs",
+            "_save_voice_prefs",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(api, name), getattr(web_voice, name))
+
+    def test_moved_functions_are_defined_in_their_new_modules(self):
+        for func, module_name in (
+            (api._normalize_session_config, "web.saved_sessions"),
+            (api._agent_preflight_payload, "web.agents"),
+            (api._connect_ssh_session, "web.terminal_io"),
+            (api._start_vosk_voice_session, "web.voice"),
+            (api._reject_cross_origin_writes, "web.app"),
+        ):
+            with self.subTest(module=module_name):
+                self.assertEqual(func.__module__, module_name)
+
+    def test_entry_point_contract_still_importable_from_web_api(self):
+        # main.py and web/webview_launcher.py import exactly these names.
+        for name in (
+            "app",
+            "socketio",
+            "session_manager",
+            "load_config",
+            "configure_browser_shutdown",
+            "_stop_vosk_service",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(api, name))
+
+
+class DeadCodeSweepTestCase(unittest.TestCase):
+    """Deep-dive step 7 — dead-code sweep (findings 5.1–5.6) and 10.2 font wiring."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    # ── 5.2: /api/sessions/active endpoint removed ─────────────────────────
+
+    def test_sessions_active_endpoint_removed(self):
+        response = self.client.get("/api/sessions/active")
+        self.assertEqual(response.status_code, 404)
+
+    # ── 5.3: SessionManager callback registry removed ──────────────────────
+
+    def test_session_manager_has_no_callback_registry(self):
+        from sessions.manager import SessionManager
+        mgr = SessionManager()
+        self.assertFalse(hasattr(mgr, "_session_callbacks"))
+        self.assertFalse(hasattr(mgr, "register_callback"))
+        self.assertFalse(hasattr(mgr, "_notify_callbacks"))
+
+    # ── 5.4: get_active_session_count removed ──────────────────────────────
+
+    def test_get_active_session_count_removed(self):
+        from sessions.manager import SessionManager
+        self.assertFalse(hasattr(SessionManager, "get_active_session_count"))
+
+    # ── 5.4: section-title SVGs removed from launcher ──────────────────────
+
+    def test_section_title_svgs_removed_from_launcher(self):
+        html = self.client.get("/").get_data(as_text=True)
+        import re as _re
+        section_title_blocks = _re.findall(
+            r'<div class="section-title">.*?</div>', html, _re.DOTALL
+        )
+        for block in section_title_blocks:
+            self.assertNotIn("<svg", block,
+                             "section-title should not contain hidden SVGs")
+
+    # ── 5.6: t-menu-btn removed from launcher card HTML ────────────────────
+
+    def test_t_menu_btn_removed(self):
+        launcher_js = self.client.get("/static/js/launcher.js").get_data(as_text=True)
+        self.assertNotIn("t-menu-btn", launcher_js)
+        launcher_css = self.client.get("/static/css/launcher.css").get_data(as_text=True)
+        self.assertNotIn(".t-menu-btn", launcher_css)
+
+    # ── 10.2: terminal font settings wired through to terminals page ────────
+
+    def test_terminal_font_settings_in_terminals_page_body(self):
+        orig_size = api.runtime_config.terminal_font_size
+        orig_family = api.runtime_config.terminal_font_family
+        api.runtime_config.terminal_font_size = 18
+        api.runtime_config.terminal_font_family = "JetBrains Mono, monospace"
+        try:
+            html = self.client.get("/terminals").get_data(as_text=True)
+        finally:
+            api.runtime_config.terminal_font_size = orig_size
+            api.runtime_config.terminal_font_family = orig_family
+        self.assertIn('data-terminal-font-size="18"', html)
+        self.assertIn("JetBrains Mono", html)
+
+    def test_makeTerminal_reads_font_from_dataset(self):
+        terminals_js = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+        # Dataset properties are read.
+        self.assertIn("terminalFontSize", terminals_js)
+        self.assertIn("terminalFontFamily", terminals_js)
+        # The old hardcoded literals are gone.
+        self.assertNotIn("fontSize      : 13", terminals_js)
+
+
+class StyleThemingTestCase(unittest.TestCase):
+    """Deep-dive step 8 — style/theming (findings 7.1, 7.2, 7.3)."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    # ── 7.1: shared design tokens ───────────────────────────────────────────
+
+    def test_tokens_stylesheet_defines_shared_palette(self):
+        tokens = self._static("css/tokens.css")
+        for token in (
+            "--gv-bg-app", "--gv-accent", "--gv-accent-hover", "--gv-accent-soft",
+            "--gv-success", "--gv-success-hover", "--gv-danger", "--gv-warning",
+            "--gv-radius-s", "--gv-radius-m", "--gv-radius-l",
+        ):
+            self.assertIn(f"{token}:", tokens)
+        self.assertIn('[data-theme="light"]', tokens)
+
+    def test_both_pages_load_tokens_before_their_page_stylesheet(self):
+        for route, page_css in (("/", "css/launcher.css"),
+                                ("/terminals", "css/terminals.css")):
+            html = self.client.get(route).get_data(as_text=True)
+            self.assertIn("css/tokens.css", html)
+            self.assertLess(html.index("css/tokens.css"), html.index(page_css))
+
+    def test_page_palettes_map_onto_shared_tokens(self):
+        launcher_css = self._static("css/launcher.css")
+        for mapping in ("--accent: var(--gv-accent)",
+                        "--accent-strong: var(--gv-accent-hover)",
+                        "--danger: var(--gv-danger)",
+                        "--success: var(--gv-success)",
+                        "--warning: var(--gv-warning)"):
+            self.assertIn(mapping, launcher_css)
+        terminals_css = self._static("css/terminals.css")
+        for mapping in ("--t-bg: var(--gv-bg-app)",
+                        "--t-accent: var(--gv-accent)",
+                        "--t-accent-hover: var(--gv-accent-hover)",
+                        "--t-success: var(--gv-success)",
+                        "--t-success-hover: var(--gv-success-hover)"):
+            self.assertIn(mapping, terminals_css)
+
+    def test_old_divergent_palette_literals_are_gone(self):
+        launcher_css = self._static("css/launcher.css")
+        self.assertNotIn("#4cc9f0", launcher_css)
+        self.assertNotIn("rgba(76, 201, 240", launcher_css)
+        terminals_css = self._static("css/terminals.css")
+        self.assertNotIn("#18b66a", terminals_css)
+        self.assertNotIn("#14955a", terminals_css)
+
+    def test_terminal_canvas_stays_dark_in_light_theme(self):
+        terminals_css = self._static("css/terminals.css")
+        light_block = terminals_css.split('[data-theme="light"]', 1)[1]
+        for pinned in ("--t-terminal-bg: #0d0d0d",
+                       "--t-terminal-fg: #e0e0e0",
+                       "--t-terminal-cursor: #00d9ff"):
+            self.assertIn(pinned, light_block)
+
+    # ── 7.2: one SVG icon language instead of emoji/text glyphs ─────────────
+
+    def test_launcher_page_has_no_emoji_button_glyphs(self):
+        html = self.client.get("/").get_data(as_text=True)
+        for glyph in ("\U0001f4be", "\U0001f4c2", "\U0001f5d1", "\U0001f319", "↻"):
+            self.assertNotIn(glyph, html)
+
+    def test_terminals_page_has_no_emoji_or_text_glyph_buttons(self):
+        html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertNotIn("\U0001f319", html)
+        self.assertNotIn("&#9974;", html)
+        terminals_js = self._static("js/terminals.js")
+        self.assertNotIn("\U0001f9f9", terminals_js)
+        self.assertNotIn("↻", terminals_js)
+        self.assertNotIn("&#9974;", terminals_js)
+        for icon in ("TERMINAL_REFRESH_ICON", "TERMINAL_CLEAR_ICON",
+                     "FULLSCREEN_ENTER_ICON", "FULLSCREEN_EXIT_ICON"):
+            self.assertIn(icon, terminals_js)
+
+    def test_theme_toggle_uses_shared_svg_helper(self):
+        shared_js = self._static("js/shared.js")
+        self.assertIn("function themeToggleButtonHtml", shared_js)
+        self.assertIn("theme-toggle-icon", shared_js)
+        for page_js in ("js/launcher.js", "js/terminals.js"):
+            body = self._static(page_js)
+            self.assertIn("themeToggleButtonHtml", body)
+            self.assertNotIn("\U0001f319", body)
+
+    # ── 7.3: theme-ignoring hardcoded colors replaced with tokens ───────────
+
+    def test_settings_window_icon_uses_current_color(self):
+        html = self.client.get("/terminals").get_data(as_text=True)
+        for literal in ("#06263a", "#5eefff", "#63f6ff", "#6dfcff", "#4fd6ff"):
+            self.assertNotIn(literal, html)
+        terminals_css = self._static("css/terminals.css")
+        block = re.search(r"\.settings-window-btn \{.*?\}", terminals_css,
+                          re.DOTALL).group(0)
+        self.assertIn("color: var(--t-accent)", block)
+
+    def test_browser_close_button_uses_danger_token(self):
+        launcher_css = self._static("css/launcher.css")
+        for literal in ("#ff8a94", "#ff6b75", "rgba(181, 35, 49"):
+            self.assertNotIn(literal, launcher_css)
+        block = re.search(r"\.browser-close-btn \{.*?\}", launcher_css,
+                          re.DOTALL).group(0)
+        self.assertIn("var(--danger)", block)
+
+    def test_tooltip_arrow_follows_bubble_token(self):
+        launcher_css = self._static("css/launcher.css")
+        self.assertNotIn("rgba(16, 21, 39", launcher_css)
+        self.assertIn("border-color: var(--bg-deep) transparent", launcher_css)
+        self.assertIn('[data-theme="light"] .button-tooltip-bubble::after',
+                      launcher_css)
+
+    def test_xterm_theme_derived_from_css_variables(self):
+        terminals_js = self._static("js/terminals.js")
+        for var_name in ("--t-terminal-bg", "--t-terminal-fg",
+                         "--t-terminal-cursor", "--t-terminal-selection"):
+            self.assertIn(var_name, terminals_js)
+        self.assertNotIn("background          : '#0d0d0d'", terminals_js)
+        self.assertNotIn("cursor              : '#00d9ff'", terminals_js)
+
+
+class ThemeSyncTestCase(unittest.TestCase):
+    """ISSUE-2026-021 — appearance theme changes reach open session windows."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    # ── backend contract ─────────────────────────────────────────────────────
+
+    def test_backend_broadcast_carries_theme_alongside_surface_mode(self):
+        cfg = api.load_config()
+        saved_appearance = json.loads(json.dumps(cfg.get("appearance", {})))
+        saved_workspace = json.loads(json.dumps(cfg.get("workspace", {})))
+        try:
+            with patch.object(api.socketio, "emit") as emit:
+                response = self.client.post(
+                    "/api/app-config",
+                    json={
+                        "appearance": {"theme": "dark"},
+                        "workspace": {"surface_mode": "normal"},
+                    },
+                )
+            self.assertEqual(response.status_code, 200)
+            emit.assert_called_once()
+            event, payload = emit.call_args[0]
+            self.assertEqual(event, "app_config_updated")
+            self.assertEqual(payload["appearance"]["theme"], "dark")
+            self.assertEqual(payload["workspace"]["surface_mode"], "normal")
+        finally:
+            cfg = api.load_config()
+            cfg["appearance"] = saved_appearance
+            cfg["workspace"] = saved_workspace
+            api.save_config(cfg)
+            api._refresh_runtime_config()
+
+    # ── launcher-side contract ───────────────────────────────────────────────
+
+    def test_launcher_notification_payload_includes_theme(self):
+        launcher_js = self._static("js/launcher.js")
+        notify = launcher_js[
+            launcher_js.index("function notifyAppConfigUpdated(appSettings)"):
+            launcher_js.index("async function loadAppSettings()")
+        ]
+        self.assertIn(
+            "theme: normalizeThemePreference(appSettings?.appearance?.theme)",
+            notify,
+        )
+        self.assertIn(
+            "surface_mode: appSettings?.workspace?.surface_mode === 'max' ? 'max' : 'normal'",
+            notify,
+        )
+
+    # ── session-side application ─────────────────────────────────────────────
+
+    def test_terminals_app_config_handler_applies_theme_and_surface_mode(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function applyAppConfigUpdate(message)", terminals_js)
+        self.assertIn("applyAppConfigTheme(message);", terminals_js)
+        self.assertIn("applyAppConfigSurfaceMode(message);", terminals_js)
+
+    def test_terminals_wires_all_three_delivery_paths_to_the_handler(self):
+        terminals_js = self._static("js/terminals.js")
+        # BroadcastChannel
+        self.assertIn("applyAppConfigUpdate(event.data || {});", terminals_js)
+        # storage event
+        self.assertIn("applyAppConfigUpdate(JSON.parse(event.newValue));", terminals_js)
+        # Socket.IO
+        self.assertIn("socket.on('app_config_updated'", terminals_js)
+        self.assertIn("applyAppConfigUpdate(message || {});", terminals_js)
+        # the old surface-only wiring must not linger on any path
+        self.assertNotIn("applyAppConfigSurfaceMode(event.data || {});", terminals_js)
+        self.assertNotIn("applyAppConfigSurfaceMode(message || {});", terminals_js)
+
+    def test_theme_application_is_validated_and_idempotent(self):
+        terminals_js = self._static("js/terminals.js")
+        theme_fn = terminals_js[
+            terminals_js.index("function applyAppConfigTheme(message)"):
+            terminals_js.index("function applyAppConfigUpdate(message)")
+        ]
+        self.assertIn("['system', 'light', 'dark'].includes(theme)", theme_fn)
+        self.assertIn("data-theme-preference", theme_fn)
+        self.assertIn("if (theme !== current)", theme_fn)
+        self.assertIn("applyTheme(theme);", theme_fn)
+
+    def test_terminals_reconciles_theme_on_reconnect_focus_and_pageshow(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("async function reconcileAppConfigTheme()", terminals_js)
+        reconcile_fn = terminals_js[
+            terminals_js.index("async function reconcileAppConfigTheme()"):
+            terminals_js.index("function setupAppConfigUpdateListeners()")
+        ]
+        self.assertIn("fetch('/api/app-config')", reconcile_fn)
+        self.assertIn("applyAppConfigTheme(await response.json());", reconcile_fn)
+        # reconnect path (guarded by the not-first-connect flag)
+        connect_handler = terminals_js[
+            terminals_js.index("let hadSocketConnection = false;"):
+            terminals_js.index("socket.on('voice_result'")
+        ]
+        self.assertIn("reconcileAppConfigTheme();", connect_handler)
+        # focus / pageshow recovery
+        focus_wiring = terminals_js[
+            terminals_js.index("window.addEventListener('focus'"):
+            terminals_js.index("document.addEventListener('fullscreenchange'")
+        ]
+        self.assertEqual(focus_wiring.count("reconcileAppConfigTheme();"), 2)
+
+    def test_shared_init_theme_reacts_to_cross_window_storage_writes(self):
+        shared_js = self._static("js/shared.js")
+        init_theme = shared_js[
+            shared_js.index("function initTheme()"):
+            shared_js.index("function buildSavedSessionTags(")
+        ]
+        self.assertIn("event.key !== THEME_STORAGE_KEY", init_theme)
+        self.assertIn("normalizeThemePreference(event.newValue)", init_theme)
+        # loop-safety guard: only apply when the preference actually changed
+        self.assertIn(
+            "preference !== document.documentElement.getAttribute('data-theme-preference')",
+            init_theme,
+        )
+        # System-mode media-query behaviour must survive the new listener
+        self.assertIn("prefers-color-scheme: light", init_theme)
+
+
+class VoiceRecordingOverlayTestCase(unittest.TestCase):
+    """ISSUE-2026-019 — floating waveform indicator while voice is recording."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_overlay_markup_is_accessible_and_singleton(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("const VOICE_OVERLAY_ID = 'voiceRecordingOverlay';", terminals_js)
+        show_fn = terminals_js[
+            terminals_js.index("function _showVoiceRecordingOverlay(index)"):
+            terminals_js.index("function _hideVoiceRecordingOverlay()")
+        ]
+        self.assertIn("overlay.setAttribute('role', 'status');", show_fn)
+        self.assertIn("overlay.setAttribute('aria-live', 'polite');", show_fn)
+        self.assertIn('aria-hidden="true"', show_fn)
+        self.assertIn(">Recording</span>", show_fn)
+        # reuse the single element instead of stacking duplicates
+        self.assertIn("if (!overlay) {", show_fn)
+        self.assertIn("document.getElementById(VOICE_OVERLAY_ID)", show_fn)
+
+    def test_overlay_appears_only_after_capture_actually_starts(self):
+        terminals_js = self._static("js/terminals.js")
+        show_fn = terminals_js[
+            terminals_js.index("function _showVoiceRecordingOverlay(index)"):
+            terminals_js.index("function _hideVoiceRecordingOverlay()")
+        ]
+        # rapid-release guard: no overlay when the state was torn down mid-start
+        self.assertIn("if (!_voiceState[index]?.recording) {", show_fn)
+        start_fn = terminals_js[
+            terminals_js.index("async function _startVoice(index)"):
+            terminals_js.index("async function _acquireMicStream(")
+        ]
+        self.assertLess(
+            start_fn.index("_voiceState[index] = state;"),
+            start_fn.index("_showVoiceRecordingOverlay(index);"),
+        )
+
+    def test_overlay_hidden_from_every_cleanup_path(self):
+        terminals_js = self._static("js/terminals.js")
+        # start failure (permission denial / backend error)
+        start_fn = terminals_js[
+            terminals_js.index("async function _startVoice(index)"):
+            terminals_js.index("async function _acquireMicStream(")
+        ]
+        catch_block = start_fn[start_fn.index("} catch (err) {"):]
+        self.assertIn("_hideVoiceRecordingOverlay();", catch_block)
+        # every stop path (toggle, PTT release, hold release, voice_status
+        # error, _stopAllVoice on session switch/teardown) funnels here
+        stop_fn = terminals_js[
+            terminals_js.index("async function _stopVoice(index"):
+            terminals_js.index("async function _stopAllVoice()")
+        ]
+        self.assertIn("_hideVoiceRecordingOverlay();", stop_fn)
+        self.assertIn("_stopAllVoice();", terminals_js)
+
+    def test_waveform_uses_analyser_with_fallback_and_stale_loop_guard(self):
+        terminals_js = self._static("js/terminals.js")
+        animation_fn = terminals_js[
+            terminals_js.index("function _startVoiceOverlayAnimation(index, overlay)"):
+            terminals_js.index("function _stopVoiceOverlayAnimation()")
+        ]
+        self.assertIn("createAnalyser()", animation_fn)
+        self.assertIn("getByteFrequencyData(data)", animation_fn)
+        self.assertIn("requestAnimationFrame(tick)", animation_fn)
+        # stale loops from a superseded capture must stop themselves
+        self.assertIn("_voiceOverlayAnimation !== animation", animation_fn)
+        # deterministic fallback when no analyser is available
+        self.assertIn("voice-overlay-fallback", animation_fn)
+        stop_animation_fn = terminals_js[
+            terminals_js.index("function _stopVoiceOverlayAnimation()"):
+            terminals_js.index("const VOICE_HOLD_TO_TALK_MS")
+        ]
+        self.assertIn("cancelAnimationFrame", stop_animation_fn)
+        self.assertIn("animation.source.disconnect(animation.analyser);", stop_animation_fn)
+
+    def test_reduced_motion_disables_the_animations(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function _prefersReducedMotion()", terminals_js)
+        self.assertIn("prefers-reduced-motion: reduce", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        reduced_block = terminals_css[
+            terminals_css.index("@media (prefers-reduced-motion: reduce)"):
+        ]
+        self.assertIn("animation: none !important;", reduced_block)
+
+    def test_overlay_styles_are_fixed_nonblocking_and_theme_aware(self):
+        terminals_css = self._static("css/terminals.css")
+        overlay_block = re.search(
+            r"\.voice-recording-overlay \{.*?\}", terminals_css, re.DOTALL
+        ).group(0)
+        self.assertIn("position: fixed;", overlay_block)
+        self.assertIn("pointer-events: none;", overlay_block)
+        self.assertIn("var(--gv-danger)", overlay_block)
+        self.assertIn("var(--t-voice-bg)", overlay_block)
+        # centered over the workspace, with a slight pulse
+        self.assertIn("top: 50%;", overlay_block)
+        self.assertIn("left: 50%;", overlay_block)
+        self.assertIn("transform: translate(-50%, -50%);", overlay_block)
+        self.assertIn("animation: voice-overlay-pulse", overlay_block)
+        self.assertIn("@keyframes voice-overlay-pulse", terminals_css)
+        self.assertIn(".voice-overlay-bar", terminals_css)
+        self.assertIn("@keyframes voice-overlay-bounce", terminals_css)
+
+    def test_hold_to_talk_pointer_wiring_preserves_click_toggle(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("_wireVoiceHoldToTalk(card, i);", terminals_js)
+        hold_fn = terminals_js[
+            terminals_js.index("function _wireVoiceHoldToTalk(card, index)"):
+            terminals_js.index("/* ── Push-to-talk ── */")
+        ]
+        self.assertIn("addEventListener('pointerdown'", hold_fn)
+        self.assertIn("addEventListener('pointerup', endHold);", hold_fn)
+        self.assertIn("addEventListener('pointercancel', endHold);", hold_fn)
+        self.assertIn("setPointerCapture(event.pointerId);", hold_fn)
+        self.assertIn("VOICE_HOLD_TO_TALK_MS", hold_fn)
+        # a completed hold swallows the trailing click so it cannot re-toggle
+        self.assertIn("suppressClick", hold_fn)
+        self.assertIn("event.stopPropagation();", hold_fn)
+        # release during the async start stops capture once it settles
+        self.assertIn("holdStopRequested = true;", hold_fn)
+
+    def test_push_to_talk_rapid_release_cannot_leave_a_stale_recording(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("let _pttStopRequested = false;", terminals_js)
+        keydown_idx = terminals_js.index(
+            "if (!_voicePrefs.pttEnabled || !_voicePrefs.pttKeybind) return;"
+        )
+        keyup_idx = terminals_js.index("if (!_pttActive) return;")
+        keydown_block = terminals_js[keydown_idx:keyup_idx]
+        self.assertIn(
+            "if (_pttStopRequested && _voiceState[index]?.recording) {", keydown_block
+        )
+        keyup_block = terminals_js[
+            keyup_idx:terminals_js.index("function _updateVoiceBtn(index, recording)")
+        ]
+        self.assertIn("_pttStopRequested = true;", keyup_block)
+
+
+class UxInteractionButtonsTestCase(unittest.TestCase):
+    """Deep-dive step 9 — UX/interaction gaps (findings 8.1–8.5)."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        with api.connection_lock:
+            api.ssh_connections.clear()
+            api.session_output_buffers.clear()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def _make_session(self, status, error_message=None):
+        api.session_manager.create_group(
+            name="Retry",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-retry",
+        )
+        session = api.session_manager.create_session(
+            group_id="group-retry",
+            host="10.0.0.5",
+            directory="/srv",
+        )
+        api.session_manager.update_session_status(session.session_id, status, error_message)
+        return session
+
+    # ── 8.4: POST /api/sessions/<id>/reconnect ──────────────────────────────
+
+    def test_reconnect_unknown_session_returns_404(self):
+        response = self.client.post("/api/sessions/missing/reconnect")
+        self.assertEqual(response.status_code, 404)
+
+    def test_reconnect_rejects_sessions_that_are_not_errored_or_disconnected(self):
+        session = self._make_session(api.SessionStatus.CONNECTED)
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post(f"/api/sessions/{session.session_id}/reconnect")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("connected", response.get_json()["error"])
+        start_task.assert_not_called()
+        self.assertEqual(
+            api.session_manager.get_session(session.session_id).status,
+            api.SessionStatus.CONNECTED,
+        )
+
+    def test_reconnect_resets_errored_session_and_restarts_connect(self):
+        session = self._make_session(api.SessionStatus.ERROR, "Authentication failed")
+        api._cache_terminal_output(session.session_id, "stale output")
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post(f"/api/sessions/{session.session_id}/reconnect")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["status"], "pending")
+        self.assertIsNone(body["error_message"])
+        self.assertEqual(api._get_buffered_terminal_output(session.session_id), "")
+        start_task.assert_called_once_with(api._connect_session, session.session_id)
+
+    def test_reconnect_accepts_disconnected_sessions(self):
+        session = self._make_session(api.SessionStatus.DISCONNECTED)
+        with patch.object(api.socketio, "start_background_task") as start_task:
+            response = self.client.post(f"/api/sessions/{session.session_id}/reconnect")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "pending")
+        start_task.assert_called_once_with(api._connect_session, session.session_id)
+
+    # ── 8.4 frontend: retry affordance in error/disconnected placeholders ───
+
+    def test_placeholders_offer_retry_and_call_reconnect_endpoint(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function showPlaceholderDisconnected", terminals_js)
+        self.assertIn("async function retrySessionConnection(index)", terminals_js)
+        self.assertIn("/reconnect", terminals_js)
+        self.assertIn("ph-retry-btn", terminals_js)
+        # explorer/browser panes have no live connection, so no retry overlay
+        self.assertIn("function isRetryableDisconnect(session)", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".placeholder .ph-retry-btn", terminals_css)
+        self.assertIn("pointer-events: auto", terminals_css)
+        self.assertIn(".placeholder.ph-disconnected", terminals_css)
+
+    # ── 8.1: closing a session tab asks for confirmation ────────────────────
+
+    def test_terminals_page_ships_close_session_confirm_modal(self):
+        html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertIn('id="closeSessionConfirmModal"', html)
+        self.assertIn('id="closeSessionConfirmAccept"', html)
+        self.assertIn('id="closeSessionConfirmCancel"', html)
+
+    def test_close_session_group_gates_on_confirmation(self):
+        terminals_js = self._static("js/terminals.js")
+        close_fn = terminals_js[
+            terminals_js.index("async function closeSessionGroup"):
+            terminals_js.index("async function closeCurrentSession")
+        ]
+        self.assertIn("await confirmCloseSessionGroup(groupId)", close_fn)
+        confirm_fn = terminals_js[
+            terminals_js.index("async function confirmCloseSessionGroup"):
+            terminals_js.index("function buildSavedSessionLaunchPayload")
+        ]
+        # groups with no connected terminals close without the dialog
+        self.assertIn("session.status === 'connected'", confirm_fn)
+        self.assertIn("connectedCount === 0", confirm_fn)
+        # Escape / backdrop / Cancel all resolve to "keep the session"
+        self.assertIn("closeCloseSessionConfirmModal(false)", terminals_js)
+        self.assertIn("closeCloseSessionConfirmModal(true)", terminals_js)
+
+    # ── 8.2: launch CTA keeps its structure and gains a spinner ─────────────
+
+    def test_launch_button_uses_loading_class_not_text_mutation(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('class="action-btn-label"', html)
+        self.assertIn('class="action-btn-spinner"', html)
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("function setLaunchButtonLoading(button, loading)", launcher_js)
+        self.assertNotIn("button.textContent = 'Launching...'", launcher_js)
+        self.assertNotIn("originalButtonHtml", launcher_js)
+        launcher_css = self._static("css/launcher.css")
+        self.assertIn(".action-btn.loading .arrow { display: none; }", launcher_css)
+        self.assertIn(".action-btn.loading .action-btn-spinner", launcher_css)
+
+    # ── 8.3: one update-status area with an auto-clear ──────────────────────
+
+    def test_update_status_renders_in_one_place_and_auto_clears(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertNotIn('id="updateStatus"', html)
+        self.assertIn('id="quickUpdateStatus"', html)
+        launcher_js = self._static("js/launcher.js")
+        self.assertNotIn("getElementById('updateStatus')", launcher_js)
+        set_fn = launcher_js[
+            launcher_js.index("function setUpdateStatus"):
+            launcher_js.index("function applyAppSettings")
+        ]
+        self.assertIn("quickUpdateStatus", set_fn)
+        self.assertIn("6000", set_fn)
+        launcher_css = self._static("css/launcher.css")
+        self.assertNotIn(".toolbar-status", launcher_css)
+
+    # ── 8.5: save-settings button keeps only the custom tooltip ─────────────
+
+    def test_save_settings_button_has_single_tooltip(self):
+        html = self.client.get("/").get_data(as_text=True)
+        btn_start = html.index('id="saveAppSettingsBtn"')
+        button_tag = html[html.rindex("<button", 0, btn_start):html.index(">", btn_start) + 1]
+        self.assertNotIn("title=", button_tag)
+        self.assertIn('aria-describedby="saveAppSettingsTip"', button_tag)
+        self.assertIn('id="saveAppSettingsTip"', html)
+
+
+
+class HostKeyPolicyTestCase(unittest.TestCase):
+    """Deep-dive 10.7 — configurable SSH host-key verification policy."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.config_path = Path(self.temp_dir.name) / "config.json"
+        patcher = patch.object(web_config, "CONFIG_PATH", str(self.config_path))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        api._refresh_runtime_config()
+        self.addCleanup(api._refresh_runtime_config)
+        self.known_hosts = Path(self.temp_dir.name) / ".known_hosts"
+        kh_patcher = patch.object(web_hostkeys, "KNOWN_HOSTS_PATH", str(self.known_hosts))
+        kh_patcher.start()
+        self.addCleanup(kh_patcher.stop)
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_runtime_config_normalizes_host_key_policy(self):
+        for raw, expected in (
+            ("strict", "strict"),
+            ("KNOWN-HOSTS", "known-hosts"),
+            ("auto-add", "auto-add"),
+            ("nonsense", "auto-add"),
+            (None, "auto-add"),
+        ):
+            with self.subTest(raw=raw):
+                ssh_config = {} if raw is None else {"host_key_policy": raw}
+                self.config_path.write_text(json.dumps({"ssh": ssh_config}), encoding="utf-8")
+                api._refresh_runtime_config()
+                self.assertEqual(api.runtime_config.ssh_host_key_policy, expected)
+
+    def test_default_config_ships_auto_add_policy(self):
+        default_config = json.loads(
+            Path(web_config.DEFAULT_CONFIG_PATH).read_text(encoding="utf-8")
+        )
+        self.assertEqual(default_config["ssh"]["host_key_policy"], "auto-add")
+
+    def test_auto_add_policy_keeps_todays_behaviour(self):
+        client = MagicMock()
+        fake_paramiko = MagicMock()
+        api._apply_host_key_policy(client, fake_paramiko, "auto-add")
+        client.set_missing_host_key_policy.assert_called_once_with(
+            fake_paramiko.AutoAddPolicy.return_value
+        )
+        client.load_host_keys.assert_called_once_with(str(self.known_hosts))
+        client.load_system_host_keys.assert_not_called()
+
+    def test_known_hosts_policy_warns_then_delegates_to_auto_add(self):
+        client = MagicMock()
+        fake_paramiko = MagicMock()
+        api._apply_host_key_policy(client, fake_paramiko, "known-hosts")
+        policy = client.set_missing_host_key_policy.call_args[0][0]
+        self.assertIsInstance(policy, web_hostkeys._WarnNewHostKeyPolicy)
+        with self.assertLogs("web.hostkeys", level="WARNING") as logs:
+            policy.missing_host_key(client, "host.example", object())
+        self.assertTrue(any("host.example" in line for line in logs.output))
+        fake_paramiko.AutoAddPolicy.return_value.missing_host_key.assert_called_once()
+
+    def test_strict_policy_rejects_unknown_hosts_and_loads_user_known_hosts(self):
+        user_known_hosts = Path(self.temp_dir.name) / "user_known_hosts"
+        user_known_hosts.write_text("", encoding="utf-8")
+        ukh_patcher = patch.object(
+            web_hostkeys, "USER_KNOWN_HOSTS_PATH", str(user_known_hosts)
+        )
+        ukh_patcher.start()
+        self.addCleanup(ukh_patcher.stop)
+        client = MagicMock()
+        fake_paramiko = MagicMock()
+        api._apply_host_key_policy(client, fake_paramiko, "strict")
+        client.set_missing_host_key_policy.assert_called_once_with(
+            fake_paramiko.RejectPolicy.return_value
+        )
+        client.load_host_keys.assert_called_once_with(str(self.known_hosts))
+        client.load_system_host_keys.assert_called_once_with(str(user_known_hosts))
+
+    def test_policy_defaults_to_runtime_config_value(self):
+        self.config_path.write_text(
+            json.dumps({"ssh": {"host_key_policy": "strict"}}), encoding="utf-8"
+        )
+        api._refresh_runtime_config()
+        client = MagicMock()
+        fake_paramiko = MagicMock()
+        missing_user_path = str(Path(self.temp_dir.name) / "missing")
+        with patch.object(web_hostkeys, "USER_KNOWN_HOSTS_PATH", missing_user_path):
+            api._apply_host_key_policy(client, fake_paramiko)
+        client.set_missing_host_key_policy.assert_called_once_with(
+            fake_paramiko.RejectPolicy.return_value
+        )
+        client.load_system_host_keys.assert_not_called()
+
+    def test_all_three_ssh_entry_points_share_the_policy_helper(self):
+        self.assertIs(
+            web_terminal_io._apply_host_key_policy,
+            web_hostkeys._apply_host_key_policy,
+        )
+        self.assertIs(
+            web_explorer._apply_host_key_policy,
+            web_hostkeys._apply_host_key_policy,
+        )
+        self.assertIs(
+            web_agents._apply_host_key_policy,
+            web_hostkeys._apply_host_key_policy,
+        )
+
+    def test_app_config_endpoint_round_trips_host_key_policy(self):
+        response = self.client.get("/api/app-config")
+        self.assertEqual(response.get_json()["ssh"]["host_key_policy"], "auto-add")
+
+        response = self.client.post(
+            "/api/app-config", json={"ssh": {"host_key_policy": "strict"}}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["ssh"]["host_key_policy"], "strict")
+        self.assertEqual(api.load_config()["ssh"]["host_key_policy"], "strict")
+        self.assertEqual(api.runtime_config.ssh_host_key_policy, "strict")
+
+        # invalid values keep the current policy instead of weakening it
+        response = self.client.post(
+            "/api/app-config", json={"ssh": {"host_key_policy": "yolo"}}
+        )
+        self.assertEqual(response.get_json()["ssh"]["host_key_policy"], "strict")
+
+    def test_launcher_ships_host_key_policy_select(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="appSshHostKeyPolicy"', html)
+        for value in ("auto-add", "known-hosts", "strict"):
+            self.assertIn(f'value="{value}"', html)
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("host_key_policy", launcher_js)
+        self.assertIn("appSshHostKeyPolicy", launcher_js)
+
+
+class ExplorerDownloadTestCase(unittest.TestCase):
+    """Deep-dive 10.6 — explorer file download stays inside the read-only contract."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+
+    def _create_local_explorer_session(self):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(self.root),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        return response.get_json()["sessions"][0]["session_id"]
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_download_returns_attachment_including_binary_files(self):
+        payload = b"\x00\x01binary\xffdata"
+        (self.root / "artifact.bin").write_bytes(payload)
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/download?path=artifact.bin"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_data(), payload)
+        disposition = response.headers.get("Content-Disposition", "")
+        self.assertIn("attachment", disposition)
+        self.assertIn("artifact.bin", disposition)
+        response.close()
+
+    def test_download_unknown_session_returns_404(self):
+        response = self.client.get("/api/explorer/missing/download?path=x")
+        self.assertEqual(response.status_code, 404)
+
+    def test_download_rejects_paths_outside_the_root(self):
+        (self.root / "inside.txt").write_text("ok", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/download?path=../outside.txt"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_download_rejects_files_over_the_size_cap(self):
+        (self.root / "big.log").write_bytes(b"x" * 64)
+        session_id = self._create_local_explorer_session()
+        with patch.object(api, "EXPLORER_DOWNLOAD_MAX_BYTES", 16):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/download?path=big.log"
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("limit", response.get_json()["error"])
+
+    def test_download_never_touches_git_or_write_helpers(self):
+        (self.root / "read.txt").write_text("read only", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        with patch.object(web_explorer, "_run_git_command") as run_git:
+            response = self.client.get(
+                f"/api/explorer/{session_id}/download?path=read.txt"
+            )
+        self.assertEqual(response.status_code, 200)
+        run_git.assert_not_called()
+        response.close()
+
+    def test_file_viewer_ships_download_button(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function downloadExplorerFile(index)", terminals_js)
+        self.assertIn("data-explorer-download", terminals_js)
+        self.assertIn("/download?path=", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".explorer-download-btn", terminals_css)
+
+    def test_native_window_downloads_route_through_the_bridge(self):
+        # WebView2 drops anchor downloads, so the native window must use the
+        # pywebview save_download bridge instead of the <a download> click.
+        terminals_js = self._static("js/terminals.js")
+        download_fn = terminals_js[
+            terminals_js.index("async function downloadExplorerFile"):
+            terminals_js.index("function getDownloadBaseName")
+        ]
+        self.assertIn("isPywebviewAvailable()", download_fn)
+        self.assertIn("window.pywebview.api.save_download", download_fn)
+        # both paths give a visible result the user asked for
+        self.assertIn("showTerminalToast", download_fn)
+
+    def test_download_shows_a_success_toast(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function showTerminalToast(message, type", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".terminal-toast", terminals_css)
+        self.assertIn(".terminal-toast.success", terminals_css)
+
+
+class TerminalSearchWebLinksTestCase(unittest.TestCase):
+    """Deep-dive 10.3 — terminal scrollback search + clickable links."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_terminals_page_loads_vendored_addons(self):
+        html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertNotIn("cdn.jsdelivr.net", html)
+        self.assertIn("/static/vendor/xterm-addon-search.min.js", html)
+        self.assertIn("/static/vendor/xterm-addon-web-links.min.js", html)
+
+    def test_vendored_addons_are_served(self):
+        search_js = self._static("vendor/xterm-addon-search.min.js")
+        self.assertIn("SearchAddon", search_js)
+        links_js = self._static("vendor/xterm-addon-web-links.min.js")
+        self.assertIn("WebLinksAddon", links_js)
+
+    def test_make_terminal_loads_search_and_web_links_addons(self):
+        terminals_js = self._static("js/terminals.js")
+        make_terminal = terminals_js[
+            terminals_js.index("function makeTerminal"):
+            terminals_js.index("function emitTerminalResize")
+        ]
+        self.assertIn("new SearchAddon.SearchAddon()", make_terminal)
+        self.assertIn("new WebLinksAddon.WebLinksAddon(", make_terminal)
+        self.assertIn("attachCustomKeyEventHandler", make_terminal)
+        self.assertIn("searchAddon", make_terminal)
+
+    def test_search_overlay_wiring_and_shortcut(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function openTerminalSearch(index)", terminals_js)
+        self.assertIn("function closeTerminalSearch(index)", terminals_js)
+        self.assertIn("function findTerminalSearchTargetIndex()", terminals_js)
+        self.assertIn("findPrevious", terminals_js)
+        self.assertIn("{ incremental: true }", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".terminal-search-overlay", terminals_css)
+        self.assertIn(".terminal-search-input", terminals_css)
+
+
+class BroadcastInputTestCase(unittest.TestCase):
+    """Deep-dive 10.4 — broadcast typing to all plain terminal panes."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_topbar_ships_broadcast_toggle(self):
+        html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertIn('id="broadcastBtn"', html)
+        self.assertIn("toggleBroadcastInput()", html)
+        self.assertIn('aria-pressed="false"', html)
+
+    def test_input_forwarding_goes_through_the_broadcast_helper(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function forwardTerminalInput(index, data)", terminals_js)
+        # both onData wiring sites (grid build + split panes) share the helper
+        self.assertEqual(
+            terminals_js.count("onData(data => forwardTerminalInput("), 2
+        )
+        # the peer fan-out lives in a shared helper reused by keyboard + voice
+        self.assertIn(
+            "function broadcastInputToPeers(sourceIndex, data)", terminals_js
+        )
+        forward_fn = terminals_js[
+            terminals_js.index("function forwardTerminalInput"):
+            terminals_js.index("function wirePaneInputForwarding")
+        ]
+        self.assertIn("broadcastInputToPeers(index, data)", forward_fn)
+        # explorer/browser panes are skipped (no `term`) in the shared helper
+        peer_fn = terminals_js[
+            terminals_js.index("function broadcastInputToPeers"):
+            terminals_js.index("function setFocusedTerminal")
+        ]
+        self.assertIn("terminals[otherIndex]?.term", peer_fn)
+        self.assertIn("if (!broadcastInputActive || !socket)", peer_fn)
+
+    def test_broadcast_auto_disables_on_group_switch_and_idle(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("BROADCAST_IDLE_TIMEOUT_MS = 10 * 60 * 1000", terminals_js)
+        switch_fn = terminals_js[
+            terminals_js.index("async function switchGroup"):
+            terminals_js.index("Status refresh (no grid rebuild)")
+        ]
+        self.assertIn("setBroadcastInput(false)", switch_fn)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".broadcast-btn.active", terminals_css)
+        self.assertIn("#terminalsGrid.broadcast-input", terminals_css)
+
+    def test_active_terminal_pane_paints_a_single_focused_card(self):
+        """ISSUE-2026-025: paintActiveTerminalCard marks exactly one plain
+        terminal card and clears the rest (one-active-pane enforcement)."""
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function paintActiveTerminalCard(index)", terminals_js)
+        paint_fn = terminals_js[
+            terminals_js.index("function paintActiveTerminalCard(index)"):
+            terminals_js.index("function setFocusedTerminal(index)")
+        ]
+        # marks the target with a semantic class + accessible state …
+        self.assertIn("targetCard.classList.add('terminal-active')", paint_fn)
+        self.assertIn("targetCard.setAttribute('aria-current', 'true')", paint_fn)
+        # … and clears it from every other pane (one-active-pane enforcement)
+        self.assertIn(
+            "document.querySelectorAll('.terminal-container.terminal-active')", paint_fn
+        )
+        self.assertIn("card.classList.remove('terminal-active')", paint_fn)
+        self.assertIn("card.removeAttribute('aria-current')", paint_fn)
+        # explorer/browser panes are never valid input targets
+        plain_fn = terminals_js[
+            terminals_js.index("function isPlainTerminalCard(card)"):
+            terminals_js.index("function terminalCardSlot(card)")
+        ]
+        self.assertIn("!card.classList.contains('explorer-pane')", plain_fn)
+        self.assertIn("!card.classList.contains('browser-pane')", plain_fn)
+
+    def test_active_terminal_pane_tracks_real_dom_focus(self):
+        """ISSUE-2026-025: the highlight is driven by actual keyboard focus via
+        a delegated focusin/focusout pair, so it can never disagree with where
+        typing lands; focus leaving to dead space / non-terminal clears it."""
+        terminals_js = self._static("js/terminals.js")
+        # delegated focus wiring (one active pane == the focused terminal)
+        self.assertIn("document.addEventListener('focusin', event =>", terminals_js)
+        self.assertIn("document.addEventListener('focusout', event =>", terminals_js)
+        focusin = terminals_js[
+            terminals_js.index("document.addEventListener('focusin', event =>"):
+            terminals_js.index("document.addEventListener('focusout', event =>")
+        ]
+        self.assertIn("event.target?.closest?.('.terminal-container')", focusin)
+        self.assertIn("setFocusedTerminal(terminalCardSlot(card))", focusin)
+        focusout = terminals_js[
+            terminals_js.index("document.addEventListener('focusout', event =>"):
+            terminals_js.index("function forwardTerminalInput")
+        ]
+        # only clear when focus is NOT moving to another plain terminal
+        self.assertIn("event.relatedTarget?.closest?.('.terminal-container')", focusout)
+        self.assertIn("if (!isPlainTerminalCard(nextCard))", focusout)
+        self.assertIn("clearActiveTerminalHighlight();", focusout)
+        # selection is NEVER driven by terminal output: forwardTerminalInput
+        # (wired to `onData`, which also fires for TUI mouse-tracking sequences)
+        # must not touch the active-pane state, or the highlight would follow the
+        # mouse into an unfocused pane.
+        forward_fn = terminals_js[
+            terminals_js.index("function forwardTerminalInput"):
+            terminals_js.index("function wirePaneInputForwarding")
+        ]
+        self.assertNotIn("setFocusedTerminal", forward_fn)
+        # clearing selection drops the input target too (no invisible target)
+        clear_fn = terminals_js[
+            terminals_js.index("function clearActiveTerminalHighlight()"):
+            terminals_js.index("function resetFocusedTerminal()")
+        ]
+        self.assertIn("_focusedTerminalIndex = -1;", clear_fn)
+        # teardown fully resets
+        self.assertIn("function resetFocusedTerminal()", terminals_js)
+        teardown = terminals_js[
+            terminals_js.index("function teardownCurrentGrid()"):
+            terminals_js.index("function teardownCurrentGrid()") + 900
+        ]
+        self.assertIn("resetFocusedTerminal();", teardown)
+
+    def test_push_to_talk_targets_only_the_selected_terminal(self):
+        """ISSUE-2026-026 follow-up: voice/PTT go to the focused (highlighted)
+        terminal only — never to a stale 'last selected' pane when nothing is
+        selected (consistent with typing)."""
+        terminals_js = self._static("js/terminals.js")
+        ptt_fn = terminals_js[
+            terminals_js.index("function _findPttTerminalIndex()"):
+            terminals_js.index("function findExplorerSearchTargetIndex()")
+        ]
+        self.assertIn("return _focusedTerminalIndex;", ptt_fn)
+        # no fall-back scan to the first terminal when nothing is selected
+        self.assertNotIn("for (let i = 0", ptt_fn)
+
+    def test_broadcast_enable_focuses_a_terminal_for_immediate_typing(self):
+        """ISSUE-2026-026 follow-up: enabling Broadcast typing focuses a terminal
+        so the user can type immediately without first clicking a pane."""
+        terminals_js = self._static("js/terminals.js")
+        set_broadcast = terminals_js[
+            terminals_js.index("function setBroadcastInput(active)"):
+            terminals_js.index("function toggleBroadcastInput()")
+        ]
+        self.assertIn("focusActiveOrDefaultTerminal();", set_broadcast)
+        focus_default = terminals_js[
+            terminals_js.index("function focusActiveOrDefaultTerminal()"):
+            terminals_js.index("function focusActiveOrDefaultTerminal()") + 400
+        ]
+        # prefers the sticky target, focuses a real attached terminal
+        self.assertIn(
+            "firstAttachedPlainTerminalIndex(_focusedTerminalIndex)", focus_default
+        )
+        self.assertIn("terminals[index].term.focus()", focus_default)
+
+    def test_active_terminal_pane_has_distinct_token_style(self):
+        """ISSUE-2026-025: the active-pane treatment is token-based and stays
+        distinguishable from broadcast typing."""
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(
+            ".terminal-container.terminal-active:not(.explorer-pane):not(.browser-pane)",
+            terminals_css,
+        )
+        active_rule_start = terminals_css.index(
+            ".terminal-container.terminal-active:not(.explorer-pane):not(.browser-pane)"
+        )
+        active_rule = terminals_css[active_rule_start:active_rule_start + 600]
+        # token-driven accent (no palette literals) …
+        self.assertIn("var(--t-accent)", active_rule)
+        # … a heavier 2px ring than the broadcast 1px inset border …
+        self.assertIn("inset 0 0 0 2px var(--t-accent)", active_rule)
+        # … plus a header accent rule that broadcast does not paint (distinct).
+        self.assertIn("inset 0 -2px 0 var(--t-accent)", active_rule)
+
+    def test_voice_transcript_honours_broadcast_typing(self):
+        """ISSUE-2026-026: a committed voice transcript fans out to every plain
+        pane through the same broadcast filter keyboard input uses; interim
+        previews stay on the recording pane only."""
+        terminals_js = self._static("js/terminals.js")
+        handler = terminals_js[
+            terminals_js.index("socket.on('voice_result'"):
+            terminals_js.index("socket.on('voice_status'")
+        ]
+        # final branch: deliver to recorder + fan out via the shared helper
+        self.assertIn("_sendToTerminal(index, text);", handler)
+        self.assertIn("broadcastInputToPeers(index, text);", handler)
+        self.assertIn("_clearVoicePreview(index);", handler)
+        # interim (non-final) previews are isolated to the recording pane
+        self.assertIn("_showVoicePreview(index, text);", handler)
+        self.assertLess(
+            handler.index("broadcastInputToPeers(index, text)"),
+            handler.index("_showVoicePreview(index, text)"),
+        )
+        # the voice path reuses the *same* peer helper as keyboard forwarding
+        self.assertEqual(
+            terminals_js.count("broadcastInputToPeers(index, "), 2
+        )
+
+
+class RuntimeStateRestoreTestCase(unittest.TestCase):
+    """Deep-dive 10.5 — workspace-shape snapshot + restore after restart."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def _launch_explorer_group(self, name="Workspace"):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": name,
+                "sessions": [
+                    {
+                        "directory": str(self.repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        return response.get_json()["group_id"]
+
+    def test_launch_persists_a_password_free_snapshot(self):
+        self._launch_explorer_group()
+        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(snapshot["groups"]), 1)
+        group = snapshot["groups"][0]
+        self.assertEqual(group["name"], "Workspace")
+        self.assertEqual(group["connection_mode"], "wsl")
+        self.assertEqual(len(group["sessions"]), 1)
+        session = group["sessions"][0]
+        self.assertEqual(session["startup_mode"], "explorer")
+        self.assertNotIn("password", session)
+
+    def test_runtime_state_is_only_restorable_without_active_groups(self):
+        self._launch_explorer_group()
+        response = self.client.get("/api/runtime-state")
+        payload = response.get_json()
+        self.assertFalse(payload["restorable"])
+        self.assertEqual(payload["active_group_count"], 1)
+
+        # simulate a backend restart: in-memory groups vanish, the file stays
+        api.session_manager.reset_sessions()
+        response = self.client.get("/api/runtime-state")
+        payload = response.get_json()
+        self.assertTrue(payload["restorable"])
+        self.assertEqual(len(payload["groups"]), 1)
+
+    def test_replaying_the_snapshot_relaunches_the_group(self):
+        self._launch_explorer_group()
+        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
+        api.session_manager.reset_sessions()
+
+        group = snapshot["groups"][0]
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "sessions": group["sessions"],
+                "connection_mode": group["connection_mode"],
+                "layout": group["layout"],
+                "workspace_layout": group["workspace_layout"],
+                "surface_mode": group["surface_mode"],
+                "session_name": group["name"],
+                "saved_session_id": group["saved_session_id"],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        restored = response.get_json()
+        self.assertEqual(restored["group"]["name"], "Workspace")
+        self.assertEqual(restored["sessions"][0]["startup_mode"], "explorer")
+
+    def test_closing_the_group_empties_the_snapshot(self):
+        group_id = self._launch_explorer_group()
+        response = self.client.delete(f"/api/sessions?group={group_id}")
+        self.assertEqual(response.status_code, 200)
+        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(snapshot["groups"], [])
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+
+    def test_stale_or_missing_snapshots_are_not_restorable(self):
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+        stale = {
+            "version": 1,
+            "saved_at": time.time() - web_runtime_state.RUNTIME_STATE_MAX_AGE_SECONDS - 60,
+            "groups": [{"name": "old"}],
+        }
+        self.state_path.write_text(json.dumps(stale), encoding="utf-8")
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+        self.state_path.write_text("not json", encoding="utf-8")
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+
+    def test_delete_endpoint_dismisses_the_snapshot(self):
+        self._launch_explorer_group()
+        api.session_manager.reset_sessions()
+        response = self.client.delete("/api/runtime-state")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(self.state_path.exists())
+        payload = self.client.get("/api/runtime-state").get_json()
+        self.assertFalse(payload["restorable"])
+
+    def test_launcher_ships_restore_banner(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="restoreWorkspaceBanner"', html)
+        self.assertIn("restorePreviousWorkspace()", html)
+        self.assertIn("dismissRestoreBanner()", html)
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("async function checkRestorableWorkspace()", launcher_js)
+        self.assertIn("async function restorePreviousWorkspace()", launcher_js)
+        self.assertIn("fetch('/api/runtime-state', { method: 'DELETE' })", launcher_js)
+        launcher_css = self._static("css/launcher.css")
+        self.assertIn(".restore-banner", launcher_css)
+
+
+class SettingsLauncherConfigTestCase(unittest.TestCase):
+    """Stage 7 — ISSUE-2026-031 / ISSUE-2026-029 / ISSUE-2026-013."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.config_path = Path(self.temp_dir.name) / "config.json"
+        patcher = patch.object(web_config, "CONFIG_PATH", str(self.config_path))
+        patcher.start()
+        # LIFO cleanup: unpatch first, then refresh from the real config so
+        # later test classes see the on-disk settings again.
+        self.addCleanup(api._refresh_runtime_config)
+        self.addCleanup(patcher.stop)
+        api._refresh_runtime_config()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    # ── ISSUE-2026-031 — App Settings body scrolls under pinned actions ──
+
+    def test_app_settings_body_keeps_modal_scroll_region(self):
+        launcher_css = self._static("css/launcher.css")
+        # The override that disabled the scroll region must stay gone.
+        self.assertNotIn(
+            ".app-settings-card .settings-grid",
+            launcher_css,
+            "App Settings must not override the shared .settings-grid scroll model",
+        )
+        settings_grid = re.search(r"\.settings-grid \{(.*?)\}", launcher_css, re.DOTALL)
+        self.assertIsNotNone(settings_grid)
+        self.assertIn("overflow: auto", settings_grid.group(1))
+        self.assertIn("min-height: 0", settings_grid.group(1))
+        # Pinned header/body/actions rows: the actions row stays out of the
+        # scrollable body, so a taller voice panel can never paint under it.
+        modal_card = re.search(r"\n        \.modal-card \{(.*?)\}", launcher_css, re.DOTALL)
+        self.assertIsNotNone(modal_card)
+        self.assertIn("grid-template-rows: auto minmax(0, 1fr) auto", modal_card.group(1))
+        self.assertIn(".app-settings-actions", launcher_css)
+
+    # ── ISSUE-2026-029 — terminal settings in App Settings ──
+
+    def test_app_config_returns_terminal_settings(self):
+        payload = self.client.get("/api/app-config").get_json()
+        self.assertIn("terminal", payload)
+        self.assertEqual(
+            payload["terminal"]["font_family"], api.runtime_config.terminal_font_family
+        )
+        self.assertEqual(
+            payload["terminal"]["font_size"], api.runtime_config.terminal_font_size
+        )
+        self.assertEqual(
+            payload["terminal"]["max_sessions"], api.runtime_config.max_sessions
+        )
+
+    def test_app_config_persists_terminal_settings(self):
+        response = self.client.post(
+            "/api/app-config",
+            json={
+                "terminal": {
+                    "font_family": "Cascadia Mono, monospace",
+                    "font_size": 18,
+                    "max_sessions": 6,
+                }
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["terminal"]["font_family"], "Cascadia Mono, monospace")
+        self.assertEqual(payload["terminal"]["font_size"], 18)
+        self.assertEqual(payload["terminal"]["max_sessions"], 6)
+        cfg = api.load_config()
+        self.assertEqual(cfg["terminal"]["font_family"], "Cascadia Mono, monospace")
+        self.assertEqual(cfg["terminal"]["font_size"], 18)
+        self.assertEqual(cfg["terminal"]["max_sessions"], 6)
+        self.assertEqual(api.runtime_config.terminal_font_size, 18)
+        self.assertEqual(api.runtime_config.terminal_font_family, "Cascadia Mono, monospace")
+        self.assertEqual(api.runtime_config.max_sessions, 6)
+
+    def test_app_config_clamps_terminal_bounds(self):
+        response = self.client.post(
+            "/api/app-config",
+            json={"terminal": {"font_size": 200, "max_sessions": 99}},
+        )
+        payload = response.get_json()
+        self.assertEqual(payload["terminal"]["font_size"], web_config.TERMINAL_FONT_SIZE_MAX)
+        self.assertEqual(payload["terminal"]["max_sessions"], web_config.MAX_SESSIONS_MAX)
+
+        response = self.client.post(
+            "/api/app-config",
+            json={"terminal": {"font_size": 1, "max_sessions": 0}},
+        )
+        payload = response.get_json()
+        self.assertEqual(payload["terminal"]["font_size"], web_config.TERMINAL_FONT_SIZE_MIN)
+        self.assertEqual(payload["terminal"]["max_sessions"], web_config.MAX_SESSIONS_MIN)
+
+    def test_app_config_rejects_invalid_terminal_values(self):
+        before_family = api.runtime_config.terminal_font_family
+        before_size = api.runtime_config.terminal_font_size
+        before_sessions = api.runtime_config.max_sessions
+
+        response = self.client.post(
+            "/api/app-config",
+            json={
+                "terminal": {
+                    "font_family": "x" * (web_config.TERMINAL_FONT_FAMILY_MAX_LENGTH + 1),
+                    "font_size": "not-a-number",
+                    "max_sessions": None,
+                }
+            },
+        )
+
+        payload = response.get_json()
+        self.assertEqual(payload["terminal"]["font_family"], before_family)
+        self.assertEqual(payload["terminal"]["font_size"], before_size)
+        self.assertEqual(payload["terminal"]["max_sessions"], before_sessions)
+
+        response = self.client.post("/api/app-config", json={"terminal": {"font_family": "   "}})
+        self.assertEqual(response.get_json()["terminal"]["font_family"], before_family)
+
+    def test_runtime_config_refresh_clamps_terminal_settings(self):
+        self.config_path.write_text(
+            json.dumps({"terminal": {"max_sessions": "nope", "font_size": 900}}),
+            encoding="utf-8",
+        )
+        api._refresh_runtime_config()
+        self.assertEqual(api.runtime_config.max_sessions, 4)
+        self.assertEqual(
+            api.runtime_config.terminal_font_size, web_config.TERMINAL_FONT_SIZE_MAX
+        )
+
+    def test_app_settings_modal_collects_terminal_fields(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="appTerminalFontFamily"', html)
+        self.assertIn('id="appTerminalFontSize"', html)
+        self.assertIn('id="appTerminalMaxSessions"', html)
+
+        launcher_js = self._static("js/launcher.js")
+        collect = launcher_js[
+            launcher_js.index("function collectAppSettingsForm()"):
+            launcher_js.index("function notifyAppConfigUpdated(appSettings)")
+        ]
+        self.assertIn("terminal: {", collect)
+        self.assertIn("appTerminalFontFamily", collect)
+        self.assertIn("appTerminalFontSize", collect)
+        self.assertIn("appTerminalMaxSessions", collect)
+        notify = launcher_js[
+            launcher_js.index("function notifyAppConfigUpdated(appSettings)"):
+            launcher_js.index("async function loadAppSettings()")
+        ]
+        self.assertIn("terminal: {", notify)
+
+    def test_terminals_page_applies_live_terminal_font_updates(self):
+        terminals_js = self._static("js/terminals.js")
+        apply_update = terminals_js[
+            terminals_js.index("function applyAppConfigUpdate(message)"):
+            terminals_js.index("function applyAppConfigTerminalFont(message)")
+        ]
+        self.assertIn("applyAppConfigTerminalFont(message);", apply_update)
+        apply_font = terminals_js[
+            terminals_js.index("function applyAppConfigTerminalFont(message)"):
+            terminals_js.index("/* Recover app-config changes missed")
+        ]
+        self.assertIn("document.body.dataset.terminalFontSize", apply_font)
+        self.assertIn("document.body.dataset.terminalFontFamily", apply_font)
+        self.assertIn("term.options.fontSize", apply_font)
+        self.assertIn("term.options.fontFamily", apply_font)
+        self.assertIn("scheduleFit(index);", apply_font)
+
+    # ── ISSUE-2026-013 — per-agent auto-mode toggles ──
+
+    def test_agent_options_expose_registry_auto_mode_flags(self):
+        options = {item["value"]: item for item in web_agents._agent_options()}
+        self.assertEqual(options["claude"]["auto_mode_flag"], "--enable-auto-mode")
+        self.assertEqual(options["codex"]["auto_mode_flag"], "--full-auto")
+        self.assertEqual(options["copilot"]["auto_mode_flag"], "--allow-all-tools")
+        self.assertEqual(options["opencode"]["auto_mode_flag"], "")
+        self.assertEqual(options["other"]["auto_mode_flag"], "")
+
+    def test_auto_mode_flag_rejects_malformed_registry_values(self):
+        with patch.dict(
+            web_agents.AGENT_REGISTRY,
+            {"badflag": {"auto_mode": {"flag": "rm -rf /"}}},
+        ):
+            self.assertEqual(web_agents._agent_auto_mode_flag("badflag"), "")
+        with patch.dict(
+            web_agents.AGENT_REGISTRY,
+            {"nodash": {"auto_mode": {"flag": "yolo"}}},
+        ):
+            self.assertEqual(web_agents._agent_auto_mode_flag("nodash"), "")
+
+    def test_compose_agent_startup_command_variants(self):
+        def session(**overrides):
+            base = {
+                "initial_command": "claude",
+                "initial_command_mode": "agent",
+                "agent_selection": "claude",
+                "agent_auto_mode": True,
+            }
+            base.update(overrides)
+            return SimpleNamespace(**base)
+
+        compose = web_agents._compose_agent_startup_command
+        self.assertEqual(compose(session()), "claude --enable-auto-mode")
+        self.assertEqual(compose(session(agent_auto_mode=False)), "claude")
+        self.assertEqual(
+            compose(session(initial_command="opencode", agent_selection="opencode")),
+            "opencode",
+        )
+        # A custom command never gains flags, even with the toggle persisted.
+        self.assertEqual(
+            compose(
+                session(
+                    initial_command="my-agent --custom",
+                    agent_selection="other",
+                    custom_agent="my-agent --custom",
+                )
+            ),
+            "my-agent --custom",
+        )
+        self.assertEqual(
+            compose(session(initial_command_mode="command")), "claude"
+        )
+        self.assertEqual(compose(session(initial_command="")), "")
+
+    def test_startup_sequence_sends_composed_auto_mode_command(self):
+        connection = {"kind": "ssh", "shell_kind": "posix"}
+        session = SimpleNamespace(
+            directory="",
+            initial_command="claude",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            agent_auto_mode=True,
+        )
+        with patch.object(web_terminal_io, "_send_connection_input") as send:
+            web_terminal_io._run_startup_sequence(connection, session)
+        send.assert_called_once_with(connection, "claude --enable-auto-mode\n")
+
+        session.agent_auto_mode = False
+        with patch.object(web_terminal_io, "_send_connection_input") as send:
+            web_terminal_io._run_startup_sequence(connection, session)
+        send.assert_called_once_with(connection, "claude\n")
+
+    def test_normalize_terminal_entries_gates_agent_auto_mode(self):
+        normalized = web_saved_sessions._normalize_terminal_entries(
+            [
+                {
+                    "startup_mode": "agent",
+                    "agent_selection": "claude",
+                    "initial_command": "claude",
+                    "agent_auto_mode": True,
+                },
+                {"startup_mode": "terminal", "agent_auto_mode": True},
+                {"startup_mode": "agent", "agent_selection": "claude"},
+            ]
+        )
+        self.assertTrue(normalized[0]["agent_auto_mode"])
+        self.assertFalse(normalized[1]["agent_auto_mode"])
+        # Backward compatibility: presets without the field default to off.
+        self.assertFalse(normalized[2]["agent_auto_mode"])
+
+    def test_workspace_merge_carries_agent_auto_mode(self):
+        base = {
+            "connection_mode": "wsl",
+            "terminal_count": 1,
+            "terminals": [
+                {
+                    "startup_mode": "agent",
+                    "agent_selection": "claude",
+                    "initial_command": "claude",
+                    "agent_auto_mode": False,
+                }
+            ],
+        }
+        workspace = {
+            "terminal_count": 1,
+            "terminals": [
+                {
+                    "startup_mode": "agent",
+                    "agent_selection": "claude",
+                    "initial_command": "claude",
+                    "agent_auto_mode": True,
+                }
+            ],
+        }
+        merged = web_saved_sessions._merge_workspace_session_config(base, workspace)
+        self.assertTrue(merged["terminals"][0]["agent_auto_mode"])
+
+        workspace["terminals"][0] = {"startup_mode": "terminal"}
+        merged = web_saved_sessions._merge_workspace_session_config(base, workspace)
+        self.assertFalse(merged["terminals"][0]["agent_auto_mode"])
+
+    def test_sessions_post_round_trips_agent_auto_mode(self):
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        with patch.object(api, "_sanitize_agent_launch_commands", return_value=[]), patch.object(
+            api.socketio, "start_background_task"
+        ):
+            response = self.client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "wsl",
+                    "sessions": [
+                        {
+                            "directory": self.temp_dir.name,
+                            "title": "Agent",
+                            "startup_mode": "agent",
+                            "initial_command_mode": "agent",
+                            "initial_command": "claude",
+                            "agent_selection": "claude",
+                            "agent_auto_mode": True,
+                        }
+                    ],
+                },
+            )
+        self.assertEqual(response.status_code, 201)
+        session = response.get_json()["sessions"][0]
+        self.assertTrue(session["agent_auto_mode"])
+        # The persisted command stays the base agent key so preflight and
+        # saved sessions keep matching on the executable.
+        self.assertEqual(session["initial_command"], "claude")
+
+    def test_runtime_state_snapshot_includes_agent_auto_mode(self):
+        self.assertIn("agent_auto_mode", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
+
+    def test_launcher_wires_the_auto_mode_toggle(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn("auto_mode_flag", html)
+
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("function agentAutoModeFlag(agentValue)", launcher_js)
+        self.assertIn("function syncTerminalAgentAutoModeState(row, commandMode, selectedAgent)", launcher_js)
+        self.assertIn("t-agent-auto-mode", launcher_js)
+        self.assertIn("t-agent-auto-field", launcher_js)
+        collect = launcher_js[
+            launcher_js.index("function collectTerminalDrafts()"):
+            launcher_js.index("function renderCountOptions()")
+        ]
+        self.assertIn("agent_auto_mode:", collect)
+
+        terminals_js = self._static("js/terminals.js")
+        entry = terminals_js[
+            terminals_js.index("function buildWorkspaceTerminalEntry(terminal, index, connectionMode)"):
+            terminals_js.index("function buildActiveWorkspaceSessionConfig(")
+        ]
+        self.assertIn("agent_auto_mode:", entry)

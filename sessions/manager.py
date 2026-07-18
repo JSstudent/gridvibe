@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ class TerminalSession:
     initial_command_mode: str = "command"
     agent_selection: str = ""
     custom_agent: str = ""
+    agent_auto_mode: bool = False
     title: Optional[str] = None
     mode: str = "ssh"
     distribution: Optional[str] = None
@@ -50,6 +51,8 @@ class TerminalSession:
     explorer_root_directory: Optional[str] = None
     explorer_tree_open: bool = False
     explorer_git_open: bool = False
+    explorer_open_tabs: List[str] = field(default_factory=list)
+    explorer_active_tab: str = ""
     status: SessionStatus = SessionStatus.PENDING
     created_at: float = field(default_factory=time.time)
     connected_at: Optional[float] = None
@@ -68,6 +71,7 @@ class TerminalSession:
             "initial_command_mode": self.initial_command_mode,
             "agent_selection": self.agent_selection,
             "custom_agent": self.custom_agent,
+            "agent_auto_mode": self.agent_auto_mode,
             "title": self.title,
             "mode": self.mode,
             "distribution": self.distribution,
@@ -77,6 +81,8 @@ class TerminalSession:
             "explorer_root_directory": self.explorer_root_directory,
             "explorer_tree_open": self.explorer_tree_open,
             "explorer_git_open": self.explorer_git_open,
+            "explorer_open_tabs": list(self.explorer_open_tabs),
+            "explorer_active_tab": self.explorer_active_tab,
             "status": self.status.value,
             "created_at": self.created_at,
             "connected_at": self.connected_at,
@@ -124,11 +130,9 @@ class SessionManager:
         """Initialize the session manager."""
         self.sessions: Dict[str, TerminalSession] = {}
         self.groups: Dict[str, SessionGroup] = {}
-        # RLock: re-entrant so callbacks can be called while lock is held.
         # Lock ordering: web/api.py's connection_lock may be held while taking
         # this lock; code holding this lock must never take connection_lock.
         self.lock = threading.RLock()
-        self._session_callbacks: Dict[str, List[Callable]] = {}
 
     def create_group(
         self,
@@ -252,6 +256,7 @@ class SessionManager:
                     initial_command_mode=str(config.get("initial_command_mode") or "command"),
                     agent_selection=str(config.get("agent_selection") or ""),
                     custom_agent=str(config.get("custom_agent") or ""),
+                    agent_auto_mode=bool(config.get("agent_auto_mode")),
                     title=config.get("title"),
                     mode=mode,
                     distribution=config.get("distribution"),
@@ -261,6 +266,8 @@ class SessionManager:
                     explorer_root_directory=config.get("explorer_root_directory"),
                     explorer_tree_open=bool(config.get("explorer_tree_open")),
                     explorer_git_open=bool(config.get("explorer_git_open")),
+                    explorer_open_tabs=list(config.get("explorer_open_tabs") or []),
+                    explorer_active_tab=str(config.get("explorer_active_tab") or ""),
                 )
                 created.append(session)
             except Exception as e:
@@ -286,6 +293,7 @@ class SessionManager:
             "initial_command_mode",
             "agent_selection",
             "custom_agent",
+            "agent_auto_mode",
             "title",
             "distribution",
             "use_wsl",
@@ -294,6 +302,8 @@ class SessionManager:
             "explorer_root_directory",
             "explorer_tree_open",
             "explorer_git_open",
+            "explorer_open_tabs",
+            "explorer_active_tab",
         }
         with self.lock:
             session = self.sessions.get(session_id)
@@ -406,9 +416,6 @@ class SessionManager:
                 if status == SessionStatus.CONNECTED:
                     session.connected_at = time.time()
 
-                # Notify callbacks
-                self._notify_callbacks(session_id, status)
-
                 return True
 
         return False
@@ -427,10 +434,6 @@ class SessionManager:
             if session_id in self.sessions:
                 session = self.sessions[session_id]
                 session.status = SessionStatus.DISCONNECTED
-
-                # Notify callbacks
-                self._notify_callbacks(session_id, SessionStatus.DISCONNECTED)
-
                 logger.info(f"Closed session {session_id}")
                 return True
 
@@ -476,45 +479,18 @@ class SessionManager:
         ]
         for session_id in session_ids:
             self.sessions.pop(session_id, None)
-            self._session_callbacks.pop(session_id, None)
         return session_ids
 
     def reset_sessions(self):
-        """Remove all tracked sessions and callbacks."""
+        """Remove all tracked sessions."""
         with self.lock:
             self.sessions.clear()
             self.groups.clear()
-            self._session_callbacks.clear()
-
-    def register_callback(
-        self,
-        session_id: str,
-        callback: Callable[[SessionStatus], None]
-    ):
-        """Register a callback for session status changes."""
-        with self.lock:
-            if session_id not in self._session_callbacks:
-                self._session_callbacks[session_id] = []
-            self._session_callbacks[session_id].append(callback)
-
-    def _notify_callbacks(self, session_id: str, status: SessionStatus):
-        """Notify registered callbacks of status change.
-        NOTE: always called while self.lock is already held — do not re-acquire."""
-        callbacks = list(self._session_callbacks.get(session_id, []))
-        for callback in callbacks:
-            try:
-                callback(status)
-            except Exception as e:
-                logger.error(f"Callback error: {e}")
 
     def get_session_count(self) -> int:
         """Get total number of sessions."""
         with self.lock:
             return len(self.sessions)
-
-    def get_active_session_count(self) -> int:
-        """Get number of active sessions."""
-        return len(self.get_active_sessions())
 
     def clear_disconnected_sessions(self, force_group_ids: Optional[Iterable[str]] = None):
         """Remove disconnected sessions from the manager.
@@ -530,11 +506,6 @@ class SessionManager:
             ]
             for sid in disconnected:
                 del self.sessions[sid]
-
-            # Also clean up callbacks
-            for sid in disconnected:
-                if sid in self._session_callbacks:
-                    del self._session_callbacks[sid]
 
             active_group_counts: Dict[str, int] = {}
             for session in self.sessions.values():

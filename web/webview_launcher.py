@@ -7,8 +7,10 @@ back to the system browser if pywebview is missing.
 
 import argparse
 import ctypes
+import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -16,11 +18,17 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 from main import setup_logging
-from web.api import app, configure_browser_shutdown, load_config, session_manager, socketio
+from web.api import (
+    configure_browser_shutdown,
+    load_config,
+    resolve_server_settings,
+    run_server,
+    session_manager,
+)
 
 try:
     import webview
@@ -30,19 +38,12 @@ except ImportError:  # pragma: no cover - optional dependency at runtime
 logger = logging.getLogger(__name__)
 
 
-_NATIVE_FRAME_THEME = "dark"
-_NATIVE_FRAME_THEMES = {
-    _NATIVE_FRAME_THEME: {
-        "caption": "#111827",
-        "text": "#f8fafc",
-        "border": "#1f2937",
-    },
-}
+_NATIVE_FRAME_COLORS = {"caption": "#111827", "text": "#f8fafc", "border": "#1f2937"}
 
 
 def _apply_windows_dark_frame_attributes(hwnd: int) -> bool:
     """Apply the complete dark DWM frame attribute set to a Windows HWND."""
-    colors = _NATIVE_FRAME_THEMES[_NATIVE_FRAME_THEME]
+    colors = _NATIVE_FRAME_COLORS
     applied = [
         _set_dwm_window_attribute(hwnd, 19, 1),
         _set_dwm_window_attribute(hwnd, 20, 1),
@@ -555,9 +556,8 @@ class GridVibeApi:
             applied = self._apply_native_frame_theme(self._session_window, "session") or applied
         return applied
 
-    def set_native_theme(self, theme: str):
-        """Accept app theme updates while keeping the native window frame dark."""
-        self._native_theme = _NATIVE_FRAME_THEME
+    def set_native_theme(self, _theme=None):
+        """Re-apply the permanent dark native frame; the app theme argument is intentionally ignored."""
         applied = self._apply_native_frame_theme_to_windows()
         return {"ok": True, "theme": self._native_theme, "applied": applied}
 
@@ -587,6 +587,69 @@ class GridVibeApi:
             path = str(selected or "").strip()
 
         return {"ok": True, "path": path}
+
+    def save_download(self, download_url, filename=""):
+        """Save an in-app file download to disk via a native Save dialog.
+
+        WebView2 silently drops programmatic ``<a download>`` clicks (the same
+        class of limitation as ``window.prompt``/``confirm``), so the terminals
+        page routes explorer downloads here when running in the native window.
+        The bytes are fetched from the local server over its own HTTP endpoint,
+        so the endpoint's root-confinement and size-cap checks still apply.
+        """
+        window = self._session_window or self._window
+        if window is None or webview is None:
+            return {"ok": False, "error": "Window is not ready"}
+
+        relative_url = str(download_url or "").strip()
+        # Only ever fetch the app's own explorer download endpoint — never an
+        # arbitrary URL handed in from the page.
+        if not relative_url.startswith("/api/explorer/") or "/download" not in relative_url:
+            return {"ok": False, "error": "Unsupported download request"}
+
+        safe_name = os.path.basename(str(filename or "").strip()) or "download"
+
+        try:
+            selected = window.create_file_dialog(
+                webview.SAVE_DIALOG,
+                save_filename=safe_name,
+            )
+        except Exception as exc:
+            logger.warning("Native save dialog failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+        if not selected:
+            return {"ok": False, "cancelled": True}
+        if isinstance(selected, (list, tuple)):
+            destination = str(selected[0] or "").strip()
+        else:
+            destination = str(selected or "").strip()
+        if not destination:
+            return {"ok": False, "cancelled": True}
+
+        request_url = f"{self._base_url}{relative_url}"
+        try:
+            with urlopen(request_url, timeout=120) as response:
+                with open(destination, "wb") as handle:
+                    shutil.copyfileobj(response, handle)
+        except HTTPError as exc:
+            message = exc.read().decode("utf-8", errors="ignore") if exc.fp else ""
+            try:
+                message = json.loads(message).get("error", message)
+            except Exception:
+                pass
+            logger.warning("Download request failed (%s): %s", exc.code, message)
+            return {"ok": False, "error": message or f"Download failed ({exc.code})"}
+        except (URLError, OSError) as exc:
+            logger.warning("Could not save download to %s: %s", destination, exc)
+            try:
+                if os.path.exists(destination) and os.path.getsize(destination) == 0:
+                    os.remove(destination)
+            except OSError:
+                pass
+            return {"ok": False, "error": str(exc)}
+
+        return {"ok": True, "path": destination}
 
     def _bring_to_front(self, window, window_name: str = "window"):
         """Bring a pywebview window forward using the safest available call."""
@@ -894,15 +957,8 @@ def _start_restart_shutdown_thread(
 
 
 def _run_server(host: str, port: int, debug: bool):
-    """Run the Flask-SocketIO server."""
-    socketio.run(
-        app,
-        host=host,
-        port=port,
-        debug=debug,
-        use_reloader=False,
-        allow_unsafe_werkzeug=True,
-    )
+    """Run the shared Flask-SocketIO server entry point."""
+    run_server(host, port, debug)
 
 
 def main():
@@ -919,17 +975,23 @@ def main():
             "native requires pywebview; browser opens the system browser only"
         ),
     )
-    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=5050, help="Port to bind to")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--host", default=None, help="Host to bind to (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=None, help="Port to bind to (default: 5050)")
+    parser.add_argument(
+        "--debug",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable debug mode",
+    )
     parser.add_argument("--config", default="config.json", help="Path to configuration file")
     args = parser.parse_args()
     configure_browser_shutdown(args.mode == "browser")
 
+    # Explicit CLI flags win over config values (finding 4.7)
     config = load_config(args.config) if os.path.exists(args.config) else {}
-    host = config.get("server", {}).get("host", args.host)
-    port = config.get("server", {}).get("port", args.port)
-    debug = config.get("server", {}).get("debug", args.debug)
+    host, port, debug = resolve_server_settings(
+        config, host=args.host, port=args.port, debug=args.debug
+    )
     window_host = _resolve_window_host(host)
     base_url = f"http://{window_host}:{port}"
 

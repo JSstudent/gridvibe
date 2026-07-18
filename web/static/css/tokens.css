@@ -1,0 +1,30 @@
+/* GridVibe shared design tokens (deep-dive finding 7.1).
+   Single source of truth for the palette shared by the launcher and the
+   terminals workspace. The page stylesheets map their existing variable
+   names onto these tokens (--accent: var(--gv-accent),
+   --t-accent: var(--gv-accent)) instead of redefining colors locally.
+   Loaded before launcher.css / terminals.css on both pages. */
+:root {
+    --gv-bg-app: #0d0d0d;
+    --gv-accent: #00d9ff;
+    --gv-accent-hover: #00b8d9;
+    --gv-accent-soft: rgba(0, 217, 255, 0.12);
+    --gv-success: #22c55e;
+    --gv-success-hover: #16a34a;
+    --gv-danger: #ef4444;
+    --gv-warning: #f59e0b;
+    --gv-radius-s: 8px;
+    --gv-radius-m: 12px;
+    --gv-radius-l: 16px;
+}
+
+[data-theme="light"] {
+    --gv-bg-app: #f0f2f5;
+    --gv-accent: #087f9b;
+    --gv-accent-hover: #0e7490;
+    --gv-accent-soft: rgba(8, 145, 178, 0.14);
+    --gv-success: #047857;
+    --gv-success-hover: #059669;
+    --gv-danger: #dc2626;
+    --gv-warning: #b45309;
+}

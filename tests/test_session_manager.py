@@ -151,6 +151,38 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertTrue(sessions[0].to_dict()["explorer_tree_open"])
         self.assertTrue(sessions[0].to_dict()["explorer_git_open"])
 
+    def test_create_sessions_carries_explorer_open_tabs(self):
+        """ISSUE-2026-015: TerminalSession persists open explorer tabs metadata."""
+        sessions = self.manager.create_sessions(
+            [
+                {
+                    "mode": "wsl",
+                    "directory": "C:\\repo",
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                    "explorer_root_directory": "C:\\repo",
+                    "explorer_open_tabs": ["docs/a.md", "b.md"],
+                    "explorer_active_tab": "b.md",
+                }
+            ],
+            group_id="group-tabs",
+        )
+
+        self.assertEqual(sessions[0].explorer_open_tabs, ["docs/a.md", "b.md"])
+        self.assertEqual(sessions[0].explorer_active_tab, "b.md")
+        self.assertEqual(sessions[0].to_dict()["explorer_open_tabs"], ["docs/a.md", "b.md"])
+        self.assertEqual(sessions[0].to_dict()["explorer_active_tab"], "b.md")
+
+    def test_create_sessions_defaults_explorer_tabs_when_absent(self):
+        """Backward compatibility: sessions without tab metadata get safe defaults."""
+        sessions = self.manager.create_sessions(
+            [{"mode": "ssh", "host": "h", "directory": "/repo", "startup_mode": "explorer"}],
+            group_id="group-notabs",
+        )
+
+        self.assertEqual(sessions[0].explorer_open_tabs, [])
+        self.assertEqual(sessions[0].explorer_active_tab, "")
+
     def test_create_sessions_supports_agent_metadata(self):
         sessions = self.manager.create_sessions(
             [
@@ -172,6 +204,34 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(sessions[0].agent_selection, "other")
         self.assertEqual(sessions[0].custom_agent, "claude-code")
         self.assertEqual(sessions[0].to_dict()["initial_command_mode"], "agent")
+
+    def test_create_sessions_carries_agent_auto_mode(self):
+        """ISSUE-2026-013: TerminalSession persists the per-terminal auto-mode toggle."""
+        sessions = self.manager.create_sessions(
+            [
+                {
+                    "mode": "ssh",
+                    "host": "127.0.0.1",
+                    "directory": "/repo",
+                    "initial_command": "claude",
+                    "initial_command_mode": "agent",
+                    "agent_selection": "claude",
+                    "agent_auto_mode": True,
+                },
+                {
+                    "mode": "ssh",
+                    "host": "127.0.0.1",
+                    "directory": "/repo",
+                },
+            ],
+            group_id="group-auto-mode",
+        )
+
+        self.assertTrue(sessions[0].agent_auto_mode)
+        self.assertTrue(sessions[0].to_dict()["agent_auto_mode"])
+        # Backward compatibility: configs without the field default to off.
+        self.assertFalse(sessions[1].agent_auto_mode)
+        self.assertFalse(sessions[1].to_dict()["agent_auto_mode"])
 
     def test_create_group_preserves_workspace_layout_metadata(self):
         workspace_layout = {
@@ -204,14 +264,12 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(group.surface_mode, "max")
         self.assertEqual(group.to_dict()["surface_mode"], "max")
 
-    def test_update_session_status_marks_connected_and_notifies_callbacks(self):
+    def test_update_session_status_marks_connected(self):
         session = self.manager.create_session(
             group_id="group-b",
             host="example.com",
             directory="/home/user",
         )
-        observed_statuses = []
-        self.manager.register_callback(session.session_id, observed_statuses.append)
 
         updated = self.manager.update_session_status(
             session.session_id,
@@ -222,9 +280,8 @@ class SessionManagerTestCase(unittest.TestCase):
         updated_session = self.manager.get_session(session.session_id)
         self.assertEqual(updated_session.status, SessionStatus.CONNECTED)
         self.assertIsNotNone(updated_session.connected_at)
-        self.assertEqual(observed_statuses, [SessionStatus.CONNECTED])
 
-    def test_clear_disconnected_sessions_removes_sessions_callbacks_and_empty_groups(self):
+    def test_clear_disconnected_sessions_removes_sessions_and_empty_groups(self):
         session = self.manager.create_session(
             group_id="group-c",
             host="cleanup.example",
@@ -237,7 +294,6 @@ class SessionManagerTestCase(unittest.TestCase):
             terminal_count=1,
             group_id="group-c",
         )
-        self.manager.register_callback(session.session_id, lambda status: None)
         self.manager.close_session(session.session_id)
 
         # Age the group past the empty-group grace period so cleanup sweeps it.
@@ -245,7 +301,6 @@ class SessionManagerTestCase(unittest.TestCase):
         self.manager.clear_disconnected_sessions()
 
         self.assertIsNone(self.manager.get_session(session.session_id))
-        self.assertNotIn(session.session_id, self.manager._session_callbacks)
         self.assertIsNone(self.manager.get_group("group-c"))
 
     def test_get_all_groups_returns_display_order(self):

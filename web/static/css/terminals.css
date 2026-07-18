@@ -1,10 +1,18 @@
         :root {
-            --t-bg: #0d0d0d;
+            /* Palette colors come from the shared tokens.css (deep-dive 7.1). */
+            --t-bg: var(--gv-bg-app);
             --t-topbar: #161616;
             --t-tabs-bg: #121212;
             --t-card: #141414;
             --t-card-header: #1e1e1e;
+            /* Terminal canvas colors stay on the dark palette in every theme
+               (deliberate — see the light-theme block below), so they are
+               pinned literals rather than switching tokens. xterm reads them
+               via getComputedStyle in makeTerminal(). */
             --t-terminal-bg: #0d0d0d;
+            --t-terminal-fg: #e0e0e0;
+            --t-terminal-cursor: #00d9ff;
+            --t-terminal-selection: rgba(0, 217, 255, 0.25);
             --t-border: #2a2a2a;
             --t-border-dim: #232323;
             --t-border-card: #272727;
@@ -13,10 +21,10 @@
             --t-text-secondary: #bdbdbd;
             --t-text-muted: #555;
             --t-text-placeholder: #666;
-            --t-accent: #00d9ff;
-            --t-accent-hover: #00b8d9;
-            --t-success: #18b66a;
-            --t-success-hover: #14955a;
+            --t-accent: var(--gv-accent);
+            --t-accent-hover: var(--gv-accent-hover);
+            --t-success: var(--gv-success);
+            --t-success-hover: var(--gv-success-hover);
             --t-btn-bg: #181818;
             --t-btn-text: #cfcfcf;
             --t-btn-hover-bg: #202020;
@@ -66,12 +74,18 @@
         }
 
         [data-theme="light"] {
-            --t-bg: #f0f2f5;
+            /* --t-bg / accent / success follow tokens.css [data-theme="light"]. */
             --t-topbar: #ffffff;
             --t-tabs-bg: #f8f9fa;
             --t-card: #ffffff;
             --t-card-header: #f3f4f6;
+            /* Deliberate exception (deep-dive 7.1): the terminal canvas keeps
+               the dark palette on the light theme, so these stay pinned to
+               the dark values above. */
             --t-terminal-bg: #0d0d0d;
+            --t-terminal-fg: #e0e0e0;
+            --t-terminal-cursor: #00d9ff;
+            --t-terminal-selection: rgba(0, 217, 255, 0.25);
             --t-border: #b7c0cc;
             --t-border-dim: #cfd6df;
             --t-border-card: #b7c0cc;
@@ -80,10 +94,6 @@
             --t-text-secondary: #1f2937;
             --t-text-muted: #4b5563;
             --t-text-placeholder: #6b7280;
-            --t-accent: #087f9b;
-            --t-accent-hover: #0e7490;
-            --t-success: #047857;
-            --t-success-hover: #059669;
             --t-btn-bg: #f3f4f6;
             --t-btn-text: #1f2937;
             --t-btn-hover-bg: #e5e7eb;
@@ -184,6 +194,29 @@
             --explorer-open-folder-bg: #10283d;
             --explorer-open-folder-border: #2a5b83;
             --explorer-open-folder-hover-bg: #17456b;
+            /* File-type icon tints (ISSUE-2026-024); centralized like the git
+               lanes so tree/Git rows stay token-driven, not inline literals. */
+            --explorer-icon-code: #6cb6ff;
+            --explorer-icon-shell: #7ee787;
+            --explorer-icon-data: #e3b341;
+            --explorer-icon-markup: #f0883e;
+            --explorer-icon-style: #d2a8ff;
+            --explorer-icon-markdown: #79c0ff;
+            --explorer-icon-config: #a3b1c2;
+            --explorer-icon-sql: #56d4dd;
+            --explorer-icon-log: #f778ba;
+            /* Markdown callout accents/tints (ISSUE-2026-017); token-driven so
+               the preview rules stay literal-free like the git lanes above. */
+            --explorer-callout-note: #4493f8;
+            --explorer-callout-note-bg: #121d2f;
+            --explorer-callout-tip: #3fb950;
+            --explorer-callout-tip-bg: #0f1f16;
+            --explorer-callout-important: #a371f7;
+            --explorer-callout-important-bg: #1d1530;
+            --explorer-callout-warning: #d29922;
+            --explorer-callout-warning-bg: #241c10;
+            --explorer-callout-caution: #f85149;
+            --explorer-callout-caution-bg: #2b1211;
         }
 
         [data-theme="light"],
@@ -198,6 +231,44 @@
             --explorer-open-folder-bg: #e5f2ff;
             --explorer-open-folder-border: #9dc9ee;
             --explorer-open-folder-hover-bg: #cee6fb;
+            --explorer-icon-code: #0969da;
+            --explorer-icon-shell: #1a7f37;
+            --explorer-icon-data: #9a6700;
+            --explorer-icon-markup: #bc4c00;
+            --explorer-icon-style: #8250df;
+            --explorer-icon-markdown: #0550ae;
+            --explorer-icon-config: #57606a;
+            --explorer-icon-sql: #0f7c8a;
+            --explorer-icon-log: #bf3989;
+            --explorer-callout-note: #0969da;
+            --explorer-callout-note-bg: #ddf4ff;
+            --explorer-callout-tip: #1a7f37;
+            --explorer-callout-tip-bg: #dafbe1;
+            --explorer-callout-important: #8250df;
+            --explorer-callout-important-bg: #fbefff;
+            --explorer-callout-warning: #9a6700;
+            --explorer-callout-warning-bg: #fff8c5;
+            --explorer-callout-caution: #cf222e;
+            --explorer-callout-caution-bg: #ffebe9;
+        }
+
+        /* Markdown preview reading-surface presets (ISSUE-2026-030). Paper and
+           high-contrast are intentionally fixed surfaces independent of the app
+           light/dark theme (deliberate exception, same spirit as the pinned
+           terminal canvas in deep-dive 7.1); literals stay confined here. */
+        :root,
+        [data-theme="dark"],
+        [data-theme="light"],
+        .explorer-pane[data-explorer-theme="dark"],
+        .explorer-pane[data-explorer-theme="light"] {
+            --md-preset-paper-bg: #f4ecd8;
+            --md-preset-paper-ink: #433422;
+            --md-preset-paper-muted: #6b5a43;
+            --md-preset-paper-border: #d9c9a8;
+            --md-preset-contrast-bg: #000000;
+            --md-preset-contrast-ink: #ffffff;
+            --md-preset-contrast-muted: #d0d0d0;
+            --md-preset-contrast-border: #ffffff;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -785,6 +856,8 @@
             padding: 0;
             border: 1px solid var(--t-border-tab);
             background: var(--t-btn-bg);
+            /* The icon strokes use currentColor so they follow the theme. */
+            color: var(--t-accent);
         }
         .settings-window-btn:hover {
             border-color: var(--t-accent);
@@ -838,12 +911,29 @@
             width: 24px;
             height: 24px;
             display: block;
-            filter: drop-shadow(0 0 5px rgba(0, 217, 255, 0.32));
+            filter: drop-shadow(0 0 5px color-mix(in srgb, currentColor 32%, transparent));
         }
         .refresh-all-icon {
             width: 18px;
             height: 18px;
             display: block;
+        }
+        .fullscreen-icon {
+            width: 16px;
+            height: 16px;
+            display: block;
+        }
+        .theme-toggle-icon {
+            width: 14px;
+            height: 14px;
+            vertical-align: -2px;
+            margin-right: 4px;
+        }
+        .terminal-action-btn svg,
+        .explorer-refresh svg {
+            width: 13px;
+            height: 13px;
+            vertical-align: -2px;
         }
 
         /* ── Grid area ── */
@@ -1086,6 +1176,87 @@
             0%, 100% { box-shadow: 0 0 0 0 rgba(255,68,68,0.35); }
             50%      { box-shadow: 0 0 0 4px rgba(255,68,68,0); }
         }
+        /* Floating recording indicator (ISSUE-2026-019): fixed, centered over
+           the workspace, non-blocking, theme-aware, with a slight pulse.
+           Shown only while capture is active. */
+        .voice-recording-overlay {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 14px 26px;
+            border-radius: 999px;
+            background: var(--t-voice-bg);
+            border: 1px solid var(--gv-danger);
+            color: var(--gv-danger);
+            box-shadow: 0 6px 26px rgba(0, 0, 0, 0.4);
+            font-size: 1rem;
+            font-weight: 600;
+            letter-spacing: .02em;
+            pointer-events: none;
+            z-index: 3000;
+            animation: voice-overlay-pulse 1.6s ease-in-out infinite;
+        }
+        @keyframes voice-overlay-pulse {
+            0%, 100% {
+                box-shadow: 0 6px 26px rgba(0, 0, 0, 0.4),
+                            0 0 0 0 color-mix(in srgb, var(--gv-danger) 30%, transparent);
+            }
+            50% {
+                box-shadow: 0 6px 26px rgba(0, 0, 0, 0.4),
+                            0 0 0 8px color-mix(in srgb, var(--gv-danger) 0%, transparent);
+            }
+        }
+        .voice-overlay-mic {
+            width: 22px;
+            height: 22px;
+            flex-shrink: 0;
+        }
+        .voice-overlay-label {
+            color: var(--t-voice-title);
+        }
+        .voice-overlay-bars {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            height: 24px;
+        }
+        .voice-overlay-bar {
+            width: 4px;
+            height: 24px;
+            border-radius: 2px;
+            background: var(--gv-danger);
+            transform: scaleY(0.35);
+            transform-origin: center;
+            will-change: transform;
+        }
+        /* Deterministic fallback when no AnalyserNode drives the bars. */
+        .voice-overlay-fallback .voice-overlay-bar {
+            animation: voice-overlay-bounce 1.1s ease-in-out infinite;
+        }
+        .voice-overlay-fallback .voice-overlay-bar:nth-child(2) { animation-delay: .15s; }
+        .voice-overlay-fallback .voice-overlay-bar:nth-child(3) { animation-delay: .3s; }
+        .voice-overlay-fallback .voice-overlay-bar:nth-child(4) { animation-delay: .45s; }
+        .voice-overlay-fallback .voice-overlay-bar:nth-child(5) { animation-delay: .6s; }
+        @keyframes voice-overlay-bounce {
+            0%, 100% { transform: scaleY(0.3); }
+            50%      { transform: scaleY(1); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .voice-recording-overlay {
+                animation: none !important;
+            }
+            .voice-recording-overlay .voice-overlay-bar {
+                animation: none !important;
+                transform: scaleY(0.6);
+            }
+            .voice-btn.recording {
+                animation: none;
+            }
+        }
         .terminal-shortcut-btn {
             min-width: 56px;
             text-align: center;
@@ -1133,6 +1304,73 @@
             position: relative;
             overflow: hidden;
             min-height: 0;
+        }
+
+        /* Broadcast typing (finding 10.4): the accent border on every pane is a
+           deliberately loud state so mirrored keystrokes are never a surprise. */
+        .broadcast-btn.active {
+            color: var(--t-accent);
+            border-color: var(--t-accent);
+            box-shadow: 0 0 0 1px var(--t-accent) inset;
+        }
+
+        #terminalsGrid.broadcast-input .terminal-container:not(.explorer-pane):not(.browser-pane) {
+            border-color: var(--t-accent);
+            box-shadow: inset 0 0 0 1px var(--t-accent);
+        }
+
+        /* Active input target (ISSUE-2026-025): exactly one eligible terminal
+           pane is highlighted as the current input destination. It is kept
+           distinct from — and prominent alongside — broadcast typing above:
+           broadcast paints a 1px inset accent border on every plain pane, while
+           the active pane gets a heavier 2px accent ring plus an accent header
+           rule, so the current target stays identifiable even while broadcast is
+           on. Explorer/browser panes are never input targets and are excluded.
+           Colours come from tokens (no palette literals). */
+        .terminal-container.terminal-active:not(.explorer-pane):not(.browser-pane) {
+            border-color: var(--t-accent);
+            box-shadow: inset 0 0 0 2px var(--t-accent);
+        }
+
+        .terminal-container.terminal-active:not(.explorer-pane):not(.browser-pane) .terminal-header {
+            border-bottom-color: var(--t-accent);
+            box-shadow: inset 0 -2px 0 var(--t-accent);
+        }
+
+        .terminal-search-overlay {
+            position: absolute;
+            top: 6px;
+            right: 10px;
+            z-index: 6;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 6px;
+            background: var(--t-bg-panel, var(--t-terminal-bg));
+        }
+
+        .terminal-search-overlay[hidden] {
+            display: none;
+        }
+
+        .terminal-search-input {
+            width: 180px;
+            height: 28px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            padding: 4px 8px;
+            background: var(--t-terminal-bg);
+            color: var(--t-terminal-fg);
+            font: inherit;
+            font-size: .74rem;
+        }
+
+        .terminal-search-input:focus {
+            outline: 2px solid var(--t-accent);
+            outline-offset: 0;
+            border-color: var(--t-accent);
         }
 
         .terminal-container.dragging {
@@ -1635,14 +1873,130 @@
 
         .explorer-list {
             min-height: 0;
+            overflow: hidden;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+        }
+
+        /* Persistent tab strip above the file header/Back row (ISSUE-2026-014). */
+        .explorer-tab-strip {
+            display: flex;
+            align-items: stretch;
+            gap: 2px;
+            min-height: 0;
+            padding: 4px 6px 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            border-bottom: 1px solid var(--explorer-row-border);
+            background: var(--explorer-bar-bg);
+            scrollbar-width: thin;
+        }
+
+        .explorer-tab {
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            max-width: 200px;
+            border: 1px solid transparent;
+            border-bottom: none;
+            border-radius: 6px 6px 0 0;
+            background: transparent;
+            color: var(--explorer-muted);
+        }
+
+        .explorer-tab.active {
+            border-color: var(--explorer-row-border);
+            background: var(--explorer-bg);
+            color: var(--explorer-text);
+        }
+
+        .explorer-tab-main {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+            max-width: 180px;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+            font: inherit;
+            font-size: .72rem;
+            padding: 6px 4px 6px 8px;
+        }
+
+        .explorer-tab-main .explorer-icon {
+            width: 16px;
+            height: 16px;
+            flex: none;
+        }
+
+        .explorer-tab-main .explorer-icon svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        .explorer-tab-name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .explorer-tab.active .explorer-tab-name {
+            font-weight: 600;
+        }
+
+        .explorer-tab-close {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            margin-right: 5px;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: var(--explorer-muted);
+            cursor: pointer;
+            font-size: .95rem;
+            line-height: 1;
+        }
+
+        .explorer-tab-close:hover {
+            background: var(--explorer-row-hover);
+            color: var(--explorer-text);
+        }
+
+        .explorer-tab:hover:not(.active) {
+            color: var(--explorer-text);
+        }
+
+        .explorer-tab-main:focus-visible,
+        .explorer-tab-close:focus-visible {
+            outline: 2px solid var(--t-accent);
+            outline-offset: -2px;
+        }
+
+        .explorer-viewer {
+            min-height: 0;
             overflow: auto;
             display: grid;
             align-content: start;
         }
 
-        .explorer-list.file-view {
+        .explorer-list.file-view .explorer-viewer {
             overflow: hidden;
             align-content: stretch;
+        }
+
+        .explorer-empty-viewer {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            padding: 24px;
+            color: var(--explorer-muted);
+            font-size: .82rem;
         }
 
         .explorer-row {
@@ -1711,6 +2065,20 @@
         .explorer-icon.file {
             color: var(--explorer-file);
         }
+
+        /* Type-aware tints (ISSUE-2026-024). Placed after `.explorer-icon.file`
+           so equal-specificity type rules win; unknown types keep the base
+           `--explorer-file` color via the `doc` glyph. */
+        .explorer-icon.type-code { color: var(--explorer-icon-code); }
+        .explorer-icon.type-shell { color: var(--explorer-icon-shell); }
+        .explorer-icon.type-data { color: var(--explorer-icon-data); }
+        .explorer-icon.type-markup { color: var(--explorer-icon-markup); }
+        .explorer-icon.type-style { color: var(--explorer-icon-style); }
+        .explorer-icon.type-markdown { color: var(--explorer-icon-markdown); }
+        .explorer-icon.type-config { color: var(--explorer-icon-config); }
+        .explorer-icon.type-sql { color: var(--explorer-icon-sql); }
+        .explorer-icon.type-log { color: var(--explorer-icon-log); }
+        .explorer-icon.type-doc { color: var(--explorer-file); }
 
         .explorer-git-badge {
             display: inline-flex;
@@ -1930,6 +2298,30 @@
             outline: none;
         }
 
+        .explorer-git-revert-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            border-color: var(--explorer-open-folder-border);
+            background: var(--explorer-open-folder-bg);
+            color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-git-revert-btn .explorer-btn-icon {
+            width: 14px;
+            height: 14px;
+            display: block;
+        }
+
+        .explorer-git-revert-btn:hover,
+        .explorer-git-revert-btn:focus-visible {
+            background: var(--explorer-open-folder-hover-bg);
+            color: var(--gv-danger);
+            outline: none;
+        }
+
         .explorer-diff-commit-file-actions {
             display: inline-flex;
             align-items: center;
@@ -1953,6 +2345,67 @@
         .explorer-zoom-btn:disabled {
             opacity: .45;
             cursor: default;
+        }
+
+        .explorer-download-btn,
+        .explorer-md-appearance-btn {
+            width: 28px;
+            height: 28px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 5px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+            cursor: pointer;
+            flex: 0 0 auto;
+        }
+
+        .explorer-download-btn:hover,
+        .explorer-md-appearance-btn:hover,
+        .explorer-md-appearance-btn[aria-expanded="true"] {
+            color: var(--t-accent);
+        }
+
+        .terminal-toast {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translate(-50%, 12px);
+            z-index: 40;
+            max-width: min(70vw, 460px);
+            padding: 10px 16px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 8px;
+            background: var(--t-bg-panel, var(--t-terminal-bg));
+            color: var(--t-terminal-fg);
+            font-size: .82rem;
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity .18s ease, transform .18s ease;
+        }
+
+        .terminal-toast.visible {
+            opacity: 1;
+            transform: translate(-50%, 0);
+        }
+
+        .terminal-toast.success {
+            border-color: var(--t-success, var(--gv-success));
+            color: var(--t-success, var(--gv-success));
+        }
+
+        .terminal-toast.error {
+            border-color: var(--gv-danger);
+            color: var(--gv-danger);
+        }
+
+        .explorer-download-btn svg,
+        .explorer-md-appearance-btn svg {
+            width: 14px;
+            height: 14px;
         }
 
         .explorer-zoom-value {
@@ -2239,12 +2692,22 @@
 
         .explorer-diff-commit-file {
             display: grid;
-            grid-template-columns: 22px minmax(0, 1fr) auto;
+            grid-template-columns: 22px 18px minmax(0, 1fr) auto;
             align-items: center;
             gap: 6px;
             padding: 4px 10px 4px 7px;
             font: inherit;
             font-size: .7rem;
+        }
+
+        .explorer-diff-commit-file .explorer-icon {
+            width: 18px;
+            height: 18px;
+        }
+
+        .explorer-diff-commit-file .explorer-icon svg {
+            width: 15px;
+            height: 15px;
         }
 
         button.explorer-diff-commit-file {
@@ -2523,23 +2986,102 @@
         }
 
         .explorer-markdown-preview {
-            padding: 14px 18px 28px;
-            color: var(--explorer-text);
-            background: var(--explorer-bg);
+            /* Appearance surface (ISSUE-2026-030): preset classes remap these
+               custom properties; defaults track the explorer theme tokens. */
+            --md-preview-surface: var(--explorer-bg);
+            --md-preview-ink: var(--explorer-text);
+            --md-preview-muted: var(--explorer-muted);
+            --md-preview-border: var(--explorer-row-border);
+            --md-preview-rule: var(--explorer-border);
+            --md-preview-font: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+            --md-preview-measure: 46rem;
+            padding: 16px 20px 32px;
+            color: var(--md-preview-ink);
+            background: var(--md-preview-surface);
+            font-family: var(--md-preview-font);
             font-size: var(--explorer-editor-font-size, .86rem);
-            line-height: 1.55;
+            line-height: 1.6;
+        }
+
+        .explorer-markdown-preview > * {
+            max-width: var(--md-preview-measure);
+        }
+
+        /* Reading-surface presets (ISSUE-2026-030). */
+        .explorer-markdown-preview.md-preset-paper {
+            --md-preview-surface: var(--md-preset-paper-bg);
+            --md-preview-ink: var(--md-preset-paper-ink);
+            --md-preview-muted: var(--md-preset-paper-muted);
+            --md-preview-border: var(--md-preset-paper-border);
+            --md-preview-rule: var(--md-preset-paper-border);
+        }
+
+        .explorer-markdown-preview.md-preset-contrast {
+            --md-preview-surface: var(--md-preset-contrast-bg);
+            --md-preview-ink: var(--md-preset-contrast-ink);
+            --md-preview-muted: var(--md-preset-contrast-muted);
+            --md-preview-border: var(--md-preset-contrast-border);
+            --md-preview-rule: var(--md-preset-contrast-border);
+        }
+
+        /* Font-family presets (ISSUE-2026-030); font names are not palette. */
+        .explorer-markdown-preview.md-font-system {
+            --md-preview-font: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+        }
+
+        .explorer-markdown-preview.md-font-serif {
+            --md-preview-font: Georgia, 'Times New Roman', 'Iowan Old Style', serif;
+        }
+
+        .explorer-markdown-preview.md-font-mono {
+            --md-preview-font: Consolas, Monaco, 'Courier New', monospace;
         }
 
         .explorer-markdown-preview h1,
         .explorer-markdown-preview h2,
-        .explorer-markdown-preview h3 {
-            margin: 1.15em 0 .5em;
-            line-height: 1.2;
+        .explorer-markdown-preview h3,
+        .explorer-markdown-preview h4,
+        .explorer-markdown-preview h5,
+        .explorer-markdown-preview h6 {
+            margin: 1.4em 0 .55em;
+            line-height: 1.25;
+            font-weight: 700;
+            color: var(--md-preview-ink);
+        }
+
+        .explorer-markdown-preview h1 {
+            font-size: 1.75em;
+            padding-bottom: .3em;
+            border-bottom: 1px solid var(--md-preview-rule);
+        }
+
+        .explorer-markdown-preview h2 {
+            font-size: 1.4em;
+            padding-bottom: .25em;
+            border-bottom: 1px solid var(--md-preview-rule);
+        }
+
+        .explorer-markdown-preview h3 { font-size: 1.2em; }
+        .explorer-markdown-preview h4 { font-size: 1.05em; }
+
+        .explorer-markdown-preview h5 {
+            font-size: .95em;
+            color: var(--md-preview-muted);
+        }
+
+        .explorer-markdown-preview h6 {
+            font-size: .88em;
+            color: var(--md-preview-muted);
+            text-transform: uppercase;
+            letter-spacing: .04em;
         }
 
         .explorer-markdown-preview h1:first-child,
         .explorer-markdown-preview h2:first-child,
         .explorer-markdown-preview h3:first-child,
+        .explorer-markdown-preview h4:first-child,
+        .explorer-markdown-preview h5:first-child,
+        .explorer-markdown-preview h6:first-child,
         .explorer-markdown-preview p:first-child {
             margin-top: 0;
         }
@@ -2549,8 +3091,49 @@
         .explorer-markdown-preview ol,
         .explorer-markdown-preview blockquote,
         .explorer-markdown-preview pre,
-        .explorer-markdown-preview table {
+        .explorer-markdown-preview table,
+        .explorer-markdown-preview dl {
             margin: 0 0 .9em;
+        }
+
+        .explorer-markdown-preview ul,
+        .explorer-markdown-preview ol {
+            padding-left: 1.6em;
+        }
+
+        .explorer-markdown-preview li { margin: .2em 0; }
+        .explorer-markdown-preview li > ul,
+        .explorer-markdown-preview li > ol { margin: .2em 0; }
+        .explorer-markdown-preview ul { list-style: disc; }
+        .explorer-markdown-preview ul ul { list-style: circle; }
+        .explorer-markdown-preview ul ul ul { list-style: square; }
+        .explorer-markdown-preview ol { list-style: decimal; }
+
+        .explorer-markdown-preview li > input[type="checkbox"] {
+            margin: 0 .45em 0 -1.3em;
+            vertical-align: middle;
+        }
+
+        .explorer-markdown-preview a {
+            color: var(--git-lane-0);
+            text-decoration: none;
+        }
+
+        .explorer-markdown-preview a:hover,
+        .explorer-markdown-preview a:focus-visible {
+            text-decoration: underline;
+        }
+
+        .explorer-markdown-preview hr {
+            height: 1px;
+            margin: 1.4em 0;
+            border: 0;
+            background: var(--md-preview-rule);
+        }
+
+        .explorer-markdown-preview img {
+            max-width: 100%;
+            height: auto;
         }
 
         .explorer-markdown-preview code,
@@ -2559,18 +3142,20 @@
         }
 
         .explorer-markdown-preview code {
-            border: 1px solid var(--explorer-row-border);
+            border: 1px solid var(--md-preview-border);
             border-radius: 4px;
             padding: 1px 4px;
-            background: var(--explorer-bar-bg);
+            /* Neutral translucent tint so code adapts to any preset surface
+               (same overlay idiom as the menu shadows below). */
+            background: rgba(128, 128, 128, .14);
         }
 
         .explorer-markdown-preview pre {
             overflow: auto;
             padding: 10px 12px;
-            border: 1px solid var(--explorer-row-border);
+            border: 1px solid var(--md-preview-border);
             border-radius: 6px;
-            background: var(--explorer-bar-bg);
+            background: rgba(128, 128, 128, .14);
             white-space: pre-wrap;
             overflow-wrap: anywhere;
             word-break: break-word;
@@ -2600,18 +3185,18 @@
             font-size: .68rem;
             font-weight: 700;
             letter-spacing: .04em;
-            color: var(--explorer-muted);
-            background: var(--explorer-bg);
-            border: 1px solid var(--explorer-row-border);
+            color: var(--md-preview-muted);
+            background: var(--md-preview-surface);
+            border: 1px solid var(--md-preview-border);
             border-top: 0;
             border-right: 0;
             border-bottom-left-radius: 6px;
         }
 
         .explorer-markdown-preview blockquote {
-            border-left: 3px solid var(--explorer-border);
-            padding-left: 12px;
-            color: var(--explorer-muted);
+            border-left: 3px solid var(--md-preview-rule);
+            padding: .1em 0 .1em 14px;
+            color: var(--md-preview-muted);
         }
 
         .explorer-markdown-preview table {
@@ -2621,9 +3206,129 @@
 
         .explorer-markdown-preview th,
         .explorer-markdown-preview td {
-            border: 1px solid var(--explorer-row-border);
+            border: 1px solid var(--md-preview-border);
             padding: 6px 8px;
             text-align: left;
+        }
+
+        .explorer-markdown-preview th {
+            background: rgba(128, 128, 128, .14);
+            font-weight: 700;
+        }
+
+        .explorer-markdown-preview tr:nth-child(2n) td {
+            background: rgba(128, 128, 128, .07);
+        }
+
+        /* GitHub-style callouts (ISSUE-2026-017). Accent/tint come from the
+           per-theme --explorer-callout-* tokens; the markup is backend-built. */
+        .explorer-markdown-preview .md-callout {
+            margin: 0 0 1em;
+            padding: 10px 14px 2px;
+            border: 1px solid var(--md-preview-border);
+            border-left: 4px solid var(--md-callout-accent, var(--md-preview-rule));
+            border-radius: 6px;
+            background: var(--md-callout-bg, transparent);
+        }
+
+        .explorer-markdown-preview .md-callout-title {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            margin: 0 0 .5em;
+            font-weight: 700;
+            color: var(--md-callout-accent, var(--md-preview-ink));
+        }
+
+        .explorer-markdown-preview .md-callout-icon {
+            width: 1.1em;
+            height: 1.1em;
+            flex: none;
+        }
+
+        .explorer-markdown-preview .md-callout > :last-child {
+            margin-bottom: .5em;
+        }
+
+        .explorer-markdown-preview .md-callout-note {
+            --md-callout-accent: var(--explorer-callout-note);
+            --md-callout-bg: var(--explorer-callout-note-bg);
+        }
+        .explorer-markdown-preview .md-callout-tip {
+            --md-callout-accent: var(--explorer-callout-tip);
+            --md-callout-bg: var(--explorer-callout-tip-bg);
+        }
+        .explorer-markdown-preview .md-callout-important {
+            --md-callout-accent: var(--explorer-callout-important);
+            --md-callout-bg: var(--explorer-callout-important-bg);
+        }
+        .explorer-markdown-preview .md-callout-warning {
+            --md-callout-accent: var(--explorer-callout-warning);
+            --md-callout-bg: var(--explorer-callout-warning-bg);
+        }
+        .explorer-markdown-preview .md-callout-caution {
+            --md-callout-accent: var(--explorer-callout-caution);
+            --md-callout-bg: var(--explorer-callout-caution-bg);
+        }
+
+        /* Markdown appearance popover (ISSUE-2026-030). */
+        #explorer-md-menu {
+            /* Stroke-style check glyph (guardrail 7) tinted via currentColor. */
+            --explorer-md-check-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E");
+            position: fixed;
+            z-index: 9999;
+            background: var(--t-ctx-bg);
+            border: 1px solid var(--t-ctx-border);
+            border-radius: 6px;
+            padding: 6px 0;
+            min-width: 172px;
+            box-shadow: 0 4px 18px rgba(0, 0, 0, .6);
+            font-size: .82rem;
+        }
+        #explorer-md-menu .explorer-md-menu-group + .explorer-md-menu-group {
+            margin-top: 4px;
+            border-top: 1px solid var(--t-ctx-border);
+            padding-top: 4px;
+        }
+        #explorer-md-menu .explorer-md-menu-label {
+            display: block;
+            padding: 3px 14px;
+            color: var(--t-text-muted);
+            font-size: .72rem;
+            text-transform: uppercase;
+            letter-spacing: .05em;
+        }
+        #explorer-md-menu button {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 18px;
+            width: 100%;
+            padding: 6px 14px;
+            background: none;
+            border: none;
+            color: var(--t-text);
+            text-align: left;
+            cursor: pointer;
+            white-space: nowrap;
+            font: inherit;
+        }
+        #explorer-md-menu button:hover,
+        #explorer-md-menu button:focus-visible {
+            background: var(--t-ctx-hover);
+            outline: none;
+        }
+        #explorer-md-menu button[aria-checked="true"] {
+            color: var(--t-accent);
+        }
+        #explorer-md-menu button[aria-checked="true"]::after {
+            content: '';
+            width: 14px;
+            height: 14px;
+            flex: none;
+            background: currentColor;
+            -webkit-mask: var(--explorer-md-check-mask) center / contain no-repeat;
+            mask: var(--explorer-md-check-mask) center / contain no-repeat;
         }
 
         /* ── Terminal context menu ── */
@@ -2655,6 +3360,36 @@
         #term-ctx-menu button:hover { background: var(--t-ctx-hover); }
         #term-ctx-menu button .shortcut { color: var(--t-text-muted); font-size: .76rem; }
 
+        /* Explorer copy-path context menu (ISSUE-2026-028). */
+        #explorer-ctx-menu {
+            position: fixed;
+            z-index: 9999;
+            background: var(--t-ctx-bg);
+            border: 1px solid var(--t-ctx-border);
+            border-radius: 6px;
+            padding: 4px 0;
+            min-width: 158px;
+            box-shadow: 0 4px 18px rgba(0, 0, 0, .6);
+            font-size: .82rem;
+        }
+        #explorer-ctx-menu button {
+            display: block;
+            width: 100%;
+            padding: 7px 14px;
+            background: none;
+            border: none;
+            color: var(--t-text);
+            text-align: left;
+            cursor: pointer;
+            white-space: nowrap;
+            font: inherit;
+        }
+        #explorer-ctx-menu button:hover,
+        #explorer-ctx-menu button:focus-visible {
+            background: var(--t-ctx-hover);
+            outline: none;
+        }
+
         /* placeholder states */
         .placeholder {
             position: absolute;
@@ -2675,6 +3410,17 @@
 
         .placeholder.ph-error { color: #ff6b6b; }
         .placeholder.ph-error .spinner { display: none; }
+
+        /* Error/disconnected overlays can sit on top of an attached xterm
+           (shell exited after connect), so they need an opaque backdrop. */
+        .placeholder.ph-error,
+        .placeholder.ph-disconnected { background: var(--t-terminal-bg); }
+        .placeholder.ph-disconnected { color: var(--t-text-muted); }
+        .placeholder.ph-disconnected .spinner { display: none; }
+        .placeholder .ph-retry-btn {
+            pointer-events: auto;
+            margin-top: 10px;
+        }
 
         .spinner {
             width: 26px; height: 26px;

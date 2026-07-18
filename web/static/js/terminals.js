@@ -3,6 +3,17 @@
     const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';
     const DEFAULT_SAVED_SESSION_ID = 'default-session';
 
+    /* Stroke-style button icons (finding 7.2) — replace the old refresh/clear/
+       fullscreen text glyphs so every action button shares one SVG icon language. */
+    const TERMINAL_REFRESH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><polyline points="21 3 21 9 15 9"></polyline></svg>';
+    const TERMINAL_CLEAR_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"></path><path d="M22 21H7"></path><path d="m5 11 9 9"></path></svg>';
+    const FULLSCREEN_ENTER_ICON = '<svg class="fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>';
+    const FULLSCREEN_EXIT_ICON = '<svg class="fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1="14" y1="10" x2="21" y2="3"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>';
+    const EXPLORER_DOWNLOAD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
+    // Markdown preview appearance control (ISSUE-2026-030): a stroke-style "type"
+    // glyph opens the preset/font popover.
+    const EXPLORER_MD_APPEARANCE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 7 4 4 20 4 20 7"></polyline><line x1="9" y1="20" x2="15" y2="20"></line><line x1="12" y1="4" x2="12" y2="20"></line></svg>';
+
 
 
 
@@ -13,10 +24,7 @@
     function onThemeApplied(preference) {
         const btn = document.getElementById('themeToggleBtn');
         if (btn) {
-            btn.textContent =
-                preference === 'light' ? '☀️ Light'
-                : preference === 'dark' ? '🌙 Dark'
-                : '◐ System';
+            btn.innerHTML = themeToggleButtonHtml(preference);
         }
         syncDefaultExplorerThemes();
     }
@@ -109,12 +117,86 @@
         applySurfaceMode(mode === 'max', { persist: true, refit: true });
     }
 
+    function applyAppConfigTheme(message) {
+        const theme = message?.appearance?.theme;
+        if (!['system', 'light', 'dark'].includes(theme)) {
+            return;
+        }
+        /* Idempotent: skip when the preference is already active so duplicate
+           deliveries (BroadcastChannel + storage + socket) are harmless. */
+        const current = document.documentElement.getAttribute('data-theme-preference');
+        if (theme !== current) {
+            applyTheme(theme);
+        }
+    }
+
+    /* One normalized app-config update contract for every delivery path
+       (BroadcastChannel, storage event, Socket.IO): apply the global theme
+       preference and the workspace surface mode (ISSUE-2026-021). */
+    function applyAppConfigUpdate(message) {
+        if (!message || typeof message !== 'object') {
+            return;
+        }
+        applyAppConfigTheme(message);
+        applyAppConfigSurfaceMode(message);
+        applyAppConfigTerminalFont(message);
+    }
+
+    /* Apply a launcher-side terminal font change (ISSUE-2026-029) to every
+       attached xterm without a reload. Sizes outside the server's accepted
+       range are ignored so a malformed broadcast can't break rendering. */
+    function applyAppConfigTerminalFont(message) {
+        const terminalConfig = message?.terminal;
+        if (!terminalConfig || typeof terminalConfig !== 'object') {
+            return;
+        }
+        const fontSize = Number(terminalConfig.font_size);
+        const hasFontSize = Number.isFinite(fontSize) && fontSize >= 6 && fontSize <= 48;
+        const fontFamily = typeof terminalConfig.font_family === 'string'
+            ? terminalConfig.font_family.trim()
+            : '';
+        if (!hasFontSize && !fontFamily) {
+            return;
+        }
+        if (hasFontSize) {
+            document.body.dataset.terminalFontSize = String(Math.round(fontSize));
+        }
+        if (fontFamily) {
+            document.body.dataset.terminalFontFamily = fontFamily;
+        }
+        terminals.forEach((terminal, index) => {
+            const term = terminal?.term;
+            if (!term) {
+                return;
+            }
+            if (hasFontSize) {
+                term.options.fontSize = Math.round(fontSize);
+            }
+            if (fontFamily) {
+                term.options.fontFamily = fontFamily;
+            }
+            scheduleFit(index);
+        });
+    }
+
+    /* Recover app-config changes missed while this window was hidden or its
+       socket was disconnected. */
+    async function reconcileAppConfigTheme() {
+        try {
+            const response = await fetch('/api/app-config');
+            if (!response.ok) {
+                return;
+            }
+            applyAppConfigTheme(await response.json());
+        } catch (_error) {}
+    }
+
     function setupAppConfigUpdateListeners() {
         if ('BroadcastChannel' in window) {
             try {
                 const channel = new BroadcastChannel(APP_CONFIG_BROADCAST_CHANNEL);
                 channel.onmessage = event => {
-                    applyAppConfigSurfaceMode(event.data || {});
+                    applyAppConfigUpdate(event.data || {});
                 };
             } catch (_error) {}
         }
@@ -125,7 +207,7 @@
             }
 
             try {
-                applyAppConfigSurfaceMode(JSON.parse(event.newValue));
+                applyAppConfigUpdate(JSON.parse(event.newValue));
             } catch (_error) {}
         });
     }
@@ -299,9 +381,14 @@
     let surfaceModeChangedManually = false;
     let surfaceModeAppliedGroups = new Map();
     let pendingSplitRestore = null;
+    /* Live explorer/browser client state captured before a terminal close so the
+       forced grid rebuild does not wipe sibling panes (ISSUE-2026-027). */
+    let pendingCloseClientState = null;
     let pendingModeSwitchSessionIds = new Set();
     let savedSessionResolver = null;
     let saveSessionAsResolver = null;
+    let closeSessionConfirmResolver = null;
+    let genericConfirmResolver = null;
     const MAX_SPLIT_TERMINALS = Math.min(8, Number(MAX_SESSIONS || 8));
     const MIN_SPLIT_COLS = 8;
     const MIN_SPLIT_ROWS = 8;
@@ -1018,6 +1105,103 @@
         });
     }
 
+    function closeCloseSessionConfirmModal(result = false) {
+        const modal = document.getElementById('closeSessionConfirmModal');
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+
+        if (closeSessionConfirmResolver) {
+            const resolver = closeSessionConfirmResolver;
+            closeSessionConfirmResolver = null;
+            resolver(result);
+        }
+    }
+
+    function openCloseSessionConfirmModal(group, connectedCount, totalCount) {
+        const modal = document.getElementById('closeSessionConfirmModal');
+        const copy = document.getElementById('closeSessionConfirmCopy');
+        const name = group?.name || group?.group_id || 'this session';
+        const terminalNoun = totalCount === 1 ? 'terminal' : 'terminals';
+        copy.textContent = totalCount > 0
+            ? `Close "${name}" and its ${totalCount} ${terminalNoun} (${connectedCount} connected)?`
+            : `Close "${name}"?`;
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            document.getElementById('closeSessionConfirmCancel').focus();
+        }, 0);
+
+        return new Promise(resolve => {
+            closeSessionConfirmResolver = resolve;
+        });
+    }
+
+    function closeGenericConfirmModal(result = false) {
+        const modal = document.getElementById('genericConfirmModal');
+        if (!modal) {
+            return;
+        }
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+        if (genericConfirmResolver) {
+            const resolver = genericConfirmResolver;
+            genericConfirmResolver = null;
+            resolver(result);
+        }
+    }
+
+    /* Reusable in-page confirm shell for irreversible actions (WebView2 blocks
+       window.confirm). Resolves true on accept, false on cancel/dismiss. */
+    function openGenericConfirmModal({ title = 'Are you sure?', copy = '', note = '', confirmLabel = 'Confirm', danger = false } = {}) {
+        const modal = document.getElementById('genericConfirmModal');
+        if (!modal) {
+            return Promise.resolve(false);
+        }
+        closeGenericConfirmModal(false);
+        document.getElementById('genericConfirmTitle').textContent = title;
+        document.getElementById('genericConfirmCopy').textContent = copy;
+        const noteEl = document.getElementById('genericConfirmNote');
+        noteEl.textContent = note || '';
+        noteEl.hidden = !note;
+        const acceptButton = document.getElementById('genericConfirmAccept');
+        acceptButton.textContent = confirmLabel;
+        acceptButton.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`;
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            document.getElementById('genericConfirmCancel').focus();
+        }, 0);
+
+        return new Promise(resolve => {
+            genericConfirmResolver = resolve;
+        });
+    }
+
+    /* One misclick on a tab's × must not silently kill live terminals
+       (sessions are memory-only), so closing a group with ≥1 connected
+       terminal asks first. Dead groups close without the dialog. */
+    async function confirmCloseSessionGroup(groupId) {
+        let sessions = [];
+        try {
+            const response = await fetch(getSessionApiPath(groupId));
+            const data = await response.json();
+            if (response.ok && Array.isArray(data.sessions)) {
+                sessions = data.sessions;
+            }
+        } catch (_) {
+            /* Status lookup failed — fall through and ask, the safe default. */
+        }
+
+        const connectedCount = sessions.filter(session => session.status === 'connected').length;
+        if (sessions.length > 0 && connectedCount === 0) {
+            return true;
+        }
+
+        return openCloseSessionConfirmModal(getGroupById(groupId), connectedCount, sessions.length);
+    }
+
     function buildSavedSessionLaunchPayload(savedSession) {
         const config = savedSession?.config || {};
         const sshConfig = config.ssh || {};
@@ -1063,6 +1247,8 @@
                 custom_agent: startupMode === 'agent' ? (terminal?.custom_agent || '') : '',
                 explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_tree_open) : false,
                 explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_git_open) : false,
+                explorer_open_tabs: startupMode === 'explorer' && Array.isArray(terminal?.explorer_open_tabs) ? terminal.explorer_open_tabs : [],
+                explorer_active_tab: startupMode === 'explorer' ? (terminal?.explorer_active_tab || '') : '',
                 startup_mode: startupMode
             };
 
@@ -1207,6 +1393,34 @@
         });
     });
 
+    document.getElementById('closeSessionConfirmModal').addEventListener('click', event => {
+        if (event.target.id === 'closeSessionConfirmModal') {
+            closeCloseSessionConfirmModal(false);
+        }
+    });
+
+    document.getElementById('closeSessionConfirmCancel').addEventListener('click', () => {
+        closeCloseSessionConfirmModal(false);
+    });
+
+    document.getElementById('closeSessionConfirmAccept').addEventListener('click', () => {
+        closeCloseSessionConfirmModal(true);
+    });
+
+    document.getElementById('genericConfirmModal').addEventListener('click', event => {
+        if (event.target.id === 'genericConfirmModal') {
+            closeGenericConfirmModal(false);
+        }
+    });
+
+    document.getElementById('genericConfirmCancel').addEventListener('click', () => {
+        closeGenericConfirmModal(false);
+    });
+
+    document.getElementById('genericConfirmAccept').addEventListener('click', () => {
+        closeGenericConfirmModal(true);
+    });
+
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             closeSessionsMenu();
@@ -1215,6 +1429,12 @@
             }
             if (document.getElementById('saveSessionAsModal').classList.contains('visible')) {
                 closeSaveSessionAsModal();
+            }
+            if (document.getElementById('closeSessionConfirmModal').classList.contains('visible')) {
+                closeCloseSessionConfirmModal(false);
+            }
+            if (document.getElementById('genericConfirmModal').classList.contains('visible')) {
+                closeGenericConfirmModal(false);
             }
         }
     });
@@ -1331,6 +1551,9 @@
         const selectedDirectory = startupMode === 'explorer'
             ? (session.explorer_root_directory || session.directory || '')
             : (session.directory || '');
+        const explorerTabs = startupMode === 'explorer' && terminal
+            ? explorerSerializeTabs(terminal)
+            : { open_tabs: [], active_tab: '' };
 
         return {
             title: session.title || `Terminal ${index + 1}`,
@@ -1340,8 +1563,11 @@
             startup_mode: startupMode,
             agent_selection: commandMode === 'agent' ? (session.agent_selection || '') : '',
             custom_agent: commandMode === 'agent' ? (session.custom_agent || '') : '',
+            agent_auto_mode: commandMode === 'agent' ? Boolean(session.agent_auto_mode) : false,
             explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?._explorerTreeSidebarOpen) : false,
             explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
+            explorer_open_tabs: explorerTabs.open_tabs,
+            explorer_active_tab: explorerTabs.active_tab,
             distribution: connectionMode === 'wsl' ? (session.distribution || '') : '',
             use_wsl: connectionMode === 'wsl' ? Boolean(session.use_wsl) : false,
             use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false
@@ -2876,21 +3102,17 @@
         return rect;
     }
 
-    function buildTerminalCloseRectsForSideGroup(plan, sideGroup) {
-        if (!sideGroup || sideGroup.coverage < sideGroup.sideLength) {
-            return null;
-        }
-
-        const expandingSessionIds = new Set(sideGroup.entries.map(entry => entry.sessionId));
-        const nextEntries = plan.remainingEntries.map(entry => {
-            const shouldExpand = expandingSessionIds.has(entry.sessionId);
-            return {
-                ...entry,
-                rect: shouldExpand
-                    ? expandRectIntoClosedSide(entry.rect, plan.closedRect, sideGroup.side)
-                    : entry.rect,
-            };
-        });
+    /* Expand a chosen subset of side contacts into the closed rect and return
+       the resulting rects only when the layout stays gap-free (area invariant)
+       and overlap-free; otherwise null so the caller can try another subset. */
+    function terminalCloseRectsForExpandingContacts(plan, side, contactsToExpand) {
+        const expandingSessionIds = new Set(contactsToExpand.map(entry => entry.sessionId));
+        const nextEntries = plan.remainingEntries.map(entry => ({
+            ...entry,
+            rect: expandingSessionIds.has(entry.sessionId)
+                ? expandRectIntoClosedSide(entry.rect, plan.closedRect, side)
+                : entry.rect,
+        }));
         for (let leftIndex = 0; leftIndex < nextEntries.length; leftIndex += 1) {
             for (let rightIndex = leftIndex + 1; rightIndex < nextEntries.length; rightIndex += 1) {
                 if (splitRectsOverlap(nextEntries[leftIndex].rect, nextEntries[rightIndex].rect)) {
@@ -2910,6 +3132,29 @@
             rectsBySessionId[entry.sessionId] = cloneSplitSlotRects([entry.rect])[0];
         });
         return rectsBySessionId;
+    }
+
+    function buildTerminalCloseRectsForSideGroup(plan, sideGroup) {
+        if (!sideGroup || sideGroup.coverage < sideGroup.sideLength) {
+            return null;
+        }
+
+        /* Prefer expanding only the single contact with the greatest shared
+           border, so closing a pane never resizes more neighbours than the
+           geometry requires (ISSUE-2026-022). Fall back to the full side group
+           only when the single-pane expansion would leave a gap or overlap. */
+        const rankedContacts = [...sideGroup.entries].sort((left, right) => (
+            right.sharedBorder - left.sharedBorder
+            || left.visualIndex - right.visualIndex
+        ));
+        const singleContact = rankedContacts[0];
+        if (singleContact && sideGroup.entries.length > 1) {
+            const single = terminalCloseRectsForExpandingContacts(plan, sideGroup.side, [singleContact]);
+            if (single) {
+                return single;
+            }
+        }
+        return terminalCloseRectsForExpandingContacts(plan, sideGroup.side, sideGroup.entries);
     }
 
     function buildTerminalCloseRectsBySessionId(plan) {
@@ -3087,21 +3332,51 @@
        Xterm factory
     ───────────────────────────────────────────── */
     function makeTerminal() {
+        const _ds = document.body.dataset;
+        /* The xterm theme follows the CSS custom properties (finding 7.3), so
+           a tokens.css change restyles the terminal canvas automatically. */
+        const _css = getComputedStyle(document.body);
+        const cssColor = (name, fallback) => (_css.getPropertyValue(name) || '').trim() || fallback;
         const term = new Terminal({
             cursorBlink   : true,
-            fontSize      : 13,
-            fontFamily    : 'Consolas, Monaco, "Courier New", monospace',
+            fontSize      : Number(_ds.terminalFontSize) || 14,
+            fontFamily    : _ds.terminalFontFamily || 'Consolas, Monaco, "Courier New", monospace',
             copyOnSelect  : true,
             theme: {
-                background          : '#0d0d0d',
-                foreground          : '#e0e0e0',
-                cursor              : '#00d9ff',
-                selectionBackground : 'rgba(0,217,255,.25)'
+                background          : cssColor('--t-terminal-bg', '#0d0d0d'),
+                foreground          : cssColor('--t-terminal-fg', '#e0e0e0'),
+                cursor              : cssColor('--t-terminal-cursor', '#00d9ff'),
+                selectionBackground : cssColor('--t-terminal-selection', 'rgba(0,217,255,.25)')
             }
         });
         const fitAddon = new FitAddon.FitAddon();
         term.loadAddon(fitAddon);
-        return { term, fitAddon };
+        /* Search + clickable links (finding 10.3). The addons are vendored like
+           xterm itself; the typeof guards keep terminals working if a stale
+           cached page misses one of the new vendor scripts. */
+        let searchAddon = null;
+        if (typeof SearchAddon !== 'undefined') {
+            searchAddon = new SearchAddon.SearchAddon();
+            term.loadAddon(searchAddon);
+        }
+        if (typeof WebLinksAddon !== 'undefined') {
+            term.loadAddon(new WebLinksAddon.WebLinksAddon((event, uri) => {
+                window.open(uri, '_blank', 'noopener');
+            }));
+        }
+        term.attachCustomKeyEventHandler(event => {
+            /* Hand Ctrl+Shift+F to the document-level search-overlay shortcut
+               instead of letting xterm swallow it. */
+            if (event.type === 'keydown'
+                && (event.ctrlKey || event.metaKey)
+                && event.shiftKey
+                && !event.altKey
+                && event.code === 'KeyF') {
+                return false;
+            }
+            return true;
+        });
+        return { term, fitAddon, searchAddon };
     }
 
     function emitTerminalResize(index, force = false) {
@@ -3148,7 +3423,7 @@
 
         if (refreshButton) {
             refreshButton.disabled = isBusy;
-            refreshButton.textContent = action === 'refresh' ? 'Refreshing…' : '↻';
+            refreshButton.innerHTML = action === 'refresh' ? 'Refreshing…' : TERMINAL_REFRESH_ICON;
         }
 
         if (explorerRefreshButton) {
@@ -3158,7 +3433,7 @@
 
         if (clearButton) {
             clearButton.disabled = isBusy;
-            clearButton.textContent = action === 'clear' ? 'Clearing…' : '🧹';
+            clearButton.innerHTML = action === 'clear' ? 'Clearing…' : TERMINAL_CLEAR_ICON;
         }
 
     }
@@ -3607,7 +3882,7 @@
         terminals  = [];
         sessionIds = [];
         gridBuilt  = false;
-        _focusedTerminalIndex = -1;
+        resetFocusedTerminal();
         visibleGroupId = '';
     }
 
@@ -3734,7 +4009,7 @@
                             data-terminal-refresh="${i}"
                             title="${isBrowser ? 'Reload browser pane' : 'Reset this terminal view and replay recent output'}"
                         >
-                            ↻
+                            ${TERMINAL_REFRESH_ICON}
                         </button>
                         ${!isBrowser ? `
                         <button
@@ -3803,7 +4078,7 @@
                             data-terminal-clear="${i}"
                             title="Clear this terminal and purge its replay buffer"
                         >
-                            🧹
+                            ${TERMINAL_CLEAR_ICON}
                         </button>
                         <div class="voice-control" data-terminal-voice-control="${i}" ${_voiceServiceStatus.enabled ? '' : 'hidden'}>
                             <button
@@ -3847,7 +4122,7 @@
                         ` : (isExplorer ? `
                             <div class="explorer-surface" id="explorer-${i}">
                                 <div class="explorer-bar">
-                                     <button type="button" class="explorer-refresh" id="explorer-refresh-${i}" data-explorer-refresh="${i}" title="Refresh explorer" aria-label="Refresh explorer">↻</button>
+                                     <button type="button" class="explorer-refresh" id="explorer-refresh-${i}" data-explorer-refresh="${i}" title="Refresh explorer" aria-label="Refresh explorer">${TERMINAL_REFRESH_ICON}</button>
                                      <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
                                      <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${i}" data-explorer-tree-toggle="${i}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                                      <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
@@ -3926,6 +4201,7 @@
             });
             _toggleVoice(i);
         });
+        _wireVoiceHoldToTalk(card, i);
         _syncVoiceControls(i);
         wireCardButton(card, `[data-explorer-refresh="${i}"]`, () => refreshTerminalDisplay(i));
         wireCardButton(card, `[data-explorer-up="${i}"]`, () => {
@@ -3941,21 +4217,199 @@
 
     /* Forward keystrokes and pointer focus for a terminal pane once its DOM
        elements exist. */
+    /* ── Broadcast input (finding 10.4) ──
+       When active, keystrokes typed into one plain terminal pane are mirrored
+       to every other plain terminal pane in the group (explorer/browser panes
+       are skipped — they have no terminal). Frontend-only: the backend's
+       terminal_input handler already targets one session per event. */
+    let broadcastInputActive = false;
+    let _broadcastIdleTimer = null;
+    const BROADCAST_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+    function _noteBroadcastActivity() {
+        clearTimeout(_broadcastIdleTimer);
+        _broadcastIdleTimer = setTimeout(() => setBroadcastInput(false), BROADCAST_IDLE_TIMEOUT_MS);
+    }
+
+    function setBroadcastInput(active) {
+        broadcastInputActive = Boolean(active);
+        const button = document.getElementById('broadcastBtn');
+        if (button) {
+            button.classList.toggle('active', broadcastInputActive);
+            button.setAttribute('aria-pressed', broadcastInputActive ? 'true' : 'false');
+            const label = broadcastInputActive
+                ? 'Broadcast typing is on — keystrokes go to every terminal pane'
+                : 'Broadcast typing to all terminal panes';
+            button.title = label;
+            button.setAttribute('aria-label', label);
+        }
+        document.getElementById('terminalsGrid')?.classList.toggle('broadcast-input', broadcastInputActive);
+        if (broadcastInputActive) {
+            _noteBroadcastActivity();
+            /* Enabling broadcast should let the user start typing immediately —
+               focus a terminal now so keystrokes are captured without first
+               clicking a pane (ISSUE-2026-026 follow-up). */
+            focusActiveOrDefaultTerminal();
+        } else {
+            clearTimeout(_broadcastIdleTimer);
+        }
+    }
+
+    function toggleBroadcastInput() {
+        setBroadcastInput(!broadcastInputActive);
+    }
+
+    /* Mirror input into every *other* plain terminal pane while broadcast typing
+       is on (explorer/browser panes have no `term` and are skipped). Shared by
+       keyboard forwarding and committed voice transcripts (ISSUE-2026-026) so a
+       single filter governs both. */
+    function broadcastInputToPeers(sourceIndex, data) {
+        if (!broadcastInputActive || !socket) {
+            return;
+        }
+        _noteBroadcastActivity();
+        sessionIds.forEach((otherSid, otherIndex) => {
+            if (otherIndex === sourceIndex || !otherSid || !terminals[otherIndex]?.term) {
+                return;
+            }
+            socket.emit('terminal_input', { session_id: otherSid, data });
+        });
+    }
+
+    /* Active-terminal selection (ISSUE-2026-025). The highlight is driven by
+       *real DOM keyboard focus* — never by terminal output — so it can never
+       disagree with where typing (or voice) actually lands. A delegated
+       focusin/focusout pair (wired once, below) marks whichever plain terminal
+       currently holds focus and clears the mark the moment focus leaves to the
+       top bar, dead space, or an explorer/browser pane. `_focusedTerminalIndex`
+       tracks that same pane exactly (or -1 when nothing is selected) and is the
+       single input target for voice / push-to-talk / search — so a pane that is
+       not visibly selected never silently receives voice.
+
+       Critically, the highlight is NOT tied to `term.onData`: TUI apps with
+       mouse reporting (vim, opencode, …) emit mouse-move escape sequences
+       through `onData`, so driving selection from input would make the
+       highlight follow the mouse into an unfocused pane. Focus is the only
+       source of truth. */
+    function isPlainTerminalCard(card) {
+        return Boolean(
+            card
+            && card.classList.contains('terminal-container')
+            && !card.classList.contains('explorer-pane')
+            && !card.classList.contains('browser-pane')
+        );
+    }
+
+    function terminalCardSlot(card) {
+        const slot = card ? Number(card.dataset.slot) : NaN;
+        return Number.isInteger(slot) ? slot : -1;
+    }
+
+    /* Visual only: give exactly one plain terminal card the `terminal-active`
+       treatment (plus accessible state) and clear it from every other pane.
+       An invalid/missing index clears the highlight from all panes. */
+    function paintActiveTerminalCard(index) {
+        const targetCard = document.getElementById(`tc-${index}`);
+        const isTarget = isPlainTerminalCard(targetCard);
+        document.querySelectorAll('.terminal-container.terminal-active').forEach(card => {
+            if (card !== targetCard || !isTarget) {
+                card.classList.remove('terminal-active');
+                card.removeAttribute('aria-current');
+            }
+        });
+        if (isTarget) {
+            targetCard.classList.add('terminal-active');
+            targetCard.setAttribute('aria-current', 'true');
+        }
+    }
+
+    /* A plain terminal gained focus: it becomes both the input target and the
+       highlighted pane. An invalid target selects nothing. */
+    function setFocusedTerminal(index) {
+        if (!isPlainTerminalCard(document.getElementById(`tc-${index}`))) {
+            clearActiveTerminalHighlight();
+            return;
+        }
+        _focusedTerminalIndex = index;
+        paintActiveTerminalCard(index);
+    }
+
+    /* Focus left every terminal (top bar / dead space / explorer / browser):
+       nothing is selected, so drop the highlight AND the input target — voice
+       and typing both go nowhere until a terminal is focused again. */
+    function clearActiveTerminalHighlight() {
+        _focusedTerminalIndex = -1;
+        paintActiveTerminalCard(-1);
+    }
+
+    /* Full reset on teardown. */
+    function resetFocusedTerminal() {
+        clearActiveTerminalHighlight();
+    }
+
+    /* Pick an attached plain terminal to receive keyboard focus, preferring the
+       current target, else the first eligible pane. Explorer/browser panes and
+       not-yet-attached panes (no `term`) are skipped. */
+    function firstAttachedPlainTerminalIndex(preferred = -1) {
+        const eligible = i => Boolean(
+            terminals[i]?.term
+            && !isExplorerSession(terminals[i]._session)
+            && !isBrowserSession(terminals[i]._session)
+        );
+        if (preferred >= 0 && eligible(preferred)) {
+            return preferred;
+        }
+        for (let i = 0; i < terminals.length; i++) {
+            if (eligible(i)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /* Give a terminal real keyboard focus so typing is captured immediately —
+       used when Broadcast typing is enabled so the user can start typing without
+       first clicking a pane (the focusin handler then highlights it). */
+    function focusActiveOrDefaultTerminal() {
+        const index = firstAttachedPlainTerminalIndex(_focusedTerminalIndex);
+        if (index !== -1) {
+            try { terminals[index].term.focus(); } catch (_) {}
+        }
+    }
+
+    /* Delegated, wired once: the terminal that holds DOM focus is the active
+       pane. focusout only clears when focus is not moving to another plain
+       terminal (whose focusin will repaint it). */
+    document.addEventListener('focusin', event => {
+        const card = event.target?.closest?.('.terminal-container');
+        if (isPlainTerminalCard(card)) {
+            setFocusedTerminal(terminalCardSlot(card));
+        }
+    });
+    document.addEventListener('focusout', event => {
+        const nextCard = event.relatedTarget?.closest?.('.terminal-container');
+        if (!isPlainTerminalCard(nextCard)) {
+            clearActiveTerminalHighlight();
+        }
+    });
+
+    function forwardTerminalInput(index, data) {
+        /* Selection is focus-driven only — never set it from `onData`, which
+           also fires for TUI mouse-tracking sequences and would make the
+           highlight follow the mouse into an unfocused pane. */
+        if (!socket) {
+            return;
+        }
+        const sid = sessionIds[index];
+        if (sid) socket.emit('terminal_input', { session_id: sid, data });
+        broadcastInputToPeers(index, data);
+    }
+
     function wirePaneInputForwarding(t, i) {
         if (!t?.term) {
             return;
         }
-        t.term.onData(data => {
-            _focusedTerminalIndex = i;
-            const sid = sessionIds[i];
-            if (sid && socket) socket.emit('terminal_input', { session_id: sid, data });
-        });
-        const card = document.getElementById(`tc-${i}`);
-        if (card) {
-            card.addEventListener('pointerdown', () => {
-                _focusedTerminalIndex = i;
-            });
-        }
+        t.term.onData(data => forwardTerminalInput(i, data));
     }
 
     function remapCardIndexAttributes(card, sourceIndex, targetIndex) {
@@ -4146,17 +4600,7 @@
             return;
         }
 
-        terminal.term.onData(data => {
-            _focusedTerminalIndex = index;
-            const sid = sessionIds[index];
-            if (sid && socket) socket.emit('terminal_input', { session_id: sid, data });
-        });
-        const card = document.getElementById(`tc-${index}`);
-        if (card) {
-            card.addEventListener('pointerdown', () => {
-                _focusedTerminalIndex = index;
-            });
-        }
+        terminal.term.onData(data => forwardTerminalInput(index, data));
     }
 
     function getExplorerSelectedDirectory(index) {
@@ -4566,7 +5010,7 @@
             <div class="terminal-surface">
                 <div class="explorer-surface" id="explorer-${index}">
                     <div class="explorer-bar">
-                        <button type="button" class="explorer-refresh" id="explorer-refresh-${index}" data-explorer-refresh="${index}" title="Refresh explorer" aria-label="Refresh explorer">↻</button>
+                        <button type="button" class="explorer-refresh" id="explorer-refresh-${index}" data-explorer-refresh="${index}" title="Refresh explorer" aria-label="Refresh explorer">${TERMINAL_REFRESH_ICON}</button>
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
                         <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${index}" data-explorer-tree-toggle="${index}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                         <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
@@ -4903,6 +5347,8 @@
                 groupId: activeGroupId,
                 rectsBySessionId: plan.rectsBySessionId,
                 originalSplitSlotCount: plan.originalSplitSlotCount,
+                splitColumnWeights: cloneSplitTrackWeights(splitColumnWeights),
+                splitRowWeights: cloneSplitTrackWeights(splitRowWeights),
             };
             await initialLoad();
         } catch (error) {
@@ -4916,6 +5362,59 @@
                 button.textContent = '⊟';
             }
             updateAllSplitButtonStates();
+        }
+    }
+
+    /* Snapshot the live client state of every pane except the one being closed,
+       keyed by session id. Closing a terminal forces a full grid rebuild
+       (initialLoad), which would otherwise reset sibling explorer panes to a
+       plain listing and reload browser panes; re-applying this snapshot after the
+       rebuild keeps their open file, tree, Git sidebar and URL (ISSUE-2026-027). */
+    function captureSurvivingPaneClientState(closingSessionId) {
+        const stateBySessionId = {};
+        terminals.forEach((pane, index) => {
+            const sessionId = sessionIds[index];
+            if (!pane || !sessionId || sessionId === closingSessionId) {
+                return;
+            }
+            if (isExplorerSession(pane._session)) {
+                const tabs = explorerSerializeTabs(pane);
+                const previewTab = explorerPreviewTab(pane);
+                const previewActive = pane._explorerActiveTabId === EXPLORER_PREVIEW_TAB_ID;
+                stateBySessionId[sessionId] = {
+                    type: 'explorer',
+                    explorer_tree_open: Boolean(pane._explorerTreeSidebarOpen),
+                    explorer_git_open: Boolean(pane._explorerGitSidebarOpen),
+                    explorer_open_tabs: tabs.open_tabs,
+                    explorer_active_tab: tabs.active_tab,
+                    /* Only the dynamic Preview tab needs an explicit reopen; pinned
+                       tabs come back through the persisted-tab path. */
+                    explorer_preview_path: previewActive ? (previewTab?.path || '') : '',
+                    explorer_preview_view: previewActive ? (pane._explorerLastFileView || '') : '',
+                };
+            } else if (isBrowserSession(pane._session)) {
+                stateBySessionId[sessionId] = {
+                    type: 'browser',
+                    browser_url: getBrowserSessionUrl(pane._session),
+                };
+            }
+        });
+        return stateBySessionId;
+    }
+
+    /* Re-apply one surviving explorer pane's captured state after a close rebuild.
+       Tree/Git flags and pinned tabs were overlaid onto the session object, so the
+       viewer entry point restores them; the previewed file is reopened only when
+       the Preview tab was the active view. */
+    function restoreExplorerPaneFromClose(index, snapshot) {
+        syncExplorerPane(index);
+        restoreExplorerSidebarState(index);
+        if (snapshot.explorer_preview_path) {
+            const pane = terminals[index];
+            if (pane && snapshot.explorer_preview_view) {
+                pane._explorerLastFileView = snapshot.explorer_preview_view;
+            }
+            openExplorerFile(index, snapshot.explorer_preview_path, { pinned: false, showLoading: false });
         }
     }
 
@@ -4964,10 +5463,16 @@
                 return;
             }
 
+            pendingCloseClientState = {
+                groupId: activeGroupId,
+                stateBySessionId: captureSurvivingPaneClientState(plan.sessionId),
+            };
             pendingSplitRestore = {
                 groupId: activeGroupId,
                 rectsBySessionId: restoreRectsBySessionId,
                 originalSplitSlotCount: plan.originalSplitSlotCount,
+                splitColumnWeights: cloneSplitTrackWeights(splitColumnWeights),
+                splitRowWeights: cloneSplitTrackWeights(splitRowWeights),
             };
             await initialLoad();
         } catch (error) {
@@ -5652,6 +6157,7 @@
                 capabilities
             };
             _updateVoiceBtn(index, true);
+            _showVoiceRecordingOverlay(index);
             _setVoiceBtnsDisabled(index);
             _applyVoiceStateDiagnostics(index);
             _setVoicePanelStatus(
@@ -5671,6 +6177,7 @@
                 requestedConstraints: acquisition?.appliedConstraints ?? requestedConstraints
             });
             await _teardownVoicePipeline(stream, pipeline);
+            _hideVoiceRecordingOverlay();
             _updateVoiceBtn(index, false);
             _setVoiceBtnsDisabled(-1);
             const errName = err?.name ? `[${err.name}] ` : '';
@@ -5887,6 +6394,7 @@
         });
 
         state.recording = false;
+        _hideVoiceRecordingOverlay();
         await _flushVoiceWorklet(index, state);
 
         const sid = state.sessionId || sessionIds[index];
@@ -5927,9 +6435,196 @@
         }
     }
 
+    /* ── Floating recording indicator (ISSUE-2026-019) ──
+       One fixed-position, non-blocking overlay shared by every capture path
+       (mic toggle, hold-to-talk, push-to-talk keybind). Shown only after
+       _startVoice() has established an active recording state; hidden from
+       every _stopVoice(), start-failure, and teardown path. */
+    const VOICE_OVERLAY_ID = 'voiceRecordingOverlay';
+    const VOICE_OVERLAY_BAR_COUNT = 5;
+    const VOICE_OVERLAY_MIC_ICON = '<svg class="voice-overlay-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>';
+    let _voiceOverlayAnimation = null;
+
+    function _prefersReducedMotion() {
+        try {
+            return Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches);
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function _showVoiceRecordingOverlay(index) {
+        if (!_voiceState[index]?.recording) {
+            return; /* capture already stopped while startup was in flight */
+        }
+        let overlay = document.getElementById(VOICE_OVERLAY_ID);
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = VOICE_OVERLAY_ID;
+            overlay.className = 'voice-recording-overlay';
+            overlay.setAttribute('role', 'status');
+            overlay.setAttribute('aria-live', 'polite');
+            const bars = Array.from(
+                { length: VOICE_OVERLAY_BAR_COUNT },
+                () => '<span class="voice-overlay-bar"></span>'
+            ).join('');
+            overlay.innerHTML = `${VOICE_OVERLAY_MIC_ICON}<span class="voice-overlay-label">Recording</span><span class="voice-overlay-bars" aria-hidden="true">${bars}</span>`;
+            document.body.appendChild(overlay);
+        }
+        overlay.classList.remove('voice-overlay-fallback');
+        _startVoiceOverlayAnimation(index, overlay);
+    }
+
+    function _hideVoiceRecordingOverlay() {
+        _stopVoiceOverlayAnimation();
+        document.getElementById(VOICE_OVERLAY_ID)?.remove();
+    }
+
+    /* Drive the bars from a small AnalyserNode fanned out from the live
+       capture source; fall back to the deterministic CSS animation when the
+       analyser cannot be created, and stay static under reduced motion. */
+    function _startVoiceOverlayAnimation(index, overlay) {
+        _stopVoiceOverlayAnimation();
+        if (_prefersReducedMotion()) {
+            return;
+        }
+        const state = _voiceState[index];
+        let analyser = null;
+        try {
+            if (state?.audioCtx && state?.source) {
+                analyser = state.audioCtx.createAnalyser();
+                analyser.fftSize = 64;
+                analyser.smoothingTimeConstant = 0.6;
+                state.source.connect(analyser);
+            }
+        } catch (_) {
+            analyser = null;
+        }
+        if (!analyser) {
+            overlay.classList.add('voice-overlay-fallback');
+            return;
+        }
+        const bars = overlay.querySelectorAll('.voice-overlay-bar');
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        const animation = { frameId: 0, analyser, source: state.source };
+        const tick = () => {
+            if (_voiceOverlayAnimation !== animation) {
+                return; /* a newer capture (or a stop) superseded this loop */
+            }
+            analyser.getByteFrequencyData(data);
+            bars.forEach((bar, barIndex) => {
+                const bin = data[Math.floor(((barIndex + 1) * data.length) / (bars.length + 1))] || 0;
+                const scale = 0.25 + (bin / 255) * 0.75;
+                bar.style.transform = `scaleY(${scale.toFixed(3)})`;
+            });
+            animation.frameId = window.requestAnimationFrame(tick);
+        };
+        _voiceOverlayAnimation = animation;
+        animation.frameId = window.requestAnimationFrame(tick);
+    }
+
+    function _stopVoiceOverlayAnimation() {
+        const animation = _voiceOverlayAnimation;
+        if (!animation) {
+            return;
+        }
+        _voiceOverlayAnimation = null;
+        if (animation.frameId) {
+            window.cancelAnimationFrame(animation.frameId);
+        }
+        try { animation.source.disconnect(animation.analyser); } catch (_) {}
+    }
+
+    /* Press-and-hold on the mic button records while held (mirroring the
+       push-to-talk keybind); a quick click keeps the existing click-to-toggle
+       behaviour. Keyboard activation still fires plain click → toggle. */
+    const VOICE_HOLD_TO_TALK_MS = 350;
+
+    function _wireVoiceHoldToTalk(card, index) {
+        const button = card.querySelector(`[data-terminal-voice="${index}"]`);
+        const control = card.querySelector(`[data-terminal-voice-control="${index}"]`);
+        if (!button || !control) {
+            return;
+        }
+
+        let holdTimer = null;
+        let holdActive = false;
+        let holdStarting = false;
+        let holdStopRequested = false;
+        let suppressClick = false;
+
+        const clearHoldTimer = () => {
+            if (holdTimer !== null) {
+                window.clearTimeout(holdTimer);
+                holdTimer = null;
+            }
+        };
+
+        button.addEventListener('pointerdown', event => {
+            if (event.button !== 0 || button.disabled || _voiceState[index]?.recording) {
+                return;
+            }
+            try { button.setPointerCapture(event.pointerId); } catch (_) {}
+            holdStopRequested = false;
+            clearHoldTimer();
+            holdTimer = window.setTimeout(async () => {
+                holdTimer = null;
+                holdActive = true;
+                suppressClick = true;
+                holdStarting = true;
+                try {
+                    if (_voiceActiveIndex !== -1 && _voiceActiveIndex !== index) {
+                        await _stopVoice(_voiceActiveIndex);
+                    }
+                    if (!_voiceState[index]?.recording) {
+                        await _startVoice(index);
+                    }
+                } finally {
+                    holdStarting = false;
+                }
+                if (holdStopRequested) {
+                    holdStopRequested = false;
+                    if (_voiceState[index]?.recording) {
+                        await _stopVoice(index);
+                    }
+                }
+            }, VOICE_HOLD_TO_TALK_MS);
+        });
+
+        const endHold = async () => {
+            clearHoldTimer();
+            if (!holdActive) {
+                return;
+            }
+            holdActive = false;
+            if (holdStarting) {
+                /* release raced the async start — stop as soon as it settles */
+                holdStopRequested = true;
+                return;
+            }
+            if (_voiceState[index]?.recording) {
+                await _stopVoice(index);
+            }
+        };
+        button.addEventListener('pointerup', endHold);
+        button.addEventListener('pointercancel', endHold);
+
+        /* A completed hold already stopped capture on release; swallow the
+           click that follows pointerup so it cannot re-toggle recording.
+           Capture phase on the wrapper runs before the button's listener. */
+        control.addEventListener('click', event => {
+            if (suppressClick) {
+                suppressClick = false;
+                event.preventDefault();
+                event.stopPropagation();
+            }
+        }, true);
+    }
+
     /* ── Push-to-talk ── */
     let _pttActive = false;
     let _pttProcessing = false;
+    let _pttStopRequested = false;
 
     function _matchesPttKeybind(event, keybind) {
         if (!keybind) return false;
@@ -5958,14 +6653,14 @@
             || (key.length === 1 ? key.toUpperCase() : key) === parts[parts.length - 1];
     }
 
+    /* Push-to-talk targets the currently selected (focused) terminal only.
+       When nothing is selected, voice goes nowhere — consistent with typing,
+       and so a not-visibly-selected pane never silently receives dictation. */
     function _findPttTerminalIndex() {
         if (_focusedTerminalIndex !== -1
             && sessionIds[_focusedTerminalIndex]
             && terminals[_focusedTerminalIndex]) {
             return _focusedTerminalIndex;
-        }
-        for (let i = 0; i < sessionIds.length; i++) {
-            if (sessionIds[i] && terminals[i]) return i;
         }
         return -1;
     }
@@ -5997,6 +6692,117 @@
         }
         const index = findExplorerSearchTargetIndex();
         if (index === -1 || !focusExplorerSearch(index)) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+    });
+
+    /* Ctrl+Shift+F opens the scrollback search overlay on the focused terminal
+       pane (finding 10.3); makeTerminal's custom key handler keeps xterm from
+       consuming the shortcut first. */
+    function isTerminalSearchablePane(pane) {
+        return Boolean(pane?.term && pane?.searchAddon);
+    }
+
+    function findTerminalSearchTargetIndex() {
+        const activeCard = document.activeElement?.closest?.('.terminal-container');
+        const activeSlot = activeCard ? Number(activeCard.dataset.slot) : -1;
+        if (Number.isInteger(activeSlot) && isTerminalSearchablePane(terminals[activeSlot])) {
+            return activeSlot;
+        }
+        if (_focusedTerminalIndex !== -1 && isTerminalSearchablePane(terminals[_focusedTerminalIndex])) {
+            return _focusedTerminalIndex;
+        }
+        return -1;
+    }
+
+    function wireTerminalSearchOverlay(index, overlay) {
+        const input = overlay.querySelector(`[data-terminal-search-input="${index}"]`);
+        const findNext = () => {
+            const query = input?.value || '';
+            if (query) terminals[index]?.searchAddon?.findNext(query);
+        };
+        const findPrevious = () => {
+            const query = input?.value || '';
+            if (query) terminals[index]?.searchAddon?.findPrevious(query);
+        };
+        input?.addEventListener('keydown', event => {
+            event.stopPropagation();
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                if (event.shiftKey) findPrevious(); else findNext();
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                closeTerminalSearch(index);
+            }
+        });
+        input?.addEventListener('input', () => {
+            const query = input.value || '';
+            if (query) {
+                terminals[index]?.searchAddon?.findNext(query, { incremental: true });
+            }
+        });
+        overlay.querySelector(`[data-terminal-search-prev="${index}"]`)
+            ?.addEventListener('click', findPrevious);
+        overlay.querySelector(`[data-terminal-search-next="${index}"]`)
+            ?.addEventListener('click', findNext);
+        overlay.querySelector(`[data-terminal-search-close="${index}"]`)
+            ?.addEventListener('click', () => closeTerminalSearch(index));
+    }
+
+    function openTerminalSearch(index) {
+        const pane = terminals[index];
+        const wrapper = document.getElementById(`tw-${index}`);
+        if (!pane || !wrapper || !isTerminalSearchablePane(pane)) {
+            return false;
+        }
+        let overlay = wrapper.querySelector('.terminal-search-overlay');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.className = 'terminal-search-overlay';
+            overlay.innerHTML = `
+                <input
+                    type="search"
+                    class="terminal-search-input"
+                    data-terminal-search-input="${index}"
+                    placeholder="Find in terminal"
+                    autocomplete="off"
+                    spellcheck="false"
+                    aria-label="Find in terminal scrollback"
+                >
+                <button type="button" class="explorer-search-btn" data-terminal-search-prev="${index}" title="Previous match (Shift+Enter)" aria-label="Previous match">↑</button>
+                <button type="button" class="explorer-search-btn" data-terminal-search-next="${index}" title="Next match (Enter)" aria-label="Next match">↓</button>
+                <button type="button" class="explorer-search-btn" data-terminal-search-close="${index}" title="Close search (Escape)" aria-label="Close search">×</button>
+            `;
+            wrapper.appendChild(overlay);
+            wireTerminalSearchOverlay(index, overlay);
+        }
+        overlay.hidden = false;
+        const input = overlay.querySelector('input');
+        input?.focus();
+        input?.select();
+        return true;
+    }
+
+    function closeTerminalSearch(index) {
+        const wrapper = document.getElementById(`tw-${index}`);
+        const overlay = wrapper?.querySelector('.terminal-search-overlay');
+        if (overlay) {
+            overlay.hidden = true;
+        }
+        terminals[index]?.searchAddon?.clearDecorations?.();
+        /* Returning focus to the terminal re-marks it active via the delegated
+           focusin handler. */
+        terminals[index]?.term?.focus();
+    }
+
+    document.addEventListener('keydown', event => {
+        if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey || event.code !== 'KeyF') {
+            return;
+        }
+        const index = findTerminalSearchTargetIndex();
+        if (index === -1 || !openTerminalSearch(index)) {
             return;
         }
         event.preventDefault();
@@ -6036,6 +6842,7 @@
         event.preventDefault();
         _pttActive = true;
         _pttProcessing = true;
+        _pttStopRequested = false;
 
         try {
             const index = _voiceActiveIndex !== -1 ? _voiceActiveIndex : _findPttTerminalIndex();
@@ -6043,8 +6850,14 @@
             if (!_voiceState[index]?.recording) {
                 await _startVoice(index);
             }
+            /* The key was released while the async start was in flight —
+               stop immediately so no stale capture/indicator survives. */
+            if (_pttStopRequested && _voiceState[index]?.recording) {
+                await _stopVoice(index);
+            }
         } finally {
             _pttProcessing = false;
+            _pttStopRequested = false;
         }
     });
 
@@ -6054,6 +6867,10 @@
 
         event.preventDefault();
         _pttActive = false;
+        if (_pttProcessing) {
+            _pttStopRequested = true;
+            return;
+        }
         _pttProcessing = true;
 
         try {
@@ -6203,6 +7020,30 @@
                 return;
             }
 
+            /* When this rebuild is driven by a terminal close, overlay each
+               surviving pane's captured explorer/browser state onto the fetched
+               session objects so the rebuild seeds and restores it rather than
+               resetting siblings (ISSUE-2026-027). */
+            const closeClientState = pendingCloseClientState?.groupId === requestedGroupId
+                ? pendingCloseClientState.stateBySessionId
+                : null;
+            if (closeClientState) {
+                data.sessions.forEach(entry => {
+                    const snapshot = closeClientState[entry.session_id];
+                    if (!snapshot) {
+                        return;
+                    }
+                    if (snapshot.type === 'explorer') {
+                        entry.explorer_tree_open = snapshot.explorer_tree_open;
+                        entry.explorer_git_open = snapshot.explorer_git_open;
+                        entry.explorer_open_tabs = snapshot.explorer_open_tabs;
+                        entry.explorer_active_tab = snapshot.explorer_active_tab;
+                    } else if (snapshot.type === 'browser') {
+                        entry.initial_command = snapshot.browser_url;
+                    }
+                });
+            }
+
             applyConfiguredSurfaceMode(data, { refit: gridBuilt });
             const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
             const usingCurrentView = (
@@ -6253,8 +7094,13 @@
                 if (session.status === 'connected' && isBrowserSession(session)) {
                     document.getElementById(`ph-${i}`)?.remove();
                 } else if (session.status === 'connected' && isExplorerSession(session)) {
-                    loadExplorerPane(i);
-                    restoreExplorerSidebarState(i);
+                    const closeSnapshot = closeClientState ? closeClientState[session.session_id] : null;
+                    if (closeSnapshot && closeSnapshot.type === 'explorer') {
+                        restoreExplorerPaneFromClose(i, closeSnapshot);
+                    } else {
+                        loadExplorerPane(i);
+                        restoreExplorerSidebarState(i);
+                    }
                 } else if (session.status === 'connected') {
                     if (!terminals[i]._attached) {
                         attachTerminal(i);
@@ -6262,6 +7108,8 @@
                     attachedIndices.push(i);
                 } else if (session.status === 'error') {
                     showPlaceholderError(i, session.error_message || 'Connection failed');
+                } else if (isRetryableDisconnect(session)) {
+                    showPlaceholderDisconnected(i);
                 }
             });
 
@@ -6277,9 +7125,17 @@
                         pendingRestore.originalSplitSlotCount || originalSplitSlotCount || data.sessions.length
                     );
                     splitSlotRects = cloneSplitSlotRects(restoredRects);
+                    /* A valid close preserves the grid's bounding box, so the
+                       pre-close track weights map 1:1 onto the reflowed grid and
+                       user-set proportions survive (ISSUE-2026-022). */
+                    splitColumnWeights = cloneSplitTrackWeights(pendingRestore.splitColumnWeights);
+                    splitRowWeights = cloneSplitTrackWeights(pendingRestore.splitRowWeights);
                     applySplitSlotGeometry({ fit: false });
                 }
                 pendingSplitRestore = null;
+            }
+            if (closeClientState) {
+                pendingCloseClientState = null;
             }
 
             updateSessionChrome(data.sessions.length, requestedGroupId);
@@ -6300,10 +7156,10 @@
             }
 
             if (!usingCurrentView && !restoredFromCache && socket) {
+                /* Every pane joins its session room — including explorer and
+                   browser panes, which have no output stream but still need
+                   the room-scoped session_status updates. */
                 data.sessions.forEach(session => {
-                    if (isExplorerSession(session) || isBrowserSession(session)) {
-                        return;
-                    }
                     socket.emit('join_session', { session_id: session.session_id });
                 });
             }
@@ -6341,12 +7197,38 @@
     }
 
     /* ─────────────────────────────────────────────
-       Show error message inside a terminal pane
+       Show error / disconnected / retry states inside a terminal pane
     ───────────────────────────────────────────── */
-    function showPlaceholderError(index, msg) {
-        const ph = document.getElementById(`ph-${index}`);
+    /* Explorer and browser panes have no live connection to retry. */
+    function isRetryableDisconnect(session) {
+        return session.status === 'disconnected'
+            && !isExplorerSession(session)
+            && !isBrowserSession(session);
+    }
+
+    function ensurePanePlaceholder(index) {
+        let ph = document.getElementById(`ph-${index}`);
+        if (!ph) {
+            const wrapper = document.getElementById(`tw-${index}`);
+            if (!wrapper) return null;
+            ph = document.createElement('div');
+            ph.className = 'placeholder';
+            ph.id = `ph-${index}`;
+            wrapper.appendChild(ph);
+        }
+        return ph;
+    }
+
+    function showPlaceholderRetryState(index, { stateClass, title, message }) {
+        const ph = ensurePanePlaceholder(index);
         if (!ph) return;
-        ph.classList.add('ph-error');
+        const renderedState = `${stateClass}|${message}`;
+        if (ph.dataset.retryState === renderedState) {
+            return;
+        }
+        ph.dataset.retryState = renderedState;
+        ph.classList.remove('ph-error', 'ph-disconnected');
+        ph.classList.add(stateClass);
         ph.innerHTML = `
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none"
                  stroke="currentColor" stroke-width="1.5">
@@ -6354,8 +7236,59 @@
                 <line x1="12" y1="8" x2="12" y2="12"/>
                 <line x1="12" y1="16" x2="12.01" y2="16"/>
             </svg>
-            <strong>Connection Error</strong>
-            <span style="color:#aaa;word-break:break-all">${escHtml(msg)}</span>`;
+            <strong>${title}</strong>
+            <span style="color:#aaa;word-break:break-all">${escHtml(message)}</span>
+            <button type="button" class="btn btn-neutral ph-retry-btn" data-retry-session="${index}">
+                Retry connection
+            </button>`;
+        ph.querySelector(`[data-retry-session="${index}"]`)
+            .addEventListener('click', () => retrySessionConnection(index));
+    }
+
+    function showPlaceholderError(index, msg) {
+        showPlaceholderRetryState(index, {
+            stateClass: 'ph-error',
+            title: 'Connection Error',
+            message: msg
+        });
+    }
+
+    function showPlaceholderDisconnected(index, msg = 'The connection ended.') {
+        showPlaceholderRetryState(index, {
+            stateClass: 'ph-disconnected',
+            title: 'Disconnected',
+            message: msg
+        });
+    }
+
+    function showPlaceholderConnecting(index) {
+        const ph = ensurePanePlaceholder(index);
+        if (!ph) return;
+        delete ph.dataset.retryState;
+        ph.classList.remove('ph-error', 'ph-disconnected');
+        ph.innerHTML = `
+            <div class="spinner"></div>
+            <span style="font-size:.78rem">Connecting…</span>`;
+    }
+
+    async function retrySessionConnection(index) {
+        const sessionId = sessionIds[index];
+        if (!sessionId) return;
+        showPlaceholderConnecting(index);
+        try {
+            const response = await fetch(
+                `/api/sessions/${encodeURIComponent(sessionId)}/reconnect`,
+                { method: 'POST' }
+            );
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Reconnect failed with status ${response.status}`);
+            }
+            /* Discard the dead connection's output before the fresh stream lands. */
+            terminals[index]?.term?.reset?.();
+        } catch (e) {
+            showPlaceholderError(index, e.message);
+        }
     }
 
     async function loadSessionGroups() {
@@ -6406,7 +7339,7 @@
         const isBrowserFullscreen = Boolean(document.fullscreenElement);
         const active = isPywebviewAvailable() ? nativeFullscreen : isBrowserFullscreen;
         const label = active ? 'Exit fullscreen' : 'Enter fullscreen';
-        button.innerHTML = active ? '&#10005;' : '&#9974;';
+        button.innerHTML = active ? FULLSCREEN_EXIT_ICON : FULLSCREEN_ENTER_ICON;
         button.title = label;
         button.setAttribute('aria-label', label);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
@@ -6492,6 +7425,7 @@
         splitColumnWeights = null;
         splitRowWeights = null;
         pendingSplitRestore = null;
+        pendingCloseClientState = null;
         clearActiveGridResize();
         clearResizeHandles();
         document.getElementById('emptyState').classList.add('visible');
@@ -6535,6 +7469,8 @@
             return;
         }
 
+        /* Safety: broadcast typing never survives a group switch. */
+        setBroadcastInput(false);
         activeGroupId = groupId;
         syncLocationToGroup(activeGroupId);
         renderSessionTabs();
@@ -6604,6 +7540,8 @@
                     redrawAttachedTerminals([i], { forceResize: true });
                 } else if (session.status === 'error' && !terminals[i]?._attached) {
                     showPlaceholderError(i, session.error_message || 'Connection failed');
+                } else if (isRetryableDisconnect(session)) {
+                    showPlaceholderDisconnected(i);
                 }
             });
         } catch (e) {
@@ -6616,6 +7554,10 @@
     ───────────────────────────────────────────── */
     async function closeSessionGroup(groupId = activeGroupId) {
         if (!groupId) {
+            return;
+        }
+
+        if (!(await confirmCloseSessionGroup(groupId))) {
             return;
         }
 
@@ -6924,6 +7866,98 @@
         return explorerPathExtension(path) === '.txt' ? 'Text file' : 'Text file';
     }
 
+    /* Reuse the existing language classifiers to pick a compact leading icon for
+       tree and Git rows. Categories map to token-driven colors + a distinct
+       stroke glyph so mixed file lists are quick to scan; unknown types fall
+       back to the plain document glyph. */
+    const EXPLORER_FILE_ICON_CATEGORY_BY_LANGUAGE = Object.freeze({
+        javascript: 'code',
+        typescript: 'code',
+        python: 'code',
+        ruby: 'code',
+        go: 'code',
+        rust: 'code',
+        java: 'code',
+        c: 'code',
+        cpp: 'code',
+        csharp: 'code',
+        php: 'code',
+        swift: 'code',
+        kotlin: 'code',
+        lua: 'code',
+        shell: 'shell',
+        powershell: 'shell',
+        batch: 'shell',
+        json: 'data',
+        jsonl: 'data',
+        yaml: 'data',
+        toml: 'data',
+        ini: 'data',
+        html: 'markup',
+        xml: 'markup',
+        css: 'style',
+        markdown: 'markdown',
+        config: 'config',
+        dotenv: 'config',
+        gitignore: 'config',
+        dockerfile: 'config',
+        makefile: 'config',
+        sql: 'sql',
+        log: 'log',
+        text: 'doc'
+    });
+
+    const EXPLORER_FILE_ICON_GLYPHS = Object.freeze({
+        doc: '<path d="M6 3.5h7.2L18.5 8.8V19.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z"/><path d="M12.8 3.6V8a1 1 0 0 0 1 1h4"/><path d="M8 13h6"/><path d="M8 16h6"/>',
+        code: '<path d="M9.3 8.5 6 12l3.3 3.5"/><path d="M14.7 8.5 18 12l-3.3 3.5"/><path d="M13.2 6.5 10.8 17.5"/>',
+        shell: '<rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M7 9.8 9.6 12 7 14.2"/><path d="M12.5 14.5h4.5"/>',
+        data: '<path d="M10.2 4.8c-2 0-2.4 1.2-2.4 3S7.4 11 6 12c1.4 1 1.8 1.4 1.8 3.2s.4 4 2.4 4"/><path d="M13.8 4.8c2 0 2.4 1.2 2.4 3S16.6 11 18 12c-1.4 1-1.8 1.4-1.8 3.2s-.4 4-2.4 4"/>',
+        markup: '<path d="M9 8 4.5 12 9 16"/><path d="M15 8 19.5 12 15 16"/>',
+        style: '<path d="M9.8 4.5 7.8 19.5"/><path d="M16.2 4.5 14.2 19.5"/><path d="M5.5 9.2h13"/><path d="M5 14.8h13"/>',
+        markdown: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M6.5 15V9l2.6 3 2.6-3v6"/><path d="M15.6 9v4.4"/><path d="M13.9 12.1 15.6 14l1.7-1.9"/>',
+        config: '<circle cx="12" cy="12" r="3"/><path d="M12 4v2.2M12 17.8V20M4 12h2.2M17.8 12H20M6.3 6.3l1.6 1.6M16.1 16.1l1.6 1.6M17.7 6.3l-1.6 1.6M7.9 16.1l-1.6 1.6"/>',
+        sql: '<ellipse cx="12" cy="6" rx="6.3" ry="2.5"/><path d="M5.7 6v6c0 1.4 2.8 2.5 6.3 2.5s6.3-1.1 6.3-2.5V6"/><path d="M5.7 12v6c0 1.4 2.8 2.5 6.3 2.5s6.3-1.1 6.3-2.5v-6"/>',
+        log: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M7.5 9h2M7.5 12h2M7.5 15h2"/><path d="M12 9h4.5M12 12h4.5M12 15h3"/>'
+    });
+
+    function explorerFileTypeCategory(path, language = '') {
+        const detected = normalizeExplorerLanguage(language) || explorerCodeLanguage(path);
+        return EXPLORER_FILE_ICON_CATEGORY_BY_LANGUAGE[detected] || 'doc';
+    }
+
+    function explorerFileTypeIconHtml(path, language = '') {
+        const category = explorerFileTypeCategory(path, language);
+        const glyph = EXPLORER_FILE_ICON_GLYPHS[category] || EXPLORER_FILE_ICON_GLYPHS.doc;
+        return `<span class="explorer-icon file type-${category}" aria-hidden="true">`
+            + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" '
+            + `stroke-linecap="round" stroke-linejoin="round" focusable="false">${glyph}</svg></span>`;
+    }
+
+    /* A truncated preview keeps either the head or the tail of the file
+       (ISSUE-2026-020): logs retain their newest bytes, everything else keeps
+       its opening bytes. Report which end, and how much, was retained. */
+    function explorerPreviewTruncationLabel(data) {
+        if (!data || !data.truncated) {
+            return '';
+        }
+        const start = Number(data.preview_start_byte);
+        const end = Number(data.preview_end_byte);
+        const retained = (Number.isFinite(start) && Number.isFinite(end))
+            ? Math.max(0, end - start)
+            : NaN;
+        const total = Number(data.total_size);
+        const edge = data.preview_mode === 'tail' ? 'last' : 'first';
+        const retainedLabel = Number.isFinite(retained) ? formatExplorerSize(retained) : '';
+        const totalLabel = Number.isFinite(total) ? formatExplorerSize(total) : '';
+        if (retainedLabel && totalLabel) {
+            return `Showing the ${edge} ${retainedLabel} of ${totalLabel}`;
+        }
+        if (retainedLabel) {
+            return `Showing the ${edge} ${retainedLabel}`;
+        }
+        return 'Preview truncated';
+    }
+
     function explorerFileMetaParts(data, fileType) {
         const size = formatExplorerSize(data.size) || 'Unknown size';
         const modified = formatExplorerDate(data.modified);
@@ -6931,8 +7965,9 @@
         if (modified) {
             metaParts.push(modified);
         }
-        if (data.truncated) {
-            metaParts.push('Preview truncated');
+        const truncationLabel = explorerPreviewTruncationLabel(data);
+        if (truncationLabel) {
+            metaParts.push(truncationLabel);
         }
         return metaParts;
     }
@@ -7236,16 +8271,18 @@
 
     function renderExplorerMessage(index, message) {
         const list = document.getElementById(`explorer-list-${index}`);
-        if (list) {
+        const viewer = explorerEnsureViewerShell(index);
+        if (list && viewer) {
             list.classList.remove('file-view');
-            list.innerHTML = `<div class="explorer-message">${escHtml(message)}</div>`;
+            viewer.innerHTML = `<div class="explorer-message">${escHtml(message)}</div>`;
+            renderExplorerTabStrip(index);
         }
     }
 
     function renderExplorerDirectoryOpenError(index, message) {
         const pane = terminals[index];
-        const list = document.getElementById(`explorer-list-${index}`);
-        if (!pane || !list || pane._explorerMode !== 'directory') {
+        const viewer = explorerEnsureViewerShell(index);
+        if (!pane || !viewer || pane._explorerMode !== 'directory') {
             renderExplorerMessage(index, message);
             return;
         }
@@ -7254,7 +8291,7 @@
         const notice = document.createElement('div');
         notice.className = 'explorer-message explorer-file-open-error';
         notice.textContent = message;
-        list.prepend(notice);
+        viewer.prepend(notice);
     }
 
     function explorerGitStatusLabel(git) {
@@ -7326,8 +8363,8 @@
         summary.title = git?.error || (git?.repo_root || text);
     }
 
-    function explorerDiffCacheKey(path, commit) {
-        return `${String(path || '')}\n${String(commit || '')}`;
+    function explorerDiffCacheKey(path, commit, mode = '') {
+        return `${String(path || '')}\n${String(commit || '')}\n${String(mode || '')}`;
     }
 
     function explorerDiffSidebarStatusHtml(git) {
@@ -7340,11 +8377,15 @@
         return slashIndex > 0 ? cleaned.slice(0, slashIndex) : '';
     }
 
-    function explorerGitOpenFile(index, path) {
+    function explorerGitOpenFile(index, path, diffMode = 'worktree') {
         if (!path) {
             return;
         }
-        openExplorerFile(index, path);
+        // Changed-file rows jump straight to the diff view (ISSUE-2026-023).
+        // 'worktree' shows unstaged hunks, 'staged' shows the indexed hunks, so
+        // a partially staged file never surfaces the other section's changes.
+        const mode = diffMode === 'staged' ? 'staged' : 'worktree';
+        openExplorerFile(index, path, { openDiff: true, diffMode: mode });
     }
 
     async function explorerGitOpenCommitDiff(index, path, commit) {
@@ -7438,6 +8479,13 @@
         return { staged, unstaged };
     }
 
+    function explorerGitCanRevert(status) {
+        // Only tracked worktree changes can be discarded with git restore;
+        // untracked and conflicted files are intentionally excluded so nothing
+        // is silently deleted or overwritten (ISSUE-2026-018).
+        return ['modified', 'deleted', 'renamed'].includes(status || '');
+    }
+
     function renderExplorerGitFileRows(index, files, options = {}) {
         const entries = Array.isArray(files) ? files : [];
         if (!entries.length) {
@@ -7445,22 +8493,31 @@
         }
         const commitHash = options.commitHash || '';
         const action = options.action || '';
+        // Staged rows diff against HEAD (index hunks); everything else shows the
+        // worktree hunks so a partially staged file never leaks the wrong side.
+        const diffMode = action === 'unstage' ? 'staged' : 'worktree';
         return entries.map(file => {
             const path = file.path || file.repo_path || '';
+            const status = (file.git && file.git.status) || '';
             const pathAction = commitHash
                 ? `data-explorer-git-open-commit-diff="${escHtml(path)}" data-explorer-git-commit="${escHtml(commitHash)}"`
-                : `data-explorer-git-open-file="${escHtml(path)}"`;
+                : `data-explorer-git-open-file="${escHtml(path)}" data-explorer-git-diff-mode="${escHtml(diffMode)}"`;
             let actionButton = '';
             if (action === 'stage') {
                 actionButton = `<button type="button" class="explorer-search-btn explorer-git-stage-btn" data-explorer-git-stage="${escHtml(path)}" title="Stage changes" aria-label="Stage changes">+</button>`;
             } else if (action === 'unstage') {
                 actionButton = `<button type="button" class="explorer-search-btn explorer-git-unstage-btn" data-explorer-git-unstage="${escHtml(path)}" title="Unstage changes" aria-label="Unstage changes">−</button>`;
             }
+            const revertButton = (action === 'stage' && explorerGitCanRevert(status))
+                ? `<button type="button" class="explorer-search-btn explorer-git-revert-btn" data-explorer-git-revert="${escHtml(path)}" title="Discard changes (revert)" aria-label="Discard changes (revert)">${EXPLORER_GIT_REVERT_ICON}</button>`
+                : '';
             return `
-                <div class="explorer-diff-commit-file" title="${escHtml(path)}">
+                <div class="explorer-diff-commit-file" title="${escHtml(path)}" data-explorer-copy-path="${escHtml(path)}">
                     ${explorerDiffSidebarStatusHtml(file.git)}
+                    ${explorerFileTypeIconHtml(path)}
                     <button type="button" class="explorer-diff-commit-file-path" ${pathAction}>${escHtml(path || file.name || 'Changed file')}</button>
                     <span class="explorer-diff-commit-file-actions">
+                        ${revertButton}
                         ${actionButton}
                         <button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">↪</button>
                     </span>
@@ -7469,12 +8526,139 @@
         }).join('');
     }
 
+    /* ─────────────────────────────────────────────
+       Explorer copy-path context menu (ISSUE-2026-028)
+       Delegated on the tree + Git panels so right-clicking any file row offers
+       an in-page (WebView2-safe) Copy path / Copy relative path menu. Copy is a
+       read, so this stays inside the read-only explorer contract.
+    ───────────────────────────────────────────── */
+    function explorerRootDirectory(index) {
+        const session = terminals[index]?._session || {};
+        return session.explorer_root_directory || session.directory || '';
+    }
+
+    function explorerJoinRootPath(root, relativePath) {
+        const rel = String(relativePath || '').replace(/^[\\/]+/, '');
+        const base = String(root || '');
+        if (!base) {
+            return rel;
+        }
+        // Match the root's separator style so a copied Windows path is not
+        // mangled with forward slashes (and remote/POSIX roots stay POSIX).
+        const usesBackslash = base.includes('\\') && !base.includes('/');
+        const separator = usesBackslash ? '\\' : '/';
+        const trimmedBase = base.replace(/[\\/]+$/, '') || base;
+        if (!rel) {
+            return trimmedBase;
+        }
+        const nativeRel = usesBackslash ? rel.replace(/\//g, '\\') : rel.replace(/\\/g, '/');
+        return `${trimmedBase}${separator}${nativeRel}`;
+    }
+
+    function dismissExplorerContextMenu() {
+        document.getElementById('explorer-ctx-menu')?.remove();
+        document.removeEventListener('keydown', _explorerContextMenuKeydown, true);
+        document.removeEventListener('mousedown', _explorerContextMenuOutside, true);
+    }
+
+    function _explorerContextMenuOutside(event) {
+        const menu = document.getElementById('explorer-ctx-menu');
+        if (!menu || !menu.contains(event.target)) {
+            dismissExplorerContextMenu();
+        }
+    }
+
+    function _explorerContextMenuKeydown(event) {
+        const menu = document.getElementById('explorer-ctx-menu');
+        if (!menu) {
+            return;
+        }
+        const items = Array.from(menu.querySelectorAll('button'));
+        if (!items.length) {
+            return;
+        }
+        const currentIndex = items.indexOf(document.activeElement);
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            dismissExplorerContextMenu();
+        } else if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            items[(currentIndex + 1) % items.length].focus();
+        } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            items[(currentIndex - 1 + items.length) % items.length].focus();
+        } else if (event.key === 'Tab') {
+            event.preventDefault();
+        }
+    }
+
+    function showExplorerContextMenu(x, y, items) {
+        dismissExplorerContextMenu();
+        const menu = document.createElement('div');
+        menu.id = 'explorer-ctx-menu';
+        menu.setAttribute('role', 'menu');
+        items.forEach(({ label, action }) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.setAttribute('role', 'menuitem');
+            button.textContent = label;
+            button.addEventListener('click', () => {
+                action();
+                dismissExplorerContextMenu();
+            });
+            menu.appendChild(button);
+        });
+        menu.style.visibility = 'hidden';
+        document.body.appendChild(menu);
+
+        const rect = menu.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        menu.style.left = `${Math.max(8, Math.min(x, vw - rect.width - 8))}px`;
+        menu.style.top = `${Math.max(8, Math.min(y, vh - rect.height - 8))}px`;
+        menu.style.visibility = 'visible';
+        menu.querySelector('button')?.focus();
+
+        // Defer the outside-dismiss listener so the opening interaction does not
+        // immediately close the menu.
+        window.setTimeout(() => {
+            document.addEventListener('mousedown', _explorerContextMenuOutside, true);
+        }, 0);
+        document.addEventListener('keydown', _explorerContextMenuKeydown, true);
+    }
+
+    function handleExplorerCopyPathMenu(event, index) {
+        const row = event.target.closest('[data-explorer-copy-path]');
+        if (!row) {
+            return;
+        }
+        event.preventDefault();
+        const relativePath = row.dataset.explorerCopyPath || '';
+        const absolutePath = explorerJoinRootPath(explorerRootDirectory(index), relativePath);
+        const items = [
+            { label: 'Copy path', action: () => _copyText(absolutePath || relativePath) },
+        ];
+        if (relativePath) {
+            items.push({ label: 'Copy relative path', action: () => _copyText(relativePath) });
+        }
+        showExplorerContextMenu(event.clientX, event.clientY, items);
+    }
+
+    function wireExplorerCopyPathMenu(panel, index) {
+        if (!panel || panel.dataset.copyPathMenuWired === 'true') {
+            return;
+        }
+        panel.dataset.copyPathMenuWired = 'true';
+        panel.addEventListener('contextmenu', event => handleExplorerCopyPathMenu(event, index));
+    }
+
     function renderExplorerGitPanel(index) {
         const pane = terminals[index];
         const panel = document.getElementById(`explorer-git-panel-${index}`);
         if (!pane || !panel) {
             return;
         }
+        wireExplorerCopyPathMenu(panel, index);
         if (pane._explorerGitRepoLoading) {
             panel.innerHTML = '<div class="explorer-diff-sidebar-empty">Loading repository...</div>';
             return;
@@ -7558,6 +8742,12 @@
                 explorerGitUnstageFile(index, button.dataset.explorerGitUnstage || '');
             });
         });
+        panel.querySelectorAll('[data-explorer-git-revert]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                explorerGitRevertFile(index, button.dataset.explorerGitRevert || '');
+            });
+        });
         const publishButton = panel.querySelector('[data-explorer-git-publish]');
         if (publishButton) {
             publishButton.addEventListener('click', () => explorerGitPublish(index));
@@ -7568,7 +8758,11 @@
         }
         panel.querySelectorAll('[data-explorer-git-open-file]').forEach(button => {
             button.addEventListener('click', () => {
-                explorerGitOpenFile(index, button.dataset.explorerGitOpenFile || '');
+                explorerGitOpenFile(
+                    index,
+                    button.dataset.explorerGitOpenFile || '',
+                    button.dataset.explorerGitDiffMode || 'worktree',
+                );
             });
         });
         panel.querySelectorAll('[data-explorer-git-open-commit-diff]').forEach(button => {
@@ -7905,16 +9099,20 @@
         const openFolder = isDirectory
             ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">↪</button>`
             : '';
+        const openTab = isDirectory
+            ? ''
+            : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">+</button>`;
 
         return `
-            <div class="explorer-tree-row${active ? ' active' : ''}">
+            <div class="explorer-tree-row${active ? ' active' : ''}" data-explorer-copy-path="${escHtml(path)}">
                 <button type="button" class="explorer-tree-main" ${action} style="padding-left:${7 + depth * EXPLORER_TREE_INDENT_PX}px" title="${escHtml(path)}">
                     <span class="explorer-tree-chevron" aria-hidden="true">${chevron}</span>
-                    ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
+                    ${isDirectory ? EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(entry.name || path)}
                     <span class="explorer-tree-name">${escHtml(entry.name || path)}</span>
                 </button>
                 ${badge}
                 ${openFolder}
+                ${openTab}
             </div>
         `;
     }
@@ -7953,6 +9151,7 @@
         if (!pane || !panel) {
             return;
         }
+        wireExplorerCopyPathMenu(panel, index);
 
         ensureExplorerTreeState(pane);
         panel.innerHTML = `
@@ -7975,6 +9174,12 @@
             button.addEventListener('click', event => {
                 event.stopPropagation();
                 loadExplorerPane(index, button.dataset.explorerTreeOpenFolder || '');
+            });
+        });
+        panel.querySelectorAll('[data-explorer-tree-open-tab]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                openExplorerFile(index, button.dataset.explorerTreeOpenTab || '', { pinned: true });
             });
         });
     }
@@ -8138,6 +9343,32 @@
             return;
         }
         performExplorerGitAction(index, 'unstage', { path });
+    }
+
+    /* Discarding working-tree edits is irreversible, so it goes through the
+       in-page confirm shell (WebView2 blocks window.confirm) before the
+       narrow git-restore route runs; a reverted open file reloads in place. */
+    async function explorerGitRevertFile(index, path) {
+        if (!path) {
+            return;
+        }
+        const confirmed = await openGenericConfirmModal({
+            title: 'Discard changes?',
+            copy: `Discard the unstaged changes in "${path}"?`,
+            note: 'This unstaged edit will be lost. Any staged version of the file is kept.',
+            confirmLabel: 'Discard changes',
+            danger: true,
+        });
+        if (!confirmed) {
+            return;
+        }
+        const reverted = await performExplorerGitAction(index, 'revert', { path });
+        if (reverted) {
+            const pane = terminals[index];
+            if (pane && pane._explorerMode === 'file' && pane._explorerFilePath === path) {
+                await openExplorerFile(index, path, { showLoading: false, preserveScroll: true });
+            }
+        }
     }
 
     async function explorerGitCommit(index) {
@@ -8318,7 +9549,11 @@
         const code = document.getElementById(`explorer-diff-code-${index}`);
         const diffPath = pane?._explorerFilePath || '';
         const commit = pane?._explorerDiffCommit || '';
-        const cacheKey = explorerDiffCacheKey(diffPath, commit);
+        // Changed-file rows request a section-specific diff (worktree vs staged)
+        // so a partially staged file never shows the other section's hunks;
+        // commit-history rows and legacy callers fall back to the HEAD diff.
+        const diffMode = commit ? 'commit' : (pane?._explorerDiffMode || 'head');
+        const cacheKey = explorerDiffCacheKey(diffPath, commit, diffMode);
         if (!pane || !sessionId || !diffPath || !code) {
             renderExplorerDiff(index);
             return;
@@ -8332,7 +9567,7 @@
         try {
             const params = new URLSearchParams({
                 path: diffPath,
-                mode: commit ? 'commit' : 'head'
+                mode: diffMode
             });
             if (commit) {
                 params.set('commit', commit);
@@ -8494,6 +9729,215 @@
             });
         }
         applyExplorerEditorFontSize(index);
+    }
+
+    // ── Markdown preview appearance (ISSUE-2026-030) ─────────────────────────
+    // Two orthogonal axes: a reading-surface preset and a font family. Both are
+    // bounded allowlists persisted in localStorage and applied idempotently to
+    // every open preview via preset classes + CSS custom properties (defined
+    // from tokens in terminals.css), so no palette literals live in JS.
+    const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast'];
+    const EXPLORER_MD_FONTS = ['system', 'serif', 'mono'];
+    const EXPLORER_MD_PRESET_DEFAULT = 'default';
+    const EXPLORER_MD_FONT_DEFAULT = 'system';
+    const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';
+    const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';
+    const EXPLORER_MD_PRESET_LABELS = {
+        default: 'Default',
+        paper: 'Paper',
+        contrast: 'High contrast',
+    };
+    const EXPLORER_MD_FONT_LABELS = {
+        system: 'System',
+        serif: 'Serif',
+        mono: 'Monospace',
+    };
+
+    function readExplorerMarkdownPref(key, allowed, fallback) {
+        let stored = '';
+        try {
+            stored = window.localStorage.getItem(key) || '';
+        } catch (err) {
+            stored = '';
+        }
+        return allowed.includes(stored) ? stored : fallback;
+    }
+
+    function explorerMarkdownAppearance() {
+        return {
+            preset: readExplorerMarkdownPref(
+                EXPLORER_MD_PRESET_KEY, EXPLORER_MD_PRESETS, EXPLORER_MD_PRESET_DEFAULT
+            ),
+            font: readExplorerMarkdownPref(
+                EXPLORER_MD_FONT_KEY, EXPLORER_MD_FONTS, EXPLORER_MD_FONT_DEFAULT
+            ),
+        };
+    }
+
+    function applyExplorerMarkdownAppearanceToElement(preview, appearance) {
+        if (!preview) {
+            return;
+        }
+        const { preset, font } = appearance || explorerMarkdownAppearance();
+        EXPLORER_MD_PRESETS.forEach(name => preview.classList.remove(`md-preset-${name}`));
+        EXPLORER_MD_FONTS.forEach(name => preview.classList.remove(`md-font-${name}`));
+        preview.classList.add(`md-preset-${preset}`);
+        preview.classList.add(`md-font-${font}`);
+        preview.dataset.mdPreset = preset;
+        preview.dataset.mdFont = font;
+    }
+
+    function applyExplorerMarkdownAppearanceToAll() {
+        const appearance = explorerMarkdownAppearance();
+        document.querySelectorAll('.explorer-markdown-preview').forEach(preview => {
+            applyExplorerMarkdownAppearanceToElement(preview, appearance);
+        });
+    }
+
+    function setExplorerMarkdownAppearance(patch) {
+        const current = explorerMarkdownAppearance();
+        const next = {
+            preset: EXPLORER_MD_PRESETS.includes(patch?.preset) ? patch.preset : current.preset,
+            font: EXPLORER_MD_FONTS.includes(patch?.font) ? patch.font : current.font,
+        };
+        try {
+            window.localStorage.setItem(EXPLORER_MD_PRESET_KEY, next.preset);
+            window.localStorage.setItem(EXPLORER_MD_FONT_KEY, next.font);
+        } catch (err) {
+            // Non-fatal: appearance still applies to the live DOM this session.
+        }
+        applyExplorerMarkdownAppearanceToAll();
+        refreshExplorerMarkdownAppearanceMenu();
+        return next;
+    }
+
+    function dismissExplorerMarkdownAppearanceMenu() {
+        const menu = document.getElementById('explorer-md-menu');
+        if (menu) {
+            const anchor = document.querySelector('[data-explorer-md-appearance][aria-expanded="true"]');
+            anchor?.setAttribute('aria-expanded', 'false');
+            menu.remove();
+        }
+        document.removeEventListener('keydown', _explorerMarkdownMenuKeydown, true);
+        document.removeEventListener('mousedown', _explorerMarkdownMenuOutside, true);
+    }
+
+    function _explorerMarkdownMenuOutside(event) {
+        const menu = document.getElementById('explorer-md-menu');
+        const anchor = document.querySelector('[data-explorer-md-appearance][aria-expanded="true"]');
+        if (menu && !menu.contains(event.target) && !anchor?.contains(event.target)) {
+            dismissExplorerMarkdownAppearanceMenu();
+        }
+    }
+
+    function _explorerMarkdownMenuKeydown(event) {
+        const menu = document.getElementById('explorer-md-menu');
+        if (!menu) {
+            return;
+        }
+        const items = Array.from(menu.querySelectorAll('button'));
+        if (!items.length) {
+            return;
+        }
+        const currentIndex = items.indexOf(document.activeElement);
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            dismissExplorerMarkdownAppearanceMenu();
+        } else if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            items[(currentIndex + 1) % items.length].focus();
+        } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            items[(currentIndex - 1 + items.length) % items.length].focus();
+        } else if (event.key === 'Tab') {
+            event.preventDefault();
+        }
+    }
+
+    function refreshExplorerMarkdownAppearanceMenu() {
+        const menu = document.getElementById('explorer-md-menu');
+        if (!menu) {
+            return;
+        }
+        const appearance = explorerMarkdownAppearance();
+        menu.querySelectorAll('[data-md-preset]').forEach(button => {
+            button.setAttribute('aria-checked', button.dataset.mdPreset === appearance.preset ? 'true' : 'false');
+        });
+        menu.querySelectorAll('[data-md-font]').forEach(button => {
+            button.setAttribute('aria-checked', button.dataset.mdFont === appearance.font ? 'true' : 'false');
+        });
+    }
+
+    function buildExplorerMarkdownMenuGroup(labelText, options, activeValue, datasetKey, onSelect) {
+        const group = document.createElement('div');
+        group.className = 'explorer-md-menu-group';
+        group.setAttribute('role', 'group');
+        group.setAttribute('aria-label', labelText);
+        const label = document.createElement('span');
+        label.className = 'explorer-md-menu-label';
+        label.textContent = labelText;
+        group.appendChild(label);
+        options.forEach(({ value, label: optionLabel }) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.setAttribute('role', 'menuitemradio');
+            button.dataset[datasetKey] = value;
+            button.setAttribute('aria-checked', value === activeValue ? 'true' : 'false');
+            const text = document.createElement('span');
+            text.textContent = optionLabel;
+            button.appendChild(text);
+            button.addEventListener('click', () => onSelect(value));
+            group.appendChild(button);
+        });
+        return group;
+    }
+
+    function showExplorerMarkdownAppearanceMenu(anchor) {
+        dismissExplorerMarkdownAppearanceMenu();
+        if (!anchor) {
+            return;
+        }
+        const appearance = explorerMarkdownAppearance();
+        const menu = document.createElement('div');
+        menu.id = 'explorer-md-menu';
+        menu.setAttribute('role', 'menu');
+        menu.setAttribute('aria-label', 'Markdown preview appearance');
+        menu.appendChild(buildExplorerMarkdownMenuGroup(
+            'Theme',
+            EXPLORER_MD_PRESETS.map(value => ({ value, label: EXPLORER_MD_PRESET_LABELS[value] })),
+            appearance.preset,
+            'mdPreset',
+            value => setExplorerMarkdownAppearance({ preset: value })
+        ));
+        menu.appendChild(buildExplorerMarkdownMenuGroup(
+            'Font',
+            EXPLORER_MD_FONTS.map(value => ({ value, label: EXPLORER_MD_FONT_LABELS[value] })),
+            appearance.font,
+            'mdFont',
+            value => setExplorerMarkdownAppearance({ font: value })
+        ));
+
+        menu.style.visibility = 'hidden';
+        document.body.appendChild(menu);
+        const anchorRect = anchor.getBoundingClientRect();
+        const menuRect = menu.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        let left = anchorRect.right - menuRect.width;
+        let top = anchorRect.bottom + 4;
+        if (top + menuRect.height > vh - 8) {
+            top = Math.max(8, anchorRect.top - menuRect.height - 4);
+        }
+        menu.style.left = `${Math.max(8, Math.min(left, vw - menuRect.width - 8))}px`;
+        menu.style.top = `${Math.max(8, top)}px`;
+        menu.style.visibility = 'visible';
+        anchor.setAttribute('aria-expanded', 'true');
+        menu.querySelector('button[aria-checked="true"]')?.focus();
+
+        window.setTimeout(() => {
+            document.addEventListener('mousedown', _explorerMarkdownMenuOutside, true);
+        }, 0);
+        document.addEventListener('keydown', _explorerMarkdownMenuKeydown, true);
     }
 
     function activeExplorerFileView(index) {
@@ -8868,7 +10312,7 @@
                 data-explorer-path="${escHtml(entry.path || '')}"
                 ${isDeleted ? 'disabled' : ''}
             >
-                ${isDirectory ? EXPLORER_FOLDER_ICON : EXPLORER_FILE_ICON}
+                ${isDirectory ? EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(name || entry.path)}
                 ${explorerGitBadgeHtml(entry.git)}
                 <span class="explorer-name">${explorerMarkedEscHtml(name, 0, nameRanges)}</span>
                 <span class="explorer-meta">${escHtml(size)}</span>
@@ -8878,17 +10322,17 @@
     }
 
     function wireExplorerDirectoryRows(index) {
-        const list = document.getElementById(`explorer-list-${index}`);
-        if (!list) {
+        const viewer = document.getElementById(`explorer-viewer-${index}`);
+        if (!viewer) {
             return;
         }
 
-        list.querySelectorAll('.explorer-row.directory').forEach(button => {
+        viewer.querySelectorAll('.explorer-row.directory').forEach(button => {
             button.addEventListener('click', () => {
                 loadExplorerPane(index, button.dataset.explorerPath || '');
             });
         });
-        list.querySelectorAll('.explorer-row.file').forEach(button => {
+        viewer.querySelectorAll('.explorer-row.file').forEach(button => {
             button.addEventListener('click', () => {
                 openExplorerFile(index, button.dataset.explorerPath || '');
             });
@@ -8897,8 +10341,8 @@
 
     function renderExplorerDirectoryRows(index) {
         const pane = terminals[index];
-        const list = document.getElementById(`explorer-list-${index}`);
-        if (!pane || !list) {
+        const viewer = explorerEnsureViewerShell(index);
+        if (!pane || !viewer) {
             return;
         }
 
@@ -8916,11 +10360,11 @@
         state.activeIndex = matchCount ? Math.min(Number(state.activeIndex || 0), matchCount - 1) : 0;
 
         if (!entries.length && !query) {
-            list.innerHTML = '<div class="explorer-message">Directory is empty.</div>';
+            viewer.innerHTML = '<div class="explorer-message">Directory is empty.</div>';
         } else if (!visibleEntries.length) {
-            list.innerHTML = `<div class="explorer-message">No files or folders match "${escHtml(query)}".</div>`;
+            viewer.innerHTML = `<div class="explorer-message">No files or folders match "${escHtml(query)}".</div>`;
         } else {
-            list.innerHTML = visibleEntries
+            viewer.innerHTML = visibleEntries
                 .map((entry, entryIndex) => explorerDirectoryRowHtml(entry, query, Boolean(normalizedQuery) && entryIndex === state.activeIndex))
                 .join('');
             wireExplorerDirectoryRows(index);
@@ -9331,14 +10775,6 @@
         </span>
     `;
 
-    const EXPLORER_FILE_ICON = `
-        <span class="explorer-icon file" aria-hidden="true">
-            <svg viewBox="0 0 24 24" focusable="false">
-                <path fill="currentColor" d="M6.75 3A2.75 2.75 0 0 0 4 5.75v12.5A2.75 2.75 0 0 0 6.75 21h10.5A2.75 2.75 0 0 0 20 18.25V8.62a2.75 2.75 0 0 0-.8-1.94L16.32 3.8A2.75 2.75 0 0 0 14.38 3H6.75ZM5.5 5.75c0-.69.56-1.25 1.25-1.25H14V8c0 1.1.9 2 2 2h2.5v8.25c0 .69-.56 1.25-1.25 1.25H6.75c-.69 0-1.25-.56-1.25-1.25V5.75Zm10 0 1.94 1.94c.23.23.4.5.49.81H16a.5.5 0 0 1-.5-.5V5.75Z"/>
-            </svg>
-        </span>
-    `;
-
     const EXPLORER_TREE_TOGGLE_ICON = `
         <svg class="explorer-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
             fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -9362,12 +10798,559 @@
         </svg>
     `;
 
-    function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '' } = {}) {
+    const EXPLORER_GIT_REVERT_ICON = `
+        <svg class="explorer-btn-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+            fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 5.5v4.5h4.5"/>
+            <path d="M5.4 13.5a7 7 0 1 0 1.7-6.4L5 10"/>
+        </svg>
+    `;
+
+    let _terminalToastTimer = null;
+
+    /* Small transient toast for feedback that has no dedicated surface (e.g.
+       a completed download). Auto-dismisses; announced via role="status". */
+    function showTerminalToast(message, type = '') {
+        let toast = document.getElementById('terminalToast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'terminalToast';
+            toast.className = 'terminal-toast';
+            toast.setAttribute('role', 'status');
+            toast.setAttribute('aria-live', 'polite');
+            document.body.appendChild(toast);
+        }
+        toast.textContent = message;
+        toast.className = `terminal-toast${type ? ` ${type}` : ''} visible`;
+        clearTimeout(_terminalToastTimer);
+        _terminalToastTimer = setTimeout(() => {
+            toast.classList.remove('visible');
+        }, 4000);
+    }
+
+    async function downloadExplorerFile(index) {
         const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId || pane._explorerMode !== 'file') {
+            return;
+        }
+        const path = pane._explorerFilePath || '';
+        const fileName = pane._explorerFileName || 'download';
+        const url = `/api/explorer/${encodeURIComponent(sessionId)}/download?path=${encodeURIComponent(path)}`;
+
+        /* WebView2 silently ignores programmatic <a download> clicks, so in the
+           native window route the save through the pywebview bridge (native
+           Save dialog + server-side fetch). In the browser the anchor works. */
+        if (isPywebviewAvailable() && window.pywebview.api.save_download) {
+            try {
+                const result = await window.pywebview.api.save_download(url, fileName);
+                if (result?.ok) {
+                    showTerminalToast(`Saved ${getDownloadBaseName(result.path) || fileName}`, 'success');
+                } else if (!result?.cancelled) {
+                    showTerminalToast(`Download failed: ${result?.error || 'unknown error'}`, 'error');
+                }
+            } catch (error) {
+                showTerminalToast(`Download failed: ${error?.message || error}`, 'error');
+            }
+            return;
+        }
+
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        showTerminalToast(`Downloading ${fileName}…`, 'success');
+    }
+
+    function getDownloadBaseName(fullPath) {
+        return String(fullPath || '').split(/[\\/]/).pop() || '';
+    }
+
+    /* ─────────────────────────────────────────────
+       Explorer tabbed viewer (ISSUE-2026-014)
+       The main pane is always a read-only viewer with a persistent tab strip:
+       one permanent dynamic "Preview" tab plus deduplicated pinned tabs keyed
+       by normalized path. The Files tree is the navigation surface.
+    ───────────────────────────────────────────── */
+    const EXPLORER_PREVIEW_TAB_ID = '__preview__';
+    const EXPLORER_MAX_PINNED_TABS = 12;
+    const EXPLORER_MAX_TAB_PATH_LENGTH = 4096;
+
+    function explorerBaseName(path) {
+        return String(path || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
+    }
+
+    /* Normalize a path into a stable dedup key: forward slashes, no leading or
+       trailing slash, collapsed separators. Empty for unusable input. */
+    function explorerNormalizeTabPath(path) {
+        const value = String(path == null ? '' : path).replace(/\\/g, '/').trim();
+        if (!value || value.length > EXPLORER_MAX_TAB_PATH_LENGTH) {
+            return '';
+        }
+        return value.replace(/\/{2,}/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
+    }
+
+    function ensureExplorerTabState(pane) {
+        if (!Array.isArray(pane._explorerTabs) || !pane._explorerTabs.length) {
+            pane._explorerTabs = [{ id: EXPLORER_PREVIEW_TAB_ID, pinned: false, path: '', name: '' }];
+        }
+        if (!pane._explorerActiveTabId || !pane._explorerTabs.some(tab => tab.id === pane._explorerActiveTabId)) {
+            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+        }
+        return pane._explorerTabs;
+    }
+
+    function explorerPreviewTab(pane) {
+        ensureExplorerTabState(pane);
+        return pane._explorerTabs.find(tab => tab.id === EXPLORER_PREVIEW_TAB_ID) || pane._explorerTabs[0];
+    }
+
+    function explorerFindTab(pane, id) {
+        ensureExplorerTabState(pane);
+        return pane._explorerTabs.find(tab => tab.id === id) || null;
+    }
+
+    function explorerActiveTab(pane) {
+        ensureExplorerTabState(pane);
+        return explorerFindTab(pane, pane._explorerActiveTabId) || explorerPreviewTab(pane);
+    }
+
+    function explorerTabLabel(tab) {
+        if (!tab) {
+            return 'Preview';
+        }
+        if (tab.id === EXPLORER_PREVIEW_TAB_ID) {
+            return tab.path ? (explorerBaseName(tab.path) || 'Preview') : 'Preview';
+        }
+        return tab.name || explorerBaseName(tab.path) || 'File';
+    }
+
+    /* Choose (and if needed create) the tab a file should load into. A `+`
+       action or Markdown link pins a deduplicated tab; a plain click reuses the
+       active pinned tab when it already shows that path, otherwise the permanent
+       Preview tab. */
+    function explorerAssignOpenTab(pane, path, { pinned = false, tab = '' } = {}) {
+        ensureExplorerTabState(pane);
+        const key = explorerNormalizeTabPath(path);
+        const name = explorerBaseName(path);
+
+        if (tab) {
+            const existing = explorerFindTab(pane, tab);
+            if (existing) {
+                existing.path = path;
+                existing.name = name;
+                pane._explorerActiveTabId = existing.id;
+                return existing;
+            }
+        }
+
+        if (pinned && key) {
+            let pinnedTab = pane._explorerTabs.find(entry => entry.pinned && explorerNormalizeTabPath(entry.path) === key);
+            if (!pinnedTab) {
+                const pinnedCount = pane._explorerTabs.filter(entry => entry.pinned).length;
+                if (pinnedCount >= EXPLORER_MAX_PINNED_TABS) {
+                    const oldest = pane._explorerTabs.findIndex(entry => entry.pinned && entry.id !== pane._explorerActiveTabId);
+                    if (oldest !== -1) {
+                        pane._explorerTabs.splice(oldest, 1);
+                    }
+                }
+                pinnedTab = { id: key, pinned: true, path, name };
+                pane._explorerTabs.push(pinnedTab);
+            } else {
+                pinnedTab.path = path;
+                pinnedTab.name = name;
+            }
+            pane._explorerActiveTabId = pinnedTab.id;
+            return pinnedTab;
+        }
+
+        const active = explorerActiveTab(pane);
+        if (key && active && active.pinned && explorerNormalizeTabPath(active.path) === key) {
+            active.path = path;
+            active.name = name;
+            return active;
+        }
+        const preview = explorerPreviewTab(pane);
+        preview.path = path;
+        preview.name = name;
+        pane._explorerActiveTabId = preview.id;
+        return preview;
+    }
+
+    function explorerEnsureViewerShell(index) {
         const list = document.getElementById(`explorer-list-${index}`);
-        if (!pane || !list) {
+        if (!list) {
+            return null;
+        }
+        let viewer = document.getElementById(`explorer-viewer-${index}`);
+        if (!viewer) {
+            list.innerHTML =
+                `<div class="explorer-tab-strip" id="explorer-tabs-${index}" role="tablist" aria-label="Open files"></div>`
+                + `<div class="explorer-viewer" id="explorer-viewer-${index}"></div>`;
+            viewer = document.getElementById(`explorer-viewer-${index}`);
+        }
+        return viewer;
+    }
+
+    function explorerViewerEl(index) {
+        return explorerEnsureViewerShell(index);
+    }
+
+    function renderExplorerTabStrip(index) {
+        const pane = terminals[index];
+        const strip = document.getElementById(`explorer-tabs-${index}`);
+        if (!pane || !strip) {
+            return;
+        }
+        const tabs = ensureExplorerTabState(pane);
+        const activeId = pane._explorerActiveTabId;
+        strip.innerHTML = tabs.map(tab => {
+            const active = tab.id === activeId;
+            const isPreview = tab.id === EXPLORER_PREVIEW_TAB_ID;
+            const label = explorerTabLabel(tab);
+            const icon = (!isPreview || tab.path) ? explorerFileTypeIconHtml(tab.path || label) : '';
+            const closeButton = isPreview
+                ? ''
+                : `<button type="button" class="explorer-tab-close" data-explorer-tab-close="${escHtml(tab.id)}" title="Close tab" aria-label="Close ${escHtml(label)}">×</button>`;
+            return `
+                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}" data-explorer-tab="${escHtml(tab.id)}" title="${escHtml(tab.path || label)}">
+                    <button type="button" class="explorer-tab-main" data-explorer-tab-open="${escHtml(tab.id)}">
+                        ${icon}
+                        <span class="explorer-tab-name">${escHtml(label)}</span>
+                    </button>
+                    ${closeButton}
+                </div>
+            `;
+        }).join('');
+
+        strip.querySelectorAll('[data-explorer-tab-open]').forEach(button => {
+            button.addEventListener('click', () => activateExplorerTab(index, button.dataset.explorerTabOpen || ''));
+        });
+        strip.querySelectorAll('[data-explorer-tab-close]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                closeExplorerTab(index, button.dataset.explorerTabClose || '');
+            });
+        });
+    }
+
+    function renderExplorerViewerEmpty(index) {
+        const pane = terminals[index];
+        const viewer = explorerEnsureViewerShell(index);
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!pane || !viewer) {
+            return;
+        }
+        list?.classList.remove('file-view');
+        clearExplorerDirectorySearchControls(index);
+        const preview = explorerPreviewTab(pane);
+        preview.path = '';
+        preview.name = '';
+        pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+        pane._explorerMode = 'viewer';
+        pane._explorerFilePath = '';
+        viewer.innerHTML = '<div class="explorer-empty-viewer"><span>Select a file to view</span></div>';
+        renderExplorerTabStrip(index);
+    }
+
+    /* Render whatever the active tab should show: its file, the browsed
+       directory listing (Preview tab), or the empty state. */
+    function renderExplorerActiveTab(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const tab = explorerActiveTab(pane);
+        if (tab.path) {
+            openExplorerFile(index, tab.path, { tab: tab.id });
+            return;
+        }
+        if (pane._explorerMode === 'directory' && Array.isArray(pane._explorerEntries)) {
+            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+            renderExplorerDirectorySearchControls(index);
+            renderExplorerDirectoryRows(index);
+            renderExplorerTabStrip(index);
+            return;
+        }
+        renderExplorerViewerEmpty(index);
+    }
+
+    function activateExplorerTab(index, id) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const tab = explorerFindTab(pane, id);
+        if (!tab) {
+            return;
+        }
+        pane._explorerActiveTabId = tab.id;
+        renderExplorerActiveTab(index);
+        renderExplorerTabStrip(index);
+        persistExplorerTabsToSession(index);
+    }
+
+    function closeExplorerTab(index, id) {
+        const pane = terminals[index];
+        if (!pane || id === EXPLORER_PREVIEW_TAB_ID) {
+            return;
+        }
+        ensureExplorerTabState(pane);
+        const position = pane._explorerTabs.findIndex(tab => tab.id === id);
+        if (position === -1) {
+            return;
+        }
+        const wasActive = pane._explorerActiveTabId === id;
+        pane._explorerTabs.splice(position, 1);
+        if (wasActive) {
+            const fallback = pane._explorerTabs[Math.max(0, position - 1)] || explorerPreviewTab(pane);
+            activateExplorerTab(index, fallback.id);
+        } else {
+            renderExplorerTabStrip(index);
+            persistExplorerTabsToSession(index);
+        }
+    }
+
+    /* Entry point when an explorer pane first shows: empty read-only viewer with
+       the Files tree opened for navigation, plus any persisted tabs restored. */
+    function openExplorerViewer(index) {
+        const pane = terminals[index];
+        if (!pane) {
             return false;
         }
+        ensureExplorerTabState(pane);
+        pane._attached = true;
+        document.getElementById(`ph-${index}`)?.remove();
+        renderExplorerViewerEmpty(index);
+        if (!pane._explorerTreeSidebarOpen && !pane._explorerGitSidebarOpen) {
+            setExplorerTreeSidebarOpen(index, true);
+        }
+        restoreExplorerPersistedTabs(index);
+        return true;
+    }
+
+    /* ── Markdown preview link navigation (ISSUE-2026-016) ──
+       Relative Markdown links resolve against the current file and open as a
+       pinned tab; fragments scroll to the heading; external links open in an
+       isolated window without navigating the session page away. */
+    function explorerClassifyLink(href) {
+        const trimmed = String(href == null ? '' : href).trim();
+        if (!trimmed) {
+            return { type: 'ignore' };
+        }
+        if (trimmed.startsWith('#')) {
+            return { type: 'fragment', fragment: trimmed.slice(1) };
+        }
+        if (/^\/\//.test(trimmed)) {
+            return { type: 'external', href: `https:${trimmed}` };
+        }
+        if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
+            if (/^https?:/i.test(trimmed)) {
+                return { type: 'external', href: trimmed };
+            }
+            if (/^mailto:/i.test(trimmed)) {
+                return { type: 'mailto' };
+            }
+            return { type: 'unsupported' };
+        }
+        return { type: 'relative', href: trimmed };
+    }
+
+    /* Resolve a relative link against the source file, rejecting anything that
+       escapes the Explorer root. Returns { path, fragment } or null. */
+    function explorerResolveRelativePath(baseFilePath, href) {
+        const hashIndex = href.indexOf('#');
+        const fragment = hashIndex >= 0 ? href.slice(hashIndex + 1) : '';
+        let rel = hashIndex >= 0 ? href.slice(0, hashIndex) : href;
+        if (!rel) {
+            return { path: explorerNormalizeTabPath(baseFilePath), fragment };
+        }
+        try {
+            rel = decodeURIComponent(rel);
+        } catch (_) {
+            return null;
+        }
+        rel = rel.replace(/\\/g, '/');
+        const absolute = rel.startsWith('/');
+        const baseSegments = absolute
+            ? []
+            : String(baseFilePath || '').replace(/\\/g, '/').split('/').slice(0, -1);
+        const segments = baseSegments.filter(Boolean);
+        for (const segment of rel.split('/')) {
+            if (segment === '' || segment === '.') {
+                continue;
+            }
+            if (segment === '..') {
+                if (!segments.length) {
+                    return null;
+                }
+                segments.pop();
+                continue;
+            }
+            if (segment.includes(':')) {
+                return null;
+            }
+            segments.push(segment);
+        }
+        const path = segments.join('/');
+        return path ? { path, fragment } : null;
+    }
+
+    function explorerHeadingSlug(text) {
+        return String(text || '')
+            .toLowerCase()
+            .trim()
+            .replace(/[^\w\s-]/g, '')
+            .replace(/\s+/g, '-');
+    }
+
+    function explorerScrollPreviewToHeading(preview, fragment) {
+        if (!preview || !fragment) {
+            return;
+        }
+        let target = null;
+        try {
+            target = preview.querySelector(`#${CSS.escape(fragment)}`);
+        } catch (_) {
+            target = null;
+        }
+        if (!target) {
+            const slug = explorerHeadingSlug(fragment);
+            target = Array.from(preview.querySelectorAll('h1, h2, h3, h4, h5, h6'))
+                .find(heading => explorerHeadingSlug(heading.textContent) === slug) || null;
+        }
+        if (target) {
+            target.scrollIntoView({ block: 'start' });
+        }
+    }
+
+    function wireExplorerMarkdownLinks(index, preview) {
+        if (!preview || preview.dataset.mdLinksBound) {
+            return;
+        }
+        preview.dataset.mdLinksBound = 'true';
+        preview.addEventListener('click', event => {
+            const anchor = event.target.closest('a[href]');
+            if (!anchor || !preview.contains(anchor)) {
+                return;
+            }
+            const info = explorerClassifyLink(anchor.getAttribute('href') || '');
+            if (info.type === 'fragment') {
+                event.preventDefault();
+                explorerScrollPreviewToHeading(preview, info.fragment);
+                return;
+            }
+            if (info.type === 'external') {
+                event.preventDefault();
+                window.open(info.href, '_blank', 'noopener,noreferrer');
+                return;
+            }
+            if (info.type === 'mailto') {
+                return;
+            }
+            if (info.type !== 'relative') {
+                event.preventDefault();
+                return;
+            }
+            event.preventDefault();
+            const pane = terminals[index];
+            const resolved = explorerResolveRelativePath(pane?._explorerFilePath || '', info.href);
+            if (!resolved || !resolved.path) {
+                return;
+            }
+            Promise.resolve(openExplorerFile(index, resolved.path, { pinned: true })).then(opened => {
+                if (opened && resolved.fragment) {
+                    requestAnimationFrame(() => {
+                        const nextPreview = document.getElementById(`explorer-preview-${index}`);
+                        if (nextPreview) {
+                            explorerScrollPreviewToHeading(nextPreview, resolved.fragment);
+                        }
+                    });
+                }
+            });
+        });
+    }
+
+    /* ── Saved-session tab persistence (ISSUE-2026-015) ── */
+    function explorerSerializeTabs(pane) {
+        ensureExplorerTabState(pane);
+        const openTabs = [];
+        const seen = new Set();
+        pane._explorerTabs.forEach(tab => {
+            if (!tab.pinned) {
+                return;
+            }
+            const key = explorerNormalizeTabPath(tab.path);
+            if (!key || seen.has(key)) {
+                return;
+            }
+            seen.add(key);
+            openTabs.push(tab.path);
+        });
+        const active = explorerActiveTab(pane);
+        const activeTab = active && active.pinned ? explorerNormalizeTabPath(active.path) : '';
+        return {
+            open_tabs: openTabs.slice(0, EXPLORER_MAX_PINNED_TABS),
+            active_tab: activeTab
+        };
+    }
+
+    function persistExplorerTabsToSession(index) {
+        const pane = terminals[index];
+        if (!pane || !pane._session) {
+            return;
+        }
+        const serialized = explorerSerializeTabs(pane);
+        pane._session.explorer_open_tabs = serialized.open_tabs;
+        pane._session.explorer_active_tab = serialized.active_tab;
+    }
+
+    function restoreExplorerPersistedTabs(index) {
+        const pane = terminals[index];
+        if (!pane || pane._explorerTabsRestored) {
+            return;
+        }
+        pane._explorerTabsRestored = true;
+        const session = pane._session || {};
+        const rawTabs = Array.isArray(session.explorer_open_tabs) ? session.explorer_open_tabs : [];
+        if (!rawTabs.length) {
+            return;
+        }
+        ensureExplorerTabState(pane);
+        const seen = new Set();
+        rawTabs.forEach(raw => {
+            const path = String(raw == null ? '' : raw);
+            const key = explorerNormalizeTabPath(path);
+            if (!key || seen.has(key)) {
+                return;
+            }
+            if (pane._explorerTabs.filter(tab => tab.pinned).length >= EXPLORER_MAX_PINNED_TABS) {
+                return;
+            }
+            seen.add(key);
+            pane._explorerTabs.push({ id: key, pinned: true, path, name: explorerBaseName(path) });
+        });
+        const activeKey = explorerNormalizeTabPath(session.explorer_active_tab || '');
+        const activeTab = activeKey
+            ? pane._explorerTabs.find(tab => tab.pinned && explorerNormalizeTabPath(tab.path) === activeKey)
+            : null;
+        if (activeTab) {
+            activateExplorerTab(index, activeTab.id);
+        } else {
+            renderExplorerTabStrip(index);
+        }
+    }
+
+    function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '', diffMode = '', tab = '', pinned = false } = {}) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        const viewer = explorerEnsureViewerShell(index);
+        if (!pane || !list || !viewer) {
+            return false;
+        }
+        explorerAssignOpenTab(pane, data.path || '', { pinned, tab });
 
         const path = data.path || '';
         const fileName = data.name || path || 'File';
@@ -9375,13 +11358,19 @@
         const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
         const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
         const requestedDiffCommit = String(diffCommit || '');
+        const requestedDiffMode = requestedDiffCommit ? '' : String(diffMode || '');
         const hasGitDiff = explorerHasGitDiff(data.git) || Boolean(requestedDiffCommit);
         const metaParts = explorerFileMetaParts(data, fileType);
         const previousPath = pane._explorerFilePath || '';
         const keepDiffSplit = hasGitDiff && (
             Boolean(openDiff)
             || Boolean(requestedDiffCommit)
-            || (previousPath === path && pane._explorerDiffSplit && pane._explorerDiffCommit === requestedDiffCommit)
+            || (
+                previousPath === path
+                && pane._explorerDiffSplit
+                && pane._explorerDiffCommit === requestedDiffCommit
+                && (pane._explorerDiffMode || '') === requestedDiffMode
+            )
         );
         const initialFileView = keepDiffSplit ? 'diff' : 'source';
         const searchState = ensureExplorerSearchState(pane, 'file');
@@ -9401,6 +11390,7 @@
         pane._attached = true;
         pane._explorerMode = 'file';
         pane._explorerFilePath = path;
+        pane._explorerFileName = fileName;
         pane._explorerFileContent = data.content || '';
         pane._explorerFileLanguage = codeLanguage;
         pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
@@ -9411,6 +11401,7 @@
         pane._explorerDiffContent = '';
         pane._explorerDiffSplit = keepDiffSplit;
         pane._explorerDiffCommit = requestedDiffCommit;
+        pane._explorerDiffMode = requestedDiffMode;
         pane._explorerLastFileView = pane._explorerLastFileView === 'preview' && hasPreview ? 'preview' : 'source';
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
@@ -9426,7 +11417,7 @@
             upButton.disabled = false;
         }
 
-        list.innerHTML = `
+        viewer.innerHTML = `
             <div class="explorer-editor">
                 <div class="explorer-editor-header">
                     <button type="button" class="explorer-editor-back" data-explorer-editor-back="${index}">Back</button>
@@ -9446,6 +11437,8 @@
                         <span class="explorer-zoom-value" data-explorer-zoom-value="${index}"></span>
                         <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">+</button>
                     </div>
+                    ${hasPreview ? `<button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Markdown appearance" aria-label="Markdown preview appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>` : ''}
+                    <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
                     <div class="explorer-editor-search" data-explorer-search="${index}">
                         <input
                             type="search"
@@ -9477,12 +11470,31 @@
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
             highlightExplorerPreviewCode(preview);
+            wireExplorerMarkdownLinks(index, preview);
+            applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
+        }
+
+        const appearanceButton = list.querySelector(`[data-explorer-md-appearance="${index}"]`);
+        if (appearanceButton) {
+            appearanceButton.addEventListener('click', () => {
+                if (document.getElementById('explorer-md-menu')) {
+                    dismissExplorerMarkdownAppearanceMenu();
+                } else {
+                    showExplorerMarkdownAppearanceMenu(appearanceButton);
+                }
+            });
         }
 
         const backButton = list.querySelector(`[data-explorer-editor-back="${index}"]`);
         if (backButton) {
             backButton.addEventListener('click', () => {
                 loadExplorerPane(index, pane._explorerPath || '');
+            });
+        }
+        const downloadButton = list.querySelector(`[data-explorer-download="${index}"]`);
+        if (downloadButton) {
+            downloadButton.addEventListener('click', () => {
+                downloadExplorerFile(index);
             });
         }
         list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
@@ -9501,6 +11513,8 @@
         wireExplorerSearchControls(index);
         applyExplorerSearch(index);
         restoreExplorerFileScroll(index, scrollState);
+        renderExplorerTabStrip(index);
+        persistExplorerTabsToSession(index);
         return true;
     }
 
@@ -9545,6 +11559,8 @@
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
             highlightExplorerPreviewCode(preview);
+            wireExplorerMarkdownLinks(index, preview);
+            applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
         }
         if (diffPanel && hasGitDiff) {
             renderExplorerDiff(index);
@@ -9580,7 +11596,8 @@
     function renderExplorerCommitDiffFile(index, path, commit) {
         const pane = terminals[index];
         const list = document.getElementById(`explorer-list-${index}`);
-        if (!pane || !list || !path || !commit) {
+        const viewer = explorerEnsureViewerShell(index);
+        if (!pane || !list || !viewer || !path || !commit) {
             return false;
         }
 
@@ -9588,6 +11605,7 @@
         const codeLanguage = explorerCodeLanguage(path);
         clearExplorerDirectorySearchControls(index);
         cancelExplorerSearch(index);
+        explorerAssignOpenTab(pane, path, {});
 
         pane._attached = true;
         pane._explorerMode = 'file';
@@ -9601,6 +11619,7 @@
         pane._explorerDiffContent = '';
         pane._explorerDiffSplit = true;
         pane._explorerDiffCommit = commit;
+        pane._explorerDiffMode = '';
         pane._explorerLastFileView = 'source';
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
@@ -9614,7 +11633,7 @@
             upButton.disabled = false;
         }
 
-        list.innerHTML = `
+        viewer.innerHTML = `
             <div class="explorer-editor">
                 <div class="explorer-editor-header">
                     <button type="button" class="explorer-editor-back" data-explorer-editor-back="${index}">Back</button>
@@ -9662,10 +11681,11 @@
         });
         wireExplorerSearchControls(index);
         loadExplorerDiff(index);
+        renderExplorerTabStrip(index);
         return true;
     }
 
-    async function openExplorerFile(index, path, { showLoading = true, preserveScroll = false, openDiff = false, diffCommit = '' } = {}) {
+    async function openExplorerFile(index, path, { showLoading = true, preserveScroll = false, openDiff = false, diffCommit = '', diffMode = '', pinned = false, tab = '' } = {}) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !isExplorerSession(pane._session) || !sessionId || !path) {
@@ -9693,7 +11713,7 @@
             ) {
                 return true;
             }
-            const rendered = renderExplorerFile(index, data, { scrollState, openDiff, diffCommit });
+            const rendered = renderExplorerFile(index, data, { scrollState, openDiff, diffCommit, diffMode, pinned, tab });
             if (rendered) {
                 revealExplorerTreePath(index);
             }
@@ -9715,6 +11735,10 @@
         let refreshed = false;
         if (pane?._explorerMode === 'file' && pane._explorerFilePath) {
             refreshed = await openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });
+        } else if (pane?._explorerMode === 'viewer') {
+            /* Empty Preview tab: nothing to reload in the viewer body; the tree
+               and Git sidebars refresh below. */
+            refreshed = true;
         } else {
             refreshed = await loadExplorerPane(index, null, { force: true });
         }
@@ -9732,7 +11756,12 @@
         if (pane?._explorerMode === 'file' && pane._explorerFilePath) {
             return true;
         }
-        return loadExplorerPane(index);
+        if (pane?._attached) {
+            return true;
+        }
+        /* First show: the read-only tabbed viewer with an empty Preview tab and
+           the Files tree opened for navigation (ISSUE-2026-014). */
+        return openExplorerViewer(index);
     }
 
     async function loadExplorerPane(index, path = null, { force = false, showLoading = true } = {}) {
@@ -9779,6 +11808,13 @@
             if (isNavigation) {
                 resetExplorerDirectorySearch(pane);
             }
+            /* Directory browsing lives in the permanent Preview tab; pinned file
+               tabs are untouched by navigation (ISSUE-2026-014). */
+            ensureExplorerTabState(pane);
+            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+            const previewTab = explorerPreviewTab(pane);
+            previewTab.path = '';
+            previewTab.name = '';
             document.getElementById(`ph-${index}`)?.remove();
             updateExplorerGitSummary(index, data.git || null);
             renderExplorerDirectorySearchControls(index);
@@ -9800,6 +11836,7 @@
             list.classList.remove('file-view');
             wireExplorerSearchControls(index);
             applyExplorerSearch(index, { resetActive: true });
+            renderExplorerTabStrip(index);
             return true;
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer load failed:', error);
@@ -9869,14 +11906,19 @@
                 attachTerminal(index);
                 redrawAttachedTerminals([index], { forceResize: true });
             } else if (session.status === 'connected') {
+                /* A reconnected pane keeps its attached xterm; drop any
+                   error/disconnected overlay left behind by the retry flow. */
+                document.getElementById(`ph-${index}`)?.remove();
                 scheduleFit(index);
             } else if (session.status === 'error') {
                 showPlaceholderError(index, session.error_message || 'Connection failed');
+            } else if (isRetryableDisconnect(session)) {
+                showPlaceholderDisconnected(index);
             }
         });
 
         socket.on('app_config_updated', (message) => {
-            applyAppConfigSurfaceMode(message || {});
+            applyAppConfigUpdate(message || {});
         });
 
         socket.on('session_groups_updated', () => {
@@ -9892,6 +11934,7 @@
                 return;
             }
             scheduleStatusRefresh();
+            reconcileAppConfigTheme();
         });
 
         /* ── Voice transcription results ── */
@@ -9900,7 +11943,13 @@
             if (index === -1) return;
 
             if (isFinal && text) {
+                /* A committed transcript honours Broadcast typing the same way
+                   keyboard input does (ISSUE-2026-026): deliver to the recording
+                   pane, then fan out to every other plain pane through the shared
+                   broadcast filter. Interim previews above stay on the recording
+                   pane only. */
                 _sendToTerminal(index, text);
+                broadcastInputToPeers(index, text);
                 _clearVoicePreview(index);
             } else if (text) {
                 _showVoicePreview(index, text);
@@ -9947,9 +11996,11 @@
     });
     window.addEventListener('focus', () => {
         _loadVoiceServiceStatus();
+        reconcileAppConfigTheme();
     });
     window.addEventListener('pageshow', () => {
         _loadVoiceServiceStatus();
+        reconcileAppConfigTheme();
     });
     document.addEventListener('fullscreenchange', updateFullscreenButton);
     /* ─────────────────────────────────────────────

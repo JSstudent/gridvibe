@@ -6,6 +6,7 @@ local and SFTP explorer backends, the single set of Git helpers parameterised
 by backend, and the per-session SSH client pool (finding 3.1).
 """
 
+import codecs
 import logging
 import os
 import posixpath
@@ -20,7 +21,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from web.config import runtime_config
-from web.hostkeys import _load_persistent_host_keys
+from web.hostkeys import (  # noqa: F401 - _load_persistent_host_keys re-exported
+    _apply_host_key_policy,
+    _load_persistent_host_keys,
+)
 
 try:
     import paramiko
@@ -217,6 +221,17 @@ def _is_markdown_file(path: str) -> bool:
     return extension in MARKDOWN_PREVIEW_EXTENSIONS
 
 
+def _is_tail_preview_file(path: str) -> bool:
+    """Return whether an oversized preview should retain the file's *tail*.
+
+    Append-oriented files (logs) carry their most relevant content at the end,
+    so a truncated preview keeps the newest bytes instead of the oldest. The
+    classification reuses the existing language map (``.log`` → ``"log"``) so it
+    stays in one place.
+    """
+    return _explorer_code_language(path) == "log"
+
+
 def _explorer_code_language(path: str) -> Optional[str]:
     """Return the source language for code files shown in explorer previews."""
     filename = os.path.basename(path).lower()
@@ -246,7 +261,12 @@ def _explorer_content_looks_binary(raw_content: bytes) -> bool:
     if b"\x00" in sample:
         return True
     try:
-        sample.decode("utf-8")
+        # A capped sample can end in the middle of an otherwise valid multibyte
+        # character. Incremental decoding validates every complete sequence and
+        # defers a trailing partial sequence only when more content follows.
+        codecs.getincrementaldecoder("utf-8")(errors="strict").decode(
+            sample, final=len(raw_content) <= EXPLORER_BINARY_SAMPLE_BYTES
+        )
     except UnicodeDecodeError:
         return True
     control_count = sum(
@@ -255,6 +275,169 @@ def _explorer_content_looks_binary(raw_content: bytes) -> bool:
         if byte < 32 and byte not in EXPLORER_TEXT_CONTROL_BYTES
     )
     return control_count / len(sample) > 0.30
+
+
+def _trim_tail_preview_to_boundary(window: bytes) -> bytes:
+    """Drop a leading partial line / broken multibyte char from a tail window.
+
+    A tail read starts at an arbitrary byte offset, so its first line is usually
+    incomplete and may begin mid-character. Trimming to the first newline yields a
+    clean line + UTF-8 boundary; when there is no usable newline we at least skip
+    any leading UTF-8 continuation bytes so decoding never starts mid-character.
+    """
+    newline = window.find(b"\n")
+    if 0 <= newline < len(window) - 1:
+        return window[newline + 1:]
+    lead = 0
+    while lead < len(window) and (window[lead] & 0xC0) == 0x80:
+        lead += 1
+    return window[lead:]
+
+
+def read_explorer_file_preview(
+    backend: Any,
+    file_path: str,
+    *,
+    total_size: Optional[int],
+    tail: bool,
+) -> Dict[str, Any]:
+    """Read a bounded text preview, keeping the head or tail of the file.
+
+    ``tail`` append-oriented files that exceed the cap keep their newest bytes
+    (trimmed to a clean line/UTF-8 boundary); every other oversized file keeps
+    its opening bytes. The returned metadata records which end was retained and
+    the byte range so the client can message it precisely.
+    """
+    max_bytes = EXPLORER_FILE_PREVIEW_MAX_BYTES
+    if tail and total_size is not None and total_size > max_bytes:
+        window = _trim_tail_preview_to_boundary(
+            backend.read_file_suffix(file_path, max_bytes, total_size)
+        )
+        return {
+            "bytes": window,
+            "truncated": True,
+            "preview_mode": "tail",
+            "preview_start_byte": total_size - len(window),
+            "preview_end_byte": total_size,
+            "total_size": total_size,
+        }
+
+    raw_content = backend.read_file_prefix(file_path, max_bytes + 1)
+    truncated = len(raw_content) > max_bytes
+    window = raw_content[:max_bytes]
+    return {
+        "bytes": window,
+        "truncated": truncated,
+        "preview_mode": "head",
+        "preview_start_byte": 0,
+        "preview_end_byte": len(window),
+        "total_size": total_size if total_size is not None else len(raw_content),
+    }
+
+
+# GitHub-style admonition callouts (ISSUE-2026-017). Each label maps a
+# ``> [!TYPE]`` blockquote to a fixed CSS class + accessible heading. The set is
+# closed and backend-owned, so the augmentation below never emits user-derived
+# class names.
+GITHUB_CALLOUT_LABELS = {
+    "note": "Note",
+    "tip": "Tip",
+    "important": "Important",
+    "warning": "Warning",
+    "caution": "Caution",
+}
+
+# Stroke-style ``currentColor`` icons (deep-dive guardrail 7: no emoji/glyphs).
+# Injected only after sanitization into trusted, backend-built markup.
+_CALLOUT_ICON_SVG = {
+    "note": (
+        '<svg class="md-callout-icon" viewBox="0 0 24 24" fill="none"'
+        ' stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+        ' stroke-linejoin="round" aria-hidden="true" focusable="false">'
+        '<circle cx="12" cy="12" r="9"></circle>'
+        '<line x1="12" y1="11" x2="12" y2="16"></line>'
+        '<circle cx="12" cy="8" r="0.6" fill="currentColor" stroke="none">'
+        "</circle></svg>"
+    ),
+    "tip": (
+        '<svg class="md-callout-icon" viewBox="0 0 24 24" fill="none"'
+        ' stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+        ' stroke-linejoin="round" aria-hidden="true" focusable="false">'
+        '<path d="M9 18h6"></path><path d="M10 22h4"></path>'
+        '<path d="M12 2a7 7 0 0 0-4 12c.5.5 1 1.2 1 2h6c0-.8.5-1.5 1-2a7 7 0 0'
+        ' 0-4-12z"></path></svg>'
+    ),
+    "important": (
+        '<svg class="md-callout-icon" viewBox="0 0 24 24" fill="none"'
+        ' stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+        ' stroke-linejoin="round" aria-hidden="true" focusable="false">'
+        '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2'
+        ' 2z"></path><line x1="12" y1="8" x2="12" y2="12"></line>'
+        '<circle cx="12" cy="15" r="0.6" fill="currentColor" stroke="none">'
+        "</circle></svg>"
+    ),
+    "warning": (
+        '<svg class="md-callout-icon" viewBox="0 0 24 24" fill="none"'
+        ' stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+        ' stroke-linejoin="round" aria-hidden="true" focusable="false">'
+        '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7'
+        ' 3.9a2 2 0 0 0-3.4 0z"></path>'
+        '<line x1="12" y1="9" x2="12" y2="13"></line>'
+        '<circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none">'
+        "</circle></svg>"
+    ),
+    "caution": (
+        '<svg class="md-callout-icon" viewBox="0 0 24 24" fill="none"'
+        ' stroke="currentColor" stroke-width="2" stroke-linecap="round"'
+        ' stroke-linejoin="round" aria-hidden="true" focusable="false">'
+        '<polygon points="7.9 2 16.1 2 22 7.9 22 16.1 16.1 22 7.9 22 2 16.1 2'
+        ' 7.9"></polygon><line x1="12" y1="8" x2="12" y2="12"></line>'
+        '<circle cx="12" cy="16" r="0.6" fill="currentColor" stroke="none">'
+        "</circle></svg>"
+    ),
+}
+
+# An innermost ``<blockquote>`` (no nested blockquote inside) produced by the
+# Markdown renderer + bleach; nested-blockquote callouts fall through unchanged.
+_CALLOUT_BLOCKQUOTE_RE = re.compile(
+    r"<blockquote>(?P<inner>(?:(?!</?blockquote>).)*?)</blockquote>",
+    re.DOTALL,
+)
+# The first paragraph of a callout blockquote starts with the ``[!TYPE]`` marker.
+_CALLOUT_MARKER_RE = re.compile(
+    r"^\s*<p>\s*\[!(?P<type>NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][^\S\n]*"
+    r"(?:<br\s*/?>)?\s*(?P<body>.*?)</p>(?P<rest>.*)$",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _augment_markdown_callouts(html: str) -> str:
+    """Rewrite ``[!TYPE]`` blockquotes into semantic callout blocks.
+
+    Runs on already-sanitized HTML, so the injected ``div``/``span``/icon markup
+    and the fixed callout classes are trusted; the blockquote body was cleaned by
+    bleach. Non-callout blockquotes are returned untouched.
+    """
+
+    def _replace(match: "re.Match[str]") -> str:
+        inner = match.group("inner")
+        marker = _CALLOUT_MARKER_RE.match(inner)
+        if not marker:
+            return match.group(0)
+        kind = marker.group("type").lower()
+        label = GITHUB_CALLOUT_LABELS[kind]
+        icon = _CALLOUT_ICON_SVG[kind]
+        body = marker.group("body")
+        rest = marker.group("rest")
+        body_html = f"<p>{body}</p>" if body.strip() else ""
+        return (
+            f'<div class="md-callout md-callout-{kind}">'
+            f'<p class="md-callout-title">{icon}'
+            f'<span class="md-callout-label">{label}</span></p>'
+            f"{body_html}{rest}</div>"
+        )
+
+    return _CALLOUT_BLOCKQUOTE_RE.sub(_replace, html)
 
 
 def _render_markdown_preview(content: str) -> Optional[str]:
@@ -277,13 +460,16 @@ def _render_markdown_preview(content: str) -> Optional[str]:
     renderer.preprocessors.deregister("html_block")
     renderer.inlinePatterns.deregister("html")
     html = renderer.convert(content)
-    return bleach.clean(
+    sanitized = bleach.clean(
         html,
         tags=MARKDOWN_ALLOWED_TAGS,
         attributes=MARKDOWN_ALLOWED_ATTRIBUTES,
         protocols=bleach.sanitizer.ALLOWED_PROTOCOLS,
         strip=True,
     )
+    # Callout augmentation happens after sanitization so it never widens the
+    # bleach allowlist; the classes/icons it adds are backend-controlled.
+    return _augment_markdown_callouts(sanitized)
 
 
 def _resolve_explorer_candidate_path(
@@ -785,6 +971,12 @@ class _LocalExplorerBackend:
         with open(file_path, "rb") as file_handle:
             return file_handle.read(max_bytes)
 
+    def read_file_suffix(self, file_path: str, max_bytes: int, total_size: int) -> bytes:
+        start = max(0, int(total_size) - max_bytes)
+        with open(file_path, "rb") as file_handle:
+            file_handle.seek(start)
+            return file_handle.read(max_bytes)
+
     def parent_explorer_path(self, root_path: str, current_path: str) -> str:
         if os.path.normcase(current_path) == os.path.normcase(root_path):
             return ""
@@ -882,6 +1074,12 @@ class _SftpExplorerBackend:
 
     def read_file_prefix(self, file_path: str, max_bytes: int) -> bytes:
         with self.sftp.open(file_path, "rb") as file_handle:
+            return file_handle.read(max_bytes)
+
+    def read_file_suffix(self, file_path: str, max_bytes: int, total_size: int) -> bytes:
+        start = max(0, int(total_size) - max_bytes)
+        with self.sftp.open(file_path, "rb") as file_handle:
+            file_handle.seek(start)
             return file_handle.read(max_bytes)
 
     def parent_explorer_path(self, root_path: str, current_path: str) -> str:
@@ -1340,6 +1538,57 @@ def _git_unstage_path(backend: Any, root_path: str, file_path: str) -> None:
         raise ValueError(_decode_git_output(result.stderr) or "Git unstage failed")
 
 
+_GIT_UNMERGED_STATUS_CODES = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
+
+
+def _git_revert_path(backend: Any, root_path: str, file_path: str) -> None:
+    """Discard one tracked file's unstaged worktree changes.
+
+    Runs the equivalent of ``git restore --worktree -- <path>``, which restores
+    the worktree copy from the index, so any already-staged version of the file
+    is preserved. Untracked and conflicted files are refused rather than being
+    silently deleted or overwritten, and a file with no unstaged change is a
+    clear error instead of a no-op that would look like a broken action.
+    """
+    repo_root = _git_action_repo_root(backend, root_path)
+    pathspec = backend.pathspec(repo_root, file_path)
+    try:
+        status = backend.run_git(
+            ["status", "--porcelain", "--", pathspec], cwd=repo_root, timeout=5.0
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git revert timed out") from exc
+    if status.returncode != 0:
+        raise ValueError(_decode_git_output(status.stderr) or "Git revert failed")
+
+    # Decode without stripping so the leading porcelain XY status columns (e.g.
+    # " M" for a worktree-only change) survive; _decode_git_output strips.
+    raw_status = status.stdout.decode("utf-8", errors="replace")
+    entries = [line for line in raw_status.splitlines() if line.strip()]
+    if not entries:
+        raise ValueError("No unstaged changes to revert")
+    code = entries[0][:2]
+    if code == "??":
+        raise ValueError("Untracked files cannot be reverted")
+    if code in _GIT_UNMERGED_STATUS_CODES or "U" in code:
+        raise ValueError("Resolve merge conflicts before reverting")
+    if code[1:2] in {" ", "."}:
+        # Only the index differs (a staged-but-clean-worktree file); there is
+        # nothing to discard and reverting must never touch staged content.
+        raise ValueError("No unstaged changes to revert")
+
+    try:
+        result = backend.run_git(["restore", "--worktree", "--", pathspec], cwd=repo_root, write=True)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git revert timed out") from exc
+    if result.returncode != 0:
+        raise ValueError(
+            _decode_git_output(result.stderr)
+            or _decode_git_output(result.stdout)
+            or "Git revert failed"
+        )
+
+
 def _git_commit(backend: Any, root_path: str, message: str) -> None:
     """Commit staged changes inside an explorer repository."""
     commit_message = str(message or "").strip()
@@ -1473,8 +1722,7 @@ def _open_ssh_sftp(session: Any) -> Tuple[Any, Any]:
         raise RuntimeError("Paramiko is not installed. Run `pip install -r requirements.txt`.")
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    _load_persistent_host_keys(client)
+    _apply_host_key_policy(client, paramiko)
     client.connect(
         hostname=session.host,
         port=session.port,
@@ -1704,5 +1952,3 @@ def _resolve_remote_explorer_file_path(sftp: Any, session: Any, requested_path: 
     if not _remote_is_file(sftp, candidate):
         raise ValueError("Explorer path is not a file")
     return root_path, candidate
-
-

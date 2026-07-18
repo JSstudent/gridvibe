@@ -33,6 +33,21 @@
         const preference = normalizeThemePreference(theme);
         return preference === 'system' ? getSystemTheme() : preference;
     }
+    /* Theme-toggle button markup shared by both pages (finding 7.2):
+       sun / moon / monitor SVGs instead of the old emoji glyphs. */
+    const THEME_TOGGLE_ICONS = {
+        light: '<svg class="theme-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>',
+        dark: '<svg class="theme-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>',
+        system: '<svg class="theme-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2" y="3" width="20" height="14" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>'
+    };
+    function themeToggleButtonHtml(theme) {
+        const preference = normalizeThemePreference(theme);
+        const label =
+            preference === 'light' ? 'Light'
+            : preference === 'dark' ? 'Dark'
+            : 'System';
+        return `${THEME_TOGGLE_ICONS[preference]}${label}`;
+    }
     function getConnectionModeLabel(mode) {
         return mode === 'wsl' ? 'Local Repo' : 'SSH';
     }
@@ -137,11 +152,11 @@
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;');
     }
-    function syncNativeTheme(resolvedTheme) {
+    function syncNativeTheme() {
         try {
             const bridge = window.pywebview?.api;
             if (bridge?.set_native_theme) {
-                bridge.set_native_theme(resolvedTheme).catch(error => {
+                bridge.set_native_theme().catch(error => {
                     console.error('[GridVibe] native theme sync failed:', error);
                 });
             }
@@ -199,6 +214,19 @@
         applyTheme(getStoredTheme() || 'system');
         window.addEventListener('pywebviewready', () => {
             syncNativeTheme(document.documentElement.getAttribute('data-theme') || resolveTheme(getStoredTheme() || 'system'));
+        });
+        /* Another same-origin window (launcher ↔ session) changed the stored
+           preference — mirror it here. Safe from feedback loops: applyTheme's
+           setItem with an unchanged value fires no storage event, and the
+           already-applied guard below skips redundant work (ISSUE-2026-021). */
+        window.addEventListener('storage', event => {
+            if (event.key !== THEME_STORAGE_KEY || !event.newValue) {
+                return;
+            }
+            const preference = normalizeThemePreference(event.newValue);
+            if (preference !== document.documentElement.getAttribute('data-theme-preference')) {
+                applyTheme(preference);
+            }
         });
         const mediaQuery = window.matchMedia('(prefers-color-scheme: light)');
         const listener = () => {

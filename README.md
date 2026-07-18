@@ -79,6 +79,7 @@ Explorer panes support:
 - Manual refresh from the pane header without continuous auto-refresh flicker.
 - Folder/file icons, size and modified-time metadata, and per-pane light/dark explorer theme toggling.
 - Click-to-open text files in a read-only editor-style viewer with line numbers, wrapped long lines, and per-pane `-`/`+` font-size zoom controls.
+- Downloading the currently open file via the file viewer's download button (capped at 100 MB, binaries allowed). Downloading is a read, so it stays inside the explorer's read-only contract, which covers filesystem mutations.
 - Client-side find inside source, preview, and diff views, including `Ctrl+F`/`Cmd+F` focus, match counts, previous/next controls, `Enter`/`Shift+Enter` navigation, and clear.
 - Markdown files with source-gutter chevrons for collapsing heading sections and sanitized rendered preview when Markdown rendering dependencies are installed.
 - Lightweight syntax coloring for common source, config, log, JSON Lines, Dockerfile, and environment files.
@@ -169,6 +170,11 @@ After changing PATH, restart your shell, GridVibe, and any native window launche
 - Saved launcher and active-workspace presets with encrypted SSH passwords
 - Session groups with numbered closable tabs, `Alt+1` through `Alt+9` tab switching, import/save actions, drag-to-reorder persistence, collapsible top bar, and max surface mode
 - xterm.js terminal panes with resize, refresh, clear, replay buffer, fullscreen, and drag-resizable dynamic split-pane support
+- Scrollback search per terminal pane (`Ctrl+Shift+F`, `Enter`/`Shift+Enter` to step through matches) and clickable URLs in terminal output
+- Broadcast typing: a topbar toggle mirrors keystrokes to every terminal pane in the group, with a loud accent-border state and automatic switch-off on tab switch or after 10 idle minutes
+- Restore-after-restart: the workspace shape (groups, layouts, pane settings — never passwords) is snapshotted to a local `runtime_state.json`, and the launcher offers to relaunch it after a backend restart
+- Explorer file download from the read-only file viewer (100 MB cap, binaries allowed)
+- Configurable SSH host-key verification (`ssh.host_key_policy`: auto-add, known-hosts, or strict)
 - Local and SSH file explorer panes with directory search, a lazily loaded file tree sidebar, text/Markdown preview, syntax highlighting, per-pane editor font zoom, client-side file/diff search, and a resizable Git sidebar with status/diff awareness, a commit graph, and basic staging, commit, and branch publishing
 - Optional resizable native desktop window through `pywebview`
 - Optional offline voice input through Vosk or faster-whisper
@@ -387,7 +393,7 @@ GridVibe is designed as a local desktop/browser tool, not a public web service. 
 - Flask-SocketIO is run with Werkzeug for local usage; do not expose it directly to the internet.
 - Socket.IO CORS defaults to same-origin (`http://127.0.0.1:<port>` / `http://localhost:<port>`). Set `security.cors_origins` explicitly if GridVibe is served from another origin (for example behind a reverse proxy); `["*"]` restores the wildcard behaviour.
 - State-changing HTTP requests (`POST`/`DELETE`/…) that carry a cross-origin `Origin` header are rejected with `403`; origins listed in `security.cors_origins` are also allowed.
-- Paramiko accepts unknown SSH host keys on first use (`AutoAddPolicy`), but persists them to a local `.known_hosts` file and rejects a changed host key on later connections.
+- Paramiko accepts unknown SSH host keys on first use (`AutoAddPolicy`), but persists them to a local `.known_hosts` file and rejects a changed host key on later connections. Set `ssh.host_key_policy` (also editable in App Settings) to `"known-hosts"` to log a warning whenever a new host key is accepted, or to `"strict"` to reject hosts that are not already present in the project `.known_hosts` or your `~/.ssh/known_hosts`; the default is `"auto-add"`.
 - Saved SSH passwords are encrypted with Fernet before writing to `saved_sessions.json`.
 - The Fernet key is stored in `.encryption_key`; Unix-like systems use `0600` permissions, while Windows users should rely on normal profile/account isolation or add stricter ACLs if needed.
 
@@ -458,6 +464,8 @@ These are created or used at runtime and should not be committed:
 | --- | --- |
 | `config.json` | Local runtime configuration override |
 | `saved_sessions.json` | Saved launcher presets |
+| `runtime_state.json` | Workspace-shape snapshot for restore-after-restart (no passwords) |
+| `.known_hosts` | Persisted SSH host keys |
 | `.encryption_key` | Fernet key used for password encryption |
 | `logs/gridvibe.log` | Main rotating log file |
 
