@@ -1,0 +1,2107 @@
+# GridVibe Deep-Dive Code Review — 2026-07-10
+
+Full-codebase analysis pass covering `main.py`, `web/api.py`, `web/webview_launcher.py`,
+`sessions/manager.py`, `services/vosk_service.py`, `utils/cleanup.py`, the root compatibility
+shims, both templates (`templates/index.html`, `templates/terminals.html`),
+`web/static/voice-capture-worklet.js`, build/config files, and `logs/gridvibe.log`.
+
+Each finding is a standalone section with a proposed implementation. Severity is a rough
+prioritisation aid: **High** = fix soon (correctness/security), **Medium** = worth scheduling,
+**Low** = cleanup/polish.
+
+**Scope note:** this is an analysis document only — no code was changed.
+
+> **♻️ Re-validated 2026-07-11** (after commits `b4d7734` *Explorer refresh and scroll bar
+> stable* and `0eb8be7` *Save session terminal mode saved…*):
+> - **All implemented findings verified intact** — full suite green (351 tests, 1 skip) and
+>   `ruff check` clean; the regression tests added with each fix
+>   (`CorsOriginDefaultsTestCase`, `CrossOriginWriteGuardTestCase`,
+>   `KnownHostsPersistenceTestCase`, `SshSftpPoolTestCase`,
+>   `TerminalOutputBufferCacheTestCase`, `SshStreamBlockingRecvTestCase`,
+>   `SessionGroupsUpdatedBroadcastTestCase`, `VendoredFrontendAssetsTestCase`) all pass.
+> - **All open findings re-confirmed still present**, with three metadata updates: 5.1
+>   (`ssh.keepalive_interval` is now wired — see the updated note), 6.2/6.3 (`web/api.py` grew
+>   to ~7.3k lines; the duplicated session signature grew to 19 parameters with the new
+>   `explorer_tree_open`/`explorer_git_open` fields), and 3.5 (template totals updated).
+> - **One new finding** from the new commits: 2.10 (runtime agent tracking mutates
+>   connection-dict state outside `connection_lock`).
+> - Line numbers cited in the original findings have drifted slightly with the new commits;
+>   the ones load-bearing for open findings (2.4) were refreshed, the rest are ±~100 lines.
+
+---
+
+## Index
+
+| # | Finding | Category | Severity |
+|---|---------|----------|----------|
+| 1.1 | Socket.IO CORS defaults to `*` on a terminal-input socket | Security | High |
+| 1.2 | No Origin/CSRF guard on state-changing HTTP endpoints | Security | High |
+| 1.3 | `_decrypt_password` falls back to returning ciphertext | Security | Medium |
+| 1.4 | Host key `AutoAddPolicy` everywhere (no opt-in strictness) | Security | Low |
+| 2.1 | `create_group` display-order race (lock released between read and write) | Race condition | Medium |
+| 2.2 | Empty-group deletion race in `clear_disconnected_sessions` | Race condition | Medium |
+| 2.3 | Connect-vs-close TOCTOU leaks live SSH/PTY connections | Race condition | Medium |
+| 2.4 | `socketio.emit` while holding `connection_lock` | Race condition / Perf | Medium |
+| 2.5 | Agent detection subprocess runs under a global cache lock | Race condition / Perf | Medium |
+| 2.6 | Voice engine can change between `voice_start` and `voice_stop` | Race condition | Low |
+| 2.7 | Whisper model instance never reloaded after settings change | Race condition / Correctness | Medium |
+| 2.8 | 8-char session IDs stored without collision check | Race condition | Low |
+| 2.9 | `active_launch_options` mutated without a lock | Race condition | Low |
+| 2.10 | Runtime agent tracking mutates connection state outside `connection_lock` *(new 2026-07-11)* | Race condition | Low |
+| 3.1 | New SSH+SFTP connection per explorer request | Performance | High |
+| 3.2 | Terminal output buffer: full-string copy per chunk | Performance | Medium |
+| 3.3 | SSH stream loop busy-waits with 50 ms polling | Performance | Low |
+| 3.4 | 3-second HTTP polling duplicates Socket.IO push | Performance | Medium |
+| 3.5 | 18k lines of inline CSS/JS in templates (no caching, reparsed each load) | Performance / Maintainability | Medium |
+| 3.6 | Frontend depends on CDN for xterm/socket.io | Performance / Reliability | High |
+| 3.7 | Byte-at-a-time fallback read in `_stream_local_output` | Performance | Low |
+| 4.1 | PowerShell `cd` uses POSIX quoting (`shlex.quote`) | Correctness | Medium |
+| 4.2 | xterm theme uses removed `selection` key | Correctness | Low |
+| 4.3 | Launch button label changes identity after first launch | Correctness / UI | Low |
+| 4.4 | `window.prompt` in Save Session silently no-ops under WebView2 | Correctness | High |
+| 4.5 | `info`/`warning` message styles referenced but never defined | Correctness / Style | Low |
+| 4.6 | Dead reference to `wsl_default_dir_display` | Correctness / Dead code | Low |
+| 4.7 | `config.json` silently overrides explicit CLI flags | Correctness | Medium |
+| 4.8 | Vosk port configured in two unrelated keys | Correctness / Config | Medium |
+| 4.9 | `cleanup.py` deletes live logs, has stale branding, dir/file pattern confusion | Correctness | Low |
+| 4.10 | Misindented return block in `get_explorer_entries` | Style | Low |
+| 5.1 | Unused config keys (`default_username`, `terminal.*`; `keepalive_interval` now wired) | Dead code / Feature gap | Medium |
+| 5.2 | `/api/sessions/active` endpoint has no callers | Dead code | Low |
+| 5.3 | `SessionManager` callback registry is dead code | Dead code | Low |
+| 5.4 | `DESTRUCTIVE_PATTERNS = []` and other cleanup leftovers | Dead code | Low |
+| 5.5 | `set_native_theme(theme)` ignores its argument; single-entry theme dict | Dead code | Low |
+| 5.6 | `⋮` Options button on launcher terminal cards does nothing | Dead code / UI | Low |
+| 5.7 | Three near-identical server-run entry points | Dead code / DRY | Low |
+| 6.1 | Local vs remote explorer/git code is duplicated (~15 function pairs + route bodies) | DRY / Architecture | High |
+| 6.2 | `web/api.py` is a 6.8k-line monolith | Architecture | Medium |
+| 6.3 | `create_session`/`append_session_to_group` duplicate 17-parameter signatures | DRY | Low |
+| 6.4 | Shared JS duplicated between the two templates | DRY | Medium |
+| 6.5 | Oversized functions: `buildGrid` (~445 lines), `_startVoice` (~308 lines) | Maintainability | Medium |
+| 6.6 | Two similarly named git runners caused a real production TypeError | DRY / Logs | Medium |
+| 7.1 | Two divergent design-token systems (launcher vs terminals) | Style mismatch | Medium |
+| 7.2 | Mixed icon language: emoji vs inline SVG | Style mismatch | Low |
+| 7.3 | Hardcoded colors that ignore the light theme | Style mismatch | Low |
+| 8.1 | No confirmation when closing a session tab | Button/UX | Medium |
+| 8.2 | Launch button has no spinner and loses its arrow | Button/UX | Low |
+| 8.3 | Duplicate update-status areas show identical text | Button/UX | Low |
+| 8.4 | No "reconnect" affordance on errored/disconnected panes | Button/UX / Feature | Medium |
+| 8.5 | Save-settings tooltip doubles up (title + custom bubble) | Button/UX | Low |
+| 9.1 | Log noise: normal pane closures logged as ERROR | Logs | Medium |
+| 9.2 | ANSI color codes written into gridvibe.log | Logs | Low |
+| 9.3 | `/api/voice-status` polling not covered by the log filter | Logs | Low |
+| 10.1 | Feature: SSH keepalive (config key already exists) | New feature | — |
+| 10.2 | Feature: wire up `terminal.font_size` / `font_family` config | New feature | — |
+| 10.3 | Feature: terminal search + clickable links (xterm addons) | New feature | — |
+| 10.4 | Feature: broadcast input to all panes | New feature | — |
+| 10.5 | Feature: session reconnect / restore after backend restart | New feature | — |
+| 10.6 | Feature: explorer file download (read-only compatible) | New feature | — |
+| 10.7 | Feature: strict host-key verification mode | New feature | — |
+
+---
+
+## 1. Security
+
+### 1.1 Socket.IO CORS defaults to `*` on a socket that accepts terminal input — **High**
+
+**Location:** `web/api.py:1829-1839` (`_resolve_cors_origins`), `default_config.json` (`security.cors_origins: ["*"]`)
+
+**Problem.** The Socket.IO server is created with `cors_allowed_origins=["*"]` by default. The
+same socket accepts `terminal_input`, which writes keystrokes directly into live SSH/local
+shells. Browsers do not block cross-origin WebSocket/Socket.IO connections on their own —
+the server-side origin check is the only defence. With `*`, any web page open in the user's
+browser can connect to `http://127.0.0.1:5050`, enumerate nothing (it needs session IDs), but
+`session_status` broadcasts and `terminal_output` replays are emitted globally, and session IDs
+are only 8 hex chars. A malicious page can realistically join sessions and inject commands.
+This directly contradicts the "binds to 127.0.0.1, local use" security posture: localhost
+binding does not protect against the user's own browser.
+
+**Proposed implementation.**
+1. Change the default in `default_config.json` and `_resolve_cors_origins()` from `["*"]` to
+   same-origin only, derived from the configured host/port:
+   ```python
+   def _resolve_cors_origins():
+       configured = app_config.get("security", {}).get("cors_origins")
+       if configured:                      # explicit override still wins
+           return configured
+       port = app_config.get("server", {}).get("port", 5050)
+       return [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
+   ```
+2. Flag the change in `CHANGELOG.md` (users with reverse proxies must set
+   `security.cors_origins` explicitly).
+3. Optionally also scope `terminal_output`/`session_status` emits to rooms only (they already
+   use `room=session_id` for output; `session_status` in `_broadcast_session_status` is global —
+   move it to the session room too).
+
+> **✅ Implemented (2026-07-10).** `_resolve_cors_origins` in `web/api.py` now derives
+> same-origin defaults (`http://127.0.0.1:<port>` + `http://localhost:<port>`, plus the
+> configured host when it isn't loopback/wildcard) from `server.host`/`server.port`;
+> `default_config.json` ships `security.cors_origins: []` so the derivation applies. An
+> explicit non-empty `cors_origins` list (including `["*"]`) still wins for reverse-proxy
+> setups. Flagged as breaking in `CHANGELOG.md`. Step 3 (room-scoping `session_status`) was
+> **not** done. Covered by `CorsOriginDefaultsTestCase` in `tests/test_api.py`.
+
+> **✅ Step 3 completed (2026-07-13).** `_broadcast_session_status` (now in
+> `web/terminal_io.py`) emits `session_status` with `room=session_id`, so status payloads
+> only reach clients that joined the session via `join_session` (which itself still replies
+> with the current status to the joiner). The terminals page's initial-load join loop no
+> longer skips explorer/browser panes — they have no output stream but need the room-scoped
+> status updates (mode-switch reconciliation, placeholder removal, explorer sync). Covered
+> by `SessionStatusRoomScopeTestCase` (joined client receives, bystander socket does not)
+> and `test_terminals_joins_rooms_for_every_pane` in `tests/test_api.py`. Finding 1.1 is
+> now fully closed.
+
+### 1.2 No Origin/CSRF guard on state-changing HTTP endpoints — **High**
+
+**Location:** all `POST`/`DELETE` routes in `web/api.py` — notably `/api/sessions` (launch with
+credentials in body), `/api/sessions` DELETE (kill everything), `/api/app-update` (git
+fetch/pull), `/api/explorer/<id>/git/{stage,unstage,commit,publish}` (repo mutation),
+`/api/app-config` (settings write).
+
+**Problem.** A hostile web page can issue "simple" cross-origin `POST`s
+(e.g. `fetch('http://127.0.0.1:5050/api/sessions', {method:'DELETE', mode:'no-cors'})`).
+CORS prevents the attacker *reading* the response, but the side effect executes. Only
+`/api/browser-shutdown` is protected (token header). Everything else is exposed:
+drive-by git `push`, killing all sessions, changing settings.
+
+**Proposed implementation.** Add a lightweight same-origin guard as a `before_request` hook:
+```python
+@app.before_request
+def _reject_cross_origin_writes():
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    origin = request.headers.get("Origin", "")
+    host = request.host  # e.g. 127.0.0.1:5050
+    if origin and urlparse(origin).netloc not in {host, host.replace("127.0.0.1", "localhost"), host.replace("localhost", "127.0.0.1")}:
+        return jsonify({"error": "Cross-origin request rejected"}), 403
+    return None
+```
+Requests from the app's own pages send a matching `Origin` (or none for same-origin
+non-CORS requests and pywebview); cross-site `fetch`/form posts always send the attacker's
+origin. Requiring a custom header (`X-GridVibe-Request: 1`) on all frontend `fetch` calls is an
+equivalent alternative (custom headers force a CORS preflight, which then fails).
+
+> **✅ Implemented (2026-07-10).** `web/api.py` gained a `_reject_cross_origin_writes`
+> `before_request` hook (plus `_allowed_write_origin_netlocs` helper): non-GET/HEAD/OPTIONS
+> requests carrying a cross-origin (or `null`) `Origin` header get `403`. Same-origin requests,
+> requests with no `Origin` header (curl, pywebview), the `127.0.0.1`↔`localhost` alias pair,
+> and any origins listed in `security.cors_origins` (with `"*"` disabling the guard) are
+> allowed. Covered by `CrossOriginWriteGuardTestCase` in `tests/test_api.py`.
+
+### 1.3 `_decrypt_password` silently returns the ciphertext on failure — **Medium**
+
+**Location:** `web/api.py:140-147`
+
+**Problem.** If the Fernet key changed (e.g. `.encryption_key` deleted/regenerated), decryption
+fails and the function returns the *encrypted blob* as the password. GridVibe then sends that
+garbage string as an SSH password — a confusing auth failure at best, and it leaks the
+ciphertext to the remote server's auth log at worst.
+
+**Proposed implementation.** Return `""` and log a warning once:
+```python
+def _decrypt_password(encrypted: str) -> str:
+    if not encrypted:
+        return ""
+    try:
+        return _cipher.decrypt(encrypted.encode()).decode()
+    except Exception:
+        logger.warning("Stored SSH password could not be decrypted (encryption key changed?); ignoring it.")
+        return ""
+```
+The launcher then shows an empty password field instead of a broken one.
+
+> **✅ Implemented (2026-07-10).** `_decrypt_password` in `web/api.py` now logs a warning and
+> returns `""` on decryption failure instead of returning the ciphertext.
+
+### 1.4 `AutoAddPolicy` for all SSH host keys — **Low** (posture, documented)
+
+**Location:** `web/api.py` — `_connect_ssh_session`, `_open_ssh_sftp`, `_detect_ssh_command`
+
+**Problem.** All three SSH entry points use `paramiko.AutoAddPolicy()`, so a MITM on first *and
+every later* connection is accepted silently (keys are auto-added but never persisted to a
+known_hosts file, so every connection is effectively "first"). CLAUDE.md documents this as a
+deliberate default; this section only proposes making strictness available (see feature 10.7).
+
+**Proposed implementation (minimal).** Load and persist a project-local known_hosts:
+```python
+client.load_host_keys(os.path.join(BASE_DIR, ".known_hosts"))
+client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+...
+client.save_host_keys(os.path.join(BASE_DIR, ".known_hosts"))
+```
+This keeps first-use convenience but detects key *changes* on later connections.
+
+> **✅ Implemented (2026-07-10).** New `_load_persistent_host_keys(client)` helper in
+> `web/api.py` creates (if needed) and loads a project-local `.known_hosts`
+> (`KNOWN_HOSTS_PATH`, added to `.gitignore`); it is called at all three SSH entry points
+> (`_connect_ssh_session`, `_open_ssh_sftp`, `_detect_ssh_command`). No explicit
+> `save_host_keys` call is needed: because `load_host_keys` records the filename, paramiko's
+> `AutoAddPolicy` persists newly accepted keys automatically, and `connect` raises
+> `BadHostKeyException` (a `SSHException`, surfaced through the existing error path) when a
+> known host presents a different key. Load failures degrade gracefully to today's behaviour
+> with a warning. Covered by `KnownHostsPersistenceTestCase` in `tests/test_api.py`.
+> Feature 10.7 (configurable strict mode) remained open at the time; it landed 2026-07-14
+> (see 10.7), fully closing the host-key story.
+
+---
+
+## 2. Race Conditions & Concurrency
+
+### 2.1 `create_group` computes `display_order` outside the insertion lock — **Medium**
+
+**Location:** `sessions/manager.py:122-159`
+
+**Problem.** The method takes `self.lock` to compute `next_display_order`, releases it, builds
+the `SessionGroup`, then re-acquires the lock to insert. Two concurrent launches can read the
+same max order and both create groups with identical `display_order`, breaking tab ordering
+(ties fall back to `created_at`, but `reorder_groups` assumes unique orders).
+
+**Proposed implementation.** Do everything in one critical section:
+```python
+with self.lock:
+    existing_group = self.groups.get(resolved_group_id)
+    next_display_order = (
+        existing_group.display_order if existing_group is not None
+        else max((g.display_order for g in self.groups.values()), default=-1) + 1
+    )
+    group = SessionGroup(..., display_order=next_display_order, ...)
+    self.groups[resolved_group_id] = group
+return group
+```
+
+> **✅ Implemented (2026-07-10).** `create_group` in `sessions/manager.py` now computes
+> `next_display_order`, builds the `SessionGroup`, and inserts it under a single `self.lock`
+> hold, so concurrent launches can no longer observe the same max order.
+
+### 2.2 `clear_disconnected_sessions` can delete a group that is mid-launch — **Medium**
+
+**Location:** `sessions/manager.py:580-607`; called from `web/api.py:6004` and `:6022`
+
+**Problem.** `clear_disconnected_sessions()` removes **every** group that currently has zero
+sessions. `POST /api/sessions` first calls `create_group(...)` and only afterwards
+`create_sessions(...)` — separate lock acquisitions. If a `DELETE /api/sessions/<id>` for some
+*other* session lands in that window, the cleanup deletes the freshly created (still empty)
+group. The launch then proceeds with sessions pointing at a `group_id` that no longer exists;
+the terminals page shows no layout metadata for it.
+
+**Proposed implementation.** Two options (either suffices):
+1. **Grace period** — skip groups younger than a few seconds:
+   ```python
+   now = time.time()
+   disconnected_groups = [
+       gid for gid, group in self.groups.items()
+       if gid not in active_group_counts and now - group.created_at > 5.0
+   ]
+   ```
+2. **Atomic create** — add a `SessionManager.create_group_with_sessions(...)` that creates the
+   group and its sessions under one lock hold, so an empty group is never observable.
+
+Option 1 is a two-line fix; option 2 is the structurally correct one.
+
+> **✅ Implemented (2026-07-11).** Option 1: `clear_disconnected_sessions` in
+> `sessions/manager.py` now skips empty groups younger than
+> `EMPTY_GROUP_GRACE_SECONDS` (5 s). An explicit group close must still remove the
+> group immediately, so the method gained a `force_group_ids` parameter that
+> bypasses the grace period; `DELETE /api/sessions?group=<id>` passes the closed
+> group's id. Covered by `EmptyGroupGracePeriodTestCase` in
+> `tests/test_session_manager.py`.
+
+### 2.3 Connect-vs-close TOCTOU can leak a live SSH client / PTY — **Medium**
+
+**Location:** `web/api.py:4570-4578` (`_connect_ssh_session`), `:4678-4686` (`_connect_local_session`)
+
+**Problem.** Both connectors do:
+```python
+if session_manager.get_session(session_id) is None:   # check
+    _shutdown_connection(connection); return
+with connection_lock:
+    ssh_connections[session_id] = connection           # act
+```
+If `close_session`/`_close_ssh_connection` runs between the check and the insert, the close
+finds nothing in `ssh_connections` (no-op) and then the connector inserts a live connection for
+a session that no longer exists. The paramiko client / WinPTY process stays open until process
+exit; the stream thread keeps running.
+
+**Proposed implementation.** Re-validate inside the lock, treating `connection_lock` as the
+authority for the connection registry:
+```python
+with connection_lock:
+    if session_manager.get_session(session_id) is None:
+        stale = True
+    else:
+        ssh_connections[session_id] = connection
+        session_output_buffers[session_id] = ""
+        stale = False
+if stale:
+    _shutdown_connection(connection)
+    return
+```
+(`session_manager.get_session` only takes the manager's RLock; nesting it inside
+`connection_lock` here is safe because no code path takes the two locks in the opposite order —
+worth a comment at both lock definitions.)
+
+> **✅ Implemented (2026-07-11).** Both `_connect_ssh_session` and
+> `_connect_local_session` now re-validate the session inside `connection_lock` and
+> only insert into `ssh_connections` when it still exists; a stale connection is
+> shut down after the lock is released. Lock-ordering comments added at both the
+> `connection_lock` and `SessionManager.lock` definitions (verified: nothing takes
+> the locks in the opposite order — `register_callback` is unused outside manager
+> tests). Covered by `ConnectCloseToctouTestCase` in `tests/test_api.py`.
+
+### 2.4 `socketio.emit` happens while holding `connection_lock` — **Medium**
+
+**Location:** `web/api.py` — `_drain_until_prompt` (:2519-2526), `_stream_ssh_output`
+(:2608-2614), `_stream_local_output` (three sites: :2661, :2685, :2712),
+`handle_join_session` replay (:6530-6552). *(Line refs refreshed 2026-07-11; the 3.3
+blocking-recv rewrite kept the emit inside `connection_lock`, so this finding is unchanged.)*
+
+**Problem.** Every output chunk is emitted to Socket.IO clients *inside* `connection_lock`.
+In `threading` async mode a slow/blocked client write can stall the emit, and while the lock is
+held, **all** other terminals' output pumps, `terminal_input`, and `terminal_resize` handlers
+block on the same global lock. One wedged websocket degrades every pane.
+
+**Proposed implementation.** Only mutate the buffer under the lock; emit outside:
+```python
+if output:
+    with connection_lock:
+        _cache_terminal_output(session_id, output)
+    socketio.emit('terminal_output', {'session_id': session_id, 'data': output}, room=session_id)
+```
+The replay-vs-live ordering concern in `handle_join_session` can be preserved by capturing the
+buffer snapshot under the lock and emitting after, since `join_room` already happened under the
+lock (late chunks arrive after the replay by construction of the room membership).
+
+> **✅ Implemented (2026-07-11).** All five sites now cache under the lock (via
+> `_cache_terminal_output`, which takes `connection_lock` itself) and emit outside
+> it: `_drain_until_prompt`, `_stream_ssh_output`, the three `_stream_local_output`
+> branches, and `handle_join_session` (buffer snapshot + `join_room` under the
+> lock, replay emit after). Accepted trade-off: a client joining in the window
+> between a pump's cache and its emit can receive that chunk twice (once in the
+> replay, once live) — cosmetic and rare, vs. one wedged websocket stalling every
+> pane. Covered by `EmitOutsideConnectionLockTestCase` in `tests/test_api.py`.
+
+### 2.5 Agent binary detection runs a subprocess while holding the global cache lock — **Medium**
+
+**Location:** `web/api.py:1592-1610` (`_detect_agent_binary_cached`)
+
+**Problem.** On a cache miss, `_detect_agent_binary(...)` — a subprocess call with up to an 8 s
+timeout (WSL probe) — executes *inside* `_agent_detection_cache_lock`. Concurrent preflight
+requests for different agents/rows serialize behind it; the launcher fires one preflight per
+terminal row, so an 8-terminal WSL setup can take ~1 minute of serialized probing instead of
+running probes concurrently.
+
+**Proposed implementation.** Standard "check, compute outside, re-check" pattern:
+```python
+with _agent_detection_cache_lock:
+    cached = _agent_detection_cache.get(key)
+    if cached and now - cached[0] <= TTL:
+        return dict(cached[1])
+detection = _detect_agent_binary(target, binary)      # slow work, no lock
+with _agent_detection_cache_lock:
+    _agent_detection_cache[key] = (time.monotonic(), dict(detection))
+return detection
+```
+Duplicate concurrent probes for the *same* key are acceptable (idempotent, cached afterwards);
+if not, keep a per-key `threading.Lock` in a second dict.
+
+> **✅ Implemented (2026-07-11).** `_detect_agent_binary_cached` now uses the
+> check / compute-outside / re-store pattern, so concurrent preflights probe in
+> parallel instead of serializing behind `_agent_detection_cache_lock`. Duplicate
+> concurrent probes for the same key were accepted as per the note above. Covered
+> by `AgentDetectionCacheLockTestCase` in `tests/test_api.py`.
+
+### 2.6 Voice engine may differ between start / audio / stop — **Low**
+
+**Location:** `web/api.py:6728-6789` (`handle_voice_start/audio/stop` all re-read the
+`voice_engine` global)
+
+**Problem.** If the user changes the engine in App Settings while a recording is active,
+`voice_stop` routes to the *new* engine: a vosk WebSocket stays open in
+`_vosk_ws_connections`, or a whisper buffer stays in `_whisper_audio_buffers` until the next
+start overwrites it.
+
+**Proposed implementation.** Record the engine per active voice session at start
+(`_active_voice_sessions[session_id] = engine`) and dispatch `voice_audio`/`voice_stop` based
+on the recorded value, deleting the entry on stop. ~10 lines.
+
+> **✅ Implemented (2026-07-11).** As proposed: `handle_voice_start` records the
+> engine in a new `_active_voice_sessions` dict (guarded by
+> `_active_voice_sessions_lock`); `voice_audio` reads it and `voice_stop` pops it,
+> both falling back to the configured engine for unknown sessions. Covered by
+> `VoiceEngineSwitchTestCase` in `tests/test_api.py`.
+
+### 2.7 Whisper model instance survives settings changes — **Medium**
+
+**Location:** `web/api.py:6236-6262` (`_ensure_whisper_model`), `_refresh_runtime_config`
+
+**Problem.** `_whisper_model_instance` is created once with the model/device/compute-type
+captured at first use. `POST /api/app-config` refreshes the globals but never invalidates the
+instance, so switching from `base` to `large-v3` (or CPU→CUDA) silently keeps using the old
+model until a full restart. The settings UI implies it takes effect.
+
+**Proposed implementation.** Track the parameters the instance was built with and rebuild on
+mismatch:
+```python
+with _whisper_model_lock:
+    wanted = (whisper_model, whisper_device, whisper_compute_type)
+    if _whisper_model_instance is None or _whisper_model_params != wanted:
+        _whisper_model_instance = WhisperModel(*wanted[:1], device=wanted[1], compute_type=wanted[2])
+        _whisper_model_params = wanted
+    return _whisper_model_instance
+```
+
+> **✅ Implemented (2026-07-10).** `_ensure_whisper_model` in `web/api.py` now records the
+> `(model, device, compute_type)` tuple it built the instance with in a new
+> `_whisper_model_params` global and rebuilds the `WhisperModel` under `_whisper_model_lock`
+> whenever the current config no longer matches; the old instance is released to GC.
+
+### 2.8 8-character session IDs stored without collision check — **Low**
+
+**Location:** `sessions/manager.py:200, 251`
+
+**Problem.** `str(uuid.uuid4())[:8]` has a birthday-collision probability that becomes
+non-negligible over thousands of sessions; a collision silently overwrites the existing
+`self.sessions[session_id]` entry, orphaning its SSH connection.
+
+**Proposed implementation.** Generate under the lock and retry on collision:
+```python
+with self.lock:
+    while True:
+        session_id = uuid.uuid4().hex[:8]
+        if session_id not in self.sessions:
+            break
+    self.sessions[session_id] = session
+```
+
+> **✅ Implemented (2026-07-11).** New `SessionManager._generate_session_id`
+> (retry-on-collision, caller holds the lock); both `create_session` and
+> `append_session_to_group` now generate the id and insert the session under a
+> single `self.lock` hold. Covered by `SessionIdCollisionTestCase` in
+> `tests/test_session_manager.py`.
+
+### 2.9 `active_launch_options` mutated per-request without a lock — **Low**
+
+**Location:** `web/api.py:945-949, 5656-5662`
+
+**Problem.** Multi-key `dict.update` from request threads while `GET /api/sessions` reads the
+same dict. CPython makes each op atomic, so the worst case is a momentarily inconsistent
+layout/count pair — cosmetic, but easy to harden.
+
+**Proposed implementation.** Replace wholesale instead of updating in place:
+`active_launch_options = {**active_launch_options, ...}` assigned to a module global (atomic
+reference swap), or guard with a small lock.
+
+> **✅ Implemented (2026-07-11).** `create_sessions` now swaps the module global
+> atomically (`global` + dict rebuild), and the three multi-key readers
+> (`_get_group_response_meta` and the two group-less `GET /api/sessions` payload
+> branches) snapshot the reference into a local before subscripting, so each
+> response reads one consistent dict.
+
+### 2.10 Runtime agent tracking mutates connection-dict state outside `connection_lock` — **Low** *(new 2026-07-11)*
+
+**Location:** `web/api.py` — `handle_terminal_input` (:6612) → `_track_terminal_agent_input`
+(:4826-4893); introduced by commit `0eb8be7`.
+
+**Problem.** The handler fetches the connection dict under `connection_lock`, releases it, and
+then `_track_terminal_agent_input` reads and writes `connection["_gridvibe_input_line"]`,
+`_gridvibe_agent_interrupt_at`, and `_gridvibe_agent_interrupt_count` with no lock. Each
+Socket.IO event is handled on its own thread, so two browser windows joined to the same
+session (a supported flow — the replay buffer exists for it) can interleave keystrokes and
+lose/corrupt the reconstructed input line. The blast radius is small by design: only the
+*metadata heuristics* (agent start/exit detection, pane-mode tracking) can mis-fire —
+`_send_connection_input` and the actual terminal stream are unaffected. Also worth noting:
+`session_manager.get_session` is now called on every keystroke event (cheap RLock, but it is
+per-keystroke hot path).
+
+**Proposed implementation.** Move the tracking-state mutation under `connection_lock` (the
+work inside is trivial string handling, so lock hold time stays negligible), or key the
+line-reconstruction state per client (`(request.sid, session_id)`) so concurrent writers never
+share a buffer. Batchable with 2.9 into whichever PR touches `handle_terminal_input` next.
+
+> **✅ Implemented (2026-07-11).** First option: `_track_terminal_agent_input` now
+> does all `_gridvibe_*` read-modify-writes (interrupt counters and input-line
+> reconstruction) inside one `connection_lock` hold, while
+> `_mark_runtime_agent_exited`, the metadata promotion, and status broadcasts run
+> after the lock is released (keeping emits out of the lock per 2.4). The
+> per-keystroke `get_session` call noted above remains. Covered by
+> `AgentInputTrackingLockTestCase` in `tests/test_api.py`.
+
+---
+
+## 3. Performance & Optimisations
+
+### 3.1 Every explorer request opens a fresh SSH + SFTP connection — **High impact**
+
+**Location:** `web/api.py:4286-4302` (`_open_ssh_sftp`) used by all 8 remote explorer routes
+
+**Problem.** Each directory listing, file preview, git diff, stage/unstage, commit, and publish
+performs a full TCP + SSH handshake + auth + SFTP subsystem open, then tears it down. That is
+typically 300–1000 ms of overhead per click, and remote git panels issue *several* of these
+per refresh (`entries` → `git/repo` → `git/diff`). This is the single largest perceived-latency
+cost in the remote explorer.
+
+**Proposed implementation.** Add a small per-session connection cache:
+```python
+_sftp_pool: Dict[str, Tuple[float, Any, Any]] = {}   # session_id -> (last_used, client, sftp)
+_sftp_pool_lock = threading.Lock()
+SFTP_IDLE_TIMEOUT = 60.0
+
+def _acquire_ssh_sftp(session):
+    with _sftp_pool_lock:
+        entry = _sftp_pool.get(session.session_id)
+        if entry and entry[1].get_transport() and entry[1].get_transport().is_active():
+            _sftp_pool[session.session_id] = (time.monotonic(), entry[1], entry[2])
+            return entry[1], entry[2]
+    client, sftp = _open_ssh_sftp(session)            # existing function
+    with _sftp_pool_lock:
+        _sftp_pool[session.session_id] = (time.monotonic(), client, sftp)
+    return client, sftp
+```
+- Reap idle entries from a small background task (or opportunistically on each acquire).
+- Evict on session close (`_close_ssh_connection` / group close).
+- Per-session `threading.Lock` if SFTP channels must not be used concurrently (paramiko SFTP
+  is not thread-safe per channel), or open one channel per in-flight request from the cached
+  *client* (transport handshake is the expensive part; `client.open_sftp()` on a live transport
+  is cheap).
+- Keep the current open/close path as fallback when pooling fails.
+
+> **✅ Implemented (2026-07-11).** `web/api.py` gained a per-session SSH client pool
+> (`_ssh_client_pool`, `_ssh_client_pool_lock`, `SSH_CLIENT_POOL_IDLE_TIMEOUT = 60.0`) with
+> `_acquire_ssh_sftp(session)` / `_release_ssh_sftp(session, client, sftp)` used by all remote
+> explorer/git routes and `change_session_mode` (the old `_close_sftp_client` helper was
+> removed). The pool keeps the SSH *client* (transport) alive and opens a fresh SFTP channel
+> per request, so concurrent explorer requests never share an SFTP channel (paramiko SFTP
+> channels are not thread-safe; new channels on a live transport are cheap). Only genuine
+> `paramiko.SSHClient` instances with an active transport are pooled — anything else keeps the
+> historical open/close-per-request behaviour, which also keeps the MagicMock-based route tests
+> valid. Idle entries are reaped opportunistically on acquire; pool entries are evicted in
+> `_close_ssh_connection` (per session) and `_close_all_ssh_connections` (flush all, covering
+> explorer-only sessions that have no `ssh_connections` entry). Covered by
+> `SshSftpPoolTestCase` in `tests/test_api.py`.
+
+### 3.2 Rolling output buffer copies up to 50 KB per output chunk — **Medium**
+
+**Location:** `web/api.py:2055-2059` (`_cache_terminal_output`)
+
+**Problem.** `session_output_buffers[sid] = (existing + output)[-50000:]` allocates and copies
+the whole 50 KB tail for every 4 KB chunk, under `connection_lock`. A busy pane (e.g. `yes`,
+build logs) makes this a hot allocation loop that also lengthens lock hold times (compounding
+finding 2.4).
+
+**Proposed implementation.** Store chunks in a `collections.deque` with running length:
+```python
+buf = session_output_buffers.setdefault(sid, deque())
+buf.append(output); total = sum(map(len, buf))
+while total > 50000 and len(buf) > 1:
+    total -= len(buf.popleft())
+```
+Join with `''.join(buf)` only at replay time (`handle_join_session`), which is rare.
+
+> **✅ Implemented (2026-07-11).** `session_output_buffers` in `web/api.py` is now
+> `Dict[str, Deque[str]]` with a `TERMINAL_OUTPUT_BUFFER_MAX_CHARS = 50000` constant.
+> `_cache_terminal_output` appends the chunk and trims from the head (partially trimming the
+> oldest chunk when needed), preserving the exact last-50k-chars semantics of the old
+> string-slice implementation without the per-chunk full copy. A new
+> `_get_buffered_terminal_output(session_id)` joins the chunks at the two rare read sites
+> (`handle_join_session` replay and the live-cwd probe). Covered by
+> `TerminalOutputBufferCacheTestCase` in `tests/test_api.py`.
+
+### 3.3 SSH output loop busy-polls at 50 ms with a lock acquisition per iteration — **Low**
+
+**Location:** `web/api.py:2385-2412` (`_stream_ssh_output`)
+
+**Problem.** The loop wakes 20×/second per idle SSH pane, each time taking `connection_lock`
+just to fetch the connection dict. Eight idle panes = 160 lock acquisitions/sec doing nothing.
+
+**Proposed implementation.** Fetch the connection once before the loop (it never changes for a
+session lifetime; only its presence matters) and use paramiko's blocking recv with timeout:
+```python
+channel.settimeout(0.5)
+while not channel.closed:
+    try:
+        output = channel.recv(4096).decode("utf-8", errors="ignore")
+    except socket.timeout:
+        continue
+    if not output:
+        break
+    ...
+```
+Idle cost drops to ~2 wakeups/sec, and disappearance from `ssh_connections` is detected via the
+channel close that `_close_ssh_connection` already performs.
+
+> **✅ Implemented (2026-07-11).** `_stream_ssh_output` in `web/api.py` now fetches the
+> connection once before the loop, calls `channel.settimeout(SSH_STREAM_RECV_TIMEOUT)`
+> (0.5 s), and blocks on `channel.recv(4096)`: a `socket.timeout` re-checks
+> `exit_status_ready()` and continues, an empty recv (EOF) or `channel.closed` ends the loop.
+> Intentional closes are detected through the channel shutdown that `_close_ssh_connection`
+> performs, so the per-iteration `connection_lock` acquisition and the 50 ms sleep are gone.
+> Covered by `SshStreamBlockingRecvTestCase` in `tests/test_api.py`.
+
+### 3.4 3-second full-state polling on top of Socket.IO push — **Medium**
+
+**Location:** `templates/terminals.html:12941` (`setInterval(refreshStatuses, 3000)`),
+`refreshStatuses` fetches `/api/session-groups` + `/api/sessions?group=…` every tick;
+`main.py:33` exists solely to suppress the resulting log spam.
+
+**Problem.** Session status changes are already pushed over Socket.IO (`session_status`), and
+mode/pane changes trigger `initialLoad()` from the socket handler. The 3 s poll is a
+reconciliation safety net doing two HTTP requests per open window forever — and it required a
+special werkzeug log filter to hide.
+
+**Proposed implementation.**
+1. Emit a `session_groups_updated` Socket.IO event from the backend whenever groups are
+   created/removed/reordered (`create_sessions`, `close_all_sessions`, `reorder_session_groups`).
+2. Keep the poll as fallback but at 15–30 s, and pause it entirely while the socket is
+   connected (`socket.connected === true`), resuming on `disconnect`.
+3. The `_SuppressPollLogs` filter can then be deleted.
+
+> **✅ Implemented (2026-07-11).** `web/api.py` gained `_broadcast_session_groups_updated(reason)`,
+> emitted from session launch (`POST /api/sessions`), pane split, single-session close,
+> group/all close, and tab reorder. `templates/terminals.html` listens for
+> `session_groups_updated` (debounced 200 ms via `scheduleStatusRefresh()`) and reconciles on
+> socket *re*connect; the old 3-second `setInterval(refreshStatuses, 3000)` is now a 15-second
+> fallback that only runs while `socket.connected` is false. Step 3 was **not** taken: the
+> `_SuppressPollLogs` filter in `main.py` stays (comment updated) because push-triggered
+> refreshes still issue the same `GET /api/sessions` / `GET /api/session-groups` requests.
+> Covered by `SessionGroupsUpdatedBroadcastTestCase` in `tests/test_api.py`.
+
+### 3.5 ~18k lines of inline CSS/JS re-parsed on every page load — **Medium**
+
+**Location:** `templates/index.html` (5.4k lines), `templates/terminals.html` (13.2k lines —
+still growing: +280 lines across the 2026-07-11 commits)
+
+**Problem.** Everything ships inline in the HTML: no browser caching, no HTTP caching between
+launcher/session windows, and both Jinja templates are monolithic and hard to navigate. The
+session window is reopened often (new groups, restarts), re-downloading and re-parsing ~600 KB
+each time.
+
+**Proposed implementation.** Extract to `web/static/`:
+- `static/css/launcher.css`, `static/css/terminals.css`, `static/css/tokens.css` (shared
+  variables — see 7.1)
+- `static/js/launcher.js`, `static/js/terminals.js`, `static/js/shared.js` (see 6.4)
+- Keep only Jinja-templated constants inline (`{{ max_sessions }}`, `{{ agent_options|tojson }}`,
+  data-attributes on `<body>` — the terminals page already demonstrates the data-attribute
+  pattern for voice config).
+Serve via Flask's static handling with cache headers; bust with `?v={{ version }}` using
+`gridvibe_version.__version__`.
+
+> **✅ Implemented (2026-07-12).** Extracted to `web/static/css/launcher.css` /
+> `terminals.css` and `web/static/js/launcher.js` / `terminals.js` (plus `shared.js`,
+> see 6.4), all referenced with `?v={{ version }}`. `templates/index.html` shrank
+> 5,440 → ~365 lines and `templates/terminals.html` 13,195 → ~205 lines; only the
+> server-rendered constants stay inline (`BROWSER_SHUTDOWN_TOKEN`, `AGENT_OPTIONS`,
+> `LOCAL_WINDOWS_SHELLS_AVAILABLE`, `DEFAULT_SURFACE_MODE`, `MAX_SESSIONS`). The one
+> Jinja conditional inside the launcher script (`{% if local_windows_shells_available %}`
+> around the WSL/PowerShell shell fields) became a runtime gate on
+> `LOCAL_WINDOWS_SHELLS_AVAILABLE`, so the markup ships to all platforms but only
+> renders on Windows. Tests: page-content assertions now go through a `_page_html`
+> helper that appends the page's own static assets, and a new
+> `ExtractedFrontendAssetsTestCase` locks in the versioned links, shared-before-page
+> load order, and Jinja-free asset bodies. `tokens.css` (7.1) remains open.
+
+### 3.6 xterm.js and socket.io are loaded from a CDN — **High** (reliability)
+
+**Location:** `templates/terminals.html:7, 2927-2929`
+
+**Problem.** GridVibe is a local-first tool (docs emphasise offline/localhost operation), yet
+the terminals page hard-depends on `cdn.jsdelivr.net`. No network (or a corporate proxy) means
+*no terminals at all* — the `try/catch` around `io()` only degrades to polling, and `Terminal`
+being undefined breaks the page. It is also a supply-chain exposure: a compromised CDN script
+runs with access to every terminal.
+
+**Proposed implementation.** Vendor the three files (xterm 5.3.0 css+js, xterm-addon-fit 0.8.0,
+socket.io-client 4.7.2) into `web/static/vendor/` and reference them via `url_for('static', ...)`.
+~200 KB total, licence-compatible (MIT). Optionally add Subresource Integrity if the CDN must
+stay.
+
+> **✅ Implemented (2026-07-11).** The four assets (xterm 5.3.0 `xterm.css` + `xterm.min.js`,
+> xterm-addon-fit 0.8.0, socket.io-client 4.7.2) are vendored in `web/static/vendor/` with a
+> `README.md` documenting versions, sources, and licences, and `templates/terminals.html`
+> references them via `url_for('static', filename='vendor/…')`. No `cdn.jsdelivr.net`
+> references remain in either template, so the terminals page works fully offline. Flagged in
+> `CHANGELOG.md`. Covered by `VendoredFrontendAssetsTestCase` in `tests/test_api.py`.
+
+### 3.7 Fallback local-output path reads 1 byte at a time — **Low**
+
+**Location:** `web/api.py:2493-2506` (`_stream_local_output`, `stdout_handle` branch)
+
+**Problem.** `stdout_handle.read(1)` does a syscall per byte and emits per-character Socket.IO
+messages. This path is only hit when neither WinPTY nor a POSIX PTY is available (rare), but
+when hit it is pathological.
+
+**Proposed implementation.** `os.read(stdout_handle.fileno(), 4096)` /
+`stdout_handle.read1(4096)` with the same loop structure as the other branches.
+
+> **✅ Implemented (2026-07-11).** The `stdout_handle` branch of `_stream_local_output` in
+> `web/api.py` now uses `stdout_handle.read1(4096)` (returns whatever is buffered, blocking
+> until at least one byte or EOF) when the handle provides it, falling back to the old
+> `read(1)` only for handles without `read1`. Covered by
+> `LocalPtyStreamTestCase.test_stream_local_output_fallback_reads_chunks_via_read1` in
+> `tests/test_api.py`.
+
+---
+
+## 4. Correctness Bugs
+
+### 4.1 PowerShell startup directory is quoted with POSIX rules — **Medium**
+
+**Location:** `web/api.py:2360-2363` (`_run_startup_sequence`)
+
+**Problem.**
+```python
+_send_connection_input(connection, f"Set-Location -LiteralPath {shlex.quote(target_directory)}{newline}")
+```
+`shlex.quote` implements POSIX shell quoting. For simple paths it happens to produce
+PowerShell-compatible single quotes, but: (a) a path *without* special chars is passed
+unquoted, so `C:\Program Files\x` becomes two arguments; (b) a path containing a single quote
+is quoted as `'…'"'"'…'`, which PowerShell parses differently. The codebase already has the
+correct helper, `_powershell_single_quote` (`web/api.py:1113`), used elsewhere.
+
+**Proposed implementation.**
+```python
+elif shell_kind == "powershell":
+    _send_connection_input(
+        connection,
+        f"Set-Location -LiteralPath {_powershell_single_quote(target_directory)}{newline}",
+    )
+```
+Note `C:\Program Files` paths are common on the exact platform (Windows) this branch targets.
+
+> **✅ Implemented (2026-07-10).** The `powershell` branch of `_run_startup_sequence` now quotes
+> the target directory with the existing `_powershell_single_quote` helper instead of
+> `shlex.quote`.
+
+### 4.2 xterm theme uses the removed `selection` key — **Low**
+
+**Location:** `templates/terminals.html:6139-6144` (`makeTerminal`)
+
+**Problem.** xterm.js 5.x renamed `theme.selection` to `theme.selectionBackground` (removed in
+5.0). The configured cyan selection tint is silently ignored; selections render with the
+default colour.
+
+**Proposed implementation.**
+```js
+theme: {
+    background: '#0d0d0d',
+    foreground: '#e0e0e0',
+    cursor: '#00d9ff',
+    selectionBackground: 'rgba(0,217,255,.25)'
+}
+```
+
+> **✅ Implemented (2026-07-10).** `makeTerminal()` in `templates/terminals.html` now sets
+> `selectionBackground` instead of the removed `selection` theme key, restoring the cyan
+> selection tint.
+
+### 4.3 Launch button renames itself after the first launch — **Low**
+
+**Location:** `templates/index.html:2338` (initial label `Launch Workspace →`) vs `:5233, 5238`
+(reset to `'Launch Terminals'` with no arrow)
+
+**Problem.** After any launch attempt (success or failure) the primary CTA permanently changes
+from "Launch Workspace →" to "Launch Terminals". Cosmetic, but it is the most prominent button
+in the app.
+
+**Proposed implementation.** Capture and restore the original markup:
+```js
+const originalHtml = button.innerHTML;      // before disabling
+...
+button.innerHTML = originalHtml;            // in both reset paths
+```
+(There are two reset sites — success `setTimeout` and the `catch` — update both, or extract a
+`resetLaunchButton()` helper.)
+
+> **✅ Implemented (2026-07-13).** `launchSessions` in `web/static/js/launcher.js` captures
+> `button.innerHTML` before disabling and restores it at both reset sites, so the CTA keeps
+> its "Launch Workspace →" markup after a launch. The stale `'Launch Terminals'` label is
+> gone; locked in by `test_launcher_button_and_dead_display_fixes_locked_in` in
+> `tests/test_api.py`.
+>
+> **Superseded (2026-07-14)** by 8.2's structural fix: the button markup is never rewritten
+> at all — `setLaunchButtonLoading` toggles a `.loading` class and only updates the
+> `.action-btn-label` span text.
+
+### 4.4 Save Session uses `window.prompt`, which WebView2 blocks — **High**
+
+**Location:** `templates/index.html:4765-4799` (`saveCurrentConfig`)
+
+**Problem.** `window.prompt(...)` returns `null` in pywebview's EdgeChromium (WebView2)
+backend — WebView2 does not implement `prompt()` unless the host handles the script-dialog
+event, which `webview_launcher.py` does not. `rawName === null` → the function returns
+silently. In the native desktop app the "💾 Save Session" button therefore does nothing, with
+no error. (The terminals window already solved this: it has a proper `saveSessionAsModal`
+dialog.)
+
+**Proposed implementation.** Replace the `prompt()` call with a small name-input modal
+mirroring `saveSessionAsModal` from `terminals.html` (title "Save Session", pre-filled with
+`buildDefaultSessionName()`, Save/Cancel). Since 6.4 proposes sharing template JS anyway, the
+modal + `openSaveSessionAsModal()` logic can be lifted verbatim into the shared file and reused
+by both pages.
+
+> **✅ Implemented (2026-07-10).** `templates/index.html` gained a `saveSessionNameModal`
+> (mirroring the terminals page's `saveSessionAsModal` pattern: promise-based
+> `openSaveSessionNameModal()` / `closeSaveSessionNameModal()`, pre-filled with
+> `buildDefaultSessionName()`, Enter submits, Escape/backdrop cancels), and
+> `saveCurrentConfig` awaits it instead of calling `window.prompt`. Implemented directly in
+> `index.html` since the shared-JS extraction (6.4) hasn't landed yet — lift it into
+> `shared.js` when that refactor happens.
+
+### 4.5 `info` and `warning` message types are used but unstyled — **Low**
+
+**Location:** `templates/index.html` — CSS defines only `.message.success/.message.error`
+(`:495-496`) and `.inline-status.success/.error`; but code calls
+`showMessage(..., 'info')` (`:4050, 5084`) and `showMessage(..., 'warning')` (`:5211`).
+
+**Problem.** Info and warning messages render in the default muted grey — a launch that cleared
+startup commands after failed preflight (a warning users should notice) looks identical to the
+idle hint text.
+
+**Proposed implementation.** Add the two missing rules to both pages' message/status styles:
+```css
+.message.info,   .toolbar-status.info,   .inline-status.info   { color: var(--accent); }
+.message.warning,.toolbar-status.warning,.inline-status.warning{ color: #f59e0b; }
+```
+(Consider adding `--warning: #f59e0b` to the token set — there is currently no warning colour
+variable in either palette, which is why this hole appeared.)
+
+> **✅ Implemented (2026-07-10).** `templates/index.html` now defines a `--warning` token
+> (`#f59e0b` dark, `#b45309` light for contrast) and `.info` / `.warning` rules for all three
+> status classes (`.message`, `.toolbar-status`, `.inline-status`), with info mapped to
+> `var(--accent)`.
+
+### 4.6 `setLocalRepoPath` updates a DOM node that no longer exists — **Low**
+
+**Location:** `templates/index.html:3953-3969`
+
+**Problem.** The function looks up `wsl_default_dir_display` and maintains its text/empty
+state, but `WSL_FIELDS` (`:2805-2819`) renders only the `wsl_default_dir` input — the display
+element was removed in an earlier refactor. Dead branch executed on every path change.
+
+**Proposed implementation.** Delete the `display` lookup and the `if (display) {...}` block.
+
+> **✅ Implemented (2026-07-13).** The dead `wsl_default_dir_display` lookup and its
+> `if (display)` block were removed from `setLocalRepoPath` (now in
+> `web/static/js/launcher.js`); no reference to the element remains. Locked in by
+> `test_launcher_button_and_dead_display_fixes_locked_in` in `tests/test_api.py`.
+
+### 4.7 `config.json` silently overrides explicit CLI flags — **Medium**
+
+**Location:** `main.py:104-107`, duplicated in `web/webview_launcher.py:929-932`
+
+**Problem.**
+```python
+host = config.get("server", {}).get("host", args.host)
+```
+Config wins over CLI. A user who runs `python main.py --port 8080` while `config.json` contains
+`"port": 5050` gets 5050 with no warning — inverted from the universal convention that explicit
+command-line flags beat config files.
+
+**Proposed implementation.** Detect whether flags were explicitly passed by using `None`
+defaults:
+```python
+parser.add_argument("--port", type=int, default=None, ...)
+...
+port = args.port if args.port is not None else config.get("server", {}).get("port", 5050)
+```
+Same for `--host` and `--debug` (use `default=None` + `action=argparse.BooleanOptionalAction`
+or a tri-state). Apply in both entry points (or better: extract one shared
+`resolve_server_settings(args)` helper, see 5.7).
+
+> **✅ Implemented (2026-07-13).** As proposed: both entry points (`main.py`,
+> `web/webview_launcher.py`) now parse `--host`/`--port` with `default=None` and `--debug`
+> with `argparse.BooleanOptionalAction` (tri-state, adds `--no-debug`), and resolve the
+> final values through a shared `resolve_server_settings(config, *, host, port, debug)` in
+> `web/config.py` — explicit CLI flags beat `config.json`, which beats the built-in
+> defaults. `main.py`'s logging setup now also uses the *resolved* debug flag instead of
+> the raw CLI flag. Covered by `ResolveServerSettingsTestCase` in `tests/test_main.py`.
+
+### 4.8 Vosk service port is configured in two disconnected keys — **Medium**
+
+**Location:** `default_config.json` (`vosk_service_url` **and** `vosk_service_port`);
+`web/api.py:300` reads only the URL; `services/vosk_service.py:45` reads only the port.
+
+**Problem.** Changing `vosk_service_port` moves the service, but the API keeps dialing the old
+URL (and vice versa). The two processes desync with a confusing "voice service unavailable"
+failure. Additionally `vosk_service.py._load_config_defaults` reads only `config.json` — it
+ignores `default_config.json`, unlike every other config consumer.
+
+**Proposed implementation.**
+1. Make `vosk_service_url` the single source of truth. In `vosk_service.py`, parse the port
+   from it:
+   ```python
+   from urllib.parse import urlparse
+   port = urlparse(voice.get("vosk_service_url", "ws://localhost:2700")).port or DEFAULT_PORT
+   ```
+2. Remove `vosk_service_port` from `default_config.json` (accept it as a fallback for one
+   release, warn when present).
+3. Have `_load_config_defaults` reuse the layered loading (import `load_config` from `web.api`
+   is heavy — instead replicate the two-file merge in ~6 lines, or move `load_config` into a
+   tiny `utils/config.py` both can import).
+
+> **✅ Implemented (2026-07-13).** `vosk_service_url` is the single source of truth:
+> `services/vosk_service.py` now imports the Flask-free `web.config.load_config` (layered
+> `default_config.json` + `config.json` merge, fixing the step-3 gap) and parses the port
+> from the URL with `urllib.parse.urlparse`. `vosk_service_port` was removed from
+> `default_config.json`; when the key is still present in a user's `config.json` it logs a
+> deprecation warning and is honoured only if the URL carries no port. The example config
+> in `docs/voice_guideline.md` was updated. Covered by `VoskServiceConfigTestCase` in the
+> new `tests/test_vosk_service.py`.
+
+### 4.9 `cleanup.py` deletes live logs, and has leftover/odd semantics — **Low**
+
+**Location:** `utils/cleanup.py`
+
+**Problems.**
+1. The `*.log` pattern deletes `logs/gridvibe.log` while the server may be running — on Windows
+   the file is locked by `RotatingFileHandler`, producing "Error removing" spam; on POSIX it
+   silently unlinks the active log.
+2. The banner prints **"Terminal Flow Cleanup"** — a previous project name.
+3. `find_and_remove("*.pyc")` also matches *directories* ending in `.pyc` and would `rmtree`
+   them; the `is_dir` parameter only controls pruning, not whether the dir branch runs.
+4. `DESTRUCTIVE_PATTERNS = []` is unused (see 5.4).
+
+**Proposed implementation.** Rewrite the walker with explicit dir/file pattern lists (mirroring
+what `make clean` / `make clear-logs` already do): `DIR_PATTERNS = {"__pycache__"}`,
+`FILE_PATTERNS = {"*.pyc", "*.pyo"}`, and handle logs by *truncating* (`path.write_text("")`)
+rather than unlinking. Update the banner to "GridVibe Cleanup". Alternatively, deprecate
+`cleanup.py` entirely in favour of the Makefile targets, keeping the root shim printing a
+pointer message.
+
+> **✅ Implemented (2026-07-13).** `utils/cleanup.py` was rewritten with explicit pattern
+> lists: `DIR_PATTERNS` (`__pycache__`, removed recursively), `FILE_PATTERNS`
+> (`*.pyc`/`*.pyo`, deleted — files only, so a *directory* named like the pattern is no
+> longer `rmtree`'d), and `TRUNCATE_PATTERNS` (`*.log`, emptied in place so the live
+> `logs/gridvibe.log` held open by `RotatingFileHandler` survives). Banner now reads
+> "GridVibe Cleanup" and the unused `DESTRUCTIVE_PATTERNS` is gone (the 5.4 item for this
+> file). Dry-run/`--confirm` semantics and the root shim are unchanged. Covered by
+> `CleanupTestCase` in the new `tests/test_cleanup.py`.
+
+### 4.10 Misindented `return jsonify` block in `get_explorer_entries` — **Low**
+
+**Location:** `web/api.py:4958-4967`
+
+**Problem.** The local-explorer success return is indented one level deeper than its siblings
+(dict keys at odd offsets). Valid Python, but visually implies nesting that does not exist and
+will trip up future edits.
+
+**Proposed implementation.** Re-indent the block to match the remote branch's formatting.
+`ruff format` (or `ruff check --select E1`) would catch this class of issue; consider adding
+formatting to `make fix`.
+
+> **✅ Resolved (2026-07-12).** The misindented block was removed wholesale when the
+> entries route was rewritten onto the shared explorer backend (see 6.1).
+
+---
+
+## 5. Dead Code & Dead Config
+
+### 5.1 Unused config keys promise features that don't exist — **Medium**
+
+**Location:** `default_config.json` — `ssh.default_username`,
+`terminal.default_rows`, `terminal.default_cols`, `terminal.font_family`, `terminal.font_size`
+
+**Problem.** Grep confirms none of these keys are read anywhere in the codebase. Users editing
+them see no effect. `font_size` describes genuinely useful behaviour (see feature 10.2).
+
+> **Partially resolved (2026-07-11 re-validation):** `ssh.keepalive_interval` is now read and
+> applied by `_connect_ssh_session` (feature 10.1, implemented 2026-07-10) and is removed from
+> this finding's scope. The five keys above remain unread.
+
+**Proposed implementation.** For each key, either wire it up (preferred where cheap — see
+10.2) or delete it from `default_config.json` and mention the removal in `CHANGELOG.md`.
+`ssh.default_username` overlaps with the per-saved-session username and should be removed;
+`default_rows/cols` are superseded by the fit addon and should be removed.
+
+> **✅ Implemented (2026-07-13).** `ssh.default_username`, `terminal.default_rows`, and
+> `terminal.default_cols` removed from `default_config.json` (flagged in `CHANGELOG.md`).
+> `terminal.font_size` and `terminal.font_family` graduated to feature 10.2 (see below):
+> both are now read by `RuntimeConfig` in `web/config.py` and passed to every xterm
+> instance at page load, so changing either key in `config.json` takes effect on next
+> terminal page open. Covered by `DeadCodeSweepTestCase` in `tests/test_api.py`.
+
+### 5.2 `/api/sessions/active` has no frontend callers — **Low**
+
+**Location:** `web/api.py:5349-5373`
+
+**Problem.** Neither template references `sessions/active`; the endpoint is exercised only by
+tests. It duplicates `/api/sessions` filtering logic and is one more surface to keep consistent.
+
+**Proposed implementation.** Delete the route and its tests, or — if it is considered public
+API for external tooling — document it in the README API table so it stops looking accidental.
+
+> **✅ Implemented (2026-07-13).** Route removed from `web/api.py`; `GET /api/sessions/active`
+> now returns 404. No test cases existed for this route; a `test_sessions_active_endpoint_removed`
+> regression guard was added to `DeadCodeSweepTestCase` in `tests/test_api.py`.
+
+### 5.3 `SessionManager`'s callback registry is dead — **Low**
+
+**Location:** `sessions/manager.py:120, 550-569` (`_session_callbacks`, `register_callback`,
+`_notify_callbacks`)
+
+**Problem.** `register_callback` is never called outside `sessions/manager.py` and its tests,
+so `_notify_callbacks` iterates an always-empty list on every status update — while holding the
+manager lock (the docstring even warns about the re-entrancy hazard). Pure ceremony.
+
+**Proposed implementation.** Remove `register_callback`, `_notify_callbacks`,
+`_session_callbacks`, the two call sites in `update_session_status`/`close_session`, the
+cleanup in `_remove_group_sessions_locked` / `reset_sessions` / `clear_disconnected_sessions`,
+and the associated tests. If status hooks are wanted later, Socket.IO broadcast in
+`_broadcast_session_status` already fills that role at the web layer.
+
+> **✅ Implemented (2026-07-13).** `_session_callbacks`, `register_callback`, and
+> `_notify_callbacks` removed from `sessions/manager.py`; the five call/cleanup sites
+> removed; `Callable` dropped from the import. The two test methods that exercised callback
+> behaviour were trimmed to cover only the status-update and cleanup core. `Callable` is no
+> longer imported. Covered by `test_session_manager_has_no_callback_registry` in
+> `DeadCodeSweepTestCase`.
+
+### 5.4 Assorted dead fragments — **Low**
+
+**Locations / items.**
+- `utils/cleanup.py:8` — `DESTRUCTIVE_PATTERNS = []` never used.
+- `web/webview_launcher.py:33-40` — `_NATIVE_FRAME_THEMES` is a one-entry dict keyed by a
+  constant; `_apply_windows_dark_frame_attributes` could inline the three colours.
+- `sessions/manager.py:576-578` — `get_active_session_count` unused outside tests.
+- `templates/index.html` `.section-title svg { display: none; }` — every step-title SVG is
+  rendered and then hidden by CSS; delete the SVGs or the rule.
+
+**Proposed implementation.** Delete each; none has behavioural impact. (Batchable into one
+"dead code sweep" commit validated by `make check`.)
+
+> **✅ Fully resolved (2026-07-13).** `DESTRUCTIVE_PATTERNS` gone with the 4.9 rewrite;
+> the remaining three items are now closed:
+> - `_NATIVE_FRAME_THEMES` dict + `_NATIVE_FRAME_THEME` constant inlined into a plain
+>   `_NATIVE_FRAME_COLORS` dict in `web/webview_launcher.py`.
+> - `get_active_session_count` removed from `sessions/manager.py`.
+> - Three hidden SVGs deleted from the `section-title` divs in `templates/index.html`;
+>   the dead `.section-title svg { display: none; }` CSS rule removed from
+>   `web/static/css/launcher.css`. Covered by `test_section_title_svgs_removed_from_launcher`
+>   in `DeadCodeSweepTestCase`.
+
+### 5.5 `set_native_theme(theme)` ignores its argument — **Low**
+
+**Location:** `web/webview_launcher.py:558-562`; called from both templates' `syncNativeTheme`
+
+**Problem.** The JS bridge dutifully computes and passes the resolved theme on every theme
+change, but the Python side unconditionally sets `self._native_theme = _NATIVE_FRAME_THEME`
+("dark"). Either the parameter (and the JS plumbing that computes it) is dead weight, or the
+intent was a light native frame that never got finished — the launcher shows a dark title bar
+around a light-themed page.
+
+**Proposed implementation.** Decide the intent:
+- **Keep frames always-dark (current behaviour):** change the signature to
+  `set_native_theme(self, _theme=None)` with a comment, and simplify `syncNativeTheme` in both
+  templates to pass nothing.
+- **Support light frames:** add a `"light"` entry to `_NATIVE_FRAME_THEMES` (caption `#f8fafc`,
+  text `#111827`, border `#e5e7eb`), honour the parameter, and set DWM attribute 20 to 0 for
+  light mode.
+
+> **✅ Implemented (2026-07-13).** Always-dark option chosen: `set_native_theme` signature
+> changed to `(self, _theme=None)` with a comment; `syncNativeTheme` in `web/static/js/shared.js`
+> now calls `bridge.set_native_theme()` with no argument. `_NATIVE_FRAME_THEMES` and
+> `_NATIVE_FRAME_THEME` removed (part of the 5.4 inline). Covered by
+> `test_set_native_theme_always_dark_regardless_of_argument` in `tests/test_webview_launcher.py`.
+
+### 5.6 The `⋮` Options button on launcher terminal cards does nothing — **Low**
+
+**Location:** `templates/index.html:4519` (`.t-menu-btn`, `title="Options"`) — no event handler
+anywhere.
+
+**Problem.** Every terminal card renders a kebab-menu button that has never been wired up.
+Users click it and nothing happens.
+
+**Proposed implementation.** Either remove it, or implement the obvious menu (this is also a
+button improvement): a small popover with **Duplicate terminal** (copy this row's draft into
+the next slot), **Reset to defaults**, and **Move left/right** (reorder drafts). All three
+operate purely on `collectTerminalDrafts()` + `buildTerminalRows()`, so no backend work is
+needed. Removal is a one-line change if the menu isn't wanted.
+
+> **✅ Implemented (2026-07-13).** Button removed from the terminal card template in
+> `web/static/js/launcher.js`; `.t-menu-btn` CSS block removed from
+> `web/static/css/launcher.css`. Covered by `test_t_menu_btn_removed` in
+> `DeadCodeSweepTestCase`.
+
+### 5.7 Three near-identical server-run entry points — **Low**
+
+**Location:** `main.py:117-125`, `web/api.py:6794-6805` (`run_server`), `web/webview_launcher.py:896-905`
+(`_run_server`)
+
+**Problem.** Three code paths call `socketio.run(app, ...)` with slightly different flags
+(`allow_unsafe_werkzeug` present in two, `use_reloader=False` in one). Behaviour drifts —
+e.g. `web/api.py.run_server` lacks `allow_unsafe_werkzeug=True`, so `python api.py` (the
+documented shim path) can refuse to start under newer Werkzeug while `python main.py` works.
+
+**Proposed implementation.** Single `run_server(host, port, debug, *, use_reloader=False)` in
+`web/api.py` with all flags; `main.py` and the launcher call it. Also the config-vs-CLI
+resolution (finding 4.7) should live in this one place.
+
+> **✅ Implemented (2026-07-13).** As proposed: `web/api.py`'s `run_server` gained
+> `use_reloader=False` and `allow_unsafe_werkzeug=True`, and is now the only place that
+> calls `socketio.run`; `main.py` calls it directly and the launcher's `_run_server`
+> delegates to it (so `python api.py` no longer refuses to start under newer Werkzeug).
+> The config-vs-CLI resolution lives in the shared `resolve_server_settings` (finding 4.7).
+> Covered by `SharedRunServerTestCase` in `tests/test_api.py` (full flag set + both entry
+> points sharing the same function object).
+
+---
+
+## 6. Code Quality / DRY / Architecture
+
+### 6.1 Local vs remote explorer/git logic is systematically duplicated — **High value**
+
+**Location:** `web/api.py` ~lines 2900–4420 plus all explorer routes (~2,000 lines total).
+Function pairs include: `_resolve_explorer_candidate_path` / `_resolve_remote_explorer_candidate_path`,
+`_git_status_for_entry` / `_remote_git_status_for_entry` (byte-identical logic),
+`_append_deleted_git_entries` / `_append_deleted_remote_git_entries`,
+`_bounded_git_diff` / `_bounded_remote_git_diff`, `_get_git_repo_summary` /
+`_get_remote_git_repo_summary`, `_git_stage_path` / `_remote_git_stage_path`, … and every
+explorer route contains an `if _is_remote_explorer_session(session): …duplicate body… else:
+…duplicate body…` split.
+
+**Problem.** Each behavioural change (e.g. the recently added stage/unstage/commit/publish)
+must be written twice and reviewed twice; the two copies have already begun to drift
+(`_get_git_diff` returns `byte_count`+`line_count`, `_get_remote_git_diff` returns `raw_bytes`
+— frontend has to tolerate both).
+
+**Proposed implementation.** Introduce an explorer backend abstraction:
+```python
+class ExplorerBackend(Protocol):
+    def resolve_dir(self, requested) -> tuple[str, str]: ...
+    def resolve_file(self, requested) -> tuple[str, str]: ...
+    def list_entries(self, path) -> list[dict]: ...
+    def read_file(self, path, limit) -> bytes: ...
+    def run_git(self, args, cwd, timeout, write=False) -> CompletedProcess: ...
+    def rel_path(self, root, path) -> str: ...
+    def path_join / path_dirname / path_inside(...) -> ...: ...
+
+class LocalExplorerBackend: ...      # os / subprocess implementations
+class SftpExplorerBackend:           # paramiko implementations
+    def __enter__/__exit__: ...      # owns client lifetime (pairs with pooling, 3.1)
+```
+All `_git_*` helpers then exist **once**, parameterised by `backend.run_git` and the path
+helpers. Each route body shrinks to:
+```python
+with explorer_backend_for(session) as backend:
+    root, path = backend.resolve_file(request.args.get("path"))
+    return jsonify(_git_diff_payload(backend, root, path, mode, commit))
+```
+This is the highest-leverage refactor in the codebase (roughly −1,000 lines) and the natural
+place to slot in the SFTP connection pool (3.1). Migrate one route at a time with the existing
+tests (`tests/test_api.py` is 6.9k lines and covers these routes) as the safety net.
+
+> **✅ Implemented (2026-07-12).** `web/api.py` gained `_LocalExplorerBackend` /
+> `_SftpExplorerBackend` (duck-typed rather than a formal Protocol) exposing `run_git`,
+> path helpers (`repo_relative_path`, `pathspec`, `repo_abs_path`, `path_inside_root`,
+> `rel_explorer_path`, `basename`, `file_dirname`), session path resolution
+> (`resolve_dir/file/candidate/diff_path`, `root_directory`), and read-only filesystem
+> access (`list_entries`, `stat_file`, `read_file_prefix`, `parent_explorer_path`).
+> All formerly duplicated `_git_*`/`_remote_git_*` helpers now exist once, parameterised
+> by the backend; the `_explorer_backend(session)` context manager owns the pooled SSH
+> client lifetime (3.1), and all 8 explorer routes are single-body via
+> `_explorer_route_response`. Net ~−900 lines. The known payload drift was resolved:
+> remote Git diffs now return `byte_count`+`line_count` like local ones (`raw_bytes`
+> dropped; nothing consumed it) — locked in by an assertion added to
+> `test_explorer_git_diff_returns_bounded_ssh_file_diff`. Finding 4.10 (misindented
+> return block) disappeared with the entries-route rewrite. Existing local+remote route
+> tests were the safety net; suite green, `ruff` clean.
+
+### 6.2 `web/api.py` is a 7,261-line monolith — **Medium** *(was 6,805 on 2026-07-10; +456 lines since)*
+
+**Location:** `web/api.py`
+
+**Problem.** Config, crypto, saved sessions, agent preflight, self-update, SSH/PTY session
+plumbing, two explorer implementations, git tooling, HTTP routes, Socket.IO handlers, and two
+voice engines all share one module and one global namespace (60+ module globals). Navigation
+and review cost is high; import side effects (Fernet key creation, config load, Flask app
+creation) all fire on `import web.api`.
+
+**Proposed implementation.** Split along the seams that already exist as comment banners:
+```
+web/
+├── app.py            # Flask app + SocketIO creation, blueprint registration
+├── config.py         # load/save/merge config, runtime globals → a Config object
+├── secrets.py        # Fernet key + password encrypt/decrypt
+├── saved_sessions.py # saved-session persistence + normalization
+├── agents.py         # registry, detection, preflight
+├── selfupdate.py     # perform_self_update + route
+├── terminal_io.py    # connections dict, streams, startup sequence, resize
+├── explorer/         # backend abstraction from 6.1 + routes
+├── voice.py          # vosk + whisper handlers
+└── api.py            # thin re-export shim for backward compatibility
+```
+Keep `web.api` re-exporting `app`, `socketio`, `session_manager`, `load_config` so `main.py`,
+the launcher, the root shims, and the tests keep working during the transition. Do it
+incrementally (one module per PR), running `make check` between steps.
+
+> **⚠️ Partially implemented (2026-07-12) — first tranche.** Extracted `web/paths.py`
+> (`BASE_DIR`), `web/secrets.py` (Fernet key + `_encrypt_password`/`_decrypt_password`),
+> and `web/selfupdate.py` (`AppUpdateError`, `_run_repo_git`, `perform_self_update`),
+> with `web.api` importing/re-exporting the names; the self-update tests now patch
+> `web.selfupdate` directly. Also 6.1's backend abstraction removed ~900 explorer lines,
+> and 3.5 removed the giant templates from the review radius. Remaining modules are
+> blocked on extracting the runtime-config globals into a Config object first
+> (`_open_ssh_sftp` and most terminal/voice code read module-level config globals that
+> tests patch on `web.api`), so the next tranche should be `config.py`, then
+> `explorer.py` (helpers + pool), then `terminal_io.py`/`voice.py`/`app.py`.
+
+> **⚠️ Partially implemented (2026-07-12, later the same day) — second tranche.** The two
+> next modules named above landed:
+> - `web/config.py` — `load_config`/`save_config`/`_merge_dicts`, `WHISPER_MODEL_OPTIONS`,
+>   `_normalize_surface_mode`, and a `RuntimeConfig` class whose singleton `runtime_config`
+>   replaces the former 14 config-backed module globals (`app_config`, `ssh_config`,
+>   `max_sessions`, `app_theme`, the voice settings, …). `web/api.py` reads
+>   `runtime_config.<name>` everywhere (91 call sites rewritten), and
+>   `api._refresh_runtime_config()` delegates to `runtime_config.refresh()`. Tests patch
+>   attributes on `api.runtime_config` (same object as `web.config.runtime_config`) and
+>   path constants on `web.config`. Covered by `RuntimeConfigExtractionTestCase`.
+> - `web/hostkeys.py` — `KNOWN_HOSTS_PATH` + `_load_persistent_host_keys` (finding 1.4),
+>   shared by terminal SSH code in `web.api` and the explorer pool without a cycle.
+> - `web/explorer.py` (~1,700 lines) — session classification, explorer path resolution,
+>   both explorer backends from 6.1, the single parameterised Git helper set, and the SSH
+>   client pool from 3.1. Its only project dependencies are `web.config` and
+>   `web.hostkeys`, so no `web.api` cycle. Covered by `ExplorerModuleExtractionTestCase`;
+>   the pool/known-hosts tests now target `web.explorer`/`web.hostkeys` directly.
+>
+> `web.api` re-exports all moved names, so `main.py`, the launcher, and the root shims are
+> untouched; `web/api.py` shrank 6,646 → ~4,830 lines. Remaining tranches (the only step-5
+> work left): `terminal_io.py`, `voice.py`, `saved_sessions.py`/`agents.py`, and `app.py`
+> (Flask/SocketIO creation) — no longer blocked on anything, just not yet extracted.
+
+> **✅ Implemented (2026-07-13) — final tranches; finding closed.** The remaining five
+> modules landed, completing the split proposed above:
+> - `web/app.py` — Flask app + SocketIO creation, `_resolve_secret_key`,
+>   `_resolve_cors_origins`, the cross-origin write guard (1.2), and the shared
+>   `SessionManager` singleton.
+> - `web/saved_sessions.py` — session-config normalization (`_normalize_session_config`,
+>   layout/startup-mode/browser-URL normalizers, workspace merge) and the
+>   `saved_sessions.json` persistence flows (load/save/upsert/delete/last-used).
+> - `web/agents.py` — agent registry, the four detection probes with their result cache
+>   (2.5's check/compute/re-store pattern preserved), preflight payloads, launch-command
+>   sanitizing, SSH ping/TCP probes, WSL distro inspection, and the shell-quoting helpers.
+> - `web/terminal_io.py` — the connection registry (`ssh_connections`, replay buffers,
+>   `connection_lock` with its lock-ordering comment), output pumps (`_stream_ssh_output`,
+>   `_stream_local_output`), startup sequence, resize/input plumbing, runtime agent-command
+>   tracking (2.10), and the SSH/local/WSL connectors.
+> - `web/voice.py` — vosk-service lifecycle, per-session Vosk WebSocket connections, the
+>   lazily rebuilt faster-whisper model (2.7), audio buffering/transcription, voice prefs,
+>   and the optional `websocket-client`/`numpy`/`faster-whisper` imports.
+>
+> `web/api.py` is now ~1,800 lines of HTTP routes, Socket.IO handlers, and app-config
+> helpers, importing (and re-exporting with `# noqa: F401` blocks) every moved name, so
+> `main.py`, `web/webview_launcher.py`, and the root shims are untouched. Flask routes and
+> Socket.IO event handlers stay in `web.api` and delegate to the new modules (the
+> `explorer/` sub-package variant from the sketch was not needed — `web/explorer.py`
+> already covers it). Tests that patch internals moved with their code (patching
+> `web.terminal_io` / `web.voice` / `web.agents` / `web.saved_sessions` directly, same
+> pattern as the earlier tranches); shared mutable state is re-exported by object identity
+> so in-place mutation through `api.<name>` still works. Covered by
+> `FinalModuleSplitTestCase` in `tests/test_api.py` (re-export identity per module,
+> `__module__` ownership checks, and the entry-point import contract). Suite green
+> (385 tests, 1 skip) and `ruff` clean.
+
+### 6.3 `create_session` and `append_session_to_group` duplicate a 19-parameter signature — **Low**
+
+**Location:** `sessions/manager.py:161-300`
+
+**Problem.** Both methods take the identical parameter list, build the identical
+`TerminalSession(...)`, and differ only in the group-existence check + counter increment.
+Adding a session field currently means touching four places (dataclass, both methods,
+`create_sessions`). Commit `0eb8be7` demonstrated exactly this cost: adding
+`explorer_tree_open`/`explorer_git_open` required edits in five places in this file
+(dataclass, `to_dict`, both signatures + both constructor calls, `create_sessions`,
+`update_session_metadata`), growing the duplicated signature from 17 to 19 parameters.
+
+**Proposed implementation.**
+```python
+def _build_session(self, group_id: str, **fields) -> TerminalSession:
+    return TerminalSession(session_id=self._new_session_id(), group_id=group_id,
+                           status=SessionStatus.PENDING, **fields)
+
+def create_session(self, group_id, **fields):
+    session = self._build_session(group_id, **fields)
+    with self.lock:
+        self.sessions[session.session_id] = session
+    return session
+
+def append_session_to_group(self, group_id, **fields):
+    session = self._build_session(group_id, **fields)
+    with self.lock:
+        group = self.groups.get(group_id)
+        if group is None:
+            return None
+        self.sessions[session.session_id] = session
+        group.terminal_count += 1
+    return session
+```
+Callers already pass keyword arguments, so the change is source-compatible.
+
+> **✅ Implemented (2026-07-12).** As proposed: `sessions/manager.py` gained
+> `_build_session(group_id, **fields)` (id generation + PENDING status under the caller's
+> lock hold); `create_session` and `append_session_to_group` are now thin `**fields`
+> wrappers, and the `username="root"` default moved into the `TerminalSession` dataclass,
+> so a new session field is added in two places (dataclass + `create_sessions`) instead of
+> five. Covered by `test_create_and_append_build_equivalent_sessions` and
+> `test_session_builders_reject_unknown_fields` in `tests/test_session_manager.py`.
+
+### 6.4 Shared JS is copy-pasted between the two templates — **Medium**
+
+**Location:** duplicated between `templates/index.html` and `templates/terminals.html`:
+theme management (`normalizeThemePreference` → `initTheme`, ~120 lines), `escHtml`,
+`getConnectionModeLabel`, `isAbsoluteDirectory`/`normalizeComparableDirectory`/
+`joinDirectories`/`resolveTerminalDirectory`/`buildLaunchDirectory`, `getDirectoryName`,
+saved-session card builders + modal plumbing, BroadcastChannel/storage-event sync constants
+and listeners.
+
+**Problem.** The copies have already drifted (e.g. the terminals page's saved-session card has
+no `selectable` mode; its `buildSavedSessionTags` differs). Directory-resolution rules are
+security-relevant (they gate what gets sent as `directory`) and should not exist twice.
+
+**Proposed implementation.** Create `web/static/js/shared.js` exposing a `GridVibeShared`
+namespace with the theme module, path helpers, `escHtml`, and the saved-session card renderer
+(taking an options object for the selectable/delete variants). Both pages load it before their
+page script. This pairs naturally with 3.5 (extracting page JS to static files).
+
+> **⚠️ Partially implemented (2026-07-12).** `web/static/js/shared.js` exists and is
+> loaded by both pages before their page script. Only the 15 declarations that were
+> still byte-identical between the two pages were lifted: the theme primitives
+> (`normalizeThemePreference`, `getStoredTheme`, `getSystemTheme`, `resolveTheme`,
+> `THEME_STORAGE_KEY`), the directory-resolution rules (`isAbsoluteDirectory`,
+> `normalizeComparableDirectory`, `resolveTerminalDirectory`, `buildLaunchDirectory`,
+> `getDirectoryName`), `getConnectionModeLabel`, and the BroadcastChannel/storage sync
+> key constants. Confirmed drift (so left page-local for now): `escHtml`,
+> `joinDirectories`, `applyTheme`/`cycleTheme`/`syncNativeTheme`, and the saved-session
+> card/modal builders. Reconciling those drifted copies (deciding the canonical
+> behaviour for each) is the remaining half of this finding.
+
+> **✅ Implemented (2026-07-12, later the same day).** The drifted copies are reconciled
+> into `shared.js`; canonical-behaviour decisions:
+> - `escHtml` — launcher's null-safe variant (`String(value ?? '')`); the terminals copy
+>   rendered `null`/`undefined` literally.
+> - `joinDirectories` — behaviourally identical copies (the launcher had a dead duplicate
+>   branch); the terminals form won.
+> - Theme management — `syncNativeTheme` (generic `[GridVibe]` log prefix), `applyTheme`,
+>   `persistThemePreference`, `cycleTheme`, and `initTheme` live in `shared.js`. Pages
+>   declare optional hooks looked up at call time (`onThemeApplied`, `onThemeCycled`,
+>   `onThemePersisted`) for page-specific behaviour, and call `initTheme()` from their own
+>   script so their hoisted hook declarations exist first. Deliberate behaviour change:
+>   cycling the theme from a terminals window now persists it via `/api/app-config` like
+>   the launcher (previously it only changed localStorage).
+> - Saved-session cards — one `buildSavedSessionCard(session, { selectable,
+>   currentSavedSessionId })` + `buildSavedSessionTags(session, currentSavedSessionId)`;
+>   each page passes its own notion of "current". The modal *shells* stay page-local by
+>   design: the launcher dialog has import/delete modes with a footer action, the
+>   terminals dialog has an "open now" checkbox — different dialogs sharing the card
+>   renderer.
+>
+> Locked in by `test_shared_helpers_are_not_redefined_by_page_scripts` in
+> `ExtractedFrontendAssetsTestCase` (each reconciled helper defined exactly once, in
+> `shared.js`).
+
+### 6.5 Monster functions in terminals.html — **Medium**
+
+**Location:** `templates/terminals.html` — `buildGrid` (:6651-7095, ~445 lines),
+`_startVoice` (:8632-8939, ~308 lines), `initialLoad` (~150 lines) plus ~40 explorer render
+helpers forming an implicit module.
+
+**Problem.** `buildGrid` constructs card HTML, wires drag&drop, split controls, explorer
+controls, browser controls, voice panels, and clipboard in one pass; `_startVoice` handles
+permission flow, device selection, AudioContext/worklet setup, diagnostics, and error paths in
+one function. Both are effectively untestable and are where regressions cluster.
+
+**Proposed implementation.** Decompose along the seams the code already hints at:
+- `buildGrid` → `buildPaneCard(session, index)` (returns element), `wirePaneControls(card, index, session)`
+  (delegates to the existing `wireSplitCardControls`/`wireExplorerOnlyControls`/…), and a thin
+  `buildGrid` that loops.
+- `_startVoice` → `acquireMicStream(prefs)`, `createVoicePipeline(stream, onChunk)`,
+  `renderVoiceDiagnostics(...)` (exists), with `_startVoice` orchestrating.
+No behaviour change; do it as part of the JS extraction (3.5) so the new files start reviewable.
+
+> **✅ Implemented (2026-07-12).** In `web/static/js/terminals.js`:
+> - `buildGrid` (445 → 41 lines) now loops over `createPaneInstance(session)` (pane object
+>   factory), `buildPaneCard(session, i)` (pure card-DOM builder), and
+>   `wirePaneControls(card, i)`; a `wireCardButton(card, selector, onClick)` helper
+>   collapses the previously repeated draggable/mousedown/click guard pattern (~13 copies),
+>   and `wirePaneInputForwarding(t, i)` wires terminal keystroke/focus forwarding.
+> - `_startVoice` (308 → 166 lines, the rest being genuine orchestration: precondition
+>   checks, state assembly, success/error UI) delegates to `_acquireMicStream` (getUserMedia
+>   with the device-fallback and pywebview-bare-capture cascades), `_createVoicePipeline`
+>   (AudioContext → worklet → muted sink), `_wireVoiceWorkletMessages`, and
+>   `_teardownVoicePipeline` (best-effort cleanup on partial failure).
+>
+> No behaviour change. `initialLoad` and the explorer render helpers mentioned in the
+> problem statement were outside the proposal's scope and stay as they are. Locked in by
+> `test_terminals_monster_functions_are_decomposed` in `ExtractedFrontendAssetsTestCase`
+> (helpers exist exactly once + line-count regression guard on both orchestrators).
+
+### 6.6 Two similarly-named git runners already caused a production TypeError — **Medium**
+
+**Location:** `web/api.py` — `_run_self_update_git_command(args)` (cwd fixed to repo) vs
+`_run_git_command(args, *, cwd, ...)` (explorer, keyword-only cwd). Evidence:
+`logs/gridvibe.log` (2026-07-04, 4×) shows
+`TypeError: _run_git_command() missing 1 required keyword-only argument: 'cwd'` raised from
+`perform_self_update` — i.e. the self-updater called the wrong helper for several days before
+being fixed.
+
+**Problem.** The names invite exactly this mix-up, and there are now *four* runners
+(`_run_git_command`, `_run_git_write_command`, `_run_remote_git_command`,
+`_run_remote_git_write_command`) plus the self-update one.
+
+**Proposed implementation.** Consolidate into one signature family (folds into 6.1):
+```python
+def run_git(args, *, cwd, timeout=2.0, write=False) -> CompletedProcess   # local
+# env = GIT_OPTIONAL_LOCKS=0 for reads, GIT_TERMINAL_PROMPT=0 for writes
+```
+and rename the self-update one to `_run_repo_git(args)` so a positional-only call can't
+accidentally bind to the explorer runner. Add a regression test that hits
+`POST /api/app-update` end-to-end against a temp git repo (the July log shows this route had
+no test coverage for the happy path at the time).
+
+> **✅ Implemented (2026-07-12).** The self-update runner is now `_run_repo_git(args)`;
+> the four explorer runners collapsed into two, `_run_git_command(args, *, cwd, timeout=None,
+> write=False)` and `_run_remote_git_command(client, args, *, cwd, timeout=None, write=False)`
+> (reads set `GIT_OPTIONAL_LOCKS=0`, writes set `GIT_TERMINAL_PROMPT=0`; default timeouts
+> 2 s read / 15 s local write / 30 s remote write). With 6.1's backend abstraction the
+> explorer helpers only ever call `backend.run_git`. Added
+> `test_app_update_fast_forwards_real_checkout` in `tests/test_api.py`: an origin + clone
+> pair in a temp dir, one commit behind, `POST /api/app-update` fast-forwards the clone.
+
+---
+
+## 7. Style Mismatches (UI)
+
+### 7.1 Launcher and terminals pages use two unrelated design systems — **Medium**
+
+**Location:** `templates/index.html:8-30` vs `templates/terminals.html:9-74`
+
+**Problem.** The launcher is a slate/indigo glassmorphism theme (`--bg:#070b18`,
+`--accent:#4cc9f0`, 12–16 px radii, `backdrop-filter: blur`), while the terminals workspace is
+a flat neutral-black theme (`--t-bg:#0d0d0d`, `--t-accent:#00d9ff`, tighter radii, no blur).
+Even the accents differ (`#4cc9f0` vs `#00d9ff`), as do success greens (`#22c55e` vs
+`#18b66a`) and the light-theme accent (`#087f9b` in both — the one shared value, by
+coincidence). Moving between the two windows feels like switching apps.
+
+**Proposed implementation.** Create a shared `tokens.css` (see 3.5) defining one palette:
+```css
+:root { --gv-bg-app:…; --gv-accent:#00d9ff; --gv-success:…; --gv-danger:…;
+        --gv-warning:#f59e0b; --gv-radius-s/m/l:…; }
+```
+Then map both pages' existing variable names onto the shared tokens
+(`--accent: var(--gv-accent)`, `--t-accent: var(--gv-accent)`) so the visual unification lands
+without rewriting thousands of selector rules. Decide deliberately which identity wins
+(recommendation: keep the terminals page's darker neutral background for the workspace, adopt
+one accent + one success/danger/warning set everywhere). The intentional exception —
+`--t-terminal-bg` staying dark in light theme — should get a comment.
+
+> **✅ Implemented (2026-07-13).** New `web/static/css/tokens.css` defines the shared
+> palette (`--gv-bg-app/accent/accent-hover/accent-soft/success/success-hover/danger/warning`
+> plus `--gv-radius-s/m/l`) with a `[data-theme="light"]` override block, and is linked
+> before the page stylesheet on both pages. `launcher.css` maps
+> `--accent/--accent-strong/--accent-soft/--danger/--success/--warning/--border-active`
+> onto the tokens (its light-theme duplicates removed), and `terminals.css` maps
+> `--t-bg/--t-accent/--t-accent-hover/--t-success/--t-success-hover`. The terminals
+> identity won as recommended: the unified accent is `#00d9ff` (light `#087f9b`) — every
+> `#4cc9f0`/`rgba(76, 201, 240, …)` literal in `launcher.css` was rewritten to the new
+> accent — while the unified success set is `#22c55e`/`#16a34a` (the launcher's green;
+> `#18b66a`/`#14955a` are gone). The terminal canvas exception is now explicit: pinned
+> `--t-terminal-bg/fg/cursor/selection` literals with a comment in both theme blocks
+> (they feed xterm via 7.3's `getComputedStyle` wiring). Radius tokens are wired into
+> `.card` and the shared launcher button rule (same values as before). Covered by
+> `StyleThemingTestCase` in `tests/test_api.py`.
+
+### 7.2 Mixed icon language: emoji vs SVG vs text glyphs — **Low**
+
+**Location:** `templates/index.html:2287-2289, 2343` (💾 📂 🗑 🌙); `templates/terminals.html:2797`
+(🌙), `:6194-6199` (↻ and 🧹 as button text), `:2829` (fullscreen `&#9974;`), while neighbouring
+buttons use consistent inline SVG (refresh-all, surface-mode, settings, topbar toggle).
+
+**Problem.** Emoji render differently per OS/font (Windows Segoe UI Emoji vs browser
+fallbacks), can't inherit `currentColor`, ignore the theme, and sit at inconsistent optical
+sizes next to the SVG icons.
+
+**Proposed implementation.** Replace the emoji/text glyphs with the same stroke-style SVGs used
+elsewhere (Feather-style, `stroke="currentColor"`, `stroke-width 1.8-2`): save → floppy/arrow-down-tray,
+import → folder-open, delete → trash, theme → sun/moon SVG pair, clear → an eraser/ban icon,
+fullscreen → expand arrows. All already match the established `btn-icon` sizing. Keep the
+`title`/`aria-label` attributes that are already present.
+
+> **✅ Implemented (2026-07-13).** All the listed emoji/text glyphs are now Feather-style
+> inline SVGs (`stroke="currentColor"`, `aria-hidden`, existing `title`/`aria-label`
+> kept): save → floppy, import → folder, delete → trash, mic-refresh → the same
+> rotate-arrow already used by `checkUpdatesBtn`. The theme toggle on both pages renders
+> through a new shared `themeToggleButtonHtml()` in `shared.js` (sun/moon/monitor SVG +
+> label, replacing the ☀️/🌙/◐ `textContent` branches in `launcher.js`/`terminals.js`).
+> In `terminals.js`, new `TERMINAL_REFRESH_ICON`/`TERMINAL_CLEAR_ICON` (rotate-arrow /
+> eraser) constants replace `↻`/`🧹` in `buildGrid`, the explorer bars, and
+> `setTerminalActionState`'s busy-state restore, and
+> `FULLSCREEN_ENTER_ICON`/`FULLSCREEN_EXIT_ICON` (expand/contract arrows) replace
+> `&#9974;`/`&#10005;` in the template and `updateFullscreenButton`. Sizing rules added
+> for `.ghost-btn svg`, `.theme-toggle-icon`, `.fullscreen-icon`, and
+> `.terminal-action-btn/.explorer-refresh svg`. The voice 🎤, mode-toggle ☾, close ×, and
+> explorer ↑ glyphs were not part of this finding and are unchanged. Covered by
+> `StyleThemingTestCase` in `tests/test_api.py`.
+
+### 7.3 Hardcoded colors that ignore the theme system — **Low**
+
+**Location.**
+- `templates/terminals.html:2837-2842` — the settings-window button's SVG hardcodes
+  `#06263a/#5eefff/#63f6ff/...`, which clash on the light theme.
+- `templates/index.html:385-406` — `.browser-close-btn` uses literal `rgba(181,35,49,.2)`,
+  `#ff8a94`, `#ff6b75` instead of `var(--danger)` and has no `[data-theme="light"]` variant.
+- `templates/index.html:1996-1999` — tooltip arrow hardcodes `rgba(16,21,39,.98)` while the
+  bubble uses `var(--bg-deep)`; a future token change desyncs the arrow from its bubble.
+- `templates/terminals.html:6139-6144` — xterm theme colours are literals rather than being fed
+  from the CSS custom properties (they can be read via `getComputedStyle` at `makeTerminal`
+  time).
+
+**Proposed implementation.** Swap literals for the corresponding tokens; for the settings SVG
+use `stroke="currentColor"` + a `.settings-window-btn { color: var(--t-accent); }` rule; derive
+the xterm theme from computed CSS variables so 7.1's unification automatically restyles the
+terminal cursor/selection.
+
+> **✅ Implemented (2026-07-13).** All four spots fixed as proposed. The settings-window
+> SVG strokes are `currentColor` with `color: var(--t-accent)` on the button (its glow
+> filter now derives from `currentColor` too). `.browser-close-btn` builds its red from
+> `var(--danger)` via `color-mix()`, which also gives it a correct light-theme rendering.
+> The tooltip arrow uses `var(--bg-deep)` to match its bubble, with a new
+> `[data-theme="light"]` arrow override matching the light bubble background.
+> `makeTerminal()` reads the xterm theme from the computed
+> `--t-terminal-bg/fg/cursor/selection` custom properties (added in 7.1) instead of
+> literals, so a token change restyles the terminal canvas automatically. Covered by
+> `StyleThemingTestCase` in `tests/test_api.py`.
+
+---
+
+## 8. Button & Interaction Improvements
+
+### 8.1 Closing a session tab has no confirmation and no undo — **Medium**
+
+**Location:** `templates/terminals.html` — tab close button wired in `renderSessionTabs`
+(:4578) → `closeSessionGroup` (:9676); backend `DELETE /api/sessions?group=…` terminates every
+terminal in the group immediately.
+
+**Problem.** One misclick on the small `×` of a tab kills up to 8 live terminals (running
+agents, builds, SSH jobs) irrecoverably — live sessions are memory-only by design. Compare:
+the browser-mode Close button *does* confirm.
+
+**Proposed implementation.** Minimal: `if (!confirm(\`Close "\${group.name}" and its N
+terminals?\`)) return;` — but `confirm()` has the same WebView2 problem as 4.4, so implement it
+with the existing modal shell (a small "Close session?" dialog with Close/Cancel), or gate it
+to only prompt when the group has ≥1 `connected` terminal. A "hold to close" affordance
+(mousedown 600 ms with progress ring) is a good pointer-only alternative that needs no dialog.
+
+> **✅ Implemented (2026-07-14).** `templates/terminals.html` gained a `closeSessionConfirmModal`
+> built on the existing modal shell (no `confirm()`, so no WebView2 problem). `closeSessionGroup`
+> in `web/static/js/terminals.js` now awaits `confirmCloseSessionGroup(groupId)`, which fetches
+> the group's sessions and only prompts when ≥1 terminal is `connected` — dead groups still close
+> with one click, and a failed status lookup falls back to asking (the safe default). The dialog
+> names the group, its terminal count, and the connected count; Cancel/Escape/backdrop all keep
+> the session, and Cancel gets initial focus. Covered by `UxInteractionButtonsTestCase` in
+> `tests/test_api.py`.
+
+### 8.2 Launch button gives weak in-flight feedback — **Low**
+
+**Location:** `templates/index.html:5182-5240`
+
+**Problem.** During launch the CTA only swaps text to "Launching..."; there is no spinner, and
+the label bug (4.3) leaves the button mutated afterwards. The `icon-btn.loading` spin animation
+already exists (`:820-822`, `tf-spin`) but is unused here.
+
+**Proposed implementation.** Give `.action-btn` a loading state:
+```html
+<button id="launchBtn" class="action-btn" ...>
+  <span class="action-btn-label">Launch Workspace</span>
+  <span class="arrow">→</span>
+  <svg class="action-btn-spinner" ...>…</svg>
+</button>
+```
+```css
+.action-btn.loading .arrow { display:none }
+.action-btn.loading .action-btn-spinner { display:inline-block; animation: tf-spin .9s linear infinite; }
+```
+JS toggles `classList.add('loading')` instead of rewriting `textContent`, which also fixes 4.3
+structurally.
+
+> **✅ Implemented (2026-07-14).** As proposed: `#launchBtn` in `templates/index.html` is now
+> structured as `.action-btn-label` + `.arrow` + an `.action-btn-spinner` SVG, and
+> `setLaunchButtonLoading(button, loading)` in `web/static/js/launcher.js` toggles a `.loading`
+> class (spinner spins via the existing `tf-spin` keyframes, arrow hides) and only swaps the
+> label span's text — the button's markup is never rewritten, closing 4.3 structurally.
+> Covered by `UxInteractionButtonsTestCase` in `tests/test_api.py`.
+
+### 8.3 Update status is rendered twice with identical text — **Low**
+
+**Location:** `templates/index.html:3199-3212` (`setUpdateStatus` writes both `#updateStatus`
+in the Session Source card header and `#quickUpdateStatus` next to the theme controls).
+
+**Problem.** Every update/settings message appears in two places at once — visually noisy and
+the two locations imply different scopes they don't have.
+
+**Proposed implementation.** Keep only `#quickUpdateStatus` (it sits beside the buttons that
+trigger updates/settings) and drop `#updateStatus` + the `.toolbar-status` markup; or keep the
+toolbar one and drop the quick one. One-location messaging with a fade-out after ~6 s
+(`setTimeout(() => status.textContent = '', 6000)`) is the cleanest.
+
+> **✅ Implemented (2026-07-14).** Kept `#quickUpdateStatus` (it sits beside the buttons that
+> trigger updates/settings) and dropped `#updateStatus` from `templates/index.html` plus the
+> now-dead `.toolbar-status` CSS block from `web/static/css/launcher.css`. `setUpdateStatus`
+> in `web/static/js/launcher.js` writes one location and auto-clears it after 6 s (the timer
+> resets on every new message so in-flight updates aren't cut short). Covered by
+> `UxInteractionButtonsTestCase` in `tests/test_api.py`.
+
+### 8.4 Errored / disconnected panes offer no retry — **Medium** (also a feature)
+
+**Location:** `templates/terminals.html:9416-9429` (`showPlaceholderError`); no
+"reconnect/retry" string exists anywhere in the file.
+
+**Problem.** When SSH auth fails or a shell exits, the pane shows a static error/disconnected
+placeholder. The only recovery is closing and relaunching the whole group, losing the other
+panes' state.
+
+**Proposed implementation.**
+1. Backend: add `POST /api/sessions/<session_id>/reconnect` — validates the session exists and
+   is in `error`/`disconnected`, resets status to `PENDING`, clears the output buffer, and
+   `socketio.start_background_task(_connect_session, session_id)`. (~20 lines; all pieces
+   exist.)
+2. Frontend: render a `Retry connection` button inside `showPlaceholderError` (and the
+   disconnected state) that calls the endpoint and restores the "Connecting…" placeholder.
+   The existing `session_status` socket flow then reattaches the terminal automatically.
+
+> **✅ Implemented (2026-07-14).** Backend: `POST /api/sessions/<session_id>/reconnect` in
+> `web/api.py` — 404 for unknown sessions, 409 unless the session is `error`/`disconnected`,
+> then closes any lingering connection + clears the output buffer (`_close_ssh_connection`),
+> resets status to `PENDING`, broadcasts, and `start_background_task(_connect_session, …)`.
+> Frontend: `showPlaceholderError` and the new `showPlaceholderDisconnected` in
+> `web/static/js/terminals.js` render a `Retry connection` button (`retrySessionConnection`
+> swaps in the "Connecting…" spinner, resets the stale xterm, and calls the endpoint); the
+> disconnected overlay is wired into `initialLoad`, `refreshSessions`, and the
+> `session_status` handler, gated by `isRetryableDisconnect` so explorer/browser panes are
+> excluded, and a reconnected attached pane drops the overlay. Error/disconnected
+> placeholders got an opaque `--t-terminal-bg` backdrop and a pointer-events-enabled retry
+> button in `web/static/css/terminals.css`. Covered by `UxInteractionButtonsTestCase`
+> (4 endpoint tests + asset assertions) in `tests/test_api.py`.
+
+### 8.5 Save-settings button shows two tooltips at once — **Low**
+
+**Location:** `templates/index.html:2523-2524`
+
+**Problem.** The button has both a native `title` attribute and the custom
+`.button-tooltip-bubble`; hovering long enough shows the styled bubble *and* the OS tooltip
+with the same sentence.
+
+**Proposed implementation.** Remove the `title` attribute (the bubble is
+`role="tooltip"` + `aria-describedby`, so accessibility is preserved).
+
+> **✅ Implemented (2026-07-14).** As proposed: the `title` attribute is gone from
+> `#saveAppSettingsBtn` in `templates/index.html`; the `.button-tooltip-bubble` with
+> `role="tooltip"` + `aria-describedby` remains the single tooltip. Covered by
+> `UxInteractionButtonsTestCase` in `tests/test_api.py`.
+
+---
+
+## 9. Log Review (`logs/gridvibe.log`)
+
+### 9.1 Normal Windows pane closures are logged as ERROR — **Medium**
+
+**Evidence.** ~25 occurrences of
+`ERROR web.api Error streaming local output for session …: [WinError 10053] An established
+connection was aborted by the software in your host machine` — each corresponds to a local
+pane being closed normally (WinPTY read aborts when the process is torn down).
+
+**Problem.** Routine teardown fills the log with ERRORs, training users (and future log
+analysis) to ignore the level. The code already special-cases explorer sessions this way
+(`logger.debug(...)` when `_is_explorer_session`).
+
+**Proposed implementation.** In the `except` blocks of `_stream_local_output` /
+`_stream_ssh_output`, check whether the connection was already removed (i.e. an intentional
+close) and downgrade:
+```python
+with connection_lock:
+    intentional = session_id not in ssh_connections
+if intentional or session is None or session.status == SessionStatus.DISCONNECTED:
+    logger.debug("Stream ended for closed session %s: %s", session_id, e)
+    return
+logger.error(...)
+```
+
+> **✅ Implemented (2026-07-10).** Both `_stream_ssh_output` and `_stream_local_output` now
+> check (under `connection_lock`) whether the connection was already removed from
+> `ssh_connections`, or the session is gone / already `DISCONNECTED`, and log at DEBUG and
+> skip the ERROR-status transition in that case. The existing explorer-session special case
+> is preserved.
+
+### 9.2 ANSI colour escape codes are written into the log file — **Low**
+
+**Evidence.** Entries like `"[35m[1mPOST /api/app-update HTTP/1.1[0m" 500` — werkzeug's
+coloured status codes are captured raw by the `RotatingFileHandler`.
+
+**Proposed implementation.** In `setup_logging`, add a strip filter on the file handler only:
+```python
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+class _StripAnsi(logging.Filter):
+    def filter(self, record):
+        record.msg = _ANSI_RE.sub("", str(record.msg)); return True
+file_handler.addFilter(_StripAnsi())
+```
+(Console keeps colours; the file becomes grep-friendly.)
+
+> **✅ Implemented (2026-07-13).** `main.py`'s `setup_logging` adds a `_StripAnsiFilter` to
+> the file handler only. It strips from the fully formatted message
+> (`record.getMessage()` + `record.args = None`) because werkzeug carries the coloured
+> request line in `record.args`, not `record.msg`; the console handler is registered first,
+> so terminal output keeps its colours. Covered by `LogPolishTestCase` and the extended
+> `setup_logging` test in `tests/test_main.py`.
+
+### 9.3 `/api/voice-status` polling escapes the poll-suppression filter — **Low**
+
+**Evidence.** Dozens of `GET /api/voice-status` 200 lines; the terminals page refreshes it on
+every window focus/pageshow.
+
+**Proposed implementation.** Extend the regex in `main.py:33` to include it:
+```python
+_POLL_RE = re.compile(r'"GET /api/(sessions|session-groups|voice-status)(\?[^ ]*)? HTTP/[\d.]+" 2\d\d')
+```
+(If 3.4 lands, revisit whether the filter is needed at all.)
+
+> **✅ Implemented (2026-07-13).** `_POLL_RE` in `main.py` now also matches
+> `/api/voice-status`. The filter itself stays (see the 3.4 note: push-triggered refreshes
+> still issue the same reconciliation GETs). Covered by `LogPolishTestCase` in
+> `tests/test_main.py`.
+
+**Also noted:** the four `TypeError: _run_git_command() missing … 'cwd'` tracebacks from
+2026-07-04 are already fixed in the current source (`perform_self_update` now uses
+`_run_self_update_git_command`), but they motivate finding 6.6's rename + regression test.
+
+---
+
+## 10. New Feature Proposals
+
+### 10.1 SSH keepalive (the config key already exists)
+
+**Motivation.** Long-lived SSH panes behind NAT/firewalls drop after idle timeouts; users see
+frozen terminals. `ssh.keepalive_interval: 60` already ships in `default_config.json` but is
+never applied (5.1).
+
+**Proposed implementation.** One line after connect in `_connect_ssh_session` (and optionally
+`_open_ssh_sftp` for the pool from 3.1):
+```python
+keepalive = int(ssh_config.get("keepalive_interval", 60))
+if keepalive > 0:
+    client.get_transport().set_keepalive(keepalive)
+```
+
+> **✅ Implemented (2026-07-10).** `_connect_ssh_session` in `web/api.py` now applies
+> `transport.set_keepalive(...)` right after a successful connect, reading
+> `ssh.keepalive_interval` (default 60; `0` or negative disables; `None` transport guarded).
+> Not applied to `_open_ssh_sftp` — those connections are short-lived until the SFTP pool
+> (3.1) lands.
+
+### 10.2 Wire `terminal.font_size` / `font_family` into xterm
+
+**Motivation.** The config keys exist and users on high-DPI monitors regularly want a bigger
+terminal font; today `makeTerminal()` hardcodes 13 px Consolas.
+
+**Proposed implementation.**
+1. Pass through the template: `render_template('terminals.html', ..., terminal_font_size=...,
+   terminal_font_family=...)` from the `terminal` config section, exposed as data-attributes on
+   `<body>` (same pattern as the voice settings).
+2. `makeTerminal()` reads them:
+   ```js
+   fontSize: Number(document.body.dataset.terminalFontSize) || 13,
+   fontFamily: document.body.dataset.terminalFontFamily || 'Consolas, ...',
+   ```
+3. Optional stretch: Ctrl+scroll / Ctrl+±  per-pane zoom (`term.options.fontSize = n; fit()`),
+   mirroring the explorer's existing editor zoom controls (`stepExplorerEditorFontSize`).
+
+> **✅ Implemented (2026-07-13).** Steps 1 and 2 done as part of the dead-code sweep (5.1):
+> `RuntimeConfig` in `web/config.py` now reads `terminal.font_size` (clamped ≥ 6, default 14)
+> and `terminal.font_family` (default `Consolas, Monaco, 'Courier New', monospace`);
+> `terminals_page()` passes them as `terminal_font_size`/`terminal_font_family` template
+> variables rendered as `data-terminal-font-size` / `data-terminal-font-family` on `<body>`;
+> `makeTerminal()` in `web/static/js/terminals.js` reads both from `document.body.dataset`
+> with the appropriate fallbacks. Step 3 (per-pane zoom) remains open. Covered by
+> `test_terminal_font_settings_in_terminals_page_body` and
+> `test_makeTerminal_reads_font_from_dataset` in `DeadCodeSweepTestCase` (`tests/test_api.py`).
+
+### 10.3 Terminal search and clickable links (xterm addons)
+
+**Motivation.** Panes routinely hold build output and agent logs; today there is no way to
+search scrollback or click URLs. Both are official xterm addons matching the already-vendored
+version, and the explorer pane already establishes the search-UI pattern
+(`renderExplorerDirectorySearchControls`).
+
+**Proposed implementation.**
+1. Vendor `@xterm/addon-search@0.13` and `xterm-addon-web-links@0.9` (see 3.6).
+2. In `makeTerminal()`: `term.loadAddon(new SearchAddon.SearchAddon())`,
+   `term.loadAddon(new WebLinksAddon.WebLinksAddon((e, uri) => window.open(uri)))`.
+3. Add a `Ctrl+Shift+F` (per focused pane) overlay input reusing the explorer search styling;
+   Enter/Shift+Enter → `searchAddon.findNext/Previous(query)`.
+The existing global-shortcut router (`isEditableShortcutTarget`, `findExplorerSearchTargetIndex`)
+is the right place to hook the keybinding.
+
+> **✅ Implemented (2026-07-14).** `xterm-addon-search@0.13.0` and
+> `xterm-addon-web-links@0.9.0` are vendored in `web/static/vendor/` (table in its
+> `README.md` updated) and loaded by `templates/terminals.html`. `makeTerminal()` in
+> `web/static/js/terminals.js` loads both addons (`typeof` guards keep terminals working if
+> a stale cached page misses a vendor script; the web-links addon opens URIs via
+> `window.open(uri, '_blank', 'noopener')`) and registers an `attachCustomKeyEventHandler`
+> that hands `Ctrl+Shift+F` to a new document-level shortcut. That shortcut opens a
+> per-pane `.terminal-search-overlay` (input + prev/next/close, mirroring the explorer
+> search controls' styling and `findTerminalSearchTargetIndex` focus resolution):
+> Enter/Shift+Enter → `searchAddon.findNext/findPrevious`, typing searches incrementally,
+> Escape closes and refocuses the terminal. Covered by `TerminalSearchWebLinksTestCase`
+> in `tests/test_api.py`.
+
+### 10.4 Broadcast input to all panes ("synchronized typing")
+
+**Motivation.** The core multi-terminal workflow (same command on N hosts / N worktrees) is
+what GridVibe's grid invites; every established multiplexer (tmux `synchronize-panes`,
+iTerm2 broadcast) has this. It fits the existing architecture with almost no backend work —
+`terminal_input` already targets one session; the client just sends N events.
+
+**Proposed implementation (frontend-only).**
+1. Topbar toggle button "Broadcast" (with a strong visual state — e.g. accent border around all
+   panes while active, to prevent accidents).
+2. In the `term.onData` handler, when broadcast is on and the pane is a plain terminal (skip
+   explorer/browser panes), loop:
+   ```js
+   sessionIds.forEach((sid, i) => {
+       if (i === index || !isPlainTerminal(i)) return;
+       socket.emit('terminal_input', { session_id: sid, data });
+   });
+   ```
+3. Auto-disable on group switch and after 10 min idle as a safety.
+
+> **✅ Implemented (2026-07-14).** Frontend-only, as proposed. A `broadcastBtn` toggle in
+> the terminals topbar drives `setBroadcastInput`; while active, the button and every
+> plain terminal pane get an accent border (`#terminalsGrid.broadcast-input`) as the
+> loud visual state. Both `onData` wiring sites (grid build + split panes) now share one
+> `forwardTerminalInput(index, data)` helper, which mirrors keystrokes to every other
+> pane that has a `term` (explorer/browser panes are skipped). Broadcast auto-disables
+> on group switch (`switchGroup`) and after 10 minutes without input
+> (`BROADCAST_IDLE_TIMEOUT_MS`). Covered by `BroadcastInputTestCase` in `tests/test_api.py`.
+
+### 10.5 Session restore after backend restart
+
+**Motivation.** Today a GridVibe restart (including the self-update restart flow!) drops all
+groups; the user rebuilds their workspace by hand. Live shells can't survive, but the
+*workspace shape* can.
+
+**Proposed implementation.**
+1. On every group create/close/reorder, persist a compact snapshot
+   (`groups`, per-session config minus passwords — reuse the saved-session config shape that
+   `buildActiveWorkspaceSessionConfig` already produces) to `runtime_state.json` (gitignored).
+2. On startup, if the file exists and is < N hours old, the launcher shows a banner:
+   "Previous workspace found — Restore 2 sessions?" → replays each snapshot through the
+   existing `POST /api/sessions` launch path (passwords come from saved sessions or key auth).
+3. Explicitly out of scope: restoring shell history/processes.
+This dovetails with the existing `saved-session-<id>` stable group IDs, which were clearly
+designed with relaunch-idempotency in mind.
+
+> **✅ Implemented (2026-07-14).** New `web/runtime_state.py` persists the workspace shape
+> to `runtime_state.json` (gitignored): `_broadcast_session_groups_updated` in
+> `web/terminal_io.py` — already fired on every launch/split/close/reorder — now also calls
+> `save_workspace_snapshot(session_manager)`, so the snapshot is derived from *live* state
+> (groups + per-session launch config via `_SESSION_SNAPSHOT_FIELDS`; passwords are never
+> written). `GET /api/runtime-state` returns the snapshot with a `restorable` flag (true
+> only when it is < 12 h old, has groups, and no groups are currently active — i.e. after a
+> restart); `DELETE /api/runtime-state` dismisses it. The launcher shows a
+> `restoreWorkspaceBanner` ("Previous workspace found — restore N sessions?") whose Restore
+> button replays each snapshot group through the normal `POST /api/sessions` launch path
+> (stable `saved-session-<id>` group ids keep the replay idempotent) and then focuses the
+> terminals window; Dismiss clears the snapshot. Closing a group/all sessions rewrites the
+> snapshot accordingly, so an intentionally emptied workspace is not offered for restore.
+> Shell history/processes stay out of scope as proposed. Covered by
+> `RuntimeStateRestoreTestCase` in `tests/test_api.py`.
+
+### 10.6 Explorer file download (read-only compatible)
+
+**Motivation.** The explorer is deliberately read-only for mutations, but *downloading* a file
+is a read. Users inspecting a remote log or artifact currently can't save it.
+
+**Proposed implementation.**
+1. `GET /api/explorer/<session_id>/download?path=…` — resolves via the same
+   `_resolve_explorer_file_path` / remote equivalent (root confinement preserved), streams with
+   `Content-Disposition: attachment`, with a size cap (e.g. 100 MB) and no preview-format
+   restriction (binaries allowed — it's a download, not a render).
+2. Frontend: a download icon in the file-view toolbar next to the existing zoom controls, and
+   in each row's hover actions.
+3. Document in CLAUDE.md/README that the read-only contract covers *mutations*, and download is
+   read-scope.
+
+> **✅ Implemented (2026-07-14).** `GET /api/explorer/<session_id>/download?path=…` in
+> `web/api.py` resolves through the shared explorer backend (`backend.resolve_file`, so root
+> confinement is identical to the preview route), rejects files over
+> `EXPLORER_DOWNLOAD_MAX_BYTES` (100 MB) with 400, allows binaries (no
+> `_explorer_content_looks_binary` check — it's a download, not a render), and responds via
+> `send_file(as_attachment=True)`. The file is buffered inside the backend context because
+> the pooled SSH client is released when the context exits (streaming after release would
+> race the pool) — the size cap bounds that buffer. Frontend: a download icon button in the
+> file viewer's toolbar (`downloadExplorerFile` clicks a temporary `<a download>` link).
+> Per-row hover actions were deliberately skipped: directory rows are single `<button>`
+> elements, and nesting another interactive control inside them is invalid HTML — the
+> toolbar button covers the flow. CLAUDE.md and README now state that the read-only
+> contract covers mutations and download is read-scope. Covered by
+> `ExplorerDownloadTestCase` in `tests/test_api.py`.
+>
+> **Native-window follow-up (2026-07-14).** The first cut used an `<a download>.click()`,
+> which works in the browser but is silently dropped by WebView2 in the native desktop
+> window (the same limitation class as `window.prompt`/`confirm`) — so downloads did
+> nothing there. `downloadExplorerFile` now detects the native window
+> (`isPywebviewAvailable()`) and routes through a new `save_download(url, filename)` bridge
+> method on `GridVibeApi` (`web/webview_launcher.py`): it opens a native `SAVE_DIALOG`, then
+> fetches the file from the local server's own download endpoint and writes it to the chosen
+> path (reusing the endpoint keeps the root-confinement + size-cap checks in one place; the
+> bridge rejects any URL that isn't the explorer download route). Both paths now surface a
+> transient success/error `showTerminalToast` so the download is visibly acknowledged.
+> Covered by `SaveDownloadBridgeTestCase` in `tests/test_webview_launcher.py` and extra
+> assertions in `ExplorerDownloadTestCase`.
+
+### 10.7 Strict host-key verification mode
+
+**Motivation.** Completes 1.4 for security-conscious users without changing defaults.
+
+**Proposed implementation.** Config key `ssh.host_key_policy: "auto-add" | "known-hosts" |
+"strict"`:
+- `auto-add` — today's behaviour (default).
+- `known-hosts` — persist to `.known_hosts` as in 1.4; warn on change but proceed.
+- `strict` — `paramiko.RejectPolicy()` after loading `.known_hosts` + the user's
+  `~/.ssh/known_hosts`; connection errors surface through the existing error placeholder
+  (which, with 8.4, gains a Retry button).
+Settings UI: a select in App Settings under a new "SSH" section. Flag in README's security
+posture paragraph.
+
+> **✅ Implemented (2026-07-14).** `ssh.host_key_policy` (`"auto-add"` default, shipped in
+> `default_config.json`) is normalized by `RuntimeConfig` (`HOST_KEY_POLICY_OPTIONS` in
+> `web/config.py`) and applied by a new shared `_apply_host_key_policy(client, paramiko)`
+> in `web/hostkeys.py`, used by all three SSH entry points (`_connect_ssh_session`,
+> `_open_ssh_sftp`, `_detect_ssh_command`). Semantics: `auto-add` keeps today's behaviour
+> (silent accept + `.known_hosts` persistence from 1.4, changed keys still rejected);
+> `known-hosts` is the same but logs a warning per newly accepted key
+> (`_WarnNewHostKeyPolicy` — a changed key already raises before the missing-key policy is
+> consulted, so "warn on change but proceed" was tightened to "warn on *new*, reject
+> changed"); `strict` uses `paramiko.RejectPolicy()` after loading the project
+> `.known_hosts` plus the user's `~/.ssh/known_hosts`, and failures surface through the
+> existing error placeholder with its 8.4 Retry button. Settings UI: an "SSH Host Keys"
+> select in launcher App Settings, round-tripped through `/api/app-config`
+> (`_public_app_config` / `_normalize_app_config_update`). Flagged in README's security
+> posture list. This completes 1.4's host-key story. Covered by `HostKeyPolicyTestCase`
+> in `tests/test_api.py`.
+
+---
+
+## Suggested sequencing
+
+1. **Quick wins (small, high value):** 1.3, 2.1, 2.7, 4.1, 4.2, 4.4, 4.5, 9.1, 10.1 — each is
+   under ~30 lines. ✅ **All nine implemented 2026-07-10** (see the per-finding notes above).
+2. **Security defaults:** 1.1 + 1.2 together (one PR, changelog entry). ✅ **Implemented
+   2026-07-10**, together with 1.4's known_hosts persistence (see the per-finding notes above).
+3. **Perf pass:** 3.1 (SFTP pool) then 3.2/3.4; 3.6 (vendor assets) can ship independently.
+   ✅ **3.1, 3.2, 3.3, 3.4, 3.6 and 3.7 all implemented 2026-07-11** (see the per-finding notes
+   above). The only remaining item from this group is 3.5 (template extraction), which is
+   sequenced with the structural work in step 5.
+4. **Concurrency hardening:** 2.3 + 2.4 together (both are about `connection_lock` discipline —
+   re-validate inside the lock, emit outside it), then 2.2 (empty-group deletion race) and 2.5
+   (agent detection outside the cache lock), with the low-severity 2.6/2.8/2.9/2.10 batched
+   into whichever PR touches their files anyway. ✅ **All eight implemented 2026-07-11**
+   (2.2, 2.3, 2.4, 2.5, 2.6, 2.8, 2.9, 2.10 — see the per-finding notes above; 2.1 and 2.7
+   were already done in the quick-wins pass, so section 2 is now fully closed).
+5. **Structural:** 6.1 (explorer backend abstraction — slots in naturally on top of the 3.1
+   connection pool) → 6.2 (module split) → 3.5/6.4 (template/shared-JS extraction, which also
+   unblocks 6.5's function decomposition) → 6.3/6.6 as small cleanups along the way, each step
+   incremental with `make check` green between steps.
+   ✅ **Largely implemented 2026-07-12** (see the per-finding notes above): 6.1, 6.3, 6.6 and
+   3.5 are done (4.10 resolved as a side effect); 6.2 landed its first tranche
+   (`paths`/`secrets`/`selfupdate`, next is `config.py`); 6.4 lifted all still-identical
+   helpers into `shared.js` (drifted copies remain page-local); 6.5 (function decomposition
+   inside `terminals.js`) is now unblocked but not started.
+   ✅ **Second pass, 2026-07-12 (later the same day):** 6.4 and 6.5 are now fully done
+   (drifted JS copies reconciled with page hooks; `buildGrid`/`_startVoice` decomposed),
+   and 6.2 landed its second tranche (`web/config.py` with the `RuntimeConfig` object,
+   `web/hostkeys.py`, and the ~1,700-line `web/explorer.py`; `web/api.py` is down to
+   ~4,830 lines). The only step-5 work remaining is 6.2's final tranches
+   (`terminal_io.py` / `voice.py` / `saved_sessions.py`+`agents.py` / `app.py`), which are
+   now unblocked. Suite green (378 tests) and `ruff` clean after each tranche.
+   ✅ **Step 5 completed 2026-07-13:** 6.2's final tranches landed (`web/app.py`,
+   `web/saved_sessions.py`, `web/agents.py`, `web/terminal_io.py`, `web/voice.py`;
+   `web/api.py` is now a ~1,800-line routes/handlers module — see the 6.2 note). All of
+   step 5 (6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 3.5) is now closed. Suite green (385 tests,
+   1 skip) and `ruff` clean.
+6. **Correctness & config cleanups:** 4.7 + 4.8 together (CLI-vs-config precedence and the vosk
+   port key are both config-resolution fixes; 5.7's shared `run_server` is the natural home for
+   4.7 — note `web/config.py` is now importable without Flask, so 4.8's step 3 is a one-line
+   import in `vosk_service.py`), then 4.3/4.6/4.9 and the log polish 9.2/9.3 as one sweep
+   (4.10 already resolved with 6.1), plus 1.1's deferred step 3 (room-scoping the global
+   `session_status` broadcast) — the one open sub-item left from an otherwise closed finding.
+   ✅ **Step 6 completed 2026-07-13** (see the per-finding notes above): 4.7 landed with
+   5.7's shared `run_server` + a new `resolve_server_settings` in `web/config.py`; 4.8
+   made `vosk_service_url` the single port source (with a deprecated-key fallback);
+   4.3/4.6 fixed the launcher JS; 4.9 rewrote `utils/cleanup.py` (also closing 5.4's
+   `DESTRUCTIVE_PATTERNS` item); 9.2/9.3 landed the ANSI strip filter and the extended
+   poll-suppression regex; and 1.1's step 3 room-scoped the `session_status` broadcast,
+   fully closing finding 1.1. New test files `tests/test_cleanup.py` and
+   `tests/test_vosk_service.py` plus new cases in `tests/test_main.py`/`tests/test_api.py`.
+   Suite green (407 tests, 1 skip) and `ruff` clean.
+7. **Dead-code sweep:** 5.1–5.6 in one or two commits validated by `make check` (5.1's useful
+   keys graduate into features 10.2 instead of being deleted).
+   ✅ **Step 7 completed 2026-07-13** (see the per-finding notes above): removed
+   `ssh.default_username`, `terminal.default_rows/cols` from `default_config.json`; wired
+   `terminal.font_size`/`font_family` through `RuntimeConfig` → template data-attributes →
+   `makeTerminal()` (10.2 steps 1+2); deleted `/api/sessions/active` route; stripped the
+   `SessionManager` callback registry (`_session_callbacks`, `register_callback`,
+   `_notify_callbacks`) and its five call/cleanup sites; inlined `_NATIVE_FRAME_THEMES` into
+   a plain `_NATIVE_FRAME_COLORS` dict and removed `get_active_session_count`; deleted 3
+   section-title SVGs from `templates/index.html` + their dead CSS hide-rule; renamed
+   `set_native_theme(theme)` → `(self, _theme=None)` and stopped passing the resolved theme
+   from JS; removed the inert `⋮` Options button + `.t-menu-btn` CSS from the launcher card.
+   Covered by the new `DeadCodeSweepTestCase` (7 assertions) in `tests/test_api.py`. Suite
+   green (414 tests, 1 skip) and `ruff` clean.
+8. **Style/theming:** 7.1 (shared design tokens — pairs with the 3.5/6.4 extraction, do them in
+   the same PR series), then 7.2/7.3 as low-risk follow-ups.
+   ✅ **Step 8 completed 2026-07-13** (see the per-finding notes above): 7.1 landed the
+   shared `web/static/css/tokens.css` (one accent `#00d9ff`, one success/danger/warning
+   set, radius tokens) with both page stylesheets mapping their variables onto it; 7.2
+   replaced every listed emoji/text-glyph button with stroke-style SVGs, including a
+   shared `themeToggleButtonHtml()` in `shared.js` and icon constants in `terminals.js`;
+   7.3 tokenised the settings-window SVG, `.browser-close-btn`, and the tooltip arrow,
+   and `makeTerminal()` now derives the xterm theme from the `--t-terminal-*` CSS
+   variables. New `StyleThemingTestCase` (12 tests) in `tests/test_api.py`. Suite green
+   (426 tests, 1 skip) and `ruff` clean.
+   ✅ **Step 8 UI follow-up, 2026-07-14:** two theming/UI issues from
+   `docs/testing_issues.md` were closed in the same area: ISSUE-2026-021 (the
+   cross-window app-config contract — launcher `notifyAppConfigUpdated()`, backend
+   `_broadcast_app_config_update()`, and the terminals-page BroadcastChannel/storage/
+   Socket.IO handlers — now carries and applies `appearance.theme` alongside
+   `workspace.surface_mode`, with `/api/app-config` reconciliation on reconnect/focus
+   and a cross-window `gridvibe.theme` storage listener in `shared.js`) and
+   ISSUE-2026-019 (a floating, accessible, theme-aware voice-recording waveform
+   overlay driven by an `AnalyserNode` with CSS fallback, plus hold-to-talk pointer
+   handling on the mic button). New `ThemeSyncTestCase` (7 tests) and
+   `VoiceRecordingOverlayTestCase` (8 tests) in `tests/test_api.py`. Suite green
+   (441 tests, 1 skip) and `ruff` clean.
+9. **UX/features:** 8.1 and 8.4 first (close confirmation, reconnect affordance — the two
+   Medium UX gaps), then 8.2/8.3/8.5 polish, and 10.3–10.7 as individually scoped follow-ups
+   (10.2 is now done; 10.3 depends on 3.6's vendored assets; 10.7 completes 1.4's host-key
+   story).
+   ✅ **Step 9 (8.x tranche) completed 2026-07-14** (see the per-finding notes above): 8.4
+   landed `POST /api/sessions/<session_id>/reconnect` plus `Retry connection` buttons in the
+   error and new disconnected pane placeholders; 8.1 added the `closeSessionConfirmModal`
+   gate to `closeSessionGroup` (prompting only when the group has ≥1 connected terminal);
+   8.2 restructured `#launchBtn` (label/arrow/spinner spans + `.loading` class, structurally
+   closing 4.3); 8.3 collapsed the duplicate update status to `#quickUpdateStatus` with a
+   6-second auto-clear; 8.5 dropped the doubled native `title` tooltip. All of section 8 is
+   now closed; 10.3–10.7 remain as the step's follow-ups. New `UxInteractionButtonsTestCase`
+   (10 tests) in `tests/test_api.py`. Suite green (451 tests, 1 skip) and `ruff` clean.
+   ✅ **Step 9 completed 2026-07-14 — review fully implemented** (see the per-finding notes
+   above): the five remaining features landed in one pass. 10.7 added the shared
+   `_apply_host_key_policy` in `web/hostkeys.py` + `ssh.host_key_policy` config/App-Settings
+   select (completing 1.4); 10.6 added `GET /api/explorer/<id>/download` (100 MB cap,
+   read-scope, binaries allowed) + a file-viewer download button; 10.3 vendored the xterm
+   search/web-links addons and added the `Ctrl+Shift+F` per-pane search overlay; 10.4 added
+   the topbar Broadcast toggle with the shared `forwardTerminalInput` helper and
+   group-switch/10-min-idle auto-disable; 10.5 added `web/runtime_state.py`
+   (`runtime_state.json` snapshot refreshed from `_broadcast_session_groups_updated`), the
+   `/api/runtime-state` GET/DELETE routes, and the launcher's restore banner. New test
+   classes `HostKeyPolicyTestCase`, `ExplorerDownloadTestCase`,
+   `TerminalSearchWebLinksTestCase`, `BroadcastInputTestCase`, and
+   `RuntimeStateRestoreTestCase` (29 tests) in `tests/test_api.py`. Suite green
+   (480 tests, 1 skip) and `ruff` clean. With this, every finding in sections 1–10 of this
+   review is implemented or explicitly closed.
