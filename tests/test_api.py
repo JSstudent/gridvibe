@@ -1762,6 +1762,10 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "workspace": {
                     "surface_mode": "max",
                 },
+                "terminal": {
+                    "font_family": api.runtime_config.terminal_font_family,
+                    "font_size": api.runtime_config.terminal_font_size,
+                },
                 "timestamp": ANY,
             },
         )
@@ -9810,3 +9814,357 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertIn("fetch('/api/runtime-state', { method: 'DELETE' })", launcher_js)
         launcher_css = self._static("css/launcher.css")
         self.assertIn(".restore-banner", launcher_css)
+
+
+class SettingsLauncherConfigTestCase(unittest.TestCase):
+    """Stage 7 — ISSUE-2026-031 / ISSUE-2026-029 / ISSUE-2026-013."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.config_path = Path(self.temp_dir.name) / "config.json"
+        patcher = patch.object(web_config, "CONFIG_PATH", str(self.config_path))
+        patcher.start()
+        # LIFO cleanup: unpatch first, then refresh from the real config so
+        # later test classes see the on-disk settings again.
+        self.addCleanup(api._refresh_runtime_config)
+        self.addCleanup(patcher.stop)
+        api._refresh_runtime_config()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    # ── ISSUE-2026-031 — App Settings body scrolls under pinned actions ──
+
+    def test_app_settings_body_keeps_modal_scroll_region(self):
+        launcher_css = self._static("css/launcher.css")
+        # The override that disabled the scroll region must stay gone.
+        self.assertNotIn(
+            ".app-settings-card .settings-grid",
+            launcher_css,
+            "App Settings must not override the shared .settings-grid scroll model",
+        )
+        settings_grid = re.search(r"\.settings-grid \{(.*?)\}", launcher_css, re.DOTALL)
+        self.assertIsNotNone(settings_grid)
+        self.assertIn("overflow: auto", settings_grid.group(1))
+        self.assertIn("min-height: 0", settings_grid.group(1))
+        # Pinned header/body/actions rows: the actions row stays out of the
+        # scrollable body, so a taller voice panel can never paint under it.
+        modal_card = re.search(r"\n        \.modal-card \{(.*?)\}", launcher_css, re.DOTALL)
+        self.assertIsNotNone(modal_card)
+        self.assertIn("grid-template-rows: auto minmax(0, 1fr) auto", modal_card.group(1))
+        self.assertIn(".app-settings-actions", launcher_css)
+
+    # ── ISSUE-2026-029 — terminal settings in App Settings ──
+
+    def test_app_config_returns_terminal_settings(self):
+        payload = self.client.get("/api/app-config").get_json()
+        self.assertIn("terminal", payload)
+        self.assertEqual(
+            payload["terminal"]["font_family"], api.runtime_config.terminal_font_family
+        )
+        self.assertEqual(
+            payload["terminal"]["font_size"], api.runtime_config.terminal_font_size
+        )
+        self.assertEqual(
+            payload["terminal"]["max_sessions"], api.runtime_config.max_sessions
+        )
+
+    def test_app_config_persists_terminal_settings(self):
+        response = self.client.post(
+            "/api/app-config",
+            json={
+                "terminal": {
+                    "font_family": "Cascadia Mono, monospace",
+                    "font_size": 18,
+                    "max_sessions": 6,
+                }
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["terminal"]["font_family"], "Cascadia Mono, monospace")
+        self.assertEqual(payload["terminal"]["font_size"], 18)
+        self.assertEqual(payload["terminal"]["max_sessions"], 6)
+        cfg = api.load_config()
+        self.assertEqual(cfg["terminal"]["font_family"], "Cascadia Mono, monospace")
+        self.assertEqual(cfg["terminal"]["font_size"], 18)
+        self.assertEqual(cfg["terminal"]["max_sessions"], 6)
+        self.assertEqual(api.runtime_config.terminal_font_size, 18)
+        self.assertEqual(api.runtime_config.terminal_font_family, "Cascadia Mono, monospace")
+        self.assertEqual(api.runtime_config.max_sessions, 6)
+
+    def test_app_config_clamps_terminal_bounds(self):
+        response = self.client.post(
+            "/api/app-config",
+            json={"terminal": {"font_size": 200, "max_sessions": 99}},
+        )
+        payload = response.get_json()
+        self.assertEqual(payload["terminal"]["font_size"], web_config.TERMINAL_FONT_SIZE_MAX)
+        self.assertEqual(payload["terminal"]["max_sessions"], web_config.MAX_SESSIONS_MAX)
+
+        response = self.client.post(
+            "/api/app-config",
+            json={"terminal": {"font_size": 1, "max_sessions": 0}},
+        )
+        payload = response.get_json()
+        self.assertEqual(payload["terminal"]["font_size"], web_config.TERMINAL_FONT_SIZE_MIN)
+        self.assertEqual(payload["terminal"]["max_sessions"], web_config.MAX_SESSIONS_MIN)
+
+    def test_app_config_rejects_invalid_terminal_values(self):
+        before_family = api.runtime_config.terminal_font_family
+        before_size = api.runtime_config.terminal_font_size
+        before_sessions = api.runtime_config.max_sessions
+
+        response = self.client.post(
+            "/api/app-config",
+            json={
+                "terminal": {
+                    "font_family": "x" * (web_config.TERMINAL_FONT_FAMILY_MAX_LENGTH + 1),
+                    "font_size": "not-a-number",
+                    "max_sessions": None,
+                }
+            },
+        )
+
+        payload = response.get_json()
+        self.assertEqual(payload["terminal"]["font_family"], before_family)
+        self.assertEqual(payload["terminal"]["font_size"], before_size)
+        self.assertEqual(payload["terminal"]["max_sessions"], before_sessions)
+
+        response = self.client.post("/api/app-config", json={"terminal": {"font_family": "   "}})
+        self.assertEqual(response.get_json()["terminal"]["font_family"], before_family)
+
+    def test_runtime_config_refresh_clamps_terminal_settings(self):
+        self.config_path.write_text(
+            json.dumps({"terminal": {"max_sessions": "nope", "font_size": 900}}),
+            encoding="utf-8",
+        )
+        api._refresh_runtime_config()
+        self.assertEqual(api.runtime_config.max_sessions, 4)
+        self.assertEqual(
+            api.runtime_config.terminal_font_size, web_config.TERMINAL_FONT_SIZE_MAX
+        )
+
+    def test_app_settings_modal_collects_terminal_fields(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="appTerminalFontFamily"', html)
+        self.assertIn('id="appTerminalFontSize"', html)
+        self.assertIn('id="appTerminalMaxSessions"', html)
+
+        launcher_js = self._static("js/launcher.js")
+        collect = launcher_js[
+            launcher_js.index("function collectAppSettingsForm()"):
+            launcher_js.index("function notifyAppConfigUpdated(appSettings)")
+        ]
+        self.assertIn("terminal: {", collect)
+        self.assertIn("appTerminalFontFamily", collect)
+        self.assertIn("appTerminalFontSize", collect)
+        self.assertIn("appTerminalMaxSessions", collect)
+        notify = launcher_js[
+            launcher_js.index("function notifyAppConfigUpdated(appSettings)"):
+            launcher_js.index("async function loadAppSettings()")
+        ]
+        self.assertIn("terminal: {", notify)
+
+    def test_terminals_page_applies_live_terminal_font_updates(self):
+        terminals_js = self._static("js/terminals.js")
+        apply_update = terminals_js[
+            terminals_js.index("function applyAppConfigUpdate(message)"):
+            terminals_js.index("function applyAppConfigTerminalFont(message)")
+        ]
+        self.assertIn("applyAppConfigTerminalFont(message);", apply_update)
+        apply_font = terminals_js[
+            terminals_js.index("function applyAppConfigTerminalFont(message)"):
+            terminals_js.index("/* Recover app-config changes missed")
+        ]
+        self.assertIn("document.body.dataset.terminalFontSize", apply_font)
+        self.assertIn("document.body.dataset.terminalFontFamily", apply_font)
+        self.assertIn("term.options.fontSize", apply_font)
+        self.assertIn("term.options.fontFamily", apply_font)
+        self.assertIn("scheduleFit(index);", apply_font)
+
+    # ── ISSUE-2026-013 — per-agent auto-mode toggles ──
+
+    def test_agent_options_expose_registry_auto_mode_flags(self):
+        options = {item["value"]: item for item in web_agents._agent_options()}
+        self.assertEqual(options["claude"]["auto_mode_flag"], "--enable-auto-mode")
+        self.assertEqual(options["codex"]["auto_mode_flag"], "--full-auto")
+        self.assertEqual(options["copilot"]["auto_mode_flag"], "--allow-all-tools")
+        self.assertEqual(options["opencode"]["auto_mode_flag"], "")
+        self.assertEqual(options["other"]["auto_mode_flag"], "")
+
+    def test_auto_mode_flag_rejects_malformed_registry_values(self):
+        with patch.dict(
+            web_agents.AGENT_REGISTRY,
+            {"badflag": {"auto_mode": {"flag": "rm -rf /"}}},
+        ):
+            self.assertEqual(web_agents._agent_auto_mode_flag("badflag"), "")
+        with patch.dict(
+            web_agents.AGENT_REGISTRY,
+            {"nodash": {"auto_mode": {"flag": "yolo"}}},
+        ):
+            self.assertEqual(web_agents._agent_auto_mode_flag("nodash"), "")
+
+    def test_compose_agent_startup_command_variants(self):
+        def session(**overrides):
+            base = {
+                "initial_command": "claude",
+                "initial_command_mode": "agent",
+                "agent_selection": "claude",
+                "agent_auto_mode": True,
+            }
+            base.update(overrides)
+            return SimpleNamespace(**base)
+
+        compose = web_agents._compose_agent_startup_command
+        self.assertEqual(compose(session()), "claude --enable-auto-mode")
+        self.assertEqual(compose(session(agent_auto_mode=False)), "claude")
+        self.assertEqual(
+            compose(session(initial_command="opencode", agent_selection="opencode")),
+            "opencode",
+        )
+        # A custom command never gains flags, even with the toggle persisted.
+        self.assertEqual(
+            compose(
+                session(
+                    initial_command="my-agent --custom",
+                    agent_selection="other",
+                    custom_agent="my-agent --custom",
+                )
+            ),
+            "my-agent --custom",
+        )
+        self.assertEqual(
+            compose(session(initial_command_mode="command")), "claude"
+        )
+        self.assertEqual(compose(session(initial_command="")), "")
+
+    def test_startup_sequence_sends_composed_auto_mode_command(self):
+        connection = {"kind": "ssh", "shell_kind": "posix"}
+        session = SimpleNamespace(
+            directory="",
+            initial_command="claude",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            agent_auto_mode=True,
+        )
+        with patch.object(web_terminal_io, "_send_connection_input") as send:
+            web_terminal_io._run_startup_sequence(connection, session)
+        send.assert_called_once_with(connection, "claude --enable-auto-mode\n")
+
+        session.agent_auto_mode = False
+        with patch.object(web_terminal_io, "_send_connection_input") as send:
+            web_terminal_io._run_startup_sequence(connection, session)
+        send.assert_called_once_with(connection, "claude\n")
+
+    def test_normalize_terminal_entries_gates_agent_auto_mode(self):
+        normalized = web_saved_sessions._normalize_terminal_entries(
+            [
+                {
+                    "startup_mode": "agent",
+                    "agent_selection": "claude",
+                    "initial_command": "claude",
+                    "agent_auto_mode": True,
+                },
+                {"startup_mode": "terminal", "agent_auto_mode": True},
+                {"startup_mode": "agent", "agent_selection": "claude"},
+            ]
+        )
+        self.assertTrue(normalized[0]["agent_auto_mode"])
+        self.assertFalse(normalized[1]["agent_auto_mode"])
+        # Backward compatibility: presets without the field default to off.
+        self.assertFalse(normalized[2]["agent_auto_mode"])
+
+    def test_workspace_merge_carries_agent_auto_mode(self):
+        base = {
+            "connection_mode": "wsl",
+            "terminal_count": 1,
+            "terminals": [
+                {
+                    "startup_mode": "agent",
+                    "agent_selection": "claude",
+                    "initial_command": "claude",
+                    "agent_auto_mode": False,
+                }
+            ],
+        }
+        workspace = {
+            "terminal_count": 1,
+            "terminals": [
+                {
+                    "startup_mode": "agent",
+                    "agent_selection": "claude",
+                    "initial_command": "claude",
+                    "agent_auto_mode": True,
+                }
+            ],
+        }
+        merged = web_saved_sessions._merge_workspace_session_config(base, workspace)
+        self.assertTrue(merged["terminals"][0]["agent_auto_mode"])
+
+        workspace["terminals"][0] = {"startup_mode": "terminal"}
+        merged = web_saved_sessions._merge_workspace_session_config(base, workspace)
+        self.assertFalse(merged["terminals"][0]["agent_auto_mode"])
+
+    def test_sessions_post_round_trips_agent_auto_mode(self):
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        with patch.object(api, "_sanitize_agent_launch_commands", return_value=[]), patch.object(
+            api.socketio, "start_background_task"
+        ):
+            response = self.client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "wsl",
+                    "sessions": [
+                        {
+                            "directory": self.temp_dir.name,
+                            "title": "Agent",
+                            "startup_mode": "agent",
+                            "initial_command_mode": "agent",
+                            "initial_command": "claude",
+                            "agent_selection": "claude",
+                            "agent_auto_mode": True,
+                        }
+                    ],
+                },
+            )
+        self.assertEqual(response.status_code, 201)
+        session = response.get_json()["sessions"][0]
+        self.assertTrue(session["agent_auto_mode"])
+        # The persisted command stays the base agent key so preflight and
+        # saved sessions keep matching on the executable.
+        self.assertEqual(session["initial_command"], "claude")
+
+    def test_runtime_state_snapshot_includes_agent_auto_mode(self):
+        self.assertIn("agent_auto_mode", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
+
+    def test_launcher_wires_the_auto_mode_toggle(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn("auto_mode_flag", html)
+
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("function agentAutoModeFlag(agentValue)", launcher_js)
+        self.assertIn("function syncTerminalAgentAutoModeState(row, commandMode, selectedAgent)", launcher_js)
+        self.assertIn("t-agent-auto-mode", launcher_js)
+        self.assertIn("t-agent-auto-field", launcher_js)
+        collect = launcher_js[
+            launcher_js.index("function collectTerminalDrafts()"):
+            launcher_js.index("function renderCountOptions()")
+        ]
+        self.assertIn("agent_auto_mode:", collect)
+
+        terminals_js = self._static("js/terminals.js")
+        entry = terminals_js[
+            terminals_js.index("function buildWorkspaceTerminalEntry(terminal, index, connectionMode)"):
+            terminals_js.index("function buildActiveWorkspaceSessionConfig(")
+        ]
+        self.assertIn("agent_auto_mode:", entry)

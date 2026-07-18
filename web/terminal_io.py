@@ -22,7 +22,12 @@ from collections import deque
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from sessions.manager import SessionStatus
-from web.agents import AGENT_REGISTRY, _find_wsl_executable, _powershell_single_quote
+from web.agents import (
+    AGENT_REGISTRY,
+    _compose_agent_startup_command,
+    _find_wsl_executable,
+    _powershell_single_quote,
+)
 from web.app import session_manager, socketio
 from web.config import runtime_config
 from web.explorer import (
@@ -442,8 +447,9 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
             _send_connection_input(connection, f"cd {shlex.quote(target_directory)}{newline}")
         time.sleep(0.15)
 
-    if session.initial_command:
-        _send_connection_input(connection, f"{session.initial_command}{newline}")
+    startup_command = _compose_agent_startup_command(session)
+    if startup_command:
+        _send_connection_input(connection, f"{startup_command}{newline}")
 
 
 def _finalize_stream(session_id: str):

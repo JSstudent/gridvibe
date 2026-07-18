@@ -139,6 +139,44 @@
         }
         applyAppConfigTheme(message);
         applyAppConfigSurfaceMode(message);
+        applyAppConfigTerminalFont(message);
+    }
+
+    /* Apply a launcher-side terminal font change (ISSUE-2026-029) to every
+       attached xterm without a reload. Sizes outside the server's accepted
+       range are ignored so a malformed broadcast can't break rendering. */
+    function applyAppConfigTerminalFont(message) {
+        const terminalConfig = message?.terminal;
+        if (!terminalConfig || typeof terminalConfig !== 'object') {
+            return;
+        }
+        const fontSize = Number(terminalConfig.font_size);
+        const hasFontSize = Number.isFinite(fontSize) && fontSize >= 6 && fontSize <= 48;
+        const fontFamily = typeof terminalConfig.font_family === 'string'
+            ? terminalConfig.font_family.trim()
+            : '';
+        if (!hasFontSize && !fontFamily) {
+            return;
+        }
+        if (hasFontSize) {
+            document.body.dataset.terminalFontSize = String(Math.round(fontSize));
+        }
+        if (fontFamily) {
+            document.body.dataset.terminalFontFamily = fontFamily;
+        }
+        terminals.forEach((terminal, index) => {
+            const term = terminal?.term;
+            if (!term) {
+                return;
+            }
+            if (hasFontSize) {
+                term.options.fontSize = Math.round(fontSize);
+            }
+            if (fontFamily) {
+                term.options.fontFamily = fontFamily;
+            }
+            scheduleFit(index);
+        });
     }
 
     /* Recover app-config changes missed while this window was hidden or its
@@ -1525,6 +1563,7 @@
             startup_mode: startupMode,
             agent_selection: commandMode === 'agent' ? (session.agent_selection || '') : '',
             custom_agent: commandMode === 'agent' ? (session.custom_agent || '') : '',
+            agent_auto_mode: commandMode === 'agent' ? Boolean(session.agent_auto_mode) : false,
             explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?._explorerTreeSidebarOpen) : false,
             explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
             explorer_open_tabs: explorerTabs.open_tabs,

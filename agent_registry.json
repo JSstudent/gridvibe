@@ -68,7 +68,11 @@
     "verify": [
       "copilot --version"
     ],
-    "post_install": "Run copilot and complete /login if prompted."
+    "post_install": "Run copilot and complete /login if prompted.",
+    "auto_mode": {
+      "flag": "--allow-all-tools",
+      "description": "Launches with all tool executions approved automatically."
+    }
   },
   "codex": {
     "label": "codex",
@@ -139,7 +143,11 @@
     "verify": [
       "codex --version"
     ],
-    "post_install": "Run codex once and complete sign-in."
+    "post_install": "Run codex once and complete sign-in.",
+    "auto_mode": {
+      "flag": "--full-auto",
+      "description": "Launches in sandboxed full-auto mode with automatic edit approval."
+    }
   },
   "opencode": {
     "label": "opencode",
@@ -339,7 +347,11 @@
     "verify": [
       "claude --version"
     ],
-    "post_install": "Run claude once and complete browser sign-in."
+    "post_install": "Run claude once and complete browser sign-in.",
+    "auto_mode": {
+      "flag": "--enable-auto-mode",
+      "description": "Launches with automatic edit and approval mode enabled."
+    }
   }
 }
 

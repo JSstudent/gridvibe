@@ -84,6 +84,7 @@ def _default_terminal_entries():
             "startup_mode": "terminal",
             "agent_selection": "",
             "custom_agent": "",
+            "agent_auto_mode": False,
             "explorer_tree_open": False,
             "explorer_git_open": False,
             "explorer_open_tabs": [],
@@ -268,6 +269,7 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
                 "startup_mode": startup_mode,
                 "agent_selection": str(entry.get("agent_selection") or ""),
                 "custom_agent": str(entry.get("custom_agent") or ""),
+                "agent_auto_mode": startup_mode == "agent" and bool(entry.get("agent_auto_mode")),
                 "explorer_tree_open": bool(entry.get("explorer_tree_open")),
                 "explorer_git_open": bool(entry.get("explorer_git_open")),
                 "explorer_open_tabs": open_tabs,
@@ -360,6 +362,7 @@ def _merge_workspace_session_config(
                 initial_command = custom_agent if agent_selection == "other" else agent_selection
             saved_terminal["agent_selection"] = agent_selection
             saved_terminal["custom_agent"] = custom_agent
+            saved_terminal["agent_auto_mode"] = workspace_terminal["agent_auto_mode"]
             saved_terminal["initial_command"] = initial_command
         elif (
             base["terminals"][index]["initial_command_mode"] == "agent"
@@ -368,6 +371,7 @@ def _merge_workspace_session_config(
         ):
             saved_terminal["agent_selection"] = ""
             saved_terminal["custom_agent"] = ""
+            saved_terminal["agent_auto_mode"] = False
             saved_terminal["initial_command"] = ""
 
         saved_terminal["explorer_tree_open"] = (

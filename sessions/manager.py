@@ -41,6 +41,7 @@ class TerminalSession:
     initial_command_mode: str = "command"
     agent_selection: str = ""
     custom_agent: str = ""
+    agent_auto_mode: bool = False
     title: Optional[str] = None
     mode: str = "ssh"
     distribution: Optional[str] = None
@@ -70,6 +71,7 @@ class TerminalSession:
             "initial_command_mode": self.initial_command_mode,
             "agent_selection": self.agent_selection,
             "custom_agent": self.custom_agent,
+            "agent_auto_mode": self.agent_auto_mode,
             "title": self.title,
             "mode": self.mode,
             "distribution": self.distribution,
@@ -254,6 +256,7 @@ class SessionManager:
                     initial_command_mode=str(config.get("initial_command_mode") or "command"),
                     agent_selection=str(config.get("agent_selection") or ""),
                     custom_agent=str(config.get("custom_agent") or ""),
+                    agent_auto_mode=bool(config.get("agent_auto_mode")),
                     title=config.get("title"),
                     mode=mode,
                     distribution=config.get("distribution"),
@@ -290,6 +293,7 @@ class SessionManager:
             "initial_command_mode",
             "agent_selection",
             "custom_agent",
+            "agent_auto_mode",
             "title",
             "distribution",
             "use_wsl",

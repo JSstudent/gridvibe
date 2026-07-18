@@ -239,6 +239,24 @@
                     <option value="strict">Strict (reject unknown hosts)</option>
                 </select>
             </div>
+            <div class="settings-section compact-section">
+                <div class="settings-section-title">Terminal</div>
+                <div class="settings-fields-inline">
+                    <div class="field">
+                        <label>Font Family</label>
+                        <input id="appTerminalFontFamily" type="text" placeholder="Consolas, Monaco, 'Courier New', monospace" aria-label="Terminal font family">
+                    </div>
+                    <div class="field">
+                        <label>Font Size</label>
+                        <input id="appTerminalFontSize" type="number" min="6" max="48" step="1" aria-label="Terminal font size">
+                    </div>
+                    <div class="field">
+                        <label>Max Sessions</label>
+                        <input id="appTerminalMaxSessions" type="number" min="1" max="16" step="1" aria-label="Maximum terminal sessions">
+                    </div>
+                </div>
+                <div class="settings-hint">Font changes apply to open terminal windows right away. Max sessions applies to new launches.</div>
+            </div>
             <div class="voice-settings-panel">
                 <label class="check-field app-voice-enable-row">
                     <input id="appVoiceEnabled" type="checkbox" onchange="updateAppSettingsVisibility()">

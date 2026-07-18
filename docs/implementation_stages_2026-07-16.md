@@ -1,6 +1,6 @@
 # GridVibe Staged Implementation Plan
 
-Last updated: 2026-07-16
+Last updated: 2026-07-18
 
 This document groups the currently **open** issues in
 [`testing_issues.md`](testing_issues.md) into implementation **stages**. Each
@@ -22,12 +22,13 @@ depend on them. Within a stage, issues share files and can be built together.
 | 4 ✅ | Explorer large-file / log preview (**done 2026-07-17**) | 020 |
 | 5 ✅ | Terminal close & layout integrity (**done 2026-07-17**) | 022, 027 |
 | 6 ✅ | Terminal input focus & targeting (**done 2026-07-17**) | 025, 026 |
-| 7 | Settings & launcher configuration | 029, 013, 031 |
+| 7 ✅ | Settings & launcher configuration (**done 2026-07-18**) | 029, 013, 031 |
 
-All 17 issues are covered; **Stage 1 (024, 028, 023, 018), Stage 2 (014, 016,
-015), Stage 3 (017, 030), Stage 4 (020), Stage 5 (022, 027), and Stage 6 (025,
-026) are now implemented and closed**, leaving 3 open (Stage 7). Stage 7 is
-independent of the completed stages.
+All 17 issues are covered and **every stage is now implemented and closed**:
+Stage 1 (024, 028, 023, 018), Stage 2 (014, 016, 015), Stage 3 (017, 030),
+Stage 4 (020), Stage 5 (022, 027), Stage 6 (025, 026), and Stage 7 (031, 029,
+013). This plan is complete; issues reported after it was authored (032–036)
+are tracked in [`testing_issues.md`](testing_issues.md) only.
 
 ---
 
@@ -531,13 +532,16 @@ extracted `broadcastInputToPeers` helper.
 
 ## Stage 7 — Settings & launcher configuration
 
+> **Status: Implemented (2026-07-18).** All three issues below are closed. See
+> **Implementation notes** at the end of this section for what shipped.
+
 **Goal:** extend the settings/launcher configuration pipeline for the two
 config-shaped requests.
 
 **Issues**
-- **ISSUE-2026-031** — App Settings action buttons overlap voice settings content *(land first — fix the modal layout before it grows)*
-- **ISSUE-2026-029** — Settings UI omits terminal config (font family, size, max sessions)
-- **ISSUE-2026-013** — Add per-agent auto-mode toggles to terminal settings
+- **ISSUE-2026-031** — App Settings action buttons overlap voice settings content ✅ *(landed first — fixed the modal layout before it grew)*
+- **ISSUE-2026-029** — Settings UI omits terminal config (font family, size, max sessions) ✅
+- **ISSUE-2026-013** — Add per-agent auto-mode toggles to terminal settings ✅
 
 **Shared surface**
 - `web/static/css/launcher.css`: `.app-settings-card`, `.settings-grid`
@@ -578,6 +582,66 @@ fixed, scrollable modal, not the overlapping one) → 013 (independent).
 scrollable so future fields don't reintroduce the 031 overlap.
 
 **Sizing:** Small (031 CSS) + Medium (029/013 settings paths).
+
+**Implementation notes (2026-07-18)**
+1. **031 — App Settings scroll region.** The
+   `.app-settings-card .settings-grid { overflow: visible; padding-right: 0 }`
+   override in `web/static/css/launcher.css` was removed, along with the
+   narrow-width breakpoint block that re-restored `overflow: auto` (now
+   redundant). The App Settings body therefore uses the base `.settings-grid`
+   scroll model (`overflow: auto; min-height: 0; padding-right: 4px`) at every
+   width inside the `.modal-card` grid rows (`auto minmax(0, 1fr) auto`), so the
+   pinned `.app-settings-actions` row never overlaps content — taller content
+   (voice enabled, or the new 029 fields) extends the scrollable region instead.
+2. **029 — terminal settings end to end.** The App Settings modal
+   (`templates/index.html`) gained a **Terminal** section with bounded inputs for
+   Font Family, Font Size (6–48), and Max Sessions (1–16), collected/synced via a
+   new `terminal` section in `DEFAULT_APP_SETTINGS` / `syncAppSettingsForm()` /
+   `collectAppSettingsForm()` (`web/static/js/launcher.js`).
+   `_normalize_app_config_update()` in `web/api.py` validates the branch (font
+   family trimmed, rejected when empty or over `TERMINAL_FONT_FAMILY_MAX_LENGTH`
+   with fallback to the current runtime value; font size and max sessions
+   int-parsed with fallback and clamped), with the bounds defined once in
+   `web/config.py` (`TERMINAL_FONT_SIZE_MIN/MAX`, `MAX_SESSIONS_MIN/MAX`) and the
+   same clamps applied in `RuntimeConfig.refresh()` so hand-edited configs cannot
+   smuggle out-of-range values. `_public_app_config()` returns the block, and the
+   existing app-config update contract propagates live changes:
+   `_broadcast_app_config_update()` / `notifyAppConfigUpdated()` carry
+   `terminal.font_family`/`font_size`, and `applyAppConfigTerminalFont()` in
+   `web/static/js/terminals.js` applies them to every open xterm pane immediately
+   (with refit); `max_sessions` applies to new launches only, per the modal hint.
+3. **013 — per-agent auto mode.** Flags are registry-owned: `agent_registry.json`
+   entries may declare `auto_mode` (`flag` + `description`) — `claude
+   --enable-auto-mode`, `codex --full-auto`, `copilot --allow-all-tools`;
+   `opencode`/`kilo` register none. `_agent_auto_mode_flag()` in `web/agents.py`
+   accepts a flag only if it starts with `-` and has no whitespace (a registry
+   typo can never smuggle a second command); `_agent_options()` exposes it as
+   `auto_mode_flag`. The launcher agent row (`web/static/js/launcher.js`) shows an
+   accessible **Auto mode** checkbox only when the selected built-in agent has a
+   registered flag (`syncTerminalAgentAutoModeState()` recomputes visibility +
+   `Launches as "<agent> <flag>"` help text on selection/mode changes; the toggle
+   clears when unavailable, custom agents stay verbatim). The per-terminal
+   boolean `agent_auto_mode` round-trips through drafts, saved-session
+   normalization (`web/saved_sessions.py`, gated to agent startup mode),
+   workspace saves (`buildWorkspaceTerminalEntry()` +
+   `_merge_workspace_session_config()`), `TerminalSession`
+   (`sessions/manager.py`), and the runtime-state snapshot
+   (`web/runtime_state.py`) — while the persisted `initial_command` always stays
+   the bare agent key so preflight detection keeps working. The flag is composed
+   only at launch: `_run_startup_sequence()` (`web/terminal_io.py`) sends
+   `_compose_agent_startup_command(session)` (`web/agents.py`), which appends the
+   registered flag exactly once for a built-in agent in agent mode with the
+   toggle on and returns everything else verbatim.
+
+Tests: `tests/test_api.py` gained a `SettingsLauncherConfigTestCase` with 17
+focused tests — the 031 scroll-region regression test, the 029 app-config
+return/persist/clamp/reject, `RuntimeConfig` clamp, modal collect wiring, and
+live-font-update tests (plus an updated broadcast-payload assertion in
+`test_app_config_endpoint_persists_theme_and_voice_settings`), and the 013
+registry-flag exposure/validation, command-composition, startup-sequence,
+saved-session/workspace/sessions-API/runtime-state round-trip, and launcher
+toggle-wiring tests; `tests/test_session_manager.py` gained
+`test_create_sessions_carries_agent_auto_mode`.
 
 ---
 

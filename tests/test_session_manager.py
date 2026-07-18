@@ -205,6 +205,34 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(sessions[0].custom_agent, "claude-code")
         self.assertEqual(sessions[0].to_dict()["initial_command_mode"], "agent")
 
+    def test_create_sessions_carries_agent_auto_mode(self):
+        """ISSUE-2026-013: TerminalSession persists the per-terminal auto-mode toggle."""
+        sessions = self.manager.create_sessions(
+            [
+                {
+                    "mode": "ssh",
+                    "host": "127.0.0.1",
+                    "directory": "/repo",
+                    "initial_command": "claude",
+                    "initial_command_mode": "agent",
+                    "agent_selection": "claude",
+                    "agent_auto_mode": True,
+                },
+                {
+                    "mode": "ssh",
+                    "host": "127.0.0.1",
+                    "directory": "/repo",
+                },
+            ],
+            group_id="group-auto-mode",
+        )
+
+        self.assertTrue(sessions[0].agent_auto_mode)
+        self.assertTrue(sessions[0].to_dict()["agent_auto_mode"])
+        # Backward compatibility: configs without the field default to off.
+        self.assertFalse(sessions[1].agent_auto_mode)
+        self.assertFalse(sessions[1].to_dict()["agent_auto_mode"])
+
     def test_create_group_preserves_workspace_layout_metadata(self):
         workspace_layout = {
             "class_name": "layout-split-local",

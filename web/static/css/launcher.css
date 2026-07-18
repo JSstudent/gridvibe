@@ -918,11 +918,6 @@
             row-gap: 14px;
         }
 
-        .app-settings-card .settings-grid {
-            overflow: visible;
-            padding-right: 0;
-        }
-
         .settings-section {
             display: grid;
             gap: 14px;
@@ -2179,11 +2174,6 @@
 
             .modal-card {
                 max-height: calc(100vh - 32px);
-            }
-
-            .app-settings-card .settings-grid {
-                overflow: auto;
-                padding-right: 4px;
             }
 
             .modal-head,

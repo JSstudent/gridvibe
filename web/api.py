@@ -68,6 +68,11 @@ from web.app import (  # noqa: F401 - re-exported for backwards compatibility
 )
 from web.config import (
     HOST_KEY_POLICY_OPTIONS,
+    MAX_SESSIONS_MAX,
+    MAX_SESSIONS_MIN,
+    TERMINAL_FONT_FAMILY_MAX_LENGTH,
+    TERMINAL_FONT_SIZE_MAX,
+    TERMINAL_FONT_SIZE_MIN,
     WHISPER_MODEL_OPTIONS,
     _config_lock,
     _merge_dicts,
@@ -289,6 +294,11 @@ def _public_app_config() -> Dict[str, Any]:
         "ssh": {
             "host_key_policy": runtime_config.ssh_host_key_policy,
         },
+        "terminal": {
+            "font_family": runtime_config.terminal_font_family,
+            "font_size": runtime_config.terminal_font_size,
+            "max_sessions": runtime_config.max_sessions,
+        },
         "voice_input": {
             "enabled": runtime_config.voice_enabled,
             "engine": runtime_config.voice_engine,
@@ -311,6 +321,10 @@ def _broadcast_app_config_update():
             },
             "workspace": {
                 "surface_mode": runtime_config.app_surface_mode,
+            },
+            "terminal": {
+                "font_family": runtime_config.terminal_font_family,
+                "font_size": runtime_config.terminal_font_size,
             },
             "timestamp": int(time.time() * 1000),
         },
@@ -341,6 +355,25 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     if host_key_policy not in HOST_KEY_POLICY_OPTIONS:
         host_key_policy = runtime_config.ssh_host_key_policy
 
+    terminal_settings = payload.get("terminal")
+    if not isinstance(terminal_settings, dict):
+        terminal_settings = {}
+    font_family = str(
+        terminal_settings.get("font_family", runtime_config.terminal_font_family)
+    ).strip()
+    if not font_family or len(font_family) > TERMINAL_FONT_FAMILY_MAX_LENGTH:
+        font_family = runtime_config.terminal_font_family
+    try:
+        font_size = int(terminal_settings.get("font_size", runtime_config.terminal_font_size))
+    except (TypeError, ValueError):
+        font_size = runtime_config.terminal_font_size
+    font_size = max(TERMINAL_FONT_SIZE_MIN, min(TERMINAL_FONT_SIZE_MAX, font_size))
+    try:
+        max_sessions = int(terminal_settings.get("max_sessions", runtime_config.max_sessions))
+    except (TypeError, ValueError):
+        max_sessions = runtime_config.max_sessions
+    max_sessions = max(MAX_SESSIONS_MIN, min(MAX_SESSIONS_MAX, max_sessions))
+
     voice_input = payload.get("voice_input")
     if not isinstance(voice_input, dict):
         voice_input = {}
@@ -370,6 +403,11 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
         },
         "ssh": {
             "host_key_policy": host_key_policy,
+        },
+        "terminal": {
+            "font_family": font_family,
+            "font_size": font_size,
+            "max_sessions": max_sessions,
         },
         "voice_input": {
             "enabled": bool(voice_input.get("enabled", runtime_config.voice_enabled)),

@@ -23,6 +23,16 @@ _config_lock = threading.RLock()
 
 HOST_KEY_POLICY_OPTIONS = ("auto-add", "known-hosts", "strict")
 
+# Bounds for launcher-editable terminal settings (ISSUE-2026-029). The App
+# Settings write path and RuntimeConfig.refresh() share these so a hand-edited
+# config.json and an API update normalize identically.
+TERMINAL_FONT_SIZE_MIN = 6
+TERMINAL_FONT_SIZE_MAX = 48
+TERMINAL_FONT_FAMILY_MAX_LENGTH = 160
+MAX_SESSIONS_MIN = 1
+MAX_SESSIONS_MAX = 16
+DEFAULT_TERMINAL_FONT_FAMILY = "Consolas, Monaco, 'Courier New', monospace"
+
 WHISPER_MODEL_OPTIONS = {
     "tiny.en",
     "tiny",
@@ -182,14 +192,23 @@ class RuntimeConfig:
             host_key_policy = "auto-add"
         self.ssh_host_key_policy = host_key_policy
         terminal_config = self.app_config.get("terminal", {})
-        self.max_sessions = terminal_config.get("max_sessions", 4)
         try:
-            self.terminal_font_size = max(6, int(terminal_config.get("font_size", 14)))
+            self.max_sessions = max(
+                MAX_SESSIONS_MIN,
+                min(MAX_SESSIONS_MAX, int(terminal_config.get("max_sessions", 4))),
+            )
+        except (ValueError, TypeError):
+            self.max_sessions = 4
+        try:
+            self.terminal_font_size = max(
+                TERMINAL_FONT_SIZE_MIN,
+                min(TERMINAL_FONT_SIZE_MAX, int(terminal_config.get("font_size", 14))),
+            )
         except (ValueError, TypeError):
             self.terminal_font_size = 14
         self.terminal_font_family = str(
-            terminal_config.get("font_family", "Consolas, Monaco, 'Courier New', monospace")
-        ).strip() or "Consolas, Monaco, 'Courier New', monospace"
+            terminal_config.get("font_family", DEFAULT_TERMINAL_FONT_FAMILY)
+        ).strip() or DEFAULT_TERMINAL_FONT_FAMILY
         appearance_config = self.app_config.get("appearance", {})
         app_theme = str(appearance_config.get("theme", "system")).strip().lower()
         if app_theme not in {"system", "light", "dark"}:

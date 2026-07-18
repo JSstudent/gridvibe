@@ -99,6 +99,11 @@
         ssh: Object.freeze({
             host_key_policy: 'auto-add'
         }),
+        terminal: Object.freeze({
+            font_family: "Consolas, Monaco, 'Courier New', monospace",
+            font_size: 14,
+            max_sessions: 4
+        }),
         voice_input: Object.freeze({
             enabled: true,
             engine: 'vosk',
@@ -465,6 +470,7 @@
         const appearance = data?.appearance || {};
         const workspace = data?.workspace || {};
         const ssh = data?.ssh || {};
+        const terminal = data?.terminal || {};
         const voiceInput = data?.voice_input || {};
         appSettings = {
             appearance: {
@@ -478,6 +484,10 @@
             ssh: {
                 ...DEFAULT_APP_SETTINGS.ssh,
                 ...ssh
+            },
+            terminal: {
+                ...DEFAULT_APP_SETTINGS.terminal,
+                ...terminal
             },
             voice_input: {
                 ...DEFAULT_APP_SETTINGS.voice_input,
@@ -513,10 +523,14 @@
         const appearance = appSettings.appearance || DEFAULT_APP_SETTINGS.appearance;
         const workspace = appSettings.workspace || DEFAULT_APP_SETTINGS.workspace;
         const ssh = appSettings.ssh || DEFAULT_APP_SETTINGS.ssh;
+        const terminal = appSettings.terminal || DEFAULT_APP_SETTINGS.terminal;
         const voice = appSettings.voice_input || DEFAULT_APP_SETTINGS.voice_input;
         const themeInput = document.getElementById('appTheme');
         const surfaceModeInput = document.getElementById('appSurfaceMode');
         const sshHostKeyPolicyInput = document.getElementById('appSshHostKeyPolicy');
+        const terminalFontFamilyInput = document.getElementById('appTerminalFontFamily');
+        const terminalFontSizeInput = document.getElementById('appTerminalFontSize');
+        const terminalMaxSessionsInput = document.getElementById('appTerminalMaxSessions');
         const enabledInput = document.getElementById('appVoiceEnabled');
         const engineInput = document.getElementById('appVoiceEngine');
         const languageInput = document.getElementById('appVoiceLanguage');
@@ -531,6 +545,21 @@
             sshHostKeyPolicyInput.value = ['auto-add', 'known-hosts', 'strict'].includes(ssh.host_key_policy)
                 ? ssh.host_key_policy
                 : DEFAULT_APP_SETTINGS.ssh.host_key_policy;
+        }
+        if (terminalFontFamilyInput) {
+            terminalFontFamilyInput.value = String(terminal.font_family || DEFAULT_APP_SETTINGS.terminal.font_family);
+        }
+        if (terminalFontSizeInput) {
+            const fontSize = Number(terminal.font_size);
+            terminalFontSizeInput.value = Number.isFinite(fontSize)
+                ? String(fontSize)
+                : String(DEFAULT_APP_SETTINGS.terminal.font_size);
+        }
+        if (terminalMaxSessionsInput) {
+            const maxSessions = Number(terminal.max_sessions);
+            terminalMaxSessionsInput.value = Number.isFinite(maxSessions)
+                ? String(maxSessions)
+                : String(DEFAULT_APP_SETTINGS.terminal.max_sessions);
         }
         if (enabledInput) enabledInput.checked = Boolean(voice.enabled);
         if (engineInput) engineInput.value = voice.engine === 'whisper' ? 'whisper' : 'vosk';
@@ -694,6 +723,14 @@
             ssh: {
                 host_key_policy: document.getElementById('appSshHostKeyPolicy')?.value || DEFAULT_APP_SETTINGS.ssh.host_key_policy
             },
+            terminal: {
+                font_family: document.getElementById('appTerminalFontFamily')?.value.trim()
+                    || DEFAULT_APP_SETTINGS.terminal.font_family,
+                font_size: Number(document.getElementById('appTerminalFontSize')?.value)
+                    || DEFAULT_APP_SETTINGS.terminal.font_size,
+                max_sessions: Number(document.getElementById('appTerminalMaxSessions')?.value)
+                    || DEFAULT_APP_SETTINGS.terminal.max_sessions
+            },
             voice_input: {
                 enabled: Boolean(document.getElementById('appVoiceEnabled')?.checked),
                 engine: document.getElementById('appVoiceEngine')?.value || DEFAULT_APP_SETTINGS.voice_input.engine,
@@ -713,6 +750,10 @@
             },
             workspace: {
                 surface_mode: appSettings?.workspace?.surface_mode === 'max' ? 'max' : 'normal'
+            },
+            terminal: {
+                font_family: String(appSettings?.terminal?.font_family || DEFAULT_APP_SETTINGS.terminal.font_family),
+                font_size: Number(appSettings?.terminal?.font_size) || DEFAULT_APP_SETTINGS.terminal.font_size
             },
             timestamp: Date.now(),
             nonce: Math.random().toString(36).slice(2)
@@ -800,6 +841,15 @@
         return AGENT_OPTIONS.filter(option => option.value !== 'other').map(option => option.value);
     }
 
+    function agentAutoModeFlag(agentValue) {
+        const normalized = String(agentValue || '').trim().toLowerCase();
+        if (!normalized || normalized === 'other') {
+            return '';
+        }
+        const option = AGENT_OPTIONS.find(item => item.value === normalized);
+        return String(option?.auto_mode_flag || '').trim();
+    }
+
     function normalizeTerminalCommandUi(terminal) {
         const startupMode = String(terminal?.startup_mode || '').trim();
         const initialCommandMode = String(terminal?.initial_command_mode || '').trim();
@@ -817,6 +867,7 @@
         let agentSelection = String(terminal?.agent_selection || '').trim().toLowerCase();
         let customAgent = String(terminal?.custom_agent || '').trim();
         let commandValue = initialCommand;
+        const agentAutoMode = Boolean(terminal?.agent_auto_mode);
 
         if (mode === 'agent') {
             if (!agentSelection) {
@@ -840,7 +891,8 @@
                 mode,
                 commandValue,
                 agentSelection,
-                customAgent
+                customAgent,
+                agentAutoMode: agentAutoMode && Boolean(agentAutoModeFlag(agentSelection))
             };
         }
 
@@ -999,6 +1051,9 @@
                 custom_agent: commandMode === 'agent'
                     ? (row.querySelector('.t-agent-custom')?.value.trim() || '')
                     : '',
+                agent_auto_mode: commandMode === 'agent'
+                    && Boolean(agentAutoModeFlag(row.querySelector('.t-agent-select')?.value.trim() || ''))
+                    && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
                 explorer_open_tabs: commandMode === 'explorer' ? parseExplorerOpenTabsDataset(row.dataset.explorerOpenTabs) : [],
@@ -1473,6 +1528,7 @@
         agentField?.classList.toggle('hidden', commandMode !== 'agent');
         customAgentField?.classList.toggle('hidden', !(commandMode === 'agent' && selectedAgent === 'other'));
         browserField?.classList.toggle('hidden', commandMode !== 'browser');
+        syncTerminalAgentAutoModeState(row, commandMode, selectedAgent);
         if (commandMode !== 'agent') {
             clearAgentPreflight(row);
         }
@@ -1483,6 +1539,28 @@
             if (powershellCheckbox) powershellCheckbox.checked = false;
         }
         syncTerminalWslState(row);
+    }
+
+    function syncTerminalAgentAutoModeState(row, commandMode, selectedAgent) {
+        const autoField = row.querySelector('.t-agent-auto-field');
+        if (!autoField) {
+            return;
+        }
+        const flag = agentAutoModeFlag(selectedAgent);
+        const available = commandMode === 'agent' && Boolean(flag);
+        autoField.classList.toggle('hidden', !available);
+        const help = autoField.querySelector('.t-agent-auto-help');
+        if (help) {
+            help.textContent = available
+                ? `Launches as "${selectedAgent} ${flag}".`
+                : '';
+        }
+        if (!available) {
+            const checkbox = autoField.querySelector('.t-agent-auto-mode');
+            if (checkbox) {
+                checkbox.checked = false;
+            }
+        }
     }
 
     function resetTerminalCommandOnModeChange(row, nextMode) {
@@ -1498,6 +1576,8 @@
         if (previousMode === 'agent' && nextMode !== 'agent') {
             if (agentSelect) agentSelect.value = '';
             if (customAgentInput) customAgentInput.value = '';
+            const autoModeCheckbox = row.querySelector('.t-agent-auto-mode');
+            if (autoModeCheckbox) autoModeCheckbox.checked = false;
         }
     }
 
@@ -1839,6 +1919,13 @@
                                 </summary>
                                 <div class="agent-preflight-copy"></div>
                             </details>
+                            <label class="check-field t-agent-auto-field ${commandUi.mode === 'agent' && agentAutoModeFlag(commandUi.agentSelection) ? '' : 'hidden'}">
+                                <input class="t-agent-auto-mode" type="checkbox" ${commandUi.agentAutoMode ? 'checked' : ''} aria-label="Launch agent in auto mode">
+                                <span class="check-copy">
+                                    <strong>Auto mode</strong>
+                                    <span class="t-agent-auto-help"></span>
+                                </span>
+                            </label>
                         </div>
                         <div class="field t-agent-custom-field ${commandUi.mode === 'agent' && commandUi.agentSelection === 'other' ? '' : 'hidden'}">
                             <label>Custom Agent</label>

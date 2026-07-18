@@ -33,6 +33,7 @@ _SESSION_SNAPSHOT_FIELDS = (
     "initial_command_mode",
     "agent_selection",
     "custom_agent",
+    "agent_auto_mode",
     "title",
     "distribution",
     "use_wsl",

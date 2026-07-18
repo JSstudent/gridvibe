@@ -57,18 +57,60 @@ _agent_detection_cache: Dict[Tuple[str, str, str, str, str, int], Tuple[float, D
 _agent_detection_cache_lock = threading.Lock()
 
 
+def _agent_auto_mode_flag(agent_key: Any) -> str:
+    """Return the registry-defined auto-mode flag for one agent, or ""."""
+    spec = AGENT_REGISTRY.get(_normalize_agent_key(agent_key))
+    if not isinstance(spec, dict):
+        return ""
+    auto_mode = spec.get("auto_mode")
+    if not isinstance(auto_mode, dict):
+        return ""
+    flag = str(auto_mode.get("flag") or "").strip()
+    # A registered flag must look like a CLI option so a registry typo can
+    # never smuggle a second command into the composed launch line.
+    if not flag.startswith("-") or any(ch.isspace() for ch in flag):
+        return ""
+    return flag
+
+
 def _agent_options() -> List[Dict[str, str]]:
     """Return launcher agent choices sourced from the registry."""
     options = [
         {
             "value": key,
             "label": str(spec.get("label") or key),
+            "auto_mode_flag": _agent_auto_mode_flag(key),
         }
         for key, spec in AGENT_REGISTRY.items()
     ]
     options.sort(key=lambda item: item["label"])
-    options.append({"value": "other", "label": "other"})
+    options.append({"value": "other", "label": "other", "auto_mode_flag": ""})
     return options
+
+
+def _compose_agent_startup_command(session: Any) -> str:
+    """Return the startup command for a session, applying its auto-mode flag.
+
+    The persisted ``initial_command`` always stays the base agent key so
+    preflight detection and saved-session round-trips keep working; the flag
+    is appended only here, at launch time, and only when the selected
+    built-in agent has a registered auto-mode option.
+    """
+    base = str(getattr(session, "initial_command", "") or "").strip()
+    if not base:
+        return base
+    if str(getattr(session, "initial_command_mode", "") or "") != "agent":
+        return base
+    if not bool(getattr(session, "agent_auto_mode", False)):
+        return base
+    agent_key = _normalize_agent_key(getattr(session, "agent_selection", "")) or _normalize_agent_key(base)
+    if _normalize_agent_key(base) != agent_key:
+        # Custom or already-modified commands launch verbatim.
+        return base
+    flag = _agent_auto_mode_flag(agent_key)
+    if not flag:
+        return base
+    return f"{base} {flag}"
 
 
 def _normalize_agent_key(value: Any) -> str:

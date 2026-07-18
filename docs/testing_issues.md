@@ -1,7 +1,34 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-17
+Last updated: 2026-07-18
 
 ## Open Issues
+
+### Issue ID: ISSUE-2026-036
+- Title: Restart restore launches password-auth SSH sessions without credentials
+- Priority: High
+- Status: Open
+- Area: `web/static/js/launcher.js`, `web/runtime_state.py`, `web/api.py`, `web/saved_sessions.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `session`, `launcher`, `terminal`, `ssh`, `tests`
+- Reported: 2026-07-17
+
+Description:
+Restoring the previous workspace after a GridVibe restart cannot reconnect remote SSH sessions that require password authentication. The runtime snapshot correctly excludes passwords, but the restore flow replays its session entries directly through `POST /api/sessions` without rehydrating the encrypted password from the referenced saved-session preset or asking the user to authenticate. GridVibe creates the session groups and reports them as restored even though their SSH connections immediately fail, leaving every affected terminal and remote Explorer pane unusable. Key-authenticated SSH sessions are not necessarily affected.
+
+Steps to reproduce:
+1. Save and launch a remote SSH workspace that authenticates with a password, then close GridVibe while the workspace is active so `runtime_state.json` captures its group and `saved_session_id`.
+2. Restart GridVibe and click **Restore** in the previous-workspace banner.
+3. Observe that the launcher submits the password-free snapshot, reports the group as restored after `POST /api/sessions` returns `201`, and opens the terminal workspace.
+4. Observe that each restored SSH terminal or remote Explorer pane fails to connect with `No authentication methods available`.
+
+Expected behavior:
+The restart restore flow should keep `runtime_state.json` free of secrets while securely reusing the encrypted password from the matching saved-session preset when one is available. If no reusable credential exists, GridVibe should request authentication in an in-page flow or present a clear retryable failure instead of launching doomed sessions. A group should not be reported as successfully restored merely because its session records were created before the SSH connection result is known.
+
+Actual behavior / logs:
+The captured restore requests contain a valid `saved_session_id`, SSH host, username, port, and directories, but no `password`. GridVibe then logs `paramiko.connect ... password=None`, followed by `Failed to connect SSH session ...: No authentication methods available` for every restored remote pane. Agent preflight fails for the same reason and clears the startup command. Despite those asynchronous failures, `POST /api/sessions` returns `201`, so `restorePreviousWorkspace()` increments its success count from `response.ok` and can display `Restored ... from the previous workspace.` Code inspection confirms `_SESSION_SNAPSHOT_FIELDS` in `web/runtime_state.py` deliberately omits `password`; `restorePreviousWorkspace()` in `web/static/js/launcher.js` posts `group.sessions` unchanged; and `create_sessions()` in `web/api.py` retains `saved_session_id` as group metadata but does not resolve it through `load_saved_sessions()` or `_find_saved_session_entry()` to populate the in-memory SSH password. Existing runtime-restore tests cover only a local Explorer group and assert password-free persistence, so they do not exercise password-authenticated SSH restore.
+
+### Proposed solution:
+Keep passwords out of `runtime_state.json` and add a server-side restore preparation path that resolves each SSH group's normalized `saved_session_id` through `load_saved_sessions()` / `_find_saved_session_entry()`, decrypts the preset password using the existing `web/secrets.py` flow, and applies it only to the in-memory launch configuration after validating that the preset is still an SSH preset for the same host, username, and port. Do not return the rehydrated password from `/api/runtime-state`, send it back through the browser, or include it in request/session logs. When the saved preset is missing, changed, lacks a password, or does not match the snapshot target, preserve key/agent authentication attempts but expose an in-page credential/retry path rather than silently counting session creation as restore success. Update the launcher/API restore contract so connection failures remain visible and a `201` record-creation response is not presented as proof that remote panes connected. Add focused tests in `tests/test_api.py` for password-free snapshot persistence, successful saved-password rehydration without secret disclosure, key-auth restore, missing/mismatched/decryption-failed credentials, remote Explorer and agent panes, multiple restored groups, and prevention of the current false-success message when SSH authentication fails.
 
 ### Issue ID: ISSUE-2026-035
 - Title: Valid UTF-8 files are rejected when preview sample splits a character
@@ -108,17 +135,20 @@ Code inspection confirms the **Changes** section header in `renderExplorerGitSid
 ### Proposed solution:
 Add a "Stage All" button to the **Changes** header row in `renderExplorerGitSidebarContent()` in `web/static/js/terminals.js`, disabled when the unstaged list is empty or a Git action is busy. Wire it to a new client function (e.g. `explorerGitStageAll(index)`) that calls a new `POST /api/explorer/<session_id>/git/stage-all` route in `web/api.py`. The backend handler should live in `web/explorer.py` (e.g. `_git_stage_all_paths(backend, root_path)`) and run `git add -A` (or `git add .`) with `GIT_TERMINAL_PROMPT=0`, scoped to the repository root, consistent with the existing single-file stage helper. After success, return the updated repository summary and refresh the sidebar the same way individual staging does. Ensure busy-state toggling prevents overlapping actions, align the button style with the existing per-row `+` buttons and the Unstage/Commit controls, and preserve the read-only guarantee for file content. Add focused tests in `tests/test_api.py` for: the stage-all endpoint success and error paths, out-of-root/invalid session rejection, the rendered sidebar button presence, disabled state when no unstaged changes exist, and client wiring through `performExplorerGitAction`.
 
+## Closed Issues
+
 ### Issue ID: ISSUE-2026-031
 - Title: App Settings action buttons overlap voice settings content
 - Priority: Low
-- Status: Open
+- Status: Closed
 - Area: `web/static/css/launcher.css`, `templates/index.html`, `tests/test_api.py`
 - Assignee: Unassigned
 - Tags: `settings`, `launcher`, `ui`, `tests`
 - Reported: 2026-07-16
+- Closed: 2026-07-18
 
 Description:
-When voice input is enabled in the launcher App Settings modal, the pinned Save Settings and Cancel action buttons overlap the bottom of the voice settings content instead of sitting below a scrollable body. At common desktop window sizes the buttons clip into the microphone section (for example over the "Microphones loaded. Labels may stay generic until microphone permission is granted" hint), obscuring the last controls and looking broken. Because the fields backing the same modal are where new terminal configuration would be added (ISSUE-2026-029), any further growth of this modal will make the overlap worse.
+When voice input was enabled in the launcher App Settings modal, the pinned Save Settings and Cancel action buttons overlapped the bottom of the voice settings content instead of sitting below a scrollable body. At common desktop window sizes the buttons clipped into the microphone section (for example over the "Microphones loaded. Labels may stay generic until microphone permission is granted" hint), obscuring the last controls and looking broken. Because the fields backing the same modal are where new terminal configuration would be added (ISSUE-2026-029), any further growth of this modal would make the overlap worse.
 
 Steps to reproduce:
 1. Open GridVibe and open App Settings from the launcher at a normal desktop window size.
@@ -129,22 +159,23 @@ Expected behavior:
 The App Settings body should scroll within the modal's fixed height while the header and the Save Settings / Cancel action row stay pinned and never overlap content. Enabling voice input (or adding more settings later) should extend the scrollable region, not push content under the action buttons.
 
 Actual behavior / logs:
-Code inspection confirms `.modal-card` in `web/static/css/launcher.css` is a `grid-template-rows: auto minmax(0, 1fr) auto` layout (header / scroll body / pinned actions), and the base `.settings-grid` scrolls via `overflow: auto; min-height: 0`. However `.app-settings-card .settings-grid` overrides this with `overflow: visible; padding-right: 0`, which disables the scroll region for the App Settings modal. With the card capped by `.app-settings-card { max-height: min(92vh, 860px) }` / `.app-settings-card.voice-enabled { max-height: min(96vh, 900px) }`, the taller voice content overflows its `1fr` track and paints under the pinned `.app-settings-actions` footer. The narrow-width breakpoint restores `.app-settings-card .settings-grid { overflow: auto }`, so the overlap is only visible at wider desktop widths with voice enabled.
+Code inspection confirmed `.modal-card` in `web/static/css/launcher.css` is a `grid-template-rows: auto minmax(0, 1fr) auto` layout (header / scroll body / pinned actions), and the base `.settings-grid` scrolls via `overflow: auto; min-height: 0`. However `.app-settings-card .settings-grid` overrode this with `overflow: visible; padding-right: 0`, which disabled the scroll region for the App Settings modal. With the card capped by `.app-settings-card { max-height: min(92vh, 860px) }` / `.app-settings-card.voice-enabled { max-height: min(96vh, 900px) }`, the taller voice content overflowed its `1fr` track and painted under the pinned `.app-settings-actions` footer. The narrow-width breakpoint restored `.app-settings-card .settings-grid { overflow: auto }`, so the overlap was only visible at wider desktop widths with voice enabled.
 
-### Proposed solution:
-Remove or correct the `.app-settings-card .settings-grid { overflow: visible }` override in `web/static/css/launcher.css` so the App Settings body keeps the intended `overflow: auto; min-height: 0` scroll behavior at all widths, keeping the pinned action row out of the content flow. Verify the `max-height` caps and `voice-enabled` variant leave the actions fully visible with voice enabled, and confirm scroll padding does not clip focus rings. Since the same modal is the planned home for new terminal settings (ISSUE-2026-029), keep the body scroll model intact when those fields are added so a longer form does not reintroduce the overlap. Add a focused rendered-template/CSS regression test in `tests/test_api.py` asserting the App Settings body uses a scrollable overflow (not `overflow: visible`) and that the action row is a pinned grid row, covering the voice-enabled state.
+Resolution:
+The `.app-settings-card .settings-grid { overflow: visible; padding-right: 0 }` override in `web/static/css/launcher.css` was removed, along with the narrow-width breakpoint block that re-restored `overflow: auto` (now redundant). The App Settings body therefore uses the base `.settings-grid` scroll model — `overflow: auto; min-height: 0; padding-right: 4px` — at every width, inside the `.modal-card` grid rows (`auto minmax(0, 1fr) auto`), so the header and the pinned `.app-settings-actions` row stay out of the content flow and taller content (voice enabled, or the ISSUE-2026-029 terminal fields added on top of this fix) extends the scrollable region instead of painting under the buttons. Covered by `test_app_settings_body_keeps_modal_scroll_region` in `tests/test_api.py`, which rejects any `overflow: visible` override on the App Settings grid and asserts the pinned-row modal layout survives.
 
 ### Issue ID: ISSUE-2026-029
 - Title: Settings UI omits terminal config (font family, size, max sessions)
 - Priority: Low
-- Status: Open
-- Area: `templates/index.html`, `web/static/js/launcher.js`, `web/api.py`, `web/config.py`, `tests/test_api.py`
+- Status: Closed
+- Area: `templates/index.html`, `web/static/js/launcher.js`, `web/static/js/terminals.js`, `web/api.py`, `web/config.py`, `tests/test_api.py`
 - Assignee: Unassigned
 - Tags: `settings`, `launcher`, `terminal`, `flask`, `tests`
 - Reported: 2026-07-15
+- Closed: 2026-07-18
 
 Description:
-`default_config.json` exposes a `terminal` block (`max_sessions`, `font_family`, `font_size`) that is loaded into `RuntimeConfig` and applied to the xterm workspace, but the App Settings modal provides no controls for any of it. Users can change theme, workspace surface mode, SSH host-key policy, and voice options from the UI, yet can only change the terminal font family, font size, or maximum session count by hand-editing `config.json` and restarting, which is not discoverable and inconsistent with the other runtime settings.
+`default_config.json` exposes a `terminal` block (`max_sessions`, `font_family`, `font_size`) that is loaded into `RuntimeConfig` and applied to the xterm workspace, but the App Settings modal provided no controls for any of it. Users could change theme, workspace surface mode, SSH host-key policy, and voice options from the UI, yet could only change the terminal font family, font size, or maximum session count by hand-editing `config.json` and restarting, which is not discoverable and inconsistent with the other runtime settings.
 
 Steps to reproduce:
 1. Launch GridVibe and open App Settings from the launcher.
@@ -155,22 +186,23 @@ Expected behavior:
 App Settings should surface the terminal configuration already backed by `RuntimeConfig` — terminal font family, terminal font size, and maximum sessions — with validated, bounded inputs. Saving should round-trip through `/api/app-config` and `RuntimeConfig`, persist to `config.json`, and apply to the launcher and open/newly launched session windows the same way theme changes already propagate.
 
 Actual behavior / logs:
-Code inspection confirms the App Settings modal in `templates/index.html` renders only `appTheme`, `appSurfaceMode`, `appSshHostKeyPolicy`, and the voice fields. `collectAppSettings()`/`saveAppSettings()` in `web/static/js/launcher.js` gather only `appearance`, `workspace`, `ssh`, and `voice_input`. `_normalize_app_config_update()` in `web/api.py` whitelists exactly those sections and never reads or writes a `terminal` block, while `web/config.py` (`RuntimeConfig`) loads `terminal.max_sessions`, `terminal.font_size`, and `terminal.font_family`, and `web/api.py` already passes `terminal_font_size`/`terminal_font_family` into the terminals template. The values are therefore file-only with no UI or API write path.
+Code inspection confirmed the App Settings modal in `templates/index.html` rendered only `appTheme`, `appSurfaceMode`, `appSshHostKeyPolicy`, and the voice fields. `collectAppSettings()`/`saveAppSettings()` in `web/static/js/launcher.js` gathered only `appearance`, `workspace`, `ssh`, and `voice_input`. `_normalize_app_config_update()` in `web/api.py` whitelisted exactly those sections and never read or wrote a `terminal` block, while `web/config.py` (`RuntimeConfig`) loads `terminal.max_sessions`, `terminal.font_size`, and `terminal.font_family`, and `web/api.py` already passed `terminal_font_size`/`terminal_font_family` into the terminals template. The values were therefore file-only with no UI or API write path.
 
-### Proposed solution:
-Add terminal fields to the App Settings modal in `templates/index.html`, extend `collectAppSettings()` in `web/static/js/launcher.js` to include a `terminal` section, and add a validated `terminal` branch to `_normalize_app_config_update()` in `web/api.py` (bounded font size, non-empty font-family string, `max_sessions` clamped to a safe range) that persists through the existing config-save flow. Reuse the established app-config update contract so the change reaches open session windows, and confirm `RuntimeConfig` reload applies the new values. Guard against invalid/oversized input and preserve backward compatibility for configs without user-set terminal fields. Add focused tests in `tests/test_api.py` for normalization bounds, whitelist acceptance, persistence, and modal/collect wiring.
+Resolution:
+The App Settings modal in `templates/index.html` gained a **Terminal** section with three bounded, labelled inputs — Font Family (text), Font Size (number, 6–48), and Max Sessions (number, 1–16) — landing on top of the ISSUE-2026-031 scroll fix so the longer form stays scrollable. `DEFAULT_APP_SETTINGS` / `syncAppSettingsForm()` / `collectAppSettingsForm()` in `web/static/js/launcher.js` round-trip a new `terminal` section (`font_family`, `font_size`, `max_sessions`). `_normalize_app_config_update()` in `web/api.py` gained a validated `terminal` branch: the font family is trimmed and falls back to the current runtime value when empty or longer than `TERMINAL_FONT_FAMILY_MAX_LENGTH`, while font size and max sessions are int-parsed with a current-value fallback and clamped to shared bounds defined once in `web/config.py` (`TERMINAL_FONT_SIZE_MIN`/`MAX` = 6/48, `MAX_SESSIONS_MIN`/`MAX` = 1/16). `RuntimeConfig.refresh()` applies the same clamps on load, so a hand-edited `config.json` cannot smuggle out-of-range values, and `_public_app_config()` now returns the `terminal` block. Live propagation reuses the established app-config update contract: `_broadcast_app_config_update()` (Socket.IO) and `notifyAppConfigUpdated()` (BroadcastChannel/storage) carry `terminal.font_family`/`terminal.font_size`, and a new `applyAppConfigTerminalFont()` in `web/static/js/terminals.js` validates the payload and applies the font to every open xterm pane immediately (with a refit); `max_sessions` intentionally applies to new launches only, as the modal hint states. Covered by `test_app_config_returns_terminal_settings`, `test_app_config_persists_terminal_settings`, `test_app_config_clamps_terminal_bounds`, `test_app_config_rejects_invalid_terminal_values`, `test_runtime_config_refresh_clamps_terminal_settings`, `test_app_settings_modal_collects_terminal_fields`, and `test_terminals_page_applies_live_terminal_font_updates` in `tests/test_api.py`, plus the updated broadcast-payload assertion in `test_app_config_endpoint_persists_theme_and_voice_settings`.
 
 ### Issue ID: ISSUE-2026-013
 - Title: Add per-agent auto-mode toggles to terminal settings
 - Priority: Low
-- Status: Open
-- Area: `web/static/js/launcher.js`, `web/api.py`, `sessions/manager.py`, `tests/test_api.py`, `tests/test_session_manager.py`
+- Status: Closed
+- Area: `web/static/js/launcher.js`, `web/static/js/terminals.js`, `web/agents.py`, `web/terminal_io.py`, `web/saved_sessions.py`, `web/runtime_state.py`, `agent_registry.json`, `sessions/manager.py`, `tests/test_api.py`, `tests/test_session_manager.py`
 - Assignee: Unassigned
 - Tags: `terminal`, `settings`, `launcher`, `session`, `tests`
 - Reported: 2026-07-12
+- Closed: 2026-07-18
 
 Description:
-Agent-mode terminal settings need an auto-mode toggle tied to the selected agent. GridVibe currently launches built-in agents with their base command only, requiring users who want unattended edit/approval behavior to add flags manually or use a custom command instead of the normal agent selection flow.
+Agent-mode terminal settings needed an auto-mode toggle tied to the selected agent. GridVibe launched built-in agents with their base command only, requiring users who wanted unattended edit/approval behavior to add flags manually or use a custom command instead of the normal agent selection flow.
 
 Steps to reproduce:
 1. In the GridVibe launcher, set a terminal's Startup Mode to Agent and select a supported agent such as Claude.
@@ -181,12 +213,10 @@ Expected behavior:
 Agent mode should expose an Auto mode toggle for the corresponding selected agent. When enabled, GridVibe should launch that agent with its registered auto-edit/approval option, such as `claude --enable-auto-mode`; when disabled, it should retain the current base command. The setting should remain scoped per terminal, use only flags supported by the selected agent, and round-trip through launcher drafts, saved sessions, and active workspace Save Session behavior.
 
 Actual behavior / logs:
-Code inspection confirms `buildTerminalInitialCommand()` in `web/static/js/launcher.js` returns either the selected built-in agent key or the custom-agent text verbatim. `collectTerminalDrafts()` stores agent selection metadata but has no auto-mode field, `TerminalSession` in `sessions/manager.py` has no corresponding persisted property, and `_run_startup_sequence()` in `web/api.py` sends `session.initial_command` unchanged. The agent settings UI therefore has no way to represent or consistently restore an agent-specific auto-mode choice.
+Code inspection confirmed `buildTerminalInitialCommand()` in `web/static/js/launcher.js` returned either the selected built-in agent key or the custom-agent text verbatim. `collectTerminalDrafts()` stored agent selection metadata but had no auto-mode field, `TerminalSession` in `sessions/manager.py` had no corresponding persisted property, and `_run_startup_sequence()` sent `session.initial_command` unchanged. The agent settings UI therefore had no way to represent or consistently restore an agent-specific auto-mode choice.
 
-### Proposed solution:
-Add a per-terminal boolean such as `agent_auto_mode` to the launcher draft, saved-session normalization, workspace serialization, `TerminalSession`, and API responses. Define supported auto-mode arguments in the existing agent registry or another single backend-owned mapping instead of hard-coding one generic flag for every CLI. Update the agent settings row in `web/static/js/launcher.js` to show an accessible toggle only when the selected built-in agent has a registered option, recompute visibility and help text when the selection changes, and keep custom-agent behavior explicit rather than silently modifying arbitrary commands. Compose the final startup command from the validated selected-agent metadata and mapped argument without duplicating flags, while keeping preflight detection based on the base agent executable. Add focused tests in `tests/test_api.py` and `tests/test_session_manager.py` for enabled/disabled command construction, unsupported and custom agents, save/load/workspace round-trips, SSH and local launches, and backward compatibility for saved sessions without the new field.
-
-## Closed Issues
+Resolution:
+Auto-mode flags are registry-owned: entries in `agent_registry.json` may declare an `auto_mode` object (`flag` + `description`) — shipped for `claude` (`--enable-auto-mode`), `codex` (`--full-auto`), and `copilot` (`--allow-all-tools`); `opencode`/`kilo` register none. `_agent_auto_mode_flag()` in `web/agents.py` accepts a flag only if it starts with `-` and contains no whitespace, so a registry typo can never smuggle a second command, and `_agent_options()` exposes it to the launcher as `auto_mode_flag`. The agent settings row in `web/static/js/launcher.js` renders an accessible **Auto mode** checkbox only when the selected built-in agent has a registered flag: `syncTerminalAgentAutoModeState()` recomputes visibility and the `Launches as "<agent> <flag>"` help text on agent-selection and startup-mode changes, and the toggle is cleared when leaving agent mode or when the selection has no flag (custom agents stay explicit and unmodified). The per-terminal boolean `agent_auto_mode` round-trips end to end — launcher drafts (`collectTerminalDrafts()`), saved-session normalization (`_normalize_terminal_entries()` in `web/saved_sessions.py` gates it to agent startup mode), workspace saves (`buildWorkspaceTerminalEntry()` in `web/static/js/terminals.js` + `_merge_workspace_session_config()`), `TerminalSession` / `create_sessions()` / `update_session_metadata()` in `sessions/manager.py`, and the runtime-state snapshot (`_SESSION_SNAPSHOT_FIELDS` in `web/runtime_state.py`) — while the persisted `initial_command` always stays the bare agent key, keeping preflight detection based on the base agent executable. The flag is composed only at launch time: `_run_startup_sequence()` in `web/terminal_io.py` sends `_compose_agent_startup_command(session)` (`web/agents.py`), which appends the registered flag exactly once for a built-in agent in agent mode with the toggle on and returns every other command (custom, non-agent mode, unsupported agent, mismatched base) verbatim, so flags are never duplicated or applied to arbitrary commands. Covered by `test_agent_options_expose_registry_auto_mode_flags`, `test_auto_mode_flag_rejects_malformed_registry_values`, `test_compose_agent_startup_command_variants`, `test_startup_sequence_sends_composed_auto_mode_command`, `test_normalize_terminal_entries_gates_agent_auto_mode`, `test_workspace_merge_carries_agent_auto_mode`, `test_sessions_post_round_trips_agent_auto_mode`, `test_runtime_state_snapshot_includes_agent_auto_mode`, and `test_launcher_wires_the_auto_mode_toggle` in `tests/test_api.py`, plus `test_create_sessions_carries_agent_auto_mode` in `tests/test_session_manager.py`.
 
 ### Issue ID: ISSUE-2026-025
 - Title: Highlight the currently active terminal pane
