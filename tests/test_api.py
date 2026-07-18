@@ -1278,7 +1278,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function applyExplorerMarkdownAppearanceToElement(preview, appearance)", html)
         self.assertIn("function showExplorerMarkdownAppearanceMenu(anchor)", html)
         # Bounded allowlists and persisted preference keys.
-        self.assertIn("const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast'];", html)
+        self.assertIn("const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast', 'vscode'];", html)
         self.assertIn("const EXPLORER_MD_FONTS = ['system', 'serif', 'mono'];", html)
         self.assertIn("const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';", html)
         self.assertIn("const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';", html)
@@ -1297,6 +1297,63 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".explorer-markdown-preview.md-font-serif {", html)
         self.assertIn("--md-preview-surface: var(--md-preset-paper-bg);", html)
         self.assertIn("--md-preset-paper-bg: #f4ecd8;", html)
+
+    def test_terminals_page_markdown_slate_preset(self):
+        """Wave 1 / 3.a (OD-7): VS Code-style Slate preset (key `vscode`)."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Registered in the allowlist with the user-facing "Slate" label.
+        self.assertIn("const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast', 'vscode'];", html)
+        self.assertIn("vscode: 'Slate',", html)
+        # Token block + remapping rule, same fixed-surface pattern as paper/contrast.
+        self.assertIn(".explorer-markdown-preview.md-preset-vscode {", html)
+        self.assertIn("--md-preset-vscode-bg: #1e1e1e;", html)
+        self.assertIn("--md-preset-vscode-ink: #d4d4d4;", html)
+        self.assertIn("--md-preview-surface: var(--md-preset-vscode-bg);", html)
+        self.assertIn("--md-preview-ink: var(--md-preset-vscode-ink);", html)
+        self.assertIn("--md-preview-muted: var(--md-preset-vscode-muted);", html)
+        self.assertIn("--md-preview-border: var(--md-preset-vscode-border);", html)
+
+    def test_terminals_page_explorer_open_tab_button_is_theme_token_driven(self):
+        """Wave 1 / 1.d: tree row "+" control follows the light/dark theme tokens."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # The control still reuses the search-btn markup in the tree row.
+        self.assertIn('class="explorer-search-btn explorer-open-tab-btn"', html)
+        # ...but now has its own rule drawing from the theme-aware explorer tokens.
+        self.assertIn(".explorer-open-tab-btn {", html)
+        self.assertIn(".explorer-open-tab-btn:hover,", html)
+        self.assertIn(".explorer-open-tab-btn:focus-visible {", html)
+        self.assertIn("border-color: var(--explorer-open-folder-border);", html)
+        self.assertIn("background: var(--explorer-open-folder-bg);", html)
+        self.assertIn("color: var(--explorer-open-folder-text);", html)
+        self.assertIn("background: var(--explorer-open-folder-hover-bg);", html)
+
+    def test_terminals_page_explorer_preview_back_button_removed(self):
+        """Wave 1 / 2.a (OD-3): the vestigial single-file Back button is gone."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertNotIn("explorer-editor-back", html)
+        self.assertNotIn("data-explorer-editor-back", html)
+
+    def test_terminals_page_markdown_source_headings_are_coloured(self):
+        """Wave 1 / 3.b (OD-8): heading-only tokeniser colours Source headings."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Heading lines are wrapped using the fence-aware heading level map.
+        self.assertIn('class="explorer-md-source-heading explorer-md-source-heading-', html)
+        self.assertIn("${lineHtml}</span>`", html)
+        # Token-driven colour (shared accent, no palette literal in the rule).
+        self.assertIn(".explorer-md-source-heading {", html)
+        self.assertIn("color: var(--t-accent);", html)
 
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")

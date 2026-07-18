@@ -9736,7 +9736,7 @@
     // bounded allowlists persisted in localStorage and applied idempotently to
     // every open preview via preset classes + CSS custom properties (defined
     // from tokens in terminals.css), so no palette literals live in JS.
-    const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast'];
+    const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast', 'vscode'];
     const EXPLORER_MD_FONTS = ['system', 'serif', 'mono'];
     const EXPLORER_MD_PRESET_DEFAULT = 'default';
     const EXPLORER_MD_FONT_DEFAULT = 'system';
@@ -9746,6 +9746,7 @@
         default: 'Default',
         paper: 'Paper',
         contrast: 'High contrast',
+        vscode: 'Slate',
     };
     const EXPLORER_MD_FONT_LABELS = {
         system: 'System',
@@ -10069,10 +10070,16 @@
 
             const collapsed = allowMarkdownCollapse && headingLevel && collapsedLines.has(record.number);
             const lineHtml = highlightExplorerCode(record.text, language, searchRanges, record.start);
+            // Heading-only Markdown tokeniser (OD-8): the fence-aware heading map
+            // already computed for section collapse doubles as the highlighter,
+            // so heading lines get a distinct token colour without a full grammar.
+            const contentHtml = headingLevel
+                ? `<span class="explorer-md-source-heading explorer-md-source-heading-${headingLevel}">${lineHtml}</span>`
+                : lineHtml;
             rows.push(`
                 <div class="explorer-source-line">
                     ${explorerSourceLineNumberHtml(record, headingLevel, collapsed)}
-                    <code class="explorer-source-line-code${codeClass}">${lineHtml || '&nbsp;'}</code>
+                    <code class="explorer-source-line-code${codeClass}">${contentHtml || '&nbsp;'}</code>
                 </div>
             `);
 
@@ -11420,7 +11427,6 @@
         viewer.innerHTML = `
             <div class="explorer-editor">
                 <div class="explorer-editor-header">
-                    <button type="button" class="explorer-editor-back" data-explorer-editor-back="${index}">Back</button>
                     <div class="explorer-editor-title">
                         <div class="explorer-editor-name" title="${escHtml(path || fileName)}">${escHtml(fileName)}</div>
                         <div class="explorer-editor-meta">${escHtml(metaParts.join(' - '))}</div>
@@ -11485,12 +11491,6 @@
             });
         }
 
-        const backButton = list.querySelector(`[data-explorer-editor-back="${index}"]`);
-        if (backButton) {
-            backButton.addEventListener('click', () => {
-                loadExplorerPane(index, pane._explorerPath || '');
-            });
-        }
         const downloadButton = list.querySelector(`[data-explorer-download="${index}"]`);
         if (downloadButton) {
             downloadButton.addEventListener('click', () => {
@@ -11636,7 +11636,6 @@
         viewer.innerHTML = `
             <div class="explorer-editor">
                 <div class="explorer-editor-header">
-                    <button type="button" class="explorer-editor-back" data-explorer-editor-back="${index}">Back</button>
                     <div class="explorer-editor-title">
                         <div class="explorer-editor-name" title="${escHtml(path)}">${escHtml(fileName)}</div>
                         <div class="explorer-editor-meta">${escHtml(`Git commit diff - ${commit.slice(0, 7)}`)}</div>
@@ -11666,12 +11665,6 @@
             </div>
         `;
 
-        const backButton = list.querySelector(`[data-explorer-editor-back="${index}"]`);
-        if (backButton) {
-            backButton.addEventListener('click', () => {
-                loadExplorerPane(index, pane._explorerPath || '');
-            });
-        }
         list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
             button.addEventListener('click', () => {
                 if (button.dataset.explorerFileView === 'diff') {

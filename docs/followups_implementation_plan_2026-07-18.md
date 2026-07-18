@@ -419,6 +419,32 @@ confirmation — OD-12 alone is settled by tracing during 7.b, not by the user.
 `1.d` open-in-tab button theming · `2.a` remove Preview Back button (OD-3) · `3.a`
 "Slate" VS Code Markdown preset (OD-7) · `3.b` Source heading colours (OD-8).
 
+> **Status: DONE (2026-07-18).** All four Wave 1 items are implemented, with
+> `python tests/run_tests.py` (553 tests) and `python -m ruff check .` passing.
+> - **1.d:** `.explorer-open-tab-btn` got its own token-driven rule in
+>   `web/static/css/terminals.css` (surface/border/hover from the theme-aware
+>   `--explorer-open-folder-*` tokens, matching its open-folder sibling).
+> - **2.a:** the Back button, its click handlers, and the `.explorer-editor-back`
+>   CSS rule were removed from both file-header render paths
+>   (`renderExplorerFile`, `renderExplorerCommitDiffFile`) in
+>   `web/static/js/terminals.js`.
+> - **3.a:** `vscode` ("Slate") added to `EXPLORER_MD_PRESETS` /
+>   `EXPLORER_MD_PRESET_LABELS`; fixed-surface `--md-preset-vscode-*` tokens
+>   (VS Code-style `#1e1e1e` gray / `#d4d4d4` ink) and the
+>   `.explorer-markdown-preview.md-preset-vscode` remap rule added to
+>   `terminals.css`. Round-trips through the existing localStorage persistence.
+> - **3.b:** `renderExplorerSourceLines()` wraps fence-aware Markdown heading
+>   lines (levels from the existing `explorerMarkdownHeadingLevels()` map) in
+>   `explorer-md-source-heading[-N]` spans; colour comes from `--t-accent`
+>   (no new dependency, no palette literals).
+> - **Tests:** `tests/test_api.py` — new
+>   `test_terminals_page_markdown_slate_preset`,
+>   `test_terminals_page_explorer_open_tab_button_is_theme_token_driven`,
+>   `test_terminals_page_explorer_preview_back_button_removed`,
+>   `test_terminals_page_markdown_source_headings_are_coloured`; the existing
+>   `test_terminals_page_markdown_appearance_presets` allowlist assertion was
+>   extended for the new preset. CHANGELOG updated.
+
 **Wave 2 — Small isolated fixes (one classifier / route / constant each):**
 `2.c` UTF-8 boundary (ISSUE-035) · `2.b` `go.mod` backend eligibility + classifier
 (OD-2) · `4.a` preview cap → 10 MiB, plain above ~2 MiB (OD-9) · `7.a` add Kimi to

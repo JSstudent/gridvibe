@@ -269,6 +269,11 @@
             --md-preset-contrast-ink: #ffffff;
             --md-preset-contrast-muted: #d0d0d0;
             --md-preset-contrast-border: #ffffff;
+            /* Slate (key: vscode) mirrors VS Code's dark gray .md preview. */
+            --md-preset-vscode-bg: #1e1e1e;
+            --md-preset-vscode-ink: #d4d4d4;
+            --md-preset-vscode-muted: #9d9d9d;
+            --md-preset-vscode-border: #3c3c3c;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -2166,16 +2171,6 @@
             background: var(--explorer-bar-bg);
         }
 
-        .explorer-editor-back {
-            border: 1px solid var(--t-border-tab);
-            border-radius: 5px;
-            background: var(--t-btn-bg);
-            color: var(--t-btn-text);
-            cursor: pointer;
-            font-size: .74rem;
-            padding: 5px 9px;
-        }
-
         .explorer-editor-title {
             min-width: 0;
             flex: 1 1 150px;
@@ -2275,6 +2270,25 @@
 
         .explorer-open-folder-btn:hover,
         .explorer-open-folder-btn:focus-visible {
+            background: var(--explorer-open-folder-hover-bg);
+            outline: none;
+        }
+
+        /* The tree row "+" control reuses .explorer-search-btn markup but, like
+           its open-folder sibling, takes its surface from the theme-aware
+           --explorer-open-folder-* tokens so it tracks light/dark correctly. */
+        .explorer-open-tab-btn {
+            width: 22px;
+            height: 22px;
+            font-size: .95rem;
+            font-weight: 700;
+            border-color: var(--explorer-open-folder-border);
+            background: var(--explorer-open-folder-bg);
+            color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-open-tab-btn:hover,
+        .explorer-open-tab-btn:focus-visible {
             background: var(--explorer-open-folder-hover-bg);
             outline: none;
         }
@@ -2912,6 +2926,13 @@
             font-weight: 600;
         }
 
+        /* Markdown heading lines in the Source viewer (heading-only tokeniser);
+           colour comes from the shared accent token so it tracks both themes. */
+        .explorer-md-source-heading {
+            color: var(--t-accent);
+            font-weight: 700;
+        }
+
         .explorer-log-timestamp {
             color: #64748b;
             font-weight: 600;
@@ -3022,6 +3043,14 @@
             --md-preview-muted: var(--md-preset-contrast-muted);
             --md-preview-border: var(--md-preset-contrast-border);
             --md-preview-rule: var(--md-preset-contrast-border);
+        }
+
+        .explorer-markdown-preview.md-preset-vscode {
+            --md-preview-surface: var(--md-preset-vscode-bg);
+            --md-preview-ink: var(--md-preset-vscode-ink);
+            --md-preview-muted: var(--md-preset-vscode-muted);
+            --md-preview-border: var(--md-preset-vscode-border);
+            --md-preview-rule: var(--md-preset-vscode-border);
         }
 
         /* Font-family presets (ISSUE-2026-030); font names are not palette. */
