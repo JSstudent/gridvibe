@@ -145,8 +145,8 @@
     ],
     "post_install": "Run codex once and complete sign-in.",
     "auto_mode": {
-      "flag": "--full-auto",
-      "description": "Launches in sandboxed full-auto mode with automatic edit approval."
+      "flag": "--sandbox workspace-write --ask-for-approval on-request",
+      "description": "Launches in the sandboxed Auto preset: edits and commands run in the workspace automatically, only prompting for potentially unsafe actions."
     }
   },
   "opencode": {

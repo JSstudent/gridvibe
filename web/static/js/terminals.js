@@ -1306,6 +1306,7 @@
                     : (startupMode === 'agent' ? 'agent' : 'command'),
                 agent_selection: startupMode === 'agent' ? (terminal?.agent_selection || '') : '',
                 custom_agent: startupMode === 'agent' ? (terminal?.custom_agent || '') : '',
+                agent_auto_mode: startupMode === 'agent' && Boolean(terminal?.agent_auto_mode),
                 explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_tree_open) : false,
                 explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_git_open) : false,
                 explorer_open_tabs: startupMode === 'explorer' && Array.isArray(terminal?.explorer_open_tabs) ? terminal.explorer_open_tabs : [],

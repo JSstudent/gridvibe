@@ -10811,7 +10811,10 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
     def test_agent_options_expose_registry_auto_mode_flags(self):
         options = {item["value"]: item for item in web_agents._agent_options()}
         self.assertEqual(options["claude"]["auto_mode_flag"], "--enable-auto-mode")
-        self.assertEqual(options["codex"]["auto_mode_flag"], "--full-auto")
+        self.assertEqual(
+            options["codex"]["auto_mode_flag"],
+            "--sandbox workspace-write --ask-for-approval on-request",
+        )
         self.assertEqual(options["copilot"]["auto_mode_flag"], "--allow-all-tools")
         self.assertEqual(options["kimi"]["auto_mode_flag"], "--auto-approve")
         self.assertEqual(options["kilo"]["auto_mode_flag"], "--yolo")
@@ -10867,6 +10870,24 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             {"nodash": {"auto_mode": {"flag": "yolo"}}},
         ):
             self.assertEqual(web_agents._agent_auto_mode_flag("nodash"), "")
+        # Shell metacharacters must never survive validation, even when the
+        # value rides behind a real-looking option token.
+        for smuggled in ("--go; rm -rf /", "--x $(whoami)", "--x `id`", "--a|b", "--a  b"):
+            with patch.dict(
+                web_agents.AGENT_REGISTRY,
+                {"smuggle": {"auto_mode": {"flag": smuggled}}},
+            ):
+                self.assertEqual(web_agents._agent_auto_mode_flag("smuggle"), "")
+
+    def test_auto_mode_flag_allows_multi_token_option_values(self):
+        with patch.dict(
+            web_agents.AGENT_REGISTRY,
+            {"multi": {"auto_mode": {"flag": "--sandbox workspace-write --ask-for-approval on-request"}}},
+        ):
+            self.assertEqual(
+                web_agents._agent_auto_mode_flag("multi"),
+                "--sandbox workspace-write --ask-for-approval on-request",
+            )
 
     def test_compose_agent_startup_command_variants(self):
         def session(**overrides):
