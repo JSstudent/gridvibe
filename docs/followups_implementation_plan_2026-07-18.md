@@ -32,7 +32,7 @@ and its persistence).
 
 ## At a glance
 
-Done ✅ = implemented in Waves 1–4 (2026-07-18/19) plus 2.e (Wave 5 foundation, 2026-07-19); the remaining Wave 5 items stay open.
+Done ✅ = implemented in Waves 1–4 (2026-07-18/19) plus 2.e, 5.a, and 2.f (Wave 5, 2026-07-19); 2.g and 2.d stay open.
 
 | # | Stage | Item | Refs | Size | Done |
 | --- | --- | --- | --- | --- | --- |
@@ -45,12 +45,12 @@ Done ✅ = implemented in Waves 1–4 (2026-07-18/19) plus 2.e (Wave 5 foundatio
 | 2.c | 2 · Tabbed viewer | Valid UTF-8 rejected when sample splits a character | ISSUE-2026-035 | Small | ✅ |
 | 2.d | 2 · Tabbed viewer | Clicking a tree directory opens it in Preview to browse | — | Medium | |
 | 2.e | 2 · Tabbed viewer | Preserve per-tab view mode + scroll across tab swaps | — | Large | ✅ |
-| 2.f | 2 · Tabbed viewer | Persist tab modes / scroll / appearance / active tab in sessions | ISSUE-2026-033 | Large | |
+| 2.f | 2 · Tabbed viewer | Persist tab modes / scroll / appearance / active tab in sessions | ISSUE-2026-033 | Large | ✅ |
 | 2.g | 2 · Tabbed viewer | Tab drag-reorder, middle-click close, double-click preview→pin | — | Medium | |
 | 3.a | 3 · Markdown | Add a VS Code-style "gray surface / white text" preset | — (extends 030) | Small | ✅ |
 | 3.b | 3 · Markdown | Colour heading titles in **Source** view too | — | Small | ✅ |
 | 4.a | 4 · Large-file preview | Raise preview cap from 1 MiB toward 10 MiB | — (extends 020) | Small | ✅ |
-| 5.a | 5 · Terminal close | Closing a terminal resets the shown tab's mode + scroll | — (pairs with 2.e) | Medium | |
+| 5.a | 5 · Terminal close | Closing a terminal resets the shown tab's mode + scroll | — (pairs with 2.e) | Medium | ✅ |
 | 6.a | 6 · Focus/broadcast | Drop all highlights when broadcast focus leaves to dead space | — (extends 025/026) | Small | ✅ |
 | 7.a | 7 · Settings | Add Kimi CLI to the agent registry | — | Small | ✅ |
 | 7.b | 7 · Settings | Verify/fix agent auto-mode launch + descriptive text for all agents | — (extends 013) | Medium | ✅ |
@@ -221,7 +221,9 @@ Depends on 2.e (there is nothing to persist until per-tab mode/scroll exists).
 appearance** (preset + font, ISSUE-2026-033). The `todos.txt` phrase
 "fonts/layouts" maps to the **Markdown appearance font** — already covered by
 ISSUE-2026-033 — and "layouts" is already covered by existing split-geometry
-persistence; **no separate editor-zoom field is added.**
+persistence; **no separate editor-zoom field is added.** *(Amended 2026-07-19
+after user testing: per-tab editor zoom **is** persisted after all — see the
+OD-5 amendment and the Wave 5 status note.)*
 
 ### 2.g — Tab drag-reorder, middle-click close, double-click preview→pin *(Medium)*
 
@@ -607,8 +609,8 @@ OD-5 field set), and `2.g` tab reorder/middle-click/double-click (OD-6: Preview
 fixed first) → `2.d` directory-in-Preview browsing with breadcrumb (OD-3, rides
 the same viewer, can slot in once 2.e lands).
 
-> **Status: 2.e DONE (2026-07-19); 5.a / 2.f / 2.g / 2.d remain open.** `python
-> tests/run_tests.py` (579 tests) and `python -m ruff check .` pass.
+> **Status: 2.e, 5.a, and 2.f DONE (2026-07-19); 2.g / 2.d remain open.** `python
+> tests/run_tests.py` (589 tests) and `python -m ruff check .` pass.
 > - **Tab records carry the snapshot:** each `pane._explorerTabs` entry can now
 >   hold a `view` object — `{ mode, identity, scroll }` — instead of mode and
 >   scroll living in pane-global fields that were re-derived on every activate.
@@ -684,6 +686,72 @@ the same viewer, can slot in once 2.e lands).
 >   tab's mode + scroll survive the round trip. Test:
 >   `test_terminals_page_explorer_capture_tracks_rendered_tab` (582 tests
 >   pass).
+> - **5.a (2026-07-19):** the terminal-close snapshot now carries the per-tab
+>   state 2.e introduced. `captureSurvivingPaneClientState()` first runs
+>   `explorerCaptureActiveTabView(index)` (folding the shown tab's live mode +
+>   scroll into its record while the DOM is intact), then adds
+>   `explorer_tab_state` — every tab's full-fidelity record (`view` with its
+>   complete scroll metrics + identity, `fontSize`, `preferredMode`) — plus
+>   the disk-shape `explorer_tab_views` overlaid onto the rebuilt session
+>   entries in `initialLoad()`. `restoreExplorerPaneFromClose()` reattaches
+>   the records onto the rebuilt `pane._explorerTabs` synchronously after
+>   `syncExplorerPane()` — before the active tab's async re-fetch resolves —
+>   so `renderExplorerFile()` restores mode/scroll/zoom through the normal
+>   OD-4 identity check. Test:
+>   `test_terminals_page_close_preserves_tab_view_state`.
+> - **2.f (2026-07-19, closes ISSUE-2026-033):** three new persisted terminal
+>   entry fields, carried through all three persistence paths
+>   (`buildWorkspaceTerminalEntry()` → `_normalize_terminal_entries()` →
+>   `_SESSION_SNAPSHOT_FIELDS`, mirroring `explorer_open_tabs`):
+>   - `explorer_tab_views` — per-tab `{ mode, scroll, identity }` keyed by
+>     normalized tab path (OD-5 field set): the view mode, the active panel's
+>     scroll as a clamped [0, 1] fraction (OD-4), and the djb2
+>     content-identity hash, reduced from the live `tab.view` records by
+>     `explorerPersistableTabView()` (the shown tab is captured live first).
+>     On restore, `restoreExplorerPersistedTabs()` inflates them back into
+>     `tab.view` snapshots (`explorerInflatePersistedTabView()`), so render
+>     applies them only while the re-fetched content's identity still matches
+>     — a persisted diff view whose commit context cannot be re-fetched
+>     mismatches and falls back to defaults, exactly like the in-memory case.
+>   - `explorer_md_preset` / `explorer_md_font` — the Markdown appearance
+>     (ISSUE-2026-033), read from `explorerMarkdownAppearance()` at save time
+>     and re-applied on session restore via
+>     `applyExplorerSessionMarkdownAppearance()` →
+>     `setExplorerMarkdownAppearance()` (which also syncs the shared
+>     localStorage keys). Applied **once per session id** so a close-driven
+>     rebuild never clobbers an appearance changed since launch; sessions
+>     without the fields keep the local preference (graceful degradation).
+>   - Backend: `_normalize_explorer_tab_views()` /
+>     `_normalize_explorer_md_choice()` in `web/saved_sessions.py`
+>     (allowlists `source|preview|diff`, presets
+>     `default|paper|contrast|vscode`, fonts `system|serif|mono`; unknown
+>     modes, unlisted/escaping paths, non-dict records dropped; scroll
+>     clamped; identity bounded at 64 chars), gated to explorer panes in
+>     `_merge_workspace_session_config()`; new `TerminalSession` fields +
+>     `to_dict()`/`create_sessions()`/`update_session_metadata()` wiring; the
+>     launcher round-trips all three via row datasets
+>     (`data-explorer-tab-views`, `data-explorer-md-preset/-font`) and the
+>     launch payload, and `buildSavedSessionLaunchPayload()` on the terminals
+>     page passes them through too.
+>   - **Zoom amendment (2026-07-19, user feedback):** OD-5 originally excluded
+>     an editor-zoom field, but per-tab zoom was reset by a relaunch, so the
+>     persisted record gained an optional `font_size` (clamped to the client's
+>     10–24 bounds on both sides, omitted when at the default 13). Zoom-only
+>     records are valid (a zoomed tab whose view was never captured), and the
+>     reserved `__preview__` key persists the Preview tab's zoom alone — its
+>     path/content stay transient per ISSUE-2026-015.
+>     `restoreExplorerPersistedTabs()` applies the Preview zoom even when no
+>     pinned tabs were saved.
+>   - **Tests:** `tests/test_api.py` —
+>     `test_normalize_terminal_entries_validates_tab_views_and_md_appearance`,
+>     `test_workspace_save_round_trips_tab_views_and_md_appearance`,
+>     `test_terminals_page_persists_tab_views_and_markdown_appearance`,
+>     `test_launcher_round_trips_explorer_tab_views_and_markdown_appearance`,
+>     `test_runtime_state_snapshot_includes_tab_views_and_md_appearance`, and
+>     extended defaults assertions; `tests/test_session_manager.py` —
+>     `test_create_sessions_carries_explorer_tab_views_and_md_appearance`
+>     (589 tests pass). CHANGELOG updated; ISSUE-2026-033 closed in
+>     `testing_issues.md`.
 
 Rationale: `2.e` is this plan's magnet exactly the way ISSUE-2026-014 was for the
 original plan — `5.a` (Stage 5) and `2.f` (Stage 2 / ISSUE-033) both need the
@@ -737,8 +805,12 @@ records the decision as built into the item sections above.
 - **OD-5 (item 2.f — persisted field set):** Persist per-tab **view mode**, per-tab
   **scroll** (fraction), **active tab**, and **Markdown appearance** (preset +
   font). "Fonts/layouts" = the **Markdown appearance font** (already covered by
-  ISSUE-2026-033); "layouts" = existing split-geometry persistence. **No separate
-  editor-zoom field.**
+  ISSUE-2026-033); "layouts" = existing split-geometry persistence. ~~No separate
+  editor-zoom field.~~ **Amended 2026-07-19 (user feedback after testing 2.f):**
+  the per-tab **editor zoom** is persisted after all — an optional `font_size`
+  on each tab's view record (clamped to the 10–24 client bounds, omitted at the
+  default size), plus the reserved `__preview__` key carrying the Preview tab's
+  zoom only (its content stays transient per ISSUE-2026-015).
 
 - **OD-6 (item 2.g — reorder rules):** **Preview fixed first.** The permanent
   Preview tab is pinned to the first slot and cannot be dragged; only pinned tabs

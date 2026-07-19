@@ -85,6 +85,9 @@
         explorer_git_open: false,
         explorer_open_tabs: [],
         explorer_active_tab: '',
+        explorer_tab_views: {},
+        explorer_md_preset: '',
+        explorer_md_font: '',
         distribution: '',
         use_wsl: false,
         use_powershell: false
@@ -1070,6 +1073,18 @@
         }
     }
 
+    function parseExplorerTabViewsDataset(value) {
+        if (!value) {
+            return {};
+        }
+        try {
+            const parsed = JSON.parse(value);
+            return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
     function collectTerminalDrafts() {
         const rows = Array.from(document.querySelectorAll('.t-row'));
         if (!rows.length) {
@@ -1101,6 +1116,9 @@
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
                 explorer_open_tabs: commandMode === 'explorer' ? parseExplorerOpenTabsDataset(row.dataset.explorerOpenTabs) : [],
                 explorer_active_tab: commandMode === 'explorer' ? (row.dataset.explorerActiveTab || '') : '',
+                explorer_tab_views: commandMode === 'explorer' ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews) : {},
+                explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
+                explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
                 distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
                 use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
                     ? Boolean(row.querySelector('.t-use-wsl')?.checked)
@@ -1923,6 +1941,9 @@
                     data-explorer-git-open="${terminal.explorer_git_open ? 'true' : 'false'}"
                     data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
                     data-explorer-active-tab="${escHtml(terminal.explorer_active_tab || '')}"
+                    data-explorer-tab-views="${escHtml(JSON.stringify(terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object' ? terminal.explorer_tab_views : {}))}"
+                    data-explorer-md-preset="${escHtml(terminal.explorer_md_preset || '')}"
+                    data-explorer-md-font="${escHtml(terminal.explorer_md_font || '')}"
                 >
                     <div class="t-row-head">
                         <span class="t-badge">T${index + 1}</span>
@@ -2693,6 +2714,15 @@
                         : [],
                     explorer_active_tab: terminal.startup_mode === 'explorer'
                         ? (terminal.explorer_active_tab || '')
+                        : '',
+                    explorer_tab_views: terminal.startup_mode === 'explorer' && terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object'
+                        ? terminal.explorer_tab_views
+                        : {},
+                    explorer_md_preset: terminal.startup_mode === 'explorer'
+                        ? (terminal.explorer_md_preset || '')
+                        : '',
+                    explorer_md_font: terminal.startup_mode === 'explorer'
+                        ? (terminal.explorer_md_font || '')
                         : '',
                     startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
                         ? terminal.startup_mode

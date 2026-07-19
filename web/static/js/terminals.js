@@ -1310,6 +1310,11 @@
                 explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_git_open) : false,
                 explorer_open_tabs: startupMode === 'explorer' && Array.isArray(terminal?.explorer_open_tabs) ? terminal.explorer_open_tabs : [],
                 explorer_active_tab: startupMode === 'explorer' ? (terminal?.explorer_active_tab || '') : '',
+                explorer_tab_views: startupMode === 'explorer' && terminal?.explorer_tab_views && typeof terminal.explorer_tab_views === 'object'
+                    ? terminal.explorer_tab_views
+                    : {},
+                explorer_md_preset: startupMode === 'explorer' ? (terminal?.explorer_md_preset || '') : '',
+                explorer_md_font: startupMode === 'explorer' ? (terminal?.explorer_md_font || '') : '',
                 startup_mode: startupMode
             };
 
@@ -1612,9 +1617,16 @@
         const selectedDirectory = startupMode === 'explorer'
             ? (session.explorer_root_directory || session.directory || '')
             : (session.directory || '');
+        const explorerSlot = startupMode === 'explorer' && terminal ? terminals.indexOf(terminal) : -1;
+        if (explorerSlot !== -1) {
+            /* Fold the shown tab's live mode + scroll into its record so the
+               serialized tab views reflect what is on screen right now (2.f). */
+            explorerCaptureActiveTabView(explorerSlot);
+        }
         const explorerTabs = startupMode === 'explorer' && terminal
             ? explorerSerializeTabs(terminal)
-            : { open_tabs: [], active_tab: '' };
+            : { open_tabs: [], active_tab: '', tab_views: {} };
+        const mdAppearance = startupMode === 'explorer' ? explorerMarkdownAppearance() : null;
 
         return {
             title: session.title || `Terminal ${index + 1}`,
@@ -1629,6 +1641,9 @@
             explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
             explorer_open_tabs: explorerTabs.open_tabs,
             explorer_active_tab: explorerTabs.active_tab,
+            explorer_tab_views: explorerTabs.tab_views,
+            explorer_md_preset: mdAppearance ? mdAppearance.preset : '',
+            explorer_md_font: mdAppearance ? mdAppearance.font : '',
             distribution: connectionMode === 'wsl' ? (session.distribution || '') : '',
             use_wsl: connectionMode === 'wsl' ? Boolean(session.use_wsl) : false,
             use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false
@@ -5446,6 +5461,12 @@
                 return;
             }
             if (isExplorerSession(pane._session)) {
+                /* 5.a: fold the shown tab's live mode + scroll into its record
+                   first, then carry every tab's full view record (mode, scroll
+                   metrics, identity, zoom, mode preference) through the rebuild
+                   — the disk-shape session fields alone would reset the per-tab
+                   state 2.e introduced. */
+                explorerCaptureActiveTabView(index);
                 const tabs = explorerSerializeTabs(pane);
                 const previewTab = explorerPreviewTab(pane);
                 const previewActive = pane._explorerActiveTabId === EXPLORER_PREVIEW_TAB_ID;
@@ -5455,6 +5476,13 @@
                     explorer_git_open: Boolean(pane._explorerGitSidebarOpen),
                     explorer_open_tabs: tabs.open_tabs,
                     explorer_active_tab: tabs.active_tab,
+                    explorer_tab_views: tabs.tab_views,
+                    explorer_tab_state: pane._explorerTabs.map(tab => ({
+                        id: tab.id,
+                        view: tab.view || null,
+                        fontSize: tab.fontSize || 0,
+                        preferredMode: tab.preferredMode || ''
+                    })),
                     /* Only the dynamic Preview tab needs an explicit reopen; pinned
                        tabs come back through the persisted-tab path. */
                     explorer_preview_path: previewActive ? (previewTab?.path || '') : '',
@@ -5476,9 +5504,31 @@
        the Preview tab was the active view. */
     function restoreExplorerPaneFromClose(index, snapshot) {
         syncExplorerPane(index);
+        /* 5.a: reattach each tab's captured view record (mode + scroll + zoom
+           + mode preference) synchronously — the active tab's re-fetch has not
+           resolved yet, so its render restores through the 2.e identity check
+           instead of falling back to defaults. */
+        const pane = terminals[index];
+        if (pane && Array.isArray(snapshot.explorer_tab_state)) {
+            ensureExplorerTabState(pane);
+            snapshot.explorer_tab_state.forEach(saved => {
+                const tab = pane._explorerTabs.find(entry => entry.id === saved.id);
+                if (!tab) {
+                    return;
+                }
+                if (saved.view) {
+                    tab.view = saved.view;
+                }
+                if (saved.fontSize) {
+                    tab.fontSize = saved.fontSize;
+                }
+                if (saved.preferredMode) {
+                    tab.preferredMode = saved.preferredMode;
+                }
+            });
+        }
         restoreExplorerSidebarState(index);
         if (snapshot.explorer_preview_path) {
-            const pane = terminals[index];
             if (pane && snapshot.explorer_preview_view) {
                 pane._explorerLastFileView = snapshot.explorer_preview_view;
             }
@@ -7109,6 +7159,7 @@
                         entry.explorer_git_open = snapshot.explorer_git_open;
                         entry.explorer_open_tabs = snapshot.explorer_open_tabs;
                         entry.explorer_active_tab = snapshot.explorer_active_tab;
+                        entry.explorer_tab_views = snapshot.explorer_tab_views;
                     } else if (snapshot.type === 'browser') {
                         entry.initial_command = snapshot.browser_url;
                     }
@@ -11410,6 +11461,24 @@
         }
     }
 
+    /* One-shot per session id: re-apply the Markdown appearance a saved
+       session or restart snapshot carries (ISSUE-2026-033). The set keeps a
+       close-driven rebuild of the same session from clobbering an appearance
+       the user changed since launch; setExplorerMarkdownAppearance validates
+       the values and syncs the shared localStorage keys. */
+    const appliedExplorerMdSessions = new Set();
+    function applyExplorerSessionMarkdownAppearance(index) {
+        const sessionId = sessionIds[index];
+        const session = terminals[index]?._session || {};
+        const preset = session.explorer_md_preset || '';
+        const font = session.explorer_md_font || '';
+        if (!sessionId || appliedExplorerMdSessions.has(sessionId) || (!preset && !font)) {
+            return;
+        }
+        appliedExplorerMdSessions.add(sessionId);
+        setExplorerMarkdownAppearance({ preset, font });
+    }
+
     /* Entry point when an explorer pane first shows: empty read-only viewer with
        the Files tree opened for navigation, plus any persisted tabs restored. */
     function openExplorerViewer(index) {
@@ -11424,6 +11493,7 @@
         if (!pane._explorerTreeSidebarOpen && !pane._explorerGitSidebarOpen) {
             setExplorerTreeSidebarOpen(index, true);
         }
+        applyExplorerSessionMarkdownAppearance(index);
         restoreExplorerPersistedTabs(index);
         return true;
     }
@@ -11570,13 +11640,73 @@
         });
     }
 
-    /* ── Saved-session tab persistence (ISSUE-2026-015) ── */
+    /* ── Saved-session tab persistence (ISSUE-2026-015, per-tab views 2.f) ── */
+
+    /* Reduce a tab's live view snapshot to the persisted shape (OD-5, amended
+       per user feedback to include zoom): view mode, the primary panel's
+       scroll as a fraction of scroll height (OD-4), the content-identity hash
+       the restore-side skip rule compares, and the tab's editor font size
+       (omitted at the default so unzoomed tabs persist nothing). */
+    function explorerPersistableTabView(tab) {
+        if (!tab) {
+            return null;
+        }
+        const record = {};
+        const view = tab.view;
+        if (view && view.mode && view.identity) {
+            const panel = view.scroll && view.scroll.panels ? view.scroll.panels[view.mode] : null;
+            record.mode = view.mode;
+            record.scroll = panel
+                ? (panel.wasAtBottom ? 1 : Math.max(0, Math.min(1, panel.scrollTopRatio || 0)))
+                : 0;
+            record.identity = view.identity;
+        }
+        const fontSize = tab.fontSize ? clampExplorerEditorFontSize(tab.fontSize) : 0;
+        if (fontSize && fontSize !== EXPLORER_EDITOR_FONT_DEFAULT) {
+            record.font_size = fontSize;
+        }
+        return Object.keys(record).length ? record : null;
+    }
+
+    /* Clamped editor font size from one persisted tab view record; 0 = unset. */
+    function explorerPersistedTabFontSize(raw) {
+        const fontSize = Number(raw && typeof raw === 'object' ? raw.font_size : 0);
+        if (!Number.isFinite(fontSize) || fontSize <= 0) {
+            return 0;
+        }
+        return clampExplorerEditorFontSize(fontSize);
+    }
+
+    /* Inflate one persisted tab view back into the in-memory `tab.view`
+       snapshot shape 2.e restores from (clamped fraction-based metrics). */
+    function explorerInflatePersistedTabView(raw) {
+        if (!raw || typeof raw !== 'object') {
+            return null;
+        }
+        const mode = ['source', 'preview', 'diff'].includes(raw.mode) ? raw.mode : '';
+        const identity = typeof raw.identity === 'string' ? raw.identity : '';
+        if (!mode || !identity) {
+            return null;
+        }
+        const fraction = Math.max(0, Math.min(1, Number(raw.scroll) || 0));
+        return {
+            mode,
+            identity,
+            scroll: {
+                activeView: mode,
+                panels: { [mode]: { scrollTopRatio: fraction, wasAtBottom: fraction >= 0.999 } },
+                sidebar: {}
+            }
+        };
+    }
+
     function explorerSerializeTabs(pane) {
         ensureExplorerTabState(pane);
         const openTabs = [];
+        const tabViews = {};
         const seen = new Set();
         pane._explorerTabs.forEach(tab => {
-            if (!tab.pinned) {
+            if (!tab.pinned || openTabs.length >= EXPLORER_MAX_PINNED_TABS) {
                 return;
             }
             const key = explorerNormalizeTabPath(tab.path);
@@ -11585,12 +11715,24 @@
             }
             seen.add(key);
             openTabs.push(tab.path);
+            const view = explorerPersistableTabView(tab);
+            if (view) {
+                tabViews[key] = view;
+            }
         });
+        /* The Preview tab's content is transient (its path is never
+           persisted), but its zoom should survive a relaunch — stored under
+           the reserved tab id. */
+        const previewRecord = explorerPersistableTabView(explorerPreviewTab(pane));
+        if (previewRecord && previewRecord.font_size) {
+            tabViews[EXPLORER_PREVIEW_TAB_ID] = { font_size: previewRecord.font_size };
+        }
         const active = explorerActiveTab(pane);
         const activeTab = active && active.pinned ? explorerNormalizeTabPath(active.path) : '';
         return {
-            open_tabs: openTabs.slice(0, EXPLORER_MAX_PINNED_TABS),
-            active_tab: activeTab
+            open_tabs: openTabs,
+            active_tab: activeTab,
+            tab_views: tabViews
         };
     }
 
@@ -11612,10 +11754,19 @@
         pane._explorerTabsRestored = true;
         const session = pane._session || {};
         const rawTabs = Array.isArray(session.explorer_open_tabs) ? session.explorer_open_tabs : [];
+        const rawViews = session.explorer_tab_views && typeof session.explorer_tab_views === 'object'
+            ? session.explorer_tab_views
+            : {};
+        ensureExplorerTabState(pane);
+        /* The Preview tab's zoom persists under its reserved id even when no
+           pinned tabs were saved. */
+        const previewFont = explorerPersistedTabFontSize(rawViews[EXPLORER_PREVIEW_TAB_ID]);
+        if (previewFont) {
+            explorerPreviewTab(pane).fontSize = previewFont;
+        }
         if (!rawTabs.length) {
             return;
         }
-        ensureExplorerTabState(pane);
         const seen = new Set();
         rawTabs.forEach(raw => {
             const path = String(raw == null ? '' : raw);
@@ -11627,7 +11778,19 @@
                 return;
             }
             seen.add(key);
-            pane._explorerTabs.push({ id: key, pinned: true, path, name: explorerBaseName(path) });
+            const record = { id: key, pinned: true, path, name: explorerBaseName(path) };
+            /* 2.f: seed the persisted view mode + scroll fraction and zoom;
+               the OD-4 identity check decides on render whether mode/scroll
+               still apply (the zoom always does). */
+            const view = explorerInflatePersistedTabView(rawViews[key]);
+            if (view) {
+                record.view = view;
+            }
+            const fontSize = explorerPersistedTabFontSize(rawViews[key]);
+            if (fontSize) {
+                record.fontSize = fontSize;
+            }
+            pane._explorerTabs.push(record);
         });
         const activeKey = explorerNormalizeTabPath(session.explorer_active_tab || '');
         const activeTab = activeKey

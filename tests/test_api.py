@@ -754,6 +754,43 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
 
+    def test_terminals_page_close_preserves_tab_view_state(self):
+        """5.a: per-tab view mode, scroll, and zoom survive a terminal-close rebuild."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        capture = html[
+            html.index("function captureSurvivingPaneClientState(closingSessionId)"):
+            html.index("function restoreExplorerPaneFromClose(index, snapshot)")
+        ]
+        # The shown tab's live mode + scroll are folded into its record before
+        # the tabs are serialized into the snapshot.
+        self.assertLess(
+            capture.index("explorerCaptureActiveTabView(index);"),
+            capture.index("const tabs = explorerSerializeTabs(pane);"),
+        )
+        # Full-fidelity tab records ride the snapshot (view + zoom + preference),
+        # alongside the disk-shape views for the session overlay.
+        self.assertIn("explorer_tab_state: pane._explorerTabs.map(tab => ({", capture)
+        self.assertIn("explorer_tab_views: tabs.tab_views,", capture)
+        restore = html[
+            html.index("function restoreExplorerPaneFromClose(index, snapshot)"):
+            html.index("async function closeTerminalPane(index)")
+        ]
+        # Records are reattached synchronously, before the active tab's async
+        # re-fetch resolves, so the 2.e identity check restores mode + scroll.
+        self.assertIn("snapshot.explorer_tab_state.forEach(saved => {", restore)
+        self.assertIn("tab.view = saved.view;", restore)
+        self.assertIn("tab.fontSize = saved.fontSize;", restore)
+        self.assertIn("tab.preferredMode = saved.preferredMode;", restore)
+        self.assertLess(
+            restore.index("snapshot.explorer_tab_state.forEach"),
+            restore.index("openExplorerFile(index, snapshot.explorer_preview_path"),
+        )
+        # The rebuilt session entries also receive the fresh disk-shape views.
+        self.assertIn("entry.explorer_tab_views = snapshot.explorer_tab_views;", html)
+
     def test_terminals_page_exposes_session_mode_switch_controls(self):
         response = self.client.get("/terminals")
 
@@ -1194,6 +1231,44 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Bounded pinned-tab count shared with the backend cap.
         self.assertIn("const EXPLORER_MAX_PINNED_TABS = 12;", html)
 
+    def test_terminals_page_persists_tab_views_and_markdown_appearance(self):
+        """2.f: per-tab mode/scroll and the Markdown appearance round-trip sessions."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Serialize: the shown tab is captured live, then each pinned tab's view
+        # reduces to the persisted shape (mode + scroll fraction + identity, OD-5).
+        self.assertIn("function explorerPersistableTabView(tab)", html)
+        self.assertIn("explorerCaptureActiveTabView(explorerSlot);", html)
+        self.assertIn("explorer_tab_views: explorerTabs.tab_views,", html)
+        self.assertIn("explorer_md_preset: mdAppearance ? mdAppearance.preset : '',", html)
+        self.assertIn("explorer_md_font: mdAppearance ? mdAppearance.font : '',", html)
+        # Restore: persisted views seed the rebuilt tab records; the OD-4
+        # identity check decides at render time whether they still apply.
+        self.assertIn("function explorerInflatePersistedTabView(raw)", html)
+        self.assertIn("const view = explorerInflatePersistedTabView(rawViews[key]);", html)
+        # Per-tab editor zoom persists too — including the Preview tab's, under
+        # its reserved id — omitted at the default so unzoomed tabs store nothing.
+        self.assertIn("function explorerPersistedTabFontSize(raw)", html)
+        self.assertIn("fontSize !== EXPLORER_EDITOR_FONT_DEFAULT", html)
+        self.assertIn(
+            "tabViews[EXPLORER_PREVIEW_TAB_ID] = { font_size: previewRecord.font_size };",
+            html,
+        )
+        self.assertIn("explorerPreviewTab(pane).fontSize = previewFont;", html)
+        self.assertIn("record.fontSize = fontSize;", html)
+        # The saved-session relaunch payload carries the new fields through.
+        self.assertIn(
+            "explorer_tab_views: startupMode === 'explorer' && terminal?.explorer_tab_views",
+            html,
+        )
+        # Markdown appearance re-applies once per session id (ISSUE-2026-033) so
+        # a close rebuild cannot clobber an appearance changed since launch.
+        self.assertIn("function applyExplorerSessionMarkdownAppearance(index)", html)
+        self.assertIn("setExplorerMarkdownAppearance({ preset, font });", html)
+        self.assertIn("applyExplorerSessionMarkdownAppearance(index);", html)
+
     def test_terminals_page_explorer_tabs_preserve_view_mode_and_scroll(self):
         """2.e: each explorer tab keeps its own view mode + scroll across swaps."""
         response = self.client.get("/terminals")
@@ -1314,6 +1389,20 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("data-explorer-active-tab=", html)
         self.assertIn("explorer_open_tabs: commandMode === 'explorer'", html)
         self.assertIn("explorer_open_tabs: terminal.startup_mode === 'explorer'", html)
+
+    def test_launcher_round_trips_explorer_tab_views_and_markdown_appearance(self):
+        """2.f: launcher carries tab views + Markdown appearance without editing them."""
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function parseExplorerTabViewsDataset(value)", html)
+        self.assertIn("data-explorer-tab-views=", html)
+        self.assertIn("data-explorer-md-preset=", html)
+        self.assertIn("data-explorer-md-font=", html)
+        self.assertIn("explorer_tab_views: commandMode === 'explorer'", html)
+        self.assertIn("explorer_tab_views: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_md_preset: terminal.startup_mode === 'explorer'", html)
 
     def test_terminals_page_explorer_sidebar_supports_tree_and_git_together(self):
         response = self.client.get("/terminals")
@@ -5290,6 +5379,131 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(normalized[0]["explorer_open_tabs"], [])
         self.assertEqual(normalized[0]["explorer_active_tab"], "")
+        self.assertEqual(normalized[0]["explorer_tab_views"], {})
+        self.assertEqual(normalized[0]["explorer_md_preset"], "")
+        self.assertEqual(normalized[0]["explorer_md_font"], "")
+
+    def test_normalize_terminal_entries_validates_tab_views_and_md_appearance(self):
+        """2.f: per-tab view snapshots and Markdown appearance are allowlist-validated."""
+        entries = [
+            {
+                "startup_mode": "explorer",
+                "explorer_open_tabs": ["docs/a.md", "sub/b.md", "c.md", "d.md", "e.md"],
+                "explorer_tab_views": {
+                    "docs/a.md": {"mode": "preview", "scroll": 0.5, "identity": "abc123", "font_size": 18},
+                    "sub\\b.md": {"mode": "diff", "scroll": 7, "identity": "x" * 100, "font_size": 99},
+                    "c.md": {"mode": "bogus", "scroll": 0.1, "identity": "ok"},
+                    "e.md": {"font_size": 12},
+                    "../escape.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
+                    "not-open.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
+                    "d.md": "not-a-dict",
+                    "__preview__": {"mode": "source", "scroll": 0.5, "identity": "zz", "font_size": 16},
+                },
+                "explorer_md_preset": "vscode",
+                "explorer_md_font": "serif",
+            },
+            {
+                "startup_mode": "explorer",
+                "explorer_md_preset": "neon",
+                "explorer_md_font": "wingdings",
+            },
+        ]
+
+        normalized = web_saved_sessions._normalize_terminal_entries(entries)
+
+        views = normalized[0]["explorer_tab_views"]
+        self.assertEqual(
+            views["docs/a.md"],
+            {"mode": "preview", "scroll": 0.5, "identity": "abc123", "font_size": 18},
+        )
+        # Keys normalize like tab paths; out-of-range scroll fractions clamp to
+        # [0, 1]; oversized identity tokens are dropped rather than restored;
+        # font sizes clamp to the editor zoom bounds.
+        self.assertEqual(
+            views["sub/b.md"], {"mode": "diff", "scroll": 1.0, "identity": "", "font_size": 24}
+        )
+        # A record may carry only a zoom (a zoomed tab whose view was never
+        # captured), and the reserved Preview key keeps zoom only — its
+        # content is transient by design.
+        self.assertEqual(views["e.md"], {"font_size": 12})
+        self.assertEqual(views["__preview__"], {"font_size": 16})
+        # Unknown modes, escaping/unlisted paths, and non-dict records are dropped.
+        self.assertEqual(set(views), {"docs/a.md", "sub/b.md", "e.md", "__preview__"})
+        self.assertEqual(normalized[0]["explorer_md_preset"], "vscode")
+        self.assertEqual(normalized[0]["explorer_md_font"], "serif")
+        # Values outside the appearance allowlists fall back to unset.
+        self.assertEqual(normalized[1]["explorer_md_preset"], "")
+        self.assertEqual(normalized[1]["explorer_md_font"], "")
+
+    def test_workspace_save_round_trips_tab_views_and_md_appearance(self):
+        """2.f / ISSUE-2026-033: view snapshots + appearance persist, gated to explorer panes."""
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "explorer-tab-views",
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "vertical",
+                    "ssh": {"host": "example.com", "username": "ubuntu", "port": 22, "default_dir": "/repo"},
+                    "terminals": [
+                        {"title": "Files", "directory": "repo", "startup_mode": "explorer"},
+                        {"title": "Shell", "directory": "repo", "startup_mode": "terminal"},
+                    ],
+                },
+            },
+        ).get_json()
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 2,
+                    "layout": "vertical",
+                    "terminals": [
+                        {
+                            "title": "Files",
+                            "directory": "repo",
+                            "startup_mode": "explorer",
+                            "explorer_open_tabs": ["docs/a.md"],
+                            "explorer_active_tab": "docs/a.md",
+                            "explorer_tab_views": {
+                                "docs/a.md": {"mode": "preview", "scroll": 0.25, "identity": "id1"}
+                            },
+                            "explorer_md_preset": "paper",
+                            "explorer_md_font": "mono",
+                        },
+                        {
+                            "title": "Shell",
+                            "directory": "repo",
+                            "startup_mode": "terminal",
+                            "explorer_tab_views": {
+                                "x.md": {"mode": "source", "scroll": 0.1, "identity": "id2"}
+                            },
+                            "explorer_md_preset": "paper",
+                            "explorer_md_font": "mono",
+                        },
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        config = response.get_json()["config"]
+        self.assertEqual(
+            config["terminals"][0]["explorer_tab_views"],
+            {"docs/a.md": {"mode": "preview", "scroll": 0.25, "identity": "id1"}},
+        )
+        self.assertEqual(config["terminals"][0]["explorer_md_preset"], "paper")
+        self.assertEqual(config["terminals"][0]["explorer_md_font"], "mono")
+        # Non-explorer panes never carry tab views or a Markdown appearance.
+        self.assertEqual(config["terminals"][1]["explorer_tab_views"], {})
+        self.assertEqual(config["terminals"][1]["explorer_md_preset"], "")
+        self.assertEqual(config["terminals"][1]["explorer_md_font"], "")
 
     def test_workspace_save_round_trips_explorer_open_tabs(self):
         """ISSUE-2026-015: active-workspace save persists explorer tabs, gated to explorer panes."""
@@ -10787,6 +11001,12 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
 
     def test_runtime_state_snapshot_includes_agent_auto_mode(self):
         self.assertIn("agent_auto_mode", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
+
+    def test_runtime_state_snapshot_includes_tab_views_and_md_appearance(self):
+        """2.f: restart restore replays per-tab views and the Markdown appearance."""
+        self.assertIn("explorer_tab_views", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
+        self.assertIn("explorer_md_preset", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
+        self.assertIn("explorer_md_font", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
 
     def test_launcher_wires_the_auto_mode_toggle(self):
         html = self.client.get("/").get_data(as_text=True)

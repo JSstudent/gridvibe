@@ -182,6 +182,37 @@ class SessionManagerTestCase(unittest.TestCase):
 
         self.assertEqual(sessions[0].explorer_open_tabs, [])
         self.assertEqual(sessions[0].explorer_active_tab, "")
+        self.assertEqual(sessions[0].explorer_tab_views, {})
+        self.assertEqual(sessions[0].explorer_md_preset, "")
+        self.assertEqual(sessions[0].explorer_md_font, "")
+
+    def test_create_sessions_carries_explorer_tab_views_and_md_appearance(self):
+        """2.f: per-tab view snapshots and Markdown appearance ride the session."""
+        tab_views = {"docs/a.md": {"mode": "preview", "scroll": 0.4, "identity": "abc123"}}
+        sessions = self.manager.create_sessions(
+            [
+                {
+                    "mode": "wsl",
+                    "directory": "C:\\repo",
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                    "explorer_open_tabs": ["docs/a.md"],
+                    "explorer_active_tab": "docs/a.md",
+                    "explorer_tab_views": tab_views,
+                    "explorer_md_preset": "vscode",
+                    "explorer_md_font": "serif",
+                }
+            ],
+            group_id="group-tab-views",
+        )
+
+        self.assertEqual(sessions[0].explorer_tab_views, tab_views)
+        self.assertEqual(sessions[0].explorer_md_preset, "vscode")
+        self.assertEqual(sessions[0].explorer_md_font, "serif")
+        data = sessions[0].to_dict()
+        self.assertEqual(data["explorer_tab_views"], tab_views)
+        self.assertEqual(data["explorer_md_preset"], "vscode")
+        self.assertEqual(data["explorer_md_font"], "serif")
 
     def test_create_sessions_supports_agent_metadata(self):
         sessions = self.manager.create_sessions(
