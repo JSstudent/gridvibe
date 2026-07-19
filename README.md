@@ -132,7 +132,7 @@ Use the gear button on the launcher page to open `App Settings`. These settings 
 
 ### Agent CLI Detection
 
-GridVibe does not bundle agent CLIs such as Codex, Claude Code, OpenCode, Kilo, or GitHub Copilot CLI. The `Agent` selector checks whether the selected command is available in the target environment:
+GridVibe does not bundle agent CLIs such as Codex, Claude Code, OpenCode, Kilo, Kimi Code CLI, or GitHub Copilot CLI. The `Agent` selector checks whether the selected command is available in the target environment:
 
 - SSH sessions are checked on the remote host.
 - WSL terminals are checked inside the selected WSL distribution.
@@ -142,7 +142,7 @@ If every agent shows `Missing`, confirm the CLI is installed and visible on `PAT
 
 ```powershell
 npm prefix -g
-Get-Command codex, claude, opencode, kilo, copilot -ErrorAction SilentlyContinue
+Get-Command codex, claude, opencode, kilo, kimi, copilot -ErrorAction SilentlyContinue
 ```
 
 The npm prefix is commonly:
@@ -155,7 +155,7 @@ On Linux, npm global binaries usually live under the global prefix's `bin` direc
 
 ```bash
 npm prefix -g
-command -v codex claude opencode kilo copilot
+command -v codex claude opencode kilo kimi copilot
 ```
 
 Common locations include `/usr/local/bin`, `~/.npm-global/bin`, or `<npm prefix -g>/bin`.

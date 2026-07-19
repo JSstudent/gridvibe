@@ -40,7 +40,10 @@ except ImportError:  # pragma: no cover - dependency declared for runtime instal
 
 logger = logging.getLogger(__name__)
 
-EXPLORER_FILE_PREVIEW_MAX_BYTES = 1024 * 1024
+# Raised from 1 MiB to 10 MiB (OD-9): the head/tail ranged-read machinery
+# already scales, and the client renders previews above ~2 MiB as plain text
+# (no syntax highlighting) to keep the viewer responsive.
+EXPLORER_FILE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024
 EXPLORER_GIT_DIFF_MAX_BYTES = 256 * 1024
 EXPLORER_GIT_DIFF_MAX_LINES = 4000
 EXPLORER_GIT_LOG_MAX_COMMITS = 60
@@ -150,6 +153,10 @@ CODE_PREVIEW_FILENAMES = {
     ".gitkeep": "text",
     ".python-version": "text",
     "dockerfile": "dockerfile",
+    "go.mod": "go",
+    "go.sum": "text",
+    "go.work": "go",
+    "go.work.sum": "text",
     "makefile": "makefile",
 }
 EXPLORER_BINARY_SAMPLE_BYTES = 4096

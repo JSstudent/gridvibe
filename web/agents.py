@@ -73,6 +73,17 @@ def _agent_auto_mode_flag(agent_key: Any) -> str:
     return flag
 
 
+def _agent_auto_mode_description(agent_key: Any) -> str:
+    """Return the registry-defined auto-mode description for one agent, or ""."""
+    spec = AGENT_REGISTRY.get(_normalize_agent_key(agent_key))
+    if not isinstance(spec, dict):
+        return ""
+    auto_mode = spec.get("auto_mode")
+    if not isinstance(auto_mode, dict):
+        return ""
+    return str(auto_mode.get("description") or "").strip()
+
+
 def _agent_options() -> List[Dict[str, str]]:
     """Return launcher agent choices sourced from the registry."""
     options = [
@@ -80,11 +91,12 @@ def _agent_options() -> List[Dict[str, str]]:
             "value": key,
             "label": str(spec.get("label") or key),
             "auto_mode_flag": _agent_auto_mode_flag(key),
+            "auto_mode_description": _agent_auto_mode_description(key),
         }
         for key, spec in AGENT_REGISTRY.items()
     ]
     options.sort(key=lambda item: item["label"])
-    options.append({"value": "other", "label": "other", "auto_mode_flag": ""})
+    options.append({"value": "other", "label": "other", "auto_mode_flag": "", "auto_mode_description": ""})
     return options
 
 

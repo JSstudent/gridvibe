@@ -276,7 +276,11 @@
     "verify": [
       "kilo --version"
     ],
-    "post_install": "Run kilo and complete /connect."
+    "post_install": "Run kilo and complete /connect.",
+    "auto_mode": {
+      "flag": "--yolo",
+      "description": "Launches with all tool permissions auto-approved."
+    }
   },
   "claude": {
     "label": "claude",
@@ -351,6 +355,84 @@
     "auto_mode": {
       "flag": "--enable-auto-mode",
       "description": "Launches with automatic edit and approval mode enabled."
+    }
+  },
+  "kimi": {
+    "label": "kimi",
+    "display_name": "Kimi Code CLI",
+    "binary": "kimi",
+    "environments": {
+      "windows_native": {
+        "supported": true,
+        "recommended": true,
+        "warning": "The official install script bootstraps uv before installing Kimi Code CLI.",
+        "install_options": [
+          {
+            "label": "Install script",
+            "command": "Invoke-RestMethod https://code.kimi.com/install.ps1 | Invoke-Expression"
+          },
+          {
+            "label": "uv fallback",
+            "command": "uv tool install --python 3.13 kimi-cli",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "uv",
+                "message": "uv is required for the fallback install path."
+              }
+            ]
+          }
+        ]
+      },
+      "wsl_linux": {
+        "supported": true,
+        "recommended": true,
+        "install_options": [
+          {
+            "label": "Install script",
+            "command": "curl -LsSf https://code.kimi.com/install.sh | bash",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "curl",
+                "message": "curl is required for the install script path."
+              }
+            ]
+          },
+          {
+            "label": "uv fallback",
+            "command": "uv tool install --python 3.13 kimi-cli",
+            "requires": [
+              {
+                "kind": "command",
+                "binary": "uv",
+                "message": "uv is required for the fallback install path."
+              }
+            ]
+          }
+        ]
+      },
+      "ssh": {
+        "supported": true,
+        "recommended": false,
+        "detect_only": true,
+        "warning": "Remote SSH targets are detect-only by default.",
+        "install_options": [
+          {
+            "label": "Manual remote install",
+            "command": "curl -LsSf https://code.kimi.com/install.sh | bash",
+            "manual_only": true
+          }
+        ]
+      }
+    },
+    "verify": [
+      "kimi --version"
+    ],
+    "post_install": "Run kimi and complete /login if prompted.",
+    "auto_mode": {
+      "flag": "--auto-approve",
+      "description": "Launches with all actions auto-approved (alias of --yolo)."
     }
   }
 }

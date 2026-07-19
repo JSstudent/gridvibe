@@ -1355,6 +1355,33 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".explorer-md-source-heading {", html)
         self.assertIn("color: var(--t-accent);", html)
 
+    def test_terminals_page_go_filenames_frontend_classifier(self):
+        """Wave 2 / 2.b (OD-2): frontend classifier mirrors the go.* filenames."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("'go.mod': 'go',", html)
+        self.assertIn("'go.sum': 'text',", html)
+        self.assertIn("'go.work': 'go',", html)
+        self.assertIn("'go.work.sum': 'text',", html)
+
+    def test_terminals_page_plain_preview_threshold(self):
+        """Wave 2 / 4.a (OD-9): previews above ~2 MiB render without highlighting."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("const EXPLORER_PLAIN_PREVIEW_THRESHOLD = 2 * 1024 * 1024;", html)
+        # The flag is captured on both render paths and consulted by the source
+        # renderer plus the Markdown preview highlighter.
+        self.assertIn(
+            "pane._explorerFilePlain = pane._explorerFileContent.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;",
+            html,
+        )
+        self.assertIn("pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '')", html)
+        self.assertIn("if (!pane._explorerFilePlain) {", html)
+
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
 
@@ -4502,6 +4529,120 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_explorer_binary_detection_rejects_incomplete_utf8_at_content_end(self):
         self.assertTrue(web_explorer._explorer_content_looks_binary(b"valid text\xc2"))
+
+    def test_explorer_binary_detection_allows_multibyte_char_crossing_sample_boundary(self):
+        """Wave 2 / 2.c (ISSUE-2026-035): a truncated sample may end mid-character."""
+        # Byte 4,095 is 0xE2, the first byte of the valid 3-byte sequence for
+        # U+2500 (─); the remaining bytes fall just past the 4,096-byte sample.
+        content = b"a" * 4095 + "─".encode("utf-8") + b"\n"
+        self.assertGreater(len(content), web_explorer.EXPLORER_BINARY_SAMPLE_BYTES)
+        content.decode("utf-8")  # The complete file is valid strict UTF-8.
+        self.assertFalse(web_explorer._explorer_content_looks_binary(content))
+
+    def test_explorer_binary_detection_rejects_invalid_utf8_inside_oversized_sample(self):
+        """Wave 2 / 2.c (ISSUE-2026-035): only a *trailing* partial sequence is deferred."""
+        content = b"a" * 100 + b"\xc0\xaf" + b"b" * 5000
+        self.assertGreater(len(content), web_explorer.EXPLORER_BINARY_SAMPLE_BYTES)
+        self.assertTrue(web_explorer._explorer_content_looks_binary(content))
+
+    def test_explorer_file_accepts_utf8_split_across_sample_boundary(self):
+        """Wave 2 / 2.c (ISSUE-2026-035): local endpoint serves the boundary file."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        content = b"a" * 4095 + "─".encode("utf-8") + b"\n"
+        (repo_dir / "boundary.md").write_bytes(content)
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "boundary.md"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertEqual(payload["language"], "markdown")
+        self.assertIn("─", payload["content"])
+
+    def test_explorer_file_accepts_utf8_split_across_sample_boundary_remote(self):
+        """Wave 2 / 2.c (ISSUE-2026-035): SFTP endpoint parity with the local path."""
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        content = b"a" * 4095 + "─".encode("utf-8") + b"\n"
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/boundary.md": {"type": "file", "content": content},
+            }
+        )
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "boundary.md"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("─", response.get_json()["content"])
+
+    def test_explorer_go_workflow_files_are_editor_eligible(self):
+        """Wave 2 / 2.b (OD-2): go.mod and peers resolve to a preview language."""
+        self.assertEqual(web_explorer._explorer_editor_language("go.mod"), "go")
+        self.assertEqual(web_explorer._explorer_editor_language("go.sum"), "text")
+        self.assertEqual(web_explorer._explorer_editor_language("go.work"), "go")
+        self.assertEqual(web_explorer._explorer_editor_language("go.work.sum"), "text")
+
+    def test_explorer_file_serves_go_mod(self):
+        """Wave 2 / 2.b (OD-2): GET on go.mod no longer 400s and resolves to go."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "go.mod").write_text("module example.com/demo\n\ngo 1.22\n")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "go.mod"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertEqual(payload["language"], "go")
+        self.assertIn("module example.com/demo", payload["content"])
+
+    def test_explorer_preview_cap_is_10_mib(self):
+        """Wave 2 / 4.a (OD-9): the 1 MiB cap is raised; a 1.5 MiB file is served whole."""
+        self.assertEqual(
+            web_explorer.EXPLORER_FILE_PREVIEW_MAX_BYTES,
+            10 * 1024 * 1024,
+        )
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        body = '{"event":"tick"}\n' * 90000  # ~1.71 MiB, above the old 1 MiB cap.
+        (repo_dir / "events.jsonl").write_bytes(body.encode("utf-8"))
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "events.jsonl"},
+        )
+
+        self.assertEqual(file_response.status_code, 200)
+        payload = file_response.get_json()
+        self.assertFalse(payload["truncated"])
+        self.assertEqual(payload["content"], body)
+        self.assertEqual(payload["total_size"], len(body.encode("utf-8")))
 
     def test_explorer_file_rejects_unsupported_editor_format(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -10060,8 +10201,48 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertEqual(options["claude"]["auto_mode_flag"], "--enable-auto-mode")
         self.assertEqual(options["codex"]["auto_mode_flag"], "--full-auto")
         self.assertEqual(options["copilot"]["auto_mode_flag"], "--allow-all-tools")
+        self.assertEqual(options["kimi"]["auto_mode_flag"], "--auto-approve")
+        self.assertEqual(options["kilo"]["auto_mode_flag"], "--yolo")
         self.assertEqual(options["opencode"]["auto_mode_flag"], "")
         self.assertEqual(options["other"]["auto_mode_flag"], "")
+
+    def test_agent_options_expose_registry_auto_mode_descriptions(self):
+        """Wave 4 / 7.b: every flag-carrying agent surfaces its helper text."""
+        options = {item["value"]: item for item in web_agents._agent_options()}
+        for key in ("claude", "codex", "copilot", "kimi", "kilo"):
+            with self.subTest(agent=key):
+                self.assertTrue(options[key]["auto_mode_description"])
+        self.assertEqual(options["opencode"]["auto_mode_description"], "")
+        self.assertEqual(options["other"]["auto_mode_description"], "")
+
+    def test_agent_registry_includes_kimi_entry(self):
+        """Wave 2 / 7.a (OD-11): Kimi Code CLI is registered with --auto-approve."""
+        entry = web_agents.AGENT_REGISTRY.get("kimi")
+        self.assertIsInstance(entry, dict)
+        self.assertEqual(entry["binary"], "kimi")
+        self.assertEqual(entry["display_name"], "Kimi Code CLI")
+        self.assertEqual(entry["auto_mode"]["flag"], "--auto-approve")
+        self.assertTrue(entry["auto_mode"]["description"])
+        self.assertIn("kimi --version", entry["verify"])
+        environments = entry["environments"]
+        for key in ("windows_native", "wsl_linux", "ssh"):
+            with self.subTest(environment=key):
+                self.assertTrue(environments[key]["supported"])
+        # Install commands confirmed against the official docs (OD-11).
+        windows_commands = [
+            option["command"]
+            for option in environments["windows_native"]["install_options"]
+        ]
+        self.assertIn(
+            "Invoke-RestMethod https://code.kimi.com/install.ps1 | Invoke-Expression",
+            windows_commands,
+        )
+        linux_commands = [
+            option["command"]
+            for option in environments["wsl_linux"]["install_options"]
+        ]
+        self.assertIn("curl -LsSf https://code.kimi.com/install.sh | bash", linux_commands)
+        self.assertIn("uv tool install --python 3.13 kimi-cli", linux_commands)
 
     def test_auto_mode_flag_rejects_malformed_registry_values(self):
         with patch.dict(
@@ -10212,9 +10393,11 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
     def test_launcher_wires_the_auto_mode_toggle(self):
         html = self.client.get("/").get_data(as_text=True)
         self.assertIn("auto_mode_flag", html)
+        self.assertIn("auto_mode_description", html)
 
         launcher_js = self._static("js/launcher.js")
         self.assertIn("function agentAutoModeFlag(agentValue)", launcher_js)
+        self.assertIn("function agentAutoModeDescription(agentValue)", launcher_js)
         self.assertIn("function syncTerminalAgentAutoModeState(row, commandMode, selectedAgent)", launcher_js)
         self.assertIn("t-agent-auto-mode", launcher_js)
         self.assertIn("t-agent-auto-field", launcher_js)
@@ -10223,6 +10406,22 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             launcher_js.index("function renderCountOptions()")
         ]
         self.assertIn("agent_auto_mode:", collect)
+
+        # 7.b (OD-12 case a): the direct-launch payload rebuilt each session
+        # field-by-field and dropped the toggle — it must carry it now.
+        launch = launcher_js[
+            launcher_js.index("async function launchSessions()"):
+            launcher_js.index("function setLaunchButtonLoading(")
+        ]
+        self.assertIn("agent_auto_mode: terminal.initial_command_mode === 'agent'", launch)
+
+        # The help line shows the composed command plus the registry description.
+        sync = launcher_js[
+            launcher_js.index("function syncTerminalAgentAutoModeState(row, commandMode, selectedAgent)"):
+            launcher_js.index("function resetTerminalCommandOnModeChange(")
+        ]
+        self.assertIn('`Launches as "${selectedAgent} ${flag}".', sync)
+        self.assertIn("agentAutoModeDescription(selectedAgent)", sync)
 
         terminals_js = self._static("js/terminals.js")
         entry = terminals_js[

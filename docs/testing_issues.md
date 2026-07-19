@@ -30,32 +30,6 @@ The captured restore requests contain a valid `saved_session_id`, SSH host, user
 ### Proposed solution:
 Keep passwords out of `runtime_state.json` and add a server-side restore preparation path that resolves each SSH group's normalized `saved_session_id` through `load_saved_sessions()` / `_find_saved_session_entry()`, decrypts the preset password using the existing `web/secrets.py` flow, and applies it only to the in-memory launch configuration after validating that the preset is still an SSH preset for the same host, username, and port. Do not return the rehydrated password from `/api/runtime-state`, send it back through the browser, or include it in request/session logs. When the saved preset is missing, changed, lacks a password, or does not match the snapshot target, preserve key/agent authentication attempts but expose an in-page credential/retry path rather than silently counting session creation as restore success. Update the launcher/API restore contract so connection failures remain visible and a `201` record-creation response is not presented as proof that remote panes connected. Add focused tests in `tests/test_api.py` for password-free snapshot persistence, successful saved-password rehydration without secret disclosure, key-auth restore, missing/mismatched/decryption-failed credentials, remote Explorer and agent panes, multiple restored groups, and prevention of the current false-success message when SSH authentication fails.
 
-### Issue ID: ISSUE-2026-035
-- Title: Valid UTF-8 files are rejected when preview sample splits a character
-- Priority: Medium
-- Status: Open
-- Area: `web/explorer.py`, `web/api.py`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `flask`, `unicode`, `tests`
-- Reported: 2026-07-17
-
-Description:
-GridVibe Explorer can reject a valid UTF-8 text or Markdown file as binary when the fixed 4,096-byte binary-detection sample ends partway through a multibyte character. The file is then unavailable in both Source and Markdown Preview even though its complete contents decode correctly as UTF-8. Whether a normal text file opens therefore depends on the byte alignment of Unicode characters near the sampling boundary.
-
-Steps to reproduce:
-1. Under an Explorer root, create a supported text file such as `boundary.md` whose bytes begin with 4,095 ASCII bytes followed by a multibyte UTF-8 character, for example `b"a" * 4095 + "─".encode("utf-8") + b"\n"`.
-2. Open `boundary.md` from the GridVibe Explorer file tree.
-3. Observe that the file is not displayed and Explorer reports `Explorer file appears to be binary`, even though decoding the complete file as strict UTF-8 succeeds.
-
-Expected behavior:
-Explorer binary detection should accept a valid UTF-8 file when only the bounded sample ends in an incomplete multibyte sequence. It should continue rejecting NUL-containing content, invalid UTF-8 sequences within the sampled data, excessive control bytes, and genuinely incomplete UTF-8 at the end of a complete short file.
-
-Actual behavior / logs:
-The verified 30,630-byte Markdown file decodes successfully in full as strict UTF-8 and contains no NUL or disallowed control bytes in the first 4 KiB. `_explorer_content_looks_binary()` in `web/explorer.py` slices `raw_content[:EXPLORER_BINARY_SAMPLE_BYTES]`, where `EXPLORER_BINARY_SAMPLE_BYTES` is 4,096, and then calls `sample.decode("utf-8")`. In the reproduced file, byte 4,095 is `E2`, the first byte of the valid three-byte sequence `E2 94 80` (`─`); the remaining two bytes fall immediately outside the sample. The bounded decode raises `UnicodeDecodeError`, the helper returns `True`, and `get_explorer_file()` in `web/api.py` converts that false positive into the 400 error `Explorer file appears to be binary`. Existing tests cover NUL bytes and internally invalid UTF-8 but not a valid multibyte sequence crossing the sample boundary.
-
-### Proposed solution:
-Update `_explorer_content_looks_binary()` in `web/explorer.py` so strict UTF-8 validation distinguishes an incomplete sequence caused only by truncating a larger sample from invalid bytes inside the sample. One safe approach is an incremental strict UTF-8 decoder with `final=False` only when `raw_content` contains bytes beyond the 4,096-byte sample, while retaining final validation for complete inputs; alternatively, extend or trim the sample to a verified code-point boundary without weakening internal-sequence checks. Keep the existing NUL and control-byte heuristics unchanged and preserve the shared local/SFTP path. Add focused regression tests in `tests/test_api.py` for a three-byte character crossing byte 4,096, valid Unicode sequences on either side of the boundary, internally invalid UTF-8 that must still be rejected, a short file ending in an incomplete sequence, and local/remote endpoint parity.
-
 ### Issue ID: ISSUE-2026-034
 - Title: Committing via Git sidebar does not reload the Files tree
 - Priority: Low
@@ -136,6 +110,22 @@ Code inspection confirms the **Changes** section header in `renderExplorerGitSid
 Add a "Stage All" button to the **Changes** header row in `renderExplorerGitSidebarContent()` in `web/static/js/terminals.js`, disabled when the unstaged list is empty or a Git action is busy. Wire it to a new client function (e.g. `explorerGitStageAll(index)`) that calls a new `POST /api/explorer/<session_id>/git/stage-all` route in `web/api.py`. The backend handler should live in `web/explorer.py` (e.g. `_git_stage_all_paths(backend, root_path)`) and run `git add -A` (or `git add .`) with `GIT_TERMINAL_PROMPT=0`, scoped to the repository root, consistent with the existing single-file stage helper. After success, return the updated repository summary and refresh the sidebar the same way individual staging does. Ensure busy-state toggling prevents overlapping actions, align the button style with the existing per-row `+` buttons and the Unstage/Commit controls, and preserve the read-only guarantee for file content. Add focused tests in `tests/test_api.py` for: the stage-all endpoint success and error paths, out-of-root/invalid session rejection, the rendered sidebar button presence, disabled state when no unstaged changes exist, and client wiring through `performExplorerGitAction`.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-035
+- Title: Valid UTF-8 files are rejected when preview sample splits a character
+- Priority: Medium
+- Status: Closed
+- Area: `web/explorer.py`, `web/api.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `flask`, `unicode`, `tests`
+- Reported: 2026-07-17
+- Closed: 2026-07-18
+
+Description:
+GridVibe Explorer could reject a valid UTF-8 text or Markdown file as binary when the fixed 4,096-byte binary-detection sample ended partway through a multibyte character. The file was then unavailable in both Source and Markdown Preview even though its complete contents decoded correctly as UTF-8. Whether a normal text file opened therefore depended on the byte alignment of Unicode characters near the sampling boundary.
+
+Resolution:
+Implemented exactly per the proposed solution: `_explorer_content_looks_binary()` in `web/explorer.py` now decodes the 4,096-byte sample through an incremental strict UTF-8 decoder with `final=False` only when `raw_content` holds bytes beyond the sample, so a trailing partial multibyte sequence caused purely by sampling is deferred while invalid bytes inside the sample, NUL bytes, excessive control bytes, and genuinely truncated short files are still rejected (shared local/SFTP path unchanged, NUL/control-byte heuristics intact). Closed with the follow-up Wave 2 regression tests in `tests/test_api.py`: `test_explorer_binary_detection_allows_multibyte_char_crossing_sample_boundary` (three-byte `─` crossing byte 4,096), `test_explorer_binary_detection_rejects_invalid_utf8_inside_oversized_sample` (invalid sequence inside the sample still rejected), `test_explorer_file_accepts_utf8_split_across_sample_boundary` and `test_explorer_file_accepts_utf8_split_across_sample_boundary_remote` (local/SFTP endpoint parity); the pre-existing `test_explorer_binary_detection_rejects_incomplete_utf8_at_content_end` covers the short-file case.
 
 ### Issue ID: ISSUE-2026-031
 - Title: App Settings action buttons overlap voice settings content

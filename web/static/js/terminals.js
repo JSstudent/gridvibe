@@ -7654,6 +7654,12 @@
         return new Date(timestamp * 1000).toLocaleString();
     }
 
+    /* OD-9: previews above ~2 MiB render as plain text (no syntax
+       highlighting) so large files stay responsive; the backend cap itself
+       is 10 MiB (EXPLORER_FILE_PREVIEW_MAX_BYTES). Compared against the
+       decoded character count, which is a close proxy for the byte size. */
+    const EXPLORER_PLAIN_PREVIEW_THRESHOLD = 2 * 1024 * 1024;
+
     const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({
         '.bash': 'shell',
         '.bat': 'batch',
@@ -7712,6 +7718,10 @@
         '.gitkeep': 'text',
         '.python-version': 'text',
         'dockerfile': 'dockerfile',
+        'go.mod': 'go',
+        'go.sum': 'text',
+        'go.work': 'go',
+        'go.work.sum': 'text',
         'makefile': 'makefile'
     });
 
@@ -10133,7 +10143,7 @@
             return;
         }
 
-        const language = pane._explorerFileLanguage || '';
+        const language = pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '');
         code.innerHTML = renderExplorerSourceLines(
             pane._explorerFileContent || '',
             language,
@@ -10173,7 +10183,9 @@
         const preview = document.getElementById(`explorer-preview-${index}`);
         if (pane && preview) {
             preview.innerHTML = pane._explorerPreviewHtml || '';
-            highlightExplorerPreviewCode(preview);
+            if (!pane._explorerFilePlain) {
+                highlightExplorerPreviewCode(preview);
+            }
         }
         return preview;
     }
@@ -11400,6 +11412,7 @@
         pane._explorerFileName = fileName;
         pane._explorerFileContent = data.content || '';
         pane._explorerFileLanguage = codeLanguage;
+        pane._explorerFilePlain = pane._explorerFileContent.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;
         pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
         pane._explorerGit = data.git || null;
         pane._explorerGitContext = data.git_context || null;
@@ -11475,7 +11488,9 @@
         const preview = document.getElementById(`explorer-preview-${index}`);
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
-            highlightExplorerPreviewCode(preview);
+            if (!pane._explorerFilePlain) {
+                highlightExplorerPreviewCode(preview);
+            }
             wireExplorerMarkdownLinks(index, preview);
             applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
         }
@@ -11549,6 +11564,7 @@
         searchState.matchCapped = false;
         pane._explorerFileContent = data.content || '';
         pane._explorerFileLanguage = codeLanguage;
+        pane._explorerFilePlain = pane._explorerFileContent.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;
         pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
         pane._explorerGit = data.git || null;
         pane._explorerGitContext = data.git_context || null;
@@ -11558,7 +11574,9 @@
         renderExplorerSource(index);
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
-            highlightExplorerPreviewCode(preview);
+            if (!pane._explorerFilePlain) {
+                highlightExplorerPreviewCode(preview);
+            }
             wireExplorerMarkdownLinks(index, preview);
             applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
         }

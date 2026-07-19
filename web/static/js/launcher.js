@@ -850,6 +850,15 @@
         return String(option?.auto_mode_flag || '').trim();
     }
 
+    function agentAutoModeDescription(agentValue) {
+        const normalized = String(agentValue || '').trim().toLowerCase();
+        if (!normalized || normalized === 'other') {
+            return '';
+        }
+        const option = AGENT_OPTIONS.find(item => item.value === normalized);
+        return String(option?.auto_mode_description || '').trim();
+    }
+
     function normalizeTerminalCommandUi(terminal) {
         const startupMode = String(terminal?.startup_mode || '').trim();
         const initialCommandMode = String(terminal?.initial_command_mode || '').trim();
@@ -1551,8 +1560,9 @@
         autoField.classList.toggle('hidden', !available);
         const help = autoField.querySelector('.t-agent-auto-help');
         if (help) {
+            const description = available ? agentAutoModeDescription(selectedAgent) : '';
             help.textContent = available
-                ? `Launches as "${selectedAgent} ${flag}".`
+                ? `Launches as "${selectedAgent} ${flag}".${description ? ` ${description}` : ''}`
                 : '';
         }
         if (!available) {
@@ -2636,6 +2646,8 @@
                     custom_agent: terminal.initial_command_mode === 'agent'
                         ? (terminal.custom_agent || '')
                         : '',
+                    agent_auto_mode: terminal.initial_command_mode === 'agent'
+                        && Boolean(terminal.agent_auto_mode),
                     explorer_tree_open: terminal.startup_mode === 'explorer'
                         ? Boolean(terminal.explorer_tree_open)
                         : false,

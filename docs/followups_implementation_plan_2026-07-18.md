@@ -450,6 +450,40 @@ confirmation — OD-12 alone is settled by tracing during 7.b, not by the user.
 (OD-2) · `4.a` preview cap → 10 MiB, plain above ~2 MiB (OD-9) · `7.a` add Kimi to
 registry (OD-11).
 
+> **Status: DONE (2026-07-18).** All four Wave 2 items are implemented, with
+> `python tests/run_tests.py` (563 tests) and `python -m ruff check .` passing.
+> - **2.c (ISSUE-2026-035):** the backend fix (incremental strict UTF-8 decoder
+>   in `_explorer_content_looks_binary()`, `web/explorer.py`, deferring a
+>   trailing partial sequence only when bytes exist beyond the 4 KiB sample) had
+>   already landed; this wave added the issue's regression tests —
+>   `test_explorer_binary_detection_allows_multibyte_char_crossing_sample_boundary`,
+>   `test_explorer_binary_detection_rejects_invalid_utf8_inside_oversized_sample`,
+>   and local + SFTP endpoint parity
+>   (`test_explorer_file_accepts_utf8_split_across_sample_boundary[_remote]`).
+> - **2.b (OD-2):** `go.mod`/`go.work` → `go`, `go.sum`/`go.work.sum` → `text`
+>   added to `CODE_PREVIEW_FILENAMES` (`web/explorer.py`) and mirrored in
+>   `EXPLORER_LANGUAGE_BY_FILENAME` (`terminals.js`). Tests:
+>   `test_explorer_go_workflow_files_are_editor_eligible`,
+>   `test_explorer_file_serves_go_mod` (no more 400), and
+>   `test_terminals_page_go_filenames_frontend_classifier`.
+> - **4.a (OD-9):** `EXPLORER_FILE_PREVIEW_MAX_BYTES` bumped to 10 MiB; the
+>   client renders previews above ~2 MiB as plain text via
+>   `EXPLORER_PLAIN_PREVIEW_THRESHOLD` + `pane._explorerFilePlain`, consulted by
+>   `renderExplorerSource()` and all three `highlightExplorerPreviewCode()`
+>   call sites (tail policy and "Showing the last/first N of M" messaging
+>   unchanged). Tests: `test_explorer_preview_cap_is_10_mib` (a ~1.7 MiB
+>   JSON-Lines file is served whole) and
+>   `test_terminals_page_plain_preview_threshold`.
+> - **7.a (OD-11):** `kimi` (Kimi Code CLI, binary `kimi`, auto-mode flag
+>   `--auto-approve`) added to `agent_registry.json` with the official install
+>   paths confirmed against the Kimi docs — install script
+>   (`code.kimi.com/install.ps1` / `install.sh`) plus `uv tool install
+>   --python 3.13 kimi-cli` fallback; SSH targets detect-only. No code change
+>   needed (`_agent_auto_mode_flag()` validates the flag shape). Tests:
+>   `test_agent_registry_includes_kimi_entry` and the extended
+>   `test_agent_options_expose_registry_auto_mode_flags`.
+> - CHANGELOG updated.
+
 **Wave 3 — Git sidebar cluster (one shared renderer + routes):**
 `1.d` is already done in Wave 1; do `1.b` Stage All (ISSUE-032) → `1.c` Discard
 All (OD-1: tracked worktree only, no `git clean`) → `1.a` shared post-action
@@ -459,6 +493,30 @@ tree/diff refresh (ISSUE-034) last so it covers all three action types at once.
 `6.a` broadcast highlight drop (OD-10) · `7.b` auto-mode wiring + descriptive text
 (OD-12 resolved by tracing) · `7.c` font/size presets + apply-to-all (OD-13/OD-14:
 per-session by default).
+
+> **Status: 7.b DONE (2026-07-18); 6.a and 7.c still open.** `python
+> tests/run_tests.py` (564 tests) and `python -m ruff check .` pass.
+> - **7.b trace finding (OD-12 → case a, never appended):** the direct-launch
+>   path dropped the toggle — `launchSessions()` in `web/static/js/launcher.js`
+>   rebuilt each session payload field-by-field without `agent_auto_mode`, so
+>   `TerminalSession.agent_auto_mode` was always `False` and
+>   `_compose_agent_startup_command()` returned the bare agent key. Fixed by
+>   carrying the toggle in the posted payload; the draft/saved-session/restore
+>   paths were already intact (`_SESSION_SNAPSHOT_FIELDS`,
+>   `_normalize_terminal_entries()`, `buildWorkspaceTerminalEntry()`).
+> - **Descriptive text for all flag agents:** `_agent_options()` now also
+>   exposes `auto_mode_description` from the registry, and
+>   `syncTerminalAgentAutoModeState()` renders `Launches as "<agent> <flag>".
+>   <description>` uniformly (claude, codex, copilot, kimi, kilo).
+> - **Flag re-verification (OD-12 trace):** kilo gained its entry (`--yolo`,
+>   auto-approves tool permissions). **opencode has no skip-permissions CLI
+>   flag upstream** (permissions are `opencode.json`-driven), so no Auto mode
+>   toggle is registered for it — recorded here as the docs/version note case.
+> - **Tests:** extended `test_launcher_wires_the_auto_mode_toggle`
+>   (`launchSessions()` payload slice + description wiring) and
+>   `test_agent_options_expose_registry_auto_mode_flags` (kilo), plus new
+>   `test_agent_options_expose_registry_auto_mode_descriptions`. CHANGELOG
+>   updated.
 
 **Wave 5 — Tabbed-viewer state model (the magnet — ordered, do last):**
 `2.e` per-tab mode + scroll (foundation; OD-4 fraction/clamp/skip) → then in
