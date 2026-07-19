@@ -8351,9 +8351,15 @@
     }
 
     function renderExplorerMessage(index, message) {
+        const pane = terminals[index];
         const list = document.getElementById(`explorer-list-${index}`);
         const viewer = explorerEnsureViewerShell(index);
         if (list && viewer) {
+            // The placeholder replaces the tab's content: the DOM no longer
+            // belongs to any tab, so view captures must skip until re-render.
+            if (pane) {
+                pane._explorerRenderedTabId = '';
+            }
             list.classList.remove('file-view');
             viewer.innerHTML = `<div class="explorer-message">${escHtml(message)}</div>`;
             renderExplorerTabStrip(index);
@@ -8367,6 +8373,7 @@
             renderExplorerMessage(index, message);
             return;
         }
+        pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;
         renderExplorerDirectorySearchControls(index);
         renderExplorerDirectoryRows(index);
         const notice = document.createElement('div');
@@ -9458,7 +9465,11 @@
         }
         pane._explorerDiffLoaded = false;
         pane._explorerDiffCacheKey = '';
-        await openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });
+        await openExplorerFile(index, pane._explorerFilePath, {
+            showLoading: false,
+            preserveScroll: true,
+            tab: pane._explorerActiveTabId
+        });
     }
 
     function explorerGitStageFile(index, path) {
@@ -9715,6 +9726,7 @@
         }
         if (pane._explorerDiffLoaded && pane._explorerDiffCacheKey === cacheKey) {
             renderExplorerDiff(index);
+            applyExplorerPendingDiffScroll(index);
             return;
         }
 
@@ -9738,6 +9750,7 @@
             pane._explorerDiffCacheKey = cacheKey;
             pane._explorerDiffContent = data.diff || '';
             renderExplorerDiff(index);
+            applyExplorerPendingDiffScroll(index);
             if (activeExplorerFileView(index) === 'diff') {
                 applyExplorerSearch(index);
             }
@@ -9766,6 +9779,10 @@
             pane._explorerDiffSplit = isDiffMode;
             if (selectedMode === 'source' || selectedMode === 'preview') {
                 pane._explorerLastFileView = selectedMode;
+                // Sticky per-tab source/preview preference: the Preview tab
+                // carries it across different files (2.e). Diff stays an
+                // explicit per-view action, mirroring _explorerLastFileView.
+                explorerActiveTab(pane).preferredMode = selectedMode;
             }
         }
         if (body) {
@@ -9818,14 +9835,18 @@
         );
     }
 
+    /* Editor zoom is per explorer tab (2.e): each tab record keeps its own
+       font size instead of sharing one pane-global value, so swapping tabs
+       restores the zoom each tab was left at. */
     function ensureExplorerEditorFontSize(pane) {
         if (!pane) {
             return EXPLORER_EDITOR_FONT_DEFAULT;
         }
-        pane._explorerEditorFontSize = clampExplorerEditorFontSize(
-            pane._explorerEditorFontSize || EXPLORER_EDITOR_FONT_DEFAULT
+        const tab = explorerActiveTab(pane);
+        tab.fontSize = clampExplorerEditorFontSize(
+            tab.fontSize || EXPLORER_EDITOR_FONT_DEFAULT
         );
-        return pane._explorerEditorFontSize;
+        return tab.fontSize;
     }
 
     function applyExplorerEditorFontSize(index) {
@@ -9857,8 +9878,9 @@
         if (!pane) {
             return;
         }
+        const tab = explorerActiveTab(pane);
         const current = ensureExplorerEditorFontSize(pane);
-        pane._explorerEditorFontSize = clampExplorerEditorFontSize(
+        tab.fontSize = clampExplorerEditorFontSize(
             current + (Number(delta) || 0)
         );
         applyExplorerEditorFontSize(index);
@@ -10888,7 +10910,12 @@
             return;
         }
 
-        setExplorerFileView(index, state.activeView || 'source');
+        /* Directory listings have no file-view panels; switching modes there
+           would clobber stale diff state for no visual effect. */
+        const listEl = document.getElementById(`explorer-list-${index}`);
+        if (listEl && listEl.querySelector('[data-explorer-file-panel]')) {
+            setExplorerFileView(index, state.activeView || 'source');
+        }
 
         const applyScroll = () => {
             const list = document.getElementById(`explorer-list-${index}`);
@@ -10929,6 +10956,106 @@
             requestAnimationFrame(applyScroll);
         });
         window.setTimeout(applyScroll, 80);
+    }
+
+    /* ── Per-tab view mode + scroll state (2.e) ──
+       Each tab record may carry a `view` snapshot: { mode, identity, scroll }.
+       The snapshot is captured when leaving a tab and restored when the tab is
+       shown again — but only while the content identity still matches (OD-4:
+       scroll is stored as fractions of scroll height, clamped on restore, and
+       skipped entirely once the content changed). */
+
+    /* Cheap stable string hash (djb2) for content-identity comparison. */
+    function explorerHashText(text) {
+        const value = String(text == null ? '' : text);
+        let hash = 5381;
+        for (let i = 0; i < value.length; i += 1) {
+            hash = ((hash << 5) + hash + value.charCodeAt(i)) | 0;
+        }
+        return (hash >>> 0).toString(36);
+    }
+
+    /* Identity of a rendered file view: same path, same content, same diff
+       target. Any change (tail-updated log, re-fetch with new bytes) produces
+       a different identity, which suppresses scroll restore. */
+    function explorerFileContentIdentity(path, content, diffCommit, diffMode) {
+        return explorerHashText(
+            [path || '', content || '', diffCommit || '', diffMode || ''].join('\u0000')
+        );
+    }
+
+    function explorerDirectoryContentIdentity(path, entries) {
+        return explorerHashText(
+            `${path || ''}\u0000${Array.isArray(entries) ? entries.length : 0}`
+        );
+    }
+
+    /* Snapshot the currently shown tab's view mode + scroll onto its tab
+       record. Must run while the tab's content is still in the DOM, i.e.
+       before the active tab id changes or a loading placeholder replaces the
+       viewer. The `_explorerRenderedTabId` guard records which tab the viewer
+       DOM actually belongs to — with Preview isolation two tabs can show the
+       same path, so a path match alone cannot prove the DOM is the active
+       tab's (it may be the Preview tab showing the same file in diff mode). */
+    function explorerCaptureActiveTabView(index) {
+        const pane = terminals[index];
+        if (!pane || (pane._explorerMode !== 'file' && pane._explorerMode !== 'directory')) {
+            return;
+        }
+        if (pane._explorerRenderedTabId !== pane._explorerActiveTabId) {
+            return;
+        }
+        const tab = explorerFindTab(pane, pane._explorerActiveTabId);
+        if (!tab) {
+            return;
+        }
+        const isFile = pane._explorerMode === 'file';
+        if (isFile) {
+            if (explorerNormalizeTabPath(tab.path) !== explorerNormalizeTabPath(pane._explorerFilePath)) {
+                return;
+            }
+        } else if (tab.path) {
+            return;
+        }
+        const scroll = captureExplorerFileScroll(index);
+        if (!scroll) {
+            return;
+        }
+        tab.view = {
+            mode: isFile ? (scroll.activeView || 'source') : '',
+            identity: isFile
+                ? explorerFileContentIdentity(
+                    pane._explorerFilePath,
+                    pane._explorerFileContent,
+                    pane._explorerDiffCommit,
+                    pane._explorerDiffMode
+                )
+                : explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries),
+            scroll
+        };
+    }
+
+    /* Return the tab's stored view snapshot when its content identity still
+       matches what is about to render, otherwise null (OD-4 skip rule). */
+    function explorerMatchingTabView(tab, identity) {
+        const view = tab && tab.view;
+        if (!view || !view.identity || !view.scroll || view.identity !== identity) {
+            return null;
+        }
+        return view;
+    }
+
+    /* Diff content loads asynchronously, after restoreExplorerFileScroll has
+       already run; re-apply a stashed diff-panel scroll once it arrives. */
+    function applyExplorerPendingDiffScroll(index) {
+        const pane = terminals[index];
+        const metrics = pane ? pane._explorerPendingDiffScroll : null;
+        if (!pane || !metrics) {
+            return;
+        }
+        pane._explorerPendingDiffScroll = null;
+        const panel = document.getElementById(`explorer-diff-panel-${index}`);
+        applyScrollMetrics(explorerPanelScrollTarget(panel), metrics);
     }
 
     const EXPLORER_FOLDER_ICON = `
@@ -11092,9 +11219,10 @@
     }
 
     /* Choose (and if needed create) the tab a file should load into. A `+`
-       action or Markdown link pins a deduplicated tab; a plain click reuses the
-       active pinned tab when it already shows that path, otherwise the permanent
-       Preview tab. */
+       action or Markdown link pins a deduplicated tab; an explicit `tab`
+       re-renders that tab; every other plain click (Files tree, Git sidebar)
+       loads into the permanent Preview tab — pinned tabs are never hijacked,
+       even when they already show the same path. */
     function explorerAssignOpenTab(pane, path, { pinned = false, tab = '' } = {}) {
         ensureExplorerTabState(pane);
         const key = explorerNormalizeTabPath(path);
@@ -11130,12 +11258,6 @@
             return pinnedTab;
         }
 
-        const active = explorerActiveTab(pane);
-        if (key && active && active.pinned && explorerNormalizeTabPath(active.path) === key) {
-            active.path = path;
-            active.name = name;
-            return active;
-        }
         const preview = explorerPreviewTab(pane);
         preview.path = path;
         preview.name = name;
@@ -11213,6 +11335,7 @@
         preview.path = '';
         preview.name = '';
         pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+        pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;
         pane._explorerMode = 'viewer';
         pane._explorerFilePath = '';
         viewer.innerHTML = '<div class="explorer-empty-viewer"><span>Select a file to view</span></div>';
@@ -11233,8 +11356,16 @@
         }
         if (pane._explorerMode === 'directory' && Array.isArray(pane._explorerEntries)) {
             pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+            pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;
             renderExplorerDirectorySearchControls(index);
             renderExplorerDirectoryRows(index);
+            const restoredView = explorerMatchingTabView(
+                tab,
+                explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries)
+            );
+            if (restoredView) {
+                restoreExplorerFileScroll(index, restoredView.scroll);
+            }
             renderExplorerTabStrip(index);
             return;
         }
@@ -11250,6 +11381,8 @@
         if (!tab) {
             return;
         }
+        // Capture the outgoing tab's mode + scroll while its DOM is intact.
+        explorerCaptureActiveTabView(index);
         pane._explorerActiveTabId = tab.id;
         renderExplorerActiveTab(index);
         renderExplorerTabStrip(index);
@@ -11514,7 +11647,8 @@
         if (!pane || !list || !viewer) {
             return false;
         }
-        explorerAssignOpenTab(pane, data.path || '', { pinned, tab });
+        const assignedTab = explorerAssignOpenTab(pane, data.path || '', { pinned, tab });
+        pane._explorerRenderedTabId = assignedTab.id;
 
         const path = data.path || '';
         const fileName = data.name || path || 'File';
@@ -11526,9 +11660,30 @@
         const hasGitDiff = explorerHasGitDiff(data.git) || Boolean(requestedDiffCommit);
         const metaParts = explorerFileMetaParts(data, fileType);
         const previousPath = pane._explorerFilePath || '';
+        /* 2.e: restore the tab's stored view mode + scroll when the content is
+           still what the snapshot was taken from (OD-4 identity check). */
+        const restoredTabView = scrollState
+            ? null
+            : explorerMatchingTabView(
+                assignedTab,
+                explorerFileContentIdentity(path, data.content, requestedDiffCommit, requestedDiffMode)
+            );
+        const restoredMode = restoredTabView ? restoredTabView.mode : '';
+        /* The Preview tab also keeps its sticky source/preview preference
+           across *different* files (explicit diff requests and an
+           identity-matched snapshot win); files without a Markdown preview
+           fall back to source. Scroll does not carry across files. */
+        const carriedMode = !restoredTabView
+            && assignedTab
+            && assignedTab.id === EXPLORER_PREVIEW_TAB_ID
+            && !openDiff && !requestedDiffCommit && !requestedDiffMode
+            ? assignedTab.preferredMode || ''
+            : '';
+        const preferredFileView = restoredMode || carriedMode;
         const keepDiffSplit = hasGitDiff && (
             Boolean(openDiff)
             || Boolean(requestedDiffCommit)
+            || restoredMode === 'diff'
             || (
                 previousPath === path
                 && pane._explorerDiffSplit
@@ -11536,7 +11691,9 @@
                 && (pane._explorerDiffMode || '') === requestedDiffMode
             )
         );
-        const initialFileView = keepDiffSplit ? 'diff' : 'source';
+        const initialFileView = keepDiffSplit
+            ? 'diff'
+            : (preferredFileView === 'preview' && hasPreview ? 'preview' : 'source');
         const searchState = ensureExplorerSearchState(pane, 'file');
         if (previousPath !== path) {
             pane._explorerMarkdownCollapsedLines = new Set();
@@ -11567,7 +11724,15 @@
         pane._explorerDiffSplit = keepDiffSplit;
         pane._explorerDiffCommit = requestedDiffCommit;
         pane._explorerDiffMode = requestedDiffMode;
-        pane._explorerLastFileView = pane._explorerLastFileView === 'preview' && hasPreview ? 'preview' : 'source';
+        pane._explorerLastFileView = initialFileView === 'preview'
+            ? 'preview'
+            : (pane._explorerLastFileView === 'preview' && hasPreview ? 'preview' : 'source');
+        // Diff content loads async; stash the restored diff scroll until then.
+        pane._explorerPendingDiffScroll = initialFileView === 'diff'
+            ? (restoredTabView && restoredTabView.scroll.panels
+                ? restoredTabView.scroll.panels.diff || null
+                : null)
+            : null;
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
         updateExplorerGitSummary(index, data.git_context || null);
@@ -11672,7 +11837,12 @@
         wireExplorerEditorZoomControls(index);
         wireExplorerSearchControls(index);
         applyExplorerSearch(index);
-        restoreExplorerFileScroll(index, scrollState);
+        // An explicit scrollState (in-place refresh) wins; otherwise fall back
+        // to the tab's stored snapshot, aligned with the restored view mode.
+        const effectiveScrollState = scrollState || (restoredTabView
+            ? { ...restoredTabView.scroll, activeView: initialFileView }
+            : null);
+        restoreExplorerFileScroll(index, effectiveScrollState);
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
         return true;
@@ -11768,7 +11938,8 @@
         const codeLanguage = explorerCodeLanguage(path);
         clearExplorerDirectorySearchControls(index);
         cancelExplorerSearch(index);
-        explorerAssignOpenTab(pane, path, {});
+        explorerCaptureActiveTabView(index);
+        pane._explorerRenderedTabId = explorerAssignOpenTab(pane, path, {}).id;
 
         pane._attached = true;
         pane._explorerMode = 'file';
@@ -11784,6 +11955,7 @@
         pane._explorerDiffCommit = commit;
         pane._explorerDiffMode = '';
         pane._explorerLastFileView = 'source';
+        pane._explorerPendingDiffScroll = null;
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
 
@@ -11836,6 +12008,7 @@
             });
         });
         wireExplorerSearchControls(index);
+        applyExplorerEditorFontSize(index);
         loadExplorerDiff(index);
         renderExplorerTabStrip(index);
         return true;
@@ -11851,6 +12024,9 @@
         const wasDirectoryOpen = pane._explorerMode === 'directory';
         const hasDiffTarget = Boolean(openDiff || diffCommit);
         const scrollState = preserveScroll && !hasDiffTarget ? captureExplorerFileScroll(index) : null;
+        // Opening another file swaps the shown tab implicitly; keep the
+        // outgoing tab's mode + scroll before the loading placeholder renders.
+        explorerCaptureActiveTabView(index);
         if (showLoading && !wasDirectoryOpen) {
             renderExplorerMessage(index, 'Opening file...');
         }
@@ -11890,7 +12066,11 @@
         }
         let refreshed = false;
         if (pane?._explorerMode === 'file' && pane._explorerFilePath) {
-            refreshed = await openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });
+            refreshed = await openExplorerFile(index, pane._explorerFilePath, {
+                showLoading: false,
+                preserveScroll: true,
+                tab: pane._explorerActiveTabId
+            });
         } else if (pane?._explorerMode === 'viewer') {
             /* Empty Preview tab: nothing to reload in the viewer body; the tree
                and Git sidebars refresh below. */
@@ -11968,6 +12148,7 @@
                tabs are untouched by navigation (ISSUE-2026-014). */
             ensureExplorerTabState(pane);
             pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+            pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;
             const previewTab = explorerPreviewTab(pane);
             previewTab.path = '';
             previewTab.name = '';

@@ -32,7 +32,7 @@ and its persistence).
 
 ## At a glance
 
-Done ✅ = implemented in Waves 1–4 (2026-07-18/19); Wave 5 items remain open.
+Done ✅ = implemented in Waves 1–4 (2026-07-18/19) plus 2.e (Wave 5 foundation, 2026-07-19); the remaining Wave 5 items stay open.
 
 | # | Stage | Item | Refs | Size | Done |
 | --- | --- | --- | --- | --- | --- |
@@ -44,7 +44,7 @@ Done ✅ = implemented in Waves 1–4 (2026-07-18/19); Wave 5 items remain open.
 | 2.b | 2 · Tabbed viewer | `go.mod` (and peers) not displayed | — | Small | ✅ |
 | 2.c | 2 · Tabbed viewer | Valid UTF-8 rejected when sample splits a character | ISSUE-2026-035 | Small | ✅ |
 | 2.d | 2 · Tabbed viewer | Clicking a tree directory opens it in Preview to browse | — | Medium | |
-| 2.e | 2 · Tabbed viewer | Preserve per-tab view mode + scroll across tab swaps | — | Large | |
+| 2.e | 2 · Tabbed viewer | Preserve per-tab view mode + scroll across tab swaps | — | Large | ✅ |
 | 2.f | 2 · Tabbed viewer | Persist tab modes / scroll / appearance / active tab in sessions | ISSUE-2026-033 | Large | |
 | 2.g | 2 · Tabbed viewer | Tab drag-reorder, middle-click close, double-click preview→pin | — | Medium | |
 | 3.a | 3 · Markdown | Add a VS Code-style "gray surface / white text" preset | — (extends 030) | Small | ✅ |
@@ -606,6 +606,84 @@ parallel `5.a` survive a close, `2.f` persist to sessions (incl. ISSUE-033;
 OD-5 field set), and `2.g` tab reorder/middle-click/double-click (OD-6: Preview
 fixed first) → `2.d` directory-in-Preview browsing with breadcrumb (OD-3, rides
 the same viewer, can slot in once 2.e lands).
+
+> **Status: 2.e DONE (2026-07-19); 5.a / 2.f / 2.g / 2.d remain open.** `python
+> tests/run_tests.py` (579 tests) and `python -m ruff check .` pass.
+> - **Tab records carry the snapshot:** each `pane._explorerTabs` entry can now
+>   hold a `view` object — `{ mode, identity, scroll }` — instead of mode and
+>   scroll living in pane-global fields that were re-derived on every activate.
+> - **Capture sites:** `explorerCaptureActiveTabView()` runs in
+>   `activateExplorerTab()` before the active id flips, at the top of
+>   `openExplorerFile()` (tree clicks / Markdown links swap the shown tab
+>   implicitly, and the loading placeholder would otherwise gut the DOM before
+>   the fetch returns), and in `renderExplorerCommitDiffFile()`. Path guards
+>   make the snapshot land only on the tab whose content is actually rendered,
+>   so closing a tab or activating a same-path tab never mis-stores state.
+> - **Restore sites:** `renderExplorerFile()` derives `initialFileView` from
+>   the stored mode (`preview` / `diff`, with graceful fallback to `source`
+>   when the file no longer offers that view) and passes the stored scroll —
+>   fractions of scroll height, clamped to live metrics — to
+>   `restoreExplorerFileScroll()`; an explicit in-place-refresh `scrollState`
+>   still wins. The diff panel loads asynchronously, so its scroll is stashed
+>   as `pane._explorerPendingDiffScroll` and re-applied by
+>   `applyExplorerPendingDiffScroll()` on both the cached and freshly-fetched
+>   diff paths. The Preview tab's directory listing gets the same
+>   capture/restore in `renderExplorerActiveTab()`, and
+>   `restoreExplorerFileScroll()` no longer calls `setExplorerFileView()` when
+>   the DOM has no file panels.
+> - **OD-4 identity check:** scroll/mode restore is skipped when the content
+>   identity no longer matches — `explorerFileContentIdentity()` (djb2 over
+>   path + content + diff commit/mode) and
+>   `explorerDirectoryContentIdentity()` (path + entry count) — so a
+>   tail-updated log or a re-fetch with new bytes opens at the default view
+>   rather than a stale offset. A commit-diff tab whose commit context cannot
+>   be re-fetched through the normal open path mismatches identity and falls
+>   back to defaults instead of restoring the wrong mode.
+> - **Tests:** `tests/test_api.py` —
+>   `test_terminals_page_explorer_tabs_preserve_view_mode_and_scroll` and
+>   `test_terminals_page_explorer_diff_scroll_restored_after_async_load`.
+>   CHANGELOG updated. `5.a` and `2.f` can now both read the same
+>   `tab.view = { mode, identity, scroll }` record instead of inventing their
+>   own state.
+> - **Manual-verify refinements (2026-07-19, second pass):**
+>   - **Preview tab isolation:** `explorerAssignOpenTab()` no longer reuses the
+>     active pinned tab for plain clicks — every Files-tree / Git-sidebar click
+>     loads into the permanent Preview tab, so a pinned tab is never hijacked
+>     (previously, clicking a pinned-open file under Changes/Staged Changes
+>     repurposed that tab into diff mode and clobbered its saved mode + scroll).
+>     The same file may now legitimately be open in the Preview tab and a
+>     pinned tab at once. Same-tab re-renders (git-action refresh,
+>     `refreshExplorerPane()`) pass `tab: pane._explorerActiveTabId` explicitly
+>     so they are not rerouted into the Preview tab.
+>   - **Per-tab editor zoom:** the font size moved from pane-global
+>     `pane._explorerEditorFontSize` to `tab.fontSize` (zoom controls update
+>     the active tab; every render applies the shown tab's size, including the
+>     commit-diff path).
+>   - **Preview-tab mode preference across files:** explicit Source/Preview
+>     switches record a sticky `tab.preferredMode`; the Preview tab carries it
+>     across *different* files (files without a Markdown preview fall back to
+>     source; scroll still resets on a new file; diff stays an explicit
+>     per-view action). The Markdown appearance (preset + font) was already
+>     global via localStorage and applies on every render.
+>   - **Tests:** added
+>     `test_terminals_page_explorer_preview_tab_isolated_from_pinned_tabs` and
+>     `test_terminals_page_explorer_zoom_and_mode_are_per_tab`; updated
+>     `test_terminals_page_manual_refresh_keeps_open_explorer_file` for the
+>     explicit-tab refresh call (581 tests pass).
+> - **Rendered-tab guard (2026-07-19, third pass):** Preview isolation made
+>   the capture's path-match guard ambiguous — with the same file open in the
+>   Preview tab *and* a pinned tab, activating the pinned tab re-captured the
+>   Preview tab's DOM state (diff mode, wrong scroll) onto the pinned tab
+>   because the paths matched. `pane._explorerRenderedTabId` now records which
+>   tab the viewer DOM actually belongs to: it is stamped by every render
+>   entry point (`renderExplorerFile()`, `renderExplorerCommitDiffFile()`,
+>   directory/empty/error renders) and cleared by the loading placeholder, and
+>   `explorerCaptureActiveTabView()` stores a snapshot only when
+>   `_explorerRenderedTabId === _explorerActiveTabId`. Clicking a pinned-open
+>   file under Changes now opens the diff in the Preview tab while the pinned
+>   tab's mode + scroll survive the round trip. Test:
+>   `test_terminals_page_explorer_capture_tracks_rendered_tab` (582 tests
+>   pass).
 
 Rationale: `2.e` is this plan's magnet exactly the way ISSUE-2026-014 was for the
 original plan — `5.a` (Stage 5) and `2.f` (Stage 2 / ISSUE-033) both need the

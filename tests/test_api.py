@@ -830,7 +830,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         refresh_html = html[refresh_start:refresh_end]
 
         self.assertIn(
-            "refreshed = await openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });",
+            "refreshed = await openExplorerFile(index, pane._explorerFilePath, {\n"
+            "                showLoading: false,\n"
+            "                preserveScroll: true,\n"
+            "                tab: pane._explorerActiveTabId\n"
+            "            });",
             explorer_refresh_html,
         )
         self.assertIn("refreshed = await loadExplorerPane(index, null, { force: true });", explorer_refresh_html)
@@ -1189,6 +1193,115 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("restoreExplorerPersistedTabs(index);", html)
         # Bounded pinned-tab count shared with the backend cap.
         self.assertIn("const EXPLORER_MAX_PINNED_TABS = 12;", html)
+
+    def test_terminals_page_explorer_tabs_preserve_view_mode_and_scroll(self):
+        """2.e: each explorer tab keeps its own view mode + scroll across swaps."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Per-tab snapshot helpers (mode + fraction-based scroll + identity).
+        self.assertIn("function explorerCaptureActiveTabView(index)", html)
+        self.assertIn("function explorerMatchingTabView(tab, identity)", html)
+        self.assertIn(
+            "function explorerFileContentIdentity(path, content, diffCommit, diffMode)",
+            html,
+        )
+        self.assertIn("function explorerDirectoryContentIdentity(path, entries)", html)
+        # The snapshot lives on the tab record, not in pane-global state.
+        self.assertIn("tab.view = {", html)
+        # OD-4 skip rule: a stale snapshot (content changed) is never restored.
+        self.assertIn("view.identity !== identity", html)
+        # Capture runs before the active tab id flips, while the DOM is intact.
+        activate = html[html.index("function activateExplorerTab(index, id)"):]
+        self.assertLess(
+            activate.index("explorerCaptureActiveTabView(index);"),
+            activate.index("pane._explorerActiveTabId = tab.id;"),
+        )
+        # Opening another file (tree click / markdown link) also captures the
+        # outgoing tab before the loading placeholder replaces the viewer.
+        open_file = html[html.index("async function openExplorerFile(index, path"):]
+        self.assertLess(
+            open_file.index("explorerCaptureActiveTabView(index);"),
+            open_file.index("renderExplorerMessage(index, 'Opening file...');"),
+        )
+        # Restore drives the initial view mode per tab (source/preview/diff).
+        self.assertIn("const restoredMode = restoredTabView ? restoredTabView.mode : '';", html)
+        self.assertIn("restoredMode === 'diff'", html)
+        self.assertIn("preferredFileView === 'preview' && hasPreview ? 'preview' : 'source'", html)
+        # Scroll restore falls back to the tab snapshot and stays aligned with
+        # the restored mode; fractions + clamping live in restoreExplorerFileScroll.
+        self.assertIn("const effectiveScrollState = scrollState || (restoredTabView", html)
+        self.assertIn("{ ...restoredTabView.scroll, activeView: initialFileView }", html)
+        # Directory browsing on the Preview tab gets the same treatment.
+        self.assertEqual(
+            html.count("explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries)"),
+            2,
+        )
+        # Mode switching is skipped when there are no file panels (directory).
+        self.assertIn("listEl.querySelector('[data-explorer-file-panel]')", html)
+
+    def test_terminals_page_explorer_diff_scroll_restored_after_async_load(self):
+        """2.e: a diff tab's scroll survives the async diff fetch on restore."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function applyExplorerPendingDiffScroll(index)", html)
+        self.assertIn("pane._explorerPendingDiffScroll = initialFileView === 'diff'", html)
+        # Applied on both the cached and the freshly-fetched diff paths.
+        self.assertEqual(html.count("applyExplorerPendingDiffScroll(index);"), 2)
+
+    def test_terminals_page_explorer_preview_tab_isolated_from_pinned_tabs(self):
+        """2.e: plain clicks always load the Preview tab, never hijack pinned tabs."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        assign = html[
+            html.index("function explorerAssignOpenTab(pane, path"):
+            html.index("function explorerEnsureViewerShell(index)")
+        ]
+        # The active-pinned-tab reuse branch is gone: a plain click can no
+        # longer repurpose a pinned tab that happens to show the same path.
+        self.assertNotIn("active.pinned", assign)
+        self.assertIn("const preview = explorerPreviewTab(pane);", assign)
+        self.assertIn("pinned tabs are never hijacked", html)
+        # Same-tab refreshes (git actions, pane refresh) pass the active tab
+        # explicitly so they are not rerouted into the Preview tab.
+        self.assertEqual(html.count("tab: pane._explorerActiveTabId"), 2)
+
+    def test_terminals_page_explorer_capture_tracks_rendered_tab(self):
+        """2.e: a same-path Preview render never overwrites a pinned tab's snapshot."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # The capture only stores when the viewer DOM provably belongs to the
+        # active tab — with Preview isolation, two tabs may show the same path.
+        self.assertIn("pane._explorerRenderedTabId !== pane._explorerActiveTabId", html)
+        # Every render entry point stamps the tab it rendered for.
+        self.assertIn("pane._explorerRenderedTabId = assignedTab.id;", html)
+        self.assertIn("pane._explorerRenderedTabId = explorerAssignOpenTab(pane, path, {}).id;", html)
+        self.assertEqual(html.count("pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;"), 4)
+        # The loading placeholder disowns the DOM until the next render.
+        self.assertIn("pane._explorerRenderedTabId = '';", html)
+
+    def test_terminals_page_explorer_zoom_and_mode_are_per_tab(self):
+        """2.e: editor font size lives on the tab; Preview keeps its mode preference."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Font size is stored on the tab record, not pane-global.
+        self.assertNotIn("_explorerEditorFontSize", html)
+        self.assertIn("tab.fontSize = clampExplorerEditorFontSize(", html)
+        # The sticky source/preview preference is recorded on explicit mode
+        # switches and carried by the Preview tab across different files.
+        self.assertIn("explorerActiveTab(pane).preferredMode = selectedMode;", html)
+        self.assertIn("assignedTab.id === EXPLORER_PREVIEW_TAB_ID", html)
+        self.assertIn("assignedTab.preferredMode || ''", html)
+        self.assertIn("const preferredFileView = restoredMode || carriedMode;", html)
 
     def test_launcher_round_trips_explorer_open_tabs(self):
         """ISSUE-2026-015: launcher carries open tabs through without editing them."""
