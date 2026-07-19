@@ -87,11 +87,11 @@ Explorer panes support:
 - Local Repo explorers add read-only Git awareness when `git` is available. SSH explorers use the remote host's `git` command when available. Both support branch/dirty summary, per-entry status badges, directory dirty markers, and a bounded internal old/new Diff panel with added and removed line highlighting for changed tracked files.
 - The explorer tree and Git sidebar toggles sit at the left of the explorer bar, next to the Git branch summary, and are labelled with a file-hierarchy icon and a Git-branch icon.
 - The Git toggle opens a resizable repository sidebar with a `Staged Changes` section above the working `Changes` list and a collapsible commit graph whose branch lanes are colour-coded. Uncommitted file rows open the current file, commit file rows open that historical read-only diff, folder buttons jump to containing folders, and the file Diff tab preserves whitespace and syntax coloring.
-- The Git sidebar supports basic staging: working change rows have a `+` button to stage them, staged rows have a `-` button to unstage, a commit message box with a `Commit` button commits the staged changes, and a `Publish branch` button pushes the current branch (setting the `origin` upstream when none exists). These mutating actions never prompt for credentials, so publishing fails fast instead of hanging when authentication is required.
+- The Git sidebar supports basic staging: working change rows have a `+` button to stage them, staged rows have a `-` button to unstage, a commit message box with a `Commit` button commits the staged changes, and a `Publish branch` button pushes the current branch (setting the `origin` upstream when none exists). The `Changes` header also carries bulk controls: `Stage All` stages every working-tree change at once, and `Discard All` (after an in-page confirmation) restores the unstaged changes of tracked, non-conflicted files only — staged versions and untracked files are always kept. Mutating actions never prompt for credentials, so publishing fails fast instead of hanging when authentication is required. After any staging, commit, or discard action the Files tree and the open file/diff refresh automatically.
 - The tree toggle opens a lazily loaded file tree sidebar for faster navigation. Folder rows expand and collapse in place, folder buttons jump the explorer list to that folder, file rows open the read-only preview, and rows carry the same Git status badges. The tree follows the pane, expanding the ancestors of the current directory or open file.
 - The tree and Git sidebars are independent. Opening both stacks the file tree above the Git sidebar in one shared sidebar, split evenly by a draggable horizontal divider.
 
-File moving, editing, deleting, and upload, along with Git restore, checkout, pull, and merge actions, are not part of the current file explorer implementation. Git staging, unstaging, commit, and branch publishing (push) are the only supported mutating actions.
+File moving, editing, deleting, and upload, along with Git checkout, pull, and merge actions, are not part of the current file explorer implementation. Git staging (per file or all), unstaging, commit, branch publishing (push), and discarding tracked files' unstaged worktree changes (per file or all, never `git clean`) are the only supported mutating actions.
 
 ### Browser Panes
 
@@ -124,6 +124,7 @@ Use the gear button on the launcher page to open `App Settings`. These settings 
 - `Enable voice input` shows or hides voice controls and enables the speech-to-text path.
 - `Theme` sets system, light, or dark mode.
 - `Session Window` sets whether newly opened session windows start in normal or max surface mode.
+- `Terminal` sets the terminal `Font` (a dropdown of monospace presets, each previewed in its own typeface, plus a `Custom…` free-text option), `Font Size` (6-48), and `Max Sessions` (1-16). Saved font and size apply to every terminal in the currently active session and to new sessions; ticking `Apply to all active sessions` pushes them to every open session instead.
 - `Voice Backend` selects `Vosk` or `faster-whisper`.
 - `Language` sets the voice recognition language, such as `en-US`.
 - `Vosk Model` sets the local Vosk model folder/name.

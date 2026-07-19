@@ -142,39 +142,100 @@
         applyAppConfigTerminalFont(message);
     }
 
-    /* Apply a launcher-side terminal font change (ISSUE-2026-029) to every
-       attached xterm without a reload. Sizes outside the server's accepted
-       range are ignored so a malformed broadcast can't break rendering. */
+    /* Per-session font overrides (OD-14): keyed by session-group id — the
+       "session" the user launches and switches between as one tab — so the
+       active workspace keeps its own font/size across tab switches and pane
+       rebuilds. In-memory only — like live sessions themselves, overrides end
+       with the process. The single-workspace page uses the '' group key. */
+    const groupFontOverrides = new Map();
+
+    function activeFontOverrideGroupKey() {
+        return activeGroupId || visibleGroupId || '';
+    }
+
+    function applyGroupFontOverride(index) {
+        const term = terminals[index]?.term;
+        const override = groupFontOverrides.get(activeFontOverrideGroupKey());
+        if (!term || !override) {
+            return;
+        }
+        if (override.fontSize) {
+            term.options.fontSize = override.fontSize;
+        }
+        if (override.fontFamily) {
+            term.options.fontFamily = override.fontFamily;
+        }
+    }
+
+    function styleTerminalFont(terminal, fontSize, fontFamily) {
+        const term = terminal?.term;
+        if (!term) {
+            return;
+        }
+        if (fontSize) {
+            term.options.fontSize = fontSize;
+        }
+        if (fontFamily) {
+            term.options.fontFamily = fontFamily;
+        }
+    }
+
+    /* Apply a launcher-side terminal font change (ISSUE-2026-029) without a
+       reload. Sizes outside the server's accepted range are ignored so a
+       malformed broadcast can't break rendering. Scope (OD-14): by default
+       every terminal pane of the ACTIVE session (group) restyles and the
+       change is recorded as that session's override; `apply_scope: 'all'`
+       ("Apply to all active sessions") pushes font + size to every session —
+       including the cached, currently hidden groups — and drops the
+       overrides so all sessions follow the saved global value again. */
     function applyAppConfigTerminalFont(message) {
         const terminalConfig = message?.terminal;
         if (!terminalConfig || typeof terminalConfig !== 'object') {
             return;
         }
-        const fontSize = Number(terminalConfig.font_size);
-        const hasFontSize = Number.isFinite(fontSize) && fontSize >= 6 && fontSize <= 48;
+        const rawFontSize = Number(terminalConfig.font_size);
+        const fontSize = Number.isFinite(rawFontSize) && rawFontSize >= 6 && rawFontSize <= 48
+            ? Math.round(rawFontSize)
+            : 0;
         const fontFamily = typeof terminalConfig.font_family === 'string'
             ? terminalConfig.font_family.trim()
             : '';
-        if (!hasFontSize && !fontFamily) {
+        if (!fontSize && !fontFamily) {
             return;
         }
-        if (hasFontSize) {
-            document.body.dataset.terminalFontSize = String(Math.round(fontSize));
-        }
-        if (fontFamily) {
-            document.body.dataset.terminalFontFamily = fontFamily;
-        }
-        terminals.forEach((terminal, index) => {
-            const term = terminal?.term;
-            if (!term) {
-                return;
-            }
-            if (hasFontSize) {
-                term.options.fontSize = Math.round(fontSize);
+        const applyToAll = terminalConfig.apply_scope === 'all';
+        if (applyToAll) {
+            /* The dataset is what future panes read at creation, so the global
+               default only advances on the all-sessions path — a session-scoped
+               change must not leak into other groups via a later rebuild. */
+            if (fontSize) {
+                document.body.dataset.terminalFontSize = String(fontSize);
             }
             if (fontFamily) {
-                term.options.fontFamily = fontFamily;
+                document.body.dataset.terminalFontFamily = fontFamily;
             }
+            groupFontOverrides.clear();
+            /* Hidden sessions keep live xterm instances in the group cache;
+               restyle them too so switching tabs shows the new font. They
+               refit on restore (the switch path resets _fitReady). */
+            cachedGroupViews.forEach(cached => {
+                (cached.terminals || []).forEach(terminal => styleTerminalFont(terminal, fontSize, fontFamily));
+            });
+        } else {
+            const override = groupFontOverrides.get(activeFontOverrideGroupKey()) || {};
+            if (fontSize) {
+                override.fontSize = fontSize;
+            }
+            if (fontFamily) {
+                override.fontFamily = fontFamily;
+            }
+            groupFontOverrides.set(activeFontOverrideGroupKey(), override);
+        }
+        terminals.forEach((terminal, index) => {
+            if (!terminal?.term) {
+                return;
+            }
+            styleTerminalFont(terminal, fontSize, fontFamily);
             scheduleFit(index);
         });
     }
@@ -4332,14 +4393,21 @@
         }
         _focusedTerminalIndex = index;
         paintActiveTerminalCard(index);
+        /* Re-light the broadcast ring across panes: the CSS rule also requires
+           `broadcast-input`, so if broadcast was turned off while focus sat in
+           dead space only this single pane lights up (OD-10). */
+        document.getElementById('terminalsGrid')?.classList.add('terminal-focus');
     }
 
     /* Focus left every terminal (top bar / dead space / explorer / browser):
        nothing is selected, so drop the highlight AND the input target — voice
-       and typing both go nowhere until a terminal is focused again. */
+       and typing both go nowhere until a terminal is focused again. While
+       broadcast is on this also drops the all-panes ring until the next
+       focusin into a terminal. */
     function clearActiveTerminalHighlight() {
         _focusedTerminalIndex = -1;
         paintActiveTerminalCard(-1);
+        document.getElementById('terminalsGrid')?.classList.remove('terminal-focus');
     }
 
     /* Full reset on teardown. */
@@ -6959,6 +7027,9 @@
         if (ph) ph.remove();
 
         terminals[index].term.open(canvas);
+        /* A session (group) with its own font/size (OD-14) keeps it across
+           pane rebuilds and splits — new panes join their session's font. */
+        applyGroupFontOverride(index);
 
         _wireClipboard(index);
 
@@ -8685,6 +8756,9 @@
             : '';
         const changes = Array.isArray(repo.changes) ? repo.changes : [];
         const { staged, unstaged } = splitExplorerGitChanges(changes);
+        /* Discard All mirrors the per-row Revert guard: only tracked worktree
+           changes count, so an all-untracked list keeps the button disabled. */
+        const discardable = unstaged.filter(file => explorerGitCanRevert(file.git && file.git.status));
         const commits = Array.isArray(repo.commits) ? repo.commits : [];
         const expandedCommits = ensureExplorerDiffExpandedCommits(pane);
         const busy = Boolean(pane._explorerGitActionBusy);
@@ -8724,7 +8798,13 @@
                 </div>
             </div>
             <div class="explorer-diff-sidebar-section">
-                <div class="explorer-diff-sidebar-title">Changes</div>
+                <div class="explorer-diff-sidebar-title explorer-git-section-title">
+                    <span>Changes</span>
+                    <span class="explorer-git-section-actions">
+                        <button type="button" class="explorer-search-btn explorer-git-revert-btn explorer-git-discard-all-btn" data-explorer-git-discard-all ${(busy || !discardable.length) ? 'disabled' : ''} title="Discard all changes" aria-label="Discard all changes">${EXPLORER_GIT_REVERT_ICON}</button>
+                        <button type="button" class="explorer-search-btn explorer-git-stage-btn explorer-git-stage-all-btn" data-explorer-git-stage-all ${(busy || !unstaged.length) ? 'disabled' : ''} title="Stage all changes" aria-label="Stage all changes">+</button>
+                    </span>
+                </div>
                 <div class="explorer-diff-commit-files">
                     ${renderExplorerGitFileRows(index, unstaged, { emptyText: 'No unstaged changes.', action: 'stage' })}
                 </div>
@@ -8758,6 +8838,14 @@
                 explorerGitRevertFile(index, button.dataset.explorerGitRevert || '');
             });
         });
+        const stageAllButton = panel.querySelector('[data-explorer-git-stage-all]');
+        if (stageAllButton) {
+            stageAllButton.addEventListener('click', () => explorerGitStageAll(index));
+        }
+        const discardAllButton = panel.querySelector('[data-explorer-git-discard-all]');
+        if (discardAllButton) {
+            discardAllButton.addEventListener('click', () => explorerGitDiscardAll(index));
+        }
         const publishButton = panel.querySelector('[data-explorer-git-publish]');
         if (publishButton) {
             publishButton.addEventListener('click', () => explorerGitPublish(index));
@@ -9338,7 +9426,39 @@
         if (succeeded && pane._explorerMode === 'directory') {
             loadExplorerPane(index, null, { force: true, showLoading: false });
         }
+        if (succeeded && EXPLORER_GIT_WORKTREE_ENDPOINTS.has(endpoint)) {
+            await refreshExplorerAfterGitAction(index, body && body.path ? String(body.path) : '');
+        }
         return succeeded;
+    }
+
+    /* Git actions that change working-tree or index state — publish only talks
+       to the remote, so it never needs the ISSUE-2026-034 refresh below. */
+    const EXPLORER_GIT_WORKTREE_ENDPOINTS = new Set([
+        'stage', 'unstage', 'revert', 'commit', 'stage-all', 'discard-all',
+    ]);
+
+    /* ISSUE-2026-034: after a mutating Git action the Files tree and the open
+       file/diff must not go stale. The tree reload guards internally on
+       pane._explorerTreeSidebarOpen; the open file re-fetches in place (which
+       drops the cached diff and re-pulls it when a diff view is showing).
+       Single-path actions only refresh the file they touched — bulk actions
+       (commit / stage-all / discard-all) can affect any open path. */
+    async function refreshExplorerAfterGitAction(index, actionPath) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        reloadExplorerTree(index);
+        if (pane._explorerMode !== 'file' || !pane._explorerFilePath) {
+            return;
+        }
+        if (actionPath && actionPath !== pane._explorerFilePath) {
+            return;
+        }
+        pane._explorerDiffLoaded = false;
+        pane._explorerDiffCacheKey = '';
+        await openExplorerFile(index, pane._explorerFilePath, { showLoading: false, preserveScroll: true });
     }
 
     function explorerGitStageFile(index, path) {
@@ -9346,6 +9466,28 @@
             return;
         }
         performExplorerGitAction(index, 'stage', { path });
+    }
+
+    function explorerGitStageAll(index) {
+        performExplorerGitAction(index, 'stage-all', {});
+    }
+
+    /* Bulk form of the per-row Revert (OD-1): worktree restore of tracked
+       files only — staged content is preserved and untracked files are never
+       deleted (no git clean). Irreversible, so it goes through the in-page
+       confirm shell. */
+    async function explorerGitDiscardAll(index) {
+        const confirmed = await openGenericConfirmModal({
+            title: 'Discard all changes?',
+            copy: 'Discard the unstaged changes in every tracked file?',
+            note: 'Unstaged edits will be lost. Staged versions and untracked files are kept.',
+            confirmLabel: 'Discard all',
+            danger: true,
+        });
+        if (!confirmed) {
+            return;
+        }
+        performExplorerGitAction(index, 'discard-all', {});
     }
 
     function explorerGitUnstageFile(index, path) {
@@ -9372,13 +9514,9 @@
         if (!confirmed) {
             return;
         }
-        const reverted = await performExplorerGitAction(index, 'revert', { path });
-        if (reverted) {
-            const pane = terminals[index];
-            if (pane && pane._explorerMode === 'file' && pane._explorerFilePath === path) {
-                await openExplorerFile(index, path, { showLoading: false, preserveScroll: true });
-            }
-        }
+        /* A reverted open file reloads in place via the shared post-action
+           refresh (ISSUE-2026-034). */
+        performExplorerGitAction(index, 'revert', { path });
     }
 
     async function explorerGitCommit(index) {
@@ -9403,14 +9541,21 @@
         }
     }
 
-    function explorerGitPublish(index) {
+    /* Publishing is outward-facing, so it confirms through the in-page shell
+       (WebView2 blocks window.confirm — Regression Guardrail 4). */
+    async function explorerGitPublish(index) {
         const pane = terminals[index];
         if (!pane) {
             return;
         }
         const git = (pane._explorerGitRepo && pane._explorerGitRepo.git) || {};
         const branch = git.branch || 'this branch';
-        if (!window.confirm(`Publish ${branch} to its remote?`)) {
+        const confirmed = await openGenericConfirmModal({
+            title: 'Publish branch?',
+            copy: `Publish ${branch} to its remote?`,
+            confirmLabel: 'Publish',
+        });
+        if (!confirmed) {
             return;
         }
         performExplorerGitAction(index, 'publish', {});

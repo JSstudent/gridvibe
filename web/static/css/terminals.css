@@ -1319,7 +1319,12 @@
             box-shadow: 0 0 0 1px var(--t-accent) inset;
         }
 
-        #terminalsGrid.broadcast-input .terminal-container:not(.explorer-pane):not(.browser-pane) {
+        /* The broadcast ring only shows while a terminal actually holds focus
+           (`terminal-focus` tracks the delegated focusin/focusout pair): when
+           focus leaves to dead space or an explorer/browser pane, every
+           highlight drops, and the next focusin re-lights all participating
+           panes if broadcast is still on (OD-10). */
+        #terminalsGrid.broadcast-input.terminal-focus .terminal-container:not(.explorer-pane):not(.browser-pane) {
             border-color: var(--t-accent);
             box-shadow: inset 0 0 0 1px var(--t-accent);
         }
@@ -2604,6 +2609,21 @@
             font-weight: 800;
             letter-spacing: 0;
             text-transform: uppercase;
+        }
+
+        /* Section headers that carry bulk actions (Stage All / Discard All)
+           keep the title text left and the compact buttons right. */
+        .explorer-git-section-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 6px;
+        }
+
+        .explorer-git-section-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
         }
 
         .explorer-diff-sidebar-empty,

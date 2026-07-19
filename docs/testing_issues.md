@@ -1,5 +1,5 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-18
+Last updated: 2026-07-19
 
 ## Open Issues
 
@@ -30,32 +30,6 @@ The captured restore requests contain a valid `saved_session_id`, SSH host, user
 ### Proposed solution:
 Keep passwords out of `runtime_state.json` and add a server-side restore preparation path that resolves each SSH group's normalized `saved_session_id` through `load_saved_sessions()` / `_find_saved_session_entry()`, decrypts the preset password using the existing `web/secrets.py` flow, and applies it only to the in-memory launch configuration after validating that the preset is still an SSH preset for the same host, username, and port. Do not return the rehydrated password from `/api/runtime-state`, send it back through the browser, or include it in request/session logs. When the saved preset is missing, changed, lacks a password, or does not match the snapshot target, preserve key/agent authentication attempts but expose an in-page credential/retry path rather than silently counting session creation as restore success. Update the launcher/API restore contract so connection failures remain visible and a `201` record-creation response is not presented as proof that remote panes connected. Add focused tests in `tests/test_api.py` for password-free snapshot persistence, successful saved-password rehydration without secret disclosure, key-auth restore, missing/mismatched/decryption-failed credentials, remote Explorer and agent panes, multiple restored groups, and prevention of the current false-success message when SSH authentication fails.
 
-### Issue ID: ISSUE-2026-034
-- Title: Committing via Git sidebar does not reload the Files tree
-- Priority: Low
-- Status: Open
-- Area: `web/static/js/terminals.js`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `git`, `ui`, `tests`
-- Reported: 2026-07-16
-
-Description:
-After a successful commit through the Explorer Git sidebar, the Files tree sidebar is not reloaded and the main pane is not refreshed in tabbed viewer mode. The user must manually trigger a refresh to see the updated working-tree state in the Files tree. The Git status panel itself does update correctly — `performExplorerGitAction` sets `pane._explorerGitRepo` from the backend response and immediately calls `renderExplorerGitPanels` — but `reloadExplorerTree` is never called from that path, leaving the Files tree stale after the commit.
-
-Steps to reproduce:
-1. Open a GridVibe Explorer pane on a Git repository, expand the Files tree, and open the Git sidebar.
-2. Stage one or more changes and commit them via the Commit button in the Git sidebar.
-3. Observe that the Git sidebar updates (staged changes become empty) but the Files tree is not reloaded; any file or directory changes introduced by the commit are not reflected until the user manually refreshes the Explorer pane.
-
-Expected behavior:
-A successful commit should trigger a reload of the Files tree (via `reloadExplorerTree`) so the tree reflects the post-commit working-tree state without requiring manual intervention. In tabbed file viewer mode (the default since ISSUE-2026-014), the currently open file or diff view should also be refreshed to avoid showing stale staged-change hunks for the just-committed files.
-
-Actual behavior / logs:
-Code inspection confirms `performExplorerGitAction` in `web/static/js/terminals.js` (line 8993) sets `pane._explorerGitRepo = data` and calls `renderExplorerGitPanels(index)` on success, which correctly re-renders the Git sidebar. However, `reloadExplorerTree(index)` (line 8938) — which drops cached children and refetches visible tree nodes — is never called. Additionally, `loadExplorerPane` is only called when `pane._explorerMode === 'directory'` (line 9023–9025); since ISSUE-2026-014 made the tabbed file viewer the default mode, this condition is rarely true, so the main pane is also not refreshed. The backend `commit_explorer_git` (web/api.py:847) already returns an updated `_get_git_repo_summary` payload, so no new backend work is needed.
-
-### Proposed solution:
-In `performExplorerGitAction` in `web/static/js/terminals.js`, after a successful commit (i.e., when `succeeded` is true and `endpoint === 'commit'`), call `reloadExplorerTree(index)` to reload the Files tree. `reloadExplorerTree` already guards on `pane._explorerTreeSidebarOpen` internally, so calling it unconditionally is safe. Additionally, consider refreshing any open file or diff view for the committed paths in the tabbed viewer by calling `updateExplorerFileInPlace` or equivalent; at minimum, clear `_explorerDiffContent` so a stale staged diff is not shown after the commit clears the staging area. Add focused tests in `tests/test_api.py` for: post-commit tree reload wiring, reload skipped when tree sidebar is closed, and Git sidebar state reset after commit.
-
 ### Issue ID: ISSUE-2026-033
 - Title: Markdown preview appearance not saved with session presets or restore snapshot
 - Priority: Low
@@ -83,33 +57,39 @@ Code inspection confirms `buildWorkspaceTerminalEntry()` in `web/static/js/termi
 ### Proposed solution:
 Add two fields — e.g. `explorer_md_preset` and `explorer_md_font` — to the saved-session terminal entry schema. In `buildWorkspaceTerminalEntry()` in `web/static/js/terminals.js`, read the current `localStorage` appearance (via the existing `explorerMarkdownAppearance()`) for explorer panes and include it in the serialized entry. In `web/saved_sessions.py`, normalize and allowlist-validate both fields (same safe-default logic as `explorerMarkdownAppearance()`: preset ∈ `{default, paper, high-contrast}`, font ∈ `{system, serif, mono}`) in `_normalize_terminal_entries()` and gate them to explorer panes in `_merge_workspace_session_config`. Add both fields to `_SESSION_SNAPSHOT_FIELDS` in `web/runtime_state.py`. On session restore in `web/static/js/terminals.js`, after the Explorer pane is initialized, apply the saved appearance via `setExplorerMarkdownAppearance()` if the session carries the field — fallback to the current `localStorage` value when the field is absent so existing presets degrade gracefully. Since the appearance is currently global (one pair of localStorage keys for all panes), the restore path should apply to the pane being opened and also update the shared `localStorage` keys for consistency; document any per-pane vs. global behaviour choice explicitly. Add focused tests in `tests/test_api.py` for: normalization and allowlist validation of both fields, non-explorer pane exclusion, saved-session round-trips, runtime-state field presence, and client restore wiring.
 
+## Closed Issues
+
+### Issue ID: ISSUE-2026-034
+- Title: Committing via Git sidebar does not reload the Files tree
+- Priority: Low
+- Status: Closed
+- Area: `web/static/js/terminals.js`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `git`, `ui`, `tests`
+- Reported: 2026-07-16
+- Closed: 2026-07-19
+
+Description:
+After a successful commit through the Explorer Git sidebar, the Files tree sidebar was not reloaded and the main pane was not refreshed in tabbed viewer mode: `performExplorerGitAction` updated the Git panel from the backend response but never called `reloadExplorerTree`, and `loadExplorerPane` only ran in the rarely-active directory mode, so the tree and any open file/diff went stale after a commit.
+
+Resolution:
+Implemented per the proposed solution, generalised to every worktree-mutating action (follow-up Wave 3 / item 1.a). `performExplorerGitAction()` now routes `stage`, `unstage`, `revert`, `commit`, and the new `stage-all` / `discard-all` endpoints (publish excluded — remote-only) through a shared `refreshExplorerAfterGitAction()` that reloads the Files tree (`reloadExplorerTree` guards internally on `pane._explorerTreeSidebarOpen`), invalidates the cached diff (`_explorerDiffLoaded` / `_explorerDiffCacheKey`), and re-fetches the currently open file in place with scroll preserved — bulk actions refresh whatever file is open, single-path actions only their own path. The revert flow's bespoke reopen was folded into the shared refresh. Covered by `test_terminals_page_git_actions_refresh_tree_and_open_file` in `tests/test_api.py`.
+
 ### Issue ID: ISSUE-2026-032
 - Title: Git sidebar "Changes" header has no Stage All button
 - Priority: Low
-- Status: Open
+- Status: Closed
 - Area: `web/static/js/terminals.js`, `web/api.py`, `web/explorer.py`, `tests/test_api.py`
 - Assignee: Unassigned
 - Tags: `file-explorer`, `git`, `ui`, `flask`, `tests`
 - Reported: 2026-07-16
+- Closed: 2026-07-19
 
 Description:
-The Git sidebar's **Changes** (unstaged) section header contains only a plain title label. There is no action to stage all uncommitted working-tree changes at once. Users must stage each file individually using the per-row `+` button, which is slow when many files are modified. The **Staged Changes** section already has a commit action in its footer; the **Changes** section has no equivalent bulk action for its header row.
+The Git sidebar's **Changes** (unstaged) section header contained only a plain title label with no action to stage all uncommitted working-tree changes at once; each file had to be staged individually with its per-row `+` button.
 
-Steps to reproduce:
-1. Open a GridVibe Explorer pane rooted in a Git repository that has two or more modified tracked files.
-2. Open the Git sidebar and inspect the **Changes** section header row.
-3. Observe that the header contains only the "Changes" label and no "Stage All" button; each file must be staged individually with its per-row `+` button.
-
-Expected behavior:
-The **Changes** section header should include a compact "Stage All" button that stages every currently listed unstaged change in a single action (equivalent to `git add -A` scoped to the repository root). After the action completes, the Git summary should refresh and the staged files should appear under **Staged Changes**, consistent with how individual staging already works.
-
-Actual behavior / logs:
-Code inspection confirms the **Changes** section header in `renderExplorerGitSidebarContent()` (terminals.js:8411–8416) is rendered as `<div class="explorer-diff-sidebar-title">Changes</div>` with no accompanying button. `explorerGitStageFile(index, path)` (terminals.js:9029) takes a single `path` argument and delegates to `performExplorerGitAction(index, 'stage', { path })`. The backend route `POST /api/explorer/<session_id>/git/stage` (api.py:792) similarly accepts one `path` field and calls `_git_stage_path(backend, root_path, file_path)`. No `stage_all` client function, no stage-all button, and no bulk-stage endpoint exist anywhere in the codebase (confirmed by literal search).
-
-### Proposed solution:
-Add a "Stage All" button to the **Changes** header row in `renderExplorerGitSidebarContent()` in `web/static/js/terminals.js`, disabled when the unstaged list is empty or a Git action is busy. Wire it to a new client function (e.g. `explorerGitStageAll(index)`) that calls a new `POST /api/explorer/<session_id>/git/stage-all` route in `web/api.py`. The backend handler should live in `web/explorer.py` (e.g. `_git_stage_all_paths(backend, root_path)`) and run `git add -A` (or `git add .`) with `GIT_TERMINAL_PROMPT=0`, scoped to the repository root, consistent with the existing single-file stage helper. After success, return the updated repository summary and refresh the sidebar the same way individual staging does. Ensure busy-state toggling prevents overlapping actions, align the button style with the existing per-row `+` buttons and the Unstage/Commit controls, and preserve the read-only guarantee for file content. Add focused tests in `tests/test_api.py` for: the stage-all endpoint success and error paths, out-of-root/invalid session rejection, the rendered sidebar button presence, disabled state when no unstaged changes exist, and client wiring through `performExplorerGitAction`.
-
-## Closed Issues
+Resolution:
+Implemented per the proposed solution (follow-up Wave 3 / item 1.b). The **Changes** header now carries a compact **Stage All** button (`data-explorer-git-stage-all`, styled like the per-row `+` controls, disabled when the unstaged list is empty or a Git action is busy) wired to `explorerGitStageAll(index)` → `POST /api/explorer/<session_id>/git/stage-all` → `_git_stage_all_paths()` in `web/explorer.py` (`git add --all` scoped to the repository root, run with `write=True` so `GIT_TERMINAL_PROMPT=0`). Success returns the updated repository summary and routes through the shared ISSUE-2026-034 refresh. A sibling **Discard All** button (follow-up item 1.c, OD-1) landed in the same header: tracked-worktree-only `git restore --worktree` via `POST .../git/discard-all`, in-page confirm, no `git clean`. Covered by `test_explorer_git_stage_all_stages_every_change`, `test_explorer_git_stage_all_requires_a_repository`, the three discard-all tests, `test_git_discardable_worktree_paths_filters_porcelain_records`, and `test_terminals_page_git_bulk_action_controls_are_present` in `tests/test_api.py`.
 
 ### Issue ID: ISSUE-2026-035
 - Title: Valid UTF-8 files are rejected when preview sample splits a character

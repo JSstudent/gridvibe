@@ -426,8 +426,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('<option value="large-v3-turbo">large-v3-turbo</option>', html)
         self.assertIn("const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';", html)
         self.assertIn("const APP_CONFIG_BROADCAST_CHANNEL = 'gridvibe.appConfig';", html)
-        self.assertIn("function notifyAppConfigUpdated(appSettings)", html)
-        self.assertIn("notifyAppConfigUpdated(data);", html)
+        self.assertIn("function notifyAppConfigUpdated(appSettings, applyScope = 'session')", html)
+        self.assertIn("notifyAppConfigUpdated(data, settingsForm.terminal.apply_scope);", html)
 
     def test_launcher_page_uses_compact_centered_header(self):
         response = self.client.get("/")
@@ -1849,6 +1849,8 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "terminal": {
                     "font_family": api.runtime_config.terminal_font_family,
                     "font_size": api.runtime_config.terminal_font_size,
+                    # OD-14: no scope in the request → focused-session default.
+                    "apply_scope": "session",
                 },
                 "timestamp": ANY,
             },
@@ -3629,6 +3631,160 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("inside the configured root", response.get_json()["error"])
         self.assertTrue(outside_file.exists())
+
+    def test_explorer_git_stage_all_stages_every_change(self):
+        # Wave 3 / 1.b (ISSUE-2026-032): one action stages modified, deleted,
+        # and untracked files alike.
+        repo_dir = self._init_committed_repo()
+        (repo_dir / "second.txt").write_text("second\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "second.txt")
+        self._run_git(repo_dir, "commit", "-m", "second file")
+        (repo_dir / "README.md").write_text("# Project\nchanged\n", encoding="utf-8")
+        (repo_dir / "second.txt").unlink()
+        (repo_dir / "new.txt").write_text("new\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(f"/api/explorer/{session_id}/git/stage-all", json={})
+
+        self.assertEqual(response.status_code, 200)
+        changes = {change["path"]: change for change in response.get_json()["changes"]}
+        self.assertEqual(changes["README.md"]["git"]["index_status"], "M")
+        self.assertEqual(changes["README.md"]["git"]["worktree_status"], ".")
+        self.assertEqual(changes["second.txt"]["git"]["index_status"], "D")
+        self.assertEqual(changes["new.txt"]["git"]["index_status"], "A")
+
+    def test_explorer_git_stage_all_requires_a_repository(self):
+        plain_dir = Path(self.temp_dir.name) / "plain"
+        plain_dir.mkdir()
+        (plain_dir / "file.txt").write_text("hello\n", encoding="utf-8")
+        session_id = self._create_explorer_session(plain_dir)
+
+        response = self.client.post(f"/api/explorer/{session_id}/git/stage-all", json={})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("worktree", response.get_json()["error"].lower())
+
+    def test_explorer_git_discard_all_restores_tracked_worktree_changes(self):
+        # Wave 3 / 1.c (OD-1): bulk discard restores modified + deleted tracked
+        # files while untracked files are left in place (never git clean).
+        repo_dir = self._init_committed_repo()
+        (repo_dir / "second.txt").write_text("second\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "second.txt")
+        self._run_git(repo_dir, "commit", "-m", "second file")
+        readme = repo_dir / "README.md"
+        second = repo_dir / "second.txt"
+        untracked = repo_dir / "scratch.txt"
+        readme.write_text("# Project\nunwanted\n", encoding="utf-8")
+        second.unlink()
+        untracked.write_text("keep me\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(f"/api/explorer/{session_id}/git/discard-all", json={})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\n")
+        self.assertTrue(second.exists())
+        self.assertEqual(second.read_text(encoding="utf-8"), "second\n")
+        self.assertTrue(untracked.exists())
+        self.assertEqual(untracked.read_text(encoding="utf-8"), "keep me\n")
+        paths = {change["path"] for change in response.get_json()["changes"]}
+        self.assertEqual(paths, {"scratch.txt"})
+
+    def test_explorer_git_discard_all_preserves_staged_content(self):
+        # OD-1: worktree-only restore — the staged copy survives the bulk discard.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nSTAGED\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        readme.write_text("# Project\nSTAGED\nWORKTREE\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(f"/api/explorer/{session_id}/git/discard-all", json={})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\nSTAGED\n")
+        changes = {change["path"]: change for change in response.get_json()["changes"]}
+        self.assertEqual(changes["README.md"]["git"]["index_status"], "M")
+        self.assertEqual(changes["README.md"]["git"]["worktree_status"], ".")
+
+    def test_explorer_git_discard_all_rejects_when_nothing_unstaged(self):
+        # A clean-or-untracked-only worktree is a clear error, and the
+        # untracked file must survive.
+        repo_dir = self._init_committed_repo()
+        untracked = repo_dir / "scratch.txt"
+        untracked.write_text("keep me\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(f"/api/explorer/{session_id}/git/discard-all", json={})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no unstaged changes", response.get_json()["error"].lower())
+        self.assertTrue(untracked.exists())
+
+    def test_git_discardable_worktree_paths_filters_porcelain_records(self):
+        # Parser unit test for the OD-1 safety envelope: only tracked,
+        # non-conflicted worktree changes qualify; rename records must consume
+        # their original-path token instead of treating it as a record.
+        raw = "\0".join([
+            " M modified.txt",
+            "M  staged-only.txt",
+            "MM both.txt",
+            "?? untracked.txt",
+            "UU conflicted.txt",
+            "R  renamed-clean.txt", "old-name.txt",
+            "RM renamed-dirty.txt", "old-dirty.txt",
+            " D deleted.txt",
+            "",
+        ])
+        self.assertEqual(
+            web_explorer._git_discardable_worktree_paths(raw),
+            ["modified.txt", "both.txt", "renamed-dirty.txt", "deleted.txt"],
+        )
+
+    def test_terminals_page_git_bulk_action_controls_are_present(self):
+        # Wave 3 / 1.b + 1.c: Stage All and Discard All live in the Changes
+        # header, disabled while busy or when there is nothing to act on, and
+        # the irreversible bulk discard confirms through the in-page shell.
+        response = self.client.get("/terminals")
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("data-explorer-git-stage-all", html)
+        self.assertIn("data-explorer-git-discard-all", html)
+        self.assertIn("function explorerGitStageAll(index)", html)
+        self.assertIn("performExplorerGitAction(index, 'stage-all', {})", html)
+        self.assertIn("async function explorerGitDiscardAll(index)", html)
+        self.assertIn("performExplorerGitAction(index, 'discard-all', {})", html)
+        self.assertIn("(busy || !unstaged.length) ? 'disabled'", html)
+        self.assertIn("(busy || !discardable.length) ? 'disabled'", html)
+        self.assertIn("explorerGitCanRevert(file.git && file.git.status)", html)
+        self.assertIn("title: 'Discard all changes?'", html)
+        self.assertIn(".explorer-git-section-title", html)
+        self.assertIn(".explorer-git-section-actions", html)
+
+    def test_terminals_page_git_actions_refresh_tree_and_open_file(self):
+        # Wave 3 / 1.a (ISSUE-2026-034): every worktree-mutating Git action
+        # routes through the shared refresh; publish (remote-only) does not.
+        response = self.client.get("/terminals")
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("const EXPLORER_GIT_WORKTREE_ENDPOINTS = new Set([", html)
+        self.assertIn("'stage', 'unstage', 'revert', 'commit', 'stage-all', 'discard-all',", html)
+        self.assertIn("EXPLORER_GIT_WORKTREE_ENDPOINTS.has(endpoint)", html)
+        self.assertIn("async function refreshExplorerAfterGitAction(index, actionPath)", html)
+        refresh_fn = html[
+            html.index("async function refreshExplorerAfterGitAction"):
+            html.index("function explorerGitStageFile")
+        ]
+        self.assertIn("reloadExplorerTree(index);", refresh_fn)
+        self.assertIn("pane._explorerDiffLoaded = false;", refresh_fn)
+        self.assertIn("actionPath && actionPath !== pane._explorerFilePath", refresh_fn)
+        self.assertIn("preserveScroll: true", refresh_fn)
+        # Publish stays outside the mutating set and now confirms in-page
+        # (Regression Guardrail 4: no window.confirm in WebView2).
+        self.assertNotIn("'publish', 'stage'", html)
+        self.assertIn("title: 'Publish branch?'", html)
+        terminals_js = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+        self.assertNotIn("window.confirm(", terminals_js)
 
     def test_terminals_page_explorer_file_type_icons_are_present(self):
         # ISSUE-2026-024
@@ -8992,7 +9148,7 @@ class ThemeSyncTestCase(unittest.TestCase):
     def test_launcher_notification_payload_includes_theme(self):
         launcher_js = self._static("js/launcher.js")
         notify = launcher_js[
-            launcher_js.index("function notifyAppConfigUpdated(appSettings)"):
+            launcher_js.index("function notifyAppConfigUpdated(appSettings"):
             launcher_js.index("async function loadAppSettings()")
         ]
         self.assertIn(
@@ -9883,6 +10039,37 @@ class BroadcastInputTestCase(unittest.TestCase):
             terminals_js.count("broadcastInputToPeers(index, "), 2
         )
 
+    def test_broadcast_highlight_drops_when_focus_leaves_terminals(self):
+        """Wave 4 / 6.a (OD-10): the all-panes broadcast ring only paints while
+        a terminal actually holds focus; clicking into dead space or an
+        explorer/browser pane drops every highlight, and the next focusin
+        re-lights per the broadcast state at that moment."""
+        terminals_css = self._static("css/terminals.css")
+        # The broadcast ring rule requires the focus-tracking class …
+        self.assertIn(
+            "#terminalsGrid.broadcast-input.terminal-focus .terminal-container:not(.explorer-pane):not(.browser-pane)",
+            terminals_css,
+        )
+        # … and the old unconditional (focus-free) rule is gone.
+        self.assertNotIn(
+            "#terminalsGrid.broadcast-input .terminal-container",
+            terminals_css,
+        )
+        terminals_js = self._static("js/terminals.js")
+        focus_fns = terminals_js[
+            terminals_js.index("function setFocusedTerminal(index)"):
+            terminals_js.index("function resetFocusedTerminal()")
+        ]
+        # focusin into a terminal re-lights; leaving to dead space clears.
+        self.assertIn("classList.add('terminal-focus')", focus_fns)
+        self.assertIn("classList.remove('terminal-focus')", focus_fns)
+        # ISSUE-2026-026 stays intact: enabling broadcast still focuses a pane.
+        set_broadcast = terminals_js[
+            terminals_js.index("function setBroadcastInput(active)"):
+            terminals_js.index("function toggleBroadcastInput()")
+        ]
+        self.assertIn("focusActiveOrDefaultTerminal();", set_broadcast)
+
 
 class RuntimeStateRestoreTestCase(unittest.TestCase):
     """Deep-dive 10.5 — workspace-shape snapshot + restore after restart."""
@@ -10164,15 +10351,15 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
 
         launcher_js = self._static("js/launcher.js")
         collect = launcher_js[
-            launcher_js.index("function collectAppSettingsForm()"):
-            launcher_js.index("function notifyAppConfigUpdated(appSettings)")
+            launcher_js.index("function collectTerminalFontFamily()"):
+            launcher_js.index("function notifyAppConfigUpdated(appSettings")
         ]
         self.assertIn("terminal: {", collect)
         self.assertIn("appTerminalFontFamily", collect)
         self.assertIn("appTerminalFontSize", collect)
         self.assertIn("appTerminalMaxSessions", collect)
         notify = launcher_js[
-            launcher_js.index("function notifyAppConfigUpdated(appSettings)"):
+            launcher_js.index("function notifyAppConfigUpdated(appSettings"):
             launcher_js.index("async function loadAppSettings()")
         ]
         self.assertIn("terminal: {", notify)
@@ -10190,9 +10377,107 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         ]
         self.assertIn("document.body.dataset.terminalFontSize", apply_font)
         self.assertIn("document.body.dataset.terminalFontFamily", apply_font)
-        self.assertIn("term.options.fontSize", apply_font)
-        self.assertIn("term.options.fontFamily", apply_font)
+        self.assertIn("styleTerminalFont(terminal, fontSize, fontFamily);", apply_font)
         self.assertIn("scheduleFit(index);", apply_font)
+        # The shared styler is what writes the xterm options.
+        style_fn = terminals_js[
+            terminals_js.index("function styleTerminalFont(terminal, fontSize, fontFamily)"):
+            terminals_js.index("function applyAppConfigTerminalFont(message)")
+        ]
+        self.assertIn("term.options.fontSize", style_fn)
+        self.assertIn("term.options.fontFamily", style_fn)
+
+    # ── Wave 4 / 7.c — font presets + per-session apply scope (OD-13/OD-14) ──
+
+    def test_app_config_broadcast_carries_apply_scope_without_persisting_it(self):
+        with patch.object(api.socketio, "emit") as emit:
+            response = self.client.post(
+                "/api/app-config",
+                json={"terminal": {"font_size": 16, "apply_scope": "all"}},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        emit.assert_called_once()
+        _event, payload = emit.call_args[0]
+        self.assertEqual(payload["terminal"]["apply_scope"], "all")
+        # OD-14: the scope is a one-shot modifier — never persisted to
+        # config.json (Regression Guardrail 5) and never in the public config.
+        self.assertNotIn("apply_scope", api.load_config().get("terminal", {}))
+        self.assertNotIn("apply_scope", response.get_json()["terminal"])
+
+    def test_app_config_broadcast_defaults_to_session_scope(self):
+        with patch.object(api.socketio, "emit") as emit:
+            response = self.client.post(
+                "/api/app-config", json={"terminal": {"font_size": 15}}
+            )
+        self.assertEqual(response.status_code, 200)
+        _event, payload = emit.call_args[0]
+        self.assertEqual(payload["terminal"]["apply_scope"], "session")
+
+        # Unknown scopes collapse to the safe focused-session default.
+        with patch.object(api.socketio, "emit") as emit:
+            self.client.post(
+                "/api/app-config", json={"terminal": {"apply_scope": "everything"}}
+            )
+        _event, payload = emit.call_args[0]
+        self.assertEqual(payload["terminal"]["apply_scope"], "session")
+
+    def test_app_settings_modal_offers_font_presets_with_custom_escape(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="appTerminalFontPreset"', html)
+        # Each preset option previews in its own family (OD-13).
+        self.assertIn("value=\"'JetBrains Mono', Consolas, monospace\"", html)
+        self.assertIn("style=\"font-family: 'JetBrains Mono', Consolas, monospace\"", html)
+        # "Custom…" keeps the free-text escape hatch alive.
+        self.assertIn('<option value="custom">Custom…</option>', html)
+        self.assertIn('id="appTerminalFontCustomField"', html)
+        self.assertIn('id="appTerminalApplyAll"', html)
+
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("function collectTerminalFontFamily()", launcher_js)
+        self.assertIn(
+            "apply_scope: document.getElementById('appTerminalApplyAll')?.checked ? 'all' : 'session'",
+            launcher_js,
+        )
+        # Presets hide the free-text input; "Custom…" reveals it.
+        self.assertIn(
+            "fontCustomField?.classList.toggle('hidden', fontPresetInput?.value !== 'custom')",
+            launcher_js,
+        )
+        # The one-shot scope checkbox resets whenever the form re-syncs, and
+        # the saved scope rides the cross-window notification.
+        self.assertIn("terminalApplyAllInput.checked = false;", launcher_js)
+        self.assertIn("notifyAppConfigUpdated(data, settingsForm.terminal.apply_scope);", launcher_js)
+        self.assertIn("apply_scope: applyScope === 'all' ? 'all' : 'session'", launcher_js)
+
+    def test_terminals_page_applies_scoped_font_updates(self):
+        # OD-14: default scope restyles every terminal of the ACTIVE session
+        # (group) and records a per-group override; 'all' pushes to every
+        # session — including cached hidden groups — and drops the overrides.
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("const groupFontOverrides = new Map();", terminals_js)
+        self.assertIn("function applyGroupFontOverride(index)", terminals_js)
+        apply_font = terminals_js[
+            terminals_js.index("function applyAppConfigTerminalFont(message)"):
+            terminals_js.index("/* Recover app-config changes missed")
+        ]
+        self.assertIn("terminalConfig.apply_scope === 'all'", apply_font)
+        self.assertIn("groupFontOverrides.clear();", apply_font)
+        self.assertIn("groupFontOverrides.set(activeFontOverrideGroupKey(), override);", apply_font)
+        # Session scope restyles the whole visible group, not a focused pane.
+        self.assertNotIn("_focusedTerminalIndex", apply_font)
+        self.assertIn("terminals.forEach((terminal, index)", apply_font)
+        # 'all' reaches the hidden sessions' live xterms in the group cache …
+        self.assertIn("cachedGroupViews.forEach(cached => {", apply_font)
+        # … and only the all-sessions path moves the new-pane default.
+        dataset_updates = apply_font.index("document.body.dataset.terminalFontSize")
+        self.assertGreater(dataset_updates, apply_font.index("if (applyToAll) {"))
+        # A session keeps its override when panes are rebuilt or split.
+        attach_fn = terminals_js[
+            terminals_js.index("function attachTerminal(index)"):
+            terminals_js.index("Update status badge for a single terminal")
+        ]
+        self.assertIn("applyGroupFontOverride(index);", attach_fn)
 
     # ── ISSUE-2026-013 — per-agent auto-mode toggles ──
 

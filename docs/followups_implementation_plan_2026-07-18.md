@@ -1,6 +1,6 @@
 # GridVibe Follow-up Implementation Plan
 
-Last updated: 2026-07-18
+Last updated: 2026-07-19
 
 This plan covers the **follow-up refinements** captured in
 [`todos.txt`](todos.txt) after the seven original stages in
@@ -32,27 +32,29 @@ and its persistence).
 
 ## At a glance
 
-| # | Stage | Item | Refs | Size |
-| --- | --- | --- | --- | --- |
-| 1.a | 1 · Git sidebar | Reload Files tree after commit / stage-all / discard-all | ISSUE-2026-034 | Small |
-| 1.b | 1 · Git sidebar | "Stage All" button in the Changes header | ISSUE-2026-032 | Medium |
-| 1.c | 1 · Git sidebar | "Discard All" button for unstaged changes | — (extends 018) | Medium |
-| 1.d | 1 · Git sidebar | "Open in new tab" (`+`) button ignores light/dark theme | — | Trivial |
-| 2.a | 2 · Tabbed viewer | Remove the vestigial Back button on the Preview tab | — | Trivial |
-| 2.b | 2 · Tabbed viewer | `go.mod` (and peers) not displayed | — | Small |
-| 2.c | 2 · Tabbed viewer | Valid UTF-8 rejected when sample splits a character | ISSUE-2026-035 | Small |
-| 2.d | 2 · Tabbed viewer | Clicking a tree directory opens it in Preview to browse | — | Medium |
-| 2.e | 2 · Tabbed viewer | Preserve per-tab view mode + scroll across tab swaps | — | Large |
-| 2.f | 2 · Tabbed viewer | Persist tab modes / scroll / appearance / active tab in sessions | ISSUE-2026-033 | Large |
-| 2.g | 2 · Tabbed viewer | Tab drag-reorder, middle-click close, double-click preview→pin | — | Medium |
-| 3.a | 3 · Markdown | Add a VS Code-style "gray surface / white text" preset | — (extends 030) | Small |
-| 3.b | 3 · Markdown | Colour heading titles in **Source** view too | — | Small |
-| 4.a | 4 · Large-file preview | Raise preview cap from 1 MiB toward 10 MiB | — (extends 020) | Small |
-| 5.a | 5 · Terminal close | Closing a terminal resets the shown tab's mode + scroll | — (pairs with 2.e) | Medium |
-| 6.a | 6 · Focus/broadcast | Drop all highlights when broadcast focus leaves to dead space | — (extends 025/026) | Small |
-| 7.a | 7 · Settings | Add Kimi CLI to the agent registry | — | Small |
-| 7.b | 7 · Settings | Verify/fix agent auto-mode launch + descriptive text for all agents | — (extends 013) | Medium |
-| 7.c | 7 · Settings | "Apply to all active sessions" toggle + font preset dropdown | — (extends 029) | Medium |
+Done ✅ = implemented in Waves 1–4 (2026-07-18/19); Wave 5 items remain open.
+
+| # | Stage | Item | Refs | Size | Done |
+| --- | --- | --- | --- | --- | --- |
+| 1.a | 1 · Git sidebar | Reload Files tree after commit / stage-all / discard-all | ISSUE-2026-034 | Small | ✅ |
+| 1.b | 1 · Git sidebar | "Stage All" button in the Changes header | ISSUE-2026-032 | Medium | ✅ |
+| 1.c | 1 · Git sidebar | "Discard All" button for unstaged changes | — (extends 018) | Medium | ✅ |
+| 1.d | 1 · Git sidebar | "Open in new tab" (`+`) button ignores light/dark theme | — | Trivial | ✅ |
+| 2.a | 2 · Tabbed viewer | Remove the vestigial Back button on the Preview tab | — | Trivial | ✅ |
+| 2.b | 2 · Tabbed viewer | `go.mod` (and peers) not displayed | — | Small | ✅ |
+| 2.c | 2 · Tabbed viewer | Valid UTF-8 rejected when sample splits a character | ISSUE-2026-035 | Small | ✅ |
+| 2.d | 2 · Tabbed viewer | Clicking a tree directory opens it in Preview to browse | — | Medium | |
+| 2.e | 2 · Tabbed viewer | Preserve per-tab view mode + scroll across tab swaps | — | Large | |
+| 2.f | 2 · Tabbed viewer | Persist tab modes / scroll / appearance / active tab in sessions | ISSUE-2026-033 | Large | |
+| 2.g | 2 · Tabbed viewer | Tab drag-reorder, middle-click close, double-click preview→pin | — | Medium | |
+| 3.a | 3 · Markdown | Add a VS Code-style "gray surface / white text" preset | — (extends 030) | Small | ✅ |
+| 3.b | 3 · Markdown | Colour heading titles in **Source** view too | — | Small | ✅ |
+| 4.a | 4 · Large-file preview | Raise preview cap from 1 MiB toward 10 MiB | — (extends 020) | Small | ✅ |
+| 5.a | 5 · Terminal close | Closing a terminal resets the shown tab's mode + scroll | — (pairs with 2.e) | Medium | |
+| 6.a | 6 · Focus/broadcast | Drop all highlights when broadcast focus leaves to dead space | — (extends 025/026) | Small | ✅ |
+| 7.a | 7 · Settings | Add Kimi CLI to the agent registry | — | Small | ✅ |
+| 7.b | 7 · Settings | Verify/fix agent auto-mode launch + descriptive text for all agents | — (extends 013) | Medium | ✅ |
+| 7.c | 7 · Settings | "Apply to all active sessions" toggle + font preset dropdown | — (extends 029) | Medium | ✅ |
 
 ---
 
@@ -489,13 +491,93 @@ registry (OD-11).
 All (OD-1: tracked worktree only, no `git clean`) → `1.a` shared post-action
 tree/diff refresh (ISSUE-034) last so it covers all three action types at once.
 
+> **Status: DONE (2026-07-19).** All three Wave 3 items are implemented, with
+> `python tests/run_tests.py` (577 tests) and `python -m ruff check .` passing.
+> - **1.b (ISSUE-2026-032):** compact **Stage All** button in the **Changes**
+>   header (`data-explorer-git-stage-all`, disabled when the unstaged list is
+>   empty or an action is busy) → `explorerGitStageAll(index)` → new `POST
+>   /api/explorer/<id>/git/stage-all` backed by `_git_stage_all_paths()`
+>   (`git add --all` at the repo root, `write=True` so `GIT_TERMINAL_PROMPT=0`).
+> - **1.c (OD-1):** **Discard All** button beside it
+>   (`data-explorer-git-discard-all`, disabled unless the unstaged list has a
+>   revert-eligible row) → in-page `openGenericConfirmModal` confirm → new
+>   `POST /api/explorer/<id>/git/discard-all` backed by
+>   `_git_discard_all_paths()`: enumerates `git status --porcelain -z`
+>   (NUL-terminated, so unusual filenames survive; rename records consume their
+>   original-path token), keeps only tracked non-conflicted worktree changes
+>   via `_git_discardable_worktree_paths()`, then runs one
+>   `git restore --worktree -- <paths…>`. Staged content preserved, untracked
+>   files untouched, never `git clean`; an all-clean/untracked-only worktree is
+>   a clear 400 ("No unstaged changes to discard").
+> - **1.a (ISSUE-2026-034):** `performExplorerGitAction()` now routes every
+>   worktree-mutating endpoint (`stage`, `unstage`, `revert`, `commit`,
+>   `stage-all`, `discard-all` — publish excluded) through a shared
+>   `refreshExplorerAfterGitAction()`: reloads the Files tree (guarded
+>   internally on `pane._explorerTreeSidebarOpen`), invalidates the diff cache,
+>   and re-fetches the open file in place with scroll preserved (bulk actions
+>   refresh whatever file is open; single-path actions only their own path).
+>   The revert flow's bespoke reopen was folded into the shared refresh.
+> - **Guardrail fix while in the cluster:** `explorerGitPublish()` used
+>   `window.confirm`, which WebView2 blocks (Regression Guardrail 4) — it now
+>   confirms through the in-page shell; `terminals.js` is asserted free of
+>   `window.confirm(` calls.
+> - **Tests:** `tests/test_api.py` — `test_explorer_git_stage_all_stages_every_change`,
+>   `test_explorer_git_stage_all_requires_a_repository`,
+>   `test_explorer_git_discard_all_restores_tracked_worktree_changes`,
+>   `test_explorer_git_discard_all_preserves_staged_content`,
+>   `test_explorer_git_discard_all_rejects_when_nothing_unstaged`,
+>   `test_git_discardable_worktree_paths_filters_porcelain_records`,
+>   `test_terminals_page_git_bulk_action_controls_are_present`, and
+>   `test_terminals_page_git_actions_refresh_tree_and_open_file`. CHANGELOG
+>   updated; ISSUE-2026-032 and ISSUE-2026-034 closed in `testing_issues.md`.
+
 **Wave 4 — Terminal-side settings & focus (independent of Explorer):**
 `6.a` broadcast highlight drop (OD-10) · `7.b` auto-mode wiring + descriptive text
 (OD-12 resolved by tracing) · `7.c` font/size presets + apply-to-all (OD-13/OD-14:
 per-session by default).
 
-> **Status: 7.b DONE (2026-07-18); 6.a and 7.c still open.** `python
-> tests/run_tests.py` (564 tests) and `python -m ruff check .` pass.
+> **Status: DONE (7.b 2026-07-18; 6.a and 7.c 2026-07-19).** `python
+> tests/run_tests.py` (577 tests) and `python -m ruff check .` pass.
+> - **6.a (OD-10):** the all-panes broadcast ring was pure CSS on
+>   `#terminalsGrid.broadcast-input`, so it lingered regardless of focus. The
+>   rule now also requires a `terminal-focus` class that
+>   `setFocusedTerminal()` adds and `clearActiveTerminalHighlight()` removes
+>   (the existing delegated `focusin`/`focusout` pair drives both), so focus
+>   leaving to dead space or an explorer/browser pane drops every highlight.
+>   Re-light follows broadcast state at the moment of re-focus exactly per
+>   OD-10: the CSS rule needs both classes, so if broadcast was switched off
+>   while focus sat in dead space only the clicked pane lights up. The
+>   ISSUE-2026-026 enable-focuses-a-terminal behaviour is untouched (and its
+>   focusin re-adds the class). Test:
+>   `test_broadcast_highlight_drops_when_focus_leaves_terminals`.
+> - **7.c (OD-13):** the App Settings Font Family free-text input became
+>   `#appTerminalFontPreset` — a `<select>` of seven curated monospace stacks,
+>   each `<option>` styled in its own family — plus a **Custom…** option that
+>   reveals the original `#appTerminalFontFamily` input
+>   (`collectTerminalFontFamily()` resolves preset vs. custom; a saved stack
+>   that matches no preset re-opens as Custom).
+> - **7.c (OD-14):** new **Apply to all active sessions** checkbox
+>   (`#appTerminalApplyAll`, reset on every form sync — it is a one-shot
+>   modifier, not a setting). Saving posts `terminal.apply_scope`
+>   (`session`/`all`); `set_app_config` strips it before persisting (nothing
+>   lands in `config.json`) and threads it through
+>   `_broadcast_app_config_update()` / `notifyAppConfigUpdated()`. Scope
+>   semantics (revised 2026-07-19 after user feedback — "session" is the
+>   session *group*, not a focused pane, which is empty anyway once the
+>   settings modal takes focus): `applyAppConfigTerminalFont()` restyles
+>   **every terminal pane of the active session** by default, recording the
+>   value in a group-id-keyed `groupFontOverrides` map (re-applied by
+>   `attachTerminal()` so the session keeps its font across pane rebuilds and
+>   splits); `apply_scope: 'all'` pushes font + size to every session —
+>   including the hidden groups whose live xterms sit in `cachedGroupViews` —
+>   and clears the overrides. Only the all-sessions path advances the body
+>   dataset (the default new panes read), so a session-scoped change cannot
+>   leak into other groups via a rebuild; new sessions/windows always launch
+>   with the saved global font from `config.json`. Tests:
+>   `test_app_config_broadcast_carries_apply_scope_without_persisting_it`,
+>   `test_app_config_broadcast_defaults_to_session_scope`,
+>   `test_app_settings_modal_offers_font_presets_with_custom_escape`,
+>   `test_terminals_page_applies_scoped_font_updates`.
 > - **7.b trace finding (OD-12 → case a, never appended):** the direct-launch
 >   path dropped the toggle — `launchSessions()` in `web/static/js/launcher.js`
 >   rebuilt each session payload field-by-field without `agent_auto_mode`, so

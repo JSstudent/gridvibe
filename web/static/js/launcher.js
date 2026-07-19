@@ -517,6 +517,10 @@
         whisperSection?.classList.toggle('hidden', !voiceEnabled || selectedEngine !== 'whisper');
         micSection?.classList.toggle('hidden', !voiceEnabled);
         whisperGpuHint?.classList.toggle('hidden', !voiceEnabled || selectedEngine !== 'whisper' || selectedDevice !== 'cuda');
+        /* OD-13: the free-text font input only shows for the "Custom…" preset. */
+        const fontPresetInput = document.getElementById('appTerminalFontPreset');
+        const fontCustomField = document.getElementById('appTerminalFontCustomField');
+        fontCustomField?.classList.toggle('hidden', fontPresetInput?.value !== 'custom');
     }
 
     function syncAppSettingsForm() {
@@ -548,6 +552,20 @@
         }
         if (terminalFontFamilyInput) {
             terminalFontFamilyInput.value = String(terminal.font_family || DEFAULT_APP_SETTINGS.terminal.font_family);
+        }
+        const terminalFontPresetInput = document.getElementById('appTerminalFontPreset');
+        if (terminalFontPresetInput) {
+            /* A saved stack that matches a preset selects it; anything else is
+               shown through the "Custom…" free-text escape hatch (OD-13). */
+            const family = String(terminal.font_family || DEFAULT_APP_SETTINGS.terminal.font_family);
+            const isPreset = Array.from(terminalFontPresetInput.options)
+                .some(option => option.value !== 'custom' && option.value === family);
+            terminalFontPresetInput.value = isPreset ? family : 'custom';
+        }
+        const terminalApplyAllInput = document.getElementById('appTerminalApplyAll');
+        if (terminalApplyAllInput) {
+            /* One-shot scope modifier (OD-14), never a persisted setting. */
+            terminalApplyAllInput.checked = false;
         }
         if (terminalFontSizeInput) {
             const fontSize = Number(terminal.font_size);
@@ -712,6 +730,18 @@
         return hasCommandKey && !isModifierOnly;
     }
 
+    /* OD-13: the preset dropdown covers the common monospace stacks; the
+       "Custom…" option falls through to the original free-text input so no
+       configurability is lost. */
+    function collectTerminalFontFamily() {
+        const preset = document.getElementById('appTerminalFontPreset')?.value || '';
+        if (preset && preset !== 'custom') {
+            return preset;
+        }
+        return document.getElementById('appTerminalFontFamily')?.value.trim()
+            || DEFAULT_APP_SETTINGS.terminal.font_family;
+    }
+
     function collectAppSettingsForm() {
         return {
             appearance: {
@@ -724,12 +754,14 @@
                 host_key_policy: document.getElementById('appSshHostKeyPolicy')?.value || DEFAULT_APP_SETTINGS.ssh.host_key_policy
             },
             terminal: {
-                font_family: document.getElementById('appTerminalFontFamily')?.value.trim()
-                    || DEFAULT_APP_SETTINGS.terminal.font_family,
+                font_family: collectTerminalFontFamily(),
                 font_size: Number(document.getElementById('appTerminalFontSize')?.value)
                     || DEFAULT_APP_SETTINGS.terminal.font_size,
                 max_sessions: Number(document.getElementById('appTerminalMaxSessions')?.value)
-                    || DEFAULT_APP_SETTINGS.terminal.max_sessions
+                    || DEFAULT_APP_SETTINGS.terminal.max_sessions,
+                /* OD-14: focused-session-only by default; the checkbox opts a
+                   save into pushing font + size to every active session. */
+                apply_scope: document.getElementById('appTerminalApplyAll')?.checked ? 'all' : 'session'
             },
             voice_input: {
                 enabled: Boolean(document.getElementById('appVoiceEnabled')?.checked),
@@ -743,7 +775,7 @@
         };
     }
 
-    function notifyAppConfigUpdated(appSettings) {
+    function notifyAppConfigUpdated(appSettings, applyScope = 'session') {
         const payload = {
             appearance: {
                 theme: normalizeThemePreference(appSettings?.appearance?.theme)
@@ -753,7 +785,8 @@
             },
             terminal: {
                 font_family: String(appSettings?.terminal?.font_family || DEFAULT_APP_SETTINGS.terminal.font_family),
-                font_size: Number(appSettings?.terminal?.font_size) || DEFAULT_APP_SETTINGS.terminal.font_size
+                font_size: Number(appSettings?.terminal?.font_size) || DEFAULT_APP_SETTINGS.terminal.font_size,
+                apply_scope: applyScope === 'all' ? 'all' : 'session'
             },
             timestamp: Date.now(),
             nonce: Math.random().toString(36).slice(2)
@@ -807,11 +840,12 @@
         button.textContent = 'Saving...';
 
         try {
+            const settingsForm = collectAppSettingsForm();
             const [settingsResponse] = await Promise.all([
                 fetch('/api/app-config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(collectAppSettingsForm())
+                    body: JSON.stringify(settingsForm)
                 }),
                 saveVoicePrefs()
             ]);
@@ -821,7 +855,7 @@
             }
 
             applyAppSettings(data);
-            notifyAppConfigUpdated(data);
+            notifyAppConfigUpdated(data, settingsForm.terminal.apply_scope);
             closeAppSettingsModal();
             setUpdateStatus('App settings saved.', 'success');
             showMessage('App settings saved.', 'success');
