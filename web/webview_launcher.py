@@ -29,6 +29,21 @@ from web.api import (
     run_server,
     session_manager,
 )
+from web.runtime_state import save_workspace_snapshot
+
+
+def _snapshot_workspace_before_teardown(context: str) -> None:
+    """Capture the live workspace shape before sessions are torn down.
+
+    Restore-after-restart (10.5) relies on the persisted snapshot reflecting the
+    workspace the user actually had open. Group-change events keep it current
+    during a session, but the authoritative capture is at teardown — closing the
+    session window or exiting the app — while the groups are still live.
+    """
+    try:
+        save_workspace_snapshot(session_manager)
+    except Exception:
+        logger.exception("Failed to snapshot workspace before teardown (%s)", context)
 
 try:
     import webview
@@ -403,6 +418,7 @@ def _open_browser_mode(base_url: str, server_thread: threading.Thread):
         server_thread.join()
     except KeyboardInterrupt:
         logger.info("Shutting down after keyboard interrupt")
+        _snapshot_workspace_before_teardown("browser_keyboard_interrupt")
         session_manager.close_all_sessions()
 
 
@@ -1056,6 +1072,10 @@ def main():
 
             if api_bridge._restarting:
                 return
+            # Capture the live workspace before teardown so restore-after-restart
+            # reflects what was actually open — whether the session window is
+            # being closed while the launcher stays alive, or the whole app exits.
+            _snapshot_workspace_before_teardown(f"{kind}_window_closed")
             if _should_exit_after_window_close(kind, open_windows):
                 session_manager.close_all_sessions()
                 os._exit(0)

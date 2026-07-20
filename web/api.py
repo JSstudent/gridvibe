@@ -1287,7 +1287,17 @@ def create_sessions():
 
             prepared_sessions.append(prepared)
 
-        launch_warnings = _sanitize_agent_launch_commands(connection_mode, prepared_sessions)
+        # A restore replays a workspace the user already had running; a cold
+        # post-restart agent probe (status "check_failed") must not silently
+        # clear its startup command, which would drop the agent and its auto-mode
+        # flag. Skip preflight-clearing on restore and let the pane surface any
+        # real launch error itself.
+        is_restore = bool(data.get("restore"))
+        launch_warnings = (
+            []
+            if is_restore
+            else _sanitize_agent_launch_commands(connection_mode, prepared_sessions)
+        )
 
         # Atomic reference swap instead of in-place update so concurrent
         # readers never observe a half-updated layout/count pair.
@@ -1682,7 +1692,7 @@ def close_all_sessions():
         # The user explicitly closed this group, so it must not survive on the
         # empty-group grace period.
         session_manager.clear_disconnected_sessions(force_group_ids={group_id})
-        _broadcast_session_groups_updated("group_closed")
+        _broadcast_session_groups_updated("group_closed", group_id=group_id)
         return jsonify({"message": "Session group closed successfully", "group_id": group_id})
 
     session_manager.close_all_sessions()

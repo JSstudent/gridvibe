@@ -2638,7 +2638,10 @@
                         workspace_layout: group.workspace_layout,
                         surface_mode: group.surface_mode,
                         session_name: group.name,
-                        saved_session_id: group.saved_session_id || ''
+                        saved_session_id: group.saved_session_id || '',
+                        // Replay the workspace verbatim: a cold post-restart agent
+                        // probe must not silently clear a command that was working.
+                        restore: true
                     })
                 });
                 if (response.ok) restored += 1;

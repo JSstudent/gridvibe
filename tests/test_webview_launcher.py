@@ -764,6 +764,24 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertIn("DETACHED_PROCESS", helper_command[2])
 
 
+class TeardownSnapshotTestCase(unittest.TestCase):
+    """Bug 1 / 10.5 — capture the live workspace before sessions are torn down."""
+
+    def test_snapshot_before_teardown_persists_live_workspace(self):
+        with patch.object(webview_launcher, "save_workspace_snapshot") as save:
+            webview_launcher._snapshot_workspace_before_teardown("unit")
+        save.assert_called_once_with(webview_launcher.session_manager)
+
+    def test_snapshot_before_teardown_swallows_errors(self):
+        with patch.object(
+            webview_launcher,
+            "save_workspace_snapshot",
+            side_effect=RuntimeError("disk full"),
+        ):
+            # Must not raise: teardown/exit paths cannot be blocked by a snapshot.
+            webview_launcher._snapshot_workspace_before_teardown("unit")
+
+
 class SaveDownloadBridgeTestCase(unittest.TestCase):
     """Native-window explorer download bridge (WebView2 blocks anchor downloads)."""
 

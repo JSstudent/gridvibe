@@ -10499,6 +10499,101 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(snapshot["groups"], [])
         self.assertIsNone(web_runtime_state.load_restorable_workspace())
 
+    def test_prune_group_from_snapshot_removes_only_target(self):
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "saved_at": time.time(),
+                    "groups": [
+                        {"group_id": "g1", "name": "one"},
+                        {"group_id": "g2", "name": "two"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        web_runtime_state.prune_group_from_snapshot("g1")
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual([g["group_id"] for g in data["groups"]], ["g2"])
+
+    def test_group_close_prunes_only_that_group_not_rebuild_from_live(self):
+        """Bug 1: closing a group prunes just it from the snapshot instead of
+        rebuilding from a live set that may have collapsed to a leftover pane."""
+        group_a = self._launch_explorer_group(name="Alpha")
+        self._launch_explorer_group(name="Beta")
+        # Simulate the live set collapsing (e.g. the session window closed and
+        # Beta is no longer tracked) while the snapshot still records both.
+        beta_group_id = [
+            g.group_id
+            for g in api.session_manager.get_all_groups()
+            if g.name == "Beta"
+        ][0]
+        api.session_manager.remove_group(beta_group_id)
+
+        response = self.client.delete(f"/api/sessions?group={group_a}")
+        self.assertEqual(response.status_code, 200)
+        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
+        # A rebuild-from-live would have dropped Beta (no longer live) and left
+        # nothing; pruning keeps the previously-captured Beta.
+        self.assertEqual([g["name"] for g in snapshot["groups"]], ["Beta"])
+
+    def test_restore_launch_skips_agent_preflight_clearing(self):
+        """Bug 2: a restore replays the workspace verbatim, so a cold post-restart
+        agent probe must not clear the command and drop its auto-mode flag."""
+        with patch.object(api.socketio, "start_background_task"), patch.object(
+            api, "_sanitize_agent_launch_commands"
+        ) as sanitize:
+            response = self.client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "wsl",
+                    "session_name": "Restored",
+                    "restore": True,
+                    "sessions": [
+                        {
+                            "directory": str(self.repo_dir),
+                            "title": "Agent",
+                            "startup_mode": "agent",
+                            "initial_command": "claude",
+                            "initial_command_mode": "agent",
+                            "agent_selection": "claude",
+                            "agent_auto_mode": True,
+                        }
+                    ],
+                },
+            )
+        self.assertEqual(response.status_code, 201)
+        sanitize.assert_not_called()
+        self.assertEqual(response.get_json()["warnings"], [])
+        session = response.get_json()["sessions"][0]
+        self.assertEqual(session["initial_command"], "claude")
+        self.assertTrue(session["agent_auto_mode"])
+
+    def test_normal_launch_still_runs_agent_preflight_clearing(self):
+        with patch.object(api.socketio, "start_background_task"), patch.object(
+            api, "_sanitize_agent_launch_commands", return_value=[]
+        ) as sanitize:
+            response = self.client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "wsl",
+                    "session_name": "Fresh",
+                    "sessions": [
+                        {
+                            "directory": str(self.repo_dir),
+                            "title": "Agent",
+                            "startup_mode": "agent",
+                            "initial_command": "claude",
+                            "initial_command_mode": "agent",
+                            "agent_selection": "claude",
+                        }
+                    ],
+                },
+            )
+        self.assertEqual(response.status_code, 201)
+        sanitize.assert_called_once()
+
     def test_stale_or_missing_snapshots_are_not_restorable(self):
         self.assertIsNone(web_runtime_state.load_restorable_workspace())
         stale = {
