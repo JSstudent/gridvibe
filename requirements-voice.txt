@@ -1,6 +1,6 @@
 # Optional offline speech-to-text dependencies
 vosk>=0.3.45
-websockets>=16.1
+websockets>=16.1.1
 faster-whisper>=1.2.1
 numpy>=2.4.6
 
