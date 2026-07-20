@@ -29,6 +29,21 @@ DEFAULT_SAVED_SESSION_NAME = "Default Session"
 EXPLORER_MAX_OPEN_TABS = 12
 EXPLORER_MAX_TAB_PATH_LENGTH = 4096
 
+# Per-tab view persistence (item 2.f): mode + scroll fraction + content
+# identity + editor zoom per open tab, plus the global Markdown appearance
+# (ISSUE-2026-033). Allowlists and bounds mirror the client
+# (`EXPLORER_MD_PRESETS` / `EXPLORER_MD_FONTS`, the file-view panel names,
+# and `EXPLORER_EDITOR_FONT_MIN/MAX` in web/static/js/terminals.js). The
+# reserved `__preview__` key carries the permanent Preview tab's zoom only —
+# its content is transient by design.
+EXPLORER_TAB_VIEW_MODES = ("source", "preview", "diff")
+EXPLORER_MAX_TAB_VIEW_IDENTITY_LENGTH = 64
+EXPLORER_PREVIEW_TAB_KEY = "__preview__"
+EXPLORER_EDITOR_FONT_MIN = 10
+EXPLORER_EDITOR_FONT_MAX = 24
+EXPLORER_MD_PRESETS = ("default", "paper", "contrast", "vscode")
+EXPLORER_MD_FONTS = ("system", "serif", "mono")
+
 
 def _normalize_explorer_tab_path(value: Any) -> str:
     """Normalize one persisted explorer tab path (root-relative, no traversal).
@@ -73,6 +88,79 @@ def _normalize_explorer_active_tab(value: Any, open_tabs: List[str]) -> str:
     return path if path in open_tabs else ""
 
 
+def _normalize_explorer_md_choice(value: Any, allowed: tuple) -> str:
+    """Return an allowlisted Markdown appearance value, or "" for unset."""
+    text = str(value or "").strip()
+    return text if text in allowed else ""
+
+
+def _normalize_explorer_tab_font_size(value: Any) -> int:
+    """Clamp a persisted per-tab editor font size to the client bounds; 0 = unset."""
+    try:
+        font_size = int(value)
+    except (TypeError, ValueError):
+        return 0
+    if font_size <= 0:
+        return 0
+    return max(EXPLORER_EDITOR_FONT_MIN, min(EXPLORER_EDITOR_FONT_MAX, font_size))
+
+
+def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str, Any]:
+    """Validate the per-tab view map: mode + scroll fraction + identity + zoom.
+
+    Only entries for persisted open tabs survive (plus the reserved Preview
+    key, which keeps zoom and the tab's own separated path — shown file and/or
+    browsed directory); the mode must be a known file view, the scroll is
+    clamped to a [0, 1] fraction (OD-4), the content-identity hash is a short
+    opaque token, and the font size is clamped to the editor's zoom bounds —
+    anything else is dropped rather than restored.
+    """
+    if not isinstance(value, dict):
+        return {}
+    views: Dict[str, Any] = {}
+    for raw_path, raw_view in value.items():
+        if not isinstance(raw_view, dict):
+            continue
+        if str(raw_path) == EXPLORER_PREVIEW_TAB_KEY:
+            record: Dict[str, Any] = {}
+            font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
+            if font_size:
+                record["font_size"] = font_size
+            preview_path = _normalize_explorer_tab_path(raw_view.get("path"))
+            if preview_path:
+                record["path"] = preview_path
+            preview_dir = _normalize_explorer_tab_path(raw_view.get("dir"))
+            if preview_dir:
+                record["dir"] = preview_dir
+            if record and EXPLORER_PREVIEW_TAB_KEY not in views:
+                views[EXPLORER_PREVIEW_TAB_KEY] = record
+            continue
+        path = _normalize_explorer_tab_path(raw_path)
+        if not path or path not in open_tabs or path in views:
+            continue
+        record: Dict[str, Any] = {}
+        mode = str(raw_view.get("mode") or "")
+        if mode in EXPLORER_TAB_VIEW_MODES:
+            try:
+                scroll = float(raw_view.get("scroll", 0.0))
+            except (TypeError, ValueError):
+                scroll = 0.0
+            if scroll != scroll:  # NaN guard
+                scroll = 0.0
+            identity = str(raw_view.get("identity") or "")
+            if len(identity) > EXPLORER_MAX_TAB_VIEW_IDENTITY_LENGTH:
+                identity = ""
+            record["mode"] = mode
+            record["scroll"] = max(0.0, min(1.0, scroll))
+            record["identity"] = identity
+        font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
+        if font_size:
+            record["font_size"] = font_size
+        if record:
+            views[path] = record
+    return views
+
+
 def _default_terminal_entries():
     """Build default per-terminal settings."""
     return [
@@ -89,6 +177,9 @@ def _default_terminal_entries():
             "explorer_git_open": False,
             "explorer_open_tabs": [],
             "explorer_active_tab": "",
+            "explorer_tab_views": {},
+            "explorer_md_preset": "",
+            "explorer_md_font": "",
             "distribution": "",
             "use_wsl": False,
             "use_powershell": False,
@@ -274,6 +365,9 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
                 "explorer_git_open": bool(entry.get("explorer_git_open")),
                 "explorer_open_tabs": open_tabs,
                 "explorer_active_tab": _normalize_explorer_active_tab(entry.get("explorer_active_tab"), open_tabs),
+                "explorer_tab_views": _normalize_explorer_tab_views(entry.get("explorer_tab_views"), open_tabs),
+                "explorer_md_preset": _normalize_explorer_md_choice(entry.get("explorer_md_preset"), EXPLORER_MD_PRESETS),
+                "explorer_md_font": _normalize_explorer_md_choice(entry.get("explorer_md_font"), EXPLORER_MD_FONTS),
                 "distribution": str(entry.get("distribution") or ""),
                 "use_wsl": bool(entry.get("use_wsl")) and not use_powershell,
                 "use_powershell": use_powershell,
@@ -385,6 +479,15 @@ def _merge_workspace_session_config(
         )
         saved_terminal["explorer_active_tab"] = (
             workspace_terminal["explorer_active_tab"] if startup_mode == "explorer" else ""
+        )
+        saved_terminal["explorer_tab_views"] = (
+            workspace_terminal["explorer_tab_views"] if startup_mode == "explorer" else {}
+        )
+        saved_terminal["explorer_md_preset"] = (
+            workspace_terminal["explorer_md_preset"] if startup_mode == "explorer" else ""
+        )
+        saved_terminal["explorer_md_font"] = (
+            workspace_terminal["explorer_md_font"] if startup_mode == "explorer" else ""
         )
 
         # Browser panes need a valid URL, but navigation performed in the live

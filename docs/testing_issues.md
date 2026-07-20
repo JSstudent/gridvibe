@@ -1,5 +1,5 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-18
+Last updated: 2026-07-19
 
 ## Open Issues
 
@@ -30,112 +30,71 @@ The captured restore requests contain a valid `saved_session_id`, SSH host, user
 ### Proposed solution:
 Keep passwords out of `runtime_state.json` and add a server-side restore preparation path that resolves each SSH group's normalized `saved_session_id` through `load_saved_sessions()` / `_find_saved_session_entry()`, decrypts the preset password using the existing `web/secrets.py` flow, and applies it only to the in-memory launch configuration after validating that the preset is still an SSH preset for the same host, username, and port. Do not return the rehydrated password from `/api/runtime-state`, send it back through the browser, or include it in request/session logs. When the saved preset is missing, changed, lacks a password, or does not match the snapshot target, preserve key/agent authentication attempts but expose an in-page credential/retry path rather than silently counting session creation as restore success. Update the launcher/API restore contract so connection failures remain visible and a `201` record-creation response is not presented as proof that remote panes connected. Add focused tests in `tests/test_api.py` for password-free snapshot persistence, successful saved-password rehydration without secret disclosure, key-auth restore, missing/mismatched/decryption-failed credentials, remote Explorer and agent panes, multiple restored groups, and prevention of the current false-success message when SSH authentication fails.
 
-### Issue ID: ISSUE-2026-035
-- Title: Valid UTF-8 files are rejected when preview sample splits a character
-- Priority: Medium
-- Status: Open
-- Area: `web/explorer.py`, `web/api.py`, `tests/test_api.py`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `flask`, `unicode`, `tests`
-- Reported: 2026-07-17
-
-Description:
-GridVibe Explorer can reject a valid UTF-8 text or Markdown file as binary when the fixed 4,096-byte binary-detection sample ends partway through a multibyte character. The file is then unavailable in both Source and Markdown Preview even though its complete contents decode correctly as UTF-8. Whether a normal text file opens therefore depends on the byte alignment of Unicode characters near the sampling boundary.
-
-Steps to reproduce:
-1. Under an Explorer root, create a supported text file such as `boundary.md` whose bytes begin with 4,095 ASCII bytes followed by a multibyte UTF-8 character, for example `b"a" * 4095 + "─".encode("utf-8") + b"\n"`.
-2. Open `boundary.md` from the GridVibe Explorer file tree.
-3. Observe that the file is not displayed and Explorer reports `Explorer file appears to be binary`, even though decoding the complete file as strict UTF-8 succeeds.
-
-Expected behavior:
-Explorer binary detection should accept a valid UTF-8 file when only the bounded sample ends in an incomplete multibyte sequence. It should continue rejecting NUL-containing content, invalid UTF-8 sequences within the sampled data, excessive control bytes, and genuinely incomplete UTF-8 at the end of a complete short file.
-
-Actual behavior / logs:
-The verified 30,630-byte Markdown file decodes successfully in full as strict UTF-8 and contains no NUL or disallowed control bytes in the first 4 KiB. `_explorer_content_looks_binary()` in `web/explorer.py` slices `raw_content[:EXPLORER_BINARY_SAMPLE_BYTES]`, where `EXPLORER_BINARY_SAMPLE_BYTES` is 4,096, and then calls `sample.decode("utf-8")`. In the reproduced file, byte 4,095 is `E2`, the first byte of the valid three-byte sequence `E2 94 80` (`─`); the remaining two bytes fall immediately outside the sample. The bounded decode raises `UnicodeDecodeError`, the helper returns `True`, and `get_explorer_file()` in `web/api.py` converts that false positive into the 400 error `Explorer file appears to be binary`. Existing tests cover NUL bytes and internally invalid UTF-8 but not a valid multibyte sequence crossing the sample boundary.
-
-### Proposed solution:
-Update `_explorer_content_looks_binary()` in `web/explorer.py` so strict UTF-8 validation distinguishes an incomplete sequence caused only by truncating a larger sample from invalid bytes inside the sample. One safe approach is an incremental strict UTF-8 decoder with `final=False` only when `raw_content` contains bytes beyond the 4,096-byte sample, while retaining final validation for complete inputs; alternatively, extend or trim the sample to a verified code-point boundary without weakening internal-sequence checks. Keep the existing NUL and control-byte heuristics unchanged and preserve the shared local/SFTP path. Add focused regression tests in `tests/test_api.py` for a three-byte character crossing byte 4,096, valid Unicode sequences on either side of the boundary, internally invalid UTF-8 that must still be rejected, a short file ending in an incomplete sequence, and local/remote endpoint parity.
-
-### Issue ID: ISSUE-2026-034
-- Title: Committing via Git sidebar does not reload the Files tree
-- Priority: Low
-- Status: Open
-- Area: `web/static/js/terminals.js`
-- Assignee: Unassigned
-- Tags: `file-explorer`, `git`, `ui`, `tests`
-- Reported: 2026-07-16
-
-Description:
-After a successful commit through the Explorer Git sidebar, the Files tree sidebar is not reloaded and the main pane is not refreshed in tabbed viewer mode. The user must manually trigger a refresh to see the updated working-tree state in the Files tree. The Git status panel itself does update correctly — `performExplorerGitAction` sets `pane._explorerGitRepo` from the backend response and immediately calls `renderExplorerGitPanels` — but `reloadExplorerTree` is never called from that path, leaving the Files tree stale after the commit.
-
-Steps to reproduce:
-1. Open a GridVibe Explorer pane on a Git repository, expand the Files tree, and open the Git sidebar.
-2. Stage one or more changes and commit them via the Commit button in the Git sidebar.
-3. Observe that the Git sidebar updates (staged changes become empty) but the Files tree is not reloaded; any file or directory changes introduced by the commit are not reflected until the user manually refreshes the Explorer pane.
-
-Expected behavior:
-A successful commit should trigger a reload of the Files tree (via `reloadExplorerTree`) so the tree reflects the post-commit working-tree state without requiring manual intervention. In tabbed file viewer mode (the default since ISSUE-2026-014), the currently open file or diff view should also be refreshed to avoid showing stale staged-change hunks for the just-committed files.
-
-Actual behavior / logs:
-Code inspection confirms `performExplorerGitAction` in `web/static/js/terminals.js` (line 8993) sets `pane._explorerGitRepo = data` and calls `renderExplorerGitPanels(index)` on success, which correctly re-renders the Git sidebar. However, `reloadExplorerTree(index)` (line 8938) — which drops cached children and refetches visible tree nodes — is never called. Additionally, `loadExplorerPane` is only called when `pane._explorerMode === 'directory'` (line 9023–9025); since ISSUE-2026-014 made the tabbed file viewer the default mode, this condition is rarely true, so the main pane is also not refreshed. The backend `commit_explorer_git` (web/api.py:847) already returns an updated `_get_git_repo_summary` payload, so no new backend work is needed.
-
-### Proposed solution:
-In `performExplorerGitAction` in `web/static/js/terminals.js`, after a successful commit (i.e., when `succeeded` is true and `endpoint === 'commit'`), call `reloadExplorerTree(index)` to reload the Files tree. `reloadExplorerTree` already guards on `pane._explorerTreeSidebarOpen` internally, so calling it unconditionally is safe. Additionally, consider refreshing any open file or diff view for the committed paths in the tabbed viewer by calling `updateExplorerFileInPlace` or equivalent; at minimum, clear `_explorerDiffContent` so a stale staged diff is not shown after the commit clears the staging area. Add focused tests in `tests/test_api.py` for: post-commit tree reload wiring, reload skipped when tree sidebar is closed, and Git sidebar state reset after commit.
+## Closed Issues
 
 ### Issue ID: ISSUE-2026-033
 - Title: Markdown preview appearance not saved with session presets or restore snapshot
 - Priority: Low
-- Status: Open
+- Status: Closed
 - Area: `web/static/js/terminals.js`, `web/saved_sessions.py`, `web/runtime_state.py`, `tests/test_api.py`
 - Assignee: Unassigned
 - Tags: `file-explorer`, `markdown`, `session`, `settings`, `tests`
 - Reported: 2026-07-16
+- Closed: 2026-07-19
 
 Description:
-The Markdown preview appearance preference (reading-surface preset and font family, introduced by ISSUE-2026-030) is stored exclusively in two global `localStorage` keys — `gridvibe.mdPreviewPreset` and `gridvibe.mdPreviewFont`. It is not included in the saved-session preset schema, the active-workspace Save Session serialization, or the `runtime_state.json` auto-restore snapshot. As a result: (1) a session preset opened on a different machine or after clearing browser storage silently reverts to the default appearance; (2) users who use different Markdown appearances for different work contexts cannot associate an appearance with a saved preset; and (3) the auto-restore snapshot produced on app close cannot faithfully re-apply the appearance independently of the browser's localStorage. Explorer open tabs and sidebar state (`explorer_open_tabs`, `explorer_active_tab`, `explorer_tree_open`, `explorer_git_open`) are already captured correctly in all three paths (ISSUE-2026-015) — this gap is Markdown appearance only.
+The Markdown preview appearance preference (reading-surface preset and font family, introduced by ISSUE-2026-030) was stored exclusively in two global `localStorage` keys — `gridvibe.mdPreviewPreset` and `gridvibe.mdPreviewFont` — and was not included in the saved-session preset schema, the active-workspace Save Session serialization, or the `runtime_state.json` auto-restore snapshot. A session preset opened on a different machine or after clearing browser storage silently reverted to the default appearance.
 
-Steps to reproduce:
-1. Open a GridVibe Explorer pane containing a Markdown file, switch to Preview, and change the reading-surface preset (e.g., to Paper) and font (e.g., to Serif) via the appearance menu.
-2. Save the active workspace via the **Save Session** button and confirm the preset is saved.
-3. Clear the browser's `localStorage` (or open the same saved preset in a different browser/machine), then relaunch the saved session and open a Markdown preview.
-4. Observe that the preview reverts to the default appearance (System preset, system font) regardless of the saved session, because the appearance is not in the preset schema.
+Resolution:
+Implemented per the proposed solution as part of follow-up item 2.f. `buildWorkspaceTerminalEntry()` now serializes `explorer_md_preset` / `explorer_md_font` (read via `explorerMarkdownAppearance()`) for explorer panes; `_normalize_terminal_entries()` in `web/saved_sessions.py` allowlist-validates both (preset ∈ `{default, paper, contrast, vscode}` — the actual client keys, including the Wave 1 Slate preset — font ∈ `{system, serif, mono}`) and `_merge_workspace_session_config()` gates them to explorer panes; both fields joined `_SESSION_SNAPSHOT_FIELDS` in `web/runtime_state.py` and the `TerminalSession` schema. On restore, `applyExplorerSessionMarkdownAppearance()` applies the saved appearance through `setExplorerMarkdownAppearance()` — which also updates the shared `localStorage` keys, keeping the appearance global as documented — once per session id, so a close-driven pane rebuild never clobbers an appearance changed since launch, and sessions without the fields keep the local preference. The launcher round-trips both fields via row datasets without editing them. Covered by `test_normalize_terminal_entries_validates_tab_views_and_md_appearance`, `test_workspace_save_round_trips_tab_views_and_md_appearance`, `test_terminals_page_persists_tab_views_and_markdown_appearance`, `test_launcher_round_trips_explorer_tab_views_and_markdown_appearance`, and `test_runtime_state_snapshot_includes_tab_views_and_md_appearance` in `tests/test_api.py`.
 
-Expected behavior:
-The Markdown preview appearance (preset and font family) should round-trip through the saved-session preset, the active-workspace Save Session flow, the launcher resave path, and the `runtime_state.json` auto-restore snapshot. Relaunching a saved session — on any machine and regardless of `localStorage` state — should restore the Markdown appearance the session was saved with.
+### Issue ID: ISSUE-2026-034
+- Title: Committing via Git sidebar does not reload the Files tree
+- Priority: Low
+- Status: Closed
+- Area: `web/static/js/terminals.js`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `git`, `ui`, `tests`
+- Reported: 2026-07-16
+- Closed: 2026-07-19
 
-Actual behavior / logs:
-Code inspection confirms `buildWorkspaceTerminalEntry()` in `web/static/js/terminals.js` (line 1499) serializes `explorer_open_tabs` and `explorer_active_tab` but no Markdown appearance fields. `_normalize_terminal_entries()` in `web/saved_sessions.py` validates the tab fields (lines 261–274) but has no `md_preset` or `md_font` handling. `_SESSION_SNAPSHOT_FIELDS` in `web/runtime_state.py` (lines 27–46) lists all explorer fields but no Markdown appearance keys. `EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset'` and `EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont'` (terminals.js:9438–9439) are read and written only through `localStorage`, with no server-side write path.
+Description:
+After a successful commit through the Explorer Git sidebar, the Files tree sidebar was not reloaded and the main pane was not refreshed in tabbed viewer mode: `performExplorerGitAction` updated the Git panel from the backend response but never called `reloadExplorerTree`, and `loadExplorerPane` only ran in the rarely-active directory mode, so the tree and any open file/diff went stale after a commit.
 
-### Proposed solution:
-Add two fields — e.g. `explorer_md_preset` and `explorer_md_font` — to the saved-session terminal entry schema. In `buildWorkspaceTerminalEntry()` in `web/static/js/terminals.js`, read the current `localStorage` appearance (via the existing `explorerMarkdownAppearance()`) for explorer panes and include it in the serialized entry. In `web/saved_sessions.py`, normalize and allowlist-validate both fields (same safe-default logic as `explorerMarkdownAppearance()`: preset ∈ `{default, paper, high-contrast}`, font ∈ `{system, serif, mono}`) in `_normalize_terminal_entries()` and gate them to explorer panes in `_merge_workspace_session_config`. Add both fields to `_SESSION_SNAPSHOT_FIELDS` in `web/runtime_state.py`. On session restore in `web/static/js/terminals.js`, after the Explorer pane is initialized, apply the saved appearance via `setExplorerMarkdownAppearance()` if the session carries the field — fallback to the current `localStorage` value when the field is absent so existing presets degrade gracefully. Since the appearance is currently global (one pair of localStorage keys for all panes), the restore path should apply to the pane being opened and also update the shared `localStorage` keys for consistency; document any per-pane vs. global behaviour choice explicitly. Add focused tests in `tests/test_api.py` for: normalization and allowlist validation of both fields, non-explorer pane exclusion, saved-session round-trips, runtime-state field presence, and client restore wiring.
+Resolution:
+Implemented per the proposed solution, generalised to every worktree-mutating action (follow-up Wave 3 / item 1.a). `performExplorerGitAction()` now routes `stage`, `unstage`, `revert`, `commit`, and the new `stage-all` / `discard-all` endpoints (publish excluded — remote-only) through a shared `refreshExplorerAfterGitAction()` that reloads the Files tree (`reloadExplorerTree` guards internally on `pane._explorerTreeSidebarOpen`), invalidates the cached diff (`_explorerDiffLoaded` / `_explorerDiffCacheKey`), and re-fetches the currently open file in place with scroll preserved — bulk actions refresh whatever file is open, single-path actions only their own path. The revert flow's bespoke reopen was folded into the shared refresh. Covered by `test_terminals_page_git_actions_refresh_tree_and_open_file` in `tests/test_api.py`.
 
 ### Issue ID: ISSUE-2026-032
 - Title: Git sidebar "Changes" header has no Stage All button
 - Priority: Low
-- Status: Open
+- Status: Closed
 - Area: `web/static/js/terminals.js`, `web/api.py`, `web/explorer.py`, `tests/test_api.py`
 - Assignee: Unassigned
 - Tags: `file-explorer`, `git`, `ui`, `flask`, `tests`
 - Reported: 2026-07-16
+- Closed: 2026-07-19
 
 Description:
-The Git sidebar's **Changes** (unstaged) section header contains only a plain title label. There is no action to stage all uncommitted working-tree changes at once. Users must stage each file individually using the per-row `+` button, which is slow when many files are modified. The **Staged Changes** section already has a commit action in its footer; the **Changes** section has no equivalent bulk action for its header row.
+The Git sidebar's **Changes** (unstaged) section header contained only a plain title label with no action to stage all uncommitted working-tree changes at once; each file had to be staged individually with its per-row `+` button.
 
-Steps to reproduce:
-1. Open a GridVibe Explorer pane rooted in a Git repository that has two or more modified tracked files.
-2. Open the Git sidebar and inspect the **Changes** section header row.
-3. Observe that the header contains only the "Changes" label and no "Stage All" button; each file must be staged individually with its per-row `+` button.
+Resolution:
+Implemented per the proposed solution (follow-up Wave 3 / item 1.b). The **Changes** header now carries a compact **Stage All** button (`data-explorer-git-stage-all`, styled like the per-row `+` controls, disabled when the unstaged list is empty or a Git action is busy) wired to `explorerGitStageAll(index)` → `POST /api/explorer/<session_id>/git/stage-all` → `_git_stage_all_paths()` in `web/explorer.py` (`git add --all` scoped to the repository root, run with `write=True` so `GIT_TERMINAL_PROMPT=0`). Success returns the updated repository summary and routes through the shared ISSUE-2026-034 refresh. A sibling **Discard All** button (follow-up item 1.c, OD-1) landed in the same header: tracked-worktree-only `git restore --worktree` via `POST .../git/discard-all`, in-page confirm, no `git clean`. Covered by `test_explorer_git_stage_all_stages_every_change`, `test_explorer_git_stage_all_requires_a_repository`, the three discard-all tests, `test_git_discardable_worktree_paths_filters_porcelain_records`, and `test_terminals_page_git_bulk_action_controls_are_present` in `tests/test_api.py`.
 
-Expected behavior:
-The **Changes** section header should include a compact "Stage All" button that stages every currently listed unstaged change in a single action (equivalent to `git add -A` scoped to the repository root). After the action completes, the Git summary should refresh and the staged files should appear under **Staged Changes**, consistent with how individual staging already works.
+### Issue ID: ISSUE-2026-035
+- Title: Valid UTF-8 files are rejected when preview sample splits a character
+- Priority: Medium
+- Status: Closed
+- Area: `web/explorer.py`, `web/api.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `file-explorer`, `flask`, `unicode`, `tests`
+- Reported: 2026-07-17
+- Closed: 2026-07-18
 
-Actual behavior / logs:
-Code inspection confirms the **Changes** section header in `renderExplorerGitSidebarContent()` (terminals.js:8411–8416) is rendered as `<div class="explorer-diff-sidebar-title">Changes</div>` with no accompanying button. `explorerGitStageFile(index, path)` (terminals.js:9029) takes a single `path` argument and delegates to `performExplorerGitAction(index, 'stage', { path })`. The backend route `POST /api/explorer/<session_id>/git/stage` (api.py:792) similarly accepts one `path` field and calls `_git_stage_path(backend, root_path, file_path)`. No `stage_all` client function, no stage-all button, and no bulk-stage endpoint exist anywhere in the codebase (confirmed by literal search).
+Description:
+GridVibe Explorer could reject a valid UTF-8 text or Markdown file as binary when the fixed 4,096-byte binary-detection sample ended partway through a multibyte character. The file was then unavailable in both Source and Markdown Preview even though its complete contents decoded correctly as UTF-8. Whether a normal text file opened therefore depended on the byte alignment of Unicode characters near the sampling boundary.
 
-### Proposed solution:
-Add a "Stage All" button to the **Changes** header row in `renderExplorerGitSidebarContent()` in `web/static/js/terminals.js`, disabled when the unstaged list is empty or a Git action is busy. Wire it to a new client function (e.g. `explorerGitStageAll(index)`) that calls a new `POST /api/explorer/<session_id>/git/stage-all` route in `web/api.py`. The backend handler should live in `web/explorer.py` (e.g. `_git_stage_all_paths(backend, root_path)`) and run `git add -A` (or `git add .`) with `GIT_TERMINAL_PROMPT=0`, scoped to the repository root, consistent with the existing single-file stage helper. After success, return the updated repository summary and refresh the sidebar the same way individual staging does. Ensure busy-state toggling prevents overlapping actions, align the button style with the existing per-row `+` buttons and the Unstage/Commit controls, and preserve the read-only guarantee for file content. Add focused tests in `tests/test_api.py` for: the stage-all endpoint success and error paths, out-of-root/invalid session rejection, the rendered sidebar button presence, disabled state when no unstaged changes exist, and client wiring through `performExplorerGitAction`.
-
-## Closed Issues
+Resolution:
+Implemented exactly per the proposed solution: `_explorer_content_looks_binary()` in `web/explorer.py` now decodes the 4,096-byte sample through an incremental strict UTF-8 decoder with `final=False` only when `raw_content` holds bytes beyond the sample, so a trailing partial multibyte sequence caused purely by sampling is deferred while invalid bytes inside the sample, NUL bytes, excessive control bytes, and genuinely truncated short files are still rejected (shared local/SFTP path unchanged, NUL/control-byte heuristics intact). Closed with the follow-up Wave 2 regression tests in `tests/test_api.py`: `test_explorer_binary_detection_allows_multibyte_char_crossing_sample_boundary` (three-byte `─` crossing byte 4,096), `test_explorer_binary_detection_rejects_invalid_utf8_inside_oversized_sample` (invalid sequence inside the sample still rejected), `test_explorer_file_accepts_utf8_split_across_sample_boundary` and `test_explorer_file_accepts_utf8_split_across_sample_boundary_remote` (local/SFTP endpoint parity); the pre-existing `test_explorer_binary_detection_rejects_incomplete_utf8_at_content_end` covers the short-file case.
 
 ### Issue ID: ISSUE-2026-031
 - Title: App Settings action buttons overlap voice settings content

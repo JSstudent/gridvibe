@@ -53,6 +53,9 @@ class TerminalSession:
     explorer_git_open: bool = False
     explorer_open_tabs: List[str] = field(default_factory=list)
     explorer_active_tab: str = ""
+    explorer_tab_views: Dict[str, Any] = field(default_factory=dict)
+    explorer_md_preset: str = ""
+    explorer_md_font: str = ""
     status: SessionStatus = SessionStatus.PENDING
     created_at: float = field(default_factory=time.time)
     connected_at: Optional[float] = None
@@ -83,6 +86,9 @@ class TerminalSession:
             "explorer_git_open": self.explorer_git_open,
             "explorer_open_tabs": list(self.explorer_open_tabs),
             "explorer_active_tab": self.explorer_active_tab,
+            "explorer_tab_views": dict(self.explorer_tab_views),
+            "explorer_md_preset": self.explorer_md_preset,
+            "explorer_md_font": self.explorer_md_font,
             "status": self.status.value,
             "created_at": self.created_at,
             "connected_at": self.connected_at,
@@ -268,6 +274,9 @@ class SessionManager:
                     explorer_git_open=bool(config.get("explorer_git_open")),
                     explorer_open_tabs=list(config.get("explorer_open_tabs") or []),
                     explorer_active_tab=str(config.get("explorer_active_tab") or ""),
+                    explorer_tab_views=dict(config.get("explorer_tab_views") or {}),
+                    explorer_md_preset=str(config.get("explorer_md_preset") or ""),
+                    explorer_md_font=str(config.get("explorer_md_font") or ""),
                 )
                 created.append(session)
             except Exception as e:
@@ -304,6 +313,9 @@ class SessionManager:
             "explorer_git_open",
             "explorer_open_tabs",
             "explorer_active_tab",
+            "explorer_tab_views",
+            "explorer_md_preset",
+            "explorer_md_font",
         }
         with self.lock:
             session = self.sessions.get(session_id)

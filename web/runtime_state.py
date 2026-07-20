@@ -44,6 +44,9 @@ _SESSION_SNAPSHOT_FIELDS = (
     "explorer_git_open",
     "explorer_open_tabs",
     "explorer_active_tab",
+    "explorer_tab_views",
+    "explorer_md_preset",
+    "explorer_md_font",
 )
 
 
@@ -116,6 +119,45 @@ def load_restorable_workspace(
     if not isinstance(saved_at, (int, float)) or time.time() - saved_at > max_age_seconds:
         return None
     return data
+
+
+def prune_group_from_snapshot(group_id: str) -> None:
+    """Remove one group from the persisted snapshot without rebuilding it.
+
+    Closing a group must not rebuild the whole snapshot from the live session
+    manager: mid-session the live set can be transiently smaller than the
+    workspace the user actually has (e.g. a leftover scratch pane), which would
+    collapse the restorable snapshot. Instead we surgically drop just the closed
+    group and keep the rest of the last-written shape intact.
+    """
+    group_id = str(group_id or "").strip()
+    if not group_id:
+        return
+    try:
+        with _runtime_state_lock:
+            try:
+                with open(RUNTIME_STATE_PATH, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except FileNotFoundError:
+                return
+            if not isinstance(data, dict) or not isinstance(data.get("groups"), list):
+                return
+            remaining = [
+                group
+                for group in data["groups"]
+                if isinstance(group, dict) and group.get("group_id") != group_id
+            ]
+            if len(remaining) == len(data["groups"]):
+                return
+            data["groups"] = remaining
+            data["saved_at"] = time.time()
+            temp_path = f"{RUNTIME_STATE_PATH}.tmp"
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2)
+                handle.write("\n")
+            os.replace(temp_path, RUNTIME_STATE_PATH)
+    except Exception as exc:
+        logger.warning("Could not prune group %s from runtime state: %s", group_id, exc)
 
 
 def clear_runtime_state() -> None:

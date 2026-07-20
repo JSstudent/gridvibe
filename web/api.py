@@ -98,8 +98,10 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _get_git_diff,
     _get_git_repo_summary,
     _git_commit,
+    _git_discard_all_paths,
     _git_publish,
     _git_revert_path,
+    _git_stage_all_paths,
     _git_stage_path,
     _git_status_for_entry,
     _git_unstage_path,
@@ -311,8 +313,13 @@ def _public_app_config() -> Dict[str, Any]:
     }
 
 
-def _broadcast_app_config_update():
-    """Notify open app windows that launcher-editable settings changed."""
+def _broadcast_app_config_update(apply_scope: str = "session"):
+    """Notify open app windows that launcher-editable settings changed.
+
+    ``apply_scope`` tells open workspaces which panes restyle (OD-14): the
+    default ``session`` targets only the focused terminal, ``all`` pushes the
+    font settings to every active session.
+    """
     socketio.emit(
         "app_config_updated",
         {
@@ -325,6 +332,7 @@ def _broadcast_app_config_update():
             "terminal": {
                 "font_family": runtime_config.terminal_font_family,
                 "font_size": runtime_config.terminal_font_size,
+                "apply_scope": "all" if apply_scope == "all" else "session",
             },
             "timestamp": int(time.time() * 1000),
         },
@@ -619,12 +627,20 @@ def set_app_config():
     if not isinstance(data, dict):
         return jsonify({"error": "Invalid payload"}), 400
 
+    # OD-14: the apply scope is a one-shot modifier for open windows — it rides
+    # the broadcast below but must never be persisted into config.json
+    # (_normalize_app_config_update builds the persisted dict without it).
+    terminal_payload = data.get("terminal")
+    if not isinstance(terminal_payload, dict):
+        terminal_payload = {}
+    apply_scope = str(terminal_payload.get("apply_scope", "")).strip().lower()
+
     with _config_lock:
         current = load_config()
         current = _merge_dicts(current, _normalize_app_config_update(data))
         save_config(current)
     _refresh_runtime_config()
-    _broadcast_app_config_update()
+    _broadcast_app_config_update(apply_scope)
     return jsonify(_public_app_config())
 
 
@@ -868,6 +884,38 @@ def unstage_explorer_git_file(session_id: str):
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
         _git_unstage_path(backend, root_path, file_path)
+        summary = _get_git_repo_summary(backend, root_path)
+        return {"root": root_path, **summary}
+
+    return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/git/stage-all', methods=['POST'])
+def stage_all_explorer_git(session_id: str):
+    """Stage every working-tree change in an explorer Git repository (ISSUE-2026-032)."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path = backend.root_directory()
+        _git_stage_all_paths(backend, root_path)
+        summary = _get_git_repo_summary(backend, root_path)
+        return {"root": root_path, **summary}
+
+    return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/git/discard-all', methods=['POST'])
+def discard_all_explorer_git(session_id: str):
+    """Discard every tracked file's unstaged worktree changes (OD-1: no git clean)."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path = backend.root_directory()
+        _git_discard_all_paths(backend, root_path)
         summary = _get_git_repo_summary(backend, root_path)
         return {"root": root_path, **summary}
 
@@ -1239,7 +1287,17 @@ def create_sessions():
 
             prepared_sessions.append(prepared)
 
-        launch_warnings = _sanitize_agent_launch_commands(connection_mode, prepared_sessions)
+        # A restore replays a workspace the user already had running; a cold
+        # post-restart agent probe (status "check_failed") must not silently
+        # clear its startup command, which would drop the agent and its auto-mode
+        # flag. Skip preflight-clearing on restore and let the pane surface any
+        # real launch error itself.
+        is_restore = bool(data.get("restore"))
+        launch_warnings = (
+            []
+            if is_restore
+            else _sanitize_agent_launch_commands(connection_mode, prepared_sessions)
+        )
 
         # Atomic reference swap instead of in-place update so concurrent
         # readers never observe a half-updated layout/count pair.
@@ -1634,7 +1692,7 @@ def close_all_sessions():
         # The user explicitly closed this group, so it must not survive on the
         # empty-group grace period.
         session_manager.clear_disconnected_sessions(force_group_ids={group_id})
-        _broadcast_session_groups_updated("group_closed")
+        _broadcast_session_groups_updated("group_closed", group_id=group_id)
         return jsonify({"message": "Session group closed successfully", "group_id": group_id})
 
     session_manager.close_all_sessions()

@@ -40,7 +40,10 @@ except ImportError:  # pragma: no cover - dependency declared for runtime instal
 
 logger = logging.getLogger(__name__)
 
-EXPLORER_FILE_PREVIEW_MAX_BYTES = 1024 * 1024
+# Raised from 1 MiB to 10 MiB (OD-9): the head/tail ranged-read machinery
+# already scales, and the client renders previews above ~2 MiB as plain text
+# (no syntax highlighting) to keep the viewer responsive.
+EXPLORER_FILE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024
 EXPLORER_GIT_DIFF_MAX_BYTES = 256 * 1024
 EXPLORER_GIT_DIFF_MAX_LINES = 4000
 EXPLORER_GIT_LOG_MAX_COMMITS = 60
@@ -150,6 +153,10 @@ CODE_PREVIEW_FILENAMES = {
     ".gitkeep": "text",
     ".python-version": "text",
     "dockerfile": "dockerfile",
+    "go.mod": "go",
+    "go.sum": "text",
+    "go.work": "go",
+    "go.work.sum": "text",
     "makefile": "makefile",
 }
 EXPLORER_BINARY_SAMPLE_BYTES = 4096
@@ -1538,6 +1545,22 @@ def _git_unstage_path(backend: Any, root_path: str, file_path: str) -> None:
         raise ValueError(_decode_git_output(result.stderr) or "Git unstage failed")
 
 
+def _git_stage_all_paths(backend: Any, root_path: str) -> None:
+    """Stage every working-tree change in an explorer repository.
+
+    Bulk form of _git_stage_path (ISSUE-2026-032): runs ``git add --all``
+    scoped to the repository root so modified, deleted, and untracked files
+    all land in the index in one action.
+    """
+    repo_root = _git_action_repo_root(backend, root_path)
+    try:
+        result = backend.run_git(["add", "--all"], cwd=repo_root, write=True)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git stage all timed out") from exc
+    if result.returncode != 0:
+        raise ValueError(_decode_git_output(result.stderr) or "Git stage all failed")
+
+
 _GIT_UNMERGED_STATUS_CODES = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
 
 
@@ -1586,6 +1609,67 @@ def _git_revert_path(backend: Any, root_path: str, file_path: str) -> None:
             _decode_git_output(result.stderr)
             or _decode_git_output(result.stdout)
             or "Git revert failed"
+        )
+
+
+def _git_discardable_worktree_paths(raw_status: str) -> List[str]:
+    """Return the tracked paths with discardable unstaged changes.
+
+    Parses NUL-terminated ``git status --porcelain -z`` output (no path
+    quoting, so unusual filenames survive) and keeps only entries whose
+    worktree column shows a change, excluding untracked and conflicted files
+    — the same safety envelope as the single-file revert.
+    """
+    paths: List[str] = []
+    records = iter(str(raw_status or "").split("\0"))
+    for record in records:
+        if len(record) < 4:
+            continue
+        code = record[:2]
+        path = record[3:]
+        if code[0] in "RC":
+            # Rename/copy records carry the original path as the next token.
+            next(records, None)
+        if code == "??" or code in _GIT_UNMERGED_STATUS_CODES or "U" in code:
+            continue
+        if code[1] in " .":
+            # Only the index differs; there is nothing unstaged to discard.
+            continue
+        paths.append(path)
+    return paths
+
+
+def _git_discard_all_paths(backend: Any, root_path: str) -> None:
+    """Discard every tracked file's unstaged worktree changes.
+
+    Bulk form of _git_revert_path (OD-1): restores only tracked,
+    non-conflicted worktree changes with ``git restore --worktree``, so
+    staged content is preserved and untracked files are left in place —
+    never ``git clean``.
+    """
+    repo_root = _git_action_repo_root(backend, root_path)
+    try:
+        status = backend.run_git(["status", "--porcelain", "-z"], cwd=repo_root, timeout=5.0)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git discard all timed out") from exc
+    if status.returncode != 0:
+        raise ValueError(_decode_git_output(status.stderr) or "Git discard all failed")
+
+    paths = _git_discardable_worktree_paths(status.stdout.decode("utf-8", errors="replace"))
+    if not paths:
+        raise ValueError("No unstaged changes to discard")
+
+    try:
+        result = backend.run_git(
+            ["restore", "--worktree", "--", *paths], cwd=repo_root, timeout=30.0, write=True
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git discard all timed out") from exc
+    if result.returncode != 0:
+        raise ValueError(
+            _decode_git_output(result.stderr)
+            or _decode_git_output(result.stdout)
+            or "Git discard all failed"
         )
 
 

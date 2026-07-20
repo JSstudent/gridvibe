@@ -85,6 +85,9 @@
         explorer_git_open: false,
         explorer_open_tabs: [],
         explorer_active_tab: '',
+        explorer_tab_views: {},
+        explorer_md_preset: '',
+        explorer_md_font: '',
         distribution: '',
         use_wsl: false,
         use_powershell: false
@@ -517,6 +520,10 @@
         whisperSection?.classList.toggle('hidden', !voiceEnabled || selectedEngine !== 'whisper');
         micSection?.classList.toggle('hidden', !voiceEnabled);
         whisperGpuHint?.classList.toggle('hidden', !voiceEnabled || selectedEngine !== 'whisper' || selectedDevice !== 'cuda');
+        /* OD-13: the free-text font input only shows for the "Custom…" preset. */
+        const fontPresetInput = document.getElementById('appTerminalFontPreset');
+        const fontCustomField = document.getElementById('appTerminalFontCustomField');
+        fontCustomField?.classList.toggle('hidden', fontPresetInput?.value !== 'custom');
     }
 
     function syncAppSettingsForm() {
@@ -548,6 +555,20 @@
         }
         if (terminalFontFamilyInput) {
             terminalFontFamilyInput.value = String(terminal.font_family || DEFAULT_APP_SETTINGS.terminal.font_family);
+        }
+        const terminalFontPresetInput = document.getElementById('appTerminalFontPreset');
+        if (terminalFontPresetInput) {
+            /* A saved stack that matches a preset selects it; anything else is
+               shown through the "Custom…" free-text escape hatch (OD-13). */
+            const family = String(terminal.font_family || DEFAULT_APP_SETTINGS.terminal.font_family);
+            const isPreset = Array.from(terminalFontPresetInput.options)
+                .some(option => option.value !== 'custom' && option.value === family);
+            terminalFontPresetInput.value = isPreset ? family : 'custom';
+        }
+        const terminalApplyAllInput = document.getElementById('appTerminalApplyAll');
+        if (terminalApplyAllInput) {
+            /* One-shot scope modifier (OD-14), never a persisted setting. */
+            terminalApplyAllInput.checked = false;
         }
         if (terminalFontSizeInput) {
             const fontSize = Number(terminal.font_size);
@@ -712,6 +733,18 @@
         return hasCommandKey && !isModifierOnly;
     }
 
+    /* OD-13: the preset dropdown covers the common monospace stacks; the
+       "Custom…" option falls through to the original free-text input so no
+       configurability is lost. */
+    function collectTerminalFontFamily() {
+        const preset = document.getElementById('appTerminalFontPreset')?.value || '';
+        if (preset && preset !== 'custom') {
+            return preset;
+        }
+        return document.getElementById('appTerminalFontFamily')?.value.trim()
+            || DEFAULT_APP_SETTINGS.terminal.font_family;
+    }
+
     function collectAppSettingsForm() {
         return {
             appearance: {
@@ -724,12 +757,14 @@
                 host_key_policy: document.getElementById('appSshHostKeyPolicy')?.value || DEFAULT_APP_SETTINGS.ssh.host_key_policy
             },
             terminal: {
-                font_family: document.getElementById('appTerminalFontFamily')?.value.trim()
-                    || DEFAULT_APP_SETTINGS.terminal.font_family,
+                font_family: collectTerminalFontFamily(),
                 font_size: Number(document.getElementById('appTerminalFontSize')?.value)
                     || DEFAULT_APP_SETTINGS.terminal.font_size,
                 max_sessions: Number(document.getElementById('appTerminalMaxSessions')?.value)
-                    || DEFAULT_APP_SETTINGS.terminal.max_sessions
+                    || DEFAULT_APP_SETTINGS.terminal.max_sessions,
+                /* OD-14: focused-session-only by default; the checkbox opts a
+                   save into pushing font + size to every active session. */
+                apply_scope: document.getElementById('appTerminalApplyAll')?.checked ? 'all' : 'session'
             },
             voice_input: {
                 enabled: Boolean(document.getElementById('appVoiceEnabled')?.checked),
@@ -743,7 +778,7 @@
         };
     }
 
-    function notifyAppConfigUpdated(appSettings) {
+    function notifyAppConfigUpdated(appSettings, applyScope = 'session') {
         const payload = {
             appearance: {
                 theme: normalizeThemePreference(appSettings?.appearance?.theme)
@@ -753,7 +788,8 @@
             },
             terminal: {
                 font_family: String(appSettings?.terminal?.font_family || DEFAULT_APP_SETTINGS.terminal.font_family),
-                font_size: Number(appSettings?.terminal?.font_size) || DEFAULT_APP_SETTINGS.terminal.font_size
+                font_size: Number(appSettings?.terminal?.font_size) || DEFAULT_APP_SETTINGS.terminal.font_size,
+                apply_scope: applyScope === 'all' ? 'all' : 'session'
             },
             timestamp: Date.now(),
             nonce: Math.random().toString(36).slice(2)
@@ -807,11 +843,12 @@
         button.textContent = 'Saving...';
 
         try {
+            const settingsForm = collectAppSettingsForm();
             const [settingsResponse] = await Promise.all([
                 fetch('/api/app-config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(collectAppSettingsForm())
+                    body: JSON.stringify(settingsForm)
                 }),
                 saveVoicePrefs()
             ]);
@@ -821,7 +858,7 @@
             }
 
             applyAppSettings(data);
-            notifyAppConfigUpdated(data);
+            notifyAppConfigUpdated(data, settingsForm.terminal.apply_scope);
             closeAppSettingsModal();
             setUpdateStatus('App settings saved.', 'success');
             showMessage('App settings saved.', 'success');
@@ -848,6 +885,15 @@
         }
         const option = AGENT_OPTIONS.find(item => item.value === normalized);
         return String(option?.auto_mode_flag || '').trim();
+    }
+
+    function agentAutoModeDescription(agentValue) {
+        const normalized = String(agentValue || '').trim().toLowerCase();
+        if (!normalized || normalized === 'other') {
+            return '';
+        }
+        const option = AGENT_OPTIONS.find(item => item.value === normalized);
+        return String(option?.auto_mode_description || '').trim();
     }
 
     function normalizeTerminalCommandUi(terminal) {
@@ -1027,6 +1073,18 @@
         }
     }
 
+    function parseExplorerTabViewsDataset(value) {
+        if (!value) {
+            return {};
+        }
+        try {
+            const parsed = JSON.parse(value);
+            return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
     function collectTerminalDrafts() {
         const rows = Array.from(document.querySelectorAll('.t-row'));
         if (!rows.length) {
@@ -1058,6 +1116,9 @@
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
                 explorer_open_tabs: commandMode === 'explorer' ? parseExplorerOpenTabsDataset(row.dataset.explorerOpenTabs) : [],
                 explorer_active_tab: commandMode === 'explorer' ? (row.dataset.explorerActiveTab || '') : '',
+                explorer_tab_views: commandMode === 'explorer' ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews) : {},
+                explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
+                explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
                 distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
                 use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
                     ? Boolean(row.querySelector('.t-use-wsl')?.checked)
@@ -1551,8 +1612,9 @@
         autoField.classList.toggle('hidden', !available);
         const help = autoField.querySelector('.t-agent-auto-help');
         if (help) {
+            const description = available ? agentAutoModeDescription(selectedAgent) : '';
             help.textContent = available
-                ? `Launches as "${selectedAgent} ${flag}".`
+                ? `Launches as "${selectedAgent} ${flag}".${description ? ` ${description}` : ''}`
                 : '';
         }
         if (!available) {
@@ -1879,6 +1941,9 @@
                     data-explorer-git-open="${terminal.explorer_git_open ? 'true' : 'false'}"
                     data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
                     data-explorer-active-tab="${escHtml(terminal.explorer_active_tab || '')}"
+                    data-explorer-tab-views="${escHtml(JSON.stringify(terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object' ? terminal.explorer_tab_views : {}))}"
+                    data-explorer-md-preset="${escHtml(terminal.explorer_md_preset || '')}"
+                    data-explorer-md-font="${escHtml(terminal.explorer_md_font || '')}"
                 >
                     <div class="t-row-head">
                         <span class="t-badge">T${index + 1}</span>
@@ -2573,7 +2638,10 @@
                         workspace_layout: group.workspace_layout,
                         surface_mode: group.surface_mode,
                         session_name: group.name,
-                        saved_session_id: group.saved_session_id || ''
+                        saved_session_id: group.saved_session_id || '',
+                        // Replay the workspace verbatim: a cold post-restart agent
+                        // probe must not silently clear a command that was working.
+                        restore: true
                     })
                 });
                 if (response.ok) restored += 1;
@@ -2636,6 +2704,8 @@
                     custom_agent: terminal.initial_command_mode === 'agent'
                         ? (terminal.custom_agent || '')
                         : '',
+                    agent_auto_mode: terminal.initial_command_mode === 'agent'
+                        && Boolean(terminal.agent_auto_mode),
                     explorer_tree_open: terminal.startup_mode === 'explorer'
                         ? Boolean(terminal.explorer_tree_open)
                         : false,
@@ -2647,6 +2717,15 @@
                         : [],
                     explorer_active_tab: terminal.startup_mode === 'explorer'
                         ? (terminal.explorer_active_tab || '')
+                        : '',
+                    explorer_tab_views: terminal.startup_mode === 'explorer' && terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object'
+                        ? terminal.explorer_tab_views
+                        : {},
+                    explorer_md_preset: terminal.startup_mode === 'explorer'
+                        ? (terminal.explorer_md_preset || '')
+                        : '',
+                    explorer_md_font: terminal.startup_mode === 'explorer'
+                        ? (terminal.explorer_md_font || '')
                         : '',
                     startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
                         ? terminal.startup_mode

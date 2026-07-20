@@ -36,7 +36,11 @@ from web.explorer import (
     _is_explorer_session,
 )
 from web.hostkeys import _apply_host_key_policy
-from web.runtime_state import save_workspace_snapshot
+from web.runtime_state import (
+    clear_runtime_state,
+    prune_group_from_snapshot,
+    save_workspace_snapshot,
+)
 
 try:
     import pty
@@ -94,16 +98,27 @@ def _broadcast_session_status(session_id: str):
             socketio.emit('session_status', session.to_dict(), room=session_id)
 
 
-def _broadcast_session_groups_updated(reason: str = ""):
+def _broadcast_session_groups_updated(reason: str = "", group_id: str = ""):
     """Notify open terminal windows that the set of session groups changed.
 
     Lets the frontend refresh on push instead of relying on its old 3-second
     reconciliation poll (that poll now only runs as a slow fallback while the
-    Socket.IO connection is down). Every group change also refreshes the
-    restore-after-restart snapshot (feature 10.5), so the persisted workspace
-    shape always matches the live groups.
+    Socket.IO connection is down). Group changes also refresh the
+    restore-after-restart snapshot (feature 10.5).
+
+    Additive/reshaping events (launch, split, reorder, single-pane close) rebuild
+    the snapshot from the live groups, which is authoritative for those. Group
+    closes instead prune only the closed group (or clear the file when the user
+    closes everything): rebuilding from the live set on a close can collapse the
+    snapshot to a transient leftover pane, which is the restore-after-restart
+    bug this guards against.
     """
-    save_workspace_snapshot(session_manager)
+    if reason == "group_closed" and group_id:
+        prune_group_from_snapshot(group_id)
+    elif reason == "all_closed":
+        clear_runtime_state()
+    else:
+        save_workspace_snapshot(session_manager)
     socketio.emit('session_groups_updated', {"reason": reason})
 
 

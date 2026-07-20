@@ -243,7 +243,20 @@
                 <div class="settings-section-title">Terminal</div>
                 <div class="settings-fields-inline">
                     <div class="field">
-                        <label>Font Family</label>
+                        <label>Font</label>
+                        <select id="appTerminalFontPreset" aria-label="Terminal font preset" onchange="updateAppSettingsVisibility()">
+                            <option value="Consolas, Monaco, 'Courier New', monospace" style="font-family: Consolas, Monaco, 'Courier New', monospace">Consolas</option>
+                            <option value="'Cascadia Code', 'Cascadia Mono', Consolas, monospace" style="font-family: 'Cascadia Code', 'Cascadia Mono', Consolas, monospace">Cascadia Code</option>
+                            <option value="'JetBrains Mono', Consolas, monospace" style="font-family: 'JetBrains Mono', Consolas, monospace">JetBrains Mono</option>
+                            <option value="'Fira Code', Consolas, monospace" style="font-family: 'Fira Code', Consolas, monospace">Fira Code</option>
+                            <option value="'Source Code Pro', Consolas, monospace" style="font-family: 'Source Code Pro', Consolas, monospace">Source Code Pro</option>
+                            <option value="Menlo, Monaco, 'Courier New', monospace" style="font-family: Menlo, Monaco, 'Courier New', monospace">Menlo</option>
+                            <option value="'Courier New', Courier, monospace" style="font-family: 'Courier New', Courier, monospace">Courier New</option>
+                            <option value="custom">Custom…</option>
+                        </select>
+                    </div>
+                    <div class="field hidden" id="appTerminalFontCustomField">
+                        <label>Custom Font Family</label>
                         <input id="appTerminalFontFamily" type="text" placeholder="Consolas, Monaco, 'Courier New', monospace" aria-label="Terminal font family">
                     </div>
                     <div class="field">
@@ -255,7 +268,11 @@
                         <input id="appTerminalMaxSessions" type="number" min="1" max="16" step="1" aria-label="Maximum terminal sessions">
                     </div>
                 </div>
-                <div class="settings-hint">Font changes apply to open terminal windows right away. Max sessions applies to new launches.</div>
+                <label class="check-field">
+                    <input id="appTerminalApplyAll" type="checkbox">
+                    <span>Apply to all active sessions</span>
+                </label>
+                <div class="settings-hint">Font and size apply to every terminal in the current session (and to new sessions); check the box to push them to all active sessions. Max sessions applies to new launches.</div>
             </div>
             <div class="voice-settings-panel">
                 <label class="check-field app-voice-enable-row">

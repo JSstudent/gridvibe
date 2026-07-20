@@ -57,6 +57,10 @@ _agent_detection_cache: Dict[Tuple[str, str, str, str, str, int], Tuple[float, D
 _agent_detection_cache_lock = threading.Lock()
 
 
+_AUTO_MODE_OPTION_TOKEN = re.compile(r"^--?[A-Za-z0-9][A-Za-z0-9_-]*$")
+_AUTO_MODE_VALUE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_=-]*$")
+
+
 def _agent_auto_mode_flag(agent_key: Any) -> str:
     """Return the registry-defined auto-mode flag for one agent, or ""."""
     spec = AGENT_REGISTRY.get(_normalize_agent_key(agent_key))
@@ -66,11 +70,31 @@ def _agent_auto_mode_flag(agent_key: Any) -> str:
     if not isinstance(auto_mode, dict):
         return ""
     flag = str(auto_mode.get("flag") or "").strip()
-    # A registered flag must look like a CLI option so a registry typo can
-    # never smuggle a second command into the composed launch line.
-    if not flag.startswith("-") or any(ch.isspace() for ch in flag):
+    # A registered flag is composed onto the launch command line and sent to a
+    # shell, so it must look like one or more CLI options (optionally each
+    # followed by a plain value) separated by single spaces — never anything
+    # carrying shell metacharacters that could smuggle a second command. This
+    # allows multi-token flags like "--sandbox workspace-write" while a registry
+    # typo (";", "$(...)", "rm -rf /") still resolves to no flag.
+    tokens = flag.split(" ")
+    if not tokens or not tokens[0].startswith("-"):
         return ""
+    for token in tokens:
+        matcher = _AUTO_MODE_OPTION_TOKEN if token.startswith("-") else _AUTO_MODE_VALUE_TOKEN
+        if not matcher.match(token):
+            return ""
     return flag
+
+
+def _agent_auto_mode_description(agent_key: Any) -> str:
+    """Return the registry-defined auto-mode description for one agent, or ""."""
+    spec = AGENT_REGISTRY.get(_normalize_agent_key(agent_key))
+    if not isinstance(spec, dict):
+        return ""
+    auto_mode = spec.get("auto_mode")
+    if not isinstance(auto_mode, dict):
+        return ""
+    return str(auto_mode.get("description") or "").strip()
 
 
 def _agent_options() -> List[Dict[str, str]]:
@@ -80,11 +104,12 @@ def _agent_options() -> List[Dict[str, str]]:
             "value": key,
             "label": str(spec.get("label") or key),
             "auto_mode_flag": _agent_auto_mode_flag(key),
+            "auto_mode_description": _agent_auto_mode_description(key),
         }
         for key, spec in AGENT_REGISTRY.items()
     ]
     options.sort(key=lambda item: item["label"])
-    options.append({"value": "other", "label": "other", "auto_mode_flag": ""})
+    options.append({"value": "other", "label": "other", "auto_mode_flag": "", "auto_mode_description": ""})
     return options
 
 
