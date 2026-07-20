@@ -1,6 +1,6 @@
 # GridVibe Follow-up Implementation Plan
 
-Last updated: 2026-07-19
+Last updated: 2026-07-20
 
 This plan covers the **follow-up refinements** captured in
 [`todos.txt`](todos.txt) after the seven original stages in
@@ -32,7 +32,7 @@ and its persistence).
 
 ## At a glance
 
-Done ✅ = implemented in Waves 1–4 (2026-07-18/19) plus 2.e, 5.a, and 2.f (Wave 5, 2026-07-19); 2.g and 2.d stay open.
+Done ✅ = all 21 items implemented: Waves 1–4 (2026-07-18/19), then 2.e, 5.a, and 2.f (Wave 5, 2026-07-19), and finally 2.g and 2.d (Wave 5, 2026-07-20). **This plan is complete.**
 
 | # | Stage | Item | Refs | Size | Done |
 | --- | --- | --- | --- | --- | --- |
@@ -43,10 +43,10 @@ Done ✅ = implemented in Waves 1–4 (2026-07-18/19) plus 2.e, 5.a, and 2.f (Wa
 | 2.a | 2 · Tabbed viewer | Remove the vestigial Back button on the Preview tab | — | Trivial | ✅ |
 | 2.b | 2 · Tabbed viewer | `go.mod` (and peers) not displayed | — | Small | ✅ |
 | 2.c | 2 · Tabbed viewer | Valid UTF-8 rejected when sample splits a character | ISSUE-2026-035 | Small | ✅ |
-| 2.d | 2 · Tabbed viewer | Clicking a tree directory opens it in Preview to browse | — | Medium | |
+| 2.d | 2 · Tabbed viewer | Clicking a tree directory opens it in Preview to browse | — | Medium | ✅ |
 | 2.e | 2 · Tabbed viewer | Preserve per-tab view mode + scroll across tab swaps | — | Large | ✅ |
 | 2.f | 2 · Tabbed viewer | Persist tab modes / scroll / appearance / active tab in sessions | ISSUE-2026-033 | Large | ✅ |
-| 2.g | 2 · Tabbed viewer | Tab drag-reorder, middle-click close, double-click preview→pin | — | Medium | |
+| 2.g | 2 · Tabbed viewer | Tab drag-reorder, middle-click close, double-click preview→pin | — | Medium | ✅ |
 | 3.a | 3 · Markdown | Add a VS Code-style "gray surface / white text" preset | — (extends 030) | Small | ✅ |
 | 3.b | 3 · Markdown | Colour heading titles in **Source** view too | — | Small | ✅ |
 | 4.a | 4 · Large-file preview | Raise preview cap from 1 MiB toward 10 MiB | — (extends 020) | Small | ✅ |
@@ -609,8 +609,9 @@ OD-5 field set), and `2.g` tab reorder/middle-click/double-click (OD-6: Preview
 fixed first) → `2.d` directory-in-Preview browsing with breadcrumb (OD-3, rides
 the same viewer, can slot in once 2.e lands).
 
-> **Status: 2.e, 5.a, and 2.f DONE (2026-07-19); 2.g / 2.d remain open.** `python
-> tests/run_tests.py` (589 tests) and `python -m ruff check .` pass.
+> **Status: 2.e, 5.a, and 2.f DONE (2026-07-19); 2.g and 2.d DONE (2026-07-20)
+> — Wave 5 and the whole plan are complete.** `python tests/run_tests.py`
+> (599 tests) and `python -m ruff check .` pass.
 > - **Tab records carry the snapshot:** each `pane._explorerTabs` entry can now
 >   hold a `view` object — `{ mode, identity, scroll }` — instead of mode and
 >   scroll living in pane-global fields that were re-derived on every activate.
@@ -752,6 +753,63 @@ the same viewer, can slot in once 2.e lands).
 >     `test_create_sessions_carries_explorer_tab_views_and_md_appearance`
 >     (589 tests pass). CHANGELOG updated; ISSUE-2026-033 closed in
 >     `testing_issues.md`.
+
+> - **2.g (2026-07-20, OD-6):** three tab-strip affordances on the 2.e model,
+>   all wired in `wireExplorerTabStripInteractions()` (called from
+>   `renderExplorerTabStrip()`):
+>   - **Drag to reorder:** pinned tabs render `draggable="true"` (the
+>     permanent Preview tab does not); `reorderExplorerPinnedTab()` splices
+>     the pane's tab array and clamps the insertion index behind the Preview
+>     tab's slot, so only pinned tabs reorder and nothing lands ahead of
+>     Preview. Drop-side feedback is a token-driven accent edge
+>     (`drag-before` / `drag-after`) plus a dimmed `dragging` state. The
+>     persisted tab order follows automatically because
+>     `explorerSerializeTabs()` reads the array in order (2.f), and the 5.a
+>     close snapshot rides the same serialization.
+>   - **Middle-click close:** `auxclick` with `button === 1` closes a pinned
+>     tab through the same `closeExplorerTab()` guard as the `×` (never the
+>     Preview tab); `mousedown` suppresses the browser's middle-click
+>     autoscroll on tabs.
+>   - **Double-click Preview → pin:** `promoteExplorerPreviewTab()` folds the
+>     live mode + scroll into the Preview record
+>     (`explorerCaptureActiveTabView()`), creates the pinned tab via the
+>     normal dedup/cap path (`explorerAssignOpenTab()`), copies the full
+>     per-tab state across (`view` snapshot, `fontSize`, `preferredMode`),
+>     and hands the already-rendered viewer DOM to the new tab
+>     (`_explorerRenderedTabId`) — no re-fetch, so the promoted tab shows the
+>     identical source/preview/diff view. A path that is already pinned just
+>     activates that tab (its own state is never clobbered). To keep the
+>     double-click's two leading single-clicks from racing the promotion with
+>     redundant re-fetches, `activateExplorerTab()` is now a no-op when the
+>     requested tab is already active *and* its DOM is current
+>     (`_explorerRenderedTabId` matches).
+> - **2.d (2026-07-20, OD-3):** directory browsing from the tree + breadcrumb:
+>   - **Tree click navigates Preview:** `toggleExplorerTreeDirectory()` keeps
+>     its expand/collapse toggle and additionally browses the clicked
+>     directory in the Preview tab via `loadExplorerPane()` (both on expand
+>     and collapse); clicking the directory the Preview tab already shows is
+>     a pure toggle. `loadExplorerPane()` now runs
+>     `explorerCaptureActiveTabView()` before the loading placeholder, so
+>     tree-click navigation preserves the outgoing tab's mode + scroll
+>     exactly like `openExplorerFile()` does (2.e parity).
+>   - **Reveal no longer force-expands the target:**
+>     `revealExplorerTreePath()` expands only *ancestors* so the target row
+>     becomes visible — previously it expanded the target directory itself,
+>     which would have made every collapse click self-revert once navigation
+>     rides the click.
+>   - **Breadcrumb (OD-3):** `renderExplorerPathBreadcrumb()` turns the
+>     explorer bar's path label into a trail of clickable ancestor segments
+>     (root included) that browse that directory in the Preview tab; the
+>     shown directory/file leaf is inert. All four render paths route
+>     through it (directory listing, file open, in-place refresh, commit
+>     diff), giving the up-one-level / jump-to-ancestor navigation that
+>     replaces the 2.a Back button. Styling is token-driven
+>     (`--explorer-muted` / `--explorer-text` / `--t-accent`).
+>   - **Tests:** `tests/test_api.py` —
+>     `test_terminals_page_tree_directory_click_browses_in_preview`,
+>     `test_terminals_page_explorer_breadcrumb_navigation`, and
+>     `test_terminals_page_tab_strip_drag_middle_click_and_promote`
+>     (599 tests pass). CHANGELOG updated.
 
 Rationale: `2.e` is this plan's magnet exactly the way ISSUE-2026-014 was for the
 original plan — `5.a` (Stage 5) and `2.f` (Stage 2 / ISSUE-033) both need the

@@ -9348,16 +9348,29 @@
         }
 
         ensureExplorerTreeState(pane);
+        /* 2.d: a directory click keeps its expand/collapse toggle AND browses
+           the directory in the Preview tab so the user can drill in from the
+           main pane. Clicking the directory the Preview tab already shows
+           only toggles its expansion. */
+        const alreadyShown = pane._explorerMode === 'directory'
+            && (pane._explorerPath || '') === path;
         if (pane._explorerTreeExpanded.has(path)) {
             pane._explorerTreeExpanded.delete(path);
             renderExplorerTreePanel(index);
+            if (!alreadyShown) {
+                await loadExplorerPane(index, path);
+            }
             return;
         }
 
         pane._explorerTreeExpanded.add(path);
         pane._explorerTreeErrors.delete(path);
         renderExplorerTreePanel(index);
-        await loadExplorerTreeChildren(index, path);
+        const childrenLoading = loadExplorerTreeChildren(index, path);
+        if (!alreadyShown) {
+            await loadExplorerPane(index, path);
+        }
+        await childrenLoading;
     }
 
     /* Expand every ancestor of the pane's current directory or open file. */
@@ -9372,9 +9385,10 @@
             ? (pane._explorerFilePath || '')
             : (pane._explorerPath || '');
         const segments = String(target).split('/').filter(Boolean);
-        if (pane._explorerMode === 'file') {
-            segments.pop();
-        }
+        /* Expand ancestors so the target's own row becomes visible; whether
+           the target directory itself expands stays a tree-click decision —
+           otherwise navigating on click (2.d) would undo a collapse. */
+        segments.pop();
 
         await loadExplorerTreeChildren(index, '');
         let current = '';
@@ -11336,6 +11350,47 @@
         return explorerEnsureViewerShell(index);
     }
 
+    /* ── Preview-header breadcrumb (2.d, OD-3) ──
+       Replaces the removed Back button: the explorer bar's path label becomes
+       a trail of clickable ancestor segments (root included), each browsing
+       that directory in the Preview tab. The final segment — the shown
+       directory or file itself — is inert. */
+    function renderExplorerPathBreadcrumb(index, path, { root = '', fallbackText = '' } = {}) {
+        const label = document.getElementById(`explorer-path-${index}`);
+        if (!label) {
+            return;
+        }
+        const segments = String(path || '').replace(/\\/g, '/').split('/').filter(Boolean);
+        if (!segments.length && fallbackText) {
+            label.textContent = fallbackText;
+            label.title = root || '';
+            return;
+        }
+        const rootName = String(root || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || '/';
+        const crumbs = [];
+        if (segments.length) {
+            crumbs.push(`<button type="button" class="explorer-crumb" data-explorer-crumb="" title="${escHtml(root || '/')}">${escHtml(rootName)}</button>`);
+        } else {
+            crumbs.push(`<span class="explorer-crumb current" title="${escHtml(root || '/')}">${escHtml(rootName)}</span>`);
+        }
+        let current = '';
+        segments.forEach((segment, position) => {
+            current = current ? `${current}/${segment}` : segment;
+            if (position === segments.length - 1) {
+                crumbs.push(`<span class="explorer-crumb current" title="${escHtml(current)}">${escHtml(segment)}</span>`);
+            } else {
+                crumbs.push(`<button type="button" class="explorer-crumb" data-explorer-crumb="${escHtml(current)}" title="${escHtml(current)}">${escHtml(segment)}</button>`);
+            }
+        });
+        label.innerHTML = crumbs.join('<span class="explorer-crumb-sep" aria-hidden="true">/</span>');
+        label.title = root || '';
+        label.querySelectorAll('button[data-explorer-crumb]').forEach(button => {
+            button.addEventListener('click', () => {
+                loadExplorerPane(index, button.dataset.explorerCrumb || '');
+            });
+        });
+    }
+
     function renderExplorerTabStrip(index) {
         const pane = terminals[index];
         const strip = document.getElementById(`explorer-tabs-${index}`);
@@ -11353,7 +11408,7 @@
                 ? ''
                 : `<button type="button" class="explorer-tab-close" data-explorer-tab-close="${escHtml(tab.id)}" title="Close tab" aria-label="Close ${escHtml(label)}">×</button>`;
             return `
-                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}" data-explorer-tab="${escHtml(tab.id)}" title="${escHtml(tab.path || label)}">
+                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}" data-explorer-tab="${escHtml(tab.id)}"${isPreview ? '' : ' draggable="true"'} title="${escHtml(tab.path || label)}">
                     <button type="button" class="explorer-tab-main" data-explorer-tab-open="${escHtml(tab.id)}">
                         ${icon}
                         <span class="explorer-tab-name">${escHtml(label)}</span>
@@ -11372,6 +11427,155 @@
                 closeExplorerTab(index, button.dataset.explorerTabClose || '');
             });
         });
+        strip.querySelectorAll('[data-explorer-tab]').forEach(tabEl => {
+            wireExplorerTabStripInteractions(index, tabEl);
+        });
+    }
+
+    /* 2.g tab-strip affordances: middle-click closes a pinned tab (same
+       guard as the ×), pinned tabs drag-reorder among themselves (OD-6: the
+       permanent Preview tab keeps the first slot and is not draggable), and
+       double-clicking the Preview tab promotes its shown file to a pinned
+       tab in the same view mode. */
+    function wireExplorerTabStripInteractions(index, tabEl) {
+        const id = tabEl.dataset.explorerTab || '';
+        if (id === EXPLORER_PREVIEW_TAB_ID) {
+            tabEl.querySelector('.explorer-tab-main')?.addEventListener('dblclick', () => {
+                promoteExplorerPreviewTab(index);
+            });
+            return;
+        }
+        tabEl.addEventListener('mousedown', event => {
+            if (event.button === 1) {
+                event.preventDefault(); // suppress middle-click autoscroll
+            }
+        });
+        tabEl.addEventListener('auxclick', event => {
+            if (event.button === 1) {
+                event.preventDefault();
+                closeExplorerTab(index, id);
+            }
+        });
+        tabEl.addEventListener('dragstart', event => {
+            const pane = terminals[index];
+            if (pane) {
+                pane._explorerDraggedTabId = id;
+            }
+            event.dataTransfer.effectAllowed = 'move';
+            try {
+                event.dataTransfer.setData('text/plain', id);
+            } catch (_) {
+                /* setData can throw in some embedded WebViews; the drag
+                   still works off the pane-held id. */
+            }
+            tabEl.classList.add('dragging');
+        });
+        tabEl.addEventListener('dragend', () => {
+            const pane = terminals[index];
+            if (pane) {
+                pane._explorerDraggedTabId = '';
+            }
+            clearExplorerTabDragMarkers(index);
+        });
+        tabEl.addEventListener('dragover', event => {
+            const draggedId = terminals[index]?._explorerDraggedTabId || '';
+            if (!draggedId || draggedId === id) {
+                return;
+            }
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'move';
+            const rect = tabEl.getBoundingClientRect();
+            const before = event.clientX < rect.left + rect.width / 2;
+            tabEl.classList.toggle('drag-before', before);
+            tabEl.classList.toggle('drag-after', !before);
+        });
+        tabEl.addEventListener('dragleave', () => {
+            tabEl.classList.remove('drag-before', 'drag-after');
+        });
+        tabEl.addEventListener('drop', event => {
+            const draggedId = terminals[index]?._explorerDraggedTabId || '';
+            if (!draggedId || draggedId === id) {
+                return;
+            }
+            event.preventDefault();
+            const rect = tabEl.getBoundingClientRect();
+            const before = event.clientX < rect.left + rect.width / 2;
+            reorderExplorerPinnedTab(index, draggedId, id, before);
+        });
+    }
+
+    function clearExplorerTabDragMarkers(index) {
+        document.getElementById(`explorer-tabs-${index}`)
+            ?.querySelectorAll('.explorer-tab')
+            .forEach(el => el.classList.remove('dragging', 'drag-before', 'drag-after'));
+    }
+
+    /* 2.g (OD-6): move a pinned tab before/after another pinned tab. Only
+       pinned tabs reorder, and the insertion point is clamped behind the
+       permanent Preview tab so nothing can land ahead of it. The persisted
+       tab order (2.f) follows automatically because explorerSerializeTabs
+       reads the array in order. */
+    function reorderExplorerPinnedTab(index, draggedId, targetId, before) {
+        const pane = terminals[index];
+        if (!pane || !draggedId || draggedId === targetId) {
+            return;
+        }
+        ensureExplorerTabState(pane);
+        const tabs = pane._explorerTabs;
+        const from = tabs.findIndex(tab => tab.pinned && tab.id === draggedId);
+        if (from === -1 || !tabs.some(tab => tab.pinned && tab.id === targetId)) {
+            return;
+        }
+        const [dragged] = tabs.splice(from, 1);
+        let insertAt = tabs.findIndex(tab => tab.id === targetId) + (before ? 0 : 1);
+        const previewPosition = tabs.findIndex(tab => tab.id === EXPLORER_PREVIEW_TAB_ID);
+        insertAt = Math.max(insertAt, previewPosition + 1);
+        tabs.splice(insertAt, 0, dragged);
+        renderExplorerTabStrip(index);
+        persistExplorerTabsToSession(index);
+    }
+
+    /* 2.g: double-clicking the Preview tab keeps its transient file — the
+       shown file becomes a pinned tab carrying the same view mode, scroll,
+       and zoom. The already-rendered viewer DOM is handed to the pinned tab
+       (nothing is re-fetched); an existing pinned tab for the path is just
+       activated, never clobbered. */
+    function promoteExplorerPreviewTab(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const preview = explorerPreviewTab(pane);
+        const path = preview.path || '';
+        if (
+            !path
+            || pane._explorerMode !== 'file'
+            || pane._explorerRenderedTabId !== EXPLORER_PREVIEW_TAB_ID
+        ) {
+            return; // Preview shows a directory or is still loading
+        }
+        const key = explorerNormalizeTabPath(path);
+        const existing = pane._explorerTabs.find(tab => tab.pinned && explorerNormalizeTabPath(tab.path) === key);
+        if (existing) {
+            activateExplorerTab(index, existing.id);
+            return;
+        }
+        // Fold the live mode + scroll into the Preview record, then copy the
+        // full per-tab state onto the new pinned tab.
+        explorerCaptureActiveTabView(index);
+        const pinnedTab = explorerAssignOpenTab(pane, path, { pinned: true });
+        if (preview.view) {
+            pinnedTab.view = { ...preview.view };
+        }
+        if (preview.fontSize) {
+            pinnedTab.fontSize = preview.fontSize;
+        }
+        if (preview.preferredMode) {
+            pinnedTab.preferredMode = preview.preferredMode;
+        }
+        pane._explorerRenderedTabId = pinnedTab.id;
+        renderExplorerTabStrip(index);
+        persistExplorerTabsToSession(index);
     }
 
     function renderExplorerViewerEmpty(index) {
@@ -11431,6 +11635,11 @@
         }
         const tab = explorerFindTab(pane, id);
         if (!tab) {
+            return;
+        }
+        if (pane._explorerActiveTabId === tab.id && pane._explorerRenderedTabId === tab.id) {
+            // Already shown and its DOM is current: re-rendering would only
+            // re-fetch, and would race a Preview-tab double-click promotion.
             return;
         }
         // Capture the outgoing tab's mode + scroll while its DOM is intact.
@@ -11901,12 +12110,8 @@
         list.classList.add('file-view');
         updateExplorerGitSummary(index, data.git_context || null);
 
-        const pathLabel = document.getElementById(`explorer-path-${index}`);
+        renderExplorerPathBreadcrumb(index, path, { root: data.root || '', fallbackText: fileName });
         const upButton = document.getElementById(`explorer-up-${index}`);
-        if (pathLabel) {
-            pathLabel.textContent = path ? `/${path}` : fileName;
-            pathLabel.title = data.root || '';
-        }
         if (upButton) {
             upButton.disabled = false;
         }
@@ -12077,11 +12282,10 @@
         if (metaLabel) {
             metaLabel.textContent = explorerFileMetaParts(data, fileType).join(' - ');
         }
-        const pathLabel = document.getElementById(`explorer-path-${index}`);
-        if (pathLabel) {
-            pathLabel.textContent = path ? `/${path}` : fileName;
-            pathLabel.title = data.root || '';
-        }
+        renderExplorerPathBreadcrumb(index, path || pane._explorerFilePath, {
+            root: data.root || '',
+            fallbackText: fileName
+        });
 
         pane._explorerMode = 'file';
         pane._explorerFilePath = path || pane._explorerFilePath;
@@ -12123,11 +12327,8 @@
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
 
-        const pathLabel = document.getElementById(`explorer-path-${index}`);
+        renderExplorerPathBreadcrumb(index, path, { fallbackText: fileName });
         const upButton = document.getElementById(`explorer-up-${index}`);
-        if (pathLabel) {
-            pathLabel.textContent = path ? `/${path}` : fileName;
-        }
         if (upButton) {
             upButton.disabled = false;
         }
@@ -12277,6 +12478,10 @@
         }
 
         const nextPath = path === null ? (pane._explorerPath || null) : path;
+        // Navigation swaps the shown tab to Preview (tree click, breadcrumb,
+        // open-folder); keep the outgoing tab's mode + scroll before the
+        // loading placeholder guts the viewer (2.e).
+        explorerCaptureActiveTabView(index);
         if (showLoading) {
             renderExplorerMessage(index, 'Loading directory...');
         }
@@ -12321,13 +12526,9 @@
             renderExplorerDirectorySearchControls(index);
             revealExplorerTreePath(index);
 
-            const pathLabel = document.getElementById(`explorer-path-${index}`);
+            renderExplorerPathBreadcrumb(index, data.path || '', { root: data.root || '' });
             const upButton = document.getElementById(`explorer-up-${index}`);
             const list = document.getElementById(`explorer-list-${index}`);
-            if (pathLabel) {
-                pathLabel.textContent = data.path ? `/${data.path}` : data.root || '/';
-                pathLabel.title = data.root || '';
-            }
             if (upButton) {
                 upButton.disabled = !data.parent_path && !data.path;
             }

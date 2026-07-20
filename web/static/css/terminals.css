@@ -1689,6 +1689,39 @@
             font-family: Consolas, Monaco, 'Courier New', monospace;
         }
 
+        /* Breadcrumb segments inside the path label (2.d): ancestor buttons
+           browse that directory in the Preview tab; the current leaf is inert. */
+        .explorer-crumb {
+            border: 0;
+            padding: 0 1px;
+            background: transparent;
+            color: var(--explorer-muted);
+            font: inherit;
+        }
+
+        button.explorer-crumb {
+            cursor: pointer;
+        }
+
+        button.explorer-crumb:hover {
+            color: var(--t-accent);
+            text-decoration: underline;
+        }
+
+        button.explorer-crumb:focus-visible {
+            outline: 2px solid var(--t-accent);
+            outline-offset: -1px;
+        }
+
+        .explorer-crumb.current {
+            color: var(--explorer-text);
+        }
+
+        .explorer-crumb-sep {
+            color: var(--explorer-muted);
+            padding: 0 1px;
+        }
+
         .explorer-git-summary {
             max-width: 30%;
             overflow: hidden;
@@ -1979,6 +2012,20 @@
 
         .explorer-tab:hover:not(.active) {
             color: var(--explorer-text);
+        }
+
+        /* Drag-reorder feedback (2.g): the dragged tab dims, the hovered
+           drop target shows an accent edge on the insertion side. */
+        .explorer-tab.dragging {
+            opacity: .55;
+        }
+
+        .explorer-tab.drag-before {
+            box-shadow: inset 2px 0 0 var(--t-accent);
+        }
+
+        .explorer-tab.drag-after {
+            box-shadow: inset -2px 0 0 var(--t-accent);
         }
 
         .explorer-tab-main:focus-visible,

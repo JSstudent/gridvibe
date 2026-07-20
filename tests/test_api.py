@@ -1378,6 +1378,107 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("assignedTab.preferredMode || ''", html)
         self.assertIn("const preferredFileView = restoredMode || carriedMode;", html)
 
+    def test_terminals_page_tree_directory_click_browses_in_preview(self):
+        """2.d: a Files-tree directory click also browses it in the Preview tab."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        toggle = html[
+            html.index("async function toggleExplorerTreeDirectory(index, path)"):
+            html.index("async function revealExplorerTreePath(index)")
+        ]
+        # Both the expand and the collapse click navigate the Preview tab —
+        # unless the Preview tab already shows that directory (pure toggle).
+        self.assertEqual(toggle.count("await loadExplorerPane(index, path);"), 2)
+        self.assertIn("const alreadyShown = pane._explorerMode === 'directory'", toggle)
+        # Navigating still reveals the target row, but no longer force-expands
+        # the directory itself (that would undo the collapse click).
+        reveal = html[
+            html.index("async function revealExplorerTreePath(index)"):
+            html.index("async function loadExplorerTree(index)")
+        ]
+        self.assertIn("segments.pop();", reveal)
+        self.assertNotIn("if (pane._explorerMode === 'file') {", reveal)
+        # Directory navigation captures the outgoing tab's mode + scroll
+        # before the loading placeholder guts the viewer (2.e parity with
+        # openExplorerFile).
+        load_pane = html[html.index("async function loadExplorerPane(index, path"):]
+        self.assertLess(
+            load_pane.index("explorerCaptureActiveTabView(index);"),
+            load_pane.index("renderExplorerMessage(index, 'Loading directory...');"),
+        )
+
+    def test_terminals_page_explorer_breadcrumb_navigation(self):
+        """2.d (OD-3): the path label is a breadcrumb; ancestors browse in Preview."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function renderExplorerPathBreadcrumb(index, path", html)
+        # Ancestor segments are buttons that navigate the Preview tab; the
+        # shown directory/file itself is inert.
+        self.assertIn('data-explorer-crumb=', html)
+        self.assertIn("loadExplorerPane(index, button.dataset.explorerCrumb || '');", html)
+        self.assertIn('class="explorer-crumb current"', html)
+        # One definition + all four render paths (directory listing, file,
+        # in-place refresh, commit diff) route through it.
+        self.assertEqual(html.count("renderExplorerPathBreadcrumb("), 5)
+        # Token-driven styling only (Regression Guardrail 7).
+        crumb_css = html[html.index(".explorer-crumb {"):html.index(".explorer-crumb-sep {")]
+        self.assertIn("var(--explorer-muted)", crumb_css)
+        self.assertIn("var(--t-accent)", crumb_css)
+        self.assertNotRegex(crumb_css, r"#[0-9a-fA-F]{3,8}\b")
+
+    def test_terminals_page_tab_strip_drag_middle_click_and_promote(self):
+        """2.g: tab drag-reorder (OD-6), middle-click close, Preview double-click pin."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Pinned tabs are draggable; the permanent Preview tab is not.
+        self.assertIn("${isPreview ? '' : ' draggable=\"true\"'}", html)
+        wire = html[
+            html.index("function wireExplorerTabStripInteractions(index, tabEl)"):
+            html.index("function clearExplorerTabDragMarkers(index)")
+        ]
+        # The Preview branch wires only the double-click promotion and returns
+        # before the close/drag handlers (same close guard as the ×).
+        self.assertLess(
+            wire.index("promoteExplorerPreviewTab(index);"),
+            wire.index("auxclick"),
+        )
+        self.assertIn("if (id === EXPLORER_PREVIEW_TAB_ID) {", wire)
+        # Middle-click closes a pinned tab (and suppresses autoscroll).
+        self.assertEqual(wire.count("event.button === 1"), 2)
+        self.assertIn("closeExplorerTab(index, id);", wire)
+        # Reorder is pinned-tabs-only and clamps behind the Preview tab (OD-6);
+        # the persisted order follows the array (2.f).
+        reorder = html[
+            html.index("function reorderExplorerPinnedTab(index, draggedId, targetId, before)"):
+            html.index("function promoteExplorerPreviewTab(index)")
+        ]
+        self.assertIn("tab.pinned && tab.id === draggedId", reorder)
+        self.assertIn("insertAt = Math.max(insertAt, previewPosition + 1);", reorder)
+        self.assertIn("persistExplorerTabsToSession(index);", reorder)
+        # Promotion hands the rendered DOM to the new pinned tab with the same
+        # view mode / scroll / zoom — no re-fetch — and never clobbers an
+        # existing pinned tab for the path.
+        promote = html[
+            html.index("function promoteExplorerPreviewTab(index)"):
+            html.index("function renderExplorerViewerEmpty(index)")
+        ]
+        self.assertIn("pinnedTab.view = { ...preview.view };", promote)
+        self.assertIn("pane._explorerRenderedTabId = pinnedTab.id;", promote)
+        self.assertNotIn("openExplorerFile(", promote)
+        self.assertIn("activateExplorerTab(index, existing.id);", promote)
+        # Activating an already-shown tab is a no-op, so the double-click's
+        # leading single-clicks cannot race the promotion with re-fetches.
+        self.assertIn(
+            "pane._explorerActiveTabId === tab.id && pane._explorerRenderedTabId === tab.id",
+            html,
+        )
+
     def test_launcher_round_trips_explorer_open_tabs(self):
         """ISSUE-2026-015: launcher carries open tabs through without editing them."""
         response = self.client.get("/")
