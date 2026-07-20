@@ -1252,11 +1252,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         # its reserved id — omitted at the default so unzoomed tabs store nothing.
         self.assertIn("function explorerPersistedTabFontSize(raw)", html)
         self.assertIn("fontSize !== EXPLORER_EDITOR_FONT_DEFAULT", html)
-        self.assertIn(
-            "tabViews[EXPLORER_PREVIEW_TAB_ID] = { font_size: previewRecord.font_size };",
-            html,
-        )
-        self.assertIn("explorerPreviewTab(pane).fontSize = previewFont;", html)
+        self.assertIn("tabViews[EXPLORER_PREVIEW_TAB_ID] = previewRecord;", html)
+        self.assertIn("previewTab.fontSize = previewFont;", html)
         self.assertIn("record.fontSize = fontSize;", html)
         # The saved-session relaunch payload carries the new fields through.
         self.assertIn(
@@ -1268,6 +1265,36 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function applyExplorerSessionMarkdownAppearance(index)", html)
         self.assertIn("setExplorerMarkdownAppearance({ preset, font });", html)
         self.assertIn("applyExplorerSessionMarkdownAppearance(index);", html)
+
+    def test_terminals_page_preview_tab_keeps_separated_path(self):
+        """The Preview tab keeps its own file/directory path across tab swaps
+        and persists it into saved sessions."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Directory browsing records the browsed path on the Preview tab itself.
+        self.assertIn("previewTab.dirPath = pane._explorerPath;", html)
+        # Returning to the Preview tab after a pinned tab was active re-browses
+        # the tab's own directory instead of falling through to the empty viewer.
+        self.assertIn("loadExplorerPane(index, tab.dirPath);", html)
+        # The empty viewer clears the tab's separated path too.
+        self.assertIn("preview.dirPath = '';", html)
+        # Serialize: the reserved Preview record carries its own path + dir
+        # alongside the zoom, so workspace saves keep the Preview content.
+        self.assertIn("previewRecord.path = previewPath;", html)
+        self.assertIn("previewRecord.dir = previewDir;", html)
+        # Restore: the saved Preview path/dir seed the tab record and reopen
+        # when no pinned tab was saved as active.
+        self.assertIn("previewTab.dirPath = savedPreviewDir;", html)
+        self.assertIn("openExplorerFile(index, savedPreviewPath);", html)
+        self.assertIn("loadExplorerPane(index, savedPreviewDir);", html)
+        # The terminal-close snapshot carries dirPath through the rebuild.
+        self.assertIn("dirPath: tab.dirPath || ''", html)
+        self.assertIn("tab.dirPath = saved.dirPath;", html)
+        # First show goes through the viewer entry point — a bare root load
+        # racing the restore could resolve last and clobber the Preview path.
+        self.assertNotIn("loadExplorerPane(i);", html)
 
     def test_terminals_page_explorer_tabs_preserve_view_mode_and_scroll(self):
         """2.e: each explorer tab keeps its own view mode + scroll across swaps."""
@@ -1308,10 +1335,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         # the restored mode; fractions + clamping live in restoreExplorerFileScroll.
         self.assertIn("const effectiveScrollState = scrollState || (restoredTabView", html)
         self.assertIn("{ ...restoredTabView.scroll, activeView: initialFileView }", html)
-        # Directory browsing on the Preview tab gets the same treatment.
+        # Directory browsing on the Preview tab gets the same treatment — on
+        # capture, on the in-memory re-render, and after a re-browse fetch.
         self.assertEqual(
             html.count("explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries)"),
-            2,
+            3,
         )
         # Mode switching is skipped when there are no file panels (directory).
         self.assertIn("listEl.querySelector('[data-explorer-file-panel]')", html)
@@ -5498,7 +5526,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                     "../escape.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "not-open.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "d.md": "not-a-dict",
-                    "__preview__": {"mode": "source", "scroll": 0.5, "identity": "zz", "font_size": 16},
+                    "__preview__": {"mode": "source", "scroll": 0.5, "identity": "zz", "font_size": 16, "path": "docs\\a.md", "dir": "../escape"},
                 },
                 "explorer_md_preset": "vscode",
                 "explorer_md_font": "serif",
@@ -5524,10 +5552,10 @@ class ApiRoutesTestCase(unittest.TestCase):
             views["sub/b.md"], {"mode": "diff", "scroll": 1.0, "identity": "", "font_size": 24}
         )
         # A record may carry only a zoom (a zoomed tab whose view was never
-        # captured), and the reserved Preview key keeps zoom only — its
-        # content is transient by design.
+        # captured), and the reserved Preview key keeps zoom plus its own
+        # separated path — file and browsed directory — but no view mode.
         self.assertEqual(views["e.md"], {"font_size": 12})
-        self.assertEqual(views["__preview__"], {"font_size": 16})
+        self.assertEqual(views["__preview__"], {"font_size": 16, "path": "docs/a.md"})
         # Unknown modes, escaping/unlisted paths, and non-dict records are dropped.
         self.assertEqual(set(views), {"docs/a.md", "sub/b.md", "e.md", "__preview__"})
         self.assertEqual(normalized[0]["explorer_md_preset"], "vscode")

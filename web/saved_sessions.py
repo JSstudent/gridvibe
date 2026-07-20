@@ -109,10 +109,11 @@ def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str,
     """Validate the per-tab view map: mode + scroll fraction + identity + zoom.
 
     Only entries for persisted open tabs survive (plus the reserved Preview
-    key, which keeps zoom only); the mode must be a known file view, the
-    scroll is clamped to a [0, 1] fraction (OD-4), the content-identity hash
-    is a short opaque token, and the font size is clamped to the editor's
-    zoom bounds — anything else is dropped rather than restored.
+    key, which keeps zoom and the tab's own separated path — shown file and/or
+    browsed directory); the mode must be a known file view, the scroll is
+    clamped to a [0, 1] fraction (OD-4), the content-identity hash is a short
+    opaque token, and the font size is clamped to the editor's zoom bounds —
+    anything else is dropped rather than restored.
     """
     if not isinstance(value, dict):
         return {}
@@ -121,9 +122,18 @@ def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str,
         if not isinstance(raw_view, dict):
             continue
         if str(raw_path) == EXPLORER_PREVIEW_TAB_KEY:
+            record: Dict[str, Any] = {}
             font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
-            if font_size and EXPLORER_PREVIEW_TAB_KEY not in views:
-                views[EXPLORER_PREVIEW_TAB_KEY] = {"font_size": font_size}
+            if font_size:
+                record["font_size"] = font_size
+            preview_path = _normalize_explorer_tab_path(raw_view.get("path"))
+            if preview_path:
+                record["path"] = preview_path
+            preview_dir = _normalize_explorer_tab_path(raw_view.get("dir"))
+            if preview_dir:
+                record["dir"] = preview_dir
+            if record and EXPLORER_PREVIEW_TAB_KEY not in views:
+                views[EXPLORER_PREVIEW_TAB_KEY] = record
             continue
         path = _normalize_explorer_tab_path(raw_path)
         if not path or path not in open_tabs or path in views:

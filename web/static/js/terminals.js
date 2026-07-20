@@ -5482,7 +5482,8 @@
                         id: tab.id,
                         view: tab.view || null,
                         fontSize: tab.fontSize || 0,
-                        preferredMode: tab.preferredMode || ''
+                        preferredMode: tab.preferredMode || '',
+                        dirPath: tab.dirPath || ''
                     })),
                     /* Only the dynamic Preview tab needs an explicit reopen; pinned
                        tabs come back through the persisted-tab path. */
@@ -5525,6 +5526,9 @@
                 }
                 if (saved.preferredMode) {
                     tab.preferredMode = saved.preferredMode;
+                }
+                if (saved.dirPath) {
+                    tab.dirPath = saved.dirPath;
                 }
             });
         }
@@ -7221,7 +7225,11 @@
                     if (closeSnapshot && closeSnapshot.type === 'explorer') {
                         restoreExplorerPaneFromClose(i, closeSnapshot);
                     } else {
-                        loadExplorerPane(i);
+                        /* First show goes through the viewer entry point (empty
+                           Preview tab + persisted tab/preview restore), never a
+                           bare root load — a root fetch racing the restore could
+                           resolve last and clobber the Preview tab's own path. */
+                        syncExplorerPane(i);
                         restoreExplorerSidebarState(i);
                     }
                 } else if (session.status === 'connected') {
@@ -11590,6 +11598,7 @@
         const preview = explorerPreviewTab(pane);
         preview.path = '';
         preview.name = '';
+        preview.dirPath = '';
         pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
         pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;
         pane._explorerMode = 'viewer';
@@ -11610,7 +11619,14 @@
             openExplorerFile(index, tab.path, { tab: tab.id });
             return;
         }
-        if (pane._explorerMode === 'directory' && Array.isArray(pane._explorerEntries)) {
+        if (
+            pane._explorerMode === 'directory'
+            && Array.isArray(pane._explorerEntries)
+            && (!tab.dirPath || tab.dirPath === pane._explorerPath)
+        ) {
+            /* The in-memory listing still belongs to this tab — render it
+               without a re-fetch and backfill the tab's own directory path. */
+            tab.dirPath = pane._explorerPath;
             pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
             pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;
             renderExplorerDirectorySearchControls(index);
@@ -11623,6 +11639,13 @@
                 restoreExplorerFileScroll(index, restoredView.scroll);
             }
             renderExplorerTabStrip(index);
+            return;
+        }
+        if (tab.id === EXPLORER_PREVIEW_TAB_ID && tab.dirPath) {
+            /* The viewer last rendered another tab, so the pane-global
+               directory state no longer describes the Preview tab — re-browse
+               the tab's own directory instead of falling through to empty. */
+            loadExplorerPane(index, tab.dirPath);
             return;
         }
         renderExplorerViewerEmpty(index);
@@ -11930,12 +11953,21 @@
                 tabViews[key] = view;
             }
         });
-        /* The Preview tab's content is transient (its path is never
-           persisted), but its zoom should survive a relaunch — stored under
-           the reserved tab id. */
-        const previewRecord = explorerPersistableTabView(explorerPreviewTab(pane));
-        if (previewRecord && previewRecord.font_size) {
-            tabViews[EXPLORER_PREVIEW_TAB_ID] = { font_size: previewRecord.font_size };
+        /* The Preview tab keeps its own separated path (shown file or browsed
+           directory) plus its zoom across saves — stored under the reserved
+           tab id, keyed as `path`/`dir` next to `font_size`. */
+        const preview = explorerPreviewTab(pane);
+        const previewRecord = explorerPersistableTabView(preview) || {};
+        const previewPath = explorerNormalizeTabPath(preview.path);
+        const previewDir = explorerNormalizeTabPath(preview.dirPath);
+        if (previewPath) {
+            previewRecord.path = previewPath;
+        }
+        if (previewDir) {
+            previewRecord.dir = previewDir;
+        }
+        if (Object.keys(previewRecord).length) {
+            tabViews[EXPLORER_PREVIEW_TAB_ID] = previewRecord;
         }
         const active = explorerActiveTab(pane);
         const activeTab = active && active.pinned ? explorerNormalizeTabPath(active.path) : '';
@@ -11968,13 +12000,42 @@
             ? session.explorer_tab_views
             : {};
         ensureExplorerTabState(pane);
-        /* The Preview tab's zoom persists under its reserved id even when no
-           pinned tabs were saved. */
-        const previewFont = explorerPersistedTabFontSize(rawViews[EXPLORER_PREVIEW_TAB_ID]);
+        /* The Preview tab's zoom, shown file, and browsed directory persist
+           under its reserved id even when no pinned tabs were saved. */
+        const rawPreviewView = rawViews[EXPLORER_PREVIEW_TAB_ID];
+        const previewTab = explorerPreviewTab(pane);
+        const previewFont = explorerPersistedTabFontSize(rawPreviewView);
         if (previewFont) {
-            explorerPreviewTab(pane).fontSize = previewFont;
+            previewTab.fontSize = previewFont;
+        }
+        const savedPreviewPath = explorerNormalizeTabPath(
+            rawPreviewView && typeof rawPreviewView === 'object' ? rawPreviewView.path : ''
+        );
+        const savedPreviewDir = explorerNormalizeTabPath(
+            rawPreviewView && typeof rawPreviewView === 'object' ? rawPreviewView.dir : ''
+        );
+        if (savedPreviewDir) {
+            previewTab.dirPath = savedPreviewDir;
+        }
+        /* Reopen the Preview tab's own content only when no pinned tab was
+           saved as active — an active pinned tab wins the viewer, and the
+           seeded path/dirPath above brings the Preview content back whenever
+           the user returns to the tab. */
+        const restorePreviewContent = () => {
+            if (savedPreviewPath) {
+                openExplorerFile(index, savedPreviewPath);
+            } else if (savedPreviewDir) {
+                loadExplorerPane(index, savedPreviewDir);
+            } else {
+                renderExplorerTabStrip(index);
+            }
+        };
+        if (savedPreviewPath) {
+            previewTab.path = savedPreviewPath;
+            previewTab.name = explorerBaseName(savedPreviewPath);
         }
         if (!rawTabs.length) {
+            restorePreviewContent();
             return;
         }
         const seen = new Set();
@@ -12009,7 +12070,7 @@
         if (activeTab) {
             activateExplorerTab(index, activeTab.id);
         } else {
-            renderExplorerTabStrip(index);
+            restorePreviewContent();
         }
     }
 
@@ -12514,13 +12575,18 @@
                 resetExplorerDirectorySearch(pane);
             }
             /* Directory browsing lives in the permanent Preview tab; pinned file
-               tabs are untouched by navigation (ISSUE-2026-014). */
+               tabs are untouched by navigation (ISSUE-2026-014). The browsed
+               path is recorded on the tab itself (`dirPath`) so swapping to a
+               pinned tab and back cannot lose it — the pane-global
+               `_explorerPath`/`_explorerMode` fields follow whatever tab was
+               rendered last. */
             ensureExplorerTabState(pane);
             pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
             pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;
             const previewTab = explorerPreviewTab(pane);
             previewTab.path = '';
             previewTab.name = '';
+            previewTab.dirPath = pane._explorerPath;
             document.getElementById(`ph-${index}`)?.remove();
             updateExplorerGitSummary(index, data.git || null);
             renderExplorerDirectorySearchControls(index);
@@ -12538,6 +12604,17 @@
             list.classList.remove('file-view');
             wireExplorerSearchControls(index);
             applyExplorerSearch(index, { resetActive: true });
+            /* Returning to a directory the Preview tab already showed (after a
+               pinned tab was active) restores its captured scroll when the
+               listing identity still matches (OD-4); a genuinely new directory
+               never matches, so navigation always starts at the top. */
+            const restoredDirView = explorerMatchingTabView(
+                previewTab,
+                explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries)
+            );
+            if (restoredDirView) {
+                restoreExplorerFileScroll(index, restoredDirView.scroll);
+            }
             renderExplorerTabStrip(index);
             return true;
         } catch (error) {
