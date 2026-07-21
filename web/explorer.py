@@ -14,6 +14,7 @@ import re
 import shlex
 import stat as stat_module
 import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -545,6 +546,36 @@ def _resolve_explorer_file_path(session: Any, requested_path: Any = "") -> Tuple
         raise ValueError("Explorer path is not a file")
 
     return root_path, candidate
+
+
+def open_path_in_os_file_manager(abs_path: str) -> None:
+    """Reveal an already-resolved local path in the host OS file manager.
+
+    Files are highlighted inside their parent folder; directories open directly.
+    This is a read-only side effect (it launches the file manager and never
+    mutates the filesystem). Callers must pass a root-confined absolute path
+    produced by the explorer path resolvers — never a raw page-supplied value.
+    """
+    target = str(abs_path or "").strip()
+    if not target or not os.path.exists(target):
+        raise ValueError("Explorer path is no longer available")
+
+    is_file = os.path.isfile(target)
+    # No shell is used (list argv), so the resolved path cannot inject commands.
+    if sys.platform == "win32":
+        args = ["explorer", f"/select,{target}"] if is_file else ["explorer", target]
+    elif sys.platform == "darwin":
+        args = ["open", "-R", target] if is_file else ["open", target]
+    else:
+        # Most Linux file managers have no portable "reveal" flag, so open the
+        # containing directory for files.
+        args = ["xdg-open", os.path.dirname(target) if is_file else target]
+
+    try:
+        # explorer.exe exits non-zero even on success, so fire-and-forget.
+        subprocess.Popen(args, close_fds=True)
+    except OSError as exc:
+        raise ValueError(f"Could not open the file manager: {exc}") from exc
 
 
 def _relative_explorer_path(root_path: str, path: str) -> str:

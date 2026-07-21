@@ -4203,6 +4203,7 @@
                                      <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
                                      <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${i}" data-explorer-tree-toggle="${i}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                                      <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
+                                     ${session.mode === 'ssh' ? '' : `<button type="button" class="explorer-os-open" id="explorer-os-open-${i}" data-explorer-os-open="${i}" title="Open current location in system file manager" aria-label="Open current location in system file manager">${EXPLORER_OS_OPEN_ICON}</button>`}
                                      <div class="explorer-git-summary" id="explorer-git-${i}" aria-live="polite"></div>
                                      <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
                                      <div class="explorer-directory-search" id="explorer-directory-search-${i}"></div>
@@ -4290,6 +4291,7 @@
         });
         wireCardButton(card, `[data-explorer-git-toggle="${i}"]`, () => toggleExplorerGitSidebar(i));
         wireCardButton(card, `[data-explorer-tree-toggle="${i}"]`, () => toggleExplorerTreeSidebar(i));
+        wireCardButton(card, `[data-explorer-os-open="${i}"]`, () => revealExplorerInOs(i));
     }
 
     /* Forward keystrokes and pointer focus for a terminal pane once its DOM
@@ -4917,6 +4919,21 @@
                 toggleExplorerTreeSidebar(index);
             });
         }
+
+        const explorerOsOpen = card.querySelector(`[data-explorer-os-open="${index}"]`);
+        if (explorerOsOpen && !explorerOsOpen.dataset.bound) {
+            explorerOsOpen.dataset.bound = 'true';
+            explorerOsOpen.draggable = false;
+            explorerOsOpen.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            explorerOsOpen.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                revealExplorerInOs(index);
+            });
+        }
     }
 
     function ensureExplorerThemeButton(card, index) {
@@ -5098,6 +5115,7 @@
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
                         <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${index}" data-explorer-tree-toggle="${index}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                         <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
+                        ${session.mode === 'ssh' ? '' : `<button type="button" class="explorer-os-open" id="explorer-os-open-${index}" data-explorer-os-open="${index}" title="Open current location in system file manager" aria-label="Open current location in system file manager">${EXPLORER_OS_OPEN_ICON}</button>`}
                         <div class="explorer-git-summary" id="explorer-git-${index}" aria-live="polite"></div>
                         <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
                         <div class="explorer-directory-search" id="explorer-directory-search-${index}"></div>
@@ -11259,6 +11277,15 @@
         </svg>
     `;
 
+    const EXPLORER_OS_OPEN_ICON = `
+        <svg class="explorer-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+            fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 6.5a1.5 1.5 0 0 1 1.5-1.5H8l1.8 1.8H15A1.5 1.5 0 0 1 16.5 8.3v2"/>
+            <path d="M4 6.5V16a1.5 1.5 0 0 0 1.5 1.5h6.5"/>
+            <path d="M14 14h6m0 0v6m0-6-7 7"/>
+        </svg>
+    `;
+
     const EXPLORER_GIT_REVERT_ICON = `
         <svg class="explorer-btn-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
             fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -11327,6 +11354,42 @@
 
     function getDownloadBaseName(fullPath) {
         return String(fullPath || '').split(/[\\/]/).pop() || '';
+    }
+
+    /* Open the host OS file manager at whatever path the explorer bar currently
+       shows (the open file for a file tab, otherwise the listed directory).
+       Fully isolated from the explorer's browsing state — it only asks the
+       backend to launch the local file manager and never mutates panes. */
+    async function revealExplorerInOs(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId) {
+            return;
+        }
+        const path = pane._explorerMode === 'file'
+            ? (pane._explorerFilePath || '')
+            : (pane._explorerPath || '');
+        try {
+            const response = await fetch(
+                `/api/explorer/${encodeURIComponent(sessionId)}/reveal`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path }),
+                }
+            );
+            if (!response.ok) {
+                const payload = await response.json().catch(() => ({}));
+                showTerminalToast(
+                    `Could not open file manager: ${payload.error || response.statusText}`,
+                    'error'
+                );
+                return;
+            }
+            showTerminalToast('Opening file location…', 'success');
+        } catch (error) {
+            showTerminalToast(`Could not open file manager: ${error?.message || error}`, 'error');
+        }
     }
 
     /* ─────────────────────────────────────────────

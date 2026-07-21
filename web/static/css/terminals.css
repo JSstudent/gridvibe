@@ -1650,7 +1650,8 @@
         }
 
         .explorer-git-toggle,
-        .explorer-tree-toggle {
+        .explorer-tree-toggle,
+        .explorer-os-open {
             width: 30px;
             height: 28px;
             display: inline-flex;

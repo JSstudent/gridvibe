@@ -10342,6 +10342,55 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         self.assertIn(".terminal-toast", terminals_css)
         self.assertIn(".terminal-toast.success", terminals_css)
 
+    def test_reveal_opens_the_confined_path_in_the_file_manager(self):
+        (self.root / "note.txt").write_text("hi", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        with patch.object(web_explorer.subprocess, "Popen") as popen:
+            response = self.client.post(
+                f"/api/explorer/{session_id}/reveal",
+                json={"path": "note.txt"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
+        popen.assert_called_once()
+        # The launcher receives the resolved, root-confined absolute path.
+        argv = popen.call_args.args[0]
+        self.assertTrue(any("note.txt" in str(arg) for arg in argv))
+
+    def test_reveal_unknown_session_returns_404(self):
+        response = self.client.post("/api/explorer/missing/reveal", json={"path": ""})
+        self.assertEqual(response.status_code, 404)
+
+    def test_reveal_rejects_paths_outside_the_root(self):
+        session_id = self._create_local_explorer_session()
+        with patch.object(web_explorer.subprocess, "Popen") as popen:
+            response = self.client.post(
+                f"/api/explorer/{session_id}/reveal",
+                json={"path": "../outside.txt"},
+            )
+        self.assertEqual(response.status_code, 400)
+        popen.assert_not_called()
+
+    def test_reveal_never_touches_git_or_write_helpers(self):
+        (self.root / "read.txt").write_text("read only", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        with patch.object(web_explorer, "_run_git_command") as run_git, \
+                patch.object(web_explorer.subprocess, "Popen"):
+            response = self.client.post(
+                f"/api/explorer/{session_id}/reveal",
+                json={"path": "read.txt"},
+            )
+        self.assertEqual(response.status_code, 200)
+        run_git.assert_not_called()
+
+    def test_explorer_bar_ships_os_open_button(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function revealExplorerInOs(index)", terminals_js)
+        self.assertIn("data-explorer-os-open", terminals_js)
+        self.assertIn("/reveal", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".explorer-os-open", terminals_css)
+
 
 class TerminalSearchWebLinksTestCase(unittest.TestCase):
     """Deep-dive 10.3 — terminal scrollback search + clickable links."""

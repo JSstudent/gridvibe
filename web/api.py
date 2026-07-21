@@ -119,6 +119,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _resolve_explorer_candidate_path,
     _resolve_remote_explorer_candidate_path,
     _sftp_request_error_types,
+    open_path_in_os_file_manager,
     read_explorer_file_preview,
 )
 from web.hostkeys import (  # noqa: F401 - re-exported for backwards compatibility
@@ -797,6 +798,36 @@ def download_explorer_file(session_id: str):
         download_name=filename,
         mimetype="application/octet-stream",
     )
+
+
+@app.route('/api/explorer/<session_id>/reveal', methods=['POST'])
+def reveal_explorer_path(session_id: str):
+    """Open the host OS file manager at the explorer pane's current path.
+
+    Isolated from the explorer's read-only browsing contract: it only launches
+    the local file manager (never mutating files) and is limited to local panes,
+    since a remote SSH path has no meaning for the server's file manager.
+    """
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if _is_remote_explorer_session(session):
+        return jsonify({
+            "error": "Opening the file manager is only available for local explorer panes"
+        }), 400
+    data = request.get_json(silent=True) or {}
+    requested_path = data.get("path", "")
+    try:
+        with _explorer_backend(session) as backend:
+            _root_path, target_path = backend.resolve_candidate(
+                requested_path, allow_empty_root=True
+            )
+            open_path_in_os_file_manager(target_path)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"session_id": session.session_id, "ok": True})
 
 
 def _explorer_route_response(session: Any, handler: Any):
