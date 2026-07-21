@@ -764,22 +764,34 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertIn("DETACHED_PROCESS", helper_command[2])
 
 
-class TeardownSnapshotTestCase(unittest.TestCase):
-    """Bug 1 / 10.5 — capture the live workspace before sessions are torn down."""
+class TeardownNoSnapshotTestCase(unittest.TestCase):
+    """10.5 hardening — teardown must never write the workspace snapshot.
 
-    def test_snapshot_before_teardown_persists_live_workspace(self):
-        with patch.object(webview_launcher, "save_workspace_snapshot") as save:
-            webview_launcher._snapshot_workspace_before_teardown("unit")
-        save.assert_called_once_with(webview_launcher.session_manager)
+    Only the autosave timer and the explicit Save Workspace action capture the
+    workspace; window close and Ctrl+C intentionally persist nothing.
+    """
 
-    def test_snapshot_before_teardown_swallows_errors(self):
-        with patch.object(
-            webview_launcher,
-            "save_workspace_snapshot",
-            side_effect=RuntimeError("disk full"),
-        ):
-            # Must not raise: teardown/exit paths cannot be blocked by a snapshot.
-            webview_launcher._snapshot_workspace_before_teardown("unit")
+    def test_launcher_has_no_snapshot_capture_path(self):
+        self.assertFalse(
+            hasattr(webview_launcher, "_snapshot_workspace_before_teardown"),
+            "the teardown snapshot capture was intentionally removed",
+        )
+        self.assertFalse(
+            hasattr(webview_launcher, "save_workspace_snapshot"),
+            "the launcher must not import any snapshot writer",
+        )
+
+    def test_keyboard_interrupt_closes_sessions_without_snapshotting(self):
+        server_thread = Mock()
+        server_thread.join.side_effect = KeyboardInterrupt
+        with patch.object(webview_launcher, "webbrowser"), patch.object(
+            webview_launcher.session_manager, "close_all_sessions"
+        ) as close_all, patch(
+            "web.runtime_state.capture_workspace"
+        ) as capture:
+            webview_launcher._open_browser_mode("http://127.0.0.1:5050", server_thread)
+        close_all.assert_called_once()
+        capture.assert_not_called()
 
 
 class SaveDownloadBridgeTestCase(unittest.TestCase):

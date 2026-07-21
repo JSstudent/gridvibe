@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import re
@@ -485,6 +486,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("container.appendChild(saveButton);", html)
         self.assertIn("async function saveActiveWorkspaceSession(button = null, options = {})", html)
         self.assertIn("function saveActiveWorkspaceSessionAs(button = null)", html)
+        self.assertIn("async function saveAllWorkspaceSessions(button = null)", html)
+        self.assertIn("closeSessionsMenu(); saveAllWorkspaceSessions(this);", html)
+        self.assertIn('id="saveAllSessionsMenuItem"', html)
         self.assertIn("let workspaceSaveTargets = new Map();", html)
         self.assertIn("function notifySavedSessionUpdated(savedSession, options = {})", html)
         self.assertIn("const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';", html)
@@ -504,7 +508,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         save_handler_start = html.index("async function saveActiveWorkspaceSession")
         save_handler_end = html.index("function saveActiveWorkspaceSessionAs", save_handler_start)
         save_handler_html = html[save_handler_start:save_handler_end]
-        self.assertIn("const targetGroupId = getActiveWorkspaceGroupId();", save_handler_html)
+        self.assertIn("const targetGroupId = options.groupId || getActiveWorkspaceGroupId();", save_handler_html)
         self.assertIn("const config = buildActiveWorkspaceSessionConfig(targetGroupId);", save_handler_html)
         self.assertIn("const saveTarget = getWorkspaceSaveTarget(targetGroupId);", save_handler_html)
         self.assertIn("const result = await openSaveSessionAsModal(suggestedName);", save_handler_html)
@@ -1449,9 +1453,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('data-explorer-crumb=', html)
         self.assertIn("loadExplorerPane(index, button.dataset.explorerCrumb || '');", html)
         self.assertIn('class="explorer-crumb current"', html)
-        # One definition + all four render paths (directory listing, file,
-        # in-place refresh, commit diff) route through it.
-        self.assertEqual(html.count("renderExplorerPathBreadcrumb("), 5)
+        # One definition + all five render paths (directory listing, file,
+        # image viewer, in-place refresh, commit diff) route through it.
+        self.assertEqual(html.count("renderExplorerPathBreadcrumb("), 6)
         # Token-driven styling only (Regression Guardrail 7).
         crumb_css = html[html.index(".explorer-crumb {"):html.index(".explorer-crumb-sep {")]
         self.assertIn("var(--explorer-muted)", crumb_css)
@@ -1571,9 +1575,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerMarkdownHeadingLevel(line)", html)
         self.assertIn("function explorerMarkdownHeadingLevels(records)", html)
         self.assertIn("data-explorer-markdown-section", html)
-        self.assertIn("function toggleExplorerMarkdownSection(index, lineNumber)", html)
+        self.assertIn(
+            "function toggleExplorerMarkdownSection(index, lineNumber, { allSameLevel = false } = {})",
+            html,
+        )
+        # Alt+click fans the toggle out to every heading sharing the clicked level;
+        # the click handler forwards the modifier and the tooltip advertises it.
+        self.assertIn("allSameLevel: event.altKey", html)
+        self.assertIn("const targetLevel = levels.get(lineNumber);", html)
+        self.assertIn("Alt: collapse all at this level", html)
+        self.assertIn("Alt: expand all at this level", html)
         self.assertIn("function wireExplorerMarkdownSectionControls(index)", html)
-        self.assertIn("pane._explorerMarkdownCollapsedLines = new Set();", html)
+        self.assertIn("tab.collapsedLines = new Set();", html)
+        self.assertIn("record.folds = Array.from(tab.collapsedLines)", html)
+        self.assertIn("record.fold_identity = tab.collapsedIdentity;", html)
+        self.assertIn("explorerPersistedMarkdownFolds(rawViews[key])", html)
+        self.assertIn("persistExplorerTabsToSession(index);", html)
         self.assertIn("wireExplorerMarkdownSectionControls(index);", html)
         self.assertNotIn('data-explorer-source-toggle="${index}"', html)
         self.assertNotIn("function setExplorerMarkdownSourceCollapsed", html)
@@ -1610,7 +1627,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function showExplorerMarkdownAppearanceMenu(anchor)", html)
         # Bounded allowlists and persisted preference keys.
         self.assertIn("const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast', 'vscode'];", html)
-        self.assertIn("const EXPLORER_MD_FONTS = ['system', 'serif', 'mono'];", html)
+        self.assertIn(
+            "'system', 'serif', 'consolas', 'cascadia-code', 'jetbrains-mono', 'courier-new'",
+            html,
+        )
         self.assertIn("const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';", html)
         self.assertIn("const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';", html)
         # Header control is present and gated to previewable files.
@@ -1626,8 +1646,34 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".explorer-markdown-preview.md-preset-paper {", html)
         self.assertIn(".explorer-markdown-preview.md-preset-contrast {", html)
         self.assertIn(".explorer-markdown-preview.md-font-serif {", html)
+        self.assertIn(".explorer-markdown-preview.md-font-cascadia-code {", html)
+        self.assertIn(".explorer-markdown-preview.md-font-jetbrains-mono {", html)
+        self.assertIn(".explorer-markdown-preview.md-font-courier-new {", html)
+        self.assertNotIn(".explorer-markdown-preview.md-font-mono {", html)
+        self.assertNotIn(".explorer-markdown-preview.md-font-fira-code {", html)
+        self.assertNotIn(".explorer-markdown-preview.md-font-source-code-pro {", html)
+        self.assertNotIn(".explorer-markdown-preview.md-font-menlo {", html)
         self.assertIn("--md-preview-surface: var(--md-preset-paper-bg);", html)
         self.assertIn("--md-preset-paper-bg: #f4ecd8;", html)
+
+    def test_terminals_page_renders_mermaid_and_exposes_preview_shortcut(self):
+        response = self.client.get("/terminals")
+        asset_response = self.client.get("/static/vendor/mermaid.min.js")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(asset_response.status_code, 200)
+        self.assertGreater(len(asset_response.data), 1_000_000)
+        html = self._page_html(response)
+        self.assertIn("vendor/mermaid.min.js", html)
+        self.assertIn("async function renderExplorerMermaid(preview)", html)
+        self.assertIn("securityLevel: 'strict'", html)
+        self.assertIn("window.mermaid.render(", html)
+        self.assertIn("renderExplorerMermaid(preview);", html)
+        self.assertIn('title="Preview (Ctrl+Shift+V)"', html)
+        self.assertIn('aria-keyshortcuts="Control+Shift+V Meta+Shift+V"', html)
+        self.assertIn("event.code !== 'KeyV'", html)
+        self.assertIn("function findExplorerMarkdownPreviewTargetIndex()", html)
+        self.assertIn(".explorer-markdown-preview .explorer-mermaid svg {", html)
 
     def test_terminals_page_markdown_slate_preset(self):
         """Wave 1 / 3.a (OD-7): VS Code-style Slate preset (key `vscode`)."""
@@ -1655,6 +1701,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         # The control still reuses the search-btn markup in the tree row.
         self.assertIn('class="explorer-search-btn explorer-open-tab-btn"', html)
+        # ...but carries a distinct ↗ glyph so it never reads as the git stage "+".
+        self.assertIn(
+            'aria-label="Open ${escHtml(entry.name || path)} in a new tab">↗</button>',
+            html,
+        )
         # ...but now has its own rule drawing from the theme-aware explorer tokens.
         self.assertIn(".explorer-open-tab-btn {", html)
         self.assertIn(".explorer-open-tab-btn:hover,", html)
@@ -1868,8 +1919,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("Close Session</button>", html)
         self.assertIn("closeButton.className = 'session-tab-close';", html)
         self.assertIn("closeSessionGroup(group.group_id);", html)
-        self.assertIn(".sessions-menu-panel {", html)
-        self.assertIn(".sessions-menu-item {", html)
+        self.assertIn(".app-menu-panel {", html)
+        self.assertIn(".app-menu-item {", html)
         self.assertIn(">Import Session ...</button>", html)
 
     def test_terminals_page_numbers_session_tabs_and_exposes_safe_shortcut(self):
@@ -4588,6 +4639,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Inline code stays classless and is left as plain monospace.
         self.assertIn("inline <code>x</code> text", preview_html)
 
+    def test_explorer_markdown_preview_marks_mermaid_fences_for_client_rendering(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "diagram.md").write_text(
+            "```mermaid\nflowchart LR\n  A --> B\n```\n",
+            encoding="utf-8",
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "diagram.md"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview_html = response.get_json()["preview_html"]
+        self.assertIn('<code class="language-mermaid">', preview_html)
+        self.assertIn("flowchart LR", preview_html)
+        self.assertNotIn("<svg", preview_html)
+
     def test_explorer_markdown_preview_treats_raw_html_as_literal_text(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -5519,14 +5590,30 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "startup_mode": "explorer",
                 "explorer_open_tabs": ["docs/a.md", "sub/b.md", "c.md", "d.md", "e.md"],
                 "explorer_tab_views": {
-                    "docs/a.md": {"mode": "preview", "scroll": 0.5, "identity": "abc123", "font_size": 18},
+                    "docs/a.md": {
+                        "mode": "preview",
+                        "scroll": 0.5,
+                        "identity": "abc123",
+                        "font_size": 18,
+                        "folds": [9, 2, 9, 0, "4", True],
+                        "fold_identity": "abc123",
+                    },
                     "sub\\b.md": {"mode": "diff", "scroll": 7, "identity": "x" * 100, "font_size": 99},
                     "c.md": {"mode": "bogus", "scroll": 0.1, "identity": "ok"},
                     "e.md": {"font_size": 12},
                     "../escape.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "not-open.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "d.md": "not-a-dict",
-                    "__preview__": {"mode": "source", "scroll": 0.5, "identity": "zz", "font_size": 16, "path": "docs\\a.md", "dir": "../escape"},
+                    "__preview__": {
+                        "mode": "source",
+                        "scroll": 0.5,
+                        "identity": "zz",
+                        "font_size": 16,
+                        "path": "docs\\a.md",
+                        "dir": "../escape",
+                        "folds": [3],
+                        "fold_identity": "preview-hash",
+                    },
                 },
                 "explorer_md_preset": "vscode",
                 "explorer_md_font": "serif",
@@ -5543,7 +5630,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         views = normalized[0]["explorer_tab_views"]
         self.assertEqual(
             views["docs/a.md"],
-            {"mode": "preview", "scroll": 0.5, "identity": "abc123", "font_size": 18},
+            {
+                "mode": "preview",
+                "scroll": 0.5,
+                "identity": "abc123",
+                "font_size": 18,
+                "folds": [2, 4, 9],
+                "fold_identity": "abc123",
+            },
         )
         # Keys normalize like tab paths; out-of-range scroll fractions clamp to
         # [0, 1]; oversized identity tokens are dropped rather than restored;
@@ -5555,7 +5649,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         # captured), and the reserved Preview key keeps zoom plus its own
         # separated path — file and browsed directory — but no view mode.
         self.assertEqual(views["e.md"], {"font_size": 12})
-        self.assertEqual(views["__preview__"], {"font_size": 16, "path": "docs/a.md"})
+        self.assertEqual(
+            views["__preview__"],
+            {
+                "font_size": 16,
+                "path": "docs/a.md",
+                "folds": [3],
+                "fold_identity": "preview-hash",
+            },
+        )
         # Unknown modes, escaping/unlisted paths, and non-dict records are dropped.
         self.assertEqual(set(views), {"docs/a.md", "sub/b.md", "e.md", "__preview__"})
         self.assertEqual(normalized[0]["explorer_md_preset"], "vscode")
@@ -5563,6 +5665,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Values outside the appearance allowlists fall back to unset.
         self.assertEqual(normalized[1]["explorer_md_preset"], "")
         self.assertEqual(normalized[1]["explorer_md_font"], "")
+
+    def test_normalize_terminal_entries_accepts_terminal_markdown_fonts(self):
+        expected = {
+            "consolas",
+            "cascadia-code",
+            "jetbrains-mono",
+            "courier-new",
+        }
+
+        for font in expected:
+            with self.subTest(font=font):
+                normalized = web_saved_sessions._normalize_terminal_entries(
+                    [{"startup_mode": "explorer", "explorer_md_font": font}]
+                )
+                self.assertEqual(normalized[0]["explorer_md_font"], font)
 
     def test_workspace_save_round_trips_tab_views_and_md_appearance(self):
         """2.f / ISSUE-2026-033: view snapshots + appearance persist, gated to explorer panes."""
@@ -5604,7 +5721,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                                 "docs/a.md": {"mode": "preview", "scroll": 0.25, "identity": "id1"}
                             },
                             "explorer_md_preset": "paper",
-                            "explorer_md_font": "mono",
+                            "explorer_md_font": "consolas",
                         },
                         {
                             "title": "Shell",
@@ -5614,7 +5731,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                                 "x.md": {"mode": "source", "scroll": 0.1, "identity": "id2"}
                             },
                             "explorer_md_preset": "paper",
-                            "explorer_md_font": "mono",
+                            "explorer_md_font": "consolas",
                         },
                     ],
                 },
@@ -5628,7 +5745,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             {"docs/a.md": {"mode": "preview", "scroll": 0.25, "identity": "id1"}},
         )
         self.assertEqual(config["terminals"][0]["explorer_md_preset"], "paper")
-        self.assertEqual(config["terminals"][0]["explorer_md_font"], "mono")
+        self.assertEqual(config["terminals"][0]["explorer_md_font"], "consolas")
         # Non-explorer panes never carry tab views or a Markdown appearance.
         self.assertEqual(config["terminals"][1]["explorer_tab_views"], {})
         self.assertEqual(config["terminals"][1]["explorer_md_preset"], "")
@@ -10243,6 +10360,125 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         self.assertIn(".terminal-toast", terminals_css)
         self.assertIn(".terminal-toast.success", terminals_css)
 
+    def test_reveal_opens_the_confined_path_in_the_file_manager(self):
+        (self.root / "note.txt").write_text("hi", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        with patch.object(api, "open_path_in_os_file_manager") as open_path:
+            response = self.client.post(
+                f"/api/explorer/{session_id}/reveal",
+                json={"path": "note.txt"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
+        # The launcher receives the resolved, root-confined absolute path. Its
+        # platform-specific subprocess may instead open the parent on Linux.
+        open_path.assert_called_once_with(str((self.root / "note.txt").resolve()))
+
+    def test_reveal_unknown_session_returns_404(self):
+        response = self.client.post("/api/explorer/missing/reveal", json={"path": ""})
+        self.assertEqual(response.status_code, 404)
+
+    def test_reveal_rejects_paths_outside_the_root(self):
+        session_id = self._create_local_explorer_session()
+        with patch.object(web_explorer.subprocess, "Popen") as popen:
+            response = self.client.post(
+                f"/api/explorer/{session_id}/reveal",
+                json={"path": "../outside.txt"},
+            )
+        self.assertEqual(response.status_code, 400)
+        popen.assert_not_called()
+
+    def test_reveal_never_touches_git_or_write_helpers(self):
+        (self.root / "read.txt").write_text("read only", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        with patch.object(web_explorer, "_run_git_command") as run_git, \
+                patch.object(web_explorer.subprocess, "Popen"):
+            response = self.client.post(
+                f"/api/explorer/{session_id}/reveal",
+                json={"path": "read.txt"},
+            )
+        self.assertEqual(response.status_code, 200)
+        run_git.assert_not_called()
+
+    def test_explorer_bar_ships_os_open_button(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function revealExplorerInOs(index)", terminals_js)
+        self.assertIn("data-explorer-os-open", terminals_js)
+        self.assertIn("/reveal", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".explorer-os-open", terminals_css)
+
+    # A 1x1 transparent PNG — smallest valid image bytes for the viewer tests.
+    _PNG_BYTES = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+        "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+
+    def test_file_route_returns_image_metadata_instead_of_binary_error(self):
+        (self.root / "pic.png").write_bytes(self._PNG_BYTES)
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file?path=pic.png"
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["preview_type"], "image")
+        self.assertEqual(payload["name"], "pic.png")
+        self.assertEqual(payload["content"], "")
+
+    def test_image_route_serves_bytes_inline_with_mimetype(self):
+        (self.root / "pic.png").write_bytes(self._PNG_BYTES)
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/image?path=pic.png"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "image/png")
+        self.assertNotIn("attachment", response.headers.get("Content-Disposition", ""))
+        self.assertEqual(response.get_data(), self._PNG_BYTES)
+        response.close()
+
+    def test_image_route_locks_down_svg_with_csp(self):
+        (self.root / "vector.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg"></svg>', encoding="utf-8"
+        )
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/image?path=vector.svg"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "image/svg+xml")
+        self.assertIn("default-src 'none'", response.headers.get("Content-Security-Policy", ""))
+        self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+        response.close()
+
+    def test_image_route_rejects_non_image_files(self):
+        (self.root / "notes.txt").write_text("hi", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/image?path=notes.txt"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_image_route_rejects_paths_outside_the_root(self):
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/image?path=../secret.png"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_image_route_unknown_session_returns_404(self):
+        response = self.client.get("/api/explorer/missing/image?path=x.png")
+        self.assertEqual(response.status_code, 404)
+
+    def test_image_viewer_ships_in_frontend_assets(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function renderExplorerImage(index, data", terminals_js)
+        self.assertIn("preview_type === 'image'", terminals_js)
+        self.assertIn("/image?path=", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".explorer-image-view", terminals_css)
+
 
 class TerminalSearchWebLinksTestCase(unittest.TestCase):
     """Deep-dive 10.3 — terminal scrollback search + clickable links."""
@@ -10571,11 +10807,18 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json()["group_id"]
 
-    def test_launch_persists_a_password_free_snapshot(self):
+    def test_capture_persists_a_password_free_v2_slot(self):
         self._launch_explorer_group()
-        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(len(snapshot["groups"]), 1)
-        group = snapshot["groups"][0]
+        slot = web_runtime_state.capture_workspace(api.session_manager)
+        self.assertIsNotNone(slot)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], 2)
+        stored = data["workspaces"]["default"]
+        self.assertEqual(stored["workspace_id"], "default")
+        self.assertEqual(stored["origin"], "auto")
+        self.assertEqual(stored["label"], "Workspace")
+        self.assertEqual(len(stored["groups"]), 1)
+        group = stored["groups"][0]
         self.assertEqual(group["name"], "Workspace")
         self.assertEqual(group["connection_mode"], "wsl")
         self.assertEqual(len(group["sessions"]), 1)
@@ -10583,26 +10826,198 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(session["startup_mode"], "explorer")
         self.assertNotIn("password", session)
 
-    def test_runtime_state_is_only_restorable_without_active_groups(self):
+    def test_v1_file_migrates_to_a_restorable_default_slot(self):
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "saved_at": time.time(),
+                    "groups": [{"group_id": "g1", "name": "buildserver-01"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertIsNotNone(slot)
+        self.assertEqual(slot["workspace_id"], "default")
+        self.assertEqual(slot["origin"], "auto")
+        self.assertEqual(slot["label"], "buildserver-01")
+        self.assertEqual(slot["groups"][0]["group_id"], "g1")
+
+    def test_eligibility_auto_and_manual_with_no_max_age(self):
         self._launch_explorer_group()
-        response = self.client.get("/api/runtime-state")
-        payload = response.get_json()
-        self.assertFalse(payload["restorable"])
+        web_runtime_state.capture_workspace(api.session_manager, origin="auto")
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace())
+        web_runtime_state.capture_workspace(api.session_manager, origin="manual")
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertEqual(slot["origin"], "manual")
+        # The offer is permanent: a years-old slot is still restorable.
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        data["workspaces"]["default"]["saved_at"] = time.time() - 10 * 365 * 24 * 3600
+        self.state_path.write_text(json.dumps(data), encoding="utf-8")
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace())
+
+    def test_empty_missing_or_unknown_slots_are_not_restorable(self):
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "workspaces": {
+                        "default": {
+                            "workspace_id": "default",
+                            "label": "Empty",
+                            "origin": "auto",
+                            "saved_at": time.time(),
+                            "groups": [],
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+        self.state_path.write_text("not json", encoding="utf-8")
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+        self.assertIsNone(web_runtime_state.load_restorable_workspace("nonexistent"))
+
+    def test_capture_and_clear_preserve_sibling_slots(self):
+        self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager, workspace_id="alpha")
+        web_runtime_state.capture_workspace(api.session_manager, workspace_id="beta")
+        # Overwriting slot A must leave slot B intact.
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id="alpha", origin="manual"
+        )
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(set(data["workspaces"]), {"alpha", "beta"})
+        self.assertEqual(data["workspaces"]["alpha"]["origin"], "manual")
+        self.assertEqual(data["workspaces"]["beta"]["origin"], "auto")
+        # Clearing slot A must leave slot B intact, and the file stays v2.
+        web_runtime_state.clear_workspace("alpha")
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], 2)
+        self.assertEqual(set(data["workspaces"]), {"beta"})
+
+    def test_autosave_tick_captures_a_live_workspace(self):
+        self._launch_explorer_group()
+        self.assertFalse(self.state_path.exists())
+        api._run_workspace_autosave_tick()
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertIsNotNone(slot)
+        self.assertEqual(slot["origin"], "auto")
+        self.assertEqual(len(slot["groups"]), 1)
+
+    def test_autosave_tick_skips_an_empty_workspace_without_clearing(self):
+        self._launch_explorer_group()
+        api._run_workspace_autosave_tick()
+        before = self.state_path.read_text(encoding="utf-8")
+        # The workspace goes idle (e.g. launcher only); the tick must skip it
+        # and leave the previously saved slot restorable.
+        api.session_manager.reset_sessions()
+        api._run_workspace_autosave_tick()
+        self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace())
+
+    def test_runtime_state_is_restorable_even_with_active_groups(self):
+        self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager)
+        payload = self.client.get("/api/runtime-state").get_json()
+        self.assertTrue(payload["restorable"])
+        self.assertEqual(payload["workspace_id"], "default")
+        self.assertEqual(payload["origin"], "auto")
+        self.assertEqual(payload["label"], "Workspace")
+        self.assertEqual(len(payload["groups"]), 1)
         self.assertEqual(payload["active_group_count"], 1)
 
-        # simulate a backend restart: in-memory groups vanish, the file stays
-        api.session_manager.reset_sessions()
-        response = self.client.get("/api/runtime-state")
+    def test_save_endpoint_captures_a_manual_slot_immediately_restorable(self):
+        self._launch_explorer_group()
+        response = self.client.post("/api/runtime-state/save", json={})
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertTrue(payload["restorable"])
-        self.assertEqual(len(payload["groups"]), 1)
+        self.assertTrue(payload["saved"])
+        self.assertEqual(payload["workspace_id"], "default")
+        self.assertEqual(payload["origin"], "manual")
+        self.assertEqual(payload["label"], "Workspace")
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertEqual(slot["origin"], "manual")
+
+    def test_save_endpoint_refuses_an_empty_workspace_without_clearing(self):
+        self._launch_explorer_group()
+        self.client.post("/api/runtime-state/save", json={})
+        before = self.state_path.read_text(encoding="utf-8")
+        api.session_manager.reset_sessions()
+        response = self.client.post("/api/runtime-state/save", json={})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
+
+    def test_group_events_do_not_write_the_snapshot(self):
+        group_id = self._launch_explorer_group()
+        # Launching a group is a pure UI event now — no snapshot write.
+        self.assertFalse(self.state_path.exists())
+        response = self.client.delete(f"/api/sessions?group={group_id}")
+        self.assertEqual(response.status_code, 200)
+        # Closing the group must not write (or clear) the snapshot either.
+        self.assertFalse(self.state_path.exists())
+
+    def test_group_close_preserves_the_previously_saved_slot(self):
+        group_id = self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager)
+        before = self.state_path.read_text(encoding="utf-8")
+        response = self.client.delete(f"/api/sessions?group={group_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace())
+
+    def test_capture_label_ignores_timestamp_group_names(self):
+        # No session_name: the live group gets an auto "Session HH:MM:SS" name,
+        # but the captured label must never be that bare timestamp.
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(self.repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        slot = web_runtime_state.capture_workspace(api.session_manager)
+        self.assertIsNotNone(slot)
+        self.assertNotRegex(slot["label"], r"\d{2}:\d{2}:\d{2}")
+        self.assertTrue(slot["label"])
+
+    def test_restore_launch_never_mints_a_timestamp_group_name(self):
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "wsl",
+                    "restore": True,
+                    "sessions": [
+                        {
+                            "directory": str(self.repo_dir),
+                            "title": "Files",
+                            "startup_mode": "explorer",
+                        }
+                    ],
+                },
+            )
+        self.assertEqual(response.status_code, 201)
+        name = response.get_json()["group"]["name"]
+        self.assertEqual(name, "Workspace")
+        self.assertNotRegex(name, r"\d{2}:\d{2}:\d{2}")
 
     def test_replaying_the_snapshot_relaunches_the_group(self):
         self._launch_explorer_group()
-        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
+        slot = web_runtime_state.capture_workspace(api.session_manager)
         api.session_manager.reset_sessions()
 
-        group = snapshot["groups"][0]
+        group = slot["groups"][0]
         response = self.client.post(
             "/api/sessions",
             json={
@@ -10613,59 +11028,13 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
                 "surface_mode": group["surface_mode"],
                 "session_name": group["name"],
                 "saved_session_id": group["saved_session_id"],
+                "restore": True,
             },
         )
         self.assertEqual(response.status_code, 201)
         restored = response.get_json()
         self.assertEqual(restored["group"]["name"], "Workspace")
         self.assertEqual(restored["sessions"][0]["startup_mode"], "explorer")
-
-    def test_closing_the_group_empties_the_snapshot(self):
-        group_id = self._launch_explorer_group()
-        response = self.client.delete(f"/api/sessions?group={group_id}")
-        self.assertEqual(response.status_code, 200)
-        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(snapshot["groups"], [])
-        self.assertIsNone(web_runtime_state.load_restorable_workspace())
-
-    def test_prune_group_from_snapshot_removes_only_target(self):
-        self.state_path.write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "saved_at": time.time(),
-                    "groups": [
-                        {"group_id": "g1", "name": "one"},
-                        {"group_id": "g2", "name": "two"},
-                    ],
-                }
-            ),
-            encoding="utf-8",
-        )
-        web_runtime_state.prune_group_from_snapshot("g1")
-        data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual([g["group_id"] for g in data["groups"]], ["g2"])
-
-    def test_group_close_prunes_only_that_group_not_rebuild_from_live(self):
-        """Bug 1: closing a group prunes just it from the snapshot instead of
-        rebuilding from a live set that may have collapsed to a leftover pane."""
-        group_a = self._launch_explorer_group(name="Alpha")
-        self._launch_explorer_group(name="Beta")
-        # Simulate the live set collapsing (e.g. the session window closed and
-        # Beta is no longer tracked) while the snapshot still records both.
-        beta_group_id = [
-            g.group_id
-            for g in api.session_manager.get_all_groups()
-            if g.name == "Beta"
-        ][0]
-        api.session_manager.remove_group(beta_group_id)
-
-        response = self.client.delete(f"/api/sessions?group={group_a}")
-        self.assertEqual(response.status_code, 200)
-        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
-        # A rebuild-from-live would have dropped Beta (no longer live) and left
-        # nothing; pruning keeps the previously-captured Beta.
-        self.assertEqual([g["name"] for g in snapshot["groups"]], ["Beta"])
 
     def test_restore_launch_skips_agent_preflight_clearing(self):
         """Bug 2: a restore replays the workspace verbatim, so a cold post-restart
@@ -10723,24 +11092,16 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         sanitize.assert_called_once()
 
-    def test_stale_or_missing_snapshots_are_not_restorable(self):
-        self.assertIsNone(web_runtime_state.load_restorable_workspace())
-        stale = {
-            "version": 1,
-            "saved_at": time.time() - web_runtime_state.RUNTIME_STATE_MAX_AGE_SECONDS - 60,
-            "groups": [{"name": "old"}],
-        }
-        self.state_path.write_text(json.dumps(stale), encoding="utf-8")
-        self.assertIsNone(web_runtime_state.load_restorable_workspace())
-        self.state_path.write_text("not json", encoding="utf-8")
-        self.assertIsNone(web_runtime_state.load_restorable_workspace())
-
-    def test_delete_endpoint_dismisses_the_snapshot(self):
+    def test_delete_endpoint_clears_only_that_workspace_slot(self):
         self._launch_explorer_group()
-        api.session_manager.reset_sessions()
+        web_runtime_state.capture_workspace(api.session_manager)
         response = self.client.delete("/api/runtime-state")
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(self.state_path.exists())
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+        # The file itself stays (v2 skeleton); only the slot is removed.
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["workspaces"], {})
         payload = self.client.get("/api/runtime-state").get_json()
         self.assertFalse(payload["restorable"])
 
@@ -10752,9 +11113,56 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         launcher_js = self._static("js/launcher.js")
         self.assertIn("async function checkRestorableWorkspace()", launcher_js)
         self.assertIn("async function restorePreviousWorkspace()", launcher_js)
-        self.assertIn("fetch('/api/runtime-state', { method: 'DELETE' })", launcher_js)
         launcher_css = self._static("css/launcher.css")
         self.assertIn(".restore-banner", launcher_css)
+
+    def test_dismiss_restore_banner_is_hide_only(self):
+        """Decision 3: Dismiss only hides the banner client-side — it must not
+        call DELETE /api/runtime-state, so the saved slot stays restorable."""
+        launcher_js = self._static("js/launcher.js")
+        start = launcher_js.index("function dismissRestoreBanner()")
+        end = launcher_js.index("function restorePreviousWorkspace", start)
+        body = launcher_js[start:end]
+        self.assertNotIn("fetch(", body)
+        self.assertNotIn("DELETE", body)
+
+    def test_restore_replays_current_saved_preset(self):
+        """"Latest preset wins": a preset-backed group is restored from the
+        saved session's *current* config (so Save All Sessions then Save
+        Workspace restores the edited state), while an ad-hoc group replays the
+        snapshot verbatim. Launch and restore share buildSessionsFromConfig so
+        both build panes identically."""
+        launcher_js = self._static("js/launcher.js")
+        # One shared expansion, reused by launch and restore (no copy-paste).
+        self.assertIn("function buildSessionsFromConfig(config, count)", launcher_js)
+        self.assertIn("sessions = buildSessionsFromConfig(config, selectedCount)", launcher_js)
+        # Restore resolves a group's current preset before replaying it.
+        self.assertIn("async function buildRestoreGroupBody(group)", launcher_js)
+        self.assertIn("await buildRestoreGroupBody(group)", launcher_js)
+        self.assertIn("buildSessionsFromConfig(config, config.terminal_count)", launcher_js)
+        self.assertIn("/api/saved-sessions/${encodeURIComponent(savedId)}", launcher_js)
+        # The blank built-in default is never treated as a real preset, and a
+        # missing/deleted preset falls back to the verbatim snapshot body.
+        self.assertIn("savedId === DEFAULT_SESSION_ID", launcher_js)
+        start = launcher_js.index("async function buildRestoreGroupBody(group)")
+        end = launcher_js.index("function dismissRestoreBanner()", start)
+        body = launcher_js[start:end]
+        self.assertIn("return snapshotBody", body)
+
+    def test_terminals_page_ships_workspace_save_menu(self):
+        """The Workspace... dropdown's Save Workspace item posts to
+        /api/runtime-state/save and is disabled when no groups are live."""
+        html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertIn('id="workspaceMenuRoot"', html)
+        self.assertIn('id="workspaceMenuBtn"', html)
+        self.assertIn(">Workspace...</button>", html)
+        self.assertIn('id="saveWorkspaceItem"', html)
+        self.assertIn(">Save Workspace</button>", html)
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function toggleWorkspaceMenu(event)", terminals_js)
+        self.assertIn("async function saveWorkspace(", terminals_js)
+        self.assertIn("/api/runtime-state/save", terminals_js)
+        self.assertIn("item.disabled = !sessionGroups.length;", terminals_js)
 
 
 class SettingsLauncherConfigTestCase(unittest.TestCase):
@@ -10858,6 +11266,51 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["terminal"]["font_size"], web_config.TERMINAL_FONT_SIZE_MIN)
         self.assertEqual(payload["terminal"]["max_sessions"], web_config.MAX_SESSIONS_MIN)
+
+    def test_app_config_round_trips_autosave_interval(self):
+        payload = self.client.get("/api/app-config").get_json()
+        self.assertEqual(payload["workspace"]["autosave_interval_minutes"], 5)
+
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"autosave_interval_minutes": 10}},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["workspace"]["autosave_interval_minutes"], 10)
+        cfg = api.load_config()
+        self.assertEqual(cfg["workspace"]["autosave_interval_minutes"], 10)
+        self.assertEqual(api.runtime_config.workspace_autosave_interval_minutes, 10)
+
+    def test_app_config_clamps_autosave_interval(self):
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"autosave_interval_minutes": 99}},
+        )
+        self.assertEqual(
+            response.get_json()["workspace"]["autosave_interval_minutes"],
+            web_config.AUTOSAVE_INTERVAL_MINUTES_MAX,
+        )
+
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"autosave_interval_minutes": 0}},
+        )
+        self.assertEqual(
+            response.get_json()["workspace"]["autosave_interval_minutes"],
+            web_config.AUTOSAVE_INTERVAL_MINUTES_MIN,
+        )
+
+    def test_runtime_config_refresh_normalizes_autosave_interval(self):
+        self.config_path.write_text(
+            json.dumps({"workspace": {"autosave_interval_minutes": "nope"}}),
+            encoding="utf-8",
+        )
+        api._refresh_runtime_config()
+        self.assertEqual(
+            api.runtime_config.workspace_autosave_interval_minutes,
+            web_config.AUTOSAVE_INTERVAL_MINUTES_DEFAULT,
+        )
 
     def test_app_config_rejects_invalid_terminal_values(self):
         before_family = api.runtime_config.terminal_font_family
@@ -10979,6 +11432,9 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         # Each preset option previews in its own family (OD-13).
         self.assertIn("value=\"'JetBrains Mono', Consolas, monospace\"", html)
         self.assertIn("style=\"font-family: 'JetBrains Mono', Consolas, monospace\"", html)
+        self.assertNotIn(">Fira Code</option>", html)
+        self.assertNotIn(">Source Code Pro</option>", html)
+        self.assertNotIn(">Menlo</option>", html)
         # "Custom…" keeps the free-text escape hatch alive.
         self.assertIn('<option value="custom">Custom…</option>', html)
         self.assertIn('id="appTerminalFontCustomField"', html)
@@ -11270,11 +11726,13 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         ]
         self.assertIn("agent_auto_mode:", collect)
 
-        # 7.b (OD-12 case a): the direct-launch payload rebuilt each session
-        # field-by-field and dropped the toggle — it must carry it now.
+        # 7.b (OD-12 case a): the launch payload rebuilds each session
+        # field-by-field and must carry the toggle. This expansion now lives in
+        # buildSessionsFromConfig, shared by the launch button and workspace
+        # restore, so both build panes identically.
         launch = launcher_js[
-            launcher_js.index("async function launchSessions()"):
-            launcher_js.index("function setLaunchButtonLoading(")
+            launcher_js.index("function buildSessionsFromConfig(config, count)"):
+            launcher_js.index("async function launchSessions()")
         ]
         self.assertIn("agent_auto_mode: terminal.initial_command_mode === 'agent'", launch)
 

@@ -34,15 +34,24 @@ EXPLORER_MAX_TAB_PATH_LENGTH = 4096
 # (ISSUE-2026-033). Allowlists and bounds mirror the client
 # (`EXPLORER_MD_PRESETS` / `EXPLORER_MD_FONTS`, the file-view panel names,
 # and `EXPLORER_EDITOR_FONT_MIN/MAX` in web/static/js/terminals.js). The
-# reserved `__preview__` key carries the permanent Preview tab's zoom only —
-# its content is transient by design.
+# reserved `__preview__` key carries the permanent Preview tab's own view state,
+# including zoom, path, and Markdown folds.
 EXPLORER_TAB_VIEW_MODES = ("source", "preview", "diff")
 EXPLORER_MAX_TAB_VIEW_IDENTITY_LENGTH = 64
+EXPLORER_MAX_MARKDOWN_FOLDS = 256
+EXPLORER_MAX_MARKDOWN_LINE = 1_000_000
 EXPLORER_PREVIEW_TAB_KEY = "__preview__"
 EXPLORER_EDITOR_FONT_MIN = 10
 EXPLORER_EDITOR_FONT_MAX = 24
 EXPLORER_MD_PRESETS = ("default", "paper", "contrast", "vscode")
-EXPLORER_MD_FONTS = ("system", "serif", "mono")
+EXPLORER_MD_FONTS = (
+    "system",
+    "serif",
+    "consolas",
+    "cascadia-code",
+    "jetbrains-mono",
+    "courier-new",
+)
 
 
 def _normalize_explorer_tab_path(value: Any) -> str:
@@ -105,15 +114,43 @@ def _normalize_explorer_tab_font_size(value: Any) -> int:
     return max(EXPLORER_EDITOR_FONT_MIN, min(EXPLORER_EDITOR_FONT_MAX, font_size))
 
 
+def _normalize_explorer_markdown_folds(value: Any) -> List[int]:
+    """Return bounded, unique Markdown heading line numbers in document order."""
+    if not isinstance(value, list):
+        return []
+    folds: List[int] = []
+    seen = set()
+    for raw_line in value:
+        if isinstance(raw_line, bool):
+            continue
+        try:
+            line = int(raw_line)
+        except (TypeError, ValueError):
+            continue
+        if line < 1 or line > EXPLORER_MAX_MARKDOWN_LINE or line in seen:
+            continue
+        seen.add(line)
+        folds.append(line)
+        if len(folds) >= EXPLORER_MAX_MARKDOWN_FOLDS:
+            break
+    return sorted(folds)
+
+
+def _normalize_explorer_view_identity(value: Any) -> str:
+    """Validate one short, opaque content identity token."""
+    identity = str(value or "")
+    return identity if len(identity) <= EXPLORER_MAX_TAB_VIEW_IDENTITY_LENGTH else ""
+
+
 def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str, Any]:
     """Validate the per-tab view map: mode + scroll fraction + identity + zoom.
 
     Only entries for persisted open tabs survive (plus the reserved Preview
-    key, which keeps zoom and the tab's own separated path — shown file and/or
-    browsed directory); the mode must be a known file view, the scroll is
-    clamped to a [0, 1] fraction (OD-4), the content-identity hash is a short
-    opaque token, and the font size is clamped to the editor's zoom bounds —
-    anything else is dropped rather than restored.
+    key, which keeps zoom, Markdown folds, and the tab's own separated path —
+    shown file and/or browsed directory); the mode must be a known file view,
+    the scroll is clamped to a [0, 1] fraction (OD-4), content identities are
+    short opaque tokens, and the font size and fold lines are bounded — anything
+    else is dropped rather than restored.
     """
     if not isinstance(value, dict):
         return {}
@@ -132,6 +169,11 @@ def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str,
             preview_dir = _normalize_explorer_tab_path(raw_view.get("dir"))
             if preview_dir:
                 record["dir"] = preview_dir
+            folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
+            fold_identity = _normalize_explorer_view_identity(raw_view.get("fold_identity"))
+            if folds and fold_identity:
+                record["folds"] = folds
+                record["fold_identity"] = fold_identity
             if record and EXPLORER_PREVIEW_TAB_KEY not in views:
                 views[EXPLORER_PREVIEW_TAB_KEY] = record
             continue
@@ -147,15 +189,18 @@ def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str,
                 scroll = 0.0
             if scroll != scroll:  # NaN guard
                 scroll = 0.0
-            identity = str(raw_view.get("identity") or "")
-            if len(identity) > EXPLORER_MAX_TAB_VIEW_IDENTITY_LENGTH:
-                identity = ""
+            identity = _normalize_explorer_view_identity(raw_view.get("identity"))
             record["mode"] = mode
             record["scroll"] = max(0.0, min(1.0, scroll))
             record["identity"] = identity
         font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
         if font_size:
             record["font_size"] = font_size
+        folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
+        fold_identity = _normalize_explorer_view_identity(raw_view.get("fold_identity"))
+        if folds and fold_identity:
+            record["folds"] = folds
+            record["fold_identity"] = fold_identity
         if record:
             views[path] = record
     return views

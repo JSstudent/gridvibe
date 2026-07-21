@@ -22,7 +22,8 @@
     "theme": "system"
   },
   "workspace": {
-    "surface_mode": "normal"
+    "surface_mode": "normal",
+    "autosave_interval_minutes": 5
   },
   "voice_input": {
     "enabled": true,

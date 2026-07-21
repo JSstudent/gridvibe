@@ -1062,6 +1062,33 @@
         const shouldOpen = !root.classList.contains('open');
         root.classList.toggle('open', shouldOpen);
         button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+        if (shouldOpen) {
+            closeWorkspaceMenu();
+        }
+    }
+
+    function closeWorkspaceMenu() {
+        const root = document.getElementById('workspaceMenuRoot');
+        const button = document.getElementById('workspaceMenuBtn');
+        root?.classList.remove('open');
+        button?.setAttribute('aria-expanded', 'false');
+    }
+
+    function toggleWorkspaceMenu(event) {
+        event?.preventDefault();
+        event?.stopPropagation();
+        const root = document.getElementById('workspaceMenuRoot');
+        const button = document.getElementById('workspaceMenuBtn');
+        if (!root || !button) {
+            return;
+        }
+
+        const shouldOpen = !root.classList.contains('open');
+        root.classList.toggle('open', shouldOpen);
+        button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+        if (shouldOpen) {
+            closeSessionsMenu();
+        }
     }
 
 
@@ -1431,6 +1458,9 @@
         if (!(event.target instanceof Element) || !event.target.closest('#sessionsMenuRoot')) {
             closeSessionsMenu();
         }
+        if (!(event.target instanceof Element) || !event.target.closest('#workspaceMenuRoot')) {
+            closeWorkspaceMenu();
+        }
     });
 
     document.getElementById('savedSessionsModal').addEventListener('click', event => {
@@ -1491,6 +1521,7 @@
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             closeSessionsMenu();
+            closeWorkspaceMenu();
             if (document.getElementById('savedSessionsModal').classList.contains('visible')) {
                 closeSavedSessionModal();
             }
@@ -1683,10 +1714,13 @@
     }
 
     async function saveActiveWorkspaceSession(button = null, options = {}) {
-        const targetGroupId = getActiveWorkspaceGroupId();
+        const silent = Boolean(options.silent);
+        const targetGroupId = options.groupId || getActiveWorkspaceGroupId();
         if (!targetGroupId) {
-            setWorkspaceSaveMessage('No active session group to save.', 'error');
-            return;
+            if (!silent) {
+                setWorkspaceSaveMessage('No active session group to save.', 'error');
+            }
+            return { ok: false, error: 'No active session group to save.' };
         }
 
         const promptForName = Boolean(options.promptForName);
@@ -1694,8 +1728,10 @@
         const group = getGroupById(targetGroupId);
         const config = buildActiveWorkspaceSessionConfig(targetGroupId);
         if (!config.terminals.length) {
-            setWorkspaceSaveMessage('No active terminals to save.', 'error');
-            return;
+            if (!silent) {
+                setWorkspaceSaveMessage('No active terminals to save.', 'error');
+            }
+            return { ok: false, skipped: true, error: 'No active terminals to save.' };
         }
 
         const saveTarget = getWorkspaceSaveTarget(targetGroupId);
@@ -1705,7 +1741,7 @@
         if (promptForName) {
             const result = await openSaveSessionAsModal(suggestedName);
             if (!result) {
-                return;
+                return { ok: false, cancelled: true };
             }
             sessionName = result.name;
             openSavedSessionNow = Boolean(result.openNow);
@@ -1756,15 +1792,22 @@
                 );
             }
             notifySavedSessionUpdated(data, { activate: openSavedSessionNow });
+            const savedName = data.name || sessionName;
             if (createNewSession && openSavedSessionNow) {
-                setWorkspaceSaveMessage(`Saved session "${data.name || sessionName}". Opening...`, 'success');
+                if (!silent) {
+                    setWorkspaceSaveMessage(`Saved session "${savedName}". Opening...`, 'success');
+                }
                 await launchSavedSession(data);
-            } else {
-                setWorkspaceSaveMessage(`Saved session "${data.name || sessionName}".`, 'success');
+            } else if (!silent) {
+                setWorkspaceSaveMessage(`Saved session "${savedName}".`, 'success');
             }
+            return { ok: true, name: savedName };
         } catch (error) {
             console.error('[GridVibe Sessions] workspace save failed:', error);
-            setWorkspaceSaveMessage(`Save failed: ${error.message}`, 'error');
+            if (!silent) {
+                setWorkspaceSaveMessage(`Save failed: ${error.message}`, 'error');
+            }
+            return { ok: false, error: error.message, name: sessionName };
         } finally {
             if (button) {
                 button.disabled = false;
@@ -1780,7 +1823,103 @@
         });
     }
 
+    async function saveAllWorkspaceSessions(button = null) {
+        const groups = sessionGroups.slice();
+        if (!groups.length) {
+            setWorkspaceSaveMessage('No sessions to save.', 'error');
+            return;
+        }
+
+        const previousText = button?.textContent;
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Saving all...';
+        }
+
+        let savedCount = 0;
+        const failures = [];
+        try {
+            for (const group of groups) {
+                const result = await saveActiveWorkspaceSession(null, {
+                    groupId: group.group_id,
+                    silent: true
+                });
+                if (result?.ok) {
+                    savedCount += 1;
+                } else if (result && !result.skipped) {
+                    failures.push(result.name || group.name || group.group_id);
+                }
+            }
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = previousText || 'Save All Sessions';
+            }
+        }
+
+        if (failures.length) {
+            setWorkspaceSaveMessage(
+                `Saved ${savedCount} session${savedCount === 1 ? '' : 's'}, ${failures.length} failed.`,
+                'error'
+            );
+        } else {
+            setWorkspaceSaveMessage(
+                `Saved all ${savedCount} session${savedCount === 1 ? '' : 's'}.`,
+                'success'
+            );
+        }
+    }
+
+    function updateWorkspaceSaveItemState() {
+        const item = document.getElementById('saveWorkspaceItem');
+        if (item) {
+            item.disabled = !sessionGroups.length;
+        }
+    }
+
+    async function saveWorkspace(button = null) {
+        if (!sessionGroups.length) {
+            setWorkspaceSaveMessage('No sessions to save.', 'error');
+            return;
+        }
+
+        if (button) {
+            button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
+        }
+
+        try {
+            const response = await fetch('/api/runtime-state/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Save failed with status ${response.status}`);
+            }
+            const savedLabel = String(data.label || '').trim();
+            const savedAt = Number(data.saved_at);
+            const savedTime = Number.isFinite(savedAt)
+                ? new Date(savedAt * 1000).toLocaleTimeString()
+                : '';
+            const detail = [savedLabel ? `"${savedLabel}"` : '', savedTime]
+                .filter(Boolean)
+                .join(' at ');
+            setWorkspaceSaveMessage(`Workspace saved${detail ? ` — ${detail}` : ''}.`, 'success');
+        } catch (error) {
+            console.error('[GridVibe Sessions] workspace save failed:', error);
+            setWorkspaceSaveMessage(`Workspace save failed: ${error.message} — try again.`, 'error');
+        } finally {
+            if (button) {
+                button.setAttribute('aria-busy', 'false');
+                button.disabled = !sessionGroups.length;
+            }
+        }
+    }
+
     function renderSessionTabs() {
+        updateWorkspaceSaveItemState();
         const container = document.getElementById('sessionTabs');
         if (!container) return;
 
@@ -4203,6 +4342,7 @@
                                      <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
                                      <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${i}" data-explorer-tree-toggle="${i}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                                      <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
+                                     ${session.mode === 'ssh' ? '' : `<button type="button" class="explorer-os-open" id="explorer-os-open-${i}" data-explorer-os-open="${i}" title="Open current location in system file manager" aria-label="Open current location in system file manager">${EXPLORER_OS_OPEN_ICON}</button>`}
                                      <div class="explorer-git-summary" id="explorer-git-${i}" aria-live="polite"></div>
                                      <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
                                      <div class="explorer-directory-search" id="explorer-directory-search-${i}"></div>
@@ -4290,6 +4430,7 @@
         });
         wireCardButton(card, `[data-explorer-git-toggle="${i}"]`, () => toggleExplorerGitSidebar(i));
         wireCardButton(card, `[data-explorer-tree-toggle="${i}"]`, () => toggleExplorerTreeSidebar(i));
+        wireCardButton(card, `[data-explorer-os-open="${i}"]`, () => revealExplorerInOs(i));
     }
 
     /* Forward keystrokes and pointer focus for a terminal pane once its DOM
@@ -4917,6 +5058,21 @@
                 toggleExplorerTreeSidebar(index);
             });
         }
+
+        const explorerOsOpen = card.querySelector(`[data-explorer-os-open="${index}"]`);
+        if (explorerOsOpen && !explorerOsOpen.dataset.bound) {
+            explorerOsOpen.dataset.bound = 'true';
+            explorerOsOpen.draggable = false;
+            explorerOsOpen.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            explorerOsOpen.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                revealExplorerInOs(index);
+            });
+        }
     }
 
     function ensureExplorerThemeButton(card, index) {
@@ -5098,6 +5254,7 @@
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
                         <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${index}" data-explorer-tree-toggle="${index}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                         <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
+                        ${session.mode === 'ssh' ? '' : `<button type="button" class="explorer-os-open" id="explorer-os-open-${index}" data-explorer-os-open="${index}" title="Open current location in system file manager" aria-label="Open current location in system file manager">${EXPLORER_OS_OPEN_ICON}</button>`}
                         <div class="explorer-git-summary" id="explorer-git-${index}" aria-live="polite"></div>
                         <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
                         <div class="explorer-directory-search" id="explorer-directory-search-${index}"></div>
@@ -9266,7 +9423,7 @@
             : '';
         const openTab = isDirectory
             ? ''
-            : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">+</button>`;
+            : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">↗</button>`;
 
         return `
             <div class="explorer-tree-row${active ? ' active' : ''}" data-explorer-copy-path="${escHtml(path)}">
@@ -9886,6 +10043,43 @@
         }
     }
 
+    function findExplorerMarkdownPreviewTargetIndex() {
+        const activePane = document.activeElement?.closest?.('.explorer-pane');
+        const candidates = [Number(activePane?.dataset.slot), _focusedTerminalIndex];
+        for (let index = 0; index < terminals.length; index += 1) {
+            candidates.push(index);
+        }
+        const seen = new Set();
+        for (const index of candidates) {
+            if (!Number.isInteger(index) || index < 0 || seen.has(index)) {
+                continue;
+            }
+            seen.add(index);
+            if (terminals[index]?._explorerMode === 'file'
+                && document.getElementById(`explorer-preview-${index}`)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    document.addEventListener('keydown', event => {
+        if (!(event.ctrlKey || event.metaKey) || !event.shiftKey
+            || event.altKey || event.code !== 'KeyV' || isEditableShortcutTarget(event.target)) {
+            return;
+        }
+        const index = findExplorerMarkdownPreviewTargetIndex();
+        if (index === -1) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        setExplorerFileView(
+            index,
+            activeExplorerFileView(index) === 'preview' ? 'source' : 'preview'
+        );
+    });
+
     function isExplorerSearchablePane(pane) {
         return pane?._explorerMode === 'file' || pane?._explorerMode === 'directory';
     }
@@ -9988,7 +10182,9 @@
     // every open preview via preset classes + CSS custom properties (defined
     // from tokens in terminals.css), so no palette literals live in JS.
     const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast', 'vscode'];
-    const EXPLORER_MD_FONTS = ['system', 'serif', 'mono'];
+    const EXPLORER_MD_FONTS = [
+        'system', 'serif', 'consolas', 'cascadia-code', 'jetbrains-mono', 'courier-new'
+    ];
     const EXPLORER_MD_PRESET_DEFAULT = 'default';
     const EXPLORER_MD_FONT_DEFAULT = 'system';
     const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';
@@ -10002,7 +10198,10 @@
     const EXPLORER_MD_FONT_LABELS = {
         system: 'System',
         serif: 'Serif',
-        mono: 'Monospace',
+        consolas: 'Consolas',
+        'cascadia-code': 'Cascadia Code',
+        'jetbrains-mono': 'JetBrains Mono',
+        'courier-new': 'Courier New',
     };
 
     function readExplorerMarkdownPref(key, allowed, fallback) {
@@ -10209,10 +10408,11 @@
         if (!pane) {
             return new Set();
         }
-        if (!(pane._explorerMarkdownCollapsedLines instanceof Set)) {
-            pane._explorerMarkdownCollapsedLines = new Set();
+        const tab = explorerActiveTab(pane);
+        if (!(tab.collapsedLines instanceof Set)) {
+            tab.collapsedLines = new Set();
         }
-        return pane._explorerMarkdownCollapsedLines;
+        return tab.collapsedLines;
     }
 
     function explorerMarkdownHeadingLevel(line) {
@@ -10290,7 +10490,7 @@
                 class="explorer-source-line-number"
                 data-explorer-markdown-section="${record.number}"
                 aria-expanded="${collapsed ? 'false' : 'true'}"
-                title="${collapsed ? 'Expand Markdown section' : 'Collapse Markdown section'}"
+                title="${collapsed ? 'Expand Markdown section (Alt: expand all at this level)' : 'Collapse Markdown section (Alt: collapse all at this level)'}"
             >
                 <span class="explorer-source-chevron" aria-hidden="true">${collapsed ? '▸' : '▾'}</span>
                 <span>${record.number}</span>
@@ -10342,17 +10542,47 @@
         return `<div class="explorer-source-lines">${rows.join('')}</div>`;
     }
 
-    function toggleExplorerMarkdownSection(index, lineNumber) {
+    function toggleExplorerMarkdownSection(index, lineNumber, { allSameLevel = false } = {}) {
         const pane = terminals[index];
         if (!pane || normalizeExplorerLanguage(pane._explorerFileLanguage || '') !== 'markdown') {
             return;
         }
         const collapsedLines = ensureExplorerMarkdownCollapsedLines(pane);
-        if (collapsedLines.has(lineNumber)) {
+        if (allSameLevel) {
+            // Alt+click fans the toggle out to every heading sharing the clicked
+            // heading's level. The new state mirrors the clicked heading: if it
+            // was expanded we collapse the whole level, and vice versa.
+            const levels = explorerMarkdownHeadingLevels(
+                explorerSourceLineRecords(pane._explorerFileContent || '')
+            );
+            const targetLevel = levels.get(lineNumber);
+            if (!targetLevel) {
+                return;
+            }
+            const collapse = !collapsedLines.has(lineNumber);
+            levels.forEach((level, number) => {
+                if (level !== targetLevel) {
+                    return;
+                }
+                if (collapse) {
+                    collapsedLines.add(number);
+                } else {
+                    collapsedLines.delete(number);
+                }
+            });
+        } else if (collapsedLines.has(lineNumber)) {
             collapsedLines.delete(lineNumber);
         } else {
             collapsedLines.add(lineNumber);
         }
+        const tab = explorerActiveTab(pane);
+        tab.collapsedIdentity = explorerFileContentIdentity(
+            pane._explorerFilePath,
+            pane._explorerFileContent,
+            pane._explorerDiffCommit,
+            pane._explorerDiffMode
+        );
+        persistExplorerTabsToSession(index);
         const state = ensureExplorerSearchState(pane, 'file');
         if (state.query && activeExplorerFileView(index) === 'source') {
             applyExplorerSearch(index);
@@ -10371,8 +10601,10 @@
                 return;
             }
             button.dataset.bound = 'true';
-            button.addEventListener('click', () => {
-                toggleExplorerMarkdownSection(index, Number(button.dataset.explorerMarkdownSection || 0));
+            button.addEventListener('click', (event) => {
+                toggleExplorerMarkdownSection(index, Number(button.dataset.explorerMarkdownSection || 0), {
+                    allSameLevel: event.altKey
+                });
             });
         });
     }
@@ -10408,6 +10640,9 @@
             if (!language) {
                 return;
             }
+            if (language === 'mermaid') {
+                return;
+            }
             const pre = code.parentElement;
             pre.classList.add('explorer-preview-code');
             pre.dataset.lang = language.toUpperCase();
@@ -10419,6 +10654,47 @@
         });
     }
 
+    let explorerMermaidRenderId = 0;
+
+    async function renderExplorerMermaid(preview) {
+        if (!preview || !window.mermaid) {
+            return;
+        }
+        const blocks = Array.from(preview.querySelectorAll('pre > code.language-mermaid'));
+        if (!blocks.length) {
+            return;
+        }
+        window.mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: 'strict',
+            theme: currentResolvedTheme() === 'dark' ? 'dark' : 'default',
+            suppressErrorRendering: true
+        });
+        for (const code of blocks) {
+            const source = code.textContent || '';
+            const pre = code.parentElement;
+            const diagram = document.createElement('div');
+            diagram.className = 'explorer-mermaid';
+            pre.replaceWith(diagram);
+            try {
+                explorerMermaidRenderId += 1;
+                const rendered = await window.mermaid.render(
+                    `explorer-mermaid-${explorerMermaidRenderId}`,
+                    source
+                );
+                if (!preview.contains(diagram)) {
+                    continue;
+                }
+                diagram.innerHTML = rendered.svg;
+                rendered.bindFunctions?.(diagram);
+            } catch (error) {
+                diagram.classList.add('explorer-mermaid-error');
+                const message = String(error?.message || 'Invalid diagram').split('\n')[0];
+                diagram.textContent = `Mermaid diagram error: ${message}`;
+            }
+        }
+    }
+
     function restoreExplorerPreview(index) {
         const pane = terminals[index];
         const preview = document.getElementById(`explorer-preview-${index}`);
@@ -10427,6 +10703,7 @@
             if (!pane._explorerFilePlain) {
                 highlightExplorerPreviewCode(preview);
             }
+            renderExplorerMermaid(preview);
         }
         return preview;
     }
@@ -11163,6 +11440,15 @@
         </svg>
     `;
 
+    const EXPLORER_OS_OPEN_ICON = `
+        <svg class="explorer-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+            fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+            <polyline points="15 3 21 3 21 9"/>
+            <line x1="10" y1="14" x2="21" y2="3"/>
+        </svg>
+    `;
+
     const EXPLORER_GIT_REVERT_ICON = `
         <svg class="explorer-btn-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
             fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -11231,6 +11517,42 @@
 
     function getDownloadBaseName(fullPath) {
         return String(fullPath || '').split(/[\\/]/).pop() || '';
+    }
+
+    /* Open the host OS file manager at whatever path the explorer bar currently
+       shows (the open file for a file tab, otherwise the listed directory).
+       Fully isolated from the explorer's browsing state — it only asks the
+       backend to launch the local file manager and never mutates panes. */
+    async function revealExplorerInOs(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId) {
+            return;
+        }
+        const path = pane._explorerMode === 'file'
+            ? (pane._explorerFilePath || '')
+            : (pane._explorerPath || '');
+        try {
+            const response = await fetch(
+                `/api/explorer/${encodeURIComponent(sessionId)}/reveal`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path }),
+                }
+            );
+            if (!response.ok) {
+                const payload = await response.json().catch(() => ({}));
+                showTerminalToast(
+                    `Could not open file manager: ${payload.error || response.statusText}`,
+                    'error'
+                );
+                return;
+            }
+            showTerminalToast('Opening file location…', 'success');
+        } catch (error) {
+            showTerminalToast(`Could not open file manager: ${error?.message || error}`, 'error');
+        }
     }
 
     /* ─────────────────────────────────────────────
@@ -11898,6 +12220,15 @@
         if (fontSize && fontSize !== EXPLORER_EDITOR_FONT_DEFAULT) {
             record.font_size = fontSize;
         }
+        if (tab.collapsedLines instanceof Set && tab.collapsedLines.size) {
+            record.folds = Array.from(tab.collapsedLines)
+                .filter(line => Number.isInteger(line) && line > 0)
+                .sort((left, right) => left - right)
+                .slice(0, 256);
+            if (tab.collapsedIdentity) {
+                record.fold_identity = tab.collapsedIdentity;
+            }
+        }
         return Object.keys(record).length ? record : null;
     }
 
@@ -11908,6 +12239,22 @@
             return 0;
         }
         return clampExplorerEditorFontSize(fontSize);
+    }
+
+    function explorerPersistedMarkdownFolds(raw) {
+        if (!raw || typeof raw !== 'object' || !Array.isArray(raw.folds)) {
+            return new Set();
+        }
+        return new Set(raw.folds
+            .map(Number)
+            .filter(line => Number.isInteger(line) && line > 0)
+            .slice(0, 256));
+    }
+
+    function explorerPersistedMarkdownFoldIdentity(raw) {
+        return raw && typeof raw === 'object' && typeof raw.fold_identity === 'string'
+            ? raw.fold_identity
+            : '';
     }
 
     /* Inflate one persisted tab view back into the in-memory `tab.view`
@@ -11986,6 +12333,7 @@
         const serialized = explorerSerializeTabs(pane);
         pane._session.explorer_open_tabs = serialized.open_tabs;
         pane._session.explorer_active_tab = serialized.active_tab;
+        pane._session.explorer_tab_views = serialized.tab_views;
     }
 
     function restoreExplorerPersistedTabs(index) {
@@ -12008,6 +12356,8 @@
         if (previewFont) {
             previewTab.fontSize = previewFont;
         }
+        previewTab.collapsedLines = explorerPersistedMarkdownFolds(rawPreviewView);
+        previewTab.collapsedIdentity = explorerPersistedMarkdownFoldIdentity(rawPreviewView);
         const savedPreviewPath = explorerNormalizeTabPath(
             rawPreviewView && typeof rawPreviewView === 'object' ? rawPreviewView.path : ''
         );
@@ -12061,6 +12411,8 @@
             if (fontSize) {
                 record.fontSize = fontSize;
             }
+            record.collapsedLines = explorerPersistedMarkdownFolds(rawViews[key]);
+            record.collapsedIdentity = explorerPersistedMarkdownFoldIdentity(rawViews[key]);
             pane._explorerTabs.push(record);
         });
         const activeKey = explorerNormalizeTabPath(session.explorer_active_tab || '');
@@ -12072,6 +12424,115 @@
         } else {
             restorePreviewContent();
         }
+    }
+
+    /* Read-only inline image viewer (ISSUE-2026 image support). The backend
+       returns preview_type "image" with no content; the bytes stream from the
+       dedicated /image route. Shares the tab strip, breadcrumb, and download
+       button with the text viewer so tabs/refresh/persistence are unchanged. */
+    function renderExplorerImage(index, data, { assignedTab = null } = {}) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        const viewer = explorerEnsureViewerShell(index);
+        if (!pane || !sessionId || !list || !viewer) {
+            return false;
+        }
+
+        const path = data.path || '';
+        const fileName = data.name || path || 'Image';
+        if (assignedTab) {
+            pane._explorerRenderedTabId = assignedTab.id;
+        }
+
+        cancelExplorerSearch(index);
+        const searchState = ensureExplorerSearchState(pane, 'file');
+        searchState.ranges = [];
+        searchState.resultQuery = '';
+        searchState.matchCount = 0;
+        searchState.matchCapped = false;
+        clearExplorerDirectorySearchControls(index);
+
+        pane._attached = true;
+        pane._explorerMode = 'file';
+        pane._explorerFilePath = path;
+        pane._explorerFileName = fileName;
+        pane._explorerFileContent = '';
+        pane._explorerFileLanguage = '';
+        pane._explorerFilePlain = false;
+        pane._explorerPreviewHtml = '';
+        pane._explorerGit = null;
+        pane._explorerGitContext = null;
+        pane._explorerDiffLoaded = false;
+        pane._explorerDiffCacheKey = '';
+        pane._explorerDiffContent = '';
+        pane._explorerDiffSplit = false;
+        pane._explorerDiffCommit = '';
+        pane._explorerDiffMode = '';
+        pane._explorerLastFileView = 'source';
+        pane._explorerPendingDiffScroll = null;
+
+        const metaParts = ['Image'];
+        const sizeLabel = formatExplorerSize(data.size);
+        if (sizeLabel) {
+            metaParts.push(sizeLabel);
+        }
+        const modifiedLabel = formatExplorerDate(data.modified);
+        if (modifiedLabel) {
+            metaParts.push(modifiedLabel);
+        }
+        const baseMeta = metaParts.join(' - ');
+        const imageUrl = `/api/explorer/${encodeURIComponent(sessionId)}/image?path=${encodeURIComponent(path)}`;
+
+        document.getElementById(`ph-${index}`)?.remove();
+        list.classList.add('file-view');
+        updateExplorerGitSummary(index, null);
+        renderExplorerPathBreadcrumb(index, path, { root: data.root || '', fallbackText: fileName });
+        const upButton = document.getElementById(`explorer-up-${index}`);
+        if (upButton) {
+            upButton.disabled = false;
+        }
+
+        viewer.innerHTML = `
+            <div class="explorer-editor explorer-image-editor">
+                <div class="explorer-editor-header">
+                    <div class="explorer-editor-title">
+                        <div class="explorer-editor-name" title="${escHtml(path || fileName)}">${escHtml(fileName)}</div>
+                        <div class="explorer-editor-meta" data-explorer-image-meta="${index}">${escHtml(baseMeta)}</div>
+                    </div>
+                    <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
+                </div>
+                <div class="explorer-editor-body">
+                    <div class="explorer-image-view" id="explorer-image-${index}">
+                        <img class="explorer-image" alt="${escHtml(fileName)}" src="${escHtml(imageUrl)}">
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const downloadButton = list.querySelector(`[data-explorer-download="${index}"]`);
+        if (downloadButton) {
+            downloadButton.addEventListener('click', () => downloadExplorerFile(index));
+        }
+        const image = viewer.querySelector('.explorer-image');
+        if (image) {
+            image.addEventListener('load', () => {
+                const metaEl = viewer.querySelector(`[data-explorer-image-meta="${index}"]`);
+                if (metaEl && image.naturalWidth) {
+                    metaEl.textContent = `${baseMeta} - ${image.naturalWidth} × ${image.naturalHeight}`;
+                }
+            });
+            image.addEventListener('error', () => {
+                const view = document.getElementById(`explorer-image-${index}`);
+                if (view) {
+                    view.innerHTML = '<div class="explorer-image-error">Unable to display this image.</div>';
+                }
+            });
+        }
+
+        renderExplorerTabStrip(index);
+        persistExplorerTabsToSession(index);
+        return true;
     }
 
     function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '', diffMode = '', tab = '', pinned = false } = {}) {
@@ -12086,6 +12547,12 @@
 
         const path = data.path || '';
         const fileName = data.name || path || 'File';
+        // Images render in a dedicated read-only viewer (no source/preview/diff/
+        // search/zoom), reusing the surrounding tab, breadcrumb, and download
+        // plumbing so tabs, refresh, and persistence keep working unchanged.
+        if (data.preview_type === 'image') {
+            return renderExplorerImage(index, data, { assignedTab });
+        }
         const codeLanguage = normalizeExplorerLanguage(data.language) || explorerCodeLanguage(path || fileName);
         const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
         const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
@@ -12094,13 +12561,20 @@
         const hasGitDiff = explorerHasGitDiff(data.git) || Boolean(requestedDiffCommit);
         const metaParts = explorerFileMetaParts(data, fileType);
         const previousPath = pane._explorerFilePath || '';
+        const contentIdentity = explorerFileContentIdentity(
+            path, data.content, requestedDiffCommit, requestedDiffMode
+        );
+        if (assignedTab.collapsedIdentity !== contentIdentity) {
+            assignedTab.collapsedLines = new Set();
+            assignedTab.collapsedIdentity = contentIdentity;
+        }
         /* 2.e: restore the tab's stored view mode + scroll when the content is
            still what the snapshot was taken from (OD-4 identity check). */
         const restoredTabView = scrollState
             ? null
             : explorerMatchingTabView(
                 assignedTab,
-                explorerFileContentIdentity(path, data.content, requestedDiffCommit, requestedDiffMode)
+                contentIdentity
             );
         const restoredMode = restoredTabView ? restoredTabView.mode : '';
         /* The Preview tab also keeps its sticky source/preview preference
@@ -12129,9 +12603,6 @@
             ? 'diff'
             : (preferredFileView === 'preview' && hasPreview ? 'preview' : 'source');
         const searchState = ensureExplorerSearchState(pane, 'file');
-        if (previousPath !== path) {
-            pane._explorerMarkdownCollapsedLines = new Set();
-        }
         if (previousPath && previousPath !== path) {
             cancelExplorerSearch(index);
             searchState.activeIndex = 0;
@@ -12187,7 +12658,7 @@
                     ${(hasPreview || hasGitDiff) ? `
                         <div class="explorer-editor-tabs" role="tablist" aria-label="File view">
                             <button type="button" class="explorer-editor-tab" data-explorer-file-view="source" role="tab" aria-selected="${initialFileView === 'source' ? 'true' : 'false'}">Source</button>
-                            ${hasPreview ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="${initialFileView === 'preview' ? 'true' : 'false'}">Preview</button>` : ''}
+                            ${hasPreview ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="${initialFileView === 'preview' ? 'true' : 'false'}" aria-keyshortcuts="Control+Shift+V Meta+Shift+V" title="Preview (Ctrl+Shift+V)">Preview</button>` : ''}
                             ${hasGitDiff ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="diff" data-explorer-diff-toggle="${index}" role="tab" aria-selected="${initialFileView === 'diff' ? 'true' : 'false'}" aria-pressed="${keepDiffSplit ? 'true' : 'false'}">Diff</button>` : ''}
                         </div>
                     ` : ''}
@@ -12233,6 +12704,7 @@
             }
             wireExplorerMarkdownLinks(index, preview);
             applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
+            renderExplorerMermaid(preview);
         }
 
         const appearanceButton = list.querySelector(`[data-explorer-md-appearance="${index}"]`);
@@ -12324,6 +12796,7 @@
             }
             wireExplorerMarkdownLinks(index, preview);
             applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
+            renderExplorerMermaid(preview);
         }
         if (diffPanel && hasGitDiff) {
             renderExplorerDiff(index);

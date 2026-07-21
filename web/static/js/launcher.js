@@ -97,7 +97,8 @@
             theme: 'system'
         }),
         workspace: Object.freeze({
-            surface_mode: 'normal'
+            surface_mode: 'normal',
+            autosave_interval_minutes: 5
         }),
         ssh: Object.freeze({
             host_key_policy: 'auto-add'
@@ -548,6 +549,16 @@
 
         if (themeInput) themeInput.value = appearance.theme || DEFAULT_APP_SETTINGS.appearance.theme;
         if (surfaceModeInput) surfaceModeInput.value = workspace.surface_mode === 'max' ? 'max' : 'normal';
+        const autosaveIntervalInput = document.getElementById('appWorkspaceAutosaveInterval');
+        if (autosaveIntervalInput) {
+            const interval = Number(workspace.autosave_interval_minutes);
+            autosaveIntervalInput.value = String(
+                Number.isFinite(interval)
+                    ? Math.min(15, Math.max(1, Math.round(interval)))
+                    : DEFAULT_APP_SETTINGS.workspace.autosave_interval_minutes
+            );
+            syncAutosaveIntervalLabel();
+        }
         if (sshHostKeyPolicyInput) {
             sshHostKeyPolicyInput.value = ['auto-add', 'known-hosts', 'strict'].includes(ssh.host_key_policy)
                 ? ssh.host_key_policy
@@ -745,13 +756,25 @@
             || DEFAULT_APP_SETTINGS.terminal.font_family;
     }
 
+    function syncAutosaveIntervalLabel() {
+        const input = document.getElementById('appWorkspaceAutosaveInterval');
+        const value = document.getElementById('appWorkspaceAutosaveIntervalValue');
+        if (input && value) {
+            value.textContent = input.value;
+        }
+    }
+
     function collectAppSettingsForm() {
         return {
             appearance: {
                 theme: document.getElementById('appTheme')?.value || DEFAULT_APP_SETTINGS.appearance.theme
             },
             workspace: {
-                surface_mode: document.getElementById('appSurfaceMode')?.value === 'max' ? 'max' : 'normal'
+                surface_mode: document.getElementById('appSurfaceMode')?.value === 'max' ? 'max' : 'normal',
+                autosave_interval_minutes: Math.min(15, Math.max(1,
+                    Number(document.getElementById('appWorkspaceAutosaveInterval')?.value)
+                        || DEFAULT_APP_SETTINGS.workspace.autosave_interval_minutes
+                ))
             },
             ssh: {
                 host_key_policy: document.getElementById('appSshHostKeyPolicy')?.value || DEFAULT_APP_SETTINGS.ssh.host_key_policy
@@ -2584,11 +2607,34 @@
     }
 
     /* ── Restore previous workspace (feature 10.5) ──
-       The backend snapshots the workspace shape on every group change; after a
-       restart the launcher offers to replay it through the normal launch path.
+       The backend snapshots the workspace shape on an autosave timer and on
+       Workspace ▸ Save Workspace; after a restart the launcher offers to replay
+       the last saved snapshot through the normal launch path. The offer is
+       permanent — Dismiss only hides it for this launcher session.
        Passwords are never persisted — restored SSH panes use key auth or fail
        into the error placeholder (which has a Retry button). */
     let restorableWorkspaceGroups = [];
+
+    function formatWorkspaceSavedAgo(savedAt) {
+        const savedSeconds = Number(savedAt);
+        if (!Number.isFinite(savedSeconds) || savedSeconds <= 0) {
+            return '';
+        }
+        const elapsedSeconds = Math.max(0, Math.floor(Date.now() / 1000 - savedSeconds));
+        if (elapsedSeconds < 60) {
+            return 'just now';
+        }
+        const minutes = Math.floor(elapsedSeconds / 60);
+        if (minutes < 60) {
+            return `${minutes} min ago`;
+        }
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) {
+            return `${hours} h ago`;
+        }
+        const days = Math.floor(hours / 24);
+        return `${days} day${days === 1 ? '' : 's'} ago`;
+    }
 
     async function checkRestorableWorkspace() {
         const banner = document.getElementById('restoreWorkspaceBanner');
@@ -2606,16 +2652,65 @@
         );
         const text = document.getElementById('restoreWorkspaceText');
         if (text) {
-            text.textContent = `Previous workspace found — restore ${groupCount} session${groupCount === 1 ? '' : 's'} (${paneCount} pane${paneCount === 1 ? '' : 's'})? Live shells do not survive a restart; this relaunches the same layout.`;
+            const label = String(data.label || '').trim();
+            const savedAgo = formatWorkspaceSavedAgo(data.saved_at);
+            const target = label ? `Restore ${label}` : 'Restore previous workspace';
+            const when = savedAgo ? ` — saved ${savedAgo}` : '';
+            text.textContent = `${target}${when}? ${groupCount} session${groupCount === 1 ? '' : 's'} (${paneCount} pane${paneCount === 1 ? '' : 's'}) will relaunch with the same layout. Live shells do not survive a restart.`;
         }
         banner.hidden = false;
     }
 
+    /* Build the POST /api/sessions body for one restored group. When the group
+       was launched from a still-existing *named* saved session, replay that
+       preset's current config ("latest preset wins" — Save All Sessions then
+       Save Workspace restores the edited state without re-importing). Otherwise
+       replay the workspace snapshot verbatim. The blank built-in default is
+       never treated as a preset — its config holds no real host/directory. */
+    async function buildRestoreGroupBody(group) {
+        const snapshotBody = {
+            sessions: Array.isArray(group.sessions) ? group.sessions : [],
+            connection_mode: group.connection_mode,
+            layout: group.layout,
+            workspace_layout: group.workspace_layout,
+            surface_mode: group.surface_mode,
+            session_name: group.name,
+            saved_session_id: group.saved_session_id || '',
+            // Replay the workspace verbatim: a cold post-restart agent probe
+            // must not silently clear a command that was working.
+            restore: true
+        };
+
+        const savedId = String(group.saved_session_id || '').trim();
+        if (!savedId || savedId === DEFAULT_SESSION_ID) {
+            return snapshotBody;
+        }
+
+        try {
+            const response = await fetch(`/api/saved-sessions/${encodeURIComponent(savedId)}`);
+            if (!response.ok) return snapshotBody;
+            const preset = await response.json();
+            const config = preset?.config;
+            if (!config || !Array.isArray(config.terminals)) return snapshotBody;
+            return {
+                ...snapshotBody,
+                sessions: buildSessionsFromConfig(config, config.terminal_count),
+                connection_mode: config.connection_mode,
+                layout: config.layout,
+                workspace_layout: config.workspace_layout || null,
+                session_name: preset.name || group.name
+            };
+        } catch (_error) {
+            return snapshotBody;
+        }
+    }
+
     function dismissRestoreBanner() {
+        /* Hide-only: the saved slot is preserved (single-workspace mode has no
+           Delete); the next autosave or manual save overwrites it. */
         const banner = document.getElementById('restoreWorkspaceBanner');
         if (banner) banner.hidden = true;
         restorableWorkspaceGroups = [];
-        fetch('/api/runtime-state', { method: 'DELETE' }).catch(() => {});
     }
 
     async function restorePreviousWorkspace() {
@@ -2631,18 +2726,7 @@
                 const response = await fetch('/api/sessions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        sessions: Array.isArray(group.sessions) ? group.sessions : [],
-                        connection_mode: group.connection_mode,
-                        layout: group.layout,
-                        workspace_layout: group.workspace_layout,
-                        surface_mode: group.surface_mode,
-                        session_name: group.name,
-                        saved_session_id: group.saved_session_id || '',
-                        // Replay the workspace verbatim: a cold post-restart agent
-                        // probe must not silently clear a command that was working.
-                        restore: true
-                    })
+                    body: JSON.stringify(await buildRestoreGroupBody(group))
                 });
                 if (response.ok) restored += 1;
             }
@@ -2664,10 +2748,89 @@
         }
     }
 
+    /* Expand one launcher config — the live form state or a saved preset — into
+       the per-pane `sessions` array that POST /api/sessions expects. Shared by
+       the Launch button and workspace restore so both build panes identically;
+       restore reuses it to replay a group's *current* saved preset. */
+    function buildSessionsFromConfig(config, count) {
+        const sessions = [];
+        const configuredDefaultDir = getStep2DefaultDirectory(config);
+        const launchDefaultDir = configuredDefaultDir || (config.connection_mode === 'ssh' ? '/' : '');
+
+        (Array.isArray(config.terminals) ? config.terminals : []).slice(0, count).forEach((terminal, index) => {
+            const resolvedDirectory = buildLaunchDirectory(
+                configuredDefaultDir,
+                terminal.directory,
+                config.connection_mode
+            ) || launchDefaultDir;
+
+            const common = {
+                title: terminal.title || `Terminal ${index + 1}`,
+                directory: resolvedDirectory,
+                initial_command: terminal.startup_mode === 'explorer' ? null : (terminal.initial_command || null),
+                initial_command_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
+                    ? terminal.startup_mode
+                    : (terminal.initial_command_mode === 'agent' ? 'agent' : 'command'),
+                agent_selection: terminal.initial_command_mode === 'agent'
+                    ? (terminal.agent_selection || '')
+                    : '',
+                custom_agent: terminal.initial_command_mode === 'agent'
+                    ? (terminal.custom_agent || '')
+                    : '',
+                agent_auto_mode: terminal.initial_command_mode === 'agent'
+                    && Boolean(terminal.agent_auto_mode),
+                explorer_tree_open: terminal.startup_mode === 'explorer'
+                    ? Boolean(terminal.explorer_tree_open)
+                    : false,
+                explorer_git_open: terminal.startup_mode === 'explorer'
+                    ? Boolean(terminal.explorer_git_open)
+                    : false,
+                explorer_open_tabs: terminal.startup_mode === 'explorer' && Array.isArray(terminal.explorer_open_tabs)
+                    ? terminal.explorer_open_tabs
+                    : [],
+                explorer_active_tab: terminal.startup_mode === 'explorer'
+                    ? (terminal.explorer_active_tab || '')
+                    : '',
+                explorer_tab_views: terminal.startup_mode === 'explorer' && terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object'
+                    ? terminal.explorer_tab_views
+                    : {},
+                explorer_md_preset: terminal.startup_mode === 'explorer'
+                    ? (terminal.explorer_md_preset || '')
+                    : '',
+                explorer_md_font: terminal.startup_mode === 'explorer'
+                    ? (terminal.explorer_md_font || '')
+                    : '',
+                startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
+                    ? terminal.startup_mode
+                    : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
+            };
+
+            if (config.connection_mode === 'ssh') {
+                sessions.push({
+                    ...common,
+                    host: config.ssh.host,
+                    username: config.ssh.username || 'ubuntu',
+                    password: config.ssh.password || null,
+                    port: config.ssh.port || 22
+                });
+                return;
+            }
+
+            sessions.push({
+                ...common,
+                distribution: terminal.distribution || config.wsl.distribution || '',
+                username: config.wsl.username || '',
+                use_wsl: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_wsl),
+                use_powershell: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_powershell)
+            });
+        });
+
+        return sessions;
+    }
+
     async function launchSessions() {
         const config = collectFormConfig();
         const button = document.getElementById('launchBtn');
-        const sessions = [];
         const sessionName = buildDefaultSessionName();
 
         if (config.connection_mode === 'ssh' && !config.ssh.host) {
@@ -2680,77 +2843,9 @@
             return;
         }
 
-        const configuredDefaultDir = getStep2DefaultDirectory(config);
-        const launchDefaultDir = configuredDefaultDir || (config.connection_mode === 'ssh' ? '/' : '');
-
+        let sessions;
         try {
-            config.terminals.slice(0, selectedCount).forEach((terminal, index) => {
-                const resolvedDirectory = buildLaunchDirectory(
-                    configuredDefaultDir,
-                    terminal.directory,
-                    config.connection_mode
-                ) || launchDefaultDir;
-
-                const common = {
-                    title: terminal.title || `Terminal ${index + 1}`,
-                    directory: resolvedDirectory,
-                    initial_command: terminal.startup_mode === 'explorer' ? null : (terminal.initial_command || null),
-                    initial_command_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
-                        ? terminal.startup_mode
-                        : (terminal.initial_command_mode === 'agent' ? 'agent' : 'command'),
-                    agent_selection: terminal.initial_command_mode === 'agent'
-                        ? (terminal.agent_selection || '')
-                        : '',
-                    custom_agent: terminal.initial_command_mode === 'agent'
-                        ? (terminal.custom_agent || '')
-                        : '',
-                    agent_auto_mode: terminal.initial_command_mode === 'agent'
-                        && Boolean(terminal.agent_auto_mode),
-                    explorer_tree_open: terminal.startup_mode === 'explorer'
-                        ? Boolean(terminal.explorer_tree_open)
-                        : false,
-                    explorer_git_open: terminal.startup_mode === 'explorer'
-                        ? Boolean(terminal.explorer_git_open)
-                        : false,
-                    explorer_open_tabs: terminal.startup_mode === 'explorer' && Array.isArray(terminal.explorer_open_tabs)
-                        ? terminal.explorer_open_tabs
-                        : [],
-                    explorer_active_tab: terminal.startup_mode === 'explorer'
-                        ? (terminal.explorer_active_tab || '')
-                        : '',
-                    explorer_tab_views: terminal.startup_mode === 'explorer' && terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object'
-                        ? terminal.explorer_tab_views
-                        : {},
-                    explorer_md_preset: terminal.startup_mode === 'explorer'
-                        ? (terminal.explorer_md_preset || '')
-                        : '',
-                    explorer_md_font: terminal.startup_mode === 'explorer'
-                        ? (terminal.explorer_md_font || '')
-                        : '',
-                    startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
-                        ? terminal.startup_mode
-                        : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
-                };
-
-                if (config.connection_mode === 'ssh') {
-                    sessions.push({
-                        ...common,
-                        host: config.ssh.host,
-                        username: config.ssh.username || 'ubuntu',
-                        password: config.ssh.password || null,
-                        port: config.ssh.port || 22
-                    });
-                    return;
-                }
-
-                sessions.push({
-                    ...common,
-                    distribution: terminal.distribution || config.wsl.distribution || '',
-                    username: config.wsl.username || '',
-                    use_wsl: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_wsl),
-                    use_powershell: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_powershell)
-                });
-            });
+            sessions = buildSessionsFromConfig(config, selectedCount);
         } catch (error) {
             showMessage(error.message, 'error');
             return;
