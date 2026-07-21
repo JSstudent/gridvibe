@@ -1573,7 +1573,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("data-explorer-markdown-section", html)
         self.assertIn("function toggleExplorerMarkdownSection(index, lineNumber)", html)
         self.assertIn("function wireExplorerMarkdownSectionControls(index)", html)
-        self.assertIn("pane._explorerMarkdownCollapsedLines = new Set();", html)
+        self.assertIn("tab.collapsedLines = new Set();", html)
+        self.assertIn("record.folds = Array.from(tab.collapsedLines)", html)
+        self.assertIn("record.fold_identity = tab.collapsedIdentity;", html)
+        self.assertIn("explorerPersistedMarkdownFolds(rawViews[key])", html)
+        self.assertIn("persistExplorerTabsToSession(index);", html)
         self.assertIn("wireExplorerMarkdownSectionControls(index);", html)
         self.assertNotIn('data-explorer-source-toggle="${index}"', html)
         self.assertNotIn("function setExplorerMarkdownSourceCollapsed", html)
@@ -1610,7 +1614,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function showExplorerMarkdownAppearanceMenu(anchor)", html)
         # Bounded allowlists and persisted preference keys.
         self.assertIn("const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast', 'vscode'];", html)
-        self.assertIn("const EXPLORER_MD_FONTS = ['system', 'serif', 'mono'];", html)
+        self.assertIn(
+            "'system', 'serif', 'consolas', 'cascadia-code', 'jetbrains-mono', 'courier-new'",
+            html,
+        )
         self.assertIn("const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';", html)
         self.assertIn("const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';", html)
         # Header control is present and gated to previewable files.
@@ -1626,8 +1633,34 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".explorer-markdown-preview.md-preset-paper {", html)
         self.assertIn(".explorer-markdown-preview.md-preset-contrast {", html)
         self.assertIn(".explorer-markdown-preview.md-font-serif {", html)
+        self.assertIn(".explorer-markdown-preview.md-font-cascadia-code {", html)
+        self.assertIn(".explorer-markdown-preview.md-font-jetbrains-mono {", html)
+        self.assertIn(".explorer-markdown-preview.md-font-courier-new {", html)
+        self.assertNotIn(".explorer-markdown-preview.md-font-mono {", html)
+        self.assertNotIn(".explorer-markdown-preview.md-font-fira-code {", html)
+        self.assertNotIn(".explorer-markdown-preview.md-font-source-code-pro {", html)
+        self.assertNotIn(".explorer-markdown-preview.md-font-menlo {", html)
         self.assertIn("--md-preview-surface: var(--md-preset-paper-bg);", html)
         self.assertIn("--md-preset-paper-bg: #f4ecd8;", html)
+
+    def test_terminals_page_renders_mermaid_and_exposes_preview_shortcut(self):
+        response = self.client.get("/terminals")
+        asset_response = self.client.get("/static/vendor/mermaid.min.js")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(asset_response.status_code, 200)
+        self.assertGreater(len(asset_response.data), 1_000_000)
+        html = self._page_html(response)
+        self.assertIn("vendor/mermaid.min.js", html)
+        self.assertIn("async function renderExplorerMermaid(preview)", html)
+        self.assertIn("securityLevel: 'strict'", html)
+        self.assertIn("window.mermaid.render(", html)
+        self.assertIn("renderExplorerMermaid(preview);", html)
+        self.assertIn('title="Preview (Ctrl+Shift+V)"', html)
+        self.assertIn('aria-keyshortcuts="Control+Shift+V Meta+Shift+V"', html)
+        self.assertIn("event.code !== 'KeyV'", html)
+        self.assertIn("function findExplorerMarkdownPreviewTargetIndex()", html)
+        self.assertIn(".explorer-markdown-preview .explorer-mermaid svg {", html)
 
     def test_terminals_page_markdown_slate_preset(self):
         """Wave 1 / 3.a (OD-7): VS Code-style Slate preset (key `vscode`)."""
@@ -4588,6 +4621,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Inline code stays classless and is left as plain monospace.
         self.assertIn("inline <code>x</code> text", preview_html)
 
+    def test_explorer_markdown_preview_marks_mermaid_fences_for_client_rendering(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "diagram.md").write_text(
+            "```mermaid\nflowchart LR\n  A --> B\n```\n",
+            encoding="utf-8",
+        )
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "diagram.md"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview_html = response.get_json()["preview_html"]
+        self.assertIn('<code class="language-mermaid">', preview_html)
+        self.assertIn("flowchart LR", preview_html)
+        self.assertNotIn("<svg", preview_html)
+
     def test_explorer_markdown_preview_treats_raw_html_as_literal_text(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -5519,14 +5572,30 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "startup_mode": "explorer",
                 "explorer_open_tabs": ["docs/a.md", "sub/b.md", "c.md", "d.md", "e.md"],
                 "explorer_tab_views": {
-                    "docs/a.md": {"mode": "preview", "scroll": 0.5, "identity": "abc123", "font_size": 18},
+                    "docs/a.md": {
+                        "mode": "preview",
+                        "scroll": 0.5,
+                        "identity": "abc123",
+                        "font_size": 18,
+                        "folds": [9, 2, 9, 0, "4", True],
+                        "fold_identity": "abc123",
+                    },
                     "sub\\b.md": {"mode": "diff", "scroll": 7, "identity": "x" * 100, "font_size": 99},
                     "c.md": {"mode": "bogus", "scroll": 0.1, "identity": "ok"},
                     "e.md": {"font_size": 12},
                     "../escape.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "not-open.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "d.md": "not-a-dict",
-                    "__preview__": {"mode": "source", "scroll": 0.5, "identity": "zz", "font_size": 16, "path": "docs\\a.md", "dir": "../escape"},
+                    "__preview__": {
+                        "mode": "source",
+                        "scroll": 0.5,
+                        "identity": "zz",
+                        "font_size": 16,
+                        "path": "docs\\a.md",
+                        "dir": "../escape",
+                        "folds": [3],
+                        "fold_identity": "preview-hash",
+                    },
                 },
                 "explorer_md_preset": "vscode",
                 "explorer_md_font": "serif",
@@ -5543,7 +5612,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         views = normalized[0]["explorer_tab_views"]
         self.assertEqual(
             views["docs/a.md"],
-            {"mode": "preview", "scroll": 0.5, "identity": "abc123", "font_size": 18},
+            {
+                "mode": "preview",
+                "scroll": 0.5,
+                "identity": "abc123",
+                "font_size": 18,
+                "folds": [2, 4, 9],
+                "fold_identity": "abc123",
+            },
         )
         # Keys normalize like tab paths; out-of-range scroll fractions clamp to
         # [0, 1]; oversized identity tokens are dropped rather than restored;
@@ -5555,7 +5631,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         # captured), and the reserved Preview key keeps zoom plus its own
         # separated path — file and browsed directory — but no view mode.
         self.assertEqual(views["e.md"], {"font_size": 12})
-        self.assertEqual(views["__preview__"], {"font_size": 16, "path": "docs/a.md"})
+        self.assertEqual(
+            views["__preview__"],
+            {
+                "font_size": 16,
+                "path": "docs/a.md",
+                "folds": [3],
+                "fold_identity": "preview-hash",
+            },
+        )
         # Unknown modes, escaping/unlisted paths, and non-dict records are dropped.
         self.assertEqual(set(views), {"docs/a.md", "sub/b.md", "e.md", "__preview__"})
         self.assertEqual(normalized[0]["explorer_md_preset"], "vscode")
@@ -5563,6 +5647,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Values outside the appearance allowlists fall back to unset.
         self.assertEqual(normalized[1]["explorer_md_preset"], "")
         self.assertEqual(normalized[1]["explorer_md_font"], "")
+
+    def test_normalize_terminal_entries_accepts_terminal_markdown_fonts(self):
+        expected = {
+            "consolas",
+            "cascadia-code",
+            "jetbrains-mono",
+            "courier-new",
+        }
+
+        for font in expected:
+            with self.subTest(font=font):
+                normalized = web_saved_sessions._normalize_terminal_entries(
+                    [{"startup_mode": "explorer", "explorer_md_font": font}]
+                )
+                self.assertEqual(normalized[0]["explorer_md_font"], font)
 
     def test_workspace_save_round_trips_tab_views_and_md_appearance(self):
         """2.f / ISSUE-2026-033: view snapshots + appearance persist, gated to explorer panes."""
@@ -5604,7 +5703,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                                 "docs/a.md": {"mode": "preview", "scroll": 0.25, "identity": "id1"}
                             },
                             "explorer_md_preset": "paper",
-                            "explorer_md_font": "mono",
+                            "explorer_md_font": "consolas",
                         },
                         {
                             "title": "Shell",
@@ -5614,7 +5713,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                                 "x.md": {"mode": "source", "scroll": 0.1, "identity": "id2"}
                             },
                             "explorer_md_preset": "paper",
-                            "explorer_md_font": "mono",
+                            "explorer_md_font": "consolas",
                         },
                     ],
                 },
@@ -5628,7 +5727,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             {"docs/a.md": {"mode": "preview", "scroll": 0.25, "identity": "id1"}},
         )
         self.assertEqual(config["terminals"][0]["explorer_md_preset"], "paper")
-        self.assertEqual(config["terminals"][0]["explorer_md_font"], "mono")
+        self.assertEqual(config["terminals"][0]["explorer_md_font"], "consolas")
         # Non-explorer panes never carry tab views or a Markdown appearance.
         self.assertEqual(config["terminals"][1]["explorer_tab_views"], {})
         self.assertEqual(config["terminals"][1]["explorer_md_preset"], "")
@@ -10979,6 +11078,9 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         # Each preset option previews in its own family (OD-13).
         self.assertIn("value=\"'JetBrains Mono', Consolas, monospace\"", html)
         self.assertIn("style=\"font-family: 'JetBrains Mono', Consolas, monospace\"", html)
+        self.assertNotIn(">Fira Code</option>", html)
+        self.assertNotIn(">Source Code Pro</option>", html)
+        self.assertNotIn(">Menlo</option>", html)
         # "Custom…" keeps the free-text escape hatch alive.
         self.assertIn('<option value="custom">Custom…</option>', html)
         self.assertIn('id="appTerminalFontCustomField"', html)

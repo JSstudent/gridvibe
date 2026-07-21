@@ -11,6 +11,7 @@ served locally so GridVibe works fully offline (see deep-dive finding 3.6).
 | `xterm-addon-search.min.js` | xterm-addon-search | 0.13.0 | https://cdn.jsdelivr.net/npm/xterm-addon-search@0.13.0/lib/xterm-addon-search.min.js | MIT |
 | `xterm-addon-web-links.min.js` | xterm-addon-web-links | 0.9.0 | https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js | MIT |
 | `socket.io.min.js` | socket.io-client | 4.7.2 | https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js | MIT |
+| `mermaid.min.js` | Mermaid | 11.15.0 | https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js | MIT |
 
 To upgrade, download the new pinned version from the same URL pattern, replace the
 file, and update this table plus any version references in `templates/terminals.html`.

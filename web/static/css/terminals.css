@@ -3129,8 +3129,20 @@
             --md-preview-font: Georgia, 'Times New Roman', 'Iowan Old Style', serif;
         }
 
-        .explorer-markdown-preview.md-font-mono {
+        .explorer-markdown-preview.md-font-consolas {
             --md-preview-font: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        .explorer-markdown-preview.md-font-cascadia-code {
+            --md-preview-font: 'Cascadia Code', 'Cascadia Mono', Consolas, monospace;
+        }
+
+        .explorer-markdown-preview.md-font-jetbrains-mono {
+            --md-preview-font: 'JetBrains Mono', Consolas, monospace;
+        }
+
+        .explorer-markdown-preview.md-font-courier-new {
+            --md-preview-font: 'Courier New', Courier, monospace;
         }
 
         .explorer-markdown-preview h1,
@@ -3289,6 +3301,31 @@
             border-bottom-left-radius: 6px;
         }
 
+        .explorer-markdown-preview .explorer-mermaid {
+            width: 100%;
+            max-width: min(100%, var(--md-preview-measure));
+            margin: 0 0 .9em;
+            overflow: auto;
+            text-align: center;
+        }
+
+        .explorer-markdown-preview .explorer-mermaid svg {
+            max-width: 100%;
+            height: auto;
+        }
+
+        .explorer-markdown-preview .explorer-mermaid-error {
+            padding: 10px 12px;
+            border: 1px solid var(--gv-danger);
+            border-radius: 6px;
+            color: var(--gv-danger);
+            background: rgba(128, 128, 128, .08);
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-size: .78rem;
+            text-align: left;
+            white-space: pre-wrap;
+        }
+
         .explorer-markdown-preview blockquote {
             border-left: 3px solid var(--md-preview-rule);
             padding: .1em 0 .1em 14px;
@@ -3378,6 +3415,8 @@
             border-radius: 6px;
             padding: 6px 0;
             min-width: 172px;
+            max-height: calc(100vh - 16px);
+            overflow-y: auto;
             box-shadow: 0 4px 18px rgba(0, 0, 0, .6);
             font-size: .82rem;
         }

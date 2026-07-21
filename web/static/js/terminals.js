@@ -9886,6 +9886,43 @@
         }
     }
 
+    function findExplorerMarkdownPreviewTargetIndex() {
+        const activePane = document.activeElement?.closest?.('.explorer-pane');
+        const candidates = [Number(activePane?.dataset.slot), _focusedTerminalIndex];
+        for (let index = 0; index < terminals.length; index += 1) {
+            candidates.push(index);
+        }
+        const seen = new Set();
+        for (const index of candidates) {
+            if (!Number.isInteger(index) || index < 0 || seen.has(index)) {
+                continue;
+            }
+            seen.add(index);
+            if (terminals[index]?._explorerMode === 'file'
+                && document.getElementById(`explorer-preview-${index}`)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    document.addEventListener('keydown', event => {
+        if (!(event.ctrlKey || event.metaKey) || !event.shiftKey
+            || event.altKey || event.code !== 'KeyV' || isEditableShortcutTarget(event.target)) {
+            return;
+        }
+        const index = findExplorerMarkdownPreviewTargetIndex();
+        if (index === -1) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        setExplorerFileView(
+            index,
+            activeExplorerFileView(index) === 'preview' ? 'source' : 'preview'
+        );
+    });
+
     function isExplorerSearchablePane(pane) {
         return pane?._explorerMode === 'file' || pane?._explorerMode === 'directory';
     }
@@ -9988,7 +10025,9 @@
     // every open preview via preset classes + CSS custom properties (defined
     // from tokens in terminals.css), so no palette literals live in JS.
     const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast', 'vscode'];
-    const EXPLORER_MD_FONTS = ['system', 'serif', 'mono'];
+    const EXPLORER_MD_FONTS = [
+        'system', 'serif', 'consolas', 'cascadia-code', 'jetbrains-mono', 'courier-new'
+    ];
     const EXPLORER_MD_PRESET_DEFAULT = 'default';
     const EXPLORER_MD_FONT_DEFAULT = 'system';
     const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';
@@ -10002,7 +10041,10 @@
     const EXPLORER_MD_FONT_LABELS = {
         system: 'System',
         serif: 'Serif',
-        mono: 'Monospace',
+        consolas: 'Consolas',
+        'cascadia-code': 'Cascadia Code',
+        'jetbrains-mono': 'JetBrains Mono',
+        'courier-new': 'Courier New',
     };
 
     function readExplorerMarkdownPref(key, allowed, fallback) {
@@ -10209,10 +10251,11 @@
         if (!pane) {
             return new Set();
         }
-        if (!(pane._explorerMarkdownCollapsedLines instanceof Set)) {
-            pane._explorerMarkdownCollapsedLines = new Set();
+        const tab = explorerActiveTab(pane);
+        if (!(tab.collapsedLines instanceof Set)) {
+            tab.collapsedLines = new Set();
         }
-        return pane._explorerMarkdownCollapsedLines;
+        return tab.collapsedLines;
     }
 
     function explorerMarkdownHeadingLevel(line) {
@@ -10353,6 +10396,14 @@
         } else {
             collapsedLines.add(lineNumber);
         }
+        const tab = explorerActiveTab(pane);
+        tab.collapsedIdentity = explorerFileContentIdentity(
+            pane._explorerFilePath,
+            pane._explorerFileContent,
+            pane._explorerDiffCommit,
+            pane._explorerDiffMode
+        );
+        persistExplorerTabsToSession(index);
         const state = ensureExplorerSearchState(pane, 'file');
         if (state.query && activeExplorerFileView(index) === 'source') {
             applyExplorerSearch(index);
@@ -10408,6 +10459,9 @@
             if (!language) {
                 return;
             }
+            if (language === 'mermaid') {
+                return;
+            }
             const pre = code.parentElement;
             pre.classList.add('explorer-preview-code');
             pre.dataset.lang = language.toUpperCase();
@@ -10419,6 +10473,47 @@
         });
     }
 
+    let explorerMermaidRenderId = 0;
+
+    async function renderExplorerMermaid(preview) {
+        if (!preview || !window.mermaid) {
+            return;
+        }
+        const blocks = Array.from(preview.querySelectorAll('pre > code.language-mermaid'));
+        if (!blocks.length) {
+            return;
+        }
+        window.mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: 'strict',
+            theme: currentResolvedTheme() === 'dark' ? 'dark' : 'default',
+            suppressErrorRendering: true
+        });
+        for (const code of blocks) {
+            const source = code.textContent || '';
+            const pre = code.parentElement;
+            const diagram = document.createElement('div');
+            diagram.className = 'explorer-mermaid';
+            pre.replaceWith(diagram);
+            try {
+                explorerMermaidRenderId += 1;
+                const rendered = await window.mermaid.render(
+                    `explorer-mermaid-${explorerMermaidRenderId}`,
+                    source
+                );
+                if (!preview.contains(diagram)) {
+                    continue;
+                }
+                diagram.innerHTML = rendered.svg;
+                rendered.bindFunctions?.(diagram);
+            } catch (error) {
+                diagram.classList.add('explorer-mermaid-error');
+                const message = String(error?.message || 'Invalid diagram').split('\n')[0];
+                diagram.textContent = `Mermaid diagram error: ${message}`;
+            }
+        }
+    }
+
     function restoreExplorerPreview(index) {
         const pane = terminals[index];
         const preview = document.getElementById(`explorer-preview-${index}`);
@@ -10427,6 +10522,7 @@
             if (!pane._explorerFilePlain) {
                 highlightExplorerPreviewCode(preview);
             }
+            renderExplorerMermaid(preview);
         }
         return preview;
     }
@@ -11898,6 +11994,15 @@
         if (fontSize && fontSize !== EXPLORER_EDITOR_FONT_DEFAULT) {
             record.font_size = fontSize;
         }
+        if (tab.collapsedLines instanceof Set && tab.collapsedLines.size) {
+            record.folds = Array.from(tab.collapsedLines)
+                .filter(line => Number.isInteger(line) && line > 0)
+                .sort((left, right) => left - right)
+                .slice(0, 256);
+            if (tab.collapsedIdentity) {
+                record.fold_identity = tab.collapsedIdentity;
+            }
+        }
         return Object.keys(record).length ? record : null;
     }
 
@@ -11908,6 +12013,22 @@
             return 0;
         }
         return clampExplorerEditorFontSize(fontSize);
+    }
+
+    function explorerPersistedMarkdownFolds(raw) {
+        if (!raw || typeof raw !== 'object' || !Array.isArray(raw.folds)) {
+            return new Set();
+        }
+        return new Set(raw.folds
+            .map(Number)
+            .filter(line => Number.isInteger(line) && line > 0)
+            .slice(0, 256));
+    }
+
+    function explorerPersistedMarkdownFoldIdentity(raw) {
+        return raw && typeof raw === 'object' && typeof raw.fold_identity === 'string'
+            ? raw.fold_identity
+            : '';
     }
 
     /* Inflate one persisted tab view back into the in-memory `tab.view`
@@ -11986,6 +12107,7 @@
         const serialized = explorerSerializeTabs(pane);
         pane._session.explorer_open_tabs = serialized.open_tabs;
         pane._session.explorer_active_tab = serialized.active_tab;
+        pane._session.explorer_tab_views = serialized.tab_views;
     }
 
     function restoreExplorerPersistedTabs(index) {
@@ -12008,6 +12130,8 @@
         if (previewFont) {
             previewTab.fontSize = previewFont;
         }
+        previewTab.collapsedLines = explorerPersistedMarkdownFolds(rawPreviewView);
+        previewTab.collapsedIdentity = explorerPersistedMarkdownFoldIdentity(rawPreviewView);
         const savedPreviewPath = explorerNormalizeTabPath(
             rawPreviewView && typeof rawPreviewView === 'object' ? rawPreviewView.path : ''
         );
@@ -12061,6 +12185,8 @@
             if (fontSize) {
                 record.fontSize = fontSize;
             }
+            record.collapsedLines = explorerPersistedMarkdownFolds(rawViews[key]);
+            record.collapsedIdentity = explorerPersistedMarkdownFoldIdentity(rawViews[key]);
             pane._explorerTabs.push(record);
         });
         const activeKey = explorerNormalizeTabPath(session.explorer_active_tab || '');
@@ -12094,13 +12220,20 @@
         const hasGitDiff = explorerHasGitDiff(data.git) || Boolean(requestedDiffCommit);
         const metaParts = explorerFileMetaParts(data, fileType);
         const previousPath = pane._explorerFilePath || '';
+        const contentIdentity = explorerFileContentIdentity(
+            path, data.content, requestedDiffCommit, requestedDiffMode
+        );
+        if (assignedTab.collapsedIdentity !== contentIdentity) {
+            assignedTab.collapsedLines = new Set();
+            assignedTab.collapsedIdentity = contentIdentity;
+        }
         /* 2.e: restore the tab's stored view mode + scroll when the content is
            still what the snapshot was taken from (OD-4 identity check). */
         const restoredTabView = scrollState
             ? null
             : explorerMatchingTabView(
                 assignedTab,
-                explorerFileContentIdentity(path, data.content, requestedDiffCommit, requestedDiffMode)
+                contentIdentity
             );
         const restoredMode = restoredTabView ? restoredTabView.mode : '';
         /* The Preview tab also keeps its sticky source/preview preference
@@ -12129,9 +12262,6 @@
             ? 'diff'
             : (preferredFileView === 'preview' && hasPreview ? 'preview' : 'source');
         const searchState = ensureExplorerSearchState(pane, 'file');
-        if (previousPath !== path) {
-            pane._explorerMarkdownCollapsedLines = new Set();
-        }
         if (previousPath && previousPath !== path) {
             cancelExplorerSearch(index);
             searchState.activeIndex = 0;
@@ -12187,7 +12317,7 @@
                     ${(hasPreview || hasGitDiff) ? `
                         <div class="explorer-editor-tabs" role="tablist" aria-label="File view">
                             <button type="button" class="explorer-editor-tab" data-explorer-file-view="source" role="tab" aria-selected="${initialFileView === 'source' ? 'true' : 'false'}">Source</button>
-                            ${hasPreview ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="${initialFileView === 'preview' ? 'true' : 'false'}">Preview</button>` : ''}
+                            ${hasPreview ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="preview" role="tab" aria-selected="${initialFileView === 'preview' ? 'true' : 'false'}" aria-keyshortcuts="Control+Shift+V Meta+Shift+V" title="Preview (Ctrl+Shift+V)">Preview</button>` : ''}
                             ${hasGitDiff ? `<button type="button" class="explorer-editor-tab" data-explorer-file-view="diff" data-explorer-diff-toggle="${index}" role="tab" aria-selected="${initialFileView === 'diff' ? 'true' : 'false'}" aria-pressed="${keepDiffSplit ? 'true' : 'false'}">Diff</button>` : ''}
                         </div>
                     ` : ''}
@@ -12233,6 +12363,7 @@
             }
             wireExplorerMarkdownLinks(index, preview);
             applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
+            renderExplorerMermaid(preview);
         }
 
         const appearanceButton = list.querySelector(`[data-explorer-md-appearance="${index}"]`);
@@ -12324,6 +12455,7 @@
             }
             wireExplorerMarkdownLinks(index, preview);
             applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
+            renderExplorerMermaid(preview);
         }
         if (diffPanel && hasGitDiff) {
             renderExplorerDiff(index);
