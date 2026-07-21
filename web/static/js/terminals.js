@@ -1683,10 +1683,13 @@
     }
 
     async function saveActiveWorkspaceSession(button = null, options = {}) {
-        const targetGroupId = getActiveWorkspaceGroupId();
+        const silent = Boolean(options.silent);
+        const targetGroupId = options.groupId || getActiveWorkspaceGroupId();
         if (!targetGroupId) {
-            setWorkspaceSaveMessage('No active session group to save.', 'error');
-            return;
+            if (!silent) {
+                setWorkspaceSaveMessage('No active session group to save.', 'error');
+            }
+            return { ok: false, error: 'No active session group to save.' };
         }
 
         const promptForName = Boolean(options.promptForName);
@@ -1694,8 +1697,10 @@
         const group = getGroupById(targetGroupId);
         const config = buildActiveWorkspaceSessionConfig(targetGroupId);
         if (!config.terminals.length) {
-            setWorkspaceSaveMessage('No active terminals to save.', 'error');
-            return;
+            if (!silent) {
+                setWorkspaceSaveMessage('No active terminals to save.', 'error');
+            }
+            return { ok: false, skipped: true, error: 'No active terminals to save.' };
         }
 
         const saveTarget = getWorkspaceSaveTarget(targetGroupId);
@@ -1705,7 +1710,7 @@
         if (promptForName) {
             const result = await openSaveSessionAsModal(suggestedName);
             if (!result) {
-                return;
+                return { ok: false, cancelled: true };
             }
             sessionName = result.name;
             openSavedSessionNow = Boolean(result.openNow);
@@ -1756,15 +1761,22 @@
                 );
             }
             notifySavedSessionUpdated(data, { activate: openSavedSessionNow });
+            const savedName = data.name || sessionName;
             if (createNewSession && openSavedSessionNow) {
-                setWorkspaceSaveMessage(`Saved session "${data.name || sessionName}". Opening...`, 'success');
+                if (!silent) {
+                    setWorkspaceSaveMessage(`Saved session "${savedName}". Opening...`, 'success');
+                }
                 await launchSavedSession(data);
-            } else {
-                setWorkspaceSaveMessage(`Saved session "${data.name || sessionName}".`, 'success');
+            } else if (!silent) {
+                setWorkspaceSaveMessage(`Saved session "${savedName}".`, 'success');
             }
+            return { ok: true, name: savedName };
         } catch (error) {
             console.error('[GridVibe Sessions] workspace save failed:', error);
-            setWorkspaceSaveMessage(`Save failed: ${error.message}`, 'error');
+            if (!silent) {
+                setWorkspaceSaveMessage(`Save failed: ${error.message}`, 'error');
+            }
+            return { ok: false, error: error.message, name: sessionName };
         } finally {
             if (button) {
                 button.disabled = false;
@@ -1778,6 +1790,53 @@
             promptForName: true,
             createNewSession: true
         });
+    }
+
+    async function saveAllWorkspaceSessions(button = null) {
+        const groups = sessionGroups.slice();
+        if (!groups.length) {
+            setWorkspaceSaveMessage('No sessions to save.', 'error');
+            return;
+        }
+
+        const previousText = button?.textContent;
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Saving all...';
+        }
+
+        let savedCount = 0;
+        const failures = [];
+        try {
+            for (const group of groups) {
+                const result = await saveActiveWorkspaceSession(null, {
+                    groupId: group.group_id,
+                    silent: true
+                });
+                if (result?.ok) {
+                    savedCount += 1;
+                } else if (result && !result.skipped) {
+                    failures.push(result.name || group.name || group.group_id);
+                }
+            }
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.textContent = previousText || 'Save All Sessions';
+            }
+        }
+
+        if (failures.length) {
+            setWorkspaceSaveMessage(
+                `Saved ${savedCount} session${savedCount === 1 ? '' : 's'}, ${failures.length} failed.`,
+                'error'
+            );
+        } else {
+            setWorkspaceSaveMessage(
+                `Saved all ${savedCount} session${savedCount === 1 ? '' : 's'}.`,
+                'success'
+            );
+        }
     }
 
     function renderSessionTabs() {

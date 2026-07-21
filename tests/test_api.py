@@ -486,6 +486,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("container.appendChild(saveButton);", html)
         self.assertIn("async function saveActiveWorkspaceSession(button = null, options = {})", html)
         self.assertIn("function saveActiveWorkspaceSessionAs(button = null)", html)
+        self.assertIn("async function saveAllWorkspaceSessions(button = null)", html)
+        self.assertIn("closeSessionsMenu(); saveAllWorkspaceSessions(this);", html)
+        self.assertIn('id="saveAllSessionsMenuItem"', html)
         self.assertIn("let workspaceSaveTargets = new Map();", html)
         self.assertIn("function notifySavedSessionUpdated(savedSession, options = {})", html)
         self.assertIn("const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';", html)
@@ -505,7 +508,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         save_handler_start = html.index("async function saveActiveWorkspaceSession")
         save_handler_end = html.index("function saveActiveWorkspaceSessionAs", save_handler_start)
         save_handler_html = html[save_handler_start:save_handler_end]
-        self.assertIn("const targetGroupId = getActiveWorkspaceGroupId();", save_handler_html)
+        self.assertIn("const targetGroupId = options.groupId || getActiveWorkspaceGroupId();", save_handler_html)
         self.assertIn("const config = buildActiveWorkspaceSessionConfig(targetGroupId);", save_handler_html)
         self.assertIn("const saveTarget = getWorkspaceSaveTarget(targetGroupId);", save_handler_html)
         self.assertIn("const result = await openSaveSessionAsModal(suggestedName);", save_handler_html)

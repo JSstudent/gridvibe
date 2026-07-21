@@ -58,6 +58,13 @@
                     role="menuitem"
                     onclick="closeSessionsMenu(); saveActiveWorkspaceSessionAs(this);"
                 >Save Session as ...</button>
+                <button
+                    type="button"
+                    class="sessions-menu-item"
+                    id="saveAllSessionsMenuItem"
+                    role="menuitem"
+                    onclick="closeSessionsMenu(); saveAllWorkspaceSessions(this);"
+                >Save All Sessions</button>
             </div>
         </div>
         <span class="topbar-sub" id="sessionLabel">Loading…</span>
