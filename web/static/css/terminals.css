@@ -1679,6 +1679,21 @@
             background: var(--explorer-row-active);
         }
 
+        /* The OS-open button is a momentary action (no pressed state), so it
+           earns its prominence from hover/active/focus feedback instead — which
+           also makes it read clearly against the bar in both themes. */
+        .explorer-os-open:hover,
+        .explorer-os-open:focus-visible {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--explorer-row-active);
+            outline: none;
+        }
+
+        .explorer-os-open:active {
+            transform: translateY(1px);
+        }
+
         .explorer-path {
             min-width: 0;
             flex: 1;
@@ -2530,6 +2545,42 @@
 
         .explorer-editor-panel[hidden] {
             display: none;
+        }
+
+        /* Read-only image viewer. A theme-aware checkerboard makes transparent
+           images legible in both light and dark explorer themes; the image is
+           fit to the pane and scrolls if it overflows. */
+        .explorer-image-view {
+            min-height: 0;
+            overflow: auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            background-color: var(--explorer-bg);
+            background-image:
+                linear-gradient(45deg, var(--explorer-row-border) 25%, transparent 25%),
+                linear-gradient(-45deg, var(--explorer-row-border) 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, var(--explorer-row-border) 75%),
+                linear-gradient(-45deg, transparent 75%, var(--explorer-row-border) 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+        }
+
+        .explorer-image {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            border-radius: 2px;
+            box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+        }
+
+        .explorer-image-error {
+            margin: auto;
+            padding: 24px;
+            color: var(--explorer-muted);
+            font-size: .82rem;
+            text-align: center;
         }
 
         .explorer-editor-content {

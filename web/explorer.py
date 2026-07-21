@@ -261,6 +261,34 @@ def _explorer_editor_language(path: str) -> str:
     return language
 
 
+# Extensions the read-only image viewer renders inline via an <img> tag. SVG is
+# included but served with a locked-down CSP (see the image route) so embedded
+# script cannot run even on direct navigation.
+EXPLORER_IMAGE_MIMETYPES = {
+    ".apng": "image/apng",
+    ".avif": "image/avif",
+    ".bmp": "image/bmp",
+    ".gif": "image/gif",
+    ".ico": "image/x-icon",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+}
+
+
+def _explorer_image_mimetype(path: str) -> Optional[str]:
+    """Return the image MIME type for a supported image path, else ``None``."""
+    _, extension = os.path.splitext(str(path or "").lower())
+    return EXPLORER_IMAGE_MIMETYPES.get(extension)
+
+
+def _is_explorer_image_file(path: str) -> bool:
+    """Return whether an explorer file should render in the inline image viewer."""
+    return _explorer_image_mimetype(path) is not None
+
+
 def _explorer_content_looks_binary(raw_content: bytes) -> bool:
     """Return whether a preview sample should be treated as binary content."""
     sample = raw_content[:EXPLORER_BINARY_SAMPLE_BYTES]

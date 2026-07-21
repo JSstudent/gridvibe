@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import re
@@ -1449,9 +1450,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('data-explorer-crumb=', html)
         self.assertIn("loadExplorerPane(index, button.dataset.explorerCrumb || '');", html)
         self.assertIn('class="explorer-crumb current"', html)
-        # One definition + all four render paths (directory listing, file,
-        # in-place refresh, commit diff) route through it.
-        self.assertEqual(html.count("renderExplorerPathBreadcrumb("), 5)
+        # One definition + all five render paths (directory listing, file,
+        # image viewer, in-place refresh, commit diff) route through it.
+        self.assertEqual(html.count("renderExplorerPathBreadcrumb("), 6)
         # Token-driven styling only (Regression Guardrail 7).
         crumb_css = html[html.index(".explorer-crumb {"):html.index(".explorer-crumb-sep {")]
         self.assertIn("var(--explorer-muted)", crumb_css)
@@ -10390,6 +10391,77 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         self.assertIn("/reveal", terminals_js)
         terminals_css = self._static("css/terminals.css")
         self.assertIn(".explorer-os-open", terminals_css)
+
+    # A 1x1 transparent PNG — smallest valid image bytes for the viewer tests.
+    _PNG_BYTES = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+        "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )
+
+    def test_file_route_returns_image_metadata_instead_of_binary_error(self):
+        (self.root / "pic.png").write_bytes(self._PNG_BYTES)
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file?path=pic.png"
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["preview_type"], "image")
+        self.assertEqual(payload["name"], "pic.png")
+        self.assertEqual(payload["content"], "")
+
+    def test_image_route_serves_bytes_inline_with_mimetype(self):
+        (self.root / "pic.png").write_bytes(self._PNG_BYTES)
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/image?path=pic.png"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "image/png")
+        self.assertNotIn("attachment", response.headers.get("Content-Disposition", ""))
+        self.assertEqual(response.get_data(), self._PNG_BYTES)
+        response.close()
+
+    def test_image_route_locks_down_svg_with_csp(self):
+        (self.root / "vector.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg"></svg>', encoding="utf-8"
+        )
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/image?path=vector.svg"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "image/svg+xml")
+        self.assertIn("default-src 'none'", response.headers.get("Content-Security-Policy", ""))
+        self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+        response.close()
+
+    def test_image_route_rejects_non_image_files(self):
+        (self.root / "notes.txt").write_text("hi", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/image?path=notes.txt"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_image_route_rejects_paths_outside_the_root(self):
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/image?path=../secret.png"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_image_route_unknown_session_returns_404(self):
+        response = self.client.get("/api/explorer/missing/image?path=x.png")
+        self.assertEqual(response.status_code, 404)
+
+    def test_image_viewer_ships_in_frontend_assets(self):
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function renderExplorerImage(index, data", terminals_js)
+        self.assertIn("preview_type === 'image'", terminals_js)
+        self.assertIn("/image?path=", terminals_js)
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".explorer-image-view", terminals_css)
 
 
 class TerminalSearchWebLinksTestCase(unittest.TestCase):

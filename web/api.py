@@ -93,6 +93,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _explorer_backend,
     _explorer_content_looks_binary,
     _explorer_editor_language,
+    _explorer_image_mimetype,
     _explorer_root_directory,
     _get_git_context,
     _get_git_diff,
@@ -106,6 +107,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _git_status_for_entry,
     _git_unstage_path,
     _is_browser_session,
+    _is_explorer_image_file,
     _is_explorer_session,
     _is_markdown_file,
     _is_remote_explorer_session,
@@ -716,6 +718,23 @@ def get_explorer_file(session_id: str):
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, file_path = backend.resolve_file(requested_path)
         size, modified = backend.stat_file(file_path)
+        # Images short-circuit the text preview pipeline: the viewer renders
+        # them via the separate /image byte route, so no content is returned
+        # here (and the binary/format rejections below are skipped).
+        if _is_explorer_image_file(file_path):
+            return {
+                "root": root_path,
+                "path": backend.rel_explorer_path(root_path, file_path),
+                "name": backend.basename(file_path),
+                "size": size,
+                "modified": modified,
+                "content": "",
+                "preview_type": "image",
+                "preview_html": None,
+                "language": None,
+                "git": _clean_git_entry_status(),
+                "git_context": None,
+            }
         code_language = _explorer_editor_language(file_path)
         preview = read_explorer_file_preview(
             backend,
@@ -798,6 +817,53 @@ def download_explorer_file(session_id: str):
         download_name=filename,
         mimetype="application/octet-stream",
     )
+
+
+# Inline image previews are a read, so they stay inside the explorer's
+# read-only contract. The cap keeps one request from buffering a huge image.
+EXPLORER_IMAGE_MAX_BYTES = 25 * 1024 * 1024
+
+
+@app.route('/api/explorer/<session_id>/image', methods=['GET'])
+def get_explorer_image(session_id: str):
+    """Serve one explorer image inline for the read-only image viewer."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    requested_path = request.args.get("path", "")
+    error_types = (
+        _sftp_request_error_types()
+        if _is_remote_explorer_session(session)
+        else (OSError,)
+    )
+    try:
+        with _explorer_backend(session) as backend:
+            _root_path, file_path = backend.resolve_file(requested_path)
+            mimetype = _explorer_image_mimetype(file_path)
+            if mimetype is None:
+                return jsonify({"error": "File is not a supported image"}), 400
+            size, _modified = backend.stat_file(file_path)
+            if size is not None and size > EXPLORER_IMAGE_MAX_BYTES:
+                return jsonify({"error": "Image exceeds the 25 MB preview limit"}), 400
+            raw_content = backend.read_file_prefix(file_path, EXPLORER_IMAGE_MAX_BYTES + 1)
+            if len(raw_content) > EXPLORER_IMAGE_MAX_BYTES:
+                return jsonify({"error": "Image exceeds the 25 MB preview limit"}), 400
+            filename = backend.basename(file_path) or "image"
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except error_types as exc:
+        return jsonify({"error": str(exc)}), 500
+    response = send_file(
+        io.BytesIO(raw_content),
+        mimetype=mimetype,
+        as_attachment=False,
+        download_name=filename,
+    )
+    # <img> rendering never executes script embedded in an SVG, but this route
+    # is directly reachable, so lock it down for the direct-navigation case too.
+    response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @app.route('/api/explorer/<session_id>/reveal', methods=['POST'])

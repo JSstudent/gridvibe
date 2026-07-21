@@ -11279,10 +11279,10 @@
 
     const EXPLORER_OS_OPEN_ICON = `
         <svg class="explorer-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
-            fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 6.5a1.5 1.5 0 0 1 1.5-1.5H8l1.8 1.8H15A1.5 1.5 0 0 1 16.5 8.3v2"/>
-            <path d="M4 6.5V16a1.5 1.5 0 0 0 1.5 1.5h6.5"/>
-            <path d="M14 14h6m0 0v6m0-6-7 7"/>
+            fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+            <polyline points="15 3 21 3 21 9"/>
+            <line x1="10" y1="14" x2="21" y2="3"/>
         </svg>
     `;
 
@@ -12263,6 +12263,115 @@
         }
     }
 
+    /* Read-only inline image viewer (ISSUE-2026 image support). The backend
+       returns preview_type "image" with no content; the bytes stream from the
+       dedicated /image route. Shares the tab strip, breadcrumb, and download
+       button with the text viewer so tabs/refresh/persistence are unchanged. */
+    function renderExplorerImage(index, data, { assignedTab = null } = {}) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        const viewer = explorerEnsureViewerShell(index);
+        if (!pane || !sessionId || !list || !viewer) {
+            return false;
+        }
+
+        const path = data.path || '';
+        const fileName = data.name || path || 'Image';
+        if (assignedTab) {
+            pane._explorerRenderedTabId = assignedTab.id;
+        }
+
+        cancelExplorerSearch(index);
+        const searchState = ensureExplorerSearchState(pane, 'file');
+        searchState.ranges = [];
+        searchState.resultQuery = '';
+        searchState.matchCount = 0;
+        searchState.matchCapped = false;
+        clearExplorerDirectorySearchControls(index);
+
+        pane._attached = true;
+        pane._explorerMode = 'file';
+        pane._explorerFilePath = path;
+        pane._explorerFileName = fileName;
+        pane._explorerFileContent = '';
+        pane._explorerFileLanguage = '';
+        pane._explorerFilePlain = false;
+        pane._explorerPreviewHtml = '';
+        pane._explorerGit = null;
+        pane._explorerGitContext = null;
+        pane._explorerDiffLoaded = false;
+        pane._explorerDiffCacheKey = '';
+        pane._explorerDiffContent = '';
+        pane._explorerDiffSplit = false;
+        pane._explorerDiffCommit = '';
+        pane._explorerDiffMode = '';
+        pane._explorerLastFileView = 'source';
+        pane._explorerPendingDiffScroll = null;
+
+        const metaParts = ['Image'];
+        const sizeLabel = formatExplorerSize(data.size);
+        if (sizeLabel) {
+            metaParts.push(sizeLabel);
+        }
+        const modifiedLabel = formatExplorerDate(data.modified);
+        if (modifiedLabel) {
+            metaParts.push(modifiedLabel);
+        }
+        const baseMeta = metaParts.join(' - ');
+        const imageUrl = `/api/explorer/${encodeURIComponent(sessionId)}/image?path=${encodeURIComponent(path)}`;
+
+        document.getElementById(`ph-${index}`)?.remove();
+        list.classList.add('file-view');
+        updateExplorerGitSummary(index, null);
+        renderExplorerPathBreadcrumb(index, path, { root: data.root || '', fallbackText: fileName });
+        const upButton = document.getElementById(`explorer-up-${index}`);
+        if (upButton) {
+            upButton.disabled = false;
+        }
+
+        viewer.innerHTML = `
+            <div class="explorer-editor explorer-image-editor">
+                <div class="explorer-editor-header">
+                    <div class="explorer-editor-title">
+                        <div class="explorer-editor-name" title="${escHtml(path || fileName)}">${escHtml(fileName)}</div>
+                        <div class="explorer-editor-meta" data-explorer-image-meta="${index}">${escHtml(baseMeta)}</div>
+                    </div>
+                    <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
+                </div>
+                <div class="explorer-editor-body">
+                    <div class="explorer-image-view" id="explorer-image-${index}">
+                        <img class="explorer-image" alt="${escHtml(fileName)}" src="${escHtml(imageUrl)}">
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const downloadButton = list.querySelector(`[data-explorer-download="${index}"]`);
+        if (downloadButton) {
+            downloadButton.addEventListener('click', () => downloadExplorerFile(index));
+        }
+        const image = viewer.querySelector('.explorer-image');
+        if (image) {
+            image.addEventListener('load', () => {
+                const metaEl = viewer.querySelector(`[data-explorer-image-meta="${index}"]`);
+                if (metaEl && image.naturalWidth) {
+                    metaEl.textContent = `${baseMeta} - ${image.naturalWidth} × ${image.naturalHeight}`;
+                }
+            });
+            image.addEventListener('error', () => {
+                const view = document.getElementById(`explorer-image-${index}`);
+                if (view) {
+                    view.innerHTML = '<div class="explorer-image-error">Unable to display this image.</div>';
+                }
+            });
+        }
+
+        renderExplorerTabStrip(index);
+        persistExplorerTabsToSession(index);
+        return true;
+    }
+
     function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '', diffMode = '', tab = '', pinned = false } = {}) {
         const pane = terminals[index];
         const list = document.getElementById(`explorer-list-${index}`);
@@ -12275,6 +12384,12 @@
 
         const path = data.path || '';
         const fileName = data.name || path || 'File';
+        // Images render in a dedicated read-only viewer (no source/preview/diff/
+        // search/zoom), reusing the surrounding tab, breadcrumb, and download
+        // plumbing so tabs, refresh, and persistence keep working unchanged.
+        if (data.preview_type === 'image') {
+            return renderExplorerImage(index, data, { assignedTab });
+        }
         const codeLanguage = normalizeExplorerLanguage(data.language) || explorerCodeLanguage(path || fileName);
         const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
         const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
