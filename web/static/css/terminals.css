@@ -2342,14 +2342,16 @@
             outline: none;
         }
 
-        /* The tree row "+" control reuses .explorer-search-btn markup but, like
-           its open-folder sibling, takes its surface from the theme-aware
-           --explorer-open-folder-* tokens so it tracks light/dark correctly. */
+        /* The tree row "open in a new tab" control reuses .explorer-search-btn
+           markup but, like its open-folder sibling, takes its surface from the
+           theme-aware --explorer-open-folder-* tokens so it tracks light/dark
+           correctly. It carries a distinct ↗ glyph (not the git stage "+") so
+           the two controls never read as the same button. */
         .explorer-open-tab-btn {
             width: 22px;
             height: 22px;
-            font-size: .95rem;
-            font-weight: 700;
+            font-size: .9rem;
+            font-weight: 600;
             border-color: var(--explorer-open-folder-border);
             background: var(--explorer-open-folder-bg);
             color: var(--explorer-open-folder-text);

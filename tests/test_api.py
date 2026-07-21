@@ -1572,7 +1572,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerMarkdownHeadingLevel(line)", html)
         self.assertIn("function explorerMarkdownHeadingLevels(records)", html)
         self.assertIn("data-explorer-markdown-section", html)
-        self.assertIn("function toggleExplorerMarkdownSection(index, lineNumber)", html)
+        self.assertIn(
+            "function toggleExplorerMarkdownSection(index, lineNumber, { allSameLevel = false } = {})",
+            html,
+        )
+        # Alt+click fans the toggle out to every heading sharing the clicked level;
+        # the click handler forwards the modifier and the tooltip advertises it.
+        self.assertIn("allSameLevel: event.altKey", html)
+        self.assertIn("const targetLevel = levels.get(lineNumber);", html)
+        self.assertIn("Alt: collapse all at this level", html)
+        self.assertIn("Alt: expand all at this level", html)
         self.assertIn("function wireExplorerMarkdownSectionControls(index)", html)
         self.assertIn("tab.collapsedLines = new Set();", html)
         self.assertIn("record.folds = Array.from(tab.collapsedLines)", html)
@@ -1689,6 +1698,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         # The control still reuses the search-btn markup in the tree row.
         self.assertIn('class="explorer-search-btn explorer-open-tab-btn"', html)
+        # ...but carries a distinct ↗ glyph so it never reads as the git stage "+".
+        self.assertIn(
+            'aria-label="Open ${escHtml(entry.name || path)} in a new tab">↗</button>',
+            html,
+        )
         # ...but now has its own rule drawing from the theme-aware explorer tokens.
         self.assertIn(".explorer-open-tab-btn {", html)
         self.assertIn(".explorer-open-tab-btn:hover,", html)

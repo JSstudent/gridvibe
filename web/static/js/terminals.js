@@ -9284,7 +9284,7 @@
             : '';
         const openTab = isDirectory
             ? ''
-            : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">+</button>`;
+            : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">↗</button>`;
 
         return `
             <div class="explorer-tree-row${active ? ' active' : ''}" data-explorer-copy-path="${escHtml(path)}">
@@ -10351,7 +10351,7 @@
                 class="explorer-source-line-number"
                 data-explorer-markdown-section="${record.number}"
                 aria-expanded="${collapsed ? 'false' : 'true'}"
-                title="${collapsed ? 'Expand Markdown section' : 'Collapse Markdown section'}"
+                title="${collapsed ? 'Expand Markdown section (Alt: expand all at this level)' : 'Collapse Markdown section (Alt: collapse all at this level)'}"
             >
                 <span class="explorer-source-chevron" aria-hidden="true">${collapsed ? '▸' : '▾'}</span>
                 <span>${record.number}</span>
@@ -10403,13 +10403,35 @@
         return `<div class="explorer-source-lines">${rows.join('')}</div>`;
     }
 
-    function toggleExplorerMarkdownSection(index, lineNumber) {
+    function toggleExplorerMarkdownSection(index, lineNumber, { allSameLevel = false } = {}) {
         const pane = terminals[index];
         if (!pane || normalizeExplorerLanguage(pane._explorerFileLanguage || '') !== 'markdown') {
             return;
         }
         const collapsedLines = ensureExplorerMarkdownCollapsedLines(pane);
-        if (collapsedLines.has(lineNumber)) {
+        if (allSameLevel) {
+            // Alt+click fans the toggle out to every heading sharing the clicked
+            // heading's level. The new state mirrors the clicked heading: if it
+            // was expanded we collapse the whole level, and vice versa.
+            const levels = explorerMarkdownHeadingLevels(
+                explorerSourceLineRecords(pane._explorerFileContent || '')
+            );
+            const targetLevel = levels.get(lineNumber);
+            if (!targetLevel) {
+                return;
+            }
+            const collapse = !collapsedLines.has(lineNumber);
+            levels.forEach((level, number) => {
+                if (level !== targetLevel) {
+                    return;
+                }
+                if (collapse) {
+                    collapsedLines.add(number);
+                } else {
+                    collapsedLines.delete(number);
+                }
+            });
+        } else if (collapsedLines.has(lineNumber)) {
             collapsedLines.delete(lineNumber);
         } else {
             collapsedLines.add(lineNumber);
@@ -10440,8 +10462,10 @@
                 return;
             }
             button.dataset.bound = 'true';
-            button.addEventListener('click', () => {
-                toggleExplorerMarkdownSection(index, Number(button.dataset.explorerMarkdownSection || 0));
+            button.addEventListener('click', (event) => {
+                toggleExplorerMarkdownSection(index, Number(button.dataset.explorerMarkdownSection || 0), {
+                    allSameLevel: event.altKey
+                });
             });
         });
     }
