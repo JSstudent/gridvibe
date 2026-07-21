@@ -11127,6 +11127,29 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertNotIn("fetch(", body)
         self.assertNotIn("DELETE", body)
 
+    def test_restore_replays_current_saved_preset(self):
+        """"Latest preset wins": a preset-backed group is restored from the
+        saved session's *current* config (so Save All Sessions then Save
+        Workspace restores the edited state), while an ad-hoc group replays the
+        snapshot verbatim. Launch and restore share buildSessionsFromConfig so
+        both build panes identically."""
+        launcher_js = self._static("js/launcher.js")
+        # One shared expansion, reused by launch and restore (no copy-paste).
+        self.assertIn("function buildSessionsFromConfig(config, count)", launcher_js)
+        self.assertIn("sessions = buildSessionsFromConfig(config, selectedCount)", launcher_js)
+        # Restore resolves a group's current preset before replaying it.
+        self.assertIn("async function buildRestoreGroupBody(group)", launcher_js)
+        self.assertIn("await buildRestoreGroupBody(group)", launcher_js)
+        self.assertIn("buildSessionsFromConfig(config, config.terminal_count)", launcher_js)
+        self.assertIn("/api/saved-sessions/${encodeURIComponent(savedId)}", launcher_js)
+        # The blank built-in default is never treated as a real preset, and a
+        # missing/deleted preset falls back to the verbatim snapshot body.
+        self.assertIn("savedId === DEFAULT_SESSION_ID", launcher_js)
+        start = launcher_js.index("async function buildRestoreGroupBody(group)")
+        end = launcher_js.index("function dismissRestoreBanner()", start)
+        body = launcher_js[start:end]
+        self.assertIn("return snapshotBody", body)
+
     def test_terminals_page_ships_workspace_save_menu(self):
         """The Workspace... dropdown's Save Workspace item posts to
         /api/runtime-state/save and is disabled when no groups are live."""
@@ -11704,11 +11727,13 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         ]
         self.assertIn("agent_auto_mode:", collect)
 
-        # 7.b (OD-12 case a): the direct-launch payload rebuilt each session
-        # field-by-field and dropped the toggle — it must carry it now.
+        # 7.b (OD-12 case a): the launch payload rebuilds each session
+        # field-by-field and must carry the toggle. This expansion now lives in
+        # buildSessionsFromConfig, shared by the launch button and workspace
+        # restore, so both build panes identically.
         launch = launcher_js[
-            launcher_js.index("async function launchSessions()"):
-            launcher_js.index("function setLaunchButtonLoading(")
+            launcher_js.index("function buildSessionsFromConfig(config, count)"):
+            launcher_js.index("async function launchSessions()")
         ]
         self.assertIn("agent_auto_mode: terminal.initial_command_mode === 'agent'", launch)
 

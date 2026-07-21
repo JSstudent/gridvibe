@@ -2661,6 +2661,50 @@
         banner.hidden = false;
     }
 
+    /* Build the POST /api/sessions body for one restored group. When the group
+       was launched from a still-existing *named* saved session, replay that
+       preset's current config ("latest preset wins" — Save All Sessions then
+       Save Workspace restores the edited state without re-importing). Otherwise
+       replay the workspace snapshot verbatim. The blank built-in default is
+       never treated as a preset — its config holds no real host/directory. */
+    async function buildRestoreGroupBody(group) {
+        const snapshotBody = {
+            sessions: Array.isArray(group.sessions) ? group.sessions : [],
+            connection_mode: group.connection_mode,
+            layout: group.layout,
+            workspace_layout: group.workspace_layout,
+            surface_mode: group.surface_mode,
+            session_name: group.name,
+            saved_session_id: group.saved_session_id || '',
+            // Replay the workspace verbatim: a cold post-restart agent probe
+            // must not silently clear a command that was working.
+            restore: true
+        };
+
+        const savedId = String(group.saved_session_id || '').trim();
+        if (!savedId || savedId === DEFAULT_SESSION_ID) {
+            return snapshotBody;
+        }
+
+        try {
+            const response = await fetch(`/api/saved-sessions/${encodeURIComponent(savedId)}`);
+            if (!response.ok) return snapshotBody;
+            const preset = await response.json();
+            const config = preset?.config;
+            if (!config || !Array.isArray(config.terminals)) return snapshotBody;
+            return {
+                ...snapshotBody,
+                sessions: buildSessionsFromConfig(config, config.terminal_count),
+                connection_mode: config.connection_mode,
+                layout: config.layout,
+                workspace_layout: config.workspace_layout || null,
+                session_name: preset.name || group.name
+            };
+        } catch (_error) {
+            return snapshotBody;
+        }
+    }
+
     function dismissRestoreBanner() {
         /* Hide-only: the saved slot is preserved (single-workspace mode has no
            Delete); the next autosave or manual save overwrites it. */
@@ -2682,18 +2726,7 @@
                 const response = await fetch('/api/sessions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        sessions: Array.isArray(group.sessions) ? group.sessions : [],
-                        connection_mode: group.connection_mode,
-                        layout: group.layout,
-                        workspace_layout: group.workspace_layout,
-                        surface_mode: group.surface_mode,
-                        session_name: group.name,
-                        saved_session_id: group.saved_session_id || '',
-                        // Replay the workspace verbatim: a cold post-restart agent
-                        // probe must not silently clear a command that was working.
-                        restore: true
-                    })
+                    body: JSON.stringify(await buildRestoreGroupBody(group))
                 });
                 if (response.ok) restored += 1;
             }
@@ -2715,10 +2748,89 @@
         }
     }
 
+    /* Expand one launcher config — the live form state or a saved preset — into
+       the per-pane `sessions` array that POST /api/sessions expects. Shared by
+       the Launch button and workspace restore so both build panes identically;
+       restore reuses it to replay a group's *current* saved preset. */
+    function buildSessionsFromConfig(config, count) {
+        const sessions = [];
+        const configuredDefaultDir = getStep2DefaultDirectory(config);
+        const launchDefaultDir = configuredDefaultDir || (config.connection_mode === 'ssh' ? '/' : '');
+
+        (Array.isArray(config.terminals) ? config.terminals : []).slice(0, count).forEach((terminal, index) => {
+            const resolvedDirectory = buildLaunchDirectory(
+                configuredDefaultDir,
+                terminal.directory,
+                config.connection_mode
+            ) || launchDefaultDir;
+
+            const common = {
+                title: terminal.title || `Terminal ${index + 1}`,
+                directory: resolvedDirectory,
+                initial_command: terminal.startup_mode === 'explorer' ? null : (terminal.initial_command || null),
+                initial_command_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
+                    ? terminal.startup_mode
+                    : (terminal.initial_command_mode === 'agent' ? 'agent' : 'command'),
+                agent_selection: terminal.initial_command_mode === 'agent'
+                    ? (terminal.agent_selection || '')
+                    : '',
+                custom_agent: terminal.initial_command_mode === 'agent'
+                    ? (terminal.custom_agent || '')
+                    : '',
+                agent_auto_mode: terminal.initial_command_mode === 'agent'
+                    && Boolean(terminal.agent_auto_mode),
+                explorer_tree_open: terminal.startup_mode === 'explorer'
+                    ? Boolean(terminal.explorer_tree_open)
+                    : false,
+                explorer_git_open: terminal.startup_mode === 'explorer'
+                    ? Boolean(terminal.explorer_git_open)
+                    : false,
+                explorer_open_tabs: terminal.startup_mode === 'explorer' && Array.isArray(terminal.explorer_open_tabs)
+                    ? terminal.explorer_open_tabs
+                    : [],
+                explorer_active_tab: terminal.startup_mode === 'explorer'
+                    ? (terminal.explorer_active_tab || '')
+                    : '',
+                explorer_tab_views: terminal.startup_mode === 'explorer' && terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object'
+                    ? terminal.explorer_tab_views
+                    : {},
+                explorer_md_preset: terminal.startup_mode === 'explorer'
+                    ? (terminal.explorer_md_preset || '')
+                    : '',
+                explorer_md_font: terminal.startup_mode === 'explorer'
+                    ? (terminal.explorer_md_font || '')
+                    : '',
+                startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
+                    ? terminal.startup_mode
+                    : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
+            };
+
+            if (config.connection_mode === 'ssh') {
+                sessions.push({
+                    ...common,
+                    host: config.ssh.host,
+                    username: config.ssh.username || 'ubuntu',
+                    password: config.ssh.password || null,
+                    port: config.ssh.port || 22
+                });
+                return;
+            }
+
+            sessions.push({
+                ...common,
+                distribution: terminal.distribution || config.wsl.distribution || '',
+                username: config.wsl.username || '',
+                use_wsl: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_wsl),
+                use_powershell: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_powershell)
+            });
+        });
+
+        return sessions;
+    }
+
     async function launchSessions() {
         const config = collectFormConfig();
         const button = document.getElementById('launchBtn');
-        const sessions = [];
         const sessionName = buildDefaultSessionName();
 
         if (config.connection_mode === 'ssh' && !config.ssh.host) {
@@ -2731,77 +2843,9 @@
             return;
         }
 
-        const configuredDefaultDir = getStep2DefaultDirectory(config);
-        const launchDefaultDir = configuredDefaultDir || (config.connection_mode === 'ssh' ? '/' : '');
-
+        let sessions;
         try {
-            config.terminals.slice(0, selectedCount).forEach((terminal, index) => {
-                const resolvedDirectory = buildLaunchDirectory(
-                    configuredDefaultDir,
-                    terminal.directory,
-                    config.connection_mode
-                ) || launchDefaultDir;
-
-                const common = {
-                    title: terminal.title || `Terminal ${index + 1}`,
-                    directory: resolvedDirectory,
-                    initial_command: terminal.startup_mode === 'explorer' ? null : (terminal.initial_command || null),
-                    initial_command_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
-                        ? terminal.startup_mode
-                        : (terminal.initial_command_mode === 'agent' ? 'agent' : 'command'),
-                    agent_selection: terminal.initial_command_mode === 'agent'
-                        ? (terminal.agent_selection || '')
-                        : '',
-                    custom_agent: terminal.initial_command_mode === 'agent'
-                        ? (terminal.custom_agent || '')
-                        : '',
-                    agent_auto_mode: terminal.initial_command_mode === 'agent'
-                        && Boolean(terminal.agent_auto_mode),
-                    explorer_tree_open: terminal.startup_mode === 'explorer'
-                        ? Boolean(terminal.explorer_tree_open)
-                        : false,
-                    explorer_git_open: terminal.startup_mode === 'explorer'
-                        ? Boolean(terminal.explorer_git_open)
-                        : false,
-                    explorer_open_tabs: terminal.startup_mode === 'explorer' && Array.isArray(terminal.explorer_open_tabs)
-                        ? terminal.explorer_open_tabs
-                        : [],
-                    explorer_active_tab: terminal.startup_mode === 'explorer'
-                        ? (terminal.explorer_active_tab || '')
-                        : '',
-                    explorer_tab_views: terminal.startup_mode === 'explorer' && terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object'
-                        ? terminal.explorer_tab_views
-                        : {},
-                    explorer_md_preset: terminal.startup_mode === 'explorer'
-                        ? (terminal.explorer_md_preset || '')
-                        : '',
-                    explorer_md_font: terminal.startup_mode === 'explorer'
-                        ? (terminal.explorer_md_font || '')
-                        : '',
-                    startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
-                        ? terminal.startup_mode
-                        : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
-                };
-
-                if (config.connection_mode === 'ssh') {
-                    sessions.push({
-                        ...common,
-                        host: config.ssh.host,
-                        username: config.ssh.username || 'ubuntu',
-                        password: config.ssh.password || null,
-                        port: config.ssh.port || 22
-                    });
-                    return;
-                }
-
-                sessions.push({
-                    ...common,
-                    distribution: terminal.distribution || config.wsl.distribution || '',
-                    username: config.wsl.username || '',
-                    use_wsl: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_wsl),
-                    use_powershell: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_powershell)
-                });
-            });
+            sessions = buildSessionsFromConfig(config, selectedCount);
         } catch (error) {
             showMessage(error.message, 'error');
             return;
