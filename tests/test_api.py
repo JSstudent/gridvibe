@@ -1919,8 +1919,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("Close Session</button>", html)
         self.assertIn("closeButton.className = 'session-tab-close';", html)
         self.assertIn("closeSessionGroup(group.group_id);", html)
-        self.assertIn(".sessions-menu-panel {", html)
-        self.assertIn(".sessions-menu-item {", html)
+        self.assertIn(".app-menu-panel {", html)
+        self.assertIn(".app-menu-item {", html)
         self.assertIn(">Import Session ...</button>", html)
 
     def test_terminals_page_numbers_session_tabs_and_exposes_safe_shortcut(self):
@@ -10808,11 +10808,18 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json()["group_id"]
 
-    def test_launch_persists_a_password_free_snapshot(self):
+    def test_capture_persists_a_password_free_v2_slot(self):
         self._launch_explorer_group()
-        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(len(snapshot["groups"]), 1)
-        group = snapshot["groups"][0]
+        slot = web_runtime_state.capture_workspace(api.session_manager)
+        self.assertIsNotNone(slot)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], 2)
+        stored = data["workspaces"]["default"]
+        self.assertEqual(stored["workspace_id"], "default")
+        self.assertEqual(stored["origin"], "auto")
+        self.assertEqual(stored["label"], "Workspace")
+        self.assertEqual(len(stored["groups"]), 1)
+        group = stored["groups"][0]
         self.assertEqual(group["name"], "Workspace")
         self.assertEqual(group["connection_mode"], "wsl")
         self.assertEqual(len(group["sessions"]), 1)
@@ -10820,26 +10827,198 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(session["startup_mode"], "explorer")
         self.assertNotIn("password", session)
 
-    def test_runtime_state_is_only_restorable_without_active_groups(self):
+    def test_v1_file_migrates_to_a_restorable_default_slot(self):
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "saved_at": time.time(),
+                    "groups": [{"group_id": "g1", "name": "buildserver-01"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertIsNotNone(slot)
+        self.assertEqual(slot["workspace_id"], "default")
+        self.assertEqual(slot["origin"], "auto")
+        self.assertEqual(slot["label"], "buildserver-01")
+        self.assertEqual(slot["groups"][0]["group_id"], "g1")
+
+    def test_eligibility_auto_and_manual_with_no_max_age(self):
         self._launch_explorer_group()
-        response = self.client.get("/api/runtime-state")
-        payload = response.get_json()
-        self.assertFalse(payload["restorable"])
+        web_runtime_state.capture_workspace(api.session_manager, origin="auto")
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace())
+        web_runtime_state.capture_workspace(api.session_manager, origin="manual")
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertEqual(slot["origin"], "manual")
+        # The offer is permanent: a years-old slot is still restorable.
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        data["workspaces"]["default"]["saved_at"] = time.time() - 10 * 365 * 24 * 3600
+        self.state_path.write_text(json.dumps(data), encoding="utf-8")
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace())
+
+    def test_empty_missing_or_unknown_slots_are_not_restorable(self):
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "workspaces": {
+                        "default": {
+                            "workspace_id": "default",
+                            "label": "Empty",
+                            "origin": "auto",
+                            "saved_at": time.time(),
+                            "groups": [],
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+        self.state_path.write_text("not json", encoding="utf-8")
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+        self.assertIsNone(web_runtime_state.load_restorable_workspace("nonexistent"))
+
+    def test_capture_and_clear_preserve_sibling_slots(self):
+        self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager, workspace_id="alpha")
+        web_runtime_state.capture_workspace(api.session_manager, workspace_id="beta")
+        # Overwriting slot A must leave slot B intact.
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id="alpha", origin="manual"
+        )
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(set(data["workspaces"]), {"alpha", "beta"})
+        self.assertEqual(data["workspaces"]["alpha"]["origin"], "manual")
+        self.assertEqual(data["workspaces"]["beta"]["origin"], "auto")
+        # Clearing slot A must leave slot B intact, and the file stays v2.
+        web_runtime_state.clear_workspace("alpha")
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], 2)
+        self.assertEqual(set(data["workspaces"]), {"beta"})
+
+    def test_autosave_tick_captures_a_live_workspace(self):
+        self._launch_explorer_group()
+        self.assertFalse(self.state_path.exists())
+        api._run_workspace_autosave_tick()
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertIsNotNone(slot)
+        self.assertEqual(slot["origin"], "auto")
+        self.assertEqual(len(slot["groups"]), 1)
+
+    def test_autosave_tick_skips_an_empty_workspace_without_clearing(self):
+        self._launch_explorer_group()
+        api._run_workspace_autosave_tick()
+        before = self.state_path.read_text(encoding="utf-8")
+        # The workspace goes idle (e.g. launcher only); the tick must skip it
+        # and leave the previously saved slot restorable.
+        api.session_manager.reset_sessions()
+        api._run_workspace_autosave_tick()
+        self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace())
+
+    def test_runtime_state_is_restorable_even_with_active_groups(self):
+        self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager)
+        payload = self.client.get("/api/runtime-state").get_json()
+        self.assertTrue(payload["restorable"])
+        self.assertEqual(payload["workspace_id"], "default")
+        self.assertEqual(payload["origin"], "auto")
+        self.assertEqual(payload["label"], "Workspace")
+        self.assertEqual(len(payload["groups"]), 1)
         self.assertEqual(payload["active_group_count"], 1)
 
-        # simulate a backend restart: in-memory groups vanish, the file stays
-        api.session_manager.reset_sessions()
-        response = self.client.get("/api/runtime-state")
+    def test_save_endpoint_captures_a_manual_slot_immediately_restorable(self):
+        self._launch_explorer_group()
+        response = self.client.post("/api/runtime-state/save", json={})
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertTrue(payload["restorable"])
-        self.assertEqual(len(payload["groups"]), 1)
+        self.assertTrue(payload["saved"])
+        self.assertEqual(payload["workspace_id"], "default")
+        self.assertEqual(payload["origin"], "manual")
+        self.assertEqual(payload["label"], "Workspace")
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertEqual(slot["origin"], "manual")
+
+    def test_save_endpoint_refuses_an_empty_workspace_without_clearing(self):
+        self._launch_explorer_group()
+        self.client.post("/api/runtime-state/save", json={})
+        before = self.state_path.read_text(encoding="utf-8")
+        api.session_manager.reset_sessions()
+        response = self.client.post("/api/runtime-state/save", json={})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
+
+    def test_group_events_do_not_write_the_snapshot(self):
+        group_id = self._launch_explorer_group()
+        # Launching a group is a pure UI event now — no snapshot write.
+        self.assertFalse(self.state_path.exists())
+        response = self.client.delete(f"/api/sessions?group={group_id}")
+        self.assertEqual(response.status_code, 200)
+        # Closing the group must not write (or clear) the snapshot either.
+        self.assertFalse(self.state_path.exists())
+
+    def test_group_close_preserves_the_previously_saved_slot(self):
+        group_id = self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager)
+        before = self.state_path.read_text(encoding="utf-8")
+        response = self.client.delete(f"/api/sessions?group={group_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace())
+
+    def test_capture_label_ignores_timestamp_group_names(self):
+        # No session_name: the live group gets an auto "Session HH:MM:SS" name,
+        # but the captured label must never be that bare timestamp.
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(self.repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        slot = web_runtime_state.capture_workspace(api.session_manager)
+        self.assertIsNotNone(slot)
+        self.assertNotRegex(slot["label"], r"\d{2}:\d{2}:\d{2}")
+        self.assertTrue(slot["label"])
+
+    def test_restore_launch_never_mints_a_timestamp_group_name(self):
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "wsl",
+                    "restore": True,
+                    "sessions": [
+                        {
+                            "directory": str(self.repo_dir),
+                            "title": "Files",
+                            "startup_mode": "explorer",
+                        }
+                    ],
+                },
+            )
+        self.assertEqual(response.status_code, 201)
+        name = response.get_json()["group"]["name"]
+        self.assertEqual(name, "Workspace")
+        self.assertNotRegex(name, r"\d{2}:\d{2}:\d{2}")
 
     def test_replaying_the_snapshot_relaunches_the_group(self):
         self._launch_explorer_group()
-        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
+        slot = web_runtime_state.capture_workspace(api.session_manager)
         api.session_manager.reset_sessions()
 
-        group = snapshot["groups"][0]
+        group = slot["groups"][0]
         response = self.client.post(
             "/api/sessions",
             json={
@@ -10850,59 +11029,13 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
                 "surface_mode": group["surface_mode"],
                 "session_name": group["name"],
                 "saved_session_id": group["saved_session_id"],
+                "restore": True,
             },
         )
         self.assertEqual(response.status_code, 201)
         restored = response.get_json()
         self.assertEqual(restored["group"]["name"], "Workspace")
         self.assertEqual(restored["sessions"][0]["startup_mode"], "explorer")
-
-    def test_closing_the_group_empties_the_snapshot(self):
-        group_id = self._launch_explorer_group()
-        response = self.client.delete(f"/api/sessions?group={group_id}")
-        self.assertEqual(response.status_code, 200)
-        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(snapshot["groups"], [])
-        self.assertIsNone(web_runtime_state.load_restorable_workspace())
-
-    def test_prune_group_from_snapshot_removes_only_target(self):
-        self.state_path.write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "saved_at": time.time(),
-                    "groups": [
-                        {"group_id": "g1", "name": "one"},
-                        {"group_id": "g2", "name": "two"},
-                    ],
-                }
-            ),
-            encoding="utf-8",
-        )
-        web_runtime_state.prune_group_from_snapshot("g1")
-        data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual([g["group_id"] for g in data["groups"]], ["g2"])
-
-    def test_group_close_prunes_only_that_group_not_rebuild_from_live(self):
-        """Bug 1: closing a group prunes just it from the snapshot instead of
-        rebuilding from a live set that may have collapsed to a leftover pane."""
-        group_a = self._launch_explorer_group(name="Alpha")
-        self._launch_explorer_group(name="Beta")
-        # Simulate the live set collapsing (e.g. the session window closed and
-        # Beta is no longer tracked) while the snapshot still records both.
-        beta_group_id = [
-            g.group_id
-            for g in api.session_manager.get_all_groups()
-            if g.name == "Beta"
-        ][0]
-        api.session_manager.remove_group(beta_group_id)
-
-        response = self.client.delete(f"/api/sessions?group={group_a}")
-        self.assertEqual(response.status_code, 200)
-        snapshot = json.loads(self.state_path.read_text(encoding="utf-8"))
-        # A rebuild-from-live would have dropped Beta (no longer live) and left
-        # nothing; pruning keeps the previously-captured Beta.
-        self.assertEqual([g["name"] for g in snapshot["groups"]], ["Beta"])
 
     def test_restore_launch_skips_agent_preflight_clearing(self):
         """Bug 2: a restore replays the workspace verbatim, so a cold post-restart
@@ -10960,24 +11093,16 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         sanitize.assert_called_once()
 
-    def test_stale_or_missing_snapshots_are_not_restorable(self):
-        self.assertIsNone(web_runtime_state.load_restorable_workspace())
-        stale = {
-            "version": 1,
-            "saved_at": time.time() - web_runtime_state.RUNTIME_STATE_MAX_AGE_SECONDS - 60,
-            "groups": [{"name": "old"}],
-        }
-        self.state_path.write_text(json.dumps(stale), encoding="utf-8")
-        self.assertIsNone(web_runtime_state.load_restorable_workspace())
-        self.state_path.write_text("not json", encoding="utf-8")
-        self.assertIsNone(web_runtime_state.load_restorable_workspace())
-
-    def test_delete_endpoint_dismisses_the_snapshot(self):
+    def test_delete_endpoint_clears_only_that_workspace_slot(self):
         self._launch_explorer_group()
-        api.session_manager.reset_sessions()
+        web_runtime_state.capture_workspace(api.session_manager)
         response = self.client.delete("/api/runtime-state")
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(self.state_path.exists())
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+        # The file itself stays (v2 skeleton); only the slot is removed.
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["workspaces"], {})
         payload = self.client.get("/api/runtime-state").get_json()
         self.assertFalse(payload["restorable"])
 
@@ -10989,9 +11114,33 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         launcher_js = self._static("js/launcher.js")
         self.assertIn("async function checkRestorableWorkspace()", launcher_js)
         self.assertIn("async function restorePreviousWorkspace()", launcher_js)
-        self.assertIn("fetch('/api/runtime-state', { method: 'DELETE' })", launcher_js)
         launcher_css = self._static("css/launcher.css")
         self.assertIn(".restore-banner", launcher_css)
+
+    def test_dismiss_restore_banner_is_hide_only(self):
+        """Decision 3: Dismiss only hides the banner client-side — it must not
+        call DELETE /api/runtime-state, so the saved slot stays restorable."""
+        launcher_js = self._static("js/launcher.js")
+        start = launcher_js.index("function dismissRestoreBanner()")
+        end = launcher_js.index("function restorePreviousWorkspace", start)
+        body = launcher_js[start:end]
+        self.assertNotIn("fetch(", body)
+        self.assertNotIn("DELETE", body)
+
+    def test_terminals_page_ships_workspace_save_menu(self):
+        """The Workspace... dropdown's Save Workspace item posts to
+        /api/runtime-state/save and is disabled when no groups are live."""
+        html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertIn('id="workspaceMenuRoot"', html)
+        self.assertIn('id="workspaceMenuBtn"', html)
+        self.assertIn(">Workspace...</button>", html)
+        self.assertIn('id="saveWorkspaceItem"', html)
+        self.assertIn(">Save Workspace</button>", html)
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function toggleWorkspaceMenu(event)", terminals_js)
+        self.assertIn("async function saveWorkspace(", terminals_js)
+        self.assertIn("/api/runtime-state/save", terminals_js)
+        self.assertIn("item.disabled = !sessionGroups.length;", terminals_js)
 
 
 class SettingsLauncherConfigTestCase(unittest.TestCase):
@@ -11095,6 +11244,51 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["terminal"]["font_size"], web_config.TERMINAL_FONT_SIZE_MIN)
         self.assertEqual(payload["terminal"]["max_sessions"], web_config.MAX_SESSIONS_MIN)
+
+    def test_app_config_round_trips_autosave_interval(self):
+        payload = self.client.get("/api/app-config").get_json()
+        self.assertEqual(payload["workspace"]["autosave_interval_minutes"], 5)
+
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"autosave_interval_minutes": 10}},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["workspace"]["autosave_interval_minutes"], 10)
+        cfg = api.load_config()
+        self.assertEqual(cfg["workspace"]["autosave_interval_minutes"], 10)
+        self.assertEqual(api.runtime_config.workspace_autosave_interval_minutes, 10)
+
+    def test_app_config_clamps_autosave_interval(self):
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"autosave_interval_minutes": 99}},
+        )
+        self.assertEqual(
+            response.get_json()["workspace"]["autosave_interval_minutes"],
+            web_config.AUTOSAVE_INTERVAL_MINUTES_MAX,
+        )
+
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"autosave_interval_minutes": 0}},
+        )
+        self.assertEqual(
+            response.get_json()["workspace"]["autosave_interval_minutes"],
+            web_config.AUTOSAVE_INTERVAL_MINUTES_MIN,
+        )
+
+    def test_runtime_config_refresh_normalizes_autosave_interval(self):
+        self.config_path.write_text(
+            json.dumps({"workspace": {"autosave_interval_minutes": "nope"}}),
+            encoding="utf-8",
+        )
+        api._refresh_runtime_config()
+        self.assertEqual(
+            api.runtime_config.workspace_autosave_interval_minutes,
+            web_config.AUTOSAVE_INTERVAL_MINUTES_DEFAULT,
+        )
 
     def test_app_config_rejects_invalid_terminal_values(self):
         before_family = api.runtime_config.terminal_font_family

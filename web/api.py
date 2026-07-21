@@ -67,6 +67,8 @@ from web.app import (  # noqa: F401 - re-exported for backwards compatibility
     socketio,
 )
 from web.config import (
+    AUTOSAVE_INTERVAL_MINUTES_MAX,
+    AUTOSAVE_INTERVAL_MINUTES_MIN,
     HOST_KEY_POLICY_OPTIONS,
     MAX_SESSIONS_MAX,
     MAX_SESSIONS_MIN,
@@ -129,10 +131,11 @@ from web.hostkeys import (  # noqa: F401 - re-exported for backwards compatibili
     _load_persistent_host_keys,
 )
 from web.paths import BASE_DIR
-from web.runtime_state import (  # noqa: F401 - save_workspace_snapshot re-exported
-    clear_runtime_state,
+from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
+    capture_workspace,
+    clear_workspace,
+    iter_live_workspaces,
     load_restorable_workspace,
-    save_workspace_snapshot,
 )
 from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compatibility
     DEFAULT_BROWSER_URL,
@@ -295,6 +298,7 @@ def _public_app_config() -> Dict[str, Any]:
         },
         "workspace": {
             "surface_mode": runtime_config.app_surface_mode,
+            "autosave_interval_minutes": runtime_config.workspace_autosave_interval_minutes,
         },
         "ssh": {
             "host_key_policy": runtime_config.ssh_host_key_policy,
@@ -356,6 +360,19 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     if not isinstance(workspace, dict):
         workspace = {}
     surface_mode = _normalize_surface_mode(workspace.get("surface_mode"), runtime_config.app_surface_mode)
+    try:
+        autosave_interval_minutes = int(
+            workspace.get(
+                "autosave_interval_minutes",
+                runtime_config.workspace_autosave_interval_minutes,
+            )
+        )
+    except (TypeError, ValueError):
+        autosave_interval_minutes = runtime_config.workspace_autosave_interval_minutes
+    autosave_interval_minutes = max(
+        AUTOSAVE_INTERVAL_MINUTES_MIN,
+        min(AUTOSAVE_INTERVAL_MINUTES_MAX, autosave_interval_minutes),
+    )
 
     ssh_settings = payload.get("ssh")
     if not isinstance(ssh_settings, dict):
@@ -411,6 +428,7 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
         },
         "workspace": {
             "surface_mode": surface_mode,
+            "autosave_interval_minutes": autosave_interval_minutes,
         },
         "ssh": {
             "host_key_policy": host_key_policy,
@@ -1093,22 +1111,107 @@ def reorder_session_groups():
 
 @app.route('/api/runtime-state', methods=['GET'])
 def get_runtime_state():
-    """Return the restorable previous-workspace snapshot, if any (10.5)."""
-    snapshot = load_restorable_workspace()
+    """Return the restorable previous-workspace slot, if any (10.5).
+
+    Eligibility is entirely backend-side: the slot is offered whenever it has
+    groups and a restorable origin — permanently, and regardless of whether
+    groups are currently live (a window may restore into itself).
+    """
+    workspace_id = str(request.args.get("workspace_id") or "default").strip() or "default"
+    slot = load_restorable_workspace(workspace_id)
     active_groups = session_manager.get_all_groups()
     return jsonify({
-        "restorable": bool(snapshot) and not active_groups,
-        "saved_at": snapshot.get("saved_at") if snapshot else None,
-        "groups": snapshot.get("groups", []) if snapshot else [],
+        "restorable": bool(slot),
+        "workspace_id": workspace_id,
+        "label": slot.get("label") if slot else None,
+        "origin": slot.get("origin") if slot else None,
+        "saved_at": slot.get("saved_at") if slot else None,
+        "groups": slot.get("groups", []) if slot else [],
         "active_group_count": len(active_groups),
+    })
+
+
+@app.route('/api/runtime-state/save', methods=['POST'])
+def save_runtime_state():
+    """Capture the workspace now (Workspace ▸ Save Workspace), origin manual."""
+    data = request.get_json(silent=True) or {}
+    workspace_id = str(data.get("workspace_id") or "default").strip() or "default"
+    label = str(data.get("label") or "").strip() or None
+    slot = capture_workspace(
+        session_manager, workspace_id=workspace_id, origin="manual", label=label
+    )
+    if slot is None:
+        # An empty workspace is never captured, so it never overwrites (or
+        # clears) the previously saved slot.
+        return jsonify({"saved": False, "workspace_id": workspace_id}), 409
+    return jsonify({
+        "saved": True,
+        "workspace_id": slot["workspace_id"],
+        "label": slot["label"],
+        "origin": slot["origin"],
+        "saved_at": slot["saved_at"],
+        "groups": slot["groups"],
     })
 
 
 @app.route('/api/runtime-state', methods=['DELETE'])
 def dismiss_runtime_state():
-    """Discard the previous-workspace snapshot (the user dismissed restore)."""
-    clear_runtime_state()
-    return jsonify({"message": "Previous workspace snapshot cleared"})
+    """Clear one workspace slot (multi-workspace skeleton; not UI-wired yet)."""
+    workspace_id = str(
+        request.args.get("workspace_id")
+        or (request.get_json(silent=True) or {}).get("workspace_id")
+        or "default"
+    ).strip() or "default"
+    clear_workspace(workspace_id)
+    return jsonify({"message": "Workspace snapshot cleared", "workspace_id": workspace_id})
+
+
+# ==================== Workspace autosave (10.5 hardening) ====================
+
+_workspace_autosave_started = False
+_workspace_autosave_lock = threading.Lock()
+
+
+def _run_workspace_autosave_tick() -> None:
+    """One autosave pass: capture every live workspace that has groups.
+
+    Empty workspaces are skipped (never cleared), so an idle launcher or a
+    just-restarted process can never wipe the restorable slot — a slot is only
+    ever overwritten by the next non-empty capture.
+    """
+    for workspace_id, _groups in iter_live_workspaces(session_manager):
+        try:
+            capture_workspace(session_manager, workspace_id=workspace_id, origin="auto")
+        except Exception:
+            logger.exception("Workspace autosave failed for %s", workspace_id)
+
+
+def _workspace_autosave_loop(stop_event: threading.Event) -> None:
+    """Daemon loop; re-reads the interval from runtime config each tick."""
+    while True:
+        interval_minutes = runtime_config.workspace_autosave_interval_minutes
+        if stop_event.wait(max(1, interval_minutes) * 60):
+            return
+        _run_workspace_autosave_tick()
+
+
+def start_workspace_autosave() -> bool:
+    """Start the single workspace-autosave daemon thread (idempotent)."""
+    global _workspace_autosave_started
+    with _workspace_autosave_lock:
+        if _workspace_autosave_started:
+            return False
+        _workspace_autosave_started = True
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_workspace_autosave_loop,
+        args=(stop_event,),
+        name="workspace-autosave",
+        daemon=True,
+    )
+    thread.start()
+    logger.info("Workspace autosave started (interval from workspace.autosave_interval_minutes)")
+    return True
 
 
 @app.route('/api/session-config', methods=['GET'])
@@ -1408,8 +1511,15 @@ def create_sessions():
         if stable_group_id:
             _replace_group_sessions(stable_group_id)
 
+        # A restore replays a stored workspace shape: its group name (or a
+        # neutral fallback) wins — it must never mint a fresh "Session
+        # HH:MM:SS" timestamp name (10.5 hardening). The timestamp fallback is
+        # only for genuinely unnamed NEW groups.
+        group_name = session_name or (
+            "Workspace" if is_restore else f"Session {time.strftime('%H:%M:%S')}"
+        )
         group = session_manager.create_group(
-            name=session_name or f"Session {time.strftime('%H:%M:%S')}",
+            name=group_name,
             connection_mode=connection_mode,
             layout=layout,
             terminal_count=len(prepared_sessions),
@@ -2108,6 +2218,7 @@ def run_server(
     `allow_unsafe_werkzeug` cannot drift between them.
     """
     logger.info(f"Starting GridVibe server on {host}:{port}")
+    start_workspace_autosave()
     socketio.run(
         app,
         host=host,

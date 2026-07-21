@@ -28,43 +28,62 @@
             width="28"
             height="28"
         >
-        <div class="sessions-menu" id="sessionsMenuRoot">
+        <div class="app-menu" id="sessionsMenuRoot">
             <button
                 type="button"
-                class="btn btn-neutral sessions-menu-toggle"
+                class="btn btn-neutral app-menu-toggle"
                 id="sessionsMenuBtn"
                 onclick="toggleSessionsMenu(event)"
                 aria-haspopup="true"
                 aria-expanded="false"
             >Sessions...</button>
-            <div class="sessions-menu-panel" id="sessionsMenu" role="menu" aria-labelledby="sessionsMenuBtn">
+            <div class="app-menu-panel" id="sessionsMenu" role="menu" aria-labelledby="sessionsMenuBtn">
                 <button
                     type="button"
-                    class="sessions-menu-item"
+                    class="app-menu-item"
                     role="menuitem"
                     onclick="closeSessionsMenu(); return openNewSessionSelector(event);"
                 >Import Session ...</button>
                 <button
                     type="button"
-                    class="sessions-menu-item"
+                    class="app-menu-item"
                     id="saveSessionMenuItem"
                     role="menuitem"
                     onclick="closeSessionsMenu(); saveActiveWorkspaceSession(this);"
                 >Save Session</button>
                 <button
                     type="button"
-                    class="sessions-menu-item"
+                    class="app-menu-item"
                     id="saveSessionAsMenuItem"
                     role="menuitem"
                     onclick="closeSessionsMenu(); saveActiveWorkspaceSessionAs(this);"
                 >Save Session as ...</button>
                 <button
                     type="button"
-                    class="sessions-menu-item"
+                    class="app-menu-item"
                     id="saveAllSessionsMenuItem"
                     role="menuitem"
                     onclick="closeSessionsMenu(); saveAllWorkspaceSessions(this);"
                 >Save All Sessions</button>
+            </div>
+        </div>
+        <div class="app-menu" id="workspaceMenuRoot">
+            <button
+                type="button"
+                class="btn btn-neutral app-menu-toggle"
+                id="workspaceMenuBtn"
+                onclick="toggleWorkspaceMenu(event)"
+                aria-haspopup="true"
+                aria-expanded="false"
+            >Workspace...</button>
+            <div class="app-menu-panel" id="workspaceMenu" role="menu" aria-labelledby="workspaceMenuBtn">
+                <button
+                    type="button"
+                    class="app-menu-item"
+                    id="saveWorkspaceItem"
+                    role="menuitem"
+                    onclick="closeWorkspaceMenu(); saveWorkspace(this);"
+                >Save Workspace</button>
             </div>
         </div>
         <span class="topbar-sub" id="sessionLabel">Loading…</span>

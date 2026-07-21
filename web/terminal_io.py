@@ -36,11 +36,6 @@ from web.explorer import (
     _is_explorer_session,
 )
 from web.hostkeys import _apply_host_key_policy
-from web.runtime_state import (
-    clear_runtime_state,
-    prune_group_from_snapshot,
-    save_workspace_snapshot,
-)
 
 try:
     import pty
@@ -103,22 +98,11 @@ def _broadcast_session_groups_updated(reason: str = "", group_id: str = ""):
 
     Lets the frontend refresh on push instead of relying on its old 3-second
     reconciliation poll (that poll now only runs as a slow fallback while the
-    Socket.IO connection is down). Group changes also refresh the
-    restore-after-restart snapshot (feature 10.5).
-
-    Additive/reshaping events (launch, split, reorder, single-pane close) rebuild
-    the snapshot from the live groups, which is authoritative for those. Group
-    closes instead prune only the closed group (or clear the file when the user
-    closes everything): rebuilding from the live set on a close can collapse the
-    snapshot to a transient leftover pane, which is the restore-after-restart
-    bug this guards against.
+    Socket.IO connection is down). This is a pure UI event: the
+    restore-after-restart snapshot is no longer written here — only the
+    autosave timer and the explicit Save Workspace action capture it (10.5
+    hardening), so transient mid-event shapes never reach the snapshot.
     """
-    if reason == "group_closed" and group_id:
-        prune_group_from_snapshot(group_id)
-    elif reason == "all_closed":
-        clear_runtime_state()
-    else:
-        save_workspace_snapshot(session_manager)
     socketio.emit('session_groups_updated', {"reason": reason})
 
 

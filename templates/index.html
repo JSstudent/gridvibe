@@ -232,6 +232,10 @@
                 </select>
             </div>
             <div class="field">
+                <label>Auto-save workspace every <span id="appWorkspaceAutosaveIntervalValue">5</span> min</label>
+                <input id="appWorkspaceAutosaveInterval" type="range" min="1" max="15" step="1" value="5" oninput="syncAutosaveIntervalLabel()" aria-label="Workspace auto-save interval in minutes">
+            </div>
+            <div class="field">
                 <label>SSH Host Keys</label>
                 <select id="appSshHostKeyPolicy" aria-label="SSH host key verification policy">
                     <option value="auto-add">Auto-add (accept new hosts)</option>

@@ -1121,6 +1121,12 @@
             cursor: pointer;
         }
 
+        .field input[type="range"] {
+            padding: 0;
+            accent-color: var(--accent);
+            cursor: pointer;
+        }
+
         .password-input-wrapper {
             position: relative;
             display: flex;

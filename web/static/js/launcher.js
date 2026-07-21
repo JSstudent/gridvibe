@@ -97,7 +97,8 @@
             theme: 'system'
         }),
         workspace: Object.freeze({
-            surface_mode: 'normal'
+            surface_mode: 'normal',
+            autosave_interval_minutes: 5
         }),
         ssh: Object.freeze({
             host_key_policy: 'auto-add'
@@ -548,6 +549,16 @@
 
         if (themeInput) themeInput.value = appearance.theme || DEFAULT_APP_SETTINGS.appearance.theme;
         if (surfaceModeInput) surfaceModeInput.value = workspace.surface_mode === 'max' ? 'max' : 'normal';
+        const autosaveIntervalInput = document.getElementById('appWorkspaceAutosaveInterval');
+        if (autosaveIntervalInput) {
+            const interval = Number(workspace.autosave_interval_minutes);
+            autosaveIntervalInput.value = String(
+                Number.isFinite(interval)
+                    ? Math.min(15, Math.max(1, Math.round(interval)))
+                    : DEFAULT_APP_SETTINGS.workspace.autosave_interval_minutes
+            );
+            syncAutosaveIntervalLabel();
+        }
         if (sshHostKeyPolicyInput) {
             sshHostKeyPolicyInput.value = ['auto-add', 'known-hosts', 'strict'].includes(ssh.host_key_policy)
                 ? ssh.host_key_policy
@@ -745,13 +756,25 @@
             || DEFAULT_APP_SETTINGS.terminal.font_family;
     }
 
+    function syncAutosaveIntervalLabel() {
+        const input = document.getElementById('appWorkspaceAutosaveInterval');
+        const value = document.getElementById('appWorkspaceAutosaveIntervalValue');
+        if (input && value) {
+            value.textContent = input.value;
+        }
+    }
+
     function collectAppSettingsForm() {
         return {
             appearance: {
                 theme: document.getElementById('appTheme')?.value || DEFAULT_APP_SETTINGS.appearance.theme
             },
             workspace: {
-                surface_mode: document.getElementById('appSurfaceMode')?.value === 'max' ? 'max' : 'normal'
+                surface_mode: document.getElementById('appSurfaceMode')?.value === 'max' ? 'max' : 'normal',
+                autosave_interval_minutes: Math.min(15, Math.max(1,
+                    Number(document.getElementById('appWorkspaceAutosaveInterval')?.value)
+                        || DEFAULT_APP_SETTINGS.workspace.autosave_interval_minutes
+                ))
             },
             ssh: {
                 host_key_policy: document.getElementById('appSshHostKeyPolicy')?.value || DEFAULT_APP_SETTINGS.ssh.host_key_policy
@@ -2584,11 +2607,34 @@
     }
 
     /* ── Restore previous workspace (feature 10.5) ──
-       The backend snapshots the workspace shape on every group change; after a
-       restart the launcher offers to replay it through the normal launch path.
+       The backend snapshots the workspace shape on an autosave timer and on
+       Workspace ▸ Save Workspace; after a restart the launcher offers to replay
+       the last saved snapshot through the normal launch path. The offer is
+       permanent — Dismiss only hides it for this launcher session.
        Passwords are never persisted — restored SSH panes use key auth or fail
        into the error placeholder (which has a Retry button). */
     let restorableWorkspaceGroups = [];
+
+    function formatWorkspaceSavedAgo(savedAt) {
+        const savedSeconds = Number(savedAt);
+        if (!Number.isFinite(savedSeconds) || savedSeconds <= 0) {
+            return '';
+        }
+        const elapsedSeconds = Math.max(0, Math.floor(Date.now() / 1000 - savedSeconds));
+        if (elapsedSeconds < 60) {
+            return 'just now';
+        }
+        const minutes = Math.floor(elapsedSeconds / 60);
+        if (minutes < 60) {
+            return `${minutes} min ago`;
+        }
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) {
+            return `${hours} h ago`;
+        }
+        const days = Math.floor(hours / 24);
+        return `${days} day${days === 1 ? '' : 's'} ago`;
+    }
 
     async function checkRestorableWorkspace() {
         const banner = document.getElementById('restoreWorkspaceBanner');
@@ -2606,16 +2652,21 @@
         );
         const text = document.getElementById('restoreWorkspaceText');
         if (text) {
-            text.textContent = `Previous workspace found — restore ${groupCount} session${groupCount === 1 ? '' : 's'} (${paneCount} pane${paneCount === 1 ? '' : 's'})? Live shells do not survive a restart; this relaunches the same layout.`;
+            const label = String(data.label || '').trim();
+            const savedAgo = formatWorkspaceSavedAgo(data.saved_at);
+            const target = label ? `Restore ${label}` : 'Restore previous workspace';
+            const when = savedAgo ? ` — saved ${savedAgo}` : '';
+            text.textContent = `${target}${when}? ${groupCount} session${groupCount === 1 ? '' : 's'} (${paneCount} pane${paneCount === 1 ? '' : 's'}) will relaunch with the same layout. Live shells do not survive a restart.`;
         }
         banner.hidden = false;
     }
 
     function dismissRestoreBanner() {
+        /* Hide-only: the saved slot is preserved (single-workspace mode has no
+           Delete); the next autosave or manual save overwrites it. */
         const banner = document.getElementById('restoreWorkspaceBanner');
         if (banner) banner.hidden = true;
         restorableWorkspaceGroups = [];
-        fetch('/api/runtime-state', { method: 'DELETE' }).catch(() => {});
     }
 
     async function restorePreviousWorkspace() {

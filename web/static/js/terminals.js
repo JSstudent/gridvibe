@@ -1062,6 +1062,33 @@
         const shouldOpen = !root.classList.contains('open');
         root.classList.toggle('open', shouldOpen);
         button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+        if (shouldOpen) {
+            closeWorkspaceMenu();
+        }
+    }
+
+    function closeWorkspaceMenu() {
+        const root = document.getElementById('workspaceMenuRoot');
+        const button = document.getElementById('workspaceMenuBtn');
+        root?.classList.remove('open');
+        button?.setAttribute('aria-expanded', 'false');
+    }
+
+    function toggleWorkspaceMenu(event) {
+        event?.preventDefault();
+        event?.stopPropagation();
+        const root = document.getElementById('workspaceMenuRoot');
+        const button = document.getElementById('workspaceMenuBtn');
+        if (!root || !button) {
+            return;
+        }
+
+        const shouldOpen = !root.classList.contains('open');
+        root.classList.toggle('open', shouldOpen);
+        button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+        if (shouldOpen) {
+            closeSessionsMenu();
+        }
     }
 
 
@@ -1431,6 +1458,9 @@
         if (!(event.target instanceof Element) || !event.target.closest('#sessionsMenuRoot')) {
             closeSessionsMenu();
         }
+        if (!(event.target instanceof Element) || !event.target.closest('#workspaceMenuRoot')) {
+            closeWorkspaceMenu();
+        }
     });
 
     document.getElementById('savedSessionsModal').addEventListener('click', event => {
@@ -1491,6 +1521,7 @@
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             closeSessionsMenu();
+            closeWorkspaceMenu();
             if (document.getElementById('savedSessionsModal').classList.contains('visible')) {
                 closeSavedSessionModal();
             }
@@ -1839,7 +1870,56 @@
         }
     }
 
+    function updateWorkspaceSaveItemState() {
+        const item = document.getElementById('saveWorkspaceItem');
+        if (item) {
+            item.disabled = !sessionGroups.length;
+        }
+    }
+
+    async function saveWorkspace(button = null) {
+        if (!sessionGroups.length) {
+            setWorkspaceSaveMessage('No sessions to save.', 'error');
+            return;
+        }
+
+        if (button) {
+            button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
+        }
+
+        try {
+            const response = await fetch('/api/runtime-state/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Save failed with status ${response.status}`);
+            }
+            const savedLabel = String(data.label || '').trim();
+            const savedAt = Number(data.saved_at);
+            const savedTime = Number.isFinite(savedAt)
+                ? new Date(savedAt * 1000).toLocaleTimeString()
+                : '';
+            const detail = [savedLabel ? `"${savedLabel}"` : '', savedTime]
+                .filter(Boolean)
+                .join(' at ');
+            setWorkspaceSaveMessage(`Workspace saved${detail ? ` — ${detail}` : ''}.`, 'success');
+        } catch (error) {
+            console.error('[GridVibe Sessions] workspace save failed:', error);
+            setWorkspaceSaveMessage(`Workspace save failed: ${error.message} — try again.`, 'error');
+        } finally {
+            if (button) {
+                button.setAttribute('aria-busy', 'false');
+                button.disabled = !sessionGroups.length;
+            }
+        }
+    }
+
     function renderSessionTabs() {
+        updateWorkspaceSaveItemState();
         const container = document.getElementById('sessionTabs');
         if (!container) return;
 

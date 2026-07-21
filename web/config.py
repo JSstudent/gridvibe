@@ -33,6 +33,13 @@ MAX_SESSIONS_MIN = 1
 MAX_SESSIONS_MAX = 16
 DEFAULT_TERMINAL_FONT_FAMILY = "Consolas, Monaco, 'Courier New', monospace"
 
+# Bounds for the workspace autosave interval (10.5 hardening). The App
+# Settings write path and RuntimeConfig.refresh() share these so a hand-edited
+# config.json and an API update normalize identically.
+AUTOSAVE_INTERVAL_MINUTES_MIN = 1
+AUTOSAVE_INTERVAL_MINUTES_MAX = 15
+AUTOSAVE_INTERVAL_MINUTES_DEFAULT = 5
+
 WHISPER_MODEL_OPTIONS = {
     "tiny.en",
     "tiny",
@@ -172,6 +179,7 @@ class RuntimeConfig:
         self.terminal_font_family = "Consolas, Monaco, 'Courier New', monospace"
         self.app_theme = "system"
         self.app_surface_mode = "normal"
+        self.workspace_autosave_interval_minutes = AUTOSAVE_INTERVAL_MINUTES_DEFAULT
         self.voice_enabled = True
         self.voice_engine = "vosk"
         self.vosk_service_url = "ws://localhost:2700"
@@ -217,6 +225,18 @@ class RuntimeConfig:
 
         workspace_config = self.app_config.get("workspace", {})
         self.app_surface_mode = _normalize_surface_mode(workspace_config.get("surface_mode"))
+        try:
+            self.workspace_autosave_interval_minutes = max(
+                AUTOSAVE_INTERVAL_MINUTES_MIN,
+                min(
+                    AUTOSAVE_INTERVAL_MINUTES_MAX,
+                    int(workspace_config.get(
+                        "autosave_interval_minutes", AUTOSAVE_INTERVAL_MINUTES_DEFAULT
+                    )),
+                ),
+            )
+        except (ValueError, TypeError):
+            self.workspace_autosave_interval_minutes = AUTOSAVE_INTERVAL_MINUTES_DEFAULT
 
         voice_config = self.app_config.get("voice_input", {})
         self.voice_enabled = voice_config.get("enabled", True)
