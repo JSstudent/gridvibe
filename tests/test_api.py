@@ -10363,17 +10363,16 @@ class ExplorerDownloadTestCase(unittest.TestCase):
     def test_reveal_opens_the_confined_path_in_the_file_manager(self):
         (self.root / "note.txt").write_text("hi", encoding="utf-8")
         session_id = self._create_local_explorer_session()
-        with patch.object(web_explorer.subprocess, "Popen") as popen:
+        with patch.object(api, "open_path_in_os_file_manager") as open_path:
             response = self.client.post(
                 f"/api/explorer/{session_id}/reveal",
                 json={"path": "note.txt"},
             )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["ok"])
-        popen.assert_called_once()
-        # The launcher receives the resolved, root-confined absolute path.
-        argv = popen.call_args.args[0]
-        self.assertTrue(any("note.txt" in str(arg) for arg in argv))
+        # The launcher receives the resolved, root-confined absolute path. Its
+        # platform-specific subprocess may instead open the parent on Linux.
+        open_path.assert_called_once_with(str((self.root / "note.txt").resolve()))
 
     def test_reveal_unknown_session_returns_404(self):
         response = self.client.post("/api/explorer/missing/reveal", json={"path": ""})
