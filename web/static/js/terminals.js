@@ -766,9 +766,22 @@
                 return;
             }
             terminal._cachedTerminalViewport = captureTerminalViewportState(terminal);
-            terminal._cachedExplorerScroll = isExplorerPaneInstance(terminal)
-                ? captureExplorerFileScroll(index)
-                : null;
+            if (isExplorerPaneInstance(terminal)) {
+                /* The detached cache has no document-level DOM lookup. Fold the
+                   final tab view into the pane and retain its live theme while
+                   the card is still mounted so Save All can serialize it. */
+                explorerCaptureActiveTabView(index);
+                const card = document.getElementById(`tc-${index}`);
+                terminal._cachedExplorerTheme = normalizeExplorerTheme(
+                    card?.dataset.explorerTheme
+                    || terminal._cachedExplorerTheme
+                    || terminal._session?.explorer_theme
+                    || 'dark'
+                );
+                terminal._cachedExplorerScroll = captureExplorerFileScroll(index);
+            } else {
+                terminal._cachedExplorerScroll = null;
+            }
         });
     }
 
@@ -1690,8 +1703,14 @@
         /* Persist the pane's live light/dark explorer theme so a saved session
            relaunches with the same appearance (its localStorage override is
            keyed by session_id and won't survive new session ids). */
-        const explorerTheme = startupMode === 'explorer' && explorerSlot !== -1
-            ? normalizeExplorerTheme(document.getElementById(`tc-${explorerSlot}`)?.dataset.explorerTheme || 'dark')
+        const explorerTheme = startupMode === 'explorer'
+            ? normalizeExplorerTheme(
+                (explorerSlot !== -1
+                    ? document.getElementById(`tc-${explorerSlot}`)?.dataset.explorerTheme
+                    : terminal?._cachedExplorerTheme)
+                || session.explorer_theme
+                || 'dark'
+            )
             : '';
 
         return {

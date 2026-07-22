@@ -532,6 +532,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("terminal?._explorerPath", entry_html)
         self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
         self.assertIn("Boolean(terminal?._explorerGitSidebarOpen)", entry_html)
+        self.assertIn("terminal?._cachedExplorerTheme", entry_html)
+        cache_state_start = html.index("function captureCachedPaneUiState()")
+        cache_state_end = html.index("function restoreCachedPaneUiState", cache_state_start)
+        cache_state_html = html[cache_state_start:cache_state_end]
+        self.assertIn("explorerCaptureActiveTabView(index);", cache_state_html)
+        self.assertIn("terminal._cachedExplorerTheme = normalizeExplorerTheme(", cache_state_html)
         self.assertIn("function restoreExplorerSidebarState(index)", html)
         self.assertIn("_explorerTreeSidebarOpen: Boolean(session.explorer_tree_open)", html)
         self.assertIn("_explorerGitSidebarOpen: Boolean(session.explorer_git_open)", html)
