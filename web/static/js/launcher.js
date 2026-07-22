@@ -4,7 +4,13 @@
         if (!BROWSER_SHUTDOWN_TOKEN) {
             return;
         }
-        if (!window.confirm('Close GridVibe and end the browser server?')) {
+        const confirmed = await openGenericConfirmModal({
+            title: 'Close GridVibe?',
+            copy: 'Close GridVibe and end the browser server?',
+            confirmLabel: 'Close GridVibe',
+            danger: true
+        });
+        if (!confirmed) {
             return;
         }
 
@@ -30,7 +36,7 @@
                 button.disabled = false;
                 button.textContent = 'Close';
             }
-            window.alert(error.message || 'GridVibe could not be closed.');
+            showMessage(error.message || 'GridVibe could not be closed.', 'error');
         }
     }
 
@@ -153,6 +159,7 @@
     let connectionMode = 'ssh';
     let savedSessionResolver = null;
     let saveSessionNameResolver = null;
+    let genericConfirmResolver = null;
     let savedSessionModalMode = 'import';
     let activeSavedSessionId = '';
     let activeSavedSessionName = '';
@@ -2283,6 +2290,49 @@
         }
     }
 
+    function closeGenericConfirmModal(result = false) {
+        const modal = document.getElementById('genericConfirmModal');
+        if (!modal) {
+            return;
+        }
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+        if (genericConfirmResolver) {
+            const resolver = genericConfirmResolver;
+            genericConfirmResolver = null;
+            resolver(result);
+        }
+    }
+
+    /* Reusable in-page confirm shell for irreversible actions (WebView2 blocks
+       window.confirm — same shell as the terminals page). Resolves true on
+       accept, false on cancel/dismiss. */
+    function openGenericConfirmModal({ title = 'Are you sure?', copy = '', note = '', confirmLabel = 'Confirm', danger = false } = {}) {
+        const modal = document.getElementById('genericConfirmModal');
+        if (!modal) {
+            return Promise.resolve(false);
+        }
+        closeGenericConfirmModal(false);
+        document.getElementById('genericConfirmTitle').textContent = title;
+        document.getElementById('genericConfirmCopy').textContent = copy;
+        const noteEl = document.getElementById('genericConfirmNote');
+        noteEl.textContent = note || '';
+        noteEl.hidden = !note;
+        const acceptButton = document.getElementById('genericConfirmAccept');
+        acceptButton.textContent = confirmLabel;
+        acceptButton.className = danger ? 'ghost-btn danger-btn' : 'ghost-btn';
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            document.getElementById('genericConfirmCancel').focus();
+        }, 0);
+
+        return new Promise(resolve => {
+            genericConfirmResolver = resolve;
+        });
+    }
+
     function closeSaveSessionNameModal(result = null) {
         const modal = document.getElementById('saveSessionNameModal');
         modal.classList.remove('visible');
@@ -2295,7 +2345,7 @@
         }
     }
 
-    // window.prompt() is a no-op under pywebview's WebView2 backend, so session
+    // window.prompt is a no-op under pywebview's WebView2 backend, so session
     // naming has to go through this modal instead.
     function openSaveSessionNameModal(suggestedName) {
         const modal = document.getElementById('saveSessionNameModal');
@@ -2567,7 +2617,17 @@
     async function restartApplication() {
         const button = document.getElementById('restartAppBtn');
 
-        if (!window.confirm('Save the workspace and restart GridVibe? Live shells do not survive a restart.')) {
+        // In-page confirm, not window.confirm: the native WebView2 window
+        // blocks the browser dialog, which made this button a silent no-op
+        // in the desktop app (guardrail audit finding N1).
+        const confirmed = await openGenericConfirmModal({
+            title: 'Restart GridVibe?',
+            copy: 'Save the workspace and restart GridVibe?',
+            note: 'Live shells do not survive a restart.',
+            confirmLabel: 'Save & Restart',
+            danger: true
+        });
+        if (!confirmed) {
             return;
         }
 
@@ -3095,6 +3155,20 @@
         closeSaveSessionNameModal({ name: document.getElementById('saveSessionNameInput').value });
     });
 
+    document.getElementById('genericConfirmModal').addEventListener('click', event => {
+        if (event.target.id === 'genericConfirmModal') {
+            closeGenericConfirmModal(false);
+        }
+    });
+
+    document.getElementById('genericConfirmCancel').addEventListener('click', () => {
+        closeGenericConfirmModal(false);
+    });
+
+    document.getElementById('genericConfirmAccept').addEventListener('click', () => {
+        closeGenericConfirmModal(true);
+    });
+
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape' && document.getElementById('savedSessionsModal').classList.contains('visible')) {
             closeSavedSessionModal();
@@ -3104,5 +3178,8 @@
         }
         if (event.key === 'Escape' && document.getElementById('saveSessionNameModal').classList.contains('visible')) {
             closeSaveSessionNameModal();
+        }
+        if (event.key === 'Escape' && document.getElementById('genericConfirmModal').classList.contains('visible')) {
+            closeGenericConfirmModal(false);
         }
     });

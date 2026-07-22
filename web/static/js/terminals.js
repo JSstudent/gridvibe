@@ -13,6 +13,14 @@
     // Markdown preview appearance control (ISSUE-2026-030): a stroke-style "type"
     // glyph opens the preset/font popover.
     const EXPLORER_MD_APPEARANCE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 7 4 4 20 4 20 7"></polyline><line x1="9" y1="20" x2="15" y2="20"></line><line x1="12" y1="4" x2="12" y2="20"></line></svg>';
+    /* Guardrail 7 (audit N3): stroke-style currentColor SVGs replace the old
+       emoji/text glyphs on the pane-header toggle buttons. */
+    const TERMINAL_PROMPT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>';
+    const EXPLORER_MODE_FOLDER_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>';
+    const BROWSER_MODE_GLOBE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>';
+    const VOICE_MIC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>';
+    const THEME_MOON_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>';
+    const THEME_SUN_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>';
 
 
 
@@ -404,7 +412,7 @@
             return;
         }
         const normalizedTheme = normalizeExplorerTheme(theme);
-        button.textContent = normalizedTheme === 'dark' ? '☀' : '☾';
+        button.innerHTML = normalizedTheme === 'dark' ? THEME_SUN_ICON : THEME_MOON_ICON;
         button.title = explorerThemeLabel(normalizedTheme);
         button.setAttribute('aria-label', explorerThemeLabel(normalizedTheme));
         button.setAttribute('aria-pressed', normalizedTheme === 'dark' ? 'true' : 'false');
@@ -4308,7 +4316,7 @@
                             title="${isExplorer ? 'Open terminal in current explorer directory' : 'Open file explorer for this terminal directory'}"
                             aria-label="${isExplorer ? 'Open terminal in current explorer directory' : 'Open file explorer for this terminal directory'}"
                         >
-                            ${isExplorer ? '&gt;_' : '📁'}
+                            ${isExplorer ? TERMINAL_PROMPT_ICON : EXPLORER_MODE_FOLDER_ICON}
                         </button>
                         ` : ''}
                         ${session.mode === 'wsl' && !isExplorer ? `
@@ -4320,7 +4328,7 @@
                                 title="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
                                 aria-label="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
                             >
-                                ${isBrowser ? '&gt;_' : '🌐'}
+                                ${isBrowser ? TERMINAL_PROMPT_ICON : BROWSER_MODE_GLOBE_ICON}
                             </button>
                         ` : ''}
                         ${!isExplorer && !isBrowser ? `
@@ -4356,7 +4364,7 @@
                                 aria-label="Dark explorer theme"
                                 aria-pressed="false"
                             >
-                                ☾
+                                ${THEME_MOON_ICON}
                             </button>
                         ` : ''}
                         <button
@@ -4376,7 +4384,7 @@
                                 data-terminal-voice="${i}"
                                 title="Voice input (click to start recording)"
                             >
-                                🎤
+                                ${VOICE_MIC_ICON}
                             </button>
                         </div>
                         <button
@@ -4918,7 +4926,7 @@
             ? 'Open terminal in current explorer directory'
             : 'Open file explorer for this terminal directory';
         button.disabled = loading;
-        button.textContent = loading ? '...' : (isExplorer ? '>_' : '📁');
+        button.innerHTML = loading ? '...' : (isExplorer ? TERMINAL_PROMPT_ICON : EXPLORER_MODE_FOLDER_ICON);
         button.title = label;
         button.setAttribute('aria-label', label);
     }
@@ -4930,7 +4938,7 @@
 
         const label = isBrowser ? 'Return to terminal' : 'Open browser preview';
         button.disabled = loading;
-        button.textContent = loading ? '...' : (isBrowser ? '>_' : '🌐');
+        button.innerHTML = loading ? '...' : (isBrowser ? TERMINAL_PROMPT_ICON : BROWSER_MODE_GLOBE_ICON);
         button.title = label;
         button.setAttribute('aria-label', label);
     }
@@ -4973,7 +4981,7 @@
                 title="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
                 aria-label="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
             >
-                ${isBrowser ? '&gt;_' : '🌐'}
+                ${isBrowser ? TERMINAL_PROMPT_ICON : BROWSER_MODE_GLOBE_ICON}
             </button>
         `);
         button = card.querySelector(`[data-session-browser-toggle="${index}"]`);
@@ -5169,7 +5177,7 @@
                 aria-label="Dark explorer theme"
                 aria-pressed="false"
             >
-                ☾
+                ${THEME_MOON_ICON}
             </button>
         `);
         button = card.querySelector(`[data-explorer-theme-toggle="${index}"]`);
@@ -5197,7 +5205,7 @@
                 title="Open file explorer for this terminal directory"
                 aria-label="Open file explorer for this terminal directory"
             >
-                📁
+                ${EXPLORER_MODE_FOLDER_ICON}
             </button>
         `);
         button = card.querySelector(`[data-session-mode-toggle="${index}"]`);
@@ -7575,7 +7583,7 @@
                 return;
             }
             console.error('Initial load failed:', e);
-            label.textContent = `❌ Load error: ${e.message}`;
+            label.textContent = `Load error: ${e.message}`;
             grid.style.display = 'none';
             document.getElementById('emptyState').classList.add('visible');
         }

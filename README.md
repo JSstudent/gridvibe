@@ -66,35 +66,39 @@ python webview_launcher.py --mode native
 ## What You Can Do
 
 - Launch 1, 2, 3, 4, 6, or 8 panes per session group: SSH hosts, WSL distributions, PowerShell, cmd, or local repositories.
-- Start each pane as a shell, an agent CLI (Codex, Claude Code, OpenCode, Kilo, Kimi Code CLI, GitHub Copilot CLI), a file explorer, or a browser preview.
+- Start each pane as a shell, an agent CLI (Codex, Claude Code, OpenCode, Kilo, Kimi Code CLI, GitHub Copilot CLI — each with an optional Auto mode toggle), a file explorer, or a browser preview.
 - Group sessions into numbered, draggable, closable tabs (`Alt+1`–`Alt+9` to switch).
-- Save the whole workspace as a preset and restore it later — including after an app restart (`runtime_state.json`, never passwords). SSH passwords are stored encrypted in `saved_sessions.json`.
+- Save any tab as a reusable session preset (`Save Session` / `Save All Sessions`), import presets into a running workspace, and keep a restore-after-restart snapshot of the whole workspace: a background autosave (configurable 1–15 min) plus an explicit `Save Workspace` write `runtime_state.json` (never passwords — SSH passwords live encrypted in `saved_sessions.json`), and after a restart the launcher offers the saved workspace back by name. Preset-backed groups restore from the preset's current config, so edits to a saved session survive the round trip.
 - Broadcast typing to every pane in a group, search scrollback (`Ctrl+Shift+F`), click URLs in output, split panes, and drag-resize dividers.
-- Browse files read-only over SFTP or locally, with a file tree, Markdown/text preview, syntax coloring, and a Git sidebar (status, diffs, commit graph, staging/commit/publish).
+- Browse files read-only over SFTP or locally — pinned file tabs, breadcrumb navigation, a lazily loaded file tree, Markdown preview with Mermaid diagrams, an inline image viewer, syntax coloring, and a Git sidebar (status, diffs, commit graph, staging/commit/publish with bulk stage/discard).
+- Update GridVibe in place from the launcher (`Check for updates`, git fast-forward) or save the workspace and restart the app in one action.
 - Dictate into any terminal with optional offline voice input (Vosk or faster-whisper).
 - Theme the whole app (system/light/dark), collapse the top bar, or go max-surface/fullscreen.
 
 ## Using the Workspace
 
-**Top bar:** theme, refresh, max surface, broadcast typing, fullscreen, and a button back to the launcher.
+**Top bar:** theme, refresh, max surface, broadcast typing, fullscreen, a `Workspace...` menu (`Save Workspace` for the restore snapshot), and a button back to the launcher.
 
-**Session tabs:** drag to reorder, `Alt+1`–`Alt+9` to switch, `Sessions...` to import/save workspace presets, close button per tab, and a chevron to hide the top bar.
+**Session tabs:** drag to reorder, `Alt+1`–`Alt+9` to switch, `Sessions...` to save/import session presets (`Save Session`, `Save All Sessions`, `Import Session`), close button per tab, and a chevron to hide the top bar.
 
-**Per pane:**
+**Per pane** (stroke-style icon buttons in the pane header):
 
-- `↻` — reset the view and replay recent output (reloads explorers and browser panes)
-- `📁` / `>_` — switch between terminal and file explorer at the current directory
-- `🌐` / `>_` — switch a Local Repo pane between terminal and browser preview
+- refresh (circular arrow) — reset the view and replay recent output (reloads explorers and browser panes)
+- folder / terminal prompt — switch between terminal and file explorer at the current directory
+- globe / terminal prompt — switch a Local Repo pane between terminal and browser preview
 - `⊞` — split the pane (clones the connection)
-- `🧹` — clear the display and replay buffer
-- `🎤` — start/stop voice input (when enabled)
+- eraser — clear the display and replay buffer
+- microphone — start/stop voice input (when enabled)
+- moon / sun — toggle an explorer pane between its dark and light theme
 - Drag the dividers between panes to resize them.
 
 ## File Explorer Panes
 
-Explorers are read-only views of a local repo folder or a remote SSH host (over SFTP), rooted at the folder you picked. They offer directory search, a lazily loaded file tree sidebar, text/Markdown preview with syntax coloring and font zoom, in-file find (`Ctrl+F`), and file download (100 MB cap).
+Explorers are read-only views of a local repo folder or a remote SSH host (over SFTP), rooted at the folder you picked. The viewer is tabbed: a permanent Preview tab for browsing plus pinned file tabs (drag to reorder, middle-click to close) that each remember their Source/Preview/Diff mode, scroll position, and font zoom — across tab swaps, workspace saves, and restarts. Around it: a clickable breadcrumb path bar, directory search, a lazily loaded file tree sidebar, in-file find (`Ctrl+F`), and file download (100 MB cap). Text previews are capped at 10 MiB (plain text above ~2 MiB); images (`.png`, `.jpg`, `.gif`, `.webp`, `.svg`, and friends) open in an inline viewer (25 MB cap).
 
-The Git sidebar shows branch/dirty status, per-file badges, a colour-coded commit graph, and historical diffs. The only mutating actions are staging/unstaging, commit, branch publishing (push), and discarding unstaged changes of tracked files — file moving, editing, deleting, upload, checkout, pull, and merge are intentionally not supported.
+Markdown gets extra treatment: rendered preview (`Ctrl+Shift+V` toggle) with Mermaid diagrams, heading folds in Source view (Alt+click folds every heading of that level), and a Markdown-appearance menu with reading-surface presets and fonts. Local panes also get an "open in system file manager" button that reveals the current file or folder outside GridVibe.
+
+The Git sidebar shows branch/dirty status, per-file badges, a colour-coded commit graph, and historical diffs. The only mutating actions are staging/unstaging (per file or `Stage All`), commit, branch publishing (push), and discarding unstaged changes of tracked files (per file or `Discard All`, behind an in-page confirm) — file moving, editing, deleting, upload, checkout, pull, and merge are intentionally not supported. Every mutating Git action refreshes the tree and any open diff in place.
 
 ## Browser Panes
 
@@ -116,7 +120,7 @@ GridVibe does not bundle agent CLIs; it checks whether each one is on `PATH` in 
 
 ## Configuration
 
-Runtime settings load from `config.json` (git-ignored), falling back to `default_config.json`. Everything is also editable in `App Settings` on the launcher. Example:
+Runtime settings load from `config.json` (git-ignored), falling back to `default_config.json`. Everything is also editable in `App Settings` on the launcher — including terminal font presets and size (applied to the active session or all sessions), max sessions, the workspace autosave interval, SSH host-key policy, and voice options. Example:
 
 ```json
 {
