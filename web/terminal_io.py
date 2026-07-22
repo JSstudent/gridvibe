@@ -87,10 +87,14 @@ def _broadcast_session_status(session_id: str):
     pane they display, and `join_session` itself replies with the current
     status.
     """
+    # Snapshot under the lock, emit after: a slow client write must not stall
+    # every thread waiting on the manager lock (same rationale as finding 2.4
+    # for connection_lock).
     with session_manager.lock:
         session = session_manager.sessions.get(session_id)
-        if session:
-            socketio.emit('session_status', session.to_dict(), room=session_id)
+        payload = session.to_dict() if session else None
+    if payload is not None:
+        socketio.emit('session_status', payload, room=session_id)
 
 
 def _broadcast_session_groups_updated(reason: str = "", group_id: str = ""):

@@ -13,6 +13,14 @@
     // Markdown preview appearance control (ISSUE-2026-030): a stroke-style "type"
     // glyph opens the preset/font popover.
     const EXPLORER_MD_APPEARANCE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 7 4 4 20 4 20 7"></polyline><line x1="9" y1="20" x2="15" y2="20"></line><line x1="12" y1="4" x2="12" y2="20"></line></svg>';
+    /* Guardrail 7 (audit N3): stroke-style currentColor SVGs replace the old
+       emoji/text glyphs on the pane-header toggle buttons. */
+    const TERMINAL_PROMPT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>';
+    const EXPLORER_MODE_FOLDER_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>';
+    const BROWSER_MODE_GLOBE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>';
+    const VOICE_MIC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>';
+    const THEME_MOON_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>';
+    const THEME_SUN_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>';
 
 
 
@@ -368,6 +376,33 @@
         }
     }
 
+    /* An explicit per-pane explorer theme carried in a saved/restored session
+       config ('light' or 'dark'), or '' when none was persisted. */
+    function explorerThemeFromSession(session) {
+        const value = session?.explorer_theme;
+        return value === 'light' || value === 'dark' ? value : '';
+    }
+
+    /* Resolve a pane's initial explorer theme + source. A per-session override
+       the user toggled this run wins; otherwise any theme baked into the saved
+       session config — light OR dark — is an explicit choice and is treated as
+       an override so the pane keeps it independent of the global app theme;
+       only a pane with no persisted theme at all falls back to the 'dark'
+       default. The explorer theme is deliberately independent of the global
+       light/dark theme, so the resolved value is always applied explicitly (a
+       pane with no data-explorer-theme would otherwise inherit the global
+       theme's --explorer-* tokens). */
+    function resolveInitialExplorerTheme(session, key) {
+        if (hasExplorerThemeOverride(key)) {
+            return { theme: getExplorerTheme(key), source: 'override' };
+        }
+        const savedTheme = explorerThemeFromSession(session);
+        if (savedTheme) {
+            return { theme: savedTheme, source: 'override' };
+        }
+        return { theme: 'dark', source: 'default' };
+    }
+
     function explorerThemeLabel(theme) {
         return normalizeExplorerTheme(theme) === 'dark' ? 'Light explorer theme' : 'Dark explorer theme';
     }
@@ -377,7 +412,7 @@
             return;
         }
         const normalizedTheme = normalizeExplorerTheme(theme);
-        button.textContent = normalizedTheme === 'dark' ? '☀' : '☾';
+        button.innerHTML = normalizedTheme === 'dark' ? THEME_SUN_ICON : THEME_MOON_ICON;
         button.title = explorerThemeLabel(normalizedTheme);
         button.setAttribute('aria-label', explorerThemeLabel(normalizedTheme));
         button.setAttribute('aria-pressed', normalizedTheme === 'dark' ? 'true' : 'false');
@@ -739,9 +774,22 @@
                 return;
             }
             terminal._cachedTerminalViewport = captureTerminalViewportState(terminal);
-            terminal._cachedExplorerScroll = isExplorerPaneInstance(terminal)
-                ? captureExplorerFileScroll(index)
-                : null;
+            if (isExplorerPaneInstance(terminal)) {
+                /* The detached cache has no document-level DOM lookup. Fold the
+                   final tab view into the pane and retain its live theme while
+                   the card is still mounted so Save All can serialize it. */
+                explorerCaptureActiveTabView(index);
+                const card = document.getElementById(`tc-${index}`);
+                terminal._cachedExplorerTheme = normalizeExplorerTheme(
+                    card?.dataset.explorerTheme
+                    || terminal._cachedExplorerTheme
+                    || terminal._session?.explorer_theme
+                    || 'dark'
+                );
+                terminal._cachedExplorerScroll = captureExplorerFileScroll(index);
+            } else {
+                terminal._cachedExplorerScroll = null;
+            }
         });
     }
 
@@ -1343,6 +1391,7 @@
                     : {},
                 explorer_md_preset: startupMode === 'explorer' ? (terminal?.explorer_md_preset || '') : '',
                 explorer_md_font: startupMode === 'explorer' ? (terminal?.explorer_md_font || '') : '',
+                explorer_theme: startupMode === 'explorer' ? (terminal?.explorer_theme || 'dark') : '',
                 startup_mode: startupMode
             };
 
@@ -1659,6 +1708,18 @@
             ? explorerSerializeTabs(terminal)
             : { open_tabs: [], active_tab: '', tab_views: {} };
         const mdAppearance = startupMode === 'explorer' ? explorerMarkdownAppearance() : null;
+        /* Persist the pane's live light/dark explorer theme so a saved session
+           relaunches with the same appearance (its localStorage override is
+           keyed by session_id and won't survive new session ids). */
+        const explorerTheme = startupMode === 'explorer'
+            ? normalizeExplorerTheme(
+                (explorerSlot !== -1
+                    ? document.getElementById(`tc-${explorerSlot}`)?.dataset.explorerTheme
+                    : terminal?._cachedExplorerTheme)
+                || session.explorer_theme
+                || 'dark'
+            )
+            : '';
 
         return {
             title: session.title || `Terminal ${index + 1}`,
@@ -1676,6 +1737,7 @@
             explorer_tab_views: explorerTabs.tab_views,
             explorer_md_preset: mdAppearance ? mdAppearance.preset : '',
             explorer_md_font: mdAppearance ? mdAppearance.font : '',
+            explorer_theme: explorerTheme,
             distribution: connectionMode === 'wsl' ? (session.distribution || '') : '',
             use_wsl: connectionMode === 'wsl' ? Boolean(session.use_wsl) : false,
             use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false
@@ -3978,6 +4040,23 @@
         return false;
     }
 
+    /* Clear-button click target: with broadcast input on, clearing one terminal
+       clears every plain terminal at once (notes 4) — the same fan-out
+       broadcast applies to typed input. Explorer/browser panes (no `term`) keep
+       their per-pane refresh behaviour and never trigger the fan-out. */
+    function clearTerminalDisplayFromButton(index) {
+        const source = terminals[index];
+        if (broadcastInputActive && source?.term) {
+            terminals.forEach((terminal, otherIndex) => {
+                if (terminal?.term && sessionIds[otherIndex]) {
+                    clearTerminalDisplay(otherIndex);
+                }
+            });
+            return;
+        }
+        clearTerminalDisplay(index);
+    }
+
     function clearDragState(){
         document.querySelectorAll('.terminal-container.dragging, .terminal-container.drag-target')
             .forEach(card => card.classList.remove('dragging', 'drag-target'));
@@ -4192,13 +4271,14 @@
         card.id = `tc-${i}`;
         card.dataset.slot = String(i);
         const explorerThemeKey = session.session_id || `${activeGroupId || 'group'}:${i}`;
-        const initialExplorerTheme = getExplorerTheme(explorerThemeKey);
         if (isExplorer) {
+            const resolvedTheme = resolveInitialExplorerTheme(session, explorerThemeKey);
             card.dataset.explorerThemeKey = explorerThemeKey;
-            card.dataset.explorerThemeSource = hasExplorerThemeOverride(explorerThemeKey) ? 'override' : 'default';
-            if (card.dataset.explorerThemeSource === 'override') {
-                card.dataset.explorerTheme = initialExplorerTheme;
-            }
+            card.dataset.explorerThemeSource = resolvedTheme.source;
+            // Always set an explicit theme; leaving it unset makes the pane
+            // inherit the global app theme's --explorer-* tokens (the flaky
+            // case where a saved-dark pane rendered light under global light).
+            card.dataset.explorerTheme = resolvedTheme.theme;
         }
         const sessionColour = tabColourForGroup(activeGroupId);
         card.style.setProperty('--session-color', sessionColour);
@@ -4236,7 +4316,7 @@
                             title="${isExplorer ? 'Open terminal in current explorer directory' : 'Open file explorer for this terminal directory'}"
                             aria-label="${isExplorer ? 'Open terminal in current explorer directory' : 'Open file explorer for this terminal directory'}"
                         >
-                            ${isExplorer ? '&gt;_' : '📁'}
+                            ${isExplorer ? TERMINAL_PROMPT_ICON : EXPLORER_MODE_FOLDER_ICON}
                         </button>
                         ` : ''}
                         ${session.mode === 'wsl' && !isExplorer ? `
@@ -4248,7 +4328,7 @@
                                 title="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
                                 aria-label="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
                             >
-                                ${isBrowser ? '&gt;_' : '🌐'}
+                                ${isBrowser ? TERMINAL_PROMPT_ICON : BROWSER_MODE_GLOBE_ICON}
                             </button>
                         ` : ''}
                         ${!isExplorer && !isBrowser ? `
@@ -4284,7 +4364,7 @@
                                 aria-label="Dark explorer theme"
                                 aria-pressed="false"
                             >
-                                ☾
+                                ${THEME_MOON_ICON}
                             </button>
                         ` : ''}
                         <button
@@ -4304,7 +4384,7 @@
                                 data-terminal-voice="${i}"
                                 title="Voice input (click to start recording)"
                             >
-                                🎤
+                                ${VOICE_MIC_ICON}
                             </button>
                         </div>
                         <button
@@ -4406,7 +4486,7 @@
         if (explorerThemeButton) {
             updateExplorerThemeButton(explorerThemeButton, card.dataset.explorerTheme || 'dark');
         }
-        wireCardButton(card, `[data-terminal-clear="${i}"]`, () => clearTerminalDisplay(i));
+        wireCardButton(card, `[data-terminal-clear="${i}"]`, () => clearTerminalDisplayFromButton(i));
         wireCardButton(card, `[data-terminal-close="${i}"]`, () => closeTerminalPane(i));
         wireCardButton(card, `[data-terminal-voice="${i}"]`, event => {
             _voiceLog('Mic button clicked', {
@@ -4731,7 +4811,7 @@
             clearButton.addEventListener('click', event => {
                 event.preventDefault();
                 event.stopPropagation();
-                clearTerminalDisplay(index);
+                clearTerminalDisplayFromButton(index);
             });
         }
 
@@ -4846,7 +4926,7 @@
             ? 'Open terminal in current explorer directory'
             : 'Open file explorer for this terminal directory';
         button.disabled = loading;
-        button.textContent = loading ? '...' : (isExplorer ? '>_' : '📁');
+        button.innerHTML = loading ? '...' : (isExplorer ? TERMINAL_PROMPT_ICON : EXPLORER_MODE_FOLDER_ICON);
         button.title = label;
         button.setAttribute('aria-label', label);
     }
@@ -4858,7 +4938,7 @@
 
         const label = isBrowser ? 'Return to terminal' : 'Open browser preview';
         button.disabled = loading;
-        button.textContent = loading ? '...' : (isBrowser ? '>_' : '🌐');
+        button.innerHTML = loading ? '...' : (isBrowser ? TERMINAL_PROMPT_ICON : BROWSER_MODE_GLOBE_ICON);
         button.title = label;
         button.setAttribute('aria-label', label);
     }
@@ -4901,7 +4981,7 @@
                 title="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
                 aria-label="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
             >
-                ${isBrowser ? '&gt;_' : '🌐'}
+                ${isBrowser ? TERMINAL_PROMPT_ICON : BROWSER_MODE_GLOBE_ICON}
             </button>
         `);
         button = card.querySelector(`[data-session-browser-toggle="${index}"]`);
@@ -5097,7 +5177,7 @@
                 aria-label="Dark explorer theme"
                 aria-pressed="false"
             >
-                ☾
+                ${THEME_MOON_ICON}
             </button>
         `);
         button = card.querySelector(`[data-explorer-theme-toggle="${index}"]`);
@@ -5125,7 +5205,7 @@
                 title="Open file explorer for this terminal directory"
                 aria-label="Open file explorer for this terminal directory"
             >
-                📁
+                ${EXPLORER_MODE_FOLDER_ICON}
             </button>
         `);
         button = card.querySelector(`[data-session-mode-toggle="${index}"]`);
@@ -5214,7 +5294,8 @@
         }
 
         const explorerThemeKey = session.session_id || `${activeGroupId || 'group'}:${index}`;
-        const initialExplorerTheme = getExplorerTheme(explorerThemeKey);
+        const resolvedExplorerTheme = resolveInitialExplorerTheme(session, explorerThemeKey);
+        const initialExplorerTheme = resolvedExplorerTheme.theme;
         terminals[index] = {
             _session: session,
             _paneType: 'explorer',
@@ -5228,7 +5309,7 @@
         card.classList.add('explorer-pane');
         card.classList.remove('browser-pane');
         card.dataset.explorerThemeKey = explorerThemeKey;
-        card.dataset.explorerThemeSource = hasExplorerThemeOverride(explorerThemeKey) ? 'override' : 'default';
+        card.dataset.explorerThemeSource = resolvedExplorerTheme.source;
         card.dataset.explorerTheme = initialExplorerTheme;
         setTerminalOnlyControlsVisible(card, false);
         const browserModeButton = card.querySelector(`[data-session-browser-toggle="${index}"]`);
@@ -6966,12 +7047,36 @@
         return -1;
     }
 
+    /* The highlighted string, when the current selection sits inside this
+       explorer pane and is a single line — the useful case for seeding a find.
+       Multi-line selections and selections in other panes are ignored. */
+    function explorerSelectionQuery(index) {
+        const selection = window.getSelection?.();
+        if (!selection || selection.isCollapsed || !selection.rangeCount) {
+            return '';
+        }
+        const query = (selection.toString() || '').trim();
+        if (!query || query.length > 200 || /[\r\n]/.test(query)) {
+            return '';
+        }
+        const card = document.querySelector(`.explorer-pane[data-slot="${index}"]`);
+        if (!card
+            || !card.contains(selection.anchorNode)
+            || !card.contains(selection.focusNode)) {
+            return '';
+        }
+        return query;
+    }
+
     document.addEventListener('keydown', event => {
         if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey || event.code !== 'KeyF') {
             return;
         }
         const index = findExplorerSearchTargetIndex();
-        if (index === -1 || !focusExplorerSearch(index)) {
+        if (index === -1) {
+            return;
+        }
+        if (!focusExplorerSearch(index, explorerSelectionQuery(index))) {
             return;
         }
         event.preventDefault();
@@ -7478,7 +7583,7 @@
                 return;
             }
             console.error('Initial load failed:', e);
-            label.textContent = `❌ Load error: ${e.message}`;
+            label.textContent = `Load error: ${e.message}`;
             grid.style.display = 'none';
             document.getElementById('emptyState').classList.add('visible');
         }
@@ -8099,6 +8204,10 @@
     const EXPLORER_EDITOR_FONT_STEP = 1;
     const EXPLORER_SEARCH_DEBOUNCE_MS = 160;
     const EXPLORER_SEARCH_MAX_MATCHES = 1000;
+    /* Ctrl+scroll zoom bounds for image / mermaid views (notes 3). Minimum is
+       the fitted (1×) size — shrinking below what fits isn't meaningful. */
+    const EXPLORER_WHEEL_ZOOM_MAX = 8;
+    const EXPLORER_WHEEL_ZOOM_STEP = 1.12;
     const EXPLORER_SEARCH_CHUNK_SIZE = 65536;
     const EXPLORER_SEARCH_YIELD_MS = 8;
     const EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT = 64;
@@ -10691,8 +10800,119 @@
                 diagram.classList.add('explorer-mermaid-error');
                 const message = String(error?.message || 'Invalid diagram').split('\n')[0];
                 diagram.textContent = `Mermaid diagram error: ${message}`;
+                continue;
             }
+            /* Ctrl+scroll zooms the rendered diagram (notes 3); double-click
+               resets it. Bound on the diagram box so the page-zoom default is
+               suppressed only while the pointer is over the diagram. */
+            enableExplorerWheelZoom(diagram, diagram.querySelector('svg'));
         }
+    }
+
+    /* Ctrl+scroll zoom for a scrollable view (container) around a scalable
+       target (an <img> or mermaid <svg>). Double-click restores 1×; while
+       zoomed the surface shows a hand cursor and can be dragged to pan.
+
+       Zoom resizes the target's LAYOUT box (explicit px width/height) rather
+       than applying a CSS transform. A transform only overflows *visually*, so
+       the scroll container never gained a real scroll region and the top/left
+       corners stayed unreachable no matter the alignment. A real size change
+       gives overflow:auto a true region, so scrollbars and drag-pan reach every
+       edge (notes 3 redo). */
+    function enableExplorerWheelZoom(container, target) {
+        if (!container || !target || container._wheelZoomBound) {
+            return;
+        }
+        container._wheelZoomBound = true;
+        let scale = 1;
+        let baseW = 0;
+        let baseH = 0;
+
+        const applyZoom = () => {
+            if (scale <= 1) {
+                target.style.width = '';
+                target.style.height = '';
+                target.style.maxWidth = '';
+                target.style.maxHeight = '';
+                container.classList.remove('explorer-zoomable');
+                return;
+            }
+            target.style.maxWidth = 'none';
+            target.style.maxHeight = 'none';
+            target.style.width = `${Math.round(baseW * scale)}px`;
+            target.style.height = `${Math.round(baseH * scale)}px`;
+            container.classList.add('explorer-zoomable');
+        };
+
+        const zoomBy = factor => {
+            // Capture the fitted (scale-1) size the first time we grow, so the
+            // scale stays relative to what the user actually sees on screen.
+            if (scale === 1) {
+                const rect = target.getBoundingClientRect();
+                baseW = rect.width;
+                baseH = rect.height;
+            }
+            if (!baseW || !baseH) {
+                return;
+            }
+            scale = Math.min(
+                EXPLORER_WHEEL_ZOOM_MAX,
+                Math.max(1, scale * factor)
+            );
+            applyZoom();
+        };
+
+        container.addEventListener('wheel', event => {
+            if (!event.ctrlKey) {
+                return;
+            }
+            event.preventDefault();
+            zoomBy(event.deltaY < 0 ? EXPLORER_WHEEL_ZOOM_STEP : 1 / EXPLORER_WHEEL_ZOOM_STEP);
+        }, { passive: false });
+        container.addEventListener('dblclick', event => {
+            if (scale === 1) {
+                return;
+            }
+            event.preventDefault();
+            scale = 1;
+            applyZoom();
+        });
+
+        let dragging = false;
+        let startX = 0;
+        let startY = 0;
+        let startLeft = 0;
+        let startTop = 0;
+        container.addEventListener('pointerdown', event => {
+            if (scale === 1 || event.button !== 0) {
+                return;
+            }
+            dragging = true;
+            startX = event.clientX;
+            startY = event.clientY;
+            startLeft = container.scrollLeft;
+            startTop = container.scrollTop;
+            container.classList.add('explorer-grabbing');
+            container.setPointerCapture?.(event.pointerId);
+            event.preventDefault();
+        });
+        container.addEventListener('pointermove', event => {
+            if (!dragging) {
+                return;
+            }
+            container.scrollLeft = startLeft - (event.clientX - startX);
+            container.scrollTop = startTop - (event.clientY - startY);
+        });
+        const endDrag = event => {
+            if (!dragging) {
+                return;
+            }
+            dragging = false;
+            container.classList.remove('explorer-grabbing');
+            container.releasePointerCapture?.(event.pointerId);
+        };
+        container.addEventListener('pointerup', endDrag);
+        container.addEventListener('pointercancel', endDrag);
     }
 
     function restoreExplorerPreview(index) {
@@ -11116,7 +11336,7 @@
         document.querySelector(`[data-explorer-search-input="${index}"]`)?.focus();
     }
 
-    function focusExplorerSearch(index) {
+    function focusExplorerSearch(index, seedQuery = '') {
         const pane = terminals[index];
         if (!pane || !isExplorerSearchablePane(pane)) {
             return false;
@@ -11124,6 +11344,20 @@
         const input = document.querySelector(`[data-explorer-search-input="${index}"]`);
         if (!input) {
             return false;
+        }
+        /* Seeding the query with the current editor selection mirrors the
+           copy → find → paste sequence (notes 1): highlight text, hit Ctrl+F,
+           and it immediately looks that text up instead of reopening the last
+           search. */
+        if (seedQuery) {
+            const state = ensureExplorerSearchState(pane);
+            state.query = seedQuery;
+            state.activeIndex = 0;
+            state.ranges = [];
+            state.resultQuery = '';
+            state.matchCapped = false;
+            input.value = seedQuery;
+            scheduleExplorerSearch(index, { resetActive: true, delay: 0 });
         }
         input.focus();
         input.select();
@@ -12516,6 +12750,8 @@
         }
         const image = viewer.querySelector('.explorer-image');
         if (image) {
+            /* Ctrl+scroll zooms the image (notes 3); double-click resets it. */
+            enableExplorerWheelZoom(document.getElementById(`explorer-image-${index}`), image);
             image.addEventListener('load', () => {
                 const metaEl = viewer.querySelector(`[data-explorer-image-meta="${index}"]`);
                 if (metaEl && image.naturalWidth) {

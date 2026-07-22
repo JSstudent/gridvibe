@@ -140,6 +140,13 @@
             --explorer-muted: #5f6f85;
             --explorer-folder: #c56f05;
             --explorer-file: #64748b;
+            /* Default (non-overridden) panes follow the app theme; the
+               data-explorer-theme blocks below override these when a pane's own
+               theme is toggled independently (notes 2). */
+            --explorer-btn-bg: #f3f4f6;
+            --explorer-btn-text: #1f2937;
+            --explorer-btn-border: #aeb7c2;
+            --explorer-btn-hover-bg: #e5e7eb;
         }
 
         [data-theme="dark"] {
@@ -153,6 +160,10 @@
             --explorer-muted: #94a3b8;
             --explorer-folder: #f0b35b;
             --explorer-file: #9fb2c8;
+            --explorer-btn-bg: #181818;
+            --explorer-btn-text: #cfcfcf;
+            --explorer-btn-border: #2d2d2d;
+            --explorer-btn-hover-bg: #202020;
         }
 
         .explorer-pane[data-explorer-theme="light"] {
@@ -166,6 +177,13 @@
             --explorer-muted: #5f6f85;
             --explorer-folder: #c56f05;
             --explorer-file: #64748b;
+            /* Toolbar-button surface follows the pane's OWN theme, not the app
+               theme (notes 2). Without this, a pane toggled opposite the app
+               keeps the app theme's button look and clashes with its surface. */
+            --explorer-btn-bg: #f3f4f6;
+            --explorer-btn-text: #1f2937;
+            --explorer-btn-border: #aeb7c2;
+            --explorer-btn-hover-bg: #e5e7eb;
         }
 
         .explorer-pane[data-explorer-theme="dark"] {
@@ -179,6 +197,10 @@
             --explorer-muted: #94a3b8;
             --explorer-folder: #f0b35b;
             --explorer-file: #9fb2c8;
+            --explorer-btn-bg: #181818;
+            --explorer-btn-text: #cfcfcf;
+            --explorer-btn-border: #2d2d2d;
+            --explorer-btn-hover-bg: #202020;
         }
 
         :root,
@@ -1632,15 +1654,24 @@
             display: inline-flex;
         }
 
+        /* The explorer bar's nav/toggle buttons (refresh, up, file-tree, git,
+           OS-open) take their surface from the pane's OWN theme tokens (notes 2
+           follow-up), so they track the per-pane light/dark toggle instead of
+           the global app theme like everything else on the explorer surface. */
         .explorer-refresh,
         .explorer-up {
             width: 32px;
             height: 28px;
-            border: 1px solid var(--t-border-tab);
+            border: 1px solid var(--explorer-btn-border);
             border-radius: 5px;
-            background: var(--t-btn-bg);
-            color: var(--t-btn-text);
+            background: var(--explorer-btn-bg);
+            color: var(--explorer-btn-text);
             cursor: pointer;
+        }
+
+        .explorer-refresh:not(:disabled):hover,
+        .explorer-up:not(:disabled):hover {
+            background: var(--explorer-btn-hover-bg);
         }
 
         .explorer-refresh:disabled,
@@ -1658,10 +1689,10 @@
             align-items: center;
             justify-content: center;
             flex: 0 0 auto;
-            border: 1px solid var(--t-border-tab);
+            border: 1px solid var(--explorer-btn-border);
             border-radius: 5px;
-            background: var(--t-btn-bg);
-            color: var(--t-btn-text);
+            background: var(--explorer-btn-bg);
+            color: var(--explorer-btn-text);
             cursor: pointer;
         }
 
@@ -2251,13 +2282,17 @@
         }
 
         .explorer-editor-tab {
-            border: 1px solid var(--t-border-tab);
+            border: 1px solid var(--explorer-btn-border);
             border-radius: 5px;
-            background: var(--t-btn-bg);
-            color: var(--t-btn-text);
+            background: var(--explorer-btn-bg);
+            color: var(--explorer-btn-text);
             cursor: pointer;
             font-size: .72rem;
             padding: 5px 8px;
+        }
+
+        .explorer-editor-tab:hover {
+            background: var(--explorer-btn-hover-bg);
         }
 
         .explorer-editor-tab[aria-selected="true"],
@@ -2286,7 +2321,7 @@
             min-width: 0;
             width: 100%;
             height: 28px;
-            border: 1px solid var(--t-border-tab);
+            border: 1px solid var(--explorer-btn-border);
             border-radius: 5px;
             padding: 4px 8px;
             background: var(--explorer-bg);
@@ -2312,10 +2347,10 @@
         .explorer-search-btn {
             width: 28px;
             height: 28px;
-            border: 1px solid var(--t-border-tab);
+            border: 1px solid var(--explorer-btn-border);
             border-radius: 5px;
-            background: var(--t-btn-bg);
-            color: var(--t-btn-text);
+            background: var(--explorer-btn-bg);
+            color: var(--explorer-btn-text);
             cursor: pointer;
             font-size: .72rem;
             line-height: 1;
@@ -2415,15 +2450,19 @@
         .explorer-zoom-btn {
             width: 28px;
             height: 28px;
-            border: 1px solid var(--t-border-tab);
+            border: 1px solid var(--explorer-btn-border);
             border-radius: 5px;
-            background: var(--t-btn-bg);
-            color: var(--t-btn-text);
+            background: var(--explorer-btn-bg);
+            color: var(--explorer-btn-text);
             cursor: pointer;
             font-size: .82rem;
             font-weight: 700;
             line-height: 1;
             flex: 0 0 auto;
+        }
+
+        .explorer-zoom-btn:not(:disabled):hover {
+            background: var(--explorer-btn-hover-bg);
         }
 
         .explorer-zoom-btn:disabled {
@@ -2438,10 +2477,10 @@
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            border: 1px solid var(--t-border-tab);
+            border: 1px solid var(--explorer-btn-border);
             border-radius: 5px;
-            background: var(--t-btn-bg);
-            color: var(--t-btn-text);
+            background: var(--explorer-btn-bg);
+            color: var(--explorer-btn-text);
             cursor: pointer;
             flex: 0 0 auto;
         }
@@ -2556,8 +2595,12 @@
             min-height: 0;
             overflow: auto;
             display: flex;
-            align-items: center;
-            justify-content: center;
+            /* `safe center` keeps the image centered while it fits but falls back
+               to start-alignment once zoomed past the viewport, so every edge
+               stays reachable by scroll/drag (notes 3 follow-up). Plain `center`
+               would clip the top/left of an overflowing flex item. */
+            align-items: safe center;
+            justify-content: safe center;
             padding: 16px;
             background-color: var(--explorer-bg);
             background-image:
@@ -2575,6 +2618,23 @@
             object-fit: contain;
             border-radius: 2px;
             box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+        }
+
+        /* Grab cursor for a zoomed image / mermaid diagram; `cursor` inherits so
+           the scaled child shows the same hand as its scroll container. */
+        .explorer-zoomable {
+            cursor: grab;
+        }
+
+        .explorer-grabbing {
+            cursor: grabbing;
+        }
+
+        /* A zoomed mermaid diagram pins to the start so every edge is reachable
+           by scroll/drag; its default text-align:center would push the left/top
+           overflow out of the scrollable region (notes 3 redo). */
+        .explorer-markdown-preview .explorer-mermaid.explorer-zoomable {
+            text-align: left;
         }
 
         .explorer-image-error {

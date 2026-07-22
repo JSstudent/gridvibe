@@ -103,6 +103,11 @@ def _normalize_explorer_md_choice(value: Any, allowed: tuple) -> str:
     return text if text in allowed else ""
 
 
+def _normalize_explorer_theme(value: Any) -> str:
+    """Return the saved per-pane explorer theme; anything but "light" is "dark"."""
+    return "light" if str(value or "").strip() == "light" else "dark"
+
+
 def _normalize_explorer_tab_font_size(value: Any) -> int:
     """Clamp a persisted per-tab editor font size to the client bounds; 0 = unset."""
     try:
@@ -225,6 +230,7 @@ def _default_terminal_entries():
             "explorer_tab_views": {},
             "explorer_md_preset": "",
             "explorer_md_font": "",
+            "explorer_theme": "dark",
             "distribution": "",
             "use_wsl": False,
             "use_powershell": False,
@@ -413,6 +419,7 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
                 "explorer_tab_views": _normalize_explorer_tab_views(entry.get("explorer_tab_views"), open_tabs),
                 "explorer_md_preset": _normalize_explorer_md_choice(entry.get("explorer_md_preset"), EXPLORER_MD_PRESETS),
                 "explorer_md_font": _normalize_explorer_md_choice(entry.get("explorer_md_font"), EXPLORER_MD_FONTS),
+                "explorer_theme": _normalize_explorer_theme(entry.get("explorer_theme")),
                 "distribution": str(entry.get("distribution") or ""),
                 "use_wsl": bool(entry.get("use_wsl")) and not use_powershell,
                 "use_powershell": use_powershell,
@@ -533,6 +540,9 @@ def _merge_workspace_session_config(
         )
         saved_terminal["explorer_md_font"] = (
             workspace_terminal["explorer_md_font"] if startup_mode == "explorer" else ""
+        )
+        saved_terminal["explorer_theme"] = (
+            workspace_terminal["explorer_theme"] if startup_mode == "explorer" else "dark"
         )
 
         # Browser panes need a valid URL, but navigation performed in the live

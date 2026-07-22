@@ -4,7 +4,13 @@
         if (!BROWSER_SHUTDOWN_TOKEN) {
             return;
         }
-        if (!window.confirm('Close GridVibe and end the browser server?')) {
+        const confirmed = await openGenericConfirmModal({
+            title: 'Close GridVibe?',
+            copy: 'Close GridVibe and end the browser server?',
+            confirmLabel: 'Close GridVibe',
+            danger: true
+        });
+        if (!confirmed) {
             return;
         }
 
@@ -30,7 +36,7 @@
                 button.disabled = false;
                 button.textContent = 'Close';
             }
-            window.alert(error.message || 'GridVibe could not be closed.');
+            showMessage(error.message || 'GridVibe could not be closed.', 'error');
         }
     }
 
@@ -88,6 +94,7 @@
         explorer_tab_views: {},
         explorer_md_preset: '',
         explorer_md_font: '',
+        explorer_theme: 'dark',
         distribution: '',
         use_wsl: false,
         use_powershell: false
@@ -152,6 +159,7 @@
     let connectionMode = 'ssh';
     let savedSessionResolver = null;
     let saveSessionNameResolver = null;
+    let genericConfirmResolver = null;
     let savedSessionModalMode = 'import';
     let activeSavedSessionId = '';
     let activeSavedSessionName = '';
@@ -1142,6 +1150,7 @@
                 explorer_tab_views: commandMode === 'explorer' ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews) : {},
                 explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
                 explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
+                explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : '',
                 distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
                 use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
                     ? Boolean(row.querySelector('.t-use-wsl')?.checked)
@@ -1967,6 +1976,7 @@
                     data-explorer-tab-views="${escHtml(JSON.stringify(terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object' ? terminal.explorer_tab_views : {}))}"
                     data-explorer-md-preset="${escHtml(terminal.explorer_md_preset || '')}"
                     data-explorer-md-font="${escHtml(terminal.explorer_md_font || '')}"
+                    data-explorer-theme="${escHtml(terminal.explorer_theme || 'dark')}"
                 >
                     <div class="t-row-head">
                         <span class="t-badge">T${index + 1}</span>
@@ -2280,6 +2290,49 @@
         }
     }
 
+    function closeGenericConfirmModal(result = false) {
+        const modal = document.getElementById('genericConfirmModal');
+        if (!modal) {
+            return;
+        }
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+        if (genericConfirmResolver) {
+            const resolver = genericConfirmResolver;
+            genericConfirmResolver = null;
+            resolver(result);
+        }
+    }
+
+    /* Reusable in-page confirm shell for irreversible actions (WebView2 blocks
+       window.confirm — same shell as the terminals page). Resolves true on
+       accept, false on cancel/dismiss. */
+    function openGenericConfirmModal({ title = 'Are you sure?', copy = '', note = '', confirmLabel = 'Confirm', danger = false } = {}) {
+        const modal = document.getElementById('genericConfirmModal');
+        if (!modal) {
+            return Promise.resolve(false);
+        }
+        closeGenericConfirmModal(false);
+        document.getElementById('genericConfirmTitle').textContent = title;
+        document.getElementById('genericConfirmCopy').textContent = copy;
+        const noteEl = document.getElementById('genericConfirmNote');
+        noteEl.textContent = note || '';
+        noteEl.hidden = !note;
+        const acceptButton = document.getElementById('genericConfirmAccept');
+        acceptButton.textContent = confirmLabel;
+        acceptButton.className = danger ? 'ghost-btn danger-btn' : 'ghost-btn';
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            document.getElementById('genericConfirmCancel').focus();
+        }, 0);
+
+        return new Promise(resolve => {
+            genericConfirmResolver = resolve;
+        });
+    }
+
     function closeSaveSessionNameModal(result = null) {
         const modal = document.getElementById('saveSessionNameModal');
         modal.classList.remove('visible');
@@ -2292,7 +2345,7 @@
         }
     }
 
-    // window.prompt() is a no-op under pywebview's WebView2 backend, so session
+    // window.prompt is a no-op under pywebview's WebView2 backend, so session
     // naming has to go through this modal instead.
     function openSaveSessionNameModal(suggestedName) {
         const modal = document.getElementById('saveSessionNameModal');
@@ -2537,6 +2590,81 @@
             button.classList.remove('loading');
             setUpdateStatus(error.message, 'error');
             showMessage(`Update failed: ${error.message}`, 'error');
+        }
+    }
+
+    async function saveWorkspaceForRestart() {
+        /* Best-effort workspace capture before a restart. A 409 means the
+           workspace is empty (nothing live to save), which is not an error —
+           the restart still proceeds. */
+        try {
+            const response = await fetch('/api/runtime-state/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            if (response.ok || response.status === 409) {
+                return true;
+            }
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.error || `Save failed with status ${response.status}`);
+        } catch (error) {
+            console.error('[GridVibe Launcher] workspace save before restart failed:', error);
+            return false;
+        }
+    }
+
+    async function restartApplication() {
+        const button = document.getElementById('restartAppBtn');
+
+        // In-page confirm, not window.confirm: the native WebView2 window
+        // blocks the browser dialog, which made this button a silent no-op
+        // in the desktop app (guardrail audit finding N1).
+        const confirmed = await openGenericConfirmModal({
+            title: 'Restart GridVibe?',
+            copy: 'Save the workspace and restart GridVibe?',
+            note: 'Live shells do not survive a restart.',
+            confirmLabel: 'Save & Restart',
+            danger: true
+        });
+        if (!confirmed) {
+            return;
+        }
+
+        button.disabled = true;
+        button.classList.add('loading');
+        setUpdateStatus('Saving workspace...');
+
+        const saved = await saveWorkspaceForRestart();
+        const savePrefix = saved ? 'Workspace saved.' : 'Workspace save failed.';
+
+        if (!window.pywebview?.api?.restart_application) {
+            // Browser mode (or no native bridge): there is nothing to relaunch.
+            button.disabled = false;
+            button.classList.remove('loading');
+            setUpdateStatus(`${savePrefix} Restart GridVibe manually to reload the app.`, saved ? 'success' : 'error');
+            showMessage(`${savePrefix} Restart GridVibe manually to reload the app.`, saved ? 'success' : 'error');
+            return;
+        }
+
+        setUpdateStatus(`${savePrefix} Restarting GridVibe...`, 'success');
+        showMessage(`${savePrefix} Restarting GridVibe...`, 'success');
+
+        try {
+            const restartResult = await window.pywebview.api.restart_application();
+            if (restartResult?.ok) {
+                return;
+            }
+            const restartError = restartResult?.error || 'Automatic restart failed.';
+            button.disabled = false;
+            button.classList.remove('loading');
+            setUpdateStatus(`${savePrefix} ${restartError} Restart GridVibe manually.`, 'error');
+            showMessage(`${savePrefix} ${restartError} Restart GridVibe manually.`, 'error');
+        } catch (error) {
+            button.disabled = false;
+            button.classList.remove('loading');
+            setUpdateStatus(`${savePrefix} ${error.message} Restart GridVibe manually.`, 'error');
+            showMessage(`${savePrefix} ${error.message} Restart GridVibe manually.`, 'error');
         }
     }
 
@@ -2800,6 +2928,9 @@
                 explorer_md_font: terminal.startup_mode === 'explorer'
                     ? (terminal.explorer_md_font || '')
                     : '',
+                explorer_theme: terminal.startup_mode === 'explorer'
+                    ? (terminal.explorer_theme || 'dark')
+                    : '',
                 startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
                     ? terminal.startup_mode
                     : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
@@ -3024,6 +3155,20 @@
         closeSaveSessionNameModal({ name: document.getElementById('saveSessionNameInput').value });
     });
 
+    document.getElementById('genericConfirmModal').addEventListener('click', event => {
+        if (event.target.id === 'genericConfirmModal') {
+            closeGenericConfirmModal(false);
+        }
+    });
+
+    document.getElementById('genericConfirmCancel').addEventListener('click', () => {
+        closeGenericConfirmModal(false);
+    });
+
+    document.getElementById('genericConfirmAccept').addEventListener('click', () => {
+        closeGenericConfirmModal(true);
+    });
+
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape' && document.getElementById('savedSessionsModal').classList.contains('visible')) {
             closeSavedSessionModal();
@@ -3033,5 +3178,8 @@
         }
         if (event.key === 'Escape' && document.getElementById('saveSessionNameModal').classList.contains('visible')) {
             closeSaveSessionNameModal();
+        }
+        if (event.key === 'Escape' && document.getElementById('genericConfirmModal').classList.contains('visible')) {
+            closeGenericConfirmModal(false);
         }
     });

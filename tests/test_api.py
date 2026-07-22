@@ -532,6 +532,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("terminal?._explorerPath", entry_html)
         self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
         self.assertIn("Boolean(terminal?._explorerGitSidebarOpen)", entry_html)
+        self.assertIn("terminal?._cachedExplorerTheme", entry_html)
+        cache_state_start = html.index("function captureCachedPaneUiState()")
+        cache_state_end = html.index("function restoreCachedPaneUiState", cache_state_start)
+        cache_state_html = html[cache_state_start:cache_state_end]
+        self.assertIn("explorerCaptureActiveTabView(index);", cache_state_html)
+        self.assertIn("terminal._cachedExplorerTheme = normalizeExplorerTheme(", cache_state_html)
         self.assertIn("function restoreExplorerSidebarState(index)", html)
         self.assertIn("_explorerTreeSidebarOpen: Boolean(session.explorer_tree_open)", html)
         self.assertIn("_explorerGitSidebarOpen: Boolean(session.explorer_git_open)", html)
@@ -908,8 +914,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function hasExplorerThemeOverride(key = '')", html)
         self.assertIn('[data-theme="dark"]', html)
         self.assertIn("--explorer-bg: #0f141b;", html)
-        self.assertIn("card.dataset.explorerThemeSource = hasExplorerThemeOverride(explorerThemeKey) ? 'override' : 'default';", html)
-        self.assertIn("if (card.dataset.explorerThemeSource === 'override')", html)
+        self.assertIn("function resolveInitialExplorerTheme(session, key)", html)
+        self.assertIn("return { theme: 'dark', source: 'default' };", html)
+        self.assertIn("card.dataset.explorerThemeSource = resolvedTheme.source;", html)
+        # The theme is applied explicitly so a pane never inherits the global
+        # app theme's --explorer-* tokens.
+        self.assertIn("card.dataset.explorerTheme = resolvedTheme.theme;", html)
         self.assertIn("updateExplorerThemeButton(explorerThemeButton, card.dataset.explorerTheme || 'dark');", html)
         self.assertIn("function syncDefaultExplorerThemes()", html)
         self.assertIn("syncDefaultExplorerThemes();", html)
@@ -1533,9 +1543,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("data-explorer-tab-views=", html)
         self.assertIn("data-explorer-md-preset=", html)
         self.assertIn("data-explorer-md-font=", html)
+        self.assertIn("data-explorer-theme=", html)
         self.assertIn("explorer_tab_views: commandMode === 'explorer'", html)
         self.assertIn("explorer_tab_views: terminal.startup_mode === 'explorer'", html)
         self.assertIn("explorer_md_preset: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : ''", html)
+        self.assertIn("explorer_theme: terminal.startup_mode === 'explorer'", html)
 
     def test_terminals_page_explorer_sidebar_supports_tree_and_git_together(self):
         response = self.client.get("/terminals")
@@ -5722,6 +5735,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                             },
                             "explorer_md_preset": "paper",
                             "explorer_md_font": "consolas",
+                            "explorer_theme": "light",
                         },
                         {
                             "title": "Shell",
@@ -5732,6 +5746,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                             },
                             "explorer_md_preset": "paper",
                             "explorer_md_font": "consolas",
+                            "explorer_theme": "light",
                         },
                     ],
                 },
@@ -5746,10 +5761,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertEqual(config["terminals"][0]["explorer_md_preset"], "paper")
         self.assertEqual(config["terminals"][0]["explorer_md_font"], "consolas")
+        self.assertEqual(config["terminals"][0]["explorer_theme"], "light")
         # Non-explorer panes never carry tab views or a Markdown appearance.
         self.assertEqual(config["terminals"][1]["explorer_tab_views"], {})
         self.assertEqual(config["terminals"][1]["explorer_md_preset"], "")
         self.assertEqual(config["terminals"][1]["explorer_md_font"], "")
+        # Theme is gated to explorer panes; a terminal pane falls back to dark.
+        self.assertEqual(config["terminals"][1]["explorer_theme"], "dark")
 
     def test_workspace_save_round_trips_explorer_open_tabs(self):
         """ISSUE-2026-015: active-workspace save persists explorer tabs, gated to explorer panes."""
@@ -8204,7 +8222,15 @@ class SharedRunServerTestCase(unittest.TestCase):
 
 
 class SessionStatusBroadcastRaceTestCase(unittest.TestCase):
-    """Issue 7 — verify status emission is serialized with session removal."""
+    """Issue 7, superseded by guardrail audit N4 (2026-07-22).
+
+    The broadcast originally held session_manager.lock through the emit so
+    removal was serialized behind it. It now snapshots the payload under the
+    lock and emits after release, so one slow client write can no longer
+    stall session management. The stale-status window this reopens is
+    harmless: the frontend session_status handler drops unknown session ids,
+    and the session_groups_updated refresh reconciles the pane set.
+    """
 
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
@@ -8222,7 +8248,7 @@ class SessionStatusBroadcastRaceTestCase(unittest.TestCase):
     def tearDown(self):
         api.session_manager.reset_sessions()
 
-    def test_broadcast_holds_session_lock_until_emit_returns(self):
+    def test_broadcast_snapshot_does_not_block_session_removal(self):
         group = api.session_manager.create_group(
             name="Race",
             connection_mode="ssh",
@@ -8261,7 +8287,9 @@ class SessionStatusBroadcastRaceTestCase(unittest.TestCase):
             self.assertTrue(emit_started.wait(timeout=1))
 
             remover.start()
-            self.assertFalse(remove_done.wait(timeout=0.1))
+            # The manager lock is released before the emit, so removal
+            # completes even while the broadcast's client write is stalled.
+            self.assertTrue(remove_done.wait(timeout=1))
 
             allow_emit.set()
             broadcaster.join(timeout=1)
@@ -8583,6 +8611,75 @@ class VendoredFrontendAssetsTestCase(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertGreater(len(response.get_data()), 1000)
                 response.close()
+
+
+class GuardrailAuditFixesTestCase(unittest.TestCase):
+    """Guardrail audit 2026-07-22 (docs/guardrail_audit_2026-07-22.md) —
+    findings N1–N4 stay fixed."""
+
+    BANNED_DIALOG_CALLS = ("window.confirm(", "window.alert(", "window.prompt(")
+    BANNED_GLYPHS = ("📁", "🌐", "🎤", "☾", "☀", "❌")
+    STATIC_JS = ("js/shared.js", "js/launcher.js", "js/terminals.js")
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _get_text(self, path: str) -> str:
+        response = self.client.get(path)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_static_js_uses_no_blocking_window_dialogs(self):
+        """N1/N2 — WebView2 blocks window.confirm/alert/prompt, so no code
+        path may call them (including browser-mode-only ones — N1 happened
+        because the pattern was imitated in a path that runs natively)."""
+        for filename in self.STATIC_JS:
+            body = self._get_text(f"/static/{filename}")
+            for call in self.BANNED_DIALOG_CALLS:
+                with self.subTest(filename=filename, call=call):
+                    self.assertNotIn(call, body)
+
+    def test_launcher_page_ships_generic_confirm_shell(self):
+        """N1 — restart/close confirmations go through the in-page shell."""
+        launcher_html = self._get_text("/")
+        self.assertIn('id="genericConfirmModal"', launcher_html)
+        launcher_js = self._get_text("/static/js/launcher.js")
+        for caller in ("shutdownBrowserApp", "restartApplication"):
+            with self.subTest(caller=caller):
+                body = launcher_js[launcher_js.index(f"async function {caller}"):]
+                body = body[:body.index("\n    }")]
+                self.assertIn("await openGenericConfirmModal", body)
+
+    def test_static_js_uses_no_emoji_glyph_icons(self):
+        """N3 — guardrail 7: stroke-style SVG icons, not emoji glyphs."""
+        for filename in self.STATIC_JS:
+            body = self._get_text(f"/static/{filename}")
+            for glyph in self.BANNED_GLYPHS:
+                with self.subTest(filename=filename, glyph=glyph):
+                    self.assertNotIn(glyph, body)
+
+    def test_broadcast_session_status_emits_outside_manager_lock(self):
+        """N4 — snapshot under session_manager.lock, emit after release."""
+        session_id = "audit-lock-status"
+        fake_session = MagicMock()
+        fake_session.to_dict.return_value = {"session_id": session_id}
+        lock_owned_during_emit = []
+
+        def fake_emit(_event, _payload, **_kwargs):
+            lock_owned_during_emit.append(api.session_manager.lock._is_owned())
+
+        with api.session_manager.lock:
+            api.session_manager.sessions[session_id] = fake_session
+        try:
+            with patch.object(api.socketio, "emit", side_effect=fake_emit):
+                api._broadcast_session_status(session_id)
+        finally:
+            with api.session_manager.lock:
+                api.session_manager.sessions.pop(session_id, None)
+
+        self.assertEqual(lock_owned_during_emit, [False])
 
 
 class ExtractedFrontendAssetsTestCase(unittest.TestCase):
@@ -11708,6 +11805,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertIn("explorer_tab_views", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_md_preset", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_md_font", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
+        self.assertIn("explorer_theme", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
 
     def test_launcher_wires_the_auto_mode_toggle(self):
         html = self.client.get("/").get_data(as_text=True)
