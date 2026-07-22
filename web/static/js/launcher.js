@@ -2543,6 +2543,71 @@
         }
     }
 
+    async function saveWorkspaceForRestart() {
+        /* Best-effort workspace capture before a restart. A 409 means the
+           workspace is empty (nothing live to save), which is not an error —
+           the restart still proceeds. */
+        try {
+            const response = await fetch('/api/runtime-state/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            if (response.ok || response.status === 409) {
+                return true;
+            }
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.error || `Save failed with status ${response.status}`);
+        } catch (error) {
+            console.error('[GridVibe Launcher] workspace save before restart failed:', error);
+            return false;
+        }
+    }
+
+    async function restartApplication() {
+        const button = document.getElementById('restartAppBtn');
+
+        if (!window.confirm('Save the workspace and restart GridVibe? Live shells do not survive a restart.')) {
+            return;
+        }
+
+        button.disabled = true;
+        button.classList.add('loading');
+        setUpdateStatus('Saving workspace...');
+
+        const saved = await saveWorkspaceForRestart();
+        const savePrefix = saved ? 'Workspace saved.' : 'Workspace save failed.';
+
+        if (!window.pywebview?.api?.restart_application) {
+            // Browser mode (or no native bridge): there is nothing to relaunch.
+            button.disabled = false;
+            button.classList.remove('loading');
+            setUpdateStatus(`${savePrefix} Restart GridVibe manually to reload the app.`, saved ? 'success' : 'error');
+            showMessage(`${savePrefix} Restart GridVibe manually to reload the app.`, saved ? 'success' : 'error');
+            return;
+        }
+
+        setUpdateStatus(`${savePrefix} Restarting GridVibe...`, 'success');
+        showMessage(`${savePrefix} Restarting GridVibe...`, 'success');
+
+        try {
+            const restartResult = await window.pywebview.api.restart_application();
+            if (restartResult?.ok) {
+                return;
+            }
+            const restartError = restartResult?.error || 'Automatic restart failed.';
+            button.disabled = false;
+            button.classList.remove('loading');
+            setUpdateStatus(`${savePrefix} ${restartError} Restart GridVibe manually.`, 'error');
+            showMessage(`${savePrefix} ${restartError} Restart GridVibe manually.`, 'error');
+        } catch (error) {
+            button.disabled = false;
+            button.classList.remove('loading');
+            setUpdateStatus(`${savePrefix} ${error.message} Restart GridVibe manually.`, 'error');
+            showMessage(`${savePrefix} ${error.message} Restart GridVibe manually.`, 'error');
+        }
+    }
+
     function logLauncherWindowAction(action, details = {}) {
         console.info(`[GridVibe Launcher] ${action}`, details);
     }
