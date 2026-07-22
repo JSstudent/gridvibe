@@ -88,6 +88,7 @@
         explorer_tab_views: {},
         explorer_md_preset: '',
         explorer_md_font: '',
+        explorer_theme: 'dark',
         distribution: '',
         use_wsl: false,
         use_powershell: false
@@ -1142,6 +1143,7 @@
                 explorer_tab_views: commandMode === 'explorer' ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews) : {},
                 explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
                 explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
+                explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : '',
                 distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
                 use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
                     ? Boolean(row.querySelector('.t-use-wsl')?.checked)
@@ -1967,6 +1969,7 @@
                     data-explorer-tab-views="${escHtml(JSON.stringify(terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object' ? terminal.explorer_tab_views : {}))}"
                     data-explorer-md-preset="${escHtml(terminal.explorer_md_preset || '')}"
                     data-explorer-md-font="${escHtml(terminal.explorer_md_font || '')}"
+                    data-explorer-theme="${escHtml(terminal.explorer_theme || 'dark')}"
                 >
                     <div class="t-row-head">
                         <span class="t-badge">T${index + 1}</span>
@@ -2799,6 +2802,9 @@
                     : '',
                 explorer_md_font: terminal.startup_mode === 'explorer'
                     ? (terminal.explorer_md_font || '')
+                    : '',
+                explorer_theme: terminal.startup_mode === 'explorer'
+                    ? (terminal.explorer_theme || 'dark')
                     : '',
                 startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
                     ? terminal.startup_mode

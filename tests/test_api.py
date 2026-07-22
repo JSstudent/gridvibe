@@ -908,8 +908,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function hasExplorerThemeOverride(key = '')", html)
         self.assertIn('[data-theme="dark"]', html)
         self.assertIn("--explorer-bg: #0f141b;", html)
-        self.assertIn("card.dataset.explorerThemeSource = hasExplorerThemeOverride(explorerThemeKey) ? 'override' : 'default';", html)
-        self.assertIn("if (card.dataset.explorerThemeSource === 'override')", html)
+        self.assertIn("function resolveInitialExplorerTheme(session, key)", html)
+        self.assertIn("return { theme: 'dark', source: 'default' };", html)
+        self.assertIn("card.dataset.explorerThemeSource = resolvedTheme.source;", html)
+        # The theme is applied explicitly so a pane never inherits the global
+        # app theme's --explorer-* tokens.
+        self.assertIn("card.dataset.explorerTheme = resolvedTheme.theme;", html)
         self.assertIn("updateExplorerThemeButton(explorerThemeButton, card.dataset.explorerTheme || 'dark');", html)
         self.assertIn("function syncDefaultExplorerThemes()", html)
         self.assertIn("syncDefaultExplorerThemes();", html)
@@ -1533,9 +1537,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("data-explorer-tab-views=", html)
         self.assertIn("data-explorer-md-preset=", html)
         self.assertIn("data-explorer-md-font=", html)
+        self.assertIn("data-explorer-theme=", html)
         self.assertIn("explorer_tab_views: commandMode === 'explorer'", html)
         self.assertIn("explorer_tab_views: terminal.startup_mode === 'explorer'", html)
         self.assertIn("explorer_md_preset: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : ''", html)
+        self.assertIn("explorer_theme: terminal.startup_mode === 'explorer'", html)
 
     def test_terminals_page_explorer_sidebar_supports_tree_and_git_together(self):
         response = self.client.get("/terminals")
@@ -5722,6 +5729,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                             },
                             "explorer_md_preset": "paper",
                             "explorer_md_font": "consolas",
+                            "explorer_theme": "light",
                         },
                         {
                             "title": "Shell",
@@ -5732,6 +5740,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                             },
                             "explorer_md_preset": "paper",
                             "explorer_md_font": "consolas",
+                            "explorer_theme": "light",
                         },
                     ],
                 },
@@ -5746,10 +5755,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertEqual(config["terminals"][0]["explorer_md_preset"], "paper")
         self.assertEqual(config["terminals"][0]["explorer_md_font"], "consolas")
+        self.assertEqual(config["terminals"][0]["explorer_theme"], "light")
         # Non-explorer panes never carry tab views or a Markdown appearance.
         self.assertEqual(config["terminals"][1]["explorer_tab_views"], {})
         self.assertEqual(config["terminals"][1]["explorer_md_preset"], "")
         self.assertEqual(config["terminals"][1]["explorer_md_font"], "")
+        # Theme is gated to explorer panes; a terminal pane falls back to dark.
+        self.assertEqual(config["terminals"][1]["explorer_theme"], "dark")
 
     def test_workspace_save_round_trips_explorer_open_tabs(self):
         """ISSUE-2026-015: active-workspace save persists explorer tabs, gated to explorer panes."""
@@ -11708,6 +11720,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertIn("explorer_tab_views", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_md_preset", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_md_font", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
+        self.assertIn("explorer_theme", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
 
     def test_launcher_wires_the_auto_mode_toggle(self):
         html = self.client.get("/").get_data(as_text=True)

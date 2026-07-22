@@ -56,6 +56,7 @@ class TerminalSession:
     explorer_tab_views: Dict[str, Any] = field(default_factory=dict)
     explorer_md_preset: str = ""
     explorer_md_font: str = ""
+    explorer_theme: str = "dark"
     status: SessionStatus = SessionStatus.PENDING
     created_at: float = field(default_factory=time.time)
     connected_at: Optional[float] = None
@@ -89,6 +90,7 @@ class TerminalSession:
             "explorer_tab_views": dict(self.explorer_tab_views),
             "explorer_md_preset": self.explorer_md_preset,
             "explorer_md_font": self.explorer_md_font,
+            "explorer_theme": self.explorer_theme,
             "status": self.status.value,
             "created_at": self.created_at,
             "connected_at": self.connected_at,
@@ -277,6 +279,7 @@ class SessionManager:
                     explorer_tab_views=dict(config.get("explorer_tab_views") or {}),
                     explorer_md_preset=str(config.get("explorer_md_preset") or ""),
                     explorer_md_font=str(config.get("explorer_md_font") or ""),
+                    explorer_theme="light" if config.get("explorer_theme") == "light" else "dark",
                 )
                 created.append(session)
             except Exception as e:
@@ -316,6 +319,7 @@ class SessionManager:
             "explorer_tab_views",
             "explorer_md_preset",
             "explorer_md_font",
+            "explorer_theme",
         }
         with self.lock:
             session = self.sessions.get(session_id)

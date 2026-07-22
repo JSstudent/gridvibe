@@ -54,6 +54,7 @@ _SESSION_SNAPSHOT_FIELDS = (
     "explorer_tab_views",
     "explorer_md_preset",
     "explorer_md_font",
+    "explorer_theme",
 )
 
 

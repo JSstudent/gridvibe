@@ -185,6 +185,24 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(sessions[0].explorer_tab_views, {})
         self.assertEqual(sessions[0].explorer_md_preset, "")
         self.assertEqual(sessions[0].explorer_md_font, "")
+        self.assertEqual(sessions[0].explorer_theme, "dark")
+
+    def test_create_sessions_carries_explorer_theme(self):
+        """The per-pane light/dark explorer theme rides the session so a saved
+        session relaunches with the same appearance."""
+        light = self.manager.create_sessions(
+            [{"mode": "ssh", "host": "h", "directory": "/repo", "startup_mode": "explorer", "explorer_theme": "light"}],
+            group_id="group-theme-light",
+        )
+        self.assertEqual(light[0].explorer_theme, "light")
+        self.assertEqual(light[0].to_dict()["explorer_theme"], "light")
+
+        # Anything that isn't "light" normalizes back to the "dark" default.
+        dark = self.manager.create_sessions(
+            [{"mode": "ssh", "host": "h", "directory": "/repo", "startup_mode": "explorer", "explorer_theme": "bogus"}],
+            group_id="group-theme-bogus",
+        )
+        self.assertEqual(dark[0].explorer_theme, "dark")
 
     def test_create_sessions_carries_explorer_tab_views_and_md_appearance(self):
         """2.f: per-tab view snapshots and Markdown appearance ride the session."""
