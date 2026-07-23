@@ -185,6 +185,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/shared.js",
             "js/launcher.js",
             "css/terminals.css",
+            "js/terminal-icons.js",
+            "js/voice-input.js",
+            "js/explorer-viewer.js",
             "js/terminals.js",
         ):
             marker = f"/static/{asset}"
@@ -8697,6 +8700,9 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertIn(f"/static/js/launcher.js?v={__version__}", launcher_html)
         self.assertIn(f"/static/css/terminals.css?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/shared.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/terminal-icons.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/voice-input.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/explorer-viewer.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/terminals.js?v={__version__}", terminals_html)
         # shared.js must load before each page script so its globals exist first.
         self.assertLess(
@@ -8705,6 +8711,24 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertLess(
             terminals_html.index("js/shared.js"), terminals_html.index("js/terminals.js")
         )
+        # Extracted terminals.js modules (2026-07-23 split) load after shared.js
+        # and before terminals.js, which owns the shared state and boot.
+        self.assertLess(
+            terminals_html.index("js/shared.js"),
+            terminals_html.index("js/terminal-icons.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/terminal-icons.js"),
+            terminals_html.index("js/voice-input.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/voice-input.js"),
+            terminals_html.index("js/explorer-viewer.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-viewer.js"),
+            terminals_html.index("js/terminals.js"),
+        )
 
     def test_extracted_assets_are_served_without_jinja(self):
         for filename in (
@@ -8712,6 +8736,9 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "css/terminals.css",
             "js/shared.js",
             "js/launcher.js",
+            "js/terminal-icons.js",
+            "js/voice-input.js",
+            "js/explorer-viewer.js",
             "js/terminals.js",
         ):
             with self.subTest(filename=filename):
@@ -8781,24 +8808,39 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertIn("socket.emit('join_session'", load_join)
 
     def test_terminals_monster_functions_are_decomposed(self):
-        """Finding 6.5 — buildGrid/_startVoice delegate to focused helpers."""
-        terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+        """Finding 6.5 — buildGrid/_startVoice delegate to focused helpers.
 
-        for name in (
+        The voice helpers moved to voice-input.js in the 2026-07-23 split, so
+        they are asserted against that file; the grid helpers stay in
+        terminals.js.
+        """
+        terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+        voice = self.client.get("/static/js/voice-input.js").get_data(as_text=True)
+
+        grid_helpers = (
             "createPaneInstance",
             "wireCardButton",
             "buildPaneCard",
             "wirePaneControls",
             "wirePaneInputForwarding",
+        )
+        voice_helpers = (
             "_acquireMicStream",
             "_createVoicePipeline",
             "_wireVoiceWorkletMessages",
             "_teardownVoicePipeline",
-        ):
-            with self.subTest(helper=name):
+        )
+        for name in grid_helpers:
+            with self.subTest(helper=name, file="terminals.js"):
                 self.assertEqual(
                     len(re.findall(rf"function {re.escape(name)}\(", terminals)), 1
                 )
+        for name in voice_helpers:
+            with self.subTest(helper=name, file="voice-input.js"):
+                self.assertEqual(
+                    len(re.findall(rf"function {re.escape(name)}\(", voice)), 1
+                )
+                self.assertNotIn(f"function {name}(", terminals)
 
         def _function_length(source: str, header: str) -> int:
             lines = source.splitlines()
@@ -8812,7 +8854,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         # The orchestrators must stay thin; the old versions were ~445/~308
         # lines and this is the regression guard against regrowing them.
         self.assertLess(_function_length(terminals, "function buildGrid("), 60)
-        self.assertLess(_function_length(terminals, "async function _startVoice("), 200)
+        self.assertLess(_function_length(voice, "async function _startVoice("), 200)
 
 
 class VoiceAudioRaceTestCase(unittest.TestCase):
@@ -9916,11 +9958,12 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         return body
 
     def test_overlay_markup_is_accessible_and_singleton(self):
-        terminals_js = self._static("js/terminals.js")
-        self.assertIn("const VOICE_OVERLAY_ID = 'voiceRecordingOverlay';", terminals_js)
-        show_fn = terminals_js[
-            terminals_js.index("function _showVoiceRecordingOverlay(index)"):
-            terminals_js.index("function _hideVoiceRecordingOverlay()")
+        # Voice code moved to voice-input.js in the 2026-07-23 split.
+        voice_js = self._static("js/voice-input.js")
+        self.assertIn("const VOICE_OVERLAY_ID = 'voiceRecordingOverlay';", voice_js)
+        show_fn = voice_js[
+            voice_js.index("function _showVoiceRecordingOverlay(index)"):
+            voice_js.index("function _hideVoiceRecordingOverlay()")
         ]
         self.assertIn("overlay.setAttribute('role', 'status');", show_fn)
         self.assertIn("overlay.setAttribute('aria-live', 'polite');", show_fn)
@@ -9931,16 +9974,16 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         self.assertIn("document.getElementById(VOICE_OVERLAY_ID)", show_fn)
 
     def test_overlay_appears_only_after_capture_actually_starts(self):
-        terminals_js = self._static("js/terminals.js")
-        show_fn = terminals_js[
-            terminals_js.index("function _showVoiceRecordingOverlay(index)"):
-            terminals_js.index("function _hideVoiceRecordingOverlay()")
+        voice_js = self._static("js/voice-input.js")
+        show_fn = voice_js[
+            voice_js.index("function _showVoiceRecordingOverlay(index)"):
+            voice_js.index("function _hideVoiceRecordingOverlay()")
         ]
         # rapid-release guard: no overlay when the state was torn down mid-start
         self.assertIn("if (!_voiceState[index]?.recording) {", show_fn)
-        start_fn = terminals_js[
-            terminals_js.index("async function _startVoice(index)"):
-            terminals_js.index("async function _acquireMicStream(")
+        start_fn = voice_js[
+            voice_js.index("async function _startVoice(index)"):
+            voice_js.index("async function _acquireMicStream(")
         ]
         self.assertLess(
             start_fn.index("_voiceState[index] = state;"),
@@ -9948,25 +9991,27 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         )
 
     def test_overlay_hidden_from_every_cleanup_path(self):
-        terminals_js = self._static("js/terminals.js")
+        voice_js = self._static("js/voice-input.js")
         # start failure (permission denial / backend error)
-        start_fn = terminals_js[
-            terminals_js.index("async function _startVoice(index)"):
-            terminals_js.index("async function _acquireMicStream(")
+        start_fn = voice_js[
+            voice_js.index("async function _startVoice(index)"):
+            voice_js.index("async function _acquireMicStream(")
         ]
         catch_block = start_fn[start_fn.index("} catch (err) {"):]
         self.assertIn("_hideVoiceRecordingOverlay();", catch_block)
         # every stop path (toggle, PTT release, hold release, voice_status
         # error, _stopAllVoice on session switch/teardown) funnels here
-        stop_fn = terminals_js[
-            terminals_js.index("async function _stopVoice(index"):
-            terminals_js.index("async function _stopAllVoice()")
+        stop_fn = voice_js[
+            voice_js.index("async function _stopVoice(index"):
+            voice_js.index("async function _stopAllVoice()")
         ]
         self.assertIn("_hideVoiceRecordingOverlay();", stop_fn)
+        # _stopAllVoice() is invoked from the teardown paths in terminals.js.
+        terminals_js = self._static("js/terminals.js")
         self.assertIn("_stopAllVoice();", terminals_js)
 
     def test_waveform_uses_analyser_with_fallback_and_stale_loop_guard(self):
-        terminals_js = self._static("js/terminals.js")
+        terminals_js = self._static("js/voice-input.js")
         animation_fn = terminals_js[
             terminals_js.index("function _startVoiceOverlayAnimation(index, overlay)"):
             terminals_js.index("function _stopVoiceOverlayAnimation()")
@@ -9986,9 +10031,9 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         self.assertIn("animation.source.disconnect(animation.analyser);", stop_animation_fn)
 
     def test_reduced_motion_disables_the_animations(self):
-        terminals_js = self._static("js/terminals.js")
-        self.assertIn("function _prefersReducedMotion()", terminals_js)
-        self.assertIn("prefers-reduced-motion: reduce", terminals_js)
+        voice_js = self._static("js/voice-input.js")
+        self.assertIn("function _prefersReducedMotion()", voice_js)
+        self.assertIn("prefers-reduced-motion: reduce", voice_js)
         terminals_css = self._static("css/terminals.css")
         reduced_block = terminals_css[
             terminals_css.index("@media (prefers-reduced-motion: reduce)"):
@@ -10014,11 +10059,14 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         self.assertIn("@keyframes voice-overlay-bounce", terminals_css)
 
     def test_hold_to_talk_pointer_wiring_preserves_click_toggle(self):
+        # The wiring call site stays in terminals.js; the helper moved to
+        # voice-input.js (2026-07-23 split).
         terminals_js = self._static("js/terminals.js")
         self.assertIn("_wireVoiceHoldToTalk(card, i);", terminals_js)
-        hold_fn = terminals_js[
-            terminals_js.index("function _wireVoiceHoldToTalk(card, index)"):
-            terminals_js.index("/* ── Push-to-talk ── */")
+        voice_js = self._static("js/voice-input.js")
+        hold_fn = voice_js[
+            voice_js.index("function _wireVoiceHoldToTalk(card, index)"):
+            voice_js.index("/* ── Push-to-talk ── */")
         ]
         self.assertIn("addEventListener('pointerdown'", hold_fn)
         self.assertIn("addEventListener('pointerup', endHold);", hold_fn)
@@ -10032,8 +10080,11 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         self.assertIn("holdStopRequested = true;", hold_fn)
 
     def test_push_to_talk_rapid_release_cannot_leave_a_stale_recording(self):
+        # The PTT state and helpers moved to voice-input.js; the key listeners
+        # (top-level executing statements) stay in terminals.js.
+        voice_js = self._static("js/voice-input.js")
+        self.assertIn("let _pttStopRequested = false;", voice_js)
         terminals_js = self._static("js/terminals.js")
-        self.assertIn("let _pttStopRequested = false;", terminals_js)
         keydown_idx = terminals_js.index(
             "if (!_voicePrefs.pttEnabled || !_voicePrefs.pttKeybind) return;"
         )
@@ -10043,7 +10094,7 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
             "if (_pttStopRequested && _voiceState[index]?.recording) {", keydown_block
         )
         keyup_block = terminals_js[
-            keyup_idx:terminals_js.index("function _updateVoiceBtn(index, recording)")
+            keyup_idx:terminals_js.index("function _showTermCtxMenu(x, y, index)")
         ]
         self.assertIn("_pttStopRequested = true;", keyup_block)
 
@@ -10430,7 +10481,8 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         response.close()
 
     def test_file_viewer_ships_download_button(self):
-        terminals_js = self._static("js/terminals.js")
+        # Explorer viewer moved to explorer-viewer.js (2026-07-23 split).
+        terminals_js = self._static("js/explorer-viewer.js")
         self.assertIn("function downloadExplorerFile(index)", terminals_js)
         self.assertIn("data-explorer-download", terminals_js)
         self.assertIn("/download?path=", terminals_js)
@@ -10440,7 +10492,7 @@ class ExplorerDownloadTestCase(unittest.TestCase):
     def test_native_window_downloads_route_through_the_bridge(self):
         # WebView2 drops anchor downloads, so the native window must use the
         # pywebview save_download bridge instead of the <a download> click.
-        terminals_js = self._static("js/terminals.js")
+        terminals_js = self._static("js/explorer-viewer.js")
         download_fn = terminals_js[
             terminals_js.index("async function downloadExplorerFile"):
             terminals_js.index("function getDownloadBaseName")
@@ -10498,10 +10550,12 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         run_git.assert_not_called()
 
     def test_explorer_bar_ships_os_open_button(self):
+        explorer_js = self._static("js/explorer-viewer.js")
+        self.assertIn("function revealExplorerInOs(index)", explorer_js)
+        self.assertIn("/reveal", explorer_js)
+        # The toolbar button markup is emitted by the pane builder in terminals.js.
         terminals_js = self._static("js/terminals.js")
-        self.assertIn("function revealExplorerInOs(index)", terminals_js)
         self.assertIn("data-explorer-os-open", terminals_js)
-        self.assertIn("/reveal", terminals_js)
         terminals_css = self._static("css/terminals.css")
         self.assertIn(".explorer-os-open", terminals_css)
 
@@ -10569,7 +10623,7 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_image_viewer_ships_in_frontend_assets(self):
-        terminals_js = self._static("js/terminals.js")
+        terminals_js = self._static("js/explorer-viewer.js")
         self.assertIn("function renderExplorerImage(index, data", terminals_js)
         self.assertIn("preview_type === 'image'", terminals_js)
         self.assertIn("/image?path=", terminals_js)
@@ -10757,10 +10811,10 @@ class BroadcastInputTestCase(unittest.TestCase):
         """ISSUE-2026-026 follow-up: voice/PTT go to the focused (highlighted)
         terminal only — never to a stale 'last selected' pane when nothing is
         selected (consistent with typing)."""
-        terminals_js = self._static("js/terminals.js")
-        ptt_fn = terminals_js[
-            terminals_js.index("function _findPttTerminalIndex()"):
-            terminals_js.index("function findExplorerSearchTargetIndex()")
+        voice_js = self._static("js/voice-input.js")
+        ptt_fn = voice_js[
+            voice_js.index("function _findPttTerminalIndex()"):
+            voice_js.index("function _updateVoiceBtn(index, recording)")
         ]
         self.assertIn("return _focusedTerminalIndex;", ptt_fn)
         # no fall-back scan to the first terminal when nothing is selected
