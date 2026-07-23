@@ -1205,6 +1205,7 @@ def _get_git_context(
         "--porcelain=v2",
         "-z",
         "--branch",
+        "--untracked-files=all",
         "--",
         backend.pathspec(repo_root, current_path),
     ]
@@ -1624,34 +1625,66 @@ _GIT_UNMERGED_STATUS_CODES = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"
 
 
 def _git_revert_path(backend: Any, root_path: str, file_path: str) -> None:
-    """Discard one tracked file's unstaged worktree changes.
+    """Discard one file's unstaged worktree changes.
 
     Runs the equivalent of ``git restore --worktree -- <path>``, which restores
     the worktree copy from the index, so any already-staged version of the file
-    is preserved. Untracked and conflicted files are refused rather than being
-    silently deleted or overwritten, and a file with no unstaged change is a
-    clear error instead of a no-op that would look like a broken action.
+    is preserved. An explicitly selected untracked file is removed with
+    ``git clean -f`` after the caller's confirmation; directories and conflicted
+    files are refused. A file with no unstaged change is a clear error instead
+    of a no-op that would look like a broken action.
     """
     repo_root = _git_action_repo_root(backend, root_path)
     pathspec = backend.pathspec(repo_root, file_path)
     try:
         status = backend.run_git(
-            ["status", "--porcelain", "--", pathspec], cwd=repo_root, timeout=5.0
+            [
+                "status",
+                "--porcelain=v2",
+                "-z",
+                "--untracked-files=all",
+                "--",
+                pathspec,
+            ],
+            cwd=repo_root,
+            timeout=5.0,
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git revert timed out") from exc
     if status.returncode != 0:
         raise ValueError(_decode_git_output(status.stderr) or "Git revert failed")
 
-    # Decode without stripping so the leading porcelain XY status columns (e.g.
-    # " M" for a worktree-only change) survive; _decode_git_output strips.
-    raw_status = status.stdout.decode("utf-8", errors="replace")
-    entries = [line for line in raw_status.splitlines() if line.strip()]
-    if not entries:
+    _branch, statuses = _parse_git_status_porcelain_v2(status.stdout)
+    clean_pathspec = _clean_git_path(pathspec)
+    file_status = statuses.get(clean_pathspec)
+    if not file_status:
+        descendant_prefix = f"{clean_pathspec.rstrip('/')}/"
+        if descendant_prefix and any(
+            path.startswith(descendant_prefix) and item.get("status") == "untracked"
+            for path, item in statuses.items()
+        ):
+            raise ValueError("Untracked directories cannot be discarded; select an individual file")
         raise ValueError("No unstaged changes to revert")
-    code = entries[0][:2]
-    if code == "??":
-        raise ValueError("Untracked files cannot be reverted")
+
+    if file_status.get("status") == "untracked":
+        try:
+            result = backend.run_git(
+                ["clean", "-f", "--", pathspec],
+                cwd=repo_root,
+                timeout=30.0,
+                write=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError("Git revert timed out") from exc
+        if result.returncode != 0:
+            raise ValueError(
+                _decode_git_output(result.stderr)
+                or _decode_git_output(result.stdout)
+                or "Git revert failed"
+            )
+        return
+
+    code = f"{file_status.get('index_status', ' ')}{file_status.get('worktree_status', ' ')}"
     if code in _GIT_UNMERGED_STATUS_CODES or "U" in code:
         raise ValueError("Resolve merge conflicts before reverting")
     if code[1:2] in {" ", "."}:

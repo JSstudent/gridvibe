@@ -98,7 +98,7 @@ Explorers are read-only views of a local repo folder or a remote SSH host (over 
 
 Markdown gets extra treatment: rendered preview (`Ctrl+Shift+V` toggle) with Mermaid diagrams, heading folds in Source view (Alt+click folds every heading of that level), and a Markdown-appearance menu with reading-surface presets and fonts. Local panes also get an "open in system file manager" button that reveals the current file or folder outside GridVibe.
 
-The Git sidebar shows branch/dirty status, per-file badges, a colour-coded commit graph, and historical diffs. The only mutating actions are staging/unstaging (per file or `Stage All`), commit, branch publishing (push), and discarding unstaged changes of tracked files (per file or `Discard All`, behind an in-page confirm) — file moving, editing, deleting, upload, checkout, pull, and merge are intentionally not supported. Every mutating Git action refreshes the tree and any open diff in place.
+The Git sidebar shows branch/dirty status, per-file badges, a colour-coded commit graph, and historical diffs. The only mutating actions are staging/unstaging (per file or `Stage All`), commit, branch publishing (push), discarding unstaged changes of tracked files (per file or `Discard All`), and deleting one explicitly selected untracked file; discard/delete actions require an in-page confirmation, and `Discard All` always preserves untracked files. File moving, editing, general deletion, upload, checkout, pull, and merge are intentionally not supported. Every mutating Git action refreshes the tree and any open diff in place.
 
 ## Browser Panes
 

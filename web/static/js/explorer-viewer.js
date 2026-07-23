@@ -884,9 +884,14 @@
     }
 
     function explorerGitCanRevert(status) {
-        // Only tracked worktree changes can be discarded with git restore;
-        // untracked and conflicted files are intentionally excluded so nothing
-        // is silently deleted or overwritten (ISSUE-2026-018).
+        // Tracked changes are restored from the index. A single explicitly
+        // selected untracked file can also be discarded after confirmation.
+        return ['modified', 'deleted', 'renamed', 'untracked'].includes(status || '');
+    }
+
+    function explorerGitCanBulkDiscard(status) {
+        // Bulk discard deliberately keeps untracked files. Removing a new file
+        // requires the narrower per-row action and its explicit warning.
         return ['modified', 'deleted', 'renamed'].includes(status || '');
     }
 
@@ -912,8 +917,11 @@
             } else if (action === 'unstage') {
                 actionButton = `<button type="button" class="explorer-search-btn explorer-git-unstage-btn" data-explorer-git-unstage="${escHtml(path)}" title="Unstage changes" aria-label="Unstage changes">−</button>`;
             }
+            const discardLabel = status === 'untracked'
+                ? 'Delete untracked file'
+                : 'Discard changes (revert)';
             const revertButton = (action === 'stage' && explorerGitCanRevert(status))
-                ? `<button type="button" class="explorer-search-btn explorer-git-revert-btn" data-explorer-git-revert="${escHtml(path)}" title="Discard changes (revert)" aria-label="Discard changes (revert)">${EXPLORER_GIT_REVERT_ICON}</button>`
+                ? `<button type="button" class="explorer-search-btn explorer-git-revert-btn" data-explorer-git-revert="${escHtml(path)}" data-explorer-git-revert-status="${escHtml(status)}" title="${discardLabel}" aria-label="${discardLabel}">${EXPLORER_GIT_REVERT_ICON}</button>`
                 : '';
             return `
                 <div class="explorer-diff-commit-file" title="${escHtml(path)}" data-explorer-copy-path="${escHtml(path)}">
@@ -1079,9 +1087,9 @@
             : '';
         const changes = Array.isArray(repo.changes) ? repo.changes : [];
         const { staged, unstaged } = splitExplorerGitChanges(changes);
-        /* Discard All mirrors the per-row Revert guard: only tracked worktree
-           changes count, so an all-untracked list keeps the button disabled. */
-        const discardable = unstaged.filter(file => explorerGitCanRevert(file.git && file.git.status));
+        /* Discard All remains tracked-only even though a confirmed per-row
+           action may now remove one explicitly selected untracked file. */
+        const discardable = unstaged.filter(file => explorerGitCanBulkDiscard(file.git && file.git.status));
         const commits = Array.isArray(repo.commits) ? repo.commits : [];
         const expandedCommits = ensureExplorerDiffExpandedCommits(pane);
         const busy = Boolean(pane._explorerGitActionBusy);
@@ -1158,7 +1166,11 @@
         panel.querySelectorAll('[data-explorer-git-revert]').forEach(button => {
             button.addEventListener('click', event => {
                 event.stopPropagation();
-                explorerGitRevertFile(index, button.dataset.explorerGitRevert || '');
+                explorerGitRevertFile(
+                    index,
+                    button.dataset.explorerGitRevert || '',
+                    button.dataset.explorerGitRevertStatus || '',
+                );
             });
         });
         const stageAllButton = panel.querySelector('[data-explorer-git-stage-all]');
@@ -1840,16 +1852,21 @@
 
     /* Discarding working-tree edits is irreversible, so it goes through the
        in-page confirm shell (WebView2 blocks window.confirm) before the
-       narrow git-restore route runs; a reverted open file reloads in place. */
-    async function explorerGitRevertFile(index, path) {
+       narrow discard route runs; a reverted open file reloads in place. */
+    async function explorerGitRevertFile(index, path, status = '') {
         if (!path) {
             return;
         }
+        const untracked = status === 'untracked';
         const confirmed = await openGenericConfirmModal({
-            title: 'Discard changes?',
-            copy: `Discard the unstaged changes in "${path}"?`,
-            note: 'This unstaged edit will be lost. Any staged version of the file is kept.',
-            confirmLabel: 'Discard changes',
+            title: untracked ? 'Delete untracked file?' : 'Discard changes?',
+            copy: untracked
+                ? `Permanently delete the untracked file "${path}"?`
+                : `Discard the unstaged changes in "${path}"?`,
+            note: untracked
+                ? 'This new file is not tracked by Git and cannot be restored after deletion.'
+                : 'This unstaged edit will be lost. Any staged version of the file is kept.',
+            confirmLabel: untracked ? 'Delete file' : 'Discard changes',
             danger: true,
         });
         if (!confirmed) {

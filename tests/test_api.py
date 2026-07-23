@@ -3798,6 +3798,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["commits"][0]["files"][0]["path"], "README.md")
         self.assertEqual(payload["commits"][0]["files"][0]["git"]["status"], "added")
 
+    def test_explorer_git_repo_expands_untracked_directories_to_files(self):
+        repo_dir = self._init_committed_repo()
+        nested_dir = repo_dir / "new" / "nested"
+        nested_dir.mkdir(parents=True)
+        (nested_dir / "first.txt").write_text("first\n", encoding="utf-8")
+        (repo_dir / "new" / "second.txt").write_text("second\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(f"/api/explorer/{session_id}/git/repo")
+
+        self.assertEqual(response.status_code, 200)
+        changes = {change["path"]: change for change in response.get_json()["changes"]}
+        self.assertEqual(set(changes), {"new/nested/first.txt", "new/second.txt"})
+        self.assertTrue(all(change["git"]["status"] == "untracked" for change in changes.values()))
+
     def test_explorer_git_stage_and_unstage_roundtrip(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -3982,20 +3997,42 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertTrue(readme.exists())
         self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\n")
 
-    def test_explorer_git_revert_rejects_untracked_file(self):
+    def test_explorer_git_revert_deletes_selected_untracked_file(self):
         repo_dir = self._init_committed_repo()
-        untracked = repo_dir / "scratch.txt"
-        untracked.write_text("keep me\n", encoding="utf-8")
+        untracked_dir = repo_dir / "new"
+        untracked_dir.mkdir()
+        untracked = untracked_dir / "scratch.txt"
+        untracked.write_text("remove me\n", encoding="utf-8")
         session_id = self._create_explorer_session(repo_dir)
 
         response = self.client.post(
             f"/api/explorer/{session_id}/git/revert",
-            json={"path": "scratch.txt"},
+            json={"path": "new/scratch.txt"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(untracked.exists())
+        self.assertTrue(untracked_dir.exists())
+        self.assertNotIn("new/scratch.txt", {
+            change["path"] for change in response.get_json()["changes"]
+        })
+
+    def test_explorer_git_revert_rejects_untracked_directory(self):
+        repo_dir = self._init_committed_repo()
+        nested_dir = repo_dir / "new"
+        nested_dir.mkdir()
+        nested_file = nested_dir / "scratch.txt"
+        nested_file.write_text("keep me\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "new"},
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("untracked", response.get_json()["error"].lower())
-        self.assertTrue(untracked.exists())
+        self.assertIn("untracked directories", response.get_json()["error"].lower())
+        self.assertTrue(nested_file.exists())
 
     def test_explorer_git_revert_rejects_staged_only_file(self):
         # Worktree already matches the index: nothing to discard, and staged
@@ -4154,7 +4191,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("performExplorerGitAction(index, 'discard-all', {})", html)
         self.assertIn("(busy || !unstaged.length) ? 'disabled'", html)
         self.assertIn("(busy || !discardable.length) ? 'disabled'", html)
-        self.assertIn("explorerGitCanRevert(file.git && file.git.status)", html)
+        self.assertIn("explorerGitCanBulkDiscard(file.git && file.git.status)", html)
         self.assertIn("title: 'Discard all changes?'", html)
         self.assertIn(".explorer-git-section-title", html)
         self.assertIn(".explorer-git-section-actions", html)
@@ -4253,17 +4290,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         self.assertIn("data-explorer-git-revert", html)
+        self.assertIn("data-explorer-git-revert-status", html)
         self.assertIn("explorer-git-revert-btn", html)
         self.assertIn("function explorerGitCanRevert(status)", html)
-        self.assertIn("['modified', 'deleted', 'renamed'].includes(status", html)
+        self.assertIn("['modified', 'deleted', 'renamed', 'untracked'].includes(status", html)
         self.assertIn("action === 'stage' && explorerGitCanRevert(status)", html)
-        self.assertIn("async function explorerGitRevertFile(index, path)", html)
-        self.assertIn("explorerGitRevertFile(index, button.dataset.explorerGitRevert || '');", html)
+        self.assertIn("async function explorerGitRevertFile(index, path, status = '')", html)
+        self.assertIn("button.dataset.explorerGitRevertStatus || ''", html)
         self.assertIn("performExplorerGitAction(index, 'revert', { path })", html)
         # Irreversible action uses the in-page confirm shell, not window.confirm.
         self.assertIn("function openGenericConfirmModal(", html)
         self.assertIn('id="genericConfirmModal"', html)
-        self.assertIn("title: 'Discard changes?'", html)
+        self.assertIn("title: untracked ? 'Delete untracked file?' : 'Discard changes?'", html)
+        self.assertIn("Permanently delete the untracked file", html)
         self.assertIn(".explorer-git-revert-btn", html)
 
     def test_parse_git_graph_log_skips_connector_only_lines(self):

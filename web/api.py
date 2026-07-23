@@ -1039,7 +1039,7 @@ def discard_all_explorer_git(session_id: str):
 
 @app.route('/api/explorer/<session_id>/git/revert', methods=['POST'])
 def revert_explorer_git_file(session_id: str):
-    """Discard one tracked file's unstaged worktree changes (git restore --worktree)."""
+    """Discard one file's unstaged changes, including a selected untracked file."""
     session = session_manager.get_session(session_id)
     if session is None:
         return jsonify({"error": "Session not found"}), 404
