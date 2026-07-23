@@ -1126,7 +1126,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".explorer-diff-cell.delete", html)
         self.assertIn(".explorer-diff-line-code", html)
         self.assertIn(".explorer-diff-content", html)
-        self.assertIn("overflow: scroll;", html)
+        self.assertIn("overflow-x: hidden;", html)
+        self.assertIn("overflow-y: auto;", html)
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
         self.assertIn("tab-size: 4;", html)
@@ -1147,6 +1148,130 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("async function explorerGitCommit(index)", html)
         self.assertIn("function explorerGitPublish(index)", html)
         self.assertIn("Staged Changes", html)
+
+    def test_terminals_page_vendors_highlightjs_source_highlighting(self):
+        """Phase 1 (docs/source_diff_analysis.md): the Source viewer highlights
+        the whole document once with the pinned Highlight.js build and keeps the
+        handwritten lexer as a fallback."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Assets are vendored and loaded locally, never from a CDN.
+        self.assertIn("/static/vendor/highlight.min.js", html)
+        self.assertNotIn("cdnjs.cloudflare.com", html)
+        # Explicit grammar map (no auto-detection) and whole-document tokenizer.
+        self.assertIn("const EXPLORER_HLJS_LANGUAGE = Object.freeze({", html)
+        self.assertIn("function explorerHighlightDocumentLines(content, normalizedLanguage)", html)
+        self.assertIn("function explorerRenderHighlightedRuns(runs, searchRanges = [])", html)
+        self.assertIn("engine.highlight(source, { language: grammar, ignoreIllegal: true })", html)
+        # Source rendering prefers the whole-document pass, falling back per line.
+        self.assertIn("const highlightedLines = explorerHighlightDocumentLines(content, normalizedLanguage);", html)
+        self.assertIn("? explorerRenderHighlightedRuns(highlightedLines.get(record.number), searchRanges)", html)
+        self.assertIn(": highlightExplorerCode(record.text, language, searchRanges, record.start);", html)
+        # The oversized-file guard is preserved for the highlighter.
+        self.assertIn("if (source.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD) {", html)
+        # Explorer-scoped token palette for both themes, shared by the Source
+        # view and the Diff2Html host so diff code keeps its syntax colours.
+        self.assertIn(
+            ":is(.explorer-source-line-code, .explorer-diff2html) .hljs-keyword,",
+            html,
+        )
+        self.assertIn(
+            '.explorer-pane[data-explorer-theme="dark"] '
+            ":is(.explorer-source-line-code, .explorer-diff2html) .hljs-string,",
+            html,
+        )
+
+    def test_terminals_page_vendors_diff2html_precise_diffs(self):
+        """Phase 2 (docs/source_diff_analysis.md): diffs render through the
+        pinned Diff2Html build with intraline emphasis, surface truncation, and
+        keep the tolerant side-by-side renderer as a fallback."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("/static/vendor/diff2html-ui-base.min.js", html)
+        self.assertIn("/static/vendor/diff2html.min.css", html)
+        # Diff2Html configuration: char-level intraline + explicit limits.
+        self.assertIn("function explorerDiff2HtmlConfig()", html)
+        self.assertIn("matching: 'words',", html)
+        self.assertIn("diffStyle: 'char',", html)
+        self.assertIn("synchronisedScroll: false,", html)
+        self.assertIn("matchingMaxComparisons: 1500,", html)
+        self.assertIn("maxLineLengthHighlight: 2000", html)
+        self.assertIn(
+            "new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs)",
+            html,
+        )
+        # Render path prefers Diff2Html, falling back to the handwritten renderer.
+        self.assertIn("function renderExplorerDiffWithDiff2Html(index, code, diff, banner)", html)
+        self.assertIn(
+            "if (!renderExplorerDiffWithDiff2Html(index, code, diff, banner)) {",
+            html,
+        )
+        self.assertIn("code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);", html)
+        self.assertIn("function renderExplorerSideBySideDiff(index, diff)", html)
+        # Truncation is captured from the API and surfaced without blocking.
+        self.assertIn("pane._explorerDiffTruncated = Boolean(data.truncated);", html)
+        self.assertIn("function explorerDiffTruncationBannerHtml(pane)", html)
+        self.assertIn("Diff truncated to 256 KiB / 4,000 lines", html)
+        self.assertIn(".explorer-diff-truncated {", html)
+        # The diff host inherits the per-tab editor zoom.
+        self.assertIn(".explorer-diff2html {", html)
+        self.assertIn("font-size: var(--explorer-editor-font-size, .78rem);", html)
+        # Original source lines remain unwrapped in two fixed, equal-width
+        # panes. A sticky scrollbar controls each side independently.
+        self.assertIn(
+            ".explorer-diff2html .d2h-code-side-line {\n"
+            "            box-sizing: border-box;\n"
+            "            width: 100%;\n"
+            "            padding: 0 .5em;\n"
+            "            white-space: nowrap;",
+            html,
+        )
+        self.assertIn(
+            ".explorer-diff2html .d2h-code-line-ctn {\n"
+            "            white-space: pre;",
+            html,
+        )
+        self.assertIn("width: 50%;", html)
+        self.assertIn("flex: 1 1 50%;", html)
+        self.assertIn(
+            ".explorer-diff2html .d2h-code-side-linenumber {\n"
+            "            position: sticky;\n"
+            "            z-index: 2;\n"
+            "            left: 0;",
+            html,
+        )
+        self.assertIn("padding: 0 .5em;", html)
+        self.assertIn(".explorer-diff-horizontal-scrollbars {", html)
+        self.assertIn("position: sticky;", html)
+        self.assertIn("function synchroniseExplorerDiffScrollbars(host)", html)
+        self.assertIn("function observeExplorerDiffLayout(host)", html)
+        self.assertIn("track.dataset.explorerDiffSide = sideIndex === 0 ? 'left' : 'right';", html)
+        self.assertIn("side.scrollLeft = track.scrollLeft;", html)
+        self.assertIn("observeExplorerDiffLayout(host);", html)
+
+    def test_richer_source_and_diff_vendored_assets_are_served(self):
+        """Phase 1/2 assets are served locally and pinned (highlight.js custom
+        build includes the extra grammars beyond the common bundle)."""
+        for filename in (
+            "vendor/highlight.min.js",
+            "vendor/diff2html-ui-base.min.js",
+            "vendor/diff2html.min.css",
+        ):
+            with self.subTest(filename=filename):
+                response = self.client.get(f"/static/{filename}")
+                self.assertEqual(response.status_code, 200)
+                self.assertGreater(len(response.get_data()), 1000)
+                response.close()
+        highlight = self.client.get("/static/vendor/highlight.min.js")
+        highlight_body = highlight.get_data(as_text=True)
+        highlight.close()
+        for grammar in ("powershell", "dockerfile"):
+            with self.subTest(grammar=grammar):
+                self.assertIn(grammar, highlight_body)
 
     def test_terminals_page_explorer_file_tree_hooks_are_present(self):
         response = self.client.get("/terminals")

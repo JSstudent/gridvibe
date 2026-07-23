@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GridVibe — Terminals</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/xterm.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/diff2html.min.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/terminals.css') }}?v={{ version }}">
 </head>
@@ -271,6 +272,8 @@
 <script src="{{ url_for('static', filename='vendor/xterm-addon-web-links.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/socket.io.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/mermaid.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/highlight.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/diff2html-ui-base.min.js') }}"></script>
 <script>
     const DEFAULT_SURFACE_MODE = {{ app_surface_mode|tojson }};
     const MAX_SESSIONS = {{ max_sessions | tojson }};

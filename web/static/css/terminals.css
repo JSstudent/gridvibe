@@ -2742,7 +2742,8 @@
             min-width: 0;
             min-height: 0;
             height: 100%;
-            overflow: scroll;
+            overflow-x: hidden;
+            overflow-y: auto;
             color: var(--explorer-text);
         }
 
@@ -2997,7 +2998,7 @@
         }
 
         .explorer-side-by-side-diff {
-            min-width: 720px;
+            min-width: 0;
             width: 100%;
             display: grid;
             align-content: start;
@@ -3076,12 +3077,6 @@
             padding: 14px;
             color: var(--explorer-muted);
             font-size: .78rem;
-        }
-
-        @media (max-width: 900px) {
-            .explorer-side-by-side-diff {
-                min-width: 620px;
-            }
         }
 
         .explorer-code-keyword {
@@ -3185,6 +3180,313 @@
 
         .explorer-pane[data-explorer-theme="dark"] .explorer-log-level.error {
             color: #fca5a5;
+        }
+
+        /* ── Highlight.js token palette (Phase 1, docs/source_diff_analysis.md
+           §5.2). Explorer-scoped so the pinned highlighter's classes track the
+           explorer light/dark theme without leaking into the rest of the page.
+           Reuses the same hues as the handwritten-lexer classes above, plus
+           richer categories (function/type/attribute/tag/decorator). The
+           `.explorer-diff2html` scope (Phase 2) shares the same palette so
+           Diff2Html's Highlight.js spans get identical syntax colours; without
+           it the diff panel would render as uncoloured plain text. */
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-keyword,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-literal,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-doctag,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-selector-tag {
+            color: #7c3aed;
+            font-weight: 700;
+        }
+
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-string,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-regexp,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-symbol,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-char,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-addition,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-quote {
+            color: #0f766e;
+        }
+
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-comment {
+            color: var(--explorer-muted);
+            font-style: italic;
+        }
+
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-number {
+            color: #b45309;
+        }
+
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-built_in,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-type,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-builtin-name {
+            color: #0369a1;
+            font-weight: 600;
+        }
+
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-title,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-title.function_,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-title.class_,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-section,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-name {
+            color: #2563eb;
+        }
+
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-attr,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-attribute,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-property,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-selector-class,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-selector-id,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-selector-pseudo,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-variable,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-template-variable {
+            color: #9a3412;
+        }
+
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-meta,
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-meta .hljs-keyword {
+            color: #b45309;
+        }
+
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-deletion {
+            color: #b91c1c;
+        }
+
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-emphasis {
+            font-style: italic;
+        }
+
+        :is(.explorer-source-line-code, .explorer-diff2html) .hljs-strong {
+            font-weight: 700;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-keyword,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-literal,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-doctag,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-selector-tag {
+            color: #c4b5fd;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-string,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-regexp,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-symbol,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-char,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-addition,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-quote {
+            color: #5eead4;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-number {
+            color: #fbbf24;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-built_in,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-type,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-builtin-name {
+            color: #7dd3fc;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-title,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-title.function_,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-title.class_,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-section,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-name {
+            color: #93c5fd;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-attr,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-attribute,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-property,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-selector-class,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-selector-id,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-selector-pseudo,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-variable,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-template-variable {
+            color: #fdba74;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-meta,
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-meta .hljs-keyword {
+            color: #fbbf24;
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] :is(.explorer-source-line-code, .explorer-diff2html) .hljs-deletion {
+            color: #fca5a5;
+        }
+
+        /* ── Diff2Html host (Phase 2, docs/source_diff_analysis.md §5.3).
+           GridVibe overrides live here rather than in the vendored CSS so the
+           pinned file can be replaced verbatim on upgrade. Font size tracks the
+           per-tab editor zoom. The two sides stay fixed at equal widths while
+           each keeps its original, unwrapped source lines. A pair of sticky
+           horizontal scrollbars below the host controls each side independently
+           without allowing long lines to displace the split. */
+        .explorer-diff2html {
+            font-size: var(--explorer-editor-font-size, .78rem);
+            min-width: 0;
+            width: 100%;
+        }
+
+        .explorer-diff2html .d2h-wrapper,
+        .explorer-diff2html .d2h-file-wrapper,
+        .explorer-diff2html .d2h-file-diff,
+        .explorer-diff2html .d2h-files-diff,
+        .explorer-diff2html .d2h-file-side-diff {
+            min-width: 0;
+            max-width: 100%;
+        }
+
+        .explorer-diff2html .d2h-file-side-diff {
+            box-sizing: border-box;
+            width: 50%;
+            flex: 1 1 50%;
+            overflow: hidden;
+        }
+
+        .explorer-diff2html .d2h-code-line,
+        .explorer-diff2html .d2h-code-side-line,
+        .explorer-diff2html .d2h-code-line-ctn,
+        .explorer-diff2html .d2h-code-linenumber,
+        .explorer-diff2html .d2h-code-side-linenumber {
+            font-size: inherit;
+        }
+
+        .explorer-diff2html .d2h-code-side-line {
+            box-sizing: border-box;
+            width: 100%;
+            padding: 0 .5em;
+            white-space: nowrap;
+        }
+
+        .explorer-diff2html .d2h-code-line-ctn {
+            white-space: pre;
+        }
+
+        .explorer-diff2html .d2h-code-side-linenumber {
+            position: sticky;
+            z-index: 2;
+            left: 0;
+            width: 4em;
+            min-width: 4em;
+            max-width: 4em;
+        }
+
+        .explorer-diff2html .d2h-file-header {
+            display: none;
+        }
+
+        .explorer-diff2html .d2h-file-wrapper {
+            border: 0;
+            margin: 0;
+        }
+
+        .explorer-diff-horizontal-scrollbars {
+            position: sticky;
+            z-index: 4;
+            bottom: 0;
+            display: flex;
+            width: 100%;
+            min-width: 0;
+            height: 17px;
+            background: var(--explorer-bg);
+            border-top: 1px solid var(--explorer-row-border);
+        }
+
+        .explorer-diff-horizontal-scroll {
+            box-sizing: border-box;
+            width: 50%;
+            min-width: 0;
+            height: 17px;
+            overflow-x: scroll;
+            overflow-y: hidden;
+            scrollbar-gutter: stable;
+            scrollbar-color: var(--explorer-muted) var(--explorer-bar-bg);
+            scrollbar-width: auto;
+        }
+
+        .explorer-diff-horizontal-scroll:first-child {
+            border-right: 1px solid var(--explorer-row-border);
+        }
+
+        .explorer-diff-horizontal-scroll::-webkit-scrollbar {
+            height: 14px;
+        }
+
+        .explorer-diff-horizontal-scroll::-webkit-scrollbar-track {
+            background: var(--explorer-bar-bg);
+        }
+
+        .explorer-diff-horizontal-scroll::-webkit-scrollbar-thumb {
+            min-width: 28px;
+            background: var(--explorer-muted);
+            border: 3px solid var(--explorer-bar-bg);
+            border-radius: 999px;
+        }
+
+        .explorer-diff-horizontal-scroll-spacer {
+            height: 1px;
+            pointer-events: none;
+        }
+
+        .explorer-diff-truncated {
+            padding: 6px 12px;
+            margin: 0 0 6px;
+            font-size: .74rem;
+            color: #92400e;
+            background: rgba(251, 191, 36, .18);
+            border-bottom: 1px solid rgba(180, 83, 9, .35);
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff-truncated {
+            color: #fbbf24;
+            background: rgba(251, 191, 36, .12);
+        }
+
+        /* Dark-theme surfaces for the vendored Diff2Html light stylesheet. */
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-diff-table,
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-file-wrapper {
+            background: var(--explorer-bg);
+            color: var(--explorer-text);
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-code-line-ctn {
+            color: var(--explorer-text);
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-code-linenumber,
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-code-side-linenumber {
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-color: var(--explorer-row-border);
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-info {
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-color: var(--explorer-row-border);
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-ins {
+            background: rgba(34, 197, 94, .14);
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-ins ins,
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-ins .d2h-change {
+            background: rgba(34, 197, 94, .34);
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-del {
+            background: rgba(239, 68, 68, .14);
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-del del,
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-del .d2h-change {
+            background: rgba(239, 68, 68, .34);
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-emptyplaceholder,
+        .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-code-side-emptyplaceholder {
+            background: var(--explorer-bar-bg);
+            border-color: var(--explorer-row-border);
         }
 
         .explorer-markdown-preview {

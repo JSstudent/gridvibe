@@ -185,6 +185,43 @@
         powershell: ['Get-ChildItem', 'Get-Content', 'New-Item', 'Remove-Item', 'Select-Object', 'Set-Content', 'Where-Object', 'Write-Host']
     });
 
+    /* Phase 1 (docs/source_diff_analysis.md): the explorer's own normalized
+       language name → the Highlight.js grammar name in the pinned custom build
+       (web/static/vendor/highlight.min.js). Languages absent here — config,
+       dotenv, gitignore, jsonl, log, markdown, text — keep the handwritten
+       fallback lexer (highlightExplorerCode) and its special renderers. We
+       always pass the grammar explicitly; Highlight.js auto-detection is never
+       used (guardrail: no auto-detect). */
+    const EXPLORER_HLJS_LANGUAGE = Object.freeze({
+        batch: 'dos',
+        c: 'c',
+        cpp: 'cpp',
+        csharp: 'csharp',
+        css: 'css',
+        dockerfile: 'dockerfile',
+        go: 'go',
+        html: 'xml',
+        ini: 'ini',
+        java: 'java',
+        javascript: 'javascript',
+        json: 'json',
+        kotlin: 'kotlin',
+        lua: 'lua',
+        makefile: 'makefile',
+        php: 'php',
+        powershell: 'powershell',
+        python: 'python',
+        ruby: 'ruby',
+        rust: 'rust',
+        shell: 'bash',
+        sql: 'sql',
+        swift: 'swift',
+        toml: 'ini',
+        typescript: 'typescript',
+        xml: 'xml',
+        yaml: 'yaml'
+    });
+
     const EXPLORER_C_LIKE_LANGUAGES = new Set(['c', 'cpp', 'csharp', 'css', 'go', 'java', 'javascript', 'kotlin', 'php', 'rust', 'swift', 'typescript']);
     const EXPLORER_HASH_COMMENT_LANGUAGES = new Set(['config', 'dockerfile', 'dotenv', 'gitignore', 'ini', 'makefile', 'python', 'ruby', 'shell', 'powershell', 'yaml', 'toml']);
     const EXPLORER_LOG_LEVELS = new Set(['TRACE', 'DEBUG', 'INFO', 'WARN', 'WARNING', 'ERROR', 'CRITICAL', 'FATAL']);
@@ -664,6 +701,109 @@
         }
 
         return output;
+    }
+
+    /* Phase 1 (docs/source_diff_analysis.md §5.2): tokenize the whole document
+       once with Highlight.js so multiline constructs (block comments, triple-
+       quoted / template strings, embedded languages) keep their state across
+       newlines — the per-line highlightExplorerCode lexer above cannot. Returns
+       a Map keyed by 1-based line number, each value an array of styled runs
+       ({ className, text, start }) whose `start` is the absolute character
+       offset into `content` (so the existing offset-based search-mark machinery
+       keeps working). Returns null — and the caller falls back to the
+       handwritten lexer — when Highlight.js is unavailable, the language is not
+       in the pinned build, the file is above the plain-preview threshold, or
+       Highlight.js throws. */
+    function explorerHighlightDocumentLines(content, normalizedLanguage) {
+        const grammar = EXPLORER_HLJS_LANGUAGE[normalizedLanguage];
+        if (!grammar) {
+            return null;
+        }
+        const source = String(content || '');
+        if (source.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD) {
+            return null;
+        }
+        const engine = typeof window !== 'undefined' ? window.hljs : null;
+        if (!engine || typeof engine.highlight !== 'function'
+            || typeof engine.getLanguage !== 'function' || !engine.getLanguage(grammar)) {
+            return null;
+        }
+
+        let markup;
+        try {
+            markup = engine.highlight(source, { language: grammar, ignoreIllegal: true }).value;
+        } catch (error) {
+            console.error('[GridVibe Sessions] Explorer syntax highlight failed:', error);
+            return null;
+        }
+
+        const template = document.createElement('template');
+        template.innerHTML = markup;
+
+        const lines = new Map();
+        let lineNumber = 1;
+        let offset = 0;
+        let current = [];
+        lines.set(lineNumber, current);
+
+        const pushText = (className, text) => {
+            let segmentStart = 0;
+            for (let i = 0; i < text.length; i += 1) {
+                if (text[i] !== '\n') {
+                    continue;
+                }
+                let segment = text.slice(segmentStart, i);
+                const rawLength = segment.length;
+                if (segment.endsWith('\r')) {
+                    // Records strip the trailing CR of CRLF lines; match that for
+                    // display while still counting it toward the raw offset.
+                    segment = segment.slice(0, -1);
+                }
+                if (segment) {
+                    current.push({ className, text: segment, start: offset });
+                }
+                offset += rawLength + 1;
+                lineNumber += 1;
+                current = [];
+                lines.set(lineNumber, current);
+                segmentStart = i + 1;
+            }
+            const tail = text.slice(segmentStart);
+            if (tail) {
+                current.push({ className, text: tail, start: offset });
+                offset += tail.length;
+            }
+        };
+
+        const walk = (node, className) => {
+            node.childNodes.forEach(child => {
+                if (child.nodeType === Node.TEXT_NODE) {
+                    pushText(className, child.nodeValue || '');
+                } else if (child.nodeType === Node.ELEMENT_NODE) {
+                    // Innermost Highlight.js class wins the colour; the decoded
+                    // text length equals the raw source so offsets stay aligned.
+                    walk(child, child.getAttribute('class') || className);
+                }
+            });
+        };
+        walk(template.content, '');
+        return lines;
+    }
+
+    /* Render one line's worth of Highlight.js runs, reusing the shared
+       escape+search-mark helpers so search marks coexist with syntax spans
+       (docs/source_diff_analysis.md §5.4). */
+    function explorerRenderHighlightedRuns(runs, searchRanges = []) {
+        if (!runs || !runs.length) {
+            return '';
+        }
+        let html = '';
+        runs.forEach(run => {
+            html += run.className
+                ? explorerCodeSpan(run.className, run.text, run.start, searchRanges)
+                : explorerMarkedEscHtml(run.text, run.start, searchRanges);
+        });
+        return html;
     }
 
     function renderExplorerMessage(index, message) {
@@ -1919,18 +2059,166 @@
         performExplorerGitAction(index, 'publish', {});
     }
 
+    /* Phase 2 (docs/source_diff_analysis.md §5.3): Diff2HtmlUI configuration.
+       `matching: 'words'` + `diffStyle: 'char'` give character-level intraline
+       emphasis and LCS-based line matching instead of the fallback renderer's
+       FIFO pairing; the comparison limits are explicit so pathological diffs
+       stay responsive (Diff2Html documents line matching as the main cost). */
+    function explorerDiff2HtmlConfig() {
+        return {
+            outputFormat: 'side-by-side',
+            drawFileList: false,
+            fileContentToggle: false,
+            matching: 'words',
+            diffStyle: 'char',
+            highlight: true,
+            synchronisedScroll: false,
+            matchingMaxComparisons: 1500,
+            maxLineLengthHighlight: 2000
+        };
+    }
+
+    function explorerDiffTruncationBannerHtml(pane) {
+        if (!pane || !pane._explorerDiffTruncated) {
+            return '';
+        }
+        return '<div class="explorer-diff-truncated" role="status">'
+            + 'Diff truncated to 256 KiB / 4,000 lines — the change shown is incomplete.'
+            + '</div>';
+    }
+
+    function synchroniseExplorerDiffScrollbars(host) {
+        const sides = host?._explorerDiffSides || [];
+        const spacers = host?._explorerDiffScrollSpacers || [];
+        sides.forEach((side, sideIndex) => {
+            const spacer = spacers[sideIndex];
+            if (spacer) {
+                spacer.style.width = `${Math.max(side.clientWidth, side.scrollWidth)}px`;
+            }
+        });
+    }
+
+    function scheduleExplorerDiffScrollbarSync(host) {
+        if (!host || host._explorerDiffScrollbarFrame) {
+            return;
+        }
+        const sync = () => {
+            host._explorerDiffScrollbarFrame = null;
+            if (host.isConnected) {
+                synchroniseExplorerDiffScrollbars(host);
+            }
+        };
+        if (typeof window.requestAnimationFrame === 'function') {
+            host._explorerDiffScrollbarFrame = window.requestAnimationFrame(sync);
+        } else {
+            sync();
+        }
+    }
+
+    function observeExplorerDiffLayout(host) {
+        const filesDiff = host?.querySelector('.d2h-files-diff');
+        const sides = filesDiff
+            ? [...filesDiff.querySelectorAll(':scope > .d2h-file-side-diff')]
+            : [];
+        if (sides.length !== 2) {
+            return;
+        }
+
+        const scrollbars = document.createElement('div');
+        scrollbars.className = 'explorer-diff-horizontal-scrollbars';
+        scrollbars.setAttribute('aria-hidden', 'true');
+        const tracks = sides.map((side, sideIndex) => {
+            const track = document.createElement('div');
+            track.className = 'explorer-diff-horizontal-scroll';
+            track.dataset.explorerDiffSide = sideIndex === 0 ? 'left' : 'right';
+            const spacer = document.createElement('div');
+            spacer.className = 'explorer-diff-horizontal-scroll-spacer';
+            track.appendChild(spacer);
+            track.addEventListener('scroll', () => {
+                side.scrollLeft = track.scrollLeft;
+            });
+            scrollbars.appendChild(track);
+            return { track, spacer };
+        });
+        host.appendChild(scrollbars);
+        host._explorerDiffSides = sides;
+        host._explorerDiffScrollTracks = tracks.map(item => item.track);
+        host._explorerDiffScrollSpacers = tracks.map(item => item.spacer);
+        scheduleExplorerDiffScrollbarSync(host);
+
+        sides.forEach((side, sideIndex) => {
+            side.addEventListener('wheel', event => {
+                const horizontalDelta = event.deltaX || (event.shiftKey ? event.deltaY : 0);
+                if (!horizontalDelta) {
+                    return;
+                }
+                event.preventDefault();
+                tracks[sideIndex].track.scrollLeft += horizontalDelta;
+            }, { passive: false });
+        });
+
+        if (typeof window.ResizeObserver === 'function') {
+            const observer = new window.ResizeObserver(entries => {
+                if (entries.length) {
+                    scheduleExplorerDiffScrollbarSync(host);
+                }
+            });
+            observer.observe(filesDiff);
+            host._explorerDiffResizeObserver = observer;
+        }
+    }
+
+    function disconnectExplorerDiffLayout(host) {
+        host?._explorerDiffResizeObserver?.disconnect();
+        if (host?._explorerDiffScrollbarFrame && typeof window.cancelAnimationFrame === 'function') {
+            window.cancelAnimationFrame(host._explorerDiffScrollbarFrame);
+        }
+    }
+
+    /* Render the patch with the pinned Diff2Html build, reusing the pinned
+       Highlight.js instance for syntax colour. Returns false — so the caller
+       falls back to the tolerant handwritten side-by-side renderer — when the
+       assets are missing, Diff2Html throws, or it parses the patch to nothing
+       (e.g. a partial patch without a file header). */
+    function renderExplorerDiffWithDiff2Html(index, code, diff, banner) {
+        if (typeof window === 'undefined' || !window.Diff2HtmlUI || !window.hljs) {
+            return false;
+        }
+        try {
+            const host = document.createElement('div');
+            host.className = 'explorer-diff2html';
+            const ui = new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs);
+            ui.draw();
+            ui.highlightCode();
+            if (!host.querySelector('.d2h-diff-table, .d2h-code-line, .d2h-file-wrapper')) {
+                return false;
+            }
+            code.innerHTML = banner;
+            code.appendChild(host);
+            observeExplorerDiffLayout(host);
+            return true;
+        } catch (error) {
+            console.error('[GridVibe Sessions] Diff2Html render failed:', error);
+            return false;
+        }
+    }
+
     function renderExplorerDiff(index) {
         const pane = terminals[index];
         const code = document.getElementById(`explorer-diff-code-${index}`);
         if (!pane || !code) {
             return;
         }
+        disconnectExplorerDiffLayout(code.querySelector('.explorer-diff2html'));
         const diff = pane._explorerDiffContent || '';
         if (!diff) {
             code.innerHTML = '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
             return;
         }
-        code.innerHTML = renderExplorerSideBySideDiff(index, diff);
+        const banner = explorerDiffTruncationBannerHtml(pane);
+        if (!renderExplorerDiffWithDiff2Html(index, code, diff, banner)) {
+            code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);
+        }
     }
 
     function explorerDiffLanguage(index) {
@@ -2096,6 +2384,10 @@
             pane._explorerDiffLoaded = true;
             pane._explorerDiffCacheKey = cacheKey;
             pane._explorerDiffContent = data.diff || '';
+            // Phase 2 (docs/source_diff_analysis.md §5.3): the backend already
+            // bounds diffs to 256 KiB / 4,000 lines and reports truncation; keep
+            // the flag so the rendered patch is never mistaken for the whole change.
+            pane._explorerDiffTruncated = Boolean(data.truncated);
             renderExplorerDiff(index);
             applyExplorerPendingDiffScroll(index);
             if (activeExplorerFileView(index) === 'diff') {
@@ -2224,6 +2516,7 @@
 
         const fontSize = ensureExplorerEditorFontSize(pane);
         list.style.setProperty('--explorer-editor-font-size', `${fontSize}px`);
+        scheduleExplorerDiffScrollbarSync(list.querySelector('.explorer-diff2html'));
 
         const value = list.querySelector(`[data-explorer-zoom-value="${index}"]`);
         if (value) {
@@ -2605,6 +2898,10 @@
             ? explorerMarkdownHeadingLevels(records)
             : new Map();
         const allowMarkdownCollapse = normalizedLanguage === 'markdown' && !searchRanges.length;
+        // Whole-document Highlight.js pass (Phase 1); null for unsupported
+        // languages, the log/markdown special renderers, oversized files, or any
+        // Highlight.js failure, in which case each line uses the fallback lexer.
+        const highlightedLines = explorerHighlightDocumentLines(content, normalizedLanguage);
         const rows = [];
         let hiddenUntilHeadingLevel = 0;
 
@@ -2618,7 +2915,9 @@
             }
 
             const collapsed = allowMarkdownCollapse && headingLevel && collapsedLines.has(record.number);
-            const lineHtml = highlightExplorerCode(record.text, language, searchRanges, record.start);
+            const lineHtml = highlightedLines
+                ? explorerRenderHighlightedRuns(highlightedLines.get(record.number), searchRanges)
+                : highlightExplorerCode(record.text, language, searchRanges, record.start);
             // Heading-only Markdown tokeniser (OD-8): the fence-aware heading map
             // already computed for section collapse doubles as the highlighter,
             // so heading lines get a distinct token colour without a full grammar.
@@ -3267,6 +3566,7 @@
                 return;
             }
             const diffMarks = markExplorerSearchInElement(diff, query, state.activeIndex || 0);
+            scheduleExplorerDiffScrollbarSync(diff.querySelector('.explorer-diff2html'));
             matchCount = diffMarks.length;
             capped = Boolean(diffMarks.capped);
             state.activeIndex = matchCount ? Math.min(state.activeIndex || 0, matchCount - 1) : 0;
