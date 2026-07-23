@@ -716,14 +716,15 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        # Both close paths carry the pre-close track weights into the restore.
+        # The terminal-close path carries the pre-close track weights into the
+        # restore (closing a split pane now goes through this same path).
         self.assertEqual(
             html.count("splitColumnWeights: cloneSplitTrackWeights(splitColumnWeights),"),
-            2,
+            1,
         )
         self.assertEqual(
             html.count("splitRowWeights: cloneSplitTrackWeights(splitRowWeights),"),
-            2,
+            1,
         )
         # initialLoad re-applies them onto the reflowed grid so proportions survive.
         self.assertIn(
@@ -824,7 +825,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("loadExplorerPane(index, null, { force: true });", html[replace_start:replace_end])
         self.assertNotIn("loadExplorerPane(index, '', { force: true });", html[replace_start:replace_end])
         switch_start = html.index("async function switchSessionPaneMode(index)")
-        switch_end = html.index("async function closeSplitPane(index)", switch_start)
+        switch_end = html.index(
+            "function captureSurvivingPaneClientState(closingSessionId)", switch_start
+        )
         self.assertNotIn("teardownCurrentGrid();", html[switch_start:switch_end])
 
     def test_terminals_page_exposes_browser_pane_rendering_hooks(self):
@@ -7870,12 +7873,17 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_terminals_page_splits_the_longer_pane_dimension(self):
         response = self.client.get("/terminals")
         html = self._page_html(response)
-        self.assertIn("grid?.classList.contains('layout-2-vertical')", html)
-        self.assertIn("return candidates.includes('horizontal') ? 'horizontal' : '';", html)
+        # Each pane splits along its own longer edge, independent of the base
+        # launcher layout or any split ancestry.
         self.assertIn(
             "const preferred = bounds && bounds.height > bounds.width ? 'horizontal' : 'vertical';",
             html,
         )
+        # When the preferred axis is too small to split, fall back to whichever
+        # axis still fits rather than blocking the split.
+        self.assertIn("return candidates.includes(preferred) ? preferred : candidates[0];", html)
+        # The old base-layout-specific forced-horizontal heuristic is gone.
+        self.assertNotIn("grid?.classList.contains('layout-2-vertical')", html)
 
     def test_terminals_page_exposes_grid_resize_handles(self):
         response = self.client.get("/terminals")

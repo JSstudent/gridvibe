@@ -477,16 +477,6 @@
     let activeGridResize = null;
     let originalSplitSlotCount = 0;
 
-    function isRecursiveSplitLayout() {
-        return originalSplitSlotCount > 0 && originalSplitSlotCount <= 2;
-    }
-
-    function getSplitPaneLimit() {
-        return isRecursiveSplitLayout()
-            ? MAX_SPLIT_TERMINALS
-            : Math.min(MAX_SPLIT_TERMINALS, Math.max(1, originalSplitSlotCount) * 2);
-    }
-
     function isExplorerSession(session) {
         return ['ssh', 'wsl'].includes(session?.mode) && session?.startup_mode === 'explorer';
     }
@@ -3017,8 +3007,7 @@
     function getSplitCandidates(index, rect) {
         if (
             window.innerWidth <= 700
-            || terminals.length >= getSplitPaneLimit()
-            || (rect.splitId && !isRecursiveSplitLayout())
+            || terminals.length >= MAX_SPLIT_TERMINALS
             || isExplorerSession(terminals[index]?._session)
         ) {
             return [];
@@ -3041,174 +3030,33 @@
         if (candidates.length === 0) {
             return '';
         }
-        const grid = document.getElementById('terminalsGrid');
-        if (
-            grid?.classList.contains('layout-2-vertical')
-            && !rect.splitId
-            && !rect.ancestors?.length
-        ) {
-            return candidates.includes('horizontal') ? 'horizontal' : '';
-        }
+        /* Split each pane along its own longer edge; if that axis is too small
+           to split but the other still fits, fall back to it rather than
+           blocking the split entirely. */
         const card = document.getElementById(`tc-${index}`);
         const bounds = card?.getBoundingClientRect();
         const preferred = bounds && bounds.height > bounds.width ? 'horizontal' : 'vertical';
-        return candidates.includes(preferred) ? preferred : '';
+        return candidates.includes(preferred) ? preferred : candidates[0];
     }
 
     function splitSlotRect(rect, axis) {
-        const splitId = makeSplitRectId();
-        const parentRect = cloneSplitRect(rect);
-        const ancestors = cloneSplitAncestors(rect.ancestors || []);
+        /* A split produces two plain, independent leaves — no shared splitId or
+           ancestor chain. Each new pane behaves like any other grid cell: it can
+           be split again until it hits the minimum size, and closing it reflows
+           its neighbours through the normal terminal-close path. */
         if (axis === 'vertical') {
             const firstWidth = Math.floor(rect.w / 2);
-            const firstRect = { x: rect.x, y: rect.y, w: firstWidth, h: rect.h };
-            const secondRect = { x: rect.x + firstWidth, y: rect.y, w: rect.w - firstWidth, h: rect.h };
             return [
-                makeSplitLeaf({
-                    ...firstRect,
-                    originSlot: rect.originSlot,
-                    splitId,
-                    splitRole: 'primary',
-                    parentRect,
-                }, [
-                    ...ancestors,
-                    { splitId, branch: 'a', parentRect, branchRect: firstRect },
-                ]),
-                makeSplitLeaf({
-                    ...secondRect,
-                    originSlot: rect.originSlot,
-                    splitId,
-                    splitRole: 'secondary',
-                    isSplitChild: true,
-                    parentRect,
-                }, [
-                    ...ancestors,
-                    { splitId, branch: 'b', parentRect, branchRect: secondRect },
-                ]),
+                makeSplitLeaf({ originSlot: rect.originSlot, x: rect.x, y: rect.y, w: firstWidth, h: rect.h }),
+                makeSplitLeaf({ originSlot: rect.originSlot, x: rect.x + firstWidth, y: rect.y, w: rect.w - firstWidth, h: rect.h }),
             ];
         }
 
         const firstHeight = Math.floor(rect.h / 2);
-        const firstRect = { x: rect.x, y: rect.y, w: rect.w, h: firstHeight };
-        const secondRect = { x: rect.x, y: rect.y + firstHeight, w: rect.w, h: rect.h - firstHeight };
         return [
-            makeSplitLeaf({
-                ...firstRect,
-                originSlot: rect.originSlot,
-                splitId,
-                splitRole: 'primary',
-                parentRect,
-            }, [
-                ...ancestors,
-                { splitId, branch: 'a', parentRect, branchRect: firstRect },
-            ]),
-            makeSplitLeaf({
-                ...secondRect,
-                originSlot: rect.originSlot,
-                splitId,
-                splitRole: 'secondary',
-                isSplitChild: true,
-                parentRect,
-            }, [
-                ...ancestors,
-                { splitId, branch: 'b', parentRect, branchRect: secondRect },
-            ]),
+            makeSplitLeaf({ originSlot: rect.originSlot, x: rect.x, y: rect.y, w: rect.w, h: firstHeight }),
+            makeSplitLeaf({ originSlot: rect.originSlot, x: rect.x, y: rect.y + firstHeight, w: rect.w, h: rect.h - firstHeight }),
         ];
-    }
-
-    function scaleSplitValue(value, sourceStart, sourceSize, targetStart, targetSize) {
-        if (!sourceSize) {
-            return targetStart;
-        }
-        return targetStart + Math.round(((value - sourceStart) / sourceSize) * targetSize);
-    }
-
-    function transformSplitRect(rect, fromRect, toRect) {
-        const x1 = scaleSplitValue(rect.x, fromRect.x, fromRect.w, toRect.x, toRect.w);
-        const y1 = scaleSplitValue(rect.y, fromRect.y, fromRect.h, toRect.y, toRect.h);
-        const x2 = scaleSplitValue(rect.x + rect.w, fromRect.x, fromRect.w, toRect.x, toRect.w);
-        const y2 = scaleSplitValue(rect.y + rect.h, fromRect.y, fromRect.h, toRect.y, toRect.h);
-        return {
-            x: x1,
-            y: y1,
-            w: Math.max(1, x2 - x1),
-            h: Math.max(1, y2 - y1),
-        };
-    }
-
-    function transformSplitAncestor(ancestor, fromRect, toRect) {
-        return {
-            ...ancestor,
-            parentRect: transformSplitRect(ancestor.parentRect, fromRect, toRect),
-            branchRect: transformSplitRect(ancestor.branchRect, fromRect, toRect),
-        };
-    }
-
-    function buildCloseSplitPlan(index) {
-        const grid = document.getElementById('terminalsGrid');
-        const card = document.getElementById(`tc-${index}`);
-        const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
-        const rect = visualIndex >= 0 && Array.isArray(splitSlotRects) ? splitSlotRects[visualIndex] : null;
-        const targetAncestor = rect?.ancestors?.[rect.ancestors.length - 1];
-        if (!grid || !targetAncestor) {
-            return null;
-        }
-
-        const rectsBySessionId = {};
-        Array.from(grid.children).forEach((paneCard, paneVisualIndex) => {
-            const slotIndex = Number(paneCard.dataset.slot);
-            const sessionId = Number.isInteger(slotIndex) ? sessionIds[slotIndex] : '';
-            const paneRect = splitSlotRects[paneVisualIndex];
-            if (!sessionId || !paneRect) {
-                return;
-            }
-
-            const splitIndex = paneRect.ancestors?.findIndex(
-                ancestor => ancestor.splitId === targetAncestor.splitId
-            );
-            if (splitIndex === undefined || splitIndex < 0) {
-                rectsBySessionId[sessionId] = cloneSplitSlotRects([paneRect])[0];
-                return;
-            }
-
-            const splitAncestor = paneRect.ancestors[splitIndex];
-            if (splitAncestor.branch === targetAncestor.branch) {
-                return;
-            }
-
-            const transformedAncestors = paneRect.ancestors
-                .map((ancestor, ancestorIndex) => (
-                    ancestorIndex > splitIndex
-                        ? transformSplitAncestor(ancestor, splitAncestor.branchRect, splitAncestor.parentRect)
-                        : ancestor
-                ))
-                .filter((_, ancestorIndex) => ancestorIndex !== splitIndex);
-            const transformedRect = normalizeSplitRectMetadata({
-                ...transformSplitRect(paneRect, splitAncestor.branchRect, splitAncestor.parentRect),
-                id: paneRect.id || makeSplitRectId(),
-                originSlot: paneRect.originSlot,
-                ancestors: transformedAncestors,
-            });
-            rectsBySessionId[sessionId] = cloneSplitSlotRects([transformedRect])[0];
-        });
-
-        const sessionIdsToClose = Array.from(grid.children)
-            .map((paneCard, paneVisualIndex) => {
-                const slotIndex = Number(paneCard.dataset.slot);
-                const sessionId = Number.isInteger(slotIndex) ? sessionIds[slotIndex] : '';
-                const paneRect = splitSlotRects[paneVisualIndex];
-                const splitAncestor = paneRect?.ancestors?.find(
-                    ancestor => ancestor.splitId === targetAncestor.splitId
-                );
-                return splitAncestor?.branch === targetAncestor.branch ? sessionId : '';
-            })
-            .filter(Boolean);
-
-        if (sessionIdsToClose.length === 0 || Object.keys(rectsBySessionId).length === 0) {
-            return null;
-        }
-
-        return { sessionIdsToClose, rectsBySessionId, originalSplitSlotCount };
     }
 
     function splitRectArea(rect) {
@@ -3527,11 +3375,10 @@
         const rects = visualIndex >= 0 ? ensureSplitSlotRects() : [];
         const rect = rects[visualIndex];
         const axis = rect ? chooseSplitAxis(index, rect) : '';
-        const splitLimit = getSplitPaneLimit();
         const disabledReason = window.innerWidth <= 700
             ? 'Splitting is disabled on narrow screens'
-            : terminals.length >= splitLimit
-                ? `Splitting is limited to ${splitLimit} terminal panes for this launcher layout`
+            : terminals.length >= MAX_SPLIT_TERMINALS
+                ? `Splitting is limited to ${MAX_SPLIT_TERMINALS} terminal panes`
                 : 'This pane is already at the smallest split size';
 
         button.disabled = !axis;
@@ -3539,33 +3386,9 @@
         button.setAttribute('aria-label', button.title);
     }
 
-    function updateUnsplitButtonState(index) {
-        const button = document.getElementById(`tunsplit-${index}`);
-        if (!button) {
-            return;
-        }
-
-        if (isExplorerSession(terminals[index]?._session) || isBrowserSession(terminals[index]?._session)) {
-            button.hidden = true;
-            button.disabled = true;
-            return;
-        }
-
-        const grid = document.getElementById('terminalsGrid');
-        const card = document.getElementById(`tc-${index}`);
-        const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
-        const rect = visualIndex >= 0 && Array.isArray(splitSlotRects) ? splitSlotRects[visualIndex] : null;
-        const canUnsplit = Boolean(rect?.ancestors?.length || rect?.splitId);
-        button.hidden = !canUnsplit;
-        button.disabled = !canUnsplit;
-        button.title = canUnsplit ? 'Close this split pane' : 'This pane is not a split branch';
-        button.setAttribute('aria-label', button.title);
-    }
-
     function updateAllSplitButtonStates() {
         terminals.forEach((_, index) => {
             updateSplitButtonState(index);
-            updateUnsplitButtonState(index);
         });
     }
 
@@ -4324,17 +4147,6 @@
                             >
                                 ⊞
                             </button>
-                            <button
-                                type="button"
-                                class="terminal-action-btn terminal-unsplit-btn"
-                                id="tunsplit-${i}"
-                                data-terminal-unsplit="${i}"
-                                title="Close this split pane"
-                                aria-label="Close this split pane"
-                                hidden
-                            >
-                                ⊟
-                            </button>
                         ` : ''}
                         ${isExplorer ? `
                             <button
@@ -4461,7 +4273,6 @@
         wireCardButton(card, `[data-session-browser-toggle="${i}"]`, () => switchSessionBrowserMode(i));
         wireCardButton(card, `[data-session-mode-toggle="${i}"]`, () => switchSessionPaneMode(i));
         wireCardButton(card, `[data-terminal-split="${i}"]`, () => splitTerminalPane(i));
-        wireCardButton(card, `[data-terminal-unsplit="${i}"]`, () => closeSplitPane(i));
         const explorerThemeButton = wireCardButton(
             card, `[data-explorer-theme-toggle="${i}"]`, () => toggleExplorerTheme(i)
         );
@@ -4777,16 +4588,6 @@
             });
         }
 
-        const unsplitButton = card.querySelector(`[data-terminal-unsplit="${index}"]`);
-        if (unsplitButton) {
-            stopHeaderButtonDrag(unsplitButton);
-            unsplitButton.addEventListener('click', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                closeSplitPane(index);
-            });
-        }
-
         const clearButton = card.querySelector(`[data-terminal-clear="${index}"]`);
         if (clearButton) {
             stopHeaderButtonDrag(clearButton);
@@ -4857,12 +4658,6 @@
             splitButton.textContent = '⊞';
             splitButton.disabled = false;
         }
-        const unsplitButton = card.querySelector(`#tunsplit-${targetIndex}`);
-        if (unsplitButton) {
-            unsplitButton.textContent = '⊟';
-            unsplitButton.hidden = false;
-            unsplitButton.disabled = false;
-        }
 
         const wrapper = card.querySelector(`#tw-${targetIndex}`);
         if (wrapper) {
@@ -4926,7 +4721,7 @@
     }
 
     function setTerminalOnlyControlsVisible(card, visible) {
-        ['data-terminal-split', 'data-terminal-unsplit'].forEach(attribute => {
+        ['data-terminal-split'].forEach(attribute => {
             const button = card.querySelector(`[${attribute}]`);
             if (button) {
                 button.hidden = !visible;
@@ -5225,17 +5020,6 @@
             >
                 ⊞
             </button>
-            <button
-                type="button"
-                class="terminal-action-btn terminal-unsplit-btn"
-                id="tunsplit-${index}"
-                data-terminal-unsplit="${index}"
-                title="Close this split pane"
-                aria-label="Close this split pane"
-                hidden
-            >
-                ⊟
-            </button>
         `);
 
         splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
@@ -5245,16 +5029,6 @@
                 event.preventDefault();
                 event.stopPropagation();
                 splitTerminalPane(index);
-            });
-        }
-
-        const unsplitButton = card.querySelector(`[data-terminal-unsplit="${index}"]`);
-        if (unsplitButton) {
-            stopHeaderButtonDrag(unsplitButton);
-            unsplitButton.addEventListener('click', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                closeSplitPane(index);
             });
         }
     }
@@ -5623,52 +5397,6 @@
         }
     }
 
-    async function closeSplitPane(index) {
-        const plan = buildCloseSplitPlan(index);
-        if (!plan) {
-            updateUnsplitButtonState(index);
-            return;
-        }
-
-        const button = document.getElementById(`tunsplit-${index}`);
-        if (button) {
-            button.disabled = true;
-            button.textContent = '...';
-        }
-
-        try {
-            for (const sessionId of plan.sessionIdsToClose) {
-                const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-                    method: 'DELETE',
-                });
-                const data = await response.json().catch(() => ({}));
-                if (!response.ok) {
-                    throw new Error(data.error || `Close split failed with status ${response.status}`);
-                }
-            }
-
-            pendingSplitRestore = {
-                groupId: activeGroupId,
-                rectsBySessionId: plan.rectsBySessionId,
-                originalSplitSlotCount: plan.originalSplitSlotCount,
-                splitColumnWeights: cloneSplitTrackWeights(splitColumnWeights),
-                splitRowWeights: cloneSplitTrackWeights(splitRowWeights),
-            };
-            await initialLoad();
-        } catch (error) {
-            console.error('[GridVibe Sessions] closeSplitPane failed:', error);
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Close split failed: ${error.message}`;
-            }
-        } finally {
-            if (button) {
-                button.textContent = '⊟';
-            }
-            updateAllSplitButtonStates();
-        }
-    }
-
     /* Snapshot the live client state of every pane except the one being closed,
        keyed by session id. Closing a terminal forces a full grid rebuild
        (initialLoad), which would otherwise reset sibling explorer panes to a
@@ -5842,7 +5570,7 @@
         if (!sourceSessionId || !sourceTerminal || !sourceCard || !grid || isExplorerSession(sourceTerminal._session)) {
             return;
         }
-        if (terminals.length >= getSplitPaneLimit()) {
+        if (terminals.length >= MAX_SPLIT_TERMINALS) {
             updateAllSplitButtonStates();
             return;
         }
