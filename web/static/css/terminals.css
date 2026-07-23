@@ -3326,6 +3326,13 @@
             width: 100%;
         }
 
+        /* Diff2Html pins its table to 13px. Let the table inherit the host's
+           per-tab zoom so Source, Preview, and Diff respond to the same
+           controls and restored font-size setting. */
+        .explorer-diff2html .d2h-diff-table {
+            font-size: inherit;
+        }
+
         .explorer-diff2html .d2h-wrapper,
         .explorer-diff2html .d2h-file-wrapper,
         .explorer-diff2html .d2h-file-diff,

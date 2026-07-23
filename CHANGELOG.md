@@ -99,7 +99,7 @@ All notable changes to GridVibe will be documented in this file.
 - Added a `Tree` file tree sidebar to Local Repo and SSH file explorer panes with lazy per-directory loading, in-place expand/collapse, Git status badges, folder jump buttons, and automatic reveal of the current directory or open file. The tree and Git sidebars can be open at the same time, stacked in one shared sidebar with a draggable horizontal divider.
 - Added numbered session tabs with `Alt+1` through `Alt+9` switching based on the current tab order, while ignoring editable fields.
 - Added drag-resizable terminal pane dividers with xterm refits, backend PTY resize propagation, session-local resize weight caching, and minimum pane-size guards.
-- Added per-pane `-`/`+` font-size zoom controls to the read-only file editor view, covering source and Markdown preview panels.
+- Added per-pane `-`/`+` font-size zoom controls to the read-only file editor view, covering Source, Markdown Preview, and Diff panels; per-tab zoom and Diff mode/target now survive saved-session export and import, including the unpinned Preview tab.
 - Added source line numbers to read-only explorer file previews and Markdown source-gutter chevrons for collapsing heading sections.
 - Added a global App Settings option for normal vs. max session-window surface mode while keeping the in-session surface toggle available.
 - Improved Git sidebar readability by colouring each commit graph lane separately, so mainline and branch commits are distinguishable, and gave the folder jump buttons in the Git and Tree sidebars a shared light-blue style that adapts to the light and dark explorer themes.

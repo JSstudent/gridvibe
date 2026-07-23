@@ -37,7 +37,9 @@ EXPLORER_MAX_TAB_PATH_LENGTH = 4096
 # reserved `__preview__` key carries the permanent Preview tab's own view state,
 # including zoom, path, and Markdown folds.
 EXPLORER_TAB_VIEW_MODES = ("source", "preview", "diff")
+EXPLORER_DIFF_MODES = ("worktree", "staged")
 EXPLORER_MAX_TAB_VIEW_IDENTITY_LENGTH = 64
+EXPLORER_MAX_DIFF_COMMIT_LENGTH = 64
 EXPLORER_MAX_MARKDOWN_FOLDS = 256
 EXPLORER_MAX_MARKDOWN_LINE = 1_000_000
 EXPLORER_PREVIEW_TAB_KEY = "__preview__"
@@ -147,6 +149,39 @@ def _normalize_explorer_view_identity(value: Any) -> str:
     return identity if len(identity) <= EXPLORER_MAX_TAB_VIEW_IDENTITY_LENGTH else ""
 
 
+def _normalize_explorer_diff_target(raw_view: Dict[str, Any], mode: str) -> Dict[str, str]:
+    """Return the bounded Git selector for a persisted Diff view."""
+    if mode != "diff":
+        return {}
+    commit = str(raw_view.get("diff_commit") or "").strip()
+    if commit and len(commit) <= EXPLORER_MAX_DIFF_COMMIT_LENGTH and re.fullmatch(
+        r"[0-9a-fA-F]{7,64}", commit
+    ):
+        return {"diff_commit": commit}
+    diff_mode = str(raw_view.get("diff_mode") or "").strip()
+    return {"diff_mode": diff_mode} if diff_mode in EXPLORER_DIFF_MODES else {}
+
+
+def _normalize_explorer_view_snapshot(raw_view: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize mode, scroll, identity, and optional Git diff selector."""
+    mode = str(raw_view.get("mode") or "")
+    if mode not in EXPLORER_TAB_VIEW_MODES:
+        return {}
+    try:
+        scroll = float(raw_view.get("scroll", 0.0))
+    except (TypeError, ValueError):
+        scroll = 0.0
+    if scroll != scroll:  # NaN guard
+        scroll = 0.0
+    record: Dict[str, Any] = {
+        "mode": mode,
+        "scroll": max(0.0, min(1.0, scroll)),
+        "identity": _normalize_explorer_view_identity(raw_view.get("identity")),
+    }
+    record.update(_normalize_explorer_diff_target(raw_view, mode))
+    return record
+
+
 def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str, Any]:
     """Validate the per-tab view map: mode + scroll fraction + identity + zoom.
 
@@ -164,7 +199,7 @@ def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str,
         if not isinstance(raw_view, dict):
             continue
         if str(raw_path) == EXPLORER_PREVIEW_TAB_KEY:
-            record: Dict[str, Any] = {}
+            record = _normalize_explorer_view_snapshot(raw_view)
             font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
             if font_size:
                 record["font_size"] = font_size
@@ -185,19 +220,7 @@ def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str,
         path = _normalize_explorer_tab_path(raw_path)
         if not path or path not in open_tabs or path in views:
             continue
-        record: Dict[str, Any] = {}
-        mode = str(raw_view.get("mode") or "")
-        if mode in EXPLORER_TAB_VIEW_MODES:
-            try:
-                scroll = float(raw_view.get("scroll", 0.0))
-            except (TypeError, ValueError):
-                scroll = 0.0
-            if scroll != scroll:  # NaN guard
-                scroll = 0.0
-            identity = _normalize_explorer_view_identity(raw_view.get("identity"))
-            record["mode"] = mode
-            record["scroll"] = max(0.0, min(1.0, scroll))
-            record["identity"] = identity
+        record = _normalize_explorer_view_snapshot(raw_view)
         font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
         if font_size:
             record["font_size"] = font_size

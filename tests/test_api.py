@@ -1220,6 +1220,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         # The diff host inherits the per-tab editor zoom.
         self.assertIn(".explorer-diff2html {", html)
         self.assertIn("font-size: var(--explorer-editor-font-size, .78rem);", html)
+        self.assertIn(
+            ".explorer-diff2html .d2h-diff-table {\n"
+            "            font-size: inherit;",
+            html,
+        )
         # Original source lines remain unwrapped in two fixed, equal-width
         # panes. A sticky scrollbar controls each side independently.
         self.assertIn(
@@ -1395,8 +1400,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerPersistedTabFontSize(raw)", html)
         self.assertIn("fontSize !== EXPLORER_EDITOR_FONT_DEFAULT", html)
         self.assertIn("tabViews[EXPLORER_PREVIEW_TAB_ID] = previewRecord;", html)
+        self.assertIn("record.diff_mode = diffMode;", html)
+        self.assertIn("record.diff_commit = diffCommit;", html)
+        self.assertIn("const previewView = explorerInflatePersistedTabView(rawPreviewView);", html)
+        self.assertIn("previewTab.view = previewView;", html)
         self.assertIn("previewTab.fontSize = previewFont;", html)
         self.assertIn("record.fontSize = fontSize;", html)
+        self.assertIn("function explorerTabPersistedDiffTarget(tab)", html)
+        self.assertIn("...explorerTabPersistedDiffTarget(previewTab)", html)
         # The saved-session relaunch payload carries the new fields through.
         self.assertIn(
             "explorer_tab_views: startupMode === 'explorer' && terminal?.explorer_tab_views",
@@ -1429,7 +1440,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Restore: the saved Preview path/dir seed the tab record and reopen
         # when no pinned tab was saved as active.
         self.assertIn("previewTab.dirPath = savedPreviewDir;", html)
-        self.assertIn("openExplorerFile(index, savedPreviewPath);", html)
+        self.assertIn("openExplorerFile(index, savedPreviewPath, {", html)
+        self.assertIn("...explorerTabPersistedDiffTarget(previewTab)", html)
         self.assertIn("loadExplorerPane(index, savedPreviewDir);", html)
         # The terminal-close snapshot carries dirPath through the rebuild.
         self.assertIn("dirPath: tab.dirPath || ''", html)
@@ -5778,16 +5790,23 @@ class ApiRoutesTestCase(unittest.TestCase):
                         "folds": [9, 2, 9, 0, "4", True],
                         "fold_identity": "abc123",
                     },
-                    "sub\\b.md": {"mode": "diff", "scroll": 7, "identity": "x" * 100, "font_size": 99},
+                    "sub\\b.md": {
+                        "mode": "diff",
+                        "scroll": 7,
+                        "identity": "x" * 100,
+                        "font_size": 99,
+                        "diff_mode": "staged",
+                    },
                     "c.md": {"mode": "bogus", "scroll": 0.1, "identity": "ok"},
                     "e.md": {"font_size": 12},
                     "../escape.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "not-open.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "d.md": "not-a-dict",
                     "__preview__": {
-                        "mode": "source",
+                        "mode": "diff",
                         "scroll": 0.5,
                         "identity": "zz",
+                        "diff_mode": "worktree",
                         "font_size": 16,
                         "path": "docs\\a.md",
                         "dir": "../escape",
@@ -5823,15 +5842,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         # [0, 1]; oversized identity tokens are dropped rather than restored;
         # font sizes clamp to the editor zoom bounds.
         self.assertEqual(
-            views["sub/b.md"], {"mode": "diff", "scroll": 1.0, "identity": "", "font_size": 24}
+            views["sub/b.md"],
+            {
+                "mode": "diff",
+                "scroll": 1.0,
+                "identity": "",
+                "diff_mode": "staged",
+                "font_size": 24,
+            },
         )
         # A record may carry only a zoom (a zoomed tab whose view was never
-        # captured), and the reserved Preview key keeps zoom plus its own
-        # separated path — file and browsed directory — but no view mode.
+        # captured), and the reserved Preview key keeps its view, zoom, and own
+        # separated path — file and browsed directory.
         self.assertEqual(views["e.md"], {"font_size": 12})
         self.assertEqual(
             views["__preview__"],
             {
+                "mode": "diff",
+                "scroll": 0.5,
+                "identity": "zz",
+                "diff_mode": "worktree",
                 "font_size": 16,
                 "path": "docs/a.md",
                 "folds": [3],
@@ -5898,7 +5928,13 @@ class ApiRoutesTestCase(unittest.TestCase):
                             "explorer_open_tabs": ["docs/a.md"],
                             "explorer_active_tab": "docs/a.md",
                             "explorer_tab_views": {
-                                "docs/a.md": {"mode": "preview", "scroll": 0.25, "identity": "id1"}
+                                "docs/a.md": {
+                                    "mode": "diff",
+                                    "scroll": 0.25,
+                                    "identity": "id1",
+                                    "diff_mode": "staged",
+                                    "font_size": 18,
+                                }
                             },
                             "explorer_md_preset": "paper",
                             "explorer_md_font": "consolas",
@@ -5924,7 +5960,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         config = response.get_json()["config"]
         self.assertEqual(
             config["terminals"][0]["explorer_tab_views"],
-            {"docs/a.md": {"mode": "preview", "scroll": 0.25, "identity": "id1"}},
+            {
+                "docs/a.md": {
+                    "mode": "diff",
+                    "scroll": 0.25,
+                    "identity": "id1",
+                    "diff_mode": "staged",
+                    "font_size": 18,
+                }
+            },
         )
         self.assertEqual(config["terminals"][0]["explorer_md_preset"], "paper")
         self.assertEqual(config["terminals"][0]["explorer_md_font"], "consolas")

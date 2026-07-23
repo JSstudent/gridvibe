@@ -3905,6 +3905,12 @@
                     pane._explorerDiffMode
                 )
                 : explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries),
+            diffCommit: isFile && scroll.activeView === 'diff'
+                ? String(pane._explorerDiffCommit || '')
+                : '',
+            diffMode: isFile && scroll.activeView === 'diff'
+                ? String(pane._explorerDiffMode || '')
+                : '',
             scroll
         };
     }
@@ -4438,7 +4444,8 @@
         }
         const tab = explorerActiveTab(pane);
         if (tab.path) {
-            openExplorerFile(index, tab.path, { tab: tab.id });
+            const diffTarget = explorerTabPersistedDiffTarget(tab);
+            openExplorerFile(index, tab.path, { tab: tab.id, ...diffTarget });
             return;
         }
         if (
@@ -4715,6 +4722,15 @@
                 ? (panel.wasAtBottom ? 1 : Math.max(0, Math.min(1, panel.scrollTopRatio || 0)))
                 : 0;
             record.identity = view.identity;
+            if (view.mode === 'diff') {
+                const diffCommit = String(view.diffCommit || '');
+                const diffMode = String(view.diffMode || '');
+                if (/^[0-9a-f]{7,64}$/i.test(diffCommit)) {
+                    record.diff_commit = diffCommit;
+                } else if (['worktree', 'staged'].includes(diffMode)) {
+                    record.diff_mode = diffMode;
+                }
+            }
         }
         const fontSize = tab.fontSize ? clampExplorerEditorFontSize(tab.fontSize) : 0;
         if (fontSize && fontSize !== EXPLORER_EDITOR_FONT_DEFAULT) {
@@ -4769,15 +4785,37 @@
             return null;
         }
         const fraction = Math.max(0, Math.min(1, Number(raw.scroll) || 0));
+        const diffCommit = mode === 'diff' && /^[0-9a-f]{7,64}$/i.test(String(raw.diff_commit || ''))
+            ? String(raw.diff_commit)
+            : '';
+        const diffMode = mode === 'diff' && !diffCommit && ['worktree', 'staged'].includes(raw.diff_mode)
+            ? raw.diff_mode
+            : '';
         return {
             mode,
             identity,
+            diffCommit,
+            diffMode,
             scroll: {
                 activeView: mode,
                 panels: { [mode]: { scrollTopRatio: fraction, wasAtBottom: fraction >= 0.999 } },
                 sidebar: {}
             }
         };
+    }
+
+    function explorerTabPersistedDiffTarget(tab) {
+        const view = tab && tab.view;
+        if (!view || view.mode !== 'diff') {
+            return {};
+        }
+        if (view.diffCommit) {
+            return { diffCommit: view.diffCommit };
+        }
+        if (view.diffMode) {
+            return { diffMode: view.diffMode };
+        }
+        return {};
     }
 
     function explorerSerializeTabs(pane) {
@@ -4848,10 +4886,14 @@
             ? session.explorer_tab_views
             : {};
         ensureExplorerTabState(pane);
-        /* The Preview tab's zoom, shown file, and browsed directory persist
-           under its reserved id even when no pinned tabs were saved. */
+        /* The Preview tab's view, zoom, shown file, and browsed directory
+           persist under its reserved id even when no pinned tabs were saved. */
         const rawPreviewView = rawViews[EXPLORER_PREVIEW_TAB_ID];
         const previewTab = explorerPreviewTab(pane);
+        const previewView = explorerInflatePersistedTabView(rawPreviewView);
+        if (previewView) {
+            previewTab.view = previewView;
+        }
         const previewFont = explorerPersistedTabFontSize(rawPreviewView);
         if (previewFont) {
             previewTab.fontSize = previewFont;
@@ -4873,7 +4915,10 @@
            the user returns to the tab. */
         const restorePreviewContent = () => {
             if (savedPreviewPath) {
-                openExplorerFile(index, savedPreviewPath);
+                openExplorerFile(index, savedPreviewPath, {
+                    tab: EXPLORER_PREVIEW_TAB_ID,
+                    ...explorerTabPersistedDiffTarget(previewTab)
+                });
             } else if (savedPreviewDir) {
                 loadExplorerPane(index, savedPreviewDir);
             } else {
