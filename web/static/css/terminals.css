@@ -1121,9 +1121,63 @@
             align-items: center;
             gap: 10px;
             flex-shrink: 0;
+            position: relative;
         }
 
         .terminal-status { display: flex; align-items: center; gap: 6px; font-size: .78rem; }
+
+        /* Inline row of foldable header actions (everything except close). */
+        .terminal-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-shrink: 0;
+        }
+
+        /* Overflow toggle: hidden until the header collapses. */
+        .terminal-actions-more-btn { display: none; }
+
+        /* Keep the name legible before collapsing so the fold triggers while the
+           title is still partly visible rather than only once it fully vanishes. */
+        .terminal-info { min-width: 46px; }
+
+        .terminal-container.actions-collapsed .terminal-actions-more-btn {
+            display: inline-flex;
+            align-items: center;
+        }
+
+        /* Collapsed: the action row becomes a dropdown anchored under the ⋯
+           button; only the ⋯ and close buttons stay inline. */
+        .terminal-container.actions-collapsed .terminal-actions {
+            position: absolute;
+            top: calc(100% + 6px);
+            right: 0;
+            z-index: 40;
+            flex-direction: column;
+            align-items: stretch;
+            gap: 6px;
+            padding: 7px;
+            background: var(--t-card-header);
+            border: 1px solid var(--t-border);
+            border-radius: 8px;
+            box-shadow: 0 10px 26px rgba(0, 0, 0, .35);
+            display: none;
+        }
+
+        .terminal-container.actions-collapsed.actions-open .terminal-actions { display: flex; }
+
+        .terminal-container.actions-collapsed .terminal-actions .terminal-action-btn,
+        .terminal-container.actions-collapsed .terminal-actions .voice-control {
+            width: 100%;
+        }
+
+        .terminal-container.actions-collapsed .terminal-actions .voice-control .terminal-action-btn {
+            width: 100%;
+        }
+
+        /* Free header space on tiny panes by dropping the status label text
+           (the coloured status dot still shows). */
+        .terminal-container.actions-collapsed .terminal-status span { display: none; }
 
         .terminal-action-btn {
             border: 1px solid var(--session-color-dim, var(--t-border-tab));
@@ -1523,7 +1577,8 @@
             font-size: .68rem;
         }
 
-        body.surface-max .terminal-meta {
+        body.surface-max .terminal-meta,
+        body.surface-max .terminal-actions {
             gap: 5px;
         }
 

@@ -320,7 +320,10 @@ def _normalize_workspace_layout(data: Any, terminal_count: int) -> Optional[Dict
         return None
 
     rects = []
-    max_grid_line = max(2, runtime_config.max_sessions * 4)
+    # The frontend lays base cells out on an 8-unit grid (SPLIT_CELL_UNIT), so the
+    # densest base (4 columns) spans 4 * 8 = 32 grid lines before any split; keep a
+    # comfortable margin above that and scale with a larger configured max_sessions.
+    max_grid_line = max(64, runtime_config.max_sessions * 8)
     for index, raw_rect in enumerate(raw_rects):
         if not isinstance(raw_rect, dict):
             return None

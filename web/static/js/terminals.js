@@ -467,10 +467,22 @@
     let saveSessionAsResolver = null;
     let closeSessionConfirmResolver = null;
     let genericConfirmResolver = null;
-    const MAX_SPLIT_TERMINALS = Math.min(8, Number(MAX_SESSIONS || 8));
+    const MAX_SPLIT_TERMINALS = Math.min(16, Number(MAX_SESSIONS || 16));
     const MIN_SPLIT_COLS = 8;
-    const MIN_SPLIT_ROWS = 8;
-    const MIN_RESIZE_SURFACE_RATIO = 1 / 8;
+    /* A stacked (horizontal) split must leave each half with at least this many
+       rows *after* its own header is subtracted, so this floor — not the column
+       floor — is what gates stacking. Kept low (4 rows) so a normal wide pane can
+       still be stacked two or three deep instead of only side-by-side; a terminal
+       narrower/shorter than the floors simply can't be split further. */
+    const MIN_SPLIT_ROWS = 4;
+    const MIN_RESIZE_SURFACE_RATIO = 1 / 16;
+    /* Grid-unit size of one base layout cell. Larger = more headroom to keep
+       halving a pane before the integer-grid `>= 2` guard bites, so splitting is
+       gated by the real character-size minimum rather than the coordinate
+       resolution. A single pane is two cells wide by one tall, so the densest
+       base (4 columns) spans 4 * SPLIT_CELL_UNIT grid lines — kept within the
+       backend's split-layout coordinate bound (see saved_sessions.py). */
+    const SPLIT_CELL_UNIT = 8;
     let splitSlotRects = null;
     let splitColumnWeights = null;
     let splitRowWeights = null;
@@ -622,6 +634,7 @@
         const observer = new ResizeObserver(() => {
             scheduleFit(index);
             updateSplitButtonState(index);
+            updatePaneHeaderLayout(index);
             renderResizeHandles();
         });
         observer.observe(wrapper);
@@ -2848,30 +2861,31 @@
     }
 
     function fixedLayoutSlotRects(count, layoutClass = '') {
+        const unit = SPLIT_CELL_UNIT;
         originalSplitSlotCount = Math.max(originalSplitSlotCount, count);
         if (count === 1) {
-            return [makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 4, h: 2 })];
+            return [makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 2 * unit, h: unit })];
         }
         if (count === 2 && layoutClass.includes('horizontal')) {
             return [
-                makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 4, h: 2 }),
-                makeSplitLeaf({ originSlot: 1, x: 1, y: 3, w: 4, h: 2 }),
+                makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 2 * unit, h: unit }),
+                makeSplitLeaf({ originSlot: 1, x: 1, y: 1 + unit, w: 2 * unit, h: unit }),
             ];
         }
         if (count === 2) {
             return [
-                makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 2, h: 2 }),
-                makeSplitLeaf({ originSlot: 1, x: 3, y: 1, w: 2, h: 2 }),
+                makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: unit, h: unit }),
+                makeSplitLeaf({ originSlot: 1, x: 1 + unit, y: 1, w: unit, h: unit }),
             ];
         }
 
         const base = getBaseLayoutSlots(count, layoutClass);
         return base.slots.map((slot, index) => makeSplitLeaf({
             originSlot: index,
-            x: 1 + (slot.col - 1) * 2,
-            y: 1 + (slot.row - 1) * 2,
-            w: slot.colSpan * 2,
-            h: slot.rowSpan * 2,
+            x: 1 + (slot.col - 1) * unit,
+            y: 1 + (slot.row - 1) * unit,
+            w: slot.colSpan * unit,
+            h: slot.rowSpan * unit,
         }));
     }
 
@@ -3023,20 +3037,6 @@
             candidates.push('horizontal');
         }
         return candidates;
-    }
-
-    function chooseSplitAxis(index, rect) {
-        const candidates = getSplitCandidates(index, rect);
-        if (candidates.length === 0) {
-            return '';
-        }
-        /* Split each pane along its own longer edge; if that axis is too small
-           to split but the other still fits, fall back to it rather than
-           blocking the split entirely. */
-        const card = document.getElementById(`tc-${index}`);
-        const bounds = card?.getBoundingClientRect();
-        const preferred = bounds && bounds.height > bounds.width ? 'horizontal' : 'vertical';
-        return candidates.includes(preferred) ? preferred : candidates[0];
     }
 
     function splitSlotRect(rect, axis) {
@@ -3356,39 +3356,70 @@
         };
     }
 
-    function updateSplitButtonState(index) {
-        const button = document.getElementById(`tsplit-${index}`);
+    function applySplitButtonState(button, enabled, activeTitle, disabledReason) {
         if (!button) {
+            return;
+        }
+        button.hidden = false;
+        button.disabled = !enabled;
+        button.title = enabled ? activeTitle : disabledReason;
+        button.setAttribute('aria-label', button.title);
+    }
+
+    function getSplitDisabledReason(axis) {
+        if (window.innerWidth <= 700) {
+            return 'Splitting is disabled on narrow screens';
+        }
+        if (terminals.length >= MAX_SPLIT_TERMINALS) {
+            return `Splitting is limited to ${MAX_SPLIT_TERMINALS} terminal panes`;
+        }
+        return axis === 'horizontal'
+            ? `Stacked split needs at least ${MIN_SPLIT_ROWS} rows below each terminal header`
+            : `Side-by-side split needs at least ${MIN_SPLIT_COLS} columns in each terminal`;
+    }
+
+    function updateSplitButtonState(index) {
+        const vButton = document.getElementById(`tsplitv-${index}`);
+        const hButton = document.getElementById(`tsplith-${index}`);
+        if (!vButton && !hButton) {
             return;
         }
 
         if (isExplorerSession(terminals[index]?._session) || isBrowserSession(terminals[index]?._session)) {
-            button.hidden = true;
-            button.disabled = true;
+            [vButton, hButton].forEach(button => {
+                if (button) {
+                    button.hidden = true;
+                    button.disabled = true;
+                }
+            });
             return;
         }
 
-        button.hidden = false;
         const grid = document.getElementById('terminalsGrid');
         const card = document.getElementById(`tc-${index}`);
         const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
         const rects = visualIndex >= 0 ? ensureSplitSlotRects() : [];
         const rect = rects[visualIndex];
-        const axis = rect ? chooseSplitAxis(index, rect) : '';
-        const disabledReason = window.innerWidth <= 700
-            ? 'Splitting is disabled on narrow screens'
-            : terminals.length >= MAX_SPLIT_TERMINALS
-                ? `Splitting is limited to ${MAX_SPLIT_TERMINALS} terminal panes`
-                : 'This pane is already at the smallest split size';
+        const candidates = rect ? getSplitCandidates(index, rect) : [];
 
-        button.disabled = !axis;
-        button.title = axis ? 'Split this terminal pane' : disabledReason;
-        button.setAttribute('aria-label', button.title);
+        applySplitButtonState(
+            vButton,
+            candidates.includes('vertical'),
+            'Split into side-by-side panes',
+            getSplitDisabledReason('vertical')
+        );
+        applySplitButtonState(
+            hButton,
+            candidates.includes('horizontal'),
+            'Split into stacked panes',
+            getSplitDisabledReason('horizontal')
+        );
     }
 
     function updateAllSplitButtonStates() {
         terminals.forEach((_, index) => {
             updateSplitButtonState(index);
+            updatePaneHeaderLayout(index);
         });
     }
 
@@ -4024,6 +4055,75 @@
         return button;
     }
 
+    /* Wire the two split controls to their explicit axes and the overflow toggle.
+       Shared by the initial pane build, split-clone cards, and mode switches. */
+    function wireSplitButtons(card, index) {
+        wireCardButton(card, `[data-terminal-split-v="${index}"]`, () => splitTerminalPane(index, 'vertical'));
+        wireCardButton(card, `[data-terminal-split-h="${index}"]`, () => splitTerminalPane(index, 'horizontal'));
+    }
+
+    function wirePaneMoreButton(card, index) {
+        wireCardButton(card, `[data-terminal-actions-more="${index}"]`, () => togglePaneActionsMenu(index));
+        /* Selecting any folded action closes the overflow menu. Capture phase so
+           it still runs even though the button handlers stopPropagation. */
+        const actions = card.querySelector(`#tactions-${index}`);
+        if (actions) {
+            actions.addEventListener('click', event => {
+                if (event.target.closest('.terminal-action-btn')) {
+                    closeAllPaneActionMenus();
+                }
+            }, true);
+        }
+    }
+
+    function closeAllPaneActionMenus(exceptIndex = -1) {
+        document.querySelectorAll('.terminal-container.actions-open').forEach(card => {
+            if (card.id === `tc-${exceptIndex}`) {
+                return;
+            }
+            card.classList.remove('actions-open');
+            const more = card.querySelector('.terminal-actions-more-btn');
+            more?.setAttribute('aria-expanded', 'false');
+        });
+    }
+
+    function togglePaneActionsMenu(index) {
+        const card = document.getElementById(`tc-${index}`);
+        if (!card) {
+            return;
+        }
+        const willOpen = !card.classList.contains('actions-open');
+        closeAllPaneActionMenus(index);
+        card.classList.toggle('actions-open', willOpen);
+        const more = card.querySelector('.terminal-actions-more-btn');
+        more?.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    }
+
+    /* Fold every header action except close into the overflow menu when the
+       inline row no longer fits — the "buttons clip when the pane is tiny" fix.
+       Measured against the header's own width so it tracks the real pixel size
+       of each pane (a pane below ~1/8 of the surface collapses first). */
+    function updatePaneHeaderLayout(index) {
+        const card = document.getElementById(`tc-${index}`);
+        if (!card) {
+            return;
+        }
+        const header = card.querySelector('.terminal-header');
+        const actions = card.querySelector('.terminal-actions');
+        if (!header || !actions) {
+            return;
+        }
+        /* Measure with the actions inline; the class is re-applied synchronously
+           in the same frame so the intermediate state never paints. */
+        card.classList.remove('actions-collapsed');
+        const overflowing = header.scrollWidth - header.clientWidth > 1;
+        card.classList.toggle('actions-collapsed', overflowing);
+        if (!overflowing && card.classList.contains('actions-open')) {
+            card.classList.remove('actions-open');
+            card.querySelector('.terminal-actions-more-btn')?.setAttribute('aria-expanded', 'false');
+        }
+    }
+
     function buildGrid(sessions, layout) {
         const grid  = document.getElementById('terminalsGrid');
         const count = sessions.length;
@@ -4066,6 +4166,54 @@
         renderResizeHandles();
     }
 
+    /* Two explicit split controls — one for a side-by-side (vertical divider)
+       split, one for a stacked (horizontal divider) split — so the axis is the
+       user's choice rather than an inferred guess. */
+    function splitButtonsHtml(index) {
+        return `
+            <button
+                type="button"
+                class="terminal-action-btn terminal-split-btn terminal-split-v-btn"
+                id="tsplitv-${index}"
+                data-terminal-split-v="${index}"
+                title="Split into side-by-side panes"
+                aria-label="Split into side-by-side panes"
+            >
+                ${SPLIT_VERTICAL_ICON}
+            </button>
+            <button
+                type="button"
+                class="terminal-action-btn terminal-split-btn terminal-split-h-btn"
+                id="tsplith-${index}"
+                data-terminal-split-h="${index}"
+                title="Split into stacked panes"
+                aria-label="Split into stacked panes"
+            >
+                ${SPLIT_HORIZONTAL_ICON}
+            </button>
+        `;
+    }
+
+    /* Overflow toggle that reveals the folded header actions on panes too small
+       to show them inline. Hidden until the header collapses; the close button
+       always stays outside the fold. */
+    function paneMoreButtonHtml(index) {
+        return `
+            <button
+                type="button"
+                class="terminal-action-btn terminal-actions-more-btn"
+                id="tmore-${index}"
+                data-terminal-actions-more="${index}"
+                title="More actions"
+                aria-label="More actions"
+                aria-haspopup="true"
+                aria-expanded="false"
+            >
+                ${TERMINAL_MORE_ICON}
+            </button>
+        `;
+    }
+
     /* Card DOM for one pane (terminal / explorer / browser); wiring happens
        in wirePaneControls so this stays a pure element builder. */
     function buildPaneCard(session, i) {
@@ -4103,84 +4251,76 @@
                             <div class="status-dot pending" id="tdot-${i}"></div>
                             <span id="tlabel-${i}">Pending</span>
                         </div>
-                        <button
-                            type="button"
-                            class="terminal-action-btn"
-                            id="trefresh-${i}"
-                            data-terminal-refresh="${i}"
-                            title="${isBrowser ? 'Reload browser pane' : 'Reset this terminal view and replay recent output'}"
-                        >
-                            ${TERMINAL_REFRESH_ICON}
-                        </button>
-                        ${!isBrowser ? `
-                        <button
-                            type="button"
-                            class="terminal-action-btn terminal-mode-toggle-btn"
-                            id="tmode-${i}"
-                            data-session-mode-toggle="${i}"
-                            title="${isExplorer ? 'Open terminal in current explorer directory' : 'Open file explorer for this terminal directory'}"
-                            aria-label="${isExplorer ? 'Open terminal in current explorer directory' : 'Open file explorer for this terminal directory'}"
-                        >
-                            ${isExplorer ? TERMINAL_PROMPT_ICON : EXPLORER_MODE_FOLDER_ICON}
-                        </button>
-                        ` : ''}
-                        ${session.mode === 'wsl' && !isExplorer ? `
+                        <div class="terminal-actions" id="tactions-${i}">
                             <button
                                 type="button"
-                                class="terminal-action-btn terminal-browser-toggle-btn"
-                                id="tbrowsermode-${i}"
-                                data-session-browser-toggle="${i}"
-                                title="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
-                                aria-label="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
+                                class="terminal-action-btn"
+                                id="trefresh-${i}"
+                                data-terminal-refresh="${i}"
+                                title="${isBrowser ? 'Reload browser pane' : 'Reset this terminal view and replay recent output'}"
                             >
-                                ${isBrowser ? TERMINAL_PROMPT_ICON : BROWSER_MODE_GLOBE_ICON}
+                                ${TERMINAL_REFRESH_ICON}
                             </button>
-                        ` : ''}
-                        ${!isExplorer && !isBrowser ? `
+                            ${!isBrowser ? `
                             <button
                                 type="button"
-                                class="terminal-action-btn terminal-split-btn"
-                                id="tsplit-${i}"
-                                data-terminal-split="${i}"
-                                title="Split this terminal pane"
-                                aria-label="Split this terminal pane"
+                                class="terminal-action-btn terminal-mode-toggle-btn"
+                                id="tmode-${i}"
+                                data-session-mode-toggle="${i}"
+                                title="${isExplorer ? 'Open terminal in current explorer directory' : 'Open file explorer for this terminal directory'}"
+                                aria-label="${isExplorer ? 'Open terminal in current explorer directory' : 'Open file explorer for this terminal directory'}"
                             >
-                                ⊞
+                                ${isExplorer ? TERMINAL_PROMPT_ICON : EXPLORER_MODE_FOLDER_ICON}
                             </button>
-                        ` : ''}
-                        ${isExplorer ? `
+                            ` : ''}
+                            ${session.mode === 'wsl' && !isExplorer ? `
+                                <button
+                                    type="button"
+                                    class="terminal-action-btn terminal-browser-toggle-btn"
+                                    id="tbrowsermode-${i}"
+                                    data-session-browser-toggle="${i}"
+                                    title="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
+                                    aria-label="${isBrowser ? 'Return to terminal' : 'Open browser preview'}"
+                                >
+                                    ${isBrowser ? TERMINAL_PROMPT_ICON : BROWSER_MODE_GLOBE_ICON}
+                                </button>
+                            ` : ''}
+                            ${!isExplorer && !isBrowser ? splitButtonsHtml(i) : ''}
+                            ${isExplorer ? `
+                                <button
+                                    type="button"
+                                    class="terminal-action-btn explorer-theme-btn"
+                                    id="texplorertheme-${i}"
+                                    data-explorer-theme-toggle="${i}"
+                                    title="Dark explorer theme"
+                                    aria-label="Dark explorer theme"
+                                    aria-pressed="false"
+                                >
+                                    ${THEME_MOON_ICON}
+                                </button>
+                            ` : ''}
                             <button
                                 type="button"
-                                class="terminal-action-btn explorer-theme-btn"
-                                id="texplorertheme-${i}"
-                                data-explorer-theme-toggle="${i}"
-                                title="Dark explorer theme"
-                                aria-label="Dark explorer theme"
-                                aria-pressed="false"
+                                class="terminal-action-btn"
+                                id="tclear-${i}"
+                                data-terminal-clear="${i}"
+                                title="Clear this terminal and purge its replay buffer"
                             >
-                                ${THEME_MOON_ICON}
+                                ${TERMINAL_CLEAR_ICON}
                             </button>
-                        ` : ''}
-                        <button
-                            type="button"
-                            class="terminal-action-btn"
-                            id="tclear-${i}"
-                            data-terminal-clear="${i}"
-                            title="Clear this terminal and purge its replay buffer"
-                        >
-                            ${TERMINAL_CLEAR_ICON}
-                        </button>
-                        <div class="voice-control" data-terminal-voice-control="${i}" ${_voiceServiceStatus.enabled ? '' : 'hidden'}>
-                            <button
-                                type="button"
-                                class="terminal-action-btn voice-btn"
-                                id="tvoice-${i}"
-                                data-terminal-voice="${i}"
-                                title="Voice input (click to start recording)"
-                            >
-                                ${VOICE_MIC_ICON}
-                            </button>
+                            <div class="voice-control" data-terminal-voice-control="${i}" ${_voiceServiceStatus.enabled ? '' : 'hidden'}>
+                                <button
+                                    type="button"
+                                    class="terminal-action-btn voice-btn"
+                                    id="tvoice-${i}"
+                                    data-terminal-voice="${i}"
+                                    title="Voice input (click to start recording)"
+                                >
+                                    ${VOICE_MIC_ICON}
+                                </button>
+                            </div>
                         </div>
+                        ${paneMoreButtonHtml(i)}
                         <button
                             type="button"
                             class="terminal-action-btn terminal-close-btn"
@@ -4272,7 +4412,8 @@
         }
         wireCardButton(card, `[data-session-browser-toggle="${i}"]`, () => switchSessionBrowserMode(i));
         wireCardButton(card, `[data-session-mode-toggle="${i}"]`, () => switchSessionPaneMode(i));
-        wireCardButton(card, `[data-terminal-split="${i}"]`, () => splitTerminalPane(i));
+        wireSplitButtons(card, i);
+        wirePaneMoreButton(card, i);
         const explorerThemeButton = wireCardButton(
             card, `[data-explorer-theme-toggle="${i}"]`, () => toggleExplorerTheme(i)
         );
@@ -4578,15 +4719,8 @@
             });
         }
 
-        const splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
-        if (splitButton) {
-            stopHeaderButtonDrag(splitButton);
-            splitButton.addEventListener('click', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                splitTerminalPane(index);
-            });
-        }
+        wireSplitButtons(card, index);
+        wirePaneMoreButton(card, index);
 
         const clearButton = card.querySelector(`[data-terminal-clear="${index}"]`);
         if (clearButton) {
@@ -4623,7 +4757,7 @@
 
     function createSplitTerminalCard(sourceCard, session, sourceIndex, targetIndex) {
         const card = sourceCard.cloneNode(true);
-        card.classList.remove('dragging', 'drag-target', 'explorer-pane', 'browser-pane');
+        card.classList.remove('dragging', 'drag-target', 'explorer-pane', 'browser-pane', 'actions-collapsed', 'actions-open');
         card.id = `tc-${targetIndex}`;
         card.dataset.slot = String(targetIndex);
         delete card.dataset.explorerThemeKey;
@@ -4653,11 +4787,9 @@
         if (label) {
             label.textContent = session.status === 'connected' ? 'Connected' : 'Pending';
         }
-        const splitButton = card.querySelector(`#tsplit-${targetIndex}`);
-        if (splitButton) {
-            splitButton.textContent = '⊞';
-            splitButton.disabled = false;
-        }
+        card.querySelectorAll(`#tsplitv-${targetIndex}, #tsplith-${targetIndex}`).forEach(button => {
+            button.disabled = false;
+        });
 
         const wrapper = card.querySelector(`#tw-${targetIndex}`);
         if (wrapper) {
@@ -4721,11 +4853,8 @@
     }
 
     function setTerminalOnlyControlsVisible(card, visible) {
-        ['data-terminal-split'].forEach(attribute => {
-            const button = card.querySelector(`[${attribute}]`);
-            if (button) {
-                button.hidden = !visible;
-            }
+        card.querySelectorAll('[data-terminal-split-v], [data-terminal-split-h]').forEach(button => {
+            button.hidden = !visible;
         });
     }
 
@@ -4998,9 +5127,9 @@
     }
 
     function ensureSplitControls(card, index) {
-        let splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
-        if (splitButton) {
-            splitButton.hidden = false;
+        const existing = card.querySelectorAll(`[data-terminal-split-v="${index}"], [data-terminal-split-h="${index}"]`);
+        if (existing.length) {
+            existing.forEach(button => { button.hidden = false; });
             return;
         }
 
@@ -5009,28 +5138,8 @@
             return;
         }
 
-        modeButton.insertAdjacentHTML('afterend', `
-            <button
-                type="button"
-                class="terminal-action-btn terminal-split-btn"
-                id="tsplit-${index}"
-                data-terminal-split="${index}"
-                title="Split this terminal pane"
-                aria-label="Split this terminal pane"
-            >
-                ⊞
-            </button>
-        `);
-
-        splitButton = card.querySelector(`[data-terminal-split="${index}"]`);
-        if (splitButton) {
-            stopHeaderButtonDrag(splitButton);
-            splitButton.addEventListener('click', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                splitTerminalPane(index);
-            });
-        }
+        modeButton.insertAdjacentHTML('afterend', splitButtonsHtml(index));
+        wireSplitButtons(card, index);
     }
 
     function replacePaneWithExplorer(index, session) {
@@ -5561,12 +5670,15 @@
         }
     }
 
-    async function splitTerminalPane(index) {
+    async function splitTerminalPane(index, axis) {
         const sourceSessionId = sessionIds[index];
         const sourceTerminal = terminals[index];
         const sourceCard = document.getElementById(`tc-${index}`);
         const grid = document.getElementById('terminalsGrid');
-        const button = document.getElementById(`tsplit-${index}`);
+        const splitButtons = sourceCard
+            ? sourceCard.querySelectorAll(`[data-terminal-split-v="${index}"], [data-terminal-split-h="${index}"]`)
+            : [];
+        closeAllPaneActionMenus();
         if (!sourceSessionId || !sourceTerminal || !sourceCard || !grid || isExplorerSession(sourceTerminal._session)) {
             return;
         }
@@ -5582,16 +5694,13 @@
 
         const rects = ensureSplitSlotRects();
         const sourceRect = rects[visualIndex];
-        const axis = sourceRect ? chooseSplitAxis(index, sourceRect) : '';
-        if (!axis) {
+        const candidates = sourceRect ? getSplitCandidates(index, sourceRect) : [];
+        if (!axis || !candidates.includes(axis)) {
             updateSplitButtonState(index);
             return;
         }
 
-        if (button) {
-            button.disabled = true;
-            button.textContent = '...';
-        }
+        splitButtons.forEach(button => { button.disabled = true; });
 
         try {
             const response = await fetch(`/api/sessions/${encodeURIComponent(sourceSessionId)}/split`, {
@@ -5652,9 +5761,6 @@
                 label.textContent = `Split failed: ${error.message}`;
             }
         } finally {
-            if (button) {
-                button.textContent = '⊞';
-            }
             updateAllSplitButtonStates();
         }
     }
@@ -6692,8 +6798,22 @@
     window.addEventListener('resize', () => {
         terminals.forEach((terminal, index) => {
             if (terminal._attached) scheduleFit(index);
+            updatePaneHeaderLayout(index);
         });
         renderResizeHandles();
+    });
+
+    /* Dismiss any open header overflow menu on an outside click or Escape. */
+    document.addEventListener('pointerdown', event => {
+        if (event.target.closest('.terminal-actions-more-btn') || event.target.closest('.terminal-container.actions-open .terminal-actions')) {
+            return;
+        }
+        closeAllPaneActionMenus();
+    });
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            closeAllPaneActionMenus();
+        }
     });
     window.addEventListener('pointermove', updateGridResize);
     window.addEventListener('pointerup', finishGridResize);

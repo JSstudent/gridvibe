@@ -7870,20 +7870,70 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("var(--t-text)", html)
         self.assertIn("var(--t-border)", html)
 
-    def test_terminals_page_splits_the_longer_pane_dimension(self):
+    def test_terminals_page_exposes_two_explicit_split_controls(self):
         response = self.client.get("/terminals")
         html = self._page_html(response)
-        # Each pane splits along its own longer edge, independent of the base
-        # launcher layout or any split ancestry.
         self.assertIn(
-            "const preferred = bounds && bounds.height > bounds.width ? 'horizontal' : 'vertical';",
+            "const MAX_SPLIT_TERMINALS = Math.min(16, Number(MAX_SESSIONS || 16));",
             html,
         )
-        # When the preferred axis is too small to split, fall back to whichever
-        # axis still fits rather than blocking the split.
-        self.assertIn("return candidates.includes(preferred) ? preferred : candidates[0];", html)
-        # The old base-layout-specific forced-horizontal heuristic is gone.
+        # Two split buttons — one per axis — replace the single auto-axis button,
+        # each wired to an explicit axis (no inferred guess).
+        self.assertIn('data-terminal-split-v="${index}"', html)
+        self.assertIn('data-terminal-split-h="${index}"', html)
+        self.assertIn("splitTerminalPane(index, 'vertical')", html)
+        self.assertIn("splitTerminalPane(index, 'horizontal')", html)
+        self.assertIn("async function splitTerminalPane(index, axis)", html)
+        # Each axis button enables independently from the per-axis candidates.
+        self.assertIn("candidates.includes('vertical'),", html)
+        self.assertIn("candidates.includes('horizontal'),", html)
+        # The old single-axis auto-picker is gone.
+        self.assertNotIn("function chooseSplitAxis", html)
         self.assertNotIn("grid?.classList.contains('layout-2-vertical')", html)
+
+    def test_terminals_page_explains_axis_specific_split_minimums(self):
+        response = self.client.get("/terminals")
+        html = self._page_html(response)
+        self.assertIn("function getSplitDisabledReason(axis)", html)
+        self.assertIn(
+            "Stacked split needs at least ${MIN_SPLIT_ROWS} rows below each terminal header",
+            html,
+        )
+        self.assertIn(
+            "Side-by-side split needs at least ${MIN_SPLIT_COLS} columns in each terminal",
+            html,
+        )
+        self.assertIn("getSplitDisabledReason('vertical')", html)
+        self.assertIn("getSplitDisabledReason('horizontal')", html)
+
+    def test_terminals_page_base_layout_leaves_room_for_stacked_splits(self):
+        response = self.client.get("/terminals")
+        html = self._page_html(response)
+        # Base cells use a coarse-enough grid unit that a single pane can be
+        # stacked several times before the integer `>= 2` guard bites, so
+        # horizontal (stacked) splits are not capped at a single level.
+        self.assertIn("const SPLIT_CELL_UNIT = 8;", html)
+        self.assertIn("makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 2 * unit, h: unit })", html)
+        self.assertIn("y: 1 + (slot.row - 1) * unit,", html)
+        self.assertIn("h: slot.rowSpan * unit,", html)
+
+    def test_terminals_page_folds_header_actions_into_overflow_menu(self):
+        response = self.client.get("/terminals")
+        html = self._page_html(response)
+        # Foldable actions live in their own group; the ⋯ toggle and the close
+        # button stay outside it so close is always reachable.
+        self.assertIn('class="terminal-actions" id="tactions-${i}"', html)
+        self.assertIn('data-terminal-actions-more="${index}"', html)
+        self.assertIn("function updatePaneHeaderLayout(index)", html)
+        self.assertIn("function togglePaneActionsMenu(index)", html)
+        self.assertIn("function closeAllPaneActionMenus(exceptIndex = -1)", html)
+        # Collapse is driven by real header overflow, not a fixed breakpoint.
+        self.assertIn("const overflowing = header.scrollWidth - header.clientWidth > 1;", html)
+        self.assertIn("card.classList.toggle('actions-collapsed', overflowing);", html)
+        # The close button is never inside the foldable actions group.
+        actions_open = html.index('class="terminal-actions" id="tactions-${i}"')
+        actions_close = html.index("${paneMoreButtonHtml(i)}", actions_open)
+        self.assertNotIn('data-terminal-close="${i}"', html[actions_open:actions_close])
 
     def test_terminals_page_exposes_grid_resize_handles(self):
         response = self.client.get("/terminals")
@@ -7916,7 +7966,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_terminals_page_resize_validation_enforces_minimums(self):
         response = self.client.get("/terminals")
         html = self._page_html(response)
-        self.assertIn("const MIN_RESIZE_SURFACE_RATIO = 1 / 8;", html)
+        self.assertIn("const MIN_RESIZE_SURFACE_RATIO = 1 / 16;", html)
         self.assertIn(
             "const minimumSurface = metrics.columnTrackSpace * metrics.rowTrackSpace * MIN_RESIZE_SURFACE_RATIO;",
             html,

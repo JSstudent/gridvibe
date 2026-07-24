@@ -59,6 +59,13 @@ def _resolve_cors_origins():
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 app.config["SECRET_KEY"] = _resolve_secret_key()
 app.config['JSON_SORT_KEYS'] = False
+# Static assets (terminals.js/css, …) are cache-busted only by ``?v={{ version }}``,
+# which is a fixed app version — so an edited JS/CSS file keeps the same URL and a
+# long-lived cache (notably the desktop WebView2 profile, which survives restarts)
+# serves the stale copy. On a local, single-user tool the revalidation cost over
+# localhost is negligible, so force the client to revalidate every load and always
+# pick up edits.
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
 # Initialize SocketIO
 socketio = SocketIO(app, cors_allowed_origins=_resolve_cors_origins(), async_mode="threading")
