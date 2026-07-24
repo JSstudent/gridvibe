@@ -1,36 +1,53 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-19
+Last updated: 2026-07-24
 
 ## Open Issues
+
+### Issue ID: ISSUE-2026-037
+- Title: SSH workspace restore still mishandles unavailable credentials and reports relaunch as connection success
+- Priority: High
+- Status: Open
+- Area: `web/static/js/launcher.js`, `web/api.py`, `web/runtime_state.py`, `web/saved_sessions.py`, `tests/test_api.py`
+- Assignee: Unassigned
+- Tags: `security`, `session`, `launcher`, `terminal`, `ssh`, `logging`, `tests`
+- Reported: 2026-07-24
+
+Description:
+The named-preset password restore failure from ISSUE-2026-036 was fixed by commit `7134da1`: restore now fetches a referenced named preset and rebuilds its SSH panes with the saved password. Several adjacent gaps remain. Ad-hoc SSH groups, groups associated with the blank built-in default, and groups whose referenced preset was deleted or cannot be loaded still replay the deliberately password-free runtime snapshot and may be launched without usable authentication. The launcher counts a `201` session-record creation response as a successful restore even though SSH authentication runs asynchronously and may immediately fail. In addition, the current preset-backed fix returns the decrypted password to the browser and posts it back through `/api/sessions`; `create_sessions()` logs the complete request body, which can write that plaintext password to `logs/gridvibe.log`. Existing restore coverage checks JavaScript source strings rather than exercising credential rehydration and connection outcomes end to end.
+
+Steps to reproduce:
+1. Launch a password-authenticated SSH workspace from edited built-in/default launcher fields without saving it as a named preset, or capture a named-preset workspace and then delete that preset.
+2. Save the workspace, restart GridVibe, and click **Restore** in the previous-workspace banner.
+3. Observe that restore falls back to the password-free snapshot, `POST /api/sessions` returns `201`, and the launcher reports the group as restored before its SSH connection result is known.
+4. Observe that affected terminal, agent, or remote Explorer panes can fail with an authentication error and no in-page credential/retry flow.
+5. For any password-authenticated launch or named-preset restore, inspect `logs/gridvibe.log` and observe that the `POST /api/sessions body=...` entry can contain the plaintext request password.
+
+Expected behavior:
+`runtime_state.json` must remain free of credentials. When a matching named preset exists, restore should resolve and validate its credential on the server and apply it only to the in-memory launch configuration. Decrypted passwords must not be returned to the browser unnecessarily or written to request/session logs. If no reusable credential exists, key/agent authentication may still be attempted, but an authentication failure must produce a clear in-page retry or credential flow. The launcher should describe a `201` response as a relaunch being started, or wait for connection outcomes, rather than claiming the remote workspace was successfully restored.
+
+Actual behavior / logs:
+`buildRestoreGroupBody()` fetches and replays a non-default named preset, but explicitly returns the password-free `snapshotBody` for an empty/default `saved_session_id` and also falls back to it when the preset request fails. `restorePreviousWorkspace()` increments its success count solely from `response.ok`, while `create_sessions()` starts `_connect_session` in background tasks after creating the group. `GET /api/saved-sessions/<id>` currently returns the decrypted config to the client, `buildSessionsFromConfig()` copies `config.ssh.password` into the POST body, and `create_sessions()` logs that body without credential redaction.
+
+### Proposed solution:
+Add an explicit server-side restore contract that accepts the password-free snapshot plus `saved_session_id`, resolves the preset through `load_saved_sessions()` / `_find_saved_session_entry()`, and rehydrates only an SSH preset whose host, username, and port match the snapshot target. Redact or remove full request-body logging for credential-bearing endpoints, and ensure no response or log exposes the rehydrated password. Return per-group launch state that distinguishes records created from connections established, or change the launcher copy to state that reconnection has started and let room-scoped `session_status` events surface failures with retry. Add functional tests for named-preset password rehydration without disclosure, ad-hoc/default and missing/mismatched/decryption-failed presets, key/agent authentication, remote Explorer and agent panes, multiple groups, asynchronous authentication failure messaging, and log redaction.
+
+## Closed Issues
 
 ### Issue ID: ISSUE-2026-036
 - Title: Restart restore launches password-auth SSH sessions without credentials
 - Priority: High
-- Status: Open
+- Status: Closed
 - Area: `web/static/js/launcher.js`, `web/runtime_state.py`, `web/api.py`, `web/saved_sessions.py`, `tests/test_api.py`
 - Assignee: Unassigned
 - Tags: `session`, `launcher`, `terminal`, `ssh`, `tests`
 - Reported: 2026-07-17
+- Closed: 2026-07-24
 
 Description:
-Restoring the previous workspace after a GridVibe restart cannot reconnect remote SSH sessions that require password authentication. The runtime snapshot correctly excludes passwords, but the restore flow replays its session entries directly through `POST /api/sessions` without rehydrating the encrypted password from the referenced saved-session preset or asking the user to authenticate. GridVibe creates the session groups and reports them as restored even though their SSH connections immediately fail, leaving every affected terminal and remote Explorer pane unusable. Key-authenticated SSH sessions are not necessarily affected.
+Restoring a named saved SSH workspace after a GridVibe restart replayed the password-free runtime snapshot directly through `POST /api/sessions`. Although the snapshot retained `saved_session_id`, restore did not reload the referenced preset, so password-authenticated terminal, agent, and remote Explorer panes failed with `No authentication methods available`.
 
-Steps to reproduce:
-1. Save and launch a remote SSH workspace that authenticates with a password, then close GridVibe while the workspace is active so `runtime_state.json` captures its group and `saved_session_id`.
-2. Restart GridVibe and click **Restore** in the previous-workspace banner.
-3. Observe that the launcher submits the password-free snapshot, reports the group as restored after `POST /api/sessions` returns `201`, and opens the terminal workspace.
-4. Observe that each restored SSH terminal or remote Explorer pane fails to connect with `No authentication methods available`.
-
-Expected behavior:
-The restart restore flow should keep `runtime_state.json` free of secrets while securely reusing the encrypted password from the matching saved-session preset when one is available. If no reusable credential exists, GridVibe should request authentication in an in-page flow or present a clear retryable failure instead of launching doomed sessions. A group should not be reported as successfully restored merely because its session records were created before the SSH connection result is known.
-
-Actual behavior / logs:
-The captured restore requests contain a valid `saved_session_id`, SSH host, username, port, and directories, but no `password`. GridVibe then logs `paramiko.connect ... password=None`, followed by `Failed to connect SSH session ...: No authentication methods available` for every restored remote pane. Agent preflight fails for the same reason and clears the startup command. Despite those asynchronous failures, `POST /api/sessions` returns `201`, so `restorePreviousWorkspace()` increments its success count from `response.ok` and can display `Restored ... from the previous workspace.` Code inspection confirms `_SESSION_SNAPSHOT_FIELDS` in `web/runtime_state.py` deliberately omits `password`; `restorePreviousWorkspace()` in `web/static/js/launcher.js` posts `group.sessions` unchanged; and `create_sessions()` in `web/api.py` retains `saved_session_id` as group metadata but does not resolve it through `load_saved_sessions()` or `_find_saved_session_entry()` to populate the in-memory SSH password. Existing runtime-restore tests cover only a local Explorer group and assert password-free persistence, so they do not exercise password-authenticated SSH restore.
-
-### Proposed solution:
-Keep passwords out of `runtime_state.json` and add a server-side restore preparation path that resolves each SSH group's normalized `saved_session_id` through `load_saved_sessions()` / `_find_saved_session_entry()`, decrypts the preset password using the existing `web/secrets.py` flow, and applies it only to the in-memory launch configuration after validating that the preset is still an SSH preset for the same host, username, and port. Do not return the rehydrated password from `/api/runtime-state`, send it back through the browser, or include it in request/session logs. When the saved preset is missing, changed, lacks a password, or does not match the snapshot target, preserve key/agent authentication attempts but expose an in-page credential/retry path rather than silently counting session creation as restore success. Update the launcher/API restore contract so connection failures remain visible and a `201` record-creation response is not presented as proof that remote panes connected. Add focused tests in `tests/test_api.py` for password-free snapshot persistence, successful saved-password rehydration without secret disclosure, key-auth restore, missing/mismatched/decryption-failed credentials, remote Explorer and agent panes, multiple restored groups, and prevention of the current false-success message when SSH authentication fails.
-
-## Closed Issues
+Resolution:
+Resolved by commit `7134da1` on 2026-07-21. `buildRestoreGroupBody()` now resolves each non-default named `saved_session_id` through `GET /api/saved-sessions/<id>` and rebuilds the group with the shared `buildSessionsFromConfig()` helper, including the saved SSH password, current pane definitions, layout, directories, commands, and agent metadata. `runtime_state.json` remains password-free. This fixes the issue's named-preset reproduction path and is covered by `test_restore_replays_current_saved_preset`, `test_capture_persists_a_password_free_v2_slot`, and the saved-session round-trip tests. Remaining behavior for ad-hoc/default or missing presets, premature restore-success messaging, browser/password exposure, plaintext request logging, and functional credential/outcome coverage is tracked separately as ISSUE-2026-037.
 
 ### Issue ID: ISSUE-2026-033
 - Title: Markdown preview appearance not saved with session presets or restore snapshot
