@@ -1390,6 +1390,28 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Disabled Edit explains why via specific tooltips.
         self.assertIn("File exceeds the 10 MiB in-place edit limit", editor)
         self.assertIn("Mixed line endings are view-only in this version", editor)
+        # Entering edit mode transfers the Source viewport and focuses without
+        # letting Chromium scroll the default end-of-file caret into view.
+        enter = editor[
+            editor.index("function enterExplorerEditMode(index)"):
+            editor.index("function renderExplorerEditTextarea(index)")
+        ]
+        self.assertIn("const sourceViewport = captureScrollMetrics(sourcePanel);", enter)
+        self.assertIn("textarea.focus({ preventScroll: true });", enter)
+        self.assertIn("restoreExplorerEditViewport(textarea, sourceViewport);", enter)
+        self.assertLess(
+            enter.index("textarea.setSelectionRange(0, 0);"),
+            enter.index("textarea.focus({ preventScroll: true });"),
+        )
+        # Save captures the textarea (the real edit-mode scroller), allowing
+        # the highlighted Source view to return to the same location.
+        self.assertIn("panel.querySelector('.explorer-source-editor')", viewer)
+        exit_mode = editor[
+            editor.index("function exitExplorerEditMode(index)"):
+            editor.index("async function cancelExplorerEdit(index)")
+        ]
+        self.assertIn("const editViewport = captureScrollMetrics(textarea);", exit_mode)
+        self.assertIn("restoreExplorerEditViewport(", exit_mode)
 
     def test_terminals_page_explorer_editor_conflict_branches_on_code(self):
         """§5.5: conflict flow branches on data.code and retries with the revision."""
@@ -5065,15 +5087,29 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_sftp_replace_file_writes_temp_applies_mode_and_posix_renames(self):
         calls = []
 
+        class _ModeAwareHandle:
+            def __init__(self, mode):
+                self.mode = mode
+                self.closed = False
+
+            def write(self, content):
+                if not any(flag in self.mode for flag in ("w", "a", "+")):
+                    raise OSError("File not open for writing")
+                calls.append(("write", content))
+
+            def flush(self):
+                calls.append(("flush",))
+
+            def close(self):
+                self.closed = True
+
         class _RecordingSftp:
             def stat(self, path):
                 return SimpleNamespace(st_mode=stat.S_IFREG | 0o644)
 
             def open(self, path, mode="rb"):
                 calls.append(("open", path, mode))
-                handle = MagicMock()
-                handle.close.return_value = None
-                return handle
+                return _ModeAwareHandle(mode)
 
             def chmod(self, path, mode):
                 calls.append(("chmod", path, mode))
@@ -5090,13 +5126,115 @@ class ApiRoutesTestCase(unittest.TestCase):
         opens = [c for c in calls if c[0] == "open"]
         self.assertEqual(len(opens), 1)
         self.assertTrue(opens[0][1].startswith("/srv/app/.gv-save-"))
-        self.assertEqual(opens[0][2], "xb")
+        self.assertEqual(opens[0][2], "x+b")
+        self.assertIn(("write", b"data\n"), calls)
         self.assertIn(("chmod", opens[0][1], 0o644), calls)
         rename = next(c for c in calls if c[0] == "posix_rename")
         self.assertEqual(rename[1], opens[0][1])
         self.assertEqual(rename[2], "/srv/app/notes.txt")
         # A successful rename consumes the temp, so it is not also removed.
         self.assertNotIn("remove", [c[0] for c in calls])
+
+    def test_explorer_save_roundtrips_remote_sftp_with_writable_exclusive_temp(self):
+        class _RemoteWriteHandle(io.BytesIO):
+            def __init__(self, sftp, path, mode):
+                super().__init__()
+                self.sftp = sftp
+                self.path = path
+                self.mode = mode
+
+            def write(self, content):
+                if not any(flag in self.mode for flag in ("w", "a", "+")):
+                    raise OSError("File not open for writing")
+                return super().write(content)
+
+            def close(self):
+                if not self.closed:
+                    self.sftp.entries[self.path] = {
+                        "type": "file",
+                        "content": self.getvalue(),
+                    }
+                super().close()
+
+        class _WritableSftp(FakeSftp):
+            def __init__(self, entries):
+                super().__init__(entries)
+                self.open_modes = []
+                self.renames = []
+
+            def open(self, path, mode="rb"):
+                normalized = self.normalize(path)
+                self.open_modes.append((normalized, mode))
+                if mode == "rb":
+                    if normalized not in self.entries:
+                        raise OSError("No such file")
+                    return io.BytesIO(self.entries[normalized].get("content", b""))
+                if "x" in mode and normalized in self.entries:
+                    raise OSError("File exists")
+                return _RemoteWriteHandle(self, normalized, mode)
+
+            def chmod(self, path, mode):
+                pass
+
+            def posix_rename(self, source, destination):
+                source_path = self.normalize(source)
+                destination_path = self.normalize(destination)
+                self.entries[destination_path] = self.entries.pop(source_path)
+                self.renames.append((source_path, destination_path))
+
+            def remove(self, path):
+                self.entries.pop(self.normalize(path), None)
+
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = _WritableSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/notes.txt": {"type": "file", "content": b"hello\n"},
+            }
+        )
+        fake_client = FakeSshExecClient([(1, b"", b"")])
+        revision = web_explorer._explorer_file_revision(b"hello\n")
+
+        with patch.object(
+            web_explorer,
+            "_open_ssh_sftp",
+            return_value=(fake_client, fake_sftp),
+        ):
+            response = self.client.put(
+                f"/api/explorer/{session.session_id}/file",
+                json={
+                    "path": "notes.txt",
+                    "content": "updated\n",
+                    "base_revision": revision,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["content"], "updated\n")
+        self.assertEqual(fake_sftp.entries["/srv/app/notes.txt"]["content"], b"updated\n")
+        exclusive_opens = [
+            (path, mode) for path, mode in fake_sftp.open_modes if "x" in mode
+        ]
+        self.assertEqual(len(exclusive_opens), 1)
+        self.assertEqual(exclusive_opens[0][1], "x+b")
+        self.assertEqual(
+            fake_sftp.renames[0][1],
+            "/srv/app/notes.txt",
+        )
 
     def test_sftp_replace_file_without_posix_rename_never_truncates_destination(self):
         opened_paths = []

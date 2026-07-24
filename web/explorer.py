@@ -1361,7 +1361,7 @@ class _SftpExplorerBackend:
     def replace_file(self, file_path: str, content_bytes: bytes) -> None:
         """Atomically replace an existing remote file with complete contents.
 
-        Uploads to a unique sibling temp path (exclusive-create ``"xb"`` where
+        Uploads to a unique sibling temp path (exclusive-create ``"x+b"`` where
         supported), copies the original mode bits, then swaps it in with the
         OpenSSH ``posix_rename`` extension. The destination is never opened with
         ``"wb"`` (that could truncate the original before a failed upload
@@ -1380,7 +1380,11 @@ class _SftpExplorerBackend:
         handle = None
         try:
             try:
-                handle = self.sftp.open(temp_path, "xb")
+                # Paramiko applies exclusive-create flags for ``x`` but only
+                # marks its BufferedFile writable when the mode also contains
+                # ``w``, ``a``, or ``+``. ``x+b`` therefore preserves O_EXCL
+                # semantics while producing a genuinely writable handle.
+                handle = self.sftp.open(temp_path, "x+b")
             except (OSError, ValueError):
                 # Exclusive-create is unavailable on some servers; the unique
                 # UUID name already avoids clobbering an existing path.

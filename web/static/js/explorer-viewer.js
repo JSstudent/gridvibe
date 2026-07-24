@@ -3697,6 +3697,15 @@
         if (!panel) {
             return null;
         }
+        // Edit mode moves Source scrolling into its full-height textarea.
+        // Capture that inner viewport so Save can restore the same location
+        // when the highlighted read-only Source panel is rebuilt.
+        if (panel.dataset.explorerFilePanel === 'source') {
+            const editor = panel.querySelector('.explorer-source-editor');
+            if (editor) {
+                return editor;
+            }
+        }
         // The diff panel wrapper (.explorer-diff-split) is overflow:hidden; the
         // element that actually scrolls is the inner .explorer-diff-content.
         if (panel.dataset.explorerFilePanel === 'diff') {

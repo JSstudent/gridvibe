@@ -309,7 +309,7 @@ filesystem. Never use a predictable `.gvtmp` name.
 
 1. stat the original and retain its permission bits;
 2. create a unique sibling temp path;
-3. open it with SFTP `"xb"` when supported, falling back to a UUID name plus
+3. open it with SFTP `"x+b"` when supported, falling back to a UUID name plus
    `"wb"` only when exclusive-create mode is unavailable;
 4. write and flush the complete byte buffer;
 5. apply original permission bits with `sftp.chmod()` when available;
@@ -414,7 +414,9 @@ Entering edit mode:
 4. set `spellcheck="false"`, `wrap="off"`, and an accessible label;
 5. disable Preview/Diff tabs, search, Download, and Markdown appearance;
 6. leave zoom enabled and apply the existing per-tab editor font-size variable;
-7. focus the textarea without changing its initial selection unexpectedly.
+7. capture the Source panel viewport before replacing it, focus the textarea
+   with `preventScroll`, and restore that viewport so entering edit mode does
+   not jump to the end of the file.
 
 The control is a `<textarea>` in v1. Syntax highlighting and fold controls are
 available again immediately after Save or Cancel.
@@ -666,7 +668,7 @@ and the few concrete choices made along the way.
   `_LocalExplorerBackend` uses `tempfile.mkstemp` (unique `.gv-save-*` sibling) +
   `fsync` + `os.chmod` + `os.replace`, cleaning the temp in `finally`.
   `_SftpExplorerBackend` uploads to a unique `.gv-save-<uuid>` sibling
-  (exclusive `"xb"`, falling back to `"wb"` only on the already-unique temp
+  (exclusive `"x+b"`, falling back to `"wb"` only on the already-unique temp
   name), copies mode bits, and swaps with `posix_rename`; a server without
   `posix_rename` raises a clear `RuntimeError` and never opens the destination.
 - **Errors + claim.** `ExplorerRouteError` (+`ExplorerFileConflictError` 409,
@@ -743,10 +745,10 @@ Every acceptance criterion (§1) and edge case is exercised. Backend tests are i
 | Two GridVibe saves racing one file | `save_in_progress`; lock not held during I/O; released after | `test_explorer_save_claim_serializes_and_releases_without_holding_lock` |
 | Write failure mid-save | original bytes intact, temp cleaned, `500 io_error` | `test_explorer_save_write_failure_preserves_original_and_cleans_temp` |
 | Local mode bits preserved | mode copied to replacement (POSIX only) | `test_local_replace_file_preserves_mode_bits` |
-| SFTP atomic write path | unique temp, `xb`, `chmod`, `posix_rename`, no stray remove | `test_sftp_replace_file_writes_temp_applies_mode_and_posix_renames` |
+| SFTP atomic write path | unique writable temp, `x+b`, `chmod`, `posix_rename`, no stray remove | `test_sftp_replace_file_writes_temp_applies_mode_and_posix_renames` |
 | SFTP server without `posix_rename` | raises; destination never opened (`wb`) | `test_sftp_replace_file_without_posix_rename_never_truncates_destination` |
 | Cross-origin PUT | untrusted origin `403`; same-origin reaches the route | `test_explorer_save_rejects_cross_origin_put` |
-| Edit/Save/Cancel + textarea + Tab + Ctrl/Cmd+S | wiring + attributes present; save sends `path`/`content`/`base_revision` | `test_terminals_page_explorer_editor_controls_and_wiring` |
+| Edit/Save/Cancel + textarea + Tab + Ctrl/Cmd+S | wiring + attributes present; Source/edit viewport preserved; save sends `path`/`content`/`base_revision` | `test_terminals_page_explorer_editor_controls_and_wiring` |
 | Conflict UI branches on `code`, retries with revision | `file_conflict` branch, Reload/Overwrite, `save_in_progress`/`file_too_large` messaging | `test_terminals_page_explorer_editor_conflict_branches_on_code` |
 | **Accidental teardown of a dirty buffer** (terminal buttons, tab switch/close, open another file, tree/breadcrumb nav, refresh, close pane, switch/close session group, page reload) | each awaits the in-page discard confirm; `beforeunload` warns on page close; editor state never serialized | `test_terminals_page_explorer_editor_guards_dirty_teardown` |
 | Icons/CSS guardrails | stroke `currentColor` icons, token colors, class-based busy state, no `window.*` dialogs | `test_terminals_page_explorer_editor_icons_and_styles_are_token_driven`, `GuardrailAuditFixesTestCase` |

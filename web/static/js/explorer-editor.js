@@ -165,6 +165,15 @@
         return String(content == null ? '' : content).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     }
 
+    function restoreExplorerEditViewport(element, viewport) {
+        if (!element || !viewport) {
+            return;
+        }
+        const apply = () => applyScrollMetrics(element, viewport);
+        apply();
+        requestAnimationFrame(apply);
+    }
+
     function enterExplorerEditMode(index) {
         const pane = terminals[index];
         if (!pane || !pane._explorerFileEditable || explorerEditState(pane) || pane._explorerMode !== 'file') {
@@ -174,6 +183,8 @@
         setExplorerFileView(index, 'source');
         clearExplorerEditBar(index);
 
+        const sourcePanel = document.getElementById(`explorer-code-${index}`);
+        const sourceViewport = captureScrollMetrics(sourcePanel);
         const normalized = explorerNormalizeEditNewlines(pane._explorerFileContent || '');
         pane._explorerEdit = {
             tabId: pane._explorerActiveTabId,
@@ -183,7 +194,8 @@
             baseRevision: pane._explorerFileRevision || '',
             conflictRevision: '',
             dirty: false,
-            saving: false
+            saving: false,
+            sourceViewport
         };
 
         renderExplorerEditTextarea(index);
@@ -193,8 +205,9 @@
 
         const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
         if (textarea) {
-            textarea.focus();
             textarea.setSelectionRange(0, 0);
+            textarea.focus({ preventScroll: true });
+            restoreExplorerEditViewport(textarea, sourceViewport);
         }
     }
 
@@ -276,9 +289,15 @@
         if (!pane) {
             return;
         }
+        const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
+        const editViewport = captureScrollMetrics(textarea);
         pane._explorerEdit = null;
         clearExplorerEditBar(index);
         renderExplorerSource(index);
+        restoreExplorerEditViewport(
+            document.getElementById(`explorer-code-${index}`),
+            editViewport
+        );
         setExplorerEditChromeDisabled(index, false);
         refreshExplorerEditControls(index);
         applyExplorerSearch(index);
