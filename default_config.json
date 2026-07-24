@@ -11,7 +11,7 @@
     "host_key_policy": "auto-add"
   },
   "terminal": {
-    "max_sessions": 8,
+    "max_sessions": 16,
     "font_family": "Consolas, Monaco, 'Courier New', monospace",
     "font_size": 14
   },

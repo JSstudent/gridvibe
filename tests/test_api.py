@@ -1,11 +1,13 @@
 import base64
 import io
 import json
+import os
 import re
 import shutil
 import socket
 import stat
 import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -185,12 +187,23 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/shared.js",
             "js/launcher.js",
             "css/terminals.css",
+            "js/terminal-icons.js",
+            "js/voice-input.js",
+            "js/explorer-viewer.js",
+            "js/explorer-editor.js",
             "js/terminals.js",
         ):
             marker = f"/static/{asset}"
             if marker in html:
                 html += "\n" + self.client.get(marker).get_data(as_text=True)
         return html
+
+    def _static(self, path: str) -> str:
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
 
     def _run_git(self, repo_dir: Path, *args: str) -> subprocess.CompletedProcess:
         if shutil.which("git") is None:
@@ -713,14 +726,15 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        # Both close paths carry the pre-close track weights into the restore.
+        # The terminal-close path carries the pre-close track weights into the
+        # restore (closing a split pane now goes through this same path).
         self.assertEqual(
             html.count("splitColumnWeights: cloneSplitTrackWeights(splitColumnWeights),"),
-            2,
+            1,
         )
         self.assertEqual(
             html.count("splitRowWeights: cloneSplitTrackWeights(splitRowWeights),"),
-            2,
+            1,
         )
         # initialLoad re-applies them onto the reflowed grid so proportions survive.
         self.assertIn(
@@ -821,7 +835,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("loadExplorerPane(index, null, { force: true });", html[replace_start:replace_end])
         self.assertNotIn("loadExplorerPane(index, '', { force: true });", html[replace_start:replace_end])
         switch_start = html.index("async function switchSessionPaneMode(index)")
-        switch_end = html.index("async function closeSplitPane(index)", switch_start)
+        switch_end = html.index(
+            "function captureSurvivingPaneClientState(closingSessionId)", switch_start
+        )
         self.assertNotIn("teardownCurrentGrid();", html[switch_start:switch_end])
 
     def test_terminals_page_exposes_browser_pane_rendering_hooks(self):
@@ -1123,7 +1139,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".explorer-diff-cell.delete", html)
         self.assertIn(".explorer-diff-line-code", html)
         self.assertIn(".explorer-diff-content", html)
-        self.assertIn("overflow: scroll;", html)
+        self.assertIn("overflow-x: hidden;", html)
+        self.assertIn("overflow-y: auto;", html)
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
         self.assertIn("tab-size: 4;", html)
@@ -1144,6 +1161,135 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("async function explorerGitCommit(index)", html)
         self.assertIn("function explorerGitPublish(index)", html)
         self.assertIn("Staged Changes", html)
+
+    def test_terminals_page_vendors_highlightjs_source_highlighting(self):
+        """Phase 1 (docs/source_diff_analysis.md): the Source viewer highlights
+        the whole document once with the pinned Highlight.js build and keeps the
+        handwritten lexer as a fallback."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Assets are vendored and loaded locally, never from a CDN.
+        self.assertIn("/static/vendor/highlight.min.js", html)
+        self.assertNotIn("cdnjs.cloudflare.com", html)
+        # Explicit grammar map (no auto-detection) and whole-document tokenizer.
+        self.assertIn("const EXPLORER_HLJS_LANGUAGE = Object.freeze({", html)
+        self.assertIn("function explorerHighlightDocumentLines(content, normalizedLanguage)", html)
+        self.assertIn("function explorerRenderHighlightedRuns(runs, searchRanges = [])", html)
+        self.assertIn("engine.highlight(source, { language: grammar, ignoreIllegal: true })", html)
+        # Source rendering prefers the whole-document pass, falling back per line.
+        self.assertIn("const highlightedLines = explorerHighlightDocumentLines(content, normalizedLanguage);", html)
+        self.assertIn("? explorerRenderHighlightedRuns(highlightedLines.get(record.number), searchRanges)", html)
+        self.assertIn(": highlightExplorerCode(record.text, language, searchRanges, record.start);", html)
+        # The oversized-file guard is preserved for the highlighter.
+        self.assertIn("if (source.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD) {", html)
+        # Explorer-scoped token palette for both themes, shared by the Source
+        # view and the Diff2Html host so diff code keeps its syntax colours.
+        self.assertIn(
+            ":is(.explorer-source-line-code, .explorer-diff2html) .hljs-keyword,",
+            html,
+        )
+        self.assertIn(
+            '.explorer-pane[data-explorer-theme="dark"] '
+            ":is(.explorer-source-line-code, .explorer-diff2html) .hljs-string,",
+            html,
+        )
+
+    def test_terminals_page_vendors_diff2html_precise_diffs(self):
+        """Phase 2 (docs/source_diff_analysis.md): diffs render through the
+        pinned Diff2Html build with intraline emphasis, surface truncation, and
+        keep the tolerant side-by-side renderer as a fallback."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("/static/vendor/diff2html-ui-base.min.js", html)
+        self.assertIn("/static/vendor/diff2html.min.css", html)
+        # Diff2Html configuration: char-level intraline + explicit limits.
+        self.assertIn("function explorerDiff2HtmlConfig()", html)
+        self.assertIn("matching: 'words',", html)
+        self.assertIn("diffStyle: 'char',", html)
+        self.assertIn("synchronisedScroll: false,", html)
+        self.assertIn("matchingMaxComparisons: 1500,", html)
+        self.assertIn("maxLineLengthHighlight: 2000", html)
+        self.assertIn(
+            "new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs)",
+            html,
+        )
+        # Render path prefers Diff2Html, falling back to the handwritten renderer.
+        self.assertIn("function renderExplorerDiffWithDiff2Html(index, code, diff, banner)", html)
+        self.assertIn(
+            "if (!renderExplorerDiffWithDiff2Html(index, code, diff, banner)) {",
+            html,
+        )
+        self.assertIn("code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);", html)
+        self.assertIn("function renderExplorerSideBySideDiff(index, diff)", html)
+        # Truncation is captured from the API and surfaced without blocking.
+        self.assertIn("pane._explorerDiffTruncated = Boolean(data.truncated);", html)
+        self.assertIn("function explorerDiffTruncationBannerHtml(pane)", html)
+        self.assertIn("Diff truncated to 256 KiB / 4,000 lines", html)
+        self.assertIn(".explorer-diff-truncated {", html)
+        # The diff host inherits the per-tab editor zoom.
+        self.assertIn(".explorer-diff2html {", html)
+        self.assertIn("font-size: var(--explorer-editor-font-size, .78rem);", html)
+        self.assertIn(
+            ".explorer-diff2html .d2h-diff-table {\n"
+            "            font-size: inherit;",
+            html,
+        )
+        # Original source lines remain unwrapped in two fixed, equal-width
+        # panes. A sticky scrollbar controls each side independently.
+        self.assertIn(
+            ".explorer-diff2html .d2h-code-side-line {\n"
+            "            box-sizing: border-box;\n"
+            "            width: 100%;\n"
+            "            padding: 0 .5em;\n"
+            "            white-space: nowrap;",
+            html,
+        )
+        self.assertIn(
+            ".explorer-diff2html .d2h-code-line-ctn {\n"
+            "            white-space: pre;",
+            html,
+        )
+        self.assertIn("width: 50%;", html)
+        self.assertIn("flex: 1 1 50%;", html)
+        self.assertIn(
+            ".explorer-diff2html .d2h-code-side-linenumber {\n"
+            "            position: sticky;\n"
+            "            z-index: 2;\n"
+            "            left: 0;",
+            html,
+        )
+        self.assertIn("padding: 0 .5em;", html)
+        self.assertIn(".explorer-diff-horizontal-scrollbars {", html)
+        self.assertIn("position: sticky;", html)
+        self.assertIn("function synchroniseExplorerDiffScrollbars(host)", html)
+        self.assertIn("function observeExplorerDiffLayout(host)", html)
+        self.assertIn("track.dataset.explorerDiffSide = sideIndex === 0 ? 'left' : 'right';", html)
+        self.assertIn("side.scrollLeft = track.scrollLeft;", html)
+        self.assertIn("observeExplorerDiffLayout(host);", html)
+
+    def test_richer_source_and_diff_vendored_assets_are_served(self):
+        """Phase 1/2 assets are served locally and pinned (highlight.js custom
+        build includes the extra grammars beyond the common bundle)."""
+        for filename in (
+            "vendor/highlight.min.js",
+            "vendor/diff2html-ui-base.min.js",
+            "vendor/diff2html.min.css",
+        ):
+            with self.subTest(filename=filename):
+                response = self.client.get(f"/static/{filename}")
+                self.assertEqual(response.status_code, 200)
+                self.assertGreater(len(response.get_data()), 1000)
+                response.close()
+        highlight = self.client.get("/static/vendor/highlight.min.js")
+        highlight_body = highlight.get_data(as_text=True)
+        highlight.close()
+        for grammar in ("powershell", "dockerfile"):
+            with self.subTest(grammar=grammar):
+                self.assertIn(grammar, highlight_body)
 
     def test_terminals_page_explorer_file_tree_hooks_are_present(self):
         response = self.client.get("/terminals")
@@ -1204,6 +1350,137 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Styling hooks (token-driven, no palette literals).
         self.assertIn(".explorer-tab-strip {", html)
         self.assertIn(".explorer-empty-viewer {", html)
+
+    def test_terminals_page_explorer_editor_controls_and_wiring(self):
+        """docs/text_editor_2026-07-20.md §5: Edit/Save/Cancel wiring + textarea."""
+        editor = self._static("js/explorer-editor.js")
+        viewer = self._static("js/explorer-viewer.js")
+
+        # renderExplorerFile hosts the editor action group before Download.
+        render = viewer[
+            viewer.index("function renderExplorerFile(index, data,"):
+            viewer.index("function updateExplorerFileInPlace(index, data")
+        ]
+        self.assertIn("${explorerEditorControlsHtml(index)}", render)
+        self.assertLess(
+            render.index("${explorerEditorControlsHtml(index)}"),
+            render.index('data-explorer-download="${index}"'),
+        )
+        # Edit / Save / Cancel controls and their handlers exist.
+        for hook in (
+            "data-explorer-edit=",
+            "data-explorer-edit-save=",
+            "data-explorer-edit-cancel=",
+            "function enterExplorerEditMode(index)",
+            "function saveExplorerEdit(index)",
+            "function cancelExplorerEdit(index)",
+        ):
+            self.assertIn(hook, editor)
+        # Textarea attributes: spellcheck off, no soft wrap, accessible label.
+        self.assertIn('class="explorer-source-editor" spellcheck="false" wrap="off"', editor)
+        self.assertIn('aria-label="Edit ', editor)
+        # Tab inserts a literal tab; Ctrl/Cmd+S saves; Escape cancels.
+        self.assertIn("textarea.setRangeText('\\t', start, end, 'end');", editor)
+        self.assertIn("(event.ctrlKey || event.metaKey) && (event.key === 's' || event.key === 'S')", editor)
+        self.assertIn("if (event.key === 'Escape') {", editor)
+        # Save sends the full-file contract.
+        self.assertIn("path: state.path", editor)
+        self.assertIn("content: state.draft", editor)
+        self.assertIn("base_revision: baseRevision", editor)
+        # Disabled Edit explains why via specific tooltips.
+        self.assertIn("File exceeds the 10 MiB in-place edit limit", editor)
+        self.assertIn("Mixed line endings are view-only in this version", editor)
+        # Entering edit mode transfers the Source viewport and focuses without
+        # letting Chromium scroll the default end-of-file caret into view.
+        enter = editor[
+            editor.index("function enterExplorerEditMode(index)"):
+            editor.index("function renderExplorerEditTextarea(index)")
+        ]
+        self.assertIn("const sourceViewport = captureScrollMetrics(sourcePanel);", enter)
+        self.assertIn("textarea.focus({ preventScroll: true });", enter)
+        self.assertIn("restoreExplorerEditViewport(textarea, sourceViewport);", enter)
+        self.assertLess(
+            enter.index("textarea.setSelectionRange(0, 0);"),
+            enter.index("textarea.focus({ preventScroll: true });"),
+        )
+        # Save captures the textarea (the real edit-mode scroller), allowing
+        # the highlighted Source view to return to the same location.
+        self.assertIn("panel.querySelector('.explorer-source-editor')", viewer)
+        exit_mode = editor[
+            editor.index("function exitExplorerEditMode(index)"):
+            editor.index("async function cancelExplorerEdit(index)")
+        ]
+        self.assertIn("const editViewport = captureScrollMetrics(textarea);", exit_mode)
+        self.assertIn("restoreExplorerEditViewport(", exit_mode)
+
+    def test_terminals_page_explorer_editor_conflict_branches_on_code(self):
+        """§5.5: conflict flow branches on data.code and retries with the revision."""
+        editor = self._static("js/explorer-editor.js")
+        self.assertIn("const code = data && data.code;", editor)
+        self.assertIn("if (code === 'file_conflict') {", editor)
+        self.assertIn("state.conflictRevision = (data && data.current_revision) || '';", editor)
+        # Retry sends the conflict's current_revision as the new base.
+        self.assertIn("const baseRevision = state.conflictRevision || state.baseRevision;", editor)
+        # Reload / Overwrite both confirm through the in-page modal first.
+        self.assertIn("data-explorer-edit-reload=", editor)
+        self.assertIn("data-explorer-edit-overwrite=", editor)
+        self.assertIn("save_in_progress", editor)
+        self.assertIn("file_too_large", editor)
+
+    def test_terminals_page_explorer_editor_guards_dirty_teardown(self):
+        """§5.6: every deliberate teardown consults the discard guard."""
+        editor = self._static("js/explorer-editor.js")
+        viewer = self._static("js/explorer-viewer.js")
+        terminals_js = self._static("js/terminals.js")
+
+        # Guard + group guard exist and use the in-page confirm shell only.
+        self.assertIn("async function confirmDiscardExplorerEdit(index, actionLabel", editor)
+        self.assertIn("async function confirmDiscardAllExplorerEdits(actionLabel", editor)
+        self.assertIn("function hasDirtyExplorerEdit(index)", editor)
+        self.assertIn("function hasAnyDirtyExplorerEdit()", editor)
+        self.assertIn("await openGenericConfirmModal(", editor)
+
+        # Tab / path / directory / refresh teardown in the viewer awaits it.
+        self.assertIn("confirmDiscardExplorerEdit(index, 'Switching tabs')", viewer)
+        self.assertIn("confirmDiscardExplorerEdit(index, 'Opening another file')", viewer)
+        self.assertIn("confirmDiscardExplorerEdit(index, 'Leaving this file')", viewer)
+        self.assertIn("confirmDiscardExplorerEdit(index, 'Refreshing')", viewer)
+        self.assertIn("&& !(await confirmDiscardExplorerEdit(index, 'Closing this tab'))", viewer)
+
+        # Pane close, group switch, and group close in terminals.js await it.
+        self.assertIn("confirmDiscardExplorerEdit(index, 'Closing this pane')", terminals_js)
+        self.assertIn("confirmDiscardAllExplorerEdits('Switching sessions')", terminals_js)
+        self.assertIn("confirmDiscardAllExplorerEdits('Closing this session')", terminals_js)
+
+        # A page-close beforeunload guard covers every dirty pane.
+        self.assertIn("window.addEventListener('beforeunload'", editor)
+        self.assertIn("if (hasAnyDirtyExplorerEdit()) {", editor)
+
+        # Editor state is transient: never serialized into saved sessions or the
+        # runtime snapshot (the tab-persist payload has no _explorerEdit).
+        persist_start = viewer.index("function persistExplorerTabsToSession(index)")
+        persist_end = viewer.index("\n    function ", persist_start + 1)
+        self.assertNotIn("_explorerEdit", viewer[persist_start:persist_end])
+
+    def test_terminals_page_explorer_editor_icons_and_styles_are_token_driven(self):
+        """§6 + guardrail 7: stroke currentColor icons, token colors, class busy state."""
+        icons = self._static("js/terminal-icons.js")
+        css = self._static("css/terminals.css")
+        for icon in ("EXPLORER_EDIT_ICON", "EXPLORER_SAVE_ICON", "EXPLORER_CANCEL_ICON"):
+            self.assertIn(icon, icons)
+            marker = f"const {icon} = '"
+            svg = icons[icons.index(marker) + len(marker):]
+            svg = svg[:svg.index("';")]
+            self.assertIn('stroke="currentColor"', svg)
+            self.assertNotIn("fill=\"#", svg)
+        # Editor surface + bars styled from tokens; busy state is a class.
+        self.assertIn(".explorer-source-editor {", css)
+        self.assertIn("font-size: var(--explorer-editor-font-size", css)
+        self.assertIn(".explorer-edit-save-btn.is-busy {", css)
+        self.assertIn(".explorer-tab.is-dirty .explorer-tab-name::after {", css)
+        # No raw hex palette literals in the new editor rules.
+        editor_css = css[css.index("/* ── In-app editor controls"):css.index(".explorer-tab.is-dirty .explorer-tab-name::after")]
+        self.assertNotRegex(editor_css, r":\s*#[0-9a-fA-F]{3,6}\b")
 
     def test_terminals_page_explorer_markdown_links_open_tabs(self):
         """ISSUE-2026-016: Markdown preview links resolve and open explorer tabs."""
@@ -1267,8 +1544,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerPersistedTabFontSize(raw)", html)
         self.assertIn("fontSize !== EXPLORER_EDITOR_FONT_DEFAULT", html)
         self.assertIn("tabViews[EXPLORER_PREVIEW_TAB_ID] = previewRecord;", html)
+        self.assertIn("record.diff_mode = diffMode;", html)
+        self.assertIn("record.diff_commit = diffCommit;", html)
+        self.assertIn("const previewView = explorerInflatePersistedTabView(rawPreviewView);", html)
+        self.assertIn("previewTab.view = previewView;", html)
         self.assertIn("previewTab.fontSize = previewFont;", html)
         self.assertIn("record.fontSize = fontSize;", html)
+        self.assertIn("function explorerTabPersistedDiffTarget(tab)", html)
+        self.assertIn("...explorerTabPersistedDiffTarget(previewTab)", html)
         # The saved-session relaunch payload carries the new fields through.
         self.assertIn(
             "explorer_tab_views: startupMode === 'explorer' && terminal?.explorer_tab_views",
@@ -1301,7 +1584,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Restore: the saved Preview path/dir seed the tab record and reopen
         # when no pinned tab was saved as active.
         self.assertIn("previewTab.dirPath = savedPreviewDir;", html)
-        self.assertIn("openExplorerFile(index, savedPreviewPath);", html)
+        self.assertIn("openExplorerFile(index, savedPreviewPath, {", html)
+        self.assertIn("...explorerTabPersistedDiffTarget(previewTab)", html)
         self.assertIn("loadExplorerPane(index, savedPreviewDir);", html)
         # The terminal-close snapshot carries dirPath through the rebuild.
         self.assertIn("dirPath: tab.dirPath || ''", html)
@@ -1385,8 +1669,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const preview = explorerPreviewTab(pane);", assign)
         self.assertIn("pinned tabs are never hijacked", html)
         # Same-tab refreshes (git actions, pane refresh) pass the active tab
-        # explicitly so they are not rerouted into the Preview tab.
-        self.assertEqual(html.count("tab: pane._explorerActiveTabId"), 2)
+        # explicitly so they are not rerouted into the Preview tab. The two
+        # additional uses come from the in-app editor's save-success re-render
+        # and conflict "Reload from disk" (explorer-editor.js).
+        self.assertEqual(html.count("tab: pane._explorerActiveTabId"), 4)
 
     def test_terminals_page_explorer_capture_tracks_rendered_tab(self):
         """2.e: a same-path Preview render never overwrites a pinned tab's snapshot."""
@@ -3795,6 +4081,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["commits"][0]["files"][0]["path"], "README.md")
         self.assertEqual(payload["commits"][0]["files"][0]["git"]["status"], "added")
 
+    def test_explorer_git_repo_expands_untracked_directories_to_files(self):
+        repo_dir = self._init_committed_repo()
+        nested_dir = repo_dir / "new" / "nested"
+        nested_dir.mkdir(parents=True)
+        (nested_dir / "first.txt").write_text("first\n", encoding="utf-8")
+        (repo_dir / "new" / "second.txt").write_text("second\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(f"/api/explorer/{session_id}/git/repo")
+
+        self.assertEqual(response.status_code, 200)
+        changes = {change["path"]: change for change in response.get_json()["changes"]}
+        self.assertEqual(set(changes), {"new/nested/first.txt", "new/second.txt"})
+        self.assertTrue(all(change["git"]["status"] == "untracked" for change in changes.values()))
+
     def test_explorer_git_stage_and_unstage_roundtrip(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -3979,20 +4280,42 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertTrue(readme.exists())
         self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\n")
 
-    def test_explorer_git_revert_rejects_untracked_file(self):
+    def test_explorer_git_revert_deletes_selected_untracked_file(self):
         repo_dir = self._init_committed_repo()
-        untracked = repo_dir / "scratch.txt"
-        untracked.write_text("keep me\n", encoding="utf-8")
+        untracked_dir = repo_dir / "new"
+        untracked_dir.mkdir()
+        untracked = untracked_dir / "scratch.txt"
+        untracked.write_text("remove me\n", encoding="utf-8")
         session_id = self._create_explorer_session(repo_dir)
 
         response = self.client.post(
             f"/api/explorer/{session_id}/git/revert",
-            json={"path": "scratch.txt"},
+            json={"path": "new/scratch.txt"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(untracked.exists())
+        self.assertTrue(untracked_dir.exists())
+        self.assertNotIn("new/scratch.txt", {
+            change["path"] for change in response.get_json()["changes"]
+        })
+
+    def test_explorer_git_revert_rejects_untracked_directory(self):
+        repo_dir = self._init_committed_repo()
+        nested_dir = repo_dir / "new"
+        nested_dir.mkdir()
+        nested_file = nested_dir / "scratch.txt"
+        nested_file.write_text("keep me\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/revert",
+            json={"path": "new"},
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("untracked", response.get_json()["error"].lower())
-        self.assertTrue(untracked.exists())
+        self.assertIn("untracked directories", response.get_json()["error"].lower())
+        self.assertTrue(nested_file.exists())
 
     def test_explorer_git_revert_rejects_staged_only_file(self):
         # Worktree already matches the index: nothing to discard, and staged
@@ -4151,7 +4474,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("performExplorerGitAction(index, 'discard-all', {})", html)
         self.assertIn("(busy || !unstaged.length) ? 'disabled'", html)
         self.assertIn("(busy || !discardable.length) ? 'disabled'", html)
-        self.assertIn("explorerGitCanRevert(file.git && file.git.status)", html)
+        self.assertIn("explorerGitCanBulkDiscard(file.git && file.git.status)", html)
         self.assertIn("title: 'Discard all changes?'", html)
         self.assertIn(".explorer-git-section-title", html)
         self.assertIn(".explorer-git-section-actions", html)
@@ -4250,17 +4573,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         self.assertIn("data-explorer-git-revert", html)
+        self.assertIn("data-explorer-git-revert-status", html)
         self.assertIn("explorer-git-revert-btn", html)
         self.assertIn("function explorerGitCanRevert(status)", html)
-        self.assertIn("['modified', 'deleted', 'renamed'].includes(status", html)
+        self.assertIn("['modified', 'deleted', 'renamed', 'untracked'].includes(status", html)
         self.assertIn("action === 'stage' && explorerGitCanRevert(status)", html)
-        self.assertIn("async function explorerGitRevertFile(index, path)", html)
-        self.assertIn("explorerGitRevertFile(index, button.dataset.explorerGitRevert || '');", html)
+        self.assertIn("async function explorerGitRevertFile(index, path, status = '')", html)
+        self.assertIn("button.dataset.explorerGitRevertStatus || ''", html)
         self.assertIn("performExplorerGitAction(index, 'revert', { path })", html)
         # Irreversible action uses the in-page confirm shell, not window.confirm.
         self.assertIn("function openGenericConfirmModal(", html)
         self.assertIn('id="genericConfirmModal"', html)
-        self.assertIn("title: 'Discard changes?'", html)
+        self.assertIn("title: untracked ? 'Delete untracked file?' : 'Discard changes?'", html)
+        self.assertIn("Permanently delete the untracked file", html)
         self.assertIn(".explorer-git-revert-btn", html)
 
     def test_parse_git_graph_log_skips_connector_only_lines(self):
@@ -4469,6 +4794,496 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["preview_type"], "markdown")
         self.assertIn("<h1>Project</h1>", payload["preview_html"])
         self.assertEqual(payload["language"], "markdown")
+
+    # ── In-app editor: read metadata (docs/text_editor_2026-07-20.md) ──
+    def test_explorer_file_returns_editor_metadata_for_complete_file(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "app.py"
+        raw = b"print(1)\nprint(2)\n"
+        file_path.write_bytes(raw)
+        session_id = self._create_explorer_session(repo_dir)
+
+        payload = self.client.get(
+            f"/api/explorer/{session_id}/file", query_string={"path": "app.py"}
+        ).get_json()
+
+        self.assertTrue(payload["editable"])
+        self.assertIsNone(payload["edit_block_reason"])
+        self.assertEqual(payload["revision"], web_explorer._explorer_file_revision(raw))
+        self.assertTrue(payload["revision"].startswith("sha256:"))
+        self.assertEqual(payload["line_ending"], "lf")
+        self.assertFalse(payload["utf8_bom"])
+
+    def test_explorer_file_reports_mixed_line_endings_as_non_editable(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "mix.py").write_bytes(b"a=1\r\nb=2\nc=3\n")
+        session_id = self._create_explorer_session(repo_dir)
+
+        payload = self.client.get(
+            f"/api/explorer/{session_id}/file", query_string={"path": "mix.py"}
+        ).get_json()
+
+        self.assertFalse(payload["editable"])
+        self.assertEqual(payload["edit_block_reason"], "mixed_line_endings")
+        self.assertEqual(payload["line_ending"], "mixed")
+
+    def test_explorer_file_reports_truncated_file_as_non_editable(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "big.txt").write_bytes(b"x\n" * 10)
+        session_id = self._create_explorer_session(repo_dir)
+
+        with patch.object(web_explorer, "EXPLORER_FILE_PREVIEW_MAX_BYTES", 8):
+            payload = self.client.get(
+                f"/api/explorer/{session_id}/file", query_string={"path": "big.txt"}
+            ).get_json()
+
+        self.assertTrue(payload["truncated"])
+        self.assertFalse(payload["editable"])
+        self.assertEqual(payload["edit_block_reason"], "truncated")
+        self.assertIsNone(payload["revision"])
+
+    def test_explorer_file_rejects_complete_invalid_utf8_for_editing(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        # Valid ASCII in the 4 KiB binary sample, invalid UTF-8 byte afterwards.
+        (repo_dir / "weird.txt").write_bytes(b"a" * 5000 + b"\xff\n")
+        session_id = self._create_explorer_session(repo_dir)
+
+        payload = self.client.get(
+            f"/api/explorer/{session_id}/file", query_string={"path": "weird.txt"}
+        ).get_json()
+
+        self.assertFalse(payload["editable"])
+        self.assertEqual(payload["edit_block_reason"], "unsupported_format")
+
+    def test_explorer_image_file_reports_unsupported_format_for_editing(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        session_id = self._create_explorer_session(repo_dir)
+
+        payload = self.client.get(
+            f"/api/explorer/{session_id}/file", query_string={"path": "logo.png"}
+        ).get_json()
+
+        self.assertEqual(payload["preview_type"], "image")
+        self.assertFalse(payload["editable"])
+        self.assertEqual(payload["edit_block_reason"], "unsupported_format")
+        self.assertIsNone(payload["revision"])
+
+    # ── In-app editor: save round-trips ──
+    def test_explorer_save_roundtrips_local_utf8_and_returns_payload(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "app.py"
+        file_path.write_bytes(b"print(1)\n")
+        session_id = self._create_explorer_session(repo_dir)
+        revision = self.client.get(
+            f"/api/explorer/{session_id}/file", query_string={"path": "app.py"}
+        ).get_json()["revision"]
+
+        response = self.client.put(
+            f"/api/explorer/{session_id}/file",
+            json={"path": "app.py", "content": "print(9)\n", "base_revision": revision},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(file_path.read_bytes(), b"print(9)\n")
+        self.assertNotEqual(payload["revision"], revision)
+        self.assertEqual(payload["content"], "print(9)\n")
+        self.assertTrue(payload["editable"])
+
+    def test_explorer_save_preserves_crlf_cr_bom_and_final_newline(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session_id = self._create_explorer_session(repo_dir)
+
+        cases = {
+            "crlf.py": (b"a=1\r\nb=2\r\n", "a=1\nb=2\nc=3\n", b"a=1\r\nb=2\r\nc=3\r\n"),
+            "cr.py": (b"a=1\rb=2\r", "a=1\nb=2\nc=3\n", b"a=1\rb=2\rc=3\r"),
+            "nonl.py": (b"a=1", "a=1\nb=2", b"a=1\nb=2"),
+            "bom.py": (b"\xef\xbb\xbfx=1\n", "﻿x=9\n", b"\xef\xbb\xbfx=9\n"),
+        }
+        for name, (initial, edited, expected) in cases.items():
+            with self.subTest(name=name):
+                path = repo_dir / name
+                path.write_bytes(initial)
+                revision = self.client.get(
+                    f"/api/explorer/{session_id}/file", query_string={"path": name}
+                ).get_json()["revision"]
+                response = self.client.put(
+                    f"/api/explorer/{session_id}/file",
+                    json={"path": name, "content": edited, "base_revision": revision},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(path.read_bytes(), expected)
+
+    def test_explorer_save_unchanged_content_is_a_noop(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "app.py"
+        file_path.write_bytes(b"print(1)\n")
+        session_id = self._create_explorer_session(repo_dir)
+        revision = self.client.get(
+            f"/api/explorer/{session_id}/file", query_string={"path": "app.py"}
+        ).get_json()["revision"]
+
+        with patch.object(web_explorer._LocalExplorerBackend, "replace_file") as replace:
+            response = self.client.put(
+                f"/api/explorer/{session_id}/file",
+                json={"path": "app.py", "content": "print(1)\n", "base_revision": revision},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        replace.assert_not_called()
+        self.assertEqual(file_path.read_bytes(), b"print(1)\n")
+
+    def test_explorer_save_rejects_bad_json_field_types(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "app.py").write_bytes(b"x\n")
+        session_id = self._create_explorer_session(repo_dir)
+
+        for body in (
+            [],
+            {"path": "app.py", "content": "x\n"},
+            {"path": "", "content": "x\n", "base_revision": "sha256:x"},
+            {"path": "app.py", "content": 5, "base_revision": "sha256:x"},
+            {"path": "app.py", "content": "x\n", "base_revision": ""},
+        ):
+            with self.subTest(body=body):
+                response = self.client.put(
+                    f"/api/explorer/{session_id}/file", json=body
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()["code"], "invalid_request")
+
+    def test_explorer_save_rejects_traversal_and_unsupported(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "app.py").write_bytes(b"x\n")
+        (repo_dir / "data.bin").write_bytes(b"\x00\x01")
+        session_id = self._create_explorer_session(repo_dir)
+
+        for path in ("../escape.py", "app.py/../..", "missing.py", "data.bin"):
+            with self.subTest(path=path):
+                response = self.client.put(
+                    f"/api/explorer/{session_id}/file",
+                    json={"path": path, "content": "x\n", "base_revision": "sha256:x"},
+                )
+                self.assertEqual(response.status_code, 400)
+
+    def test_explorer_save_rejects_oversized_replacement(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "app.py"
+        file_path.write_bytes(b"a\n")
+        session_id = self._create_explorer_session(repo_dir)
+        revision = self.client.get(
+            f"/api/explorer/{session_id}/file", query_string={"path": "app.py"}
+        ).get_json()["revision"]
+
+        with patch.object(web_explorer, "EXPLORER_FILE_PREVIEW_MAX_BYTES", 16):
+            response = self.client.put(
+                f"/api/explorer/{session_id}/file",
+                json={"path": "app.py", "content": "z" * 100, "base_revision": revision},
+            )
+
+        self.assertEqual(response.status_code, 413)
+        payload = response.get_json()
+        self.assertEqual(payload["code"], "file_too_large")
+        self.assertEqual(payload["max_bytes"], 16)
+        self.assertEqual(file_path.read_bytes(), b"a\n")
+
+    def test_explorer_save_stale_revision_conflicts_then_retry_succeeds(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "app.py"
+        file_path.write_bytes(b"v1\n")
+        session_id = self._create_explorer_session(repo_dir)
+        stale_revision = self.client.get(
+            f"/api/explorer/{session_id}/file", query_string={"path": "app.py"}
+        ).get_json()["revision"]
+
+        # Something else changes the file, so the held revision is now stale.
+        file_path.write_bytes(b"external\n")
+        conflict = self.client.put(
+            f"/api/explorer/{session_id}/file",
+            json={"path": "app.py", "content": "mine\n", "base_revision": stale_revision},
+        )
+        self.assertEqual(conflict.status_code, 409)
+        conflict_payload = conflict.get_json()
+        self.assertEqual(conflict_payload["code"], "file_conflict")
+        current_revision = conflict_payload["current_revision"]
+        self.assertEqual(current_revision, web_explorer._explorer_file_revision(b"external\n"))
+
+        # Retrying with the returned revision succeeds (overwrite).
+        retry = self.client.put(
+            f"/api/explorer/{session_id}/file",
+            json={"path": "app.py", "content": "mine\n", "base_revision": current_revision},
+        )
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(file_path.read_bytes(), b"mine\n")
+
+        # A second intervening change conflicts again.
+        file_path.write_bytes(b"changed-again\n")
+        again = self.client.put(
+            f"/api/explorer/{session_id}/file",
+            json={"path": "app.py", "content": "mine2\n", "base_revision": current_revision},
+        )
+        self.assertEqual(again.status_code, 409)
+
+    def test_explorer_save_claim_serializes_and_releases_without_holding_lock(self):
+        # The claim set blocks a concurrent GridVibe save for the same key while
+        # never holding its lock during the (yielded) I/O window.
+        with web_explorer._explorer_save_claim("s", "/p"):
+            self.assertTrue(web_explorer._explorer_save_claims_lock.acquire(blocking=False))
+            web_explorer._explorer_save_claims_lock.release()
+            with self.assertRaises(web_explorer.ExplorerSaveInProgressError):
+                with web_explorer._explorer_save_claim("s", "/p"):
+                    pass
+        # Released after the block, so the key is reusable.
+        with web_explorer._explorer_save_claim("s", "/p"):
+            pass
+
+    def test_explorer_save_write_failure_preserves_original_and_cleans_temp(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "app.py"
+        file_path.write_bytes(b"original\n")
+        session_id = self._create_explorer_session(repo_dir)
+        revision = self.client.get(
+            f"/api/explorer/{session_id}/file", query_string={"path": "app.py"}
+        ).get_json()["revision"]
+
+        with patch("web.explorer.os.replace", side_effect=OSError("disk full")):
+            response = self.client.put(
+                f"/api/explorer/{session_id}/file",
+                json={"path": "app.py", "content": "new\n", "base_revision": revision},
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json()["code"], "io_error")
+        self.assertEqual(file_path.read_bytes(), b"original\n")
+        self.assertEqual([p.name for p in repo_dir.glob(".gv-save-*")], [])
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX mode bits are not meaningful on Windows")
+    def test_local_replace_file_preserves_mode_bits(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        file_path = repo_dir / "app.py"
+        file_path.write_bytes(b"x\n")
+        os.chmod(file_path, 0o640)
+
+        web_explorer._LocalExplorerBackend().replace_file(str(file_path), b"y\n")
+
+        self.assertEqual(file_path.read_bytes(), b"y\n")
+        self.assertEqual(stat.S_IMODE(os.stat(file_path).st_mode), 0o640)
+
+    def test_sftp_replace_file_writes_temp_applies_mode_and_posix_renames(self):
+        calls = []
+
+        class _ModeAwareHandle:
+            def __init__(self, mode):
+                self.mode = mode
+                self.closed = False
+
+            def write(self, content):
+                if not any(flag in self.mode for flag in ("w", "a", "+")):
+                    raise OSError("File not open for writing")
+                calls.append(("write", content))
+
+            def flush(self):
+                calls.append(("flush",))
+
+            def close(self):
+                self.closed = True
+
+        class _RecordingSftp:
+            def stat(self, path):
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o644)
+
+            def open(self, path, mode="rb"):
+                calls.append(("open", path, mode))
+                return _ModeAwareHandle(mode)
+
+            def chmod(self, path, mode):
+                calls.append(("chmod", path, mode))
+
+            def posix_rename(self, src, dst):
+                calls.append(("posix_rename", src, dst))
+
+            def remove(self, path):
+                calls.append(("remove", path))
+
+        backend = web_explorer._SftpExplorerBackend(sftp=_RecordingSftp())
+        backend.replace_file("/srv/app/notes.txt", b"data\n")
+
+        opens = [c for c in calls if c[0] == "open"]
+        self.assertEqual(len(opens), 1)
+        self.assertTrue(opens[0][1].startswith("/srv/app/.gv-save-"))
+        self.assertEqual(opens[0][2], "x+b")
+        self.assertIn(("write", b"data\n"), calls)
+        self.assertIn(("chmod", opens[0][1], 0o644), calls)
+        rename = next(c for c in calls if c[0] == "posix_rename")
+        self.assertEqual(rename[1], opens[0][1])
+        self.assertEqual(rename[2], "/srv/app/notes.txt")
+        # A successful rename consumes the temp, so it is not also removed.
+        self.assertNotIn("remove", [c[0] for c in calls])
+
+    def test_explorer_save_roundtrips_remote_sftp_with_writable_exclusive_temp(self):
+        class _RemoteWriteHandle(io.BytesIO):
+            def __init__(self, sftp, path, mode):
+                super().__init__()
+                self.sftp = sftp
+                self.path = path
+                self.mode = mode
+
+            def write(self, content):
+                if not any(flag in self.mode for flag in ("w", "a", "+")):
+                    raise OSError("File not open for writing")
+                return super().write(content)
+
+            def close(self):
+                if not self.closed:
+                    self.sftp.entries[self.path] = {
+                        "type": "file",
+                        "content": self.getvalue(),
+                    }
+                super().close()
+
+        class _WritableSftp(FakeSftp):
+            def __init__(self, entries):
+                super().__init__(entries)
+                self.open_modes = []
+                self.renames = []
+
+            def open(self, path, mode="rb"):
+                normalized = self.normalize(path)
+                self.open_modes.append((normalized, mode))
+                if mode == "rb":
+                    if normalized not in self.entries:
+                        raise OSError("No such file")
+                    return io.BytesIO(self.entries[normalized].get("content", b""))
+                if "x" in mode and normalized in self.entries:
+                    raise OSError("File exists")
+                return _RemoteWriteHandle(self, normalized, mode)
+
+            def chmod(self, path, mode):
+                pass
+
+            def posix_rename(self, source, destination):
+                source_path = self.normalize(source)
+                destination_path = self.normalize(destination)
+                self.entries[destination_path] = self.entries.pop(source_path)
+                self.renames.append((source_path, destination_path))
+
+            def remove(self, path):
+                self.entries.pop(self.normalize(path), None)
+
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = _WritableSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/notes.txt": {"type": "file", "content": b"hello\n"},
+            }
+        )
+        fake_client = FakeSshExecClient([(1, b"", b"")])
+        revision = web_explorer._explorer_file_revision(b"hello\n")
+
+        with patch.object(
+            web_explorer,
+            "_open_ssh_sftp",
+            return_value=(fake_client, fake_sftp),
+        ):
+            response = self.client.put(
+                f"/api/explorer/{session.session_id}/file",
+                json={
+                    "path": "notes.txt",
+                    "content": "updated\n",
+                    "base_revision": revision,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["content"], "updated\n")
+        self.assertEqual(fake_sftp.entries["/srv/app/notes.txt"]["content"], b"updated\n")
+        exclusive_opens = [
+            (path, mode) for path, mode in fake_sftp.open_modes if "x" in mode
+        ]
+        self.assertEqual(len(exclusive_opens), 1)
+        self.assertEqual(exclusive_opens[0][1], "x+b")
+        self.assertEqual(
+            fake_sftp.renames[0][1],
+            "/srv/app/notes.txt",
+        )
+
+    def test_sftp_replace_file_without_posix_rename_never_truncates_destination(self):
+        opened_paths = []
+
+        class _NoRenameSftp:
+            def stat(self, path):
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o644)
+
+            def open(self, path, mode="rb"):
+                opened_paths.append(path)
+                return MagicMock()
+
+            def chmod(self, path, mode):
+                pass
+
+            def remove(self, path):
+                pass
+
+            # Deliberately no posix_rename attribute.
+
+        backend = web_explorer._SftpExplorerBackend(sftp=_NoRenameSftp())
+        with self.assertRaises(RuntimeError):
+            backend.replace_file("/srv/app/notes.txt", b"data\n")
+
+        # The destination itself is never opened (would truncate the original).
+        self.assertNotIn("/srv/app/notes.txt", opened_paths)
+
+    def test_explorer_save_rejects_cross_origin_put(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "app.py").write_bytes(b"x\n")
+        session_id = self._create_explorer_session(repo_dir)
+
+        with patch.object(
+            web_app, "_allowed_write_origin_netlocs", return_value={"localhost:5050"}
+        ):
+            blocked = self.client.put(
+                f"/api/explorer/{session_id}/file",
+                json={"path": "app.py", "content": "y\n", "base_revision": "sha256:x"},
+                headers={"Origin": "http://evil.example"},
+            )
+            self.assertEqual(blocked.status_code, 403)
+            same_origin = self.client.put(
+                f"/api/explorer/{session_id}/file",
+                json={"path": "app.py", "content": "y\n", "base_revision": "sha256:x"},
+                headers={"Origin": "http://localhost:5050"},
+            )
+            # Same-origin reaches the route (stale placeholder revision → 409).
+            self.assertNotEqual(same_origin.status_code, 403)
 
     def test_explorer_file_returns_ssh_text_content_inside_root(self):
         group = api.session_manager.create_group(
@@ -5611,16 +6426,23 @@ class ApiRoutesTestCase(unittest.TestCase):
                         "folds": [9, 2, 9, 0, "4", True],
                         "fold_identity": "abc123",
                     },
-                    "sub\\b.md": {"mode": "diff", "scroll": 7, "identity": "x" * 100, "font_size": 99},
+                    "sub\\b.md": {
+                        "mode": "diff",
+                        "scroll": 7,
+                        "identity": "x" * 100,
+                        "font_size": 99,
+                        "diff_mode": "staged",
+                    },
                     "c.md": {"mode": "bogus", "scroll": 0.1, "identity": "ok"},
                     "e.md": {"font_size": 12},
                     "../escape.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "not-open.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "d.md": "not-a-dict",
                     "__preview__": {
-                        "mode": "source",
+                        "mode": "diff",
                         "scroll": 0.5,
                         "identity": "zz",
+                        "diff_mode": "worktree",
                         "font_size": 16,
                         "path": "docs\\a.md",
                         "dir": "../escape",
@@ -5656,15 +6478,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         # [0, 1]; oversized identity tokens are dropped rather than restored;
         # font sizes clamp to the editor zoom bounds.
         self.assertEqual(
-            views["sub/b.md"], {"mode": "diff", "scroll": 1.0, "identity": "", "font_size": 24}
+            views["sub/b.md"],
+            {
+                "mode": "diff",
+                "scroll": 1.0,
+                "identity": "",
+                "diff_mode": "staged",
+                "font_size": 24,
+            },
         )
         # A record may carry only a zoom (a zoomed tab whose view was never
-        # captured), and the reserved Preview key keeps zoom plus its own
-        # separated path — file and browsed directory — but no view mode.
+        # captured), and the reserved Preview key keeps its view, zoom, and own
+        # separated path — file and browsed directory.
         self.assertEqual(views["e.md"], {"font_size": 12})
         self.assertEqual(
             views["__preview__"],
             {
+                "mode": "diff",
+                "scroll": 0.5,
+                "identity": "zz",
+                "diff_mode": "worktree",
                 "font_size": 16,
                 "path": "docs/a.md",
                 "folds": [3],
@@ -5731,7 +6564,13 @@ class ApiRoutesTestCase(unittest.TestCase):
                             "explorer_open_tabs": ["docs/a.md"],
                             "explorer_active_tab": "docs/a.md",
                             "explorer_tab_views": {
-                                "docs/a.md": {"mode": "preview", "scroll": 0.25, "identity": "id1"}
+                                "docs/a.md": {
+                                    "mode": "diff",
+                                    "scroll": 0.25,
+                                    "identity": "id1",
+                                    "diff_mode": "staged",
+                                    "font_size": 18,
+                                }
                             },
                             "explorer_md_preset": "paper",
                             "explorer_md_font": "consolas",
@@ -5757,7 +6596,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         config = response.get_json()["config"]
         self.assertEqual(
             config["terminals"][0]["explorer_tab_views"],
-            {"docs/a.md": {"mode": "preview", "scroll": 0.25, "identity": "id1"}},
+            {
+                "docs/a.md": {
+                    "mode": "diff",
+                    "scroll": 0.25,
+                    "identity": "id1",
+                    "diff_mode": "staged",
+                    "font_size": 18,
+                }
+            },
         )
         self.assertEqual(config["terminals"][0]["explorer_md_preset"], "paper")
         self.assertEqual(config["terminals"][0]["explorer_md_font"], "consolas")
@@ -7656,15 +8503,70 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("var(--t-text)", html)
         self.assertIn("var(--t-border)", html)
 
-    def test_terminals_page_splits_the_longer_pane_dimension(self):
+    def test_terminals_page_exposes_two_explicit_split_controls(self):
         response = self.client.get("/terminals")
         html = self._page_html(response)
-        self.assertIn("grid?.classList.contains('layout-2-vertical')", html)
-        self.assertIn("return candidates.includes('horizontal') ? 'horizontal' : '';", html)
         self.assertIn(
-            "const preferred = bounds && bounds.height > bounds.width ? 'horizontal' : 'vertical';",
+            "const MAX_SPLIT_TERMINALS = Math.min(16, Number(MAX_SESSIONS || 16));",
             html,
         )
+        # Two split buttons — one per axis — replace the single auto-axis button,
+        # each wired to an explicit axis (no inferred guess).
+        self.assertIn('data-terminal-split-v="${index}"', html)
+        self.assertIn('data-terminal-split-h="${index}"', html)
+        self.assertIn("splitTerminalPane(index, 'vertical')", html)
+        self.assertIn("splitTerminalPane(index, 'horizontal')", html)
+        self.assertIn("async function splitTerminalPane(index, axis)", html)
+        # Each axis button enables independently from the per-axis candidates.
+        self.assertIn("candidates.includes('vertical'),", html)
+        self.assertIn("candidates.includes('horizontal'),", html)
+        # The old single-axis auto-picker is gone.
+        self.assertNotIn("function chooseSplitAxis", html)
+        self.assertNotIn("grid?.classList.contains('layout-2-vertical')", html)
+
+    def test_terminals_page_explains_axis_specific_split_minimums(self):
+        response = self.client.get("/terminals")
+        html = self._page_html(response)
+        self.assertIn("function getSplitDisabledReason(axis)", html)
+        self.assertIn(
+            "Stacked split needs at least ${MIN_SPLIT_ROWS} rows below each terminal header",
+            html,
+        )
+        self.assertIn(
+            "Side-by-side split needs at least ${MIN_SPLIT_COLS} columns in each terminal",
+            html,
+        )
+        self.assertIn("getSplitDisabledReason('vertical')", html)
+        self.assertIn("getSplitDisabledReason('horizontal')", html)
+
+    def test_terminals_page_base_layout_leaves_room_for_stacked_splits(self):
+        response = self.client.get("/terminals")
+        html = self._page_html(response)
+        # Base cells use a coarse-enough grid unit that a single pane can be
+        # stacked several times before the integer `>= 2` guard bites, so
+        # horizontal (stacked) splits are not capped at a single level.
+        self.assertIn("const SPLIT_CELL_UNIT = 8;", html)
+        self.assertIn("makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 2 * unit, h: unit })", html)
+        self.assertIn("y: 1 + (slot.row - 1) * unit,", html)
+        self.assertIn("h: slot.rowSpan * unit,", html)
+
+    def test_terminals_page_folds_header_actions_into_overflow_menu(self):
+        response = self.client.get("/terminals")
+        html = self._page_html(response)
+        # Foldable actions live in their own group; the ⋯ toggle and the close
+        # button stay outside it so close is always reachable.
+        self.assertIn('class="terminal-actions" id="tactions-${i}"', html)
+        self.assertIn('data-terminal-actions-more="${index}"', html)
+        self.assertIn("function updatePaneHeaderLayout(index)", html)
+        self.assertIn("function togglePaneActionsMenu(index)", html)
+        self.assertIn("function closeAllPaneActionMenus(exceptIndex = -1)", html)
+        # Collapse is driven by real header overflow, not a fixed breakpoint.
+        self.assertIn("const overflowing = header.scrollWidth - header.clientWidth > 1;", html)
+        self.assertIn("card.classList.toggle('actions-collapsed', overflowing);", html)
+        # The close button is never inside the foldable actions group.
+        actions_open = html.index('class="terminal-actions" id="tactions-${i}"')
+        actions_close = html.index("${paneMoreButtonHtml(i)}", actions_open)
+        self.assertNotIn('data-terminal-close="${i}"', html[actions_open:actions_close])
 
     def test_terminals_page_exposes_grid_resize_handles(self):
         response = self.client.get("/terminals")
@@ -7697,7 +8599,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_terminals_page_resize_validation_enforces_minimums(self):
         response = self.client.get("/terminals")
         html = self._page_html(response)
-        self.assertIn("const MIN_RESIZE_SURFACE_RATIO = 1 / 8;", html)
+        self.assertIn("const MIN_RESIZE_SURFACE_RATIO = 1 / 16;", html)
         self.assertIn(
             "const minimumSurface = metrics.columnTrackSpace * metrics.rowTrackSpace * MIN_RESIZE_SURFACE_RATIO;",
             html,
@@ -8619,7 +9521,13 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
 
     BANNED_DIALOG_CALLS = ("window.confirm(", "window.alert(", "window.prompt(")
     BANNED_GLYPHS = ("📁", "🌐", "🎤", "☾", "☀", "❌")
-    STATIC_JS = ("js/shared.js", "js/launcher.js", "js/terminals.js")
+    STATIC_JS = (
+        "js/shared.js",
+        "js/launcher.js",
+        "js/terminals.js",
+        "js/explorer-viewer.js",
+        "js/explorer-editor.js",
+    )
 
     def setUp(self):
         api.app.config["TESTING"] = True
@@ -8697,6 +9605,10 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertIn(f"/static/js/launcher.js?v={__version__}", launcher_html)
         self.assertIn(f"/static/css/terminals.css?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/shared.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/terminal-icons.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/voice-input.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/explorer-viewer.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/explorer-editor.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/terminals.js?v={__version__}", terminals_html)
         # shared.js must load before each page script so its globals exist first.
         self.assertLess(
@@ -8705,6 +9617,30 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertLess(
             terminals_html.index("js/shared.js"), terminals_html.index("js/terminals.js")
         )
+        # Extracted terminals.js modules (2026-07-23 split) load after shared.js
+        # and before terminals.js, which owns the shared state and boot.
+        self.assertLess(
+            terminals_html.index("js/shared.js"),
+            terminals_html.index("js/terminal-icons.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/terminal-icons.js"),
+            terminals_html.index("js/voice-input.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/voice-input.js"),
+            terminals_html.index("js/explorer-viewer.js"),
+        )
+        # explorer-editor.js loads after explorer-viewer.js (reuses its render
+        # hooks) and before terminals.js (which owns the shared boot).
+        self.assertLess(
+            terminals_html.index("js/explorer-viewer.js"),
+            terminals_html.index("js/explorer-editor.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-editor.js"),
+            terminals_html.index("js/terminals.js"),
+        )
 
     def test_extracted_assets_are_served_without_jinja(self):
         for filename in (
@@ -8712,6 +9648,10 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "css/terminals.css",
             "js/shared.js",
             "js/launcher.js",
+            "js/terminal-icons.js",
+            "js/voice-input.js",
+            "js/explorer-viewer.js",
+            "js/explorer-editor.js",
             "js/terminals.js",
         ):
             with self.subTest(filename=filename):
@@ -8781,24 +9721,39 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertIn("socket.emit('join_session'", load_join)
 
     def test_terminals_monster_functions_are_decomposed(self):
-        """Finding 6.5 — buildGrid/_startVoice delegate to focused helpers."""
-        terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+        """Finding 6.5 — buildGrid/_startVoice delegate to focused helpers.
 
-        for name in (
+        The voice helpers moved to voice-input.js in the 2026-07-23 split, so
+        they are asserted against that file; the grid helpers stay in
+        terminals.js.
+        """
+        terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+        voice = self.client.get("/static/js/voice-input.js").get_data(as_text=True)
+
+        grid_helpers = (
             "createPaneInstance",
             "wireCardButton",
             "buildPaneCard",
             "wirePaneControls",
             "wirePaneInputForwarding",
+        )
+        voice_helpers = (
             "_acquireMicStream",
             "_createVoicePipeline",
             "_wireVoiceWorkletMessages",
             "_teardownVoicePipeline",
-        ):
-            with self.subTest(helper=name):
+        )
+        for name in grid_helpers:
+            with self.subTest(helper=name, file="terminals.js"):
                 self.assertEqual(
                     len(re.findall(rf"function {re.escape(name)}\(", terminals)), 1
                 )
+        for name in voice_helpers:
+            with self.subTest(helper=name, file="voice-input.js"):
+                self.assertEqual(
+                    len(re.findall(rf"function {re.escape(name)}\(", voice)), 1
+                )
+                self.assertNotIn(f"function {name}(", terminals)
 
         def _function_length(source: str, header: str) -> int:
             lines = source.splitlines()
@@ -8812,7 +9767,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         # The orchestrators must stay thin; the old versions were ~445/~308
         # lines and this is the regression guard against regrowing them.
         self.assertLess(_function_length(terminals, "function buildGrid("), 60)
-        self.assertLess(_function_length(terminals, "async function _startVoice("), 200)
+        self.assertLess(_function_length(voice, "async function _startVoice("), 200)
 
 
 class VoiceAudioRaceTestCase(unittest.TestCase):
@@ -9916,11 +10871,12 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         return body
 
     def test_overlay_markup_is_accessible_and_singleton(self):
-        terminals_js = self._static("js/terminals.js")
-        self.assertIn("const VOICE_OVERLAY_ID = 'voiceRecordingOverlay';", terminals_js)
-        show_fn = terminals_js[
-            terminals_js.index("function _showVoiceRecordingOverlay(index)"):
-            terminals_js.index("function _hideVoiceRecordingOverlay()")
+        # Voice code moved to voice-input.js in the 2026-07-23 split.
+        voice_js = self._static("js/voice-input.js")
+        self.assertIn("const VOICE_OVERLAY_ID = 'voiceRecordingOverlay';", voice_js)
+        show_fn = voice_js[
+            voice_js.index("function _showVoiceRecordingOverlay(index)"):
+            voice_js.index("function _hideVoiceRecordingOverlay()")
         ]
         self.assertIn("overlay.setAttribute('role', 'status');", show_fn)
         self.assertIn("overlay.setAttribute('aria-live', 'polite');", show_fn)
@@ -9931,16 +10887,16 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         self.assertIn("document.getElementById(VOICE_OVERLAY_ID)", show_fn)
 
     def test_overlay_appears_only_after_capture_actually_starts(self):
-        terminals_js = self._static("js/terminals.js")
-        show_fn = terminals_js[
-            terminals_js.index("function _showVoiceRecordingOverlay(index)"):
-            terminals_js.index("function _hideVoiceRecordingOverlay()")
+        voice_js = self._static("js/voice-input.js")
+        show_fn = voice_js[
+            voice_js.index("function _showVoiceRecordingOverlay(index)"):
+            voice_js.index("function _hideVoiceRecordingOverlay()")
         ]
         # rapid-release guard: no overlay when the state was torn down mid-start
         self.assertIn("if (!_voiceState[index]?.recording) {", show_fn)
-        start_fn = terminals_js[
-            terminals_js.index("async function _startVoice(index)"):
-            terminals_js.index("async function _acquireMicStream(")
+        start_fn = voice_js[
+            voice_js.index("async function _startVoice(index)"):
+            voice_js.index("async function _acquireMicStream(")
         ]
         self.assertLess(
             start_fn.index("_voiceState[index] = state;"),
@@ -9948,25 +10904,27 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         )
 
     def test_overlay_hidden_from_every_cleanup_path(self):
-        terminals_js = self._static("js/terminals.js")
+        voice_js = self._static("js/voice-input.js")
         # start failure (permission denial / backend error)
-        start_fn = terminals_js[
-            terminals_js.index("async function _startVoice(index)"):
-            terminals_js.index("async function _acquireMicStream(")
+        start_fn = voice_js[
+            voice_js.index("async function _startVoice(index)"):
+            voice_js.index("async function _acquireMicStream(")
         ]
         catch_block = start_fn[start_fn.index("} catch (err) {"):]
         self.assertIn("_hideVoiceRecordingOverlay();", catch_block)
         # every stop path (toggle, PTT release, hold release, voice_status
         # error, _stopAllVoice on session switch/teardown) funnels here
-        stop_fn = terminals_js[
-            terminals_js.index("async function _stopVoice(index"):
-            terminals_js.index("async function _stopAllVoice()")
+        stop_fn = voice_js[
+            voice_js.index("async function _stopVoice(index"):
+            voice_js.index("async function _stopAllVoice()")
         ]
         self.assertIn("_hideVoiceRecordingOverlay();", stop_fn)
+        # _stopAllVoice() is invoked from the teardown paths in terminals.js.
+        terminals_js = self._static("js/terminals.js")
         self.assertIn("_stopAllVoice();", terminals_js)
 
     def test_waveform_uses_analyser_with_fallback_and_stale_loop_guard(self):
-        terminals_js = self._static("js/terminals.js")
+        terminals_js = self._static("js/voice-input.js")
         animation_fn = terminals_js[
             terminals_js.index("function _startVoiceOverlayAnimation(index, overlay)"):
             terminals_js.index("function _stopVoiceOverlayAnimation()")
@@ -9986,9 +10944,9 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         self.assertIn("animation.source.disconnect(animation.analyser);", stop_animation_fn)
 
     def test_reduced_motion_disables_the_animations(self):
-        terminals_js = self._static("js/terminals.js")
-        self.assertIn("function _prefersReducedMotion()", terminals_js)
-        self.assertIn("prefers-reduced-motion: reduce", terminals_js)
+        voice_js = self._static("js/voice-input.js")
+        self.assertIn("function _prefersReducedMotion()", voice_js)
+        self.assertIn("prefers-reduced-motion: reduce", voice_js)
         terminals_css = self._static("css/terminals.css")
         reduced_block = terminals_css[
             terminals_css.index("@media (prefers-reduced-motion: reduce)"):
@@ -10014,11 +10972,14 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         self.assertIn("@keyframes voice-overlay-bounce", terminals_css)
 
     def test_hold_to_talk_pointer_wiring_preserves_click_toggle(self):
+        # The wiring call site stays in terminals.js; the helper moved to
+        # voice-input.js (2026-07-23 split).
         terminals_js = self._static("js/terminals.js")
         self.assertIn("_wireVoiceHoldToTalk(card, i);", terminals_js)
-        hold_fn = terminals_js[
-            terminals_js.index("function _wireVoiceHoldToTalk(card, index)"):
-            terminals_js.index("/* ── Push-to-talk ── */")
+        voice_js = self._static("js/voice-input.js")
+        hold_fn = voice_js[
+            voice_js.index("function _wireVoiceHoldToTalk(card, index)"):
+            voice_js.index("/* ── Push-to-talk ── */")
         ]
         self.assertIn("addEventListener('pointerdown'", hold_fn)
         self.assertIn("addEventListener('pointerup', endHold);", hold_fn)
@@ -10032,8 +10993,11 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
         self.assertIn("holdStopRequested = true;", hold_fn)
 
     def test_push_to_talk_rapid_release_cannot_leave_a_stale_recording(self):
+        # The PTT state and helpers moved to voice-input.js; the key listeners
+        # (top-level executing statements) stay in terminals.js.
+        voice_js = self._static("js/voice-input.js")
+        self.assertIn("let _pttStopRequested = false;", voice_js)
         terminals_js = self._static("js/terminals.js")
-        self.assertIn("let _pttStopRequested = false;", terminals_js)
         keydown_idx = terminals_js.index(
             "if (!_voicePrefs.pttEnabled || !_voicePrefs.pttKeybind) return;"
         )
@@ -10043,7 +11007,7 @@ class VoiceRecordingOverlayTestCase(unittest.TestCase):
             "if (_pttStopRequested && _voiceState[index]?.recording) {", keydown_block
         )
         keyup_block = terminals_js[
-            keyup_idx:terminals_js.index("function _updateVoiceBtn(index, recording)")
+            keyup_idx:terminals_js.index("function _showTermCtxMenu(x, y, index)")
         ]
         self.assertIn("_pttStopRequested = true;", keyup_block)
 
@@ -10430,7 +11394,8 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         response.close()
 
     def test_file_viewer_ships_download_button(self):
-        terminals_js = self._static("js/terminals.js")
+        # Explorer viewer moved to explorer-viewer.js (2026-07-23 split).
+        terminals_js = self._static("js/explorer-viewer.js")
         self.assertIn("function downloadExplorerFile(index)", terminals_js)
         self.assertIn("data-explorer-download", terminals_js)
         self.assertIn("/download?path=", terminals_js)
@@ -10440,7 +11405,7 @@ class ExplorerDownloadTestCase(unittest.TestCase):
     def test_native_window_downloads_route_through_the_bridge(self):
         # WebView2 drops anchor downloads, so the native window must use the
         # pywebview save_download bridge instead of the <a download> click.
-        terminals_js = self._static("js/terminals.js")
+        terminals_js = self._static("js/explorer-viewer.js")
         download_fn = terminals_js[
             terminals_js.index("async function downloadExplorerFile"):
             terminals_js.index("function getDownloadBaseName")
@@ -10498,10 +11463,12 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         run_git.assert_not_called()
 
     def test_explorer_bar_ships_os_open_button(self):
+        explorer_js = self._static("js/explorer-viewer.js")
+        self.assertIn("function revealExplorerInOs(index)", explorer_js)
+        self.assertIn("/reveal", explorer_js)
+        # The toolbar button markup is emitted by the pane builder in terminals.js.
         terminals_js = self._static("js/terminals.js")
-        self.assertIn("function revealExplorerInOs(index)", terminals_js)
         self.assertIn("data-explorer-os-open", terminals_js)
-        self.assertIn("/reveal", terminals_js)
         terminals_css = self._static("css/terminals.css")
         self.assertIn(".explorer-os-open", terminals_css)
 
@@ -10569,7 +11536,7 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_image_viewer_ships_in_frontend_assets(self):
-        terminals_js = self._static("js/terminals.js")
+        terminals_js = self._static("js/explorer-viewer.js")
         self.assertIn("function renderExplorerImage(index, data", terminals_js)
         self.assertIn("preview_type === 'image'", terminals_js)
         self.assertIn("/image?path=", terminals_js)
@@ -10757,10 +11724,10 @@ class BroadcastInputTestCase(unittest.TestCase):
         """ISSUE-2026-026 follow-up: voice/PTT go to the focused (highlighted)
         terminal only — never to a stale 'last selected' pane when nothing is
         selected (consistent with typing)."""
-        terminals_js = self._static("js/terminals.js")
-        ptt_fn = terminals_js[
-            terminals_js.index("function _findPttTerminalIndex()"):
-            terminals_js.index("function findExplorerSearchTargetIndex()")
+        voice_js = self._static("js/voice-input.js")
+        ptt_fn = voice_js[
+            voice_js.index("function _findPttTerminalIndex()"):
+            voice_js.index("function _updateVoiceBtn(index, recording)")
         ]
         self.assertIn("return _focusedTerminalIndex;", ptt_fn)
         # no fall-back scan to the first terminal when nothing is selected
