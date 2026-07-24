@@ -86,6 +86,7 @@ from web.config import (
 )
 from web.explorer import (  # noqa: F401 - some names re-exported for backwards compatibility
     EXPLORER_FILE_PREVIEW_MAX_BYTES,
+    ExplorerRouteError,
     _acquire_ssh_sftp,
     _append_deleted_git_entries,
     _attach_git_status_to_entries,
@@ -123,8 +124,10 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _resolve_explorer_candidate_path,
     _resolve_remote_explorer_candidate_path,
     _sftp_request_error_types,
+    get_explorer_file_payload,
     open_path_in_os_file_manager,
     read_explorer_file_preview,
+    save_explorer_file_payload,
 )
 from web.hostkeys import (  # noqa: F401 - re-exported for backwards compatibility
     _apply_host_key_policy,
@@ -727,72 +730,50 @@ def get_explorer_entries(session_id: str):
 
 @app.route('/api/explorer/<session_id>/file', methods=['GET'])
 def get_explorer_file(session_id: str):
-    """Return a safe, read-only text preview for one explorer file."""
+    """Return a safe, read-only text preview + editor metadata for one file."""
     session = session_manager.get_session(session_id)
     if session is None:
         return jsonify({"error": "Session not found"}), 404
     requested_path = request.args.get("path", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path, file_path = backend.resolve_file(requested_path)
-        size, modified = backend.stat_file(file_path)
-        # Images short-circuit the text preview pipeline: the viewer renders
-        # them via the separate /image byte route, so no content is returned
-        # here (and the binary/format rejections below are skipped).
-        if _is_explorer_image_file(file_path):
-            return {
-                "root": root_path,
-                "path": backend.rel_explorer_path(root_path, file_path),
-                "name": backend.basename(file_path),
-                "size": size,
-                "modified": modified,
-                "content": "",
-                "preview_type": "image",
-                "preview_html": None,
-                "language": None,
-                "git": _clean_git_entry_status(),
-                "git_context": None,
-            }
-        code_language = _explorer_editor_language(file_path)
-        preview = read_explorer_file_preview(
-            backend,
-            file_path,
-            total_size=size,
-            tail=_is_tail_preview_file(file_path),
-        )
-        preview_bytes = preview["bytes"]
+        return get_explorer_file_payload(backend, requested_path)
 
-        if _explorer_content_looks_binary(preview_bytes):
-            raise ValueError("Explorer file appears to be binary")
+    return _explorer_route_response(session, handler)
 
-        truncated = preview["truncated"]
-        content = preview_bytes.decode("utf-8", errors="replace")
-        preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
-        git_context, git_statuses = _get_git_context(backend, root_path, backend.file_dirname(file_path))
-        file_git = (
-            _git_status_for_entry(backend, str(git_context["repo_root"]), file_path, git_statuses)
-            if git_context.get("available")
-            else _clean_git_entry_status()
+
+@app.route('/api/explorer/<session_id>/file', methods=['PUT'])
+def save_explorer_file(session_id: str):
+    """Atomically replace one explorer text file with edited contents.
+
+    The single bounded exception to the explorer's read-only filesystem
+    contract: writes are confined to the session root and guarded by the
+    filename/language gate, the 10 MiB read/write limit, complete strict-UTF-8
+    single-line-ending source, and an optimistic-concurrency revision check
+    (web/explorer.py). The app-level cross-origin write guard already covers
+    this PUT.
+    """
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object", "code": "invalid_request"}), 400
+    requested_path = data.get("path")
+    content = data.get("content")
+    base_revision = data.get("base_revision")
+    if not isinstance(requested_path, str) or not requested_path.strip():
+        return jsonify({"error": "A file path is required", "code": "invalid_request"}), 400
+    if not isinstance(content, str):
+        return jsonify({"error": "File content must be a string", "code": "invalid_request"}), 400
+    if not isinstance(base_revision, str) or not base_revision.strip():
+        return jsonify({"error": "A base revision is required", "code": "invalid_request"}), 400
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return save_explorer_file_payload(
+            backend, requested_path, content, base_revision, session_id=session_id
         )
-        return {
-            "root": root_path,
-            "path": backend.rel_explorer_path(root_path, file_path),
-            "name": backend.basename(file_path),
-            "size": size,
-            "modified": modified,
-            "encoding": "utf-8",
-            "truncated": truncated,
-            "preview_mode": preview["preview_mode"],
-            "preview_start_byte": preview["preview_start_byte"],
-            "preview_end_byte": preview["preview_end_byte"],
-            "total_size": preview["total_size"],
-            "content": content,
-            "preview_type": "markdown" if preview_html is not None else None,
-            "preview_html": preview_html,
-            "language": code_language,
-            "git": file_git,
-            "git_context": git_context,
-        }
 
     return _explorer_route_response(session, handler)
 
@@ -925,10 +906,14 @@ def _explorer_route_response(session: Any, handler: Any):
         with _explorer_backend(session) as backend:
             payload = handler(backend)
         return jsonify({"session_id": session.session_id, **payload})
+    except ExplorerRouteError as exc:
+        # Structured editor errors carry a stable code + status the frontend
+        # branches on (stale revision, save-in-progress, too-large, …).
+        return jsonify({"error": str(exc), "code": exc.code, **exc.details}), exc.status_code
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except error_types as exc:
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": str(exc), "code": "io_error"}), 500
 
 
 @app.route('/api/explorer/<session_id>/git/diff', methods=['GET'])

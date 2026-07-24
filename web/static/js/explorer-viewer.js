@@ -4235,16 +4235,18 @@
         }
         const tabs = ensureExplorerTabState(pane);
         const activeId = pane._explorerActiveTabId;
+        const dirtyEdit = pane._explorerEdit && pane._explorerEdit.dirty ? pane._explorerEdit : null;
         strip.innerHTML = tabs.map(tab => {
             const active = tab.id === activeId;
             const isPreview = tab.id === EXPLORER_PREVIEW_TAB_ID;
+            const dirty = Boolean(dirtyEdit && dirtyEdit.tabId === tab.id);
             const label = explorerTabLabel(tab);
             const icon = (!isPreview || tab.path) ? explorerFileTypeIconHtml(tab.path || label) : '';
             const closeButton = isPreview
                 ? ''
                 : `<button type="button" class="explorer-tab-close" data-explorer-tab-close="${escHtml(tab.id)}" title="Close tab" aria-label="Close ${escHtml(label)}">×</button>`;
             return `
-                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}" data-explorer-tab="${escHtml(tab.id)}"${isPreview ? '' : ' draggable="true"'} title="${escHtml(tab.path || label)}">
+                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}${dirty ? ' is-dirty' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}"${dirty ? ' aria-label="' + escHtml(label) + ' (unsaved changes)"' : ''} data-explorer-tab="${escHtml(tab.id)}"${isPreview ? '' : ' draggable="true"'} title="${escHtml((dirty ? '● ' : '') + (tab.path || label))}">
                     <button type="button" class="explorer-tab-main" data-explorer-tab-open="${escHtml(tab.id)}">
                         ${icon}
                         <span class="explorer-tab-name">${escHtml(label)}</span>
@@ -4480,7 +4482,7 @@
         renderExplorerViewerEmpty(index);
     }
 
-    function activateExplorerTab(index, id) {
+    async function activateExplorerTab(index, id) {
         const pane = terminals[index];
         if (!pane) {
             return;
@@ -4494,6 +4496,11 @@
             // re-fetch, and would race a Preview-tab double-click promotion.
             return;
         }
+        // Switching away from a dirty in-place edit needs confirmation first.
+        if (pane._explorerActiveTabId !== tab.id
+            && !(await confirmDiscardExplorerEdit(index, 'Switching tabs'))) {
+            return;
+        }
         // Capture the outgoing tab's mode + scroll while its DOM is intact.
         explorerCaptureActiveTabView(index);
         pane._explorerActiveTabId = tab.id;
@@ -4502,7 +4509,7 @@
         persistExplorerTabsToSession(index);
     }
 
-    function closeExplorerTab(index, id) {
+    async function closeExplorerTab(index, id) {
         const pane = terminals[index];
         if (!pane || id === EXPLORER_PREVIEW_TAB_ID) {
             return;
@@ -4510,6 +4517,12 @@
         ensureExplorerTabState(pane);
         const position = pane._explorerTabs.findIndex(tab => tab.id === id);
         if (position === -1) {
+            return;
+        }
+        // Closing the tab that holds a dirty edit discards it — confirm first.
+        const edit = explorerEditState(pane);
+        if (edit && edit.tabId === id && edit.dirty
+            && !(await confirmDiscardExplorerEdit(index, 'Closing this tab'))) {
             return;
         }
         const wasActive = pane._explorerActiveTabId === id;
@@ -5162,9 +5175,18 @@
 
         pane._attached = true;
         pane._explorerMode = 'file';
+        // A full rebuild tears down any active in-place editor; deliberate
+        // teardown paths guard the dirty buffer before reaching here.
+        pane._explorerEdit = null;
         pane._explorerFilePath = path;
         pane._explorerFileName = fileName;
         pane._explorerFileContent = data.content || '';
+        pane._explorerFileEditable = Boolean(data.editable);
+        pane._explorerFileEditBlockReason = data.edit_block_reason || '';
+        pane._explorerFileRevision = data.revision || '';
+        pane._explorerFileLineEnding = data.line_ending || '';
+        pane._explorerFileUtf8Bom = Boolean(data.utf8_bom);
+        pane._explorerFileTruncated = Boolean(data.truncated);
         pane._explorerFileLanguage = codeLanguage;
         pane._explorerFilePlain = pane._explorerFileContent.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;
         pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
@@ -5215,6 +5237,7 @@
                         <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">+</button>
                     </div>
                     ${hasPreview ? `<button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Markdown appearance" aria-label="Markdown preview appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>` : ''}
+                    ${explorerEditorControlsHtml(index)}
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
                     <div class="explorer-editor-search" data-explorer-search="${index}">
                         <input
@@ -5285,6 +5308,7 @@
         }
         wireExplorerEditorZoomControls(index);
         wireExplorerSearchControls(index);
+        refreshExplorerEditControls(index);
         applyExplorerSearch(index);
         // An explicit scrollState (in-place refresh) wins; otherwise fall back
         // to the tab's stored snapshot, aligned with the restored view mode.
@@ -5327,6 +5351,12 @@
         searchState.resultQuery = '';
         searchState.matchCapped = false;
         pane._explorerFileContent = data.content || '';
+        pane._explorerFileEditable = Boolean(data.editable);
+        pane._explorerFileEditBlockReason = data.edit_block_reason || '';
+        pane._explorerFileRevision = data.revision || '';
+        pane._explorerFileLineEnding = data.line_ending || '';
+        pane._explorerFileUtf8Bom = Boolean(data.utf8_bom);
+        pane._explorerFileTruncated = Boolean(data.truncated);
         pane._explorerFileLanguage = codeLanguage;
         pane._explorerFilePlain = pane._explorerFileContent.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;
         pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
@@ -5370,6 +5400,10 @@
 
         pane._explorerMode = 'file';
         pane._explorerFilePath = path || pane._explorerFilePath;
+        // An in-place refresh always lands on the read-only view: drop any stale
+        // editor chrome and refresh the Edit button's enabled state + revision.
+        setExplorerEditChromeDisabled(index, false);
+        refreshExplorerEditControls(index);
         applyExplorerSearch(index);
         restoreExplorerFileScroll(index, scrollState);
         return true;
@@ -5466,6 +5500,10 @@
         if (!pane || !isExplorerSession(pane._session) || !sessionId || !path) {
             return false;
         }
+        // Replacing the viewer with another file discards any active edit.
+        if (!(await confirmDiscardExplorerEdit(index, 'Opening another file'))) {
+            return false;
+        }
 
         const wasDirectoryOpen = pane._explorerMode === 'directory';
         const hasDiffTarget = Boolean(openDiff || diffCommit);
@@ -5504,6 +5542,10 @@
     }
 
     async function refreshExplorerPane(index) {
+        // A manual refresh reloads (and would replace) the edited file.
+        if (!(await confirmDiscardExplorerEdit(index, 'Refreshing'))) {
+            return false;
+        }
         const pane = terminals[index];
         const refreshGitSidebar = Boolean(pane?._explorerGitSidebarOpen);
         const refreshTreeSidebar = Boolean(pane?._explorerTreeSidebarOpen);
@@ -5550,6 +5592,11 @@
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !isExplorerSession(pane._session) || !sessionId) {
+            return false;
+        }
+        // Directory navigation (tree, breadcrumb, open-folder) replaces the
+        // viewer, so a dirty in-place edit must be confirmed first.
+        if (!(await confirmDiscardExplorerEdit(index, 'Leaving this file'))) {
             return false;
         }
 

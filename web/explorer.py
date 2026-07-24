@@ -1,12 +1,20 @@
-"""Read-only file-explorer and Git-sidebar backends (local + SFTP).
+"""File-explorer and Git-sidebar backends (local + SFTP).
 
 Extracted from web/api.py (deep-dive finding 6.2, building on 6.1's backend
 abstraction). Contains session classification, explorer path resolution, the
 local and SFTP explorer backends, the single set of Git helpers parameterised
 by backend, and the per-session SSH client pool (finding 3.1).
+
+Filesystem access is read-only with one bounded exception: the in-place file
+editor. Explorer filesystem writes are allowed only through the root-confined,
+size/format/encoding/revision-guarded ``replace_file`` save path
+(``save_explorer_file_payload``); all other direct move/delete/upload/create
+operations remain out of scope. The existing guarded Git mutations are
+unchanged.
 """
 
 import codecs
+import hashlib
 import logging
 import os
 import posixpath
@@ -15,8 +23,10 @@ import shlex
 import stat as stat_module
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -369,6 +379,167 @@ def read_explorer_file_preview(
         "preview_end_byte": len(window),
         "total_size": total_size if total_size is not None else len(raw_content),
     }
+
+
+# ── In-place editor: encoding, revision, and editability metadata ──────────
+# The editor is bounded by the same read contract as previews: an editable file
+# is exactly one whose complete contents fit through EXPLORER_FILE_PREVIEW_MAX_BYTES,
+# decode as strict UTF-8, and use a single line-ending style. No separate edit
+# size limit is introduced (keeps the invariant simple).
+
+
+def _explorer_file_revision(raw_content: bytes) -> str:
+    """Return a ``sha256:`` optimistic-concurrency token for exact file bytes."""
+    return "sha256:" + hashlib.sha256(raw_content).hexdigest()
+
+
+def _explorer_line_ending(raw_content: bytes) -> str:
+    """Classify a file's newline style as lf/crlf/cr/none/mixed."""
+    crlf = raw_content.count(b"\r\n")
+    lone_cr = raw_content.count(b"\r") - crlf
+    lone_lf = raw_content.count(b"\n") - crlf
+    styles = [
+        name
+        for name, count in (("crlf", crlf), ("cr", lone_cr), ("lf", lone_lf))
+        if count
+    ]
+    if not styles:
+        return "none"
+    if len(styles) > 1:
+        return "mixed"
+    return styles[0]
+
+
+def _explorer_edit_metadata(raw_content: bytes, *, truncated: bool) -> Dict[str, Any]:
+    """Return editability metadata for a file the preview pipeline just read.
+
+    Only a *complete* (non-truncated), strict-UTF-8, single-line-ending file is
+    editable. Truncated, mixed-line-ending, or invalid-UTF-8 files stay viewable
+    but never editable, so a save can never silently normalize or corrupt bytes
+    the editor never actually held.
+    """
+    if truncated:
+        return {
+            "editable": False,
+            "edit_block_reason": "truncated",
+            "revision": None,
+            "line_ending": None,
+            "utf8_bom": False,
+        }
+
+    utf8_bom = raw_content.startswith(codecs.BOM_UTF8)
+    body = raw_content[len(codecs.BOM_UTF8):] if utf8_bom else raw_content
+    try:
+        body.decode("utf-8")
+        strict_utf8 = True
+    except UnicodeDecodeError:
+        strict_utf8 = False
+
+    line_ending = _explorer_line_ending(raw_content)
+    revision = _explorer_file_revision(raw_content)
+
+    if not strict_utf8:
+        reason: Optional[str] = "unsupported_format"
+        editable = False
+    elif line_ending == "mixed":
+        reason = "mixed_line_endings"
+        editable = False
+    else:
+        reason = None
+        editable = True
+
+    return {
+        "editable": editable,
+        "edit_block_reason": reason,
+        "revision": revision,
+        "line_ending": line_ending,
+        "utf8_bom": utf8_bom,
+    }
+
+
+def _encode_explorer_edit(content: str, *, line_ending: str, utf8_bom: bool) -> bytes:
+    """Re-encode textarea contents in the file's original BOM + line-ending style.
+
+    The browser normalizes textarea newlines to ``\\n``; this restores the file's
+    original style. One leading U+FEFF is stripped before the BOM is reapplied so
+    it can never be duplicated. A file with no original newline (``"none"``)
+    writes new line breaks as LF.
+    """
+    text = content
+    if text.startswith("﻿"):
+        text = text[1:]
+    # Collapse any stray CR/CRLF the client sent to LF before applying the target
+    # style, so the whole buffer ends up with one consistent line ending.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    newline = {"crlf": "\r\n", "cr": "\r", "lf": "\n", "none": "\n"}.get(line_ending, "\n")
+    if newline != "\n":
+        text = text.replace("\n", newline)
+    data = text.encode("utf-8")
+    if utf8_bom:
+        data = codecs.BOM_UTF8 + data
+    return data
+
+
+# ── Structured editor route errors ─────────────────────────────────────────
+# Carried up through _explorer_route_response so the frontend can branch on a
+# stable ``code`` instead of human-readable error text (proposal §3.3).
+
+
+class ExplorerRouteError(ValueError):
+    """A validation/route error carrying an HTTP status and stable code."""
+
+    status_code = 400
+    code = "invalid_request"
+
+    def __init__(self, message: str, **details: Any):
+        super().__init__(message)
+        self.details = details
+
+
+class ExplorerFileConflictError(ExplorerRouteError):
+    """The on-disk file changed since the editor read it (optimistic concurrency)."""
+
+    status_code = 409
+    code = "file_conflict"
+
+
+class ExplorerSaveInProgressError(ExplorerRouteError):
+    """Another GridVibe save for the same session/path is already running."""
+
+    status_code = 409
+    code = "save_in_progress"
+
+
+class ExplorerFileTooLargeError(ExplorerRouteError):
+    """The current file or its replacement exceeds the in-place edit limit."""
+
+    status_code = 413
+    code = "file_too_large"
+
+
+# A short-held claim set prevents two of GridVibe's *own* saves from racing on
+# one file. This is not an OS compare-and-swap — external software can still
+# change a file in the narrow window between the revision check and the
+# replacement; the revision check plus atomic replace are the real guard.
+_explorer_save_claims: set = set()
+_explorer_save_claims_lock = threading.Lock()
+
+
+@contextmanager
+def _explorer_save_claim(session_id: str, resolved_path: str):
+    """Claim ``(session_id, resolved_path)`` for one save; no I/O under the lock."""
+    key = (str(session_id or ""), str(resolved_path or ""))
+    with _explorer_save_claims_lock:
+        if key in _explorer_save_claims:
+            raise ExplorerSaveInProgressError(
+                "Another save for this file is already in progress"
+            )
+        _explorer_save_claims.add(key)
+    try:
+        yield
+    finally:
+        with _explorer_save_claims_lock:
+            _explorer_save_claims.discard(key)
 
 
 # GitHub-style admonition callouts (ISSUE-2026-017). Each label maps a
@@ -1043,6 +1214,44 @@ class _LocalExplorerBackend:
             file_handle.seek(start)
             return file_handle.read(max_bytes)
 
+    # -- bounded, atomic in-place write (in-app editor) -----------------------
+    def replace_file(self, file_path: str, content_bytes: bytes) -> None:
+        """Atomically replace an existing file with complete encoded contents.
+
+        Writes to a uniquely named sibling temp file on the same filesystem,
+        fsyncs it, copies the original mode bits, then ``os.replace()`` swaps it
+        in. A failure before the replace leaves the original file untouched and
+        removes the temp file. Extended attributes, ACLs, ownership, and
+        hard-link identity are not preserved (v1 preserves ordinary mode bits).
+        """
+        directory = os.path.dirname(file_path) or "."
+        try:
+            original_mode = stat_module.S_IMODE(
+                os.stat(file_path, follow_symlinks=False).st_mode
+            )
+        except OSError:
+            original_mode = None
+
+        temp_fd, temp_path = tempfile.mkstemp(prefix=".gv-save-", dir=directory)
+        try:
+            with os.fdopen(temp_fd, "wb") as temp_handle:
+                temp_handle.write(content_bytes)
+                temp_handle.flush()
+                os.fsync(temp_handle.fileno())
+            if original_mode is not None:
+                try:
+                    os.chmod(temp_path, original_mode)
+                except OSError:
+                    pass
+            os.replace(temp_path, file_path)
+            temp_path = None
+        finally:
+            if temp_path is not None:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
     def parent_explorer_path(self, root_path: str, current_path: str) -> str:
         if os.path.normcase(current_path) == os.path.normcase(root_path):
             return ""
@@ -1147,6 +1356,65 @@ class _SftpExplorerBackend:
         with self.sftp.open(file_path, "rb") as file_handle:
             file_handle.seek(start)
             return file_handle.read(max_bytes)
+
+    # -- bounded, atomic in-place write (in-app editor) -----------------------
+    def replace_file(self, file_path: str, content_bytes: bytes) -> None:
+        """Atomically replace an existing remote file with complete contents.
+
+        Uploads to a unique sibling temp path (exclusive-create ``"xb"`` where
+        supported), copies the original mode bits, then swaps it in with the
+        OpenSSH ``posix_rename`` extension. The destination is never opened with
+        ``"wb"`` (that could truncate the original before a failed upload
+        finishes). If the server lacks ``posix_rename`` a clear I/O error is
+        raised and the original file is left untouched.
+        """
+        directory = _remote_path_dirname(file_path) or "."
+        try:
+            original_mode: Optional[int] = stat_module.S_IMODE(
+                getattr(self.sftp.stat(file_path), "st_mode", 0) or 0
+            )
+        except OSError:
+            original_mode = None
+
+        temp_path = _remote_path_join(directory, f".gv-save-{uuid.uuid4().hex}")
+        handle = None
+        try:
+            try:
+                handle = self.sftp.open(temp_path, "xb")
+            except (OSError, ValueError):
+                # Exclusive-create is unavailable on some servers; the unique
+                # UUID name already avoids clobbering an existing path.
+                handle = self.sftp.open(temp_path, "wb")
+            handle.write(content_bytes)
+            handle.flush()
+            handle.close()
+            handle = None
+
+            if original_mode is not None:
+                try:
+                    self.sftp.chmod(temp_path, original_mode)
+                except OSError:
+                    pass
+
+            posix_rename = getattr(self.sftp, "posix_rename", None)
+            if posix_rename is None:
+                raise RuntimeError(
+                    "The remote SFTP server does not support atomic replace"
+                    " (posix_rename); the file was not changed"
+                )
+            posix_rename(temp_path, file_path)
+            temp_path = None
+        finally:
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            if temp_path is not None:
+                try:
+                    self.sftp.remove(temp_path)
+                except Exception:
+                    pass
 
     def parent_explorer_path(self, root_path: str, current_path: str) -> str:
         if _remote_compare_path(current_path) == _remote_compare_path(root_path):
@@ -2128,3 +2396,157 @@ def _resolve_remote_explorer_file_path(sftp: Any, session: Any, requested_path: 
     if not _remote_is_file(sftp, candidate):
         raise ValueError("Explorer path is not a file")
     return root_path, candidate
+
+
+# ── Explorer file read/save payload builders (in-app editor) ────────────────
+
+
+def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, Any]:
+    """Return the canonical read payload for one explorer file.
+
+    Owns the file read, binary/format rejection, Markdown preview, Git status,
+    and — for a complete UTF-8 text file — the editor metadata (``editable``,
+    ``revision``, ``line_ending``, ``utf8_bom``). Shared by the GET route and by
+    a successful save so both stay on one response contract.
+    """
+    root_path, file_path = backend.resolve_file(requested_path)
+    size, modified = backend.stat_file(file_path)
+    # Images short-circuit the text pipeline: the viewer renders them via the
+    # separate /image byte route, so no content is returned here.
+    if _is_explorer_image_file(file_path):
+        return {
+            "root": root_path,
+            "path": backend.rel_explorer_path(root_path, file_path),
+            "name": backend.basename(file_path),
+            "size": size,
+            "modified": modified,
+            "content": "",
+            "preview_type": "image",
+            "preview_html": None,
+            "language": None,
+            "editable": False,
+            "edit_block_reason": "unsupported_format",
+            "revision": None,
+            "line_ending": None,
+            "utf8_bom": False,
+            "git": _clean_git_entry_status(),
+            "git_context": None,
+        }
+
+    code_language = _explorer_editor_language(file_path)
+    preview = read_explorer_file_preview(
+        backend,
+        file_path,
+        total_size=size,
+        tail=_is_tail_preview_file(file_path),
+    )
+    preview_bytes = preview["bytes"]
+
+    if _explorer_content_looks_binary(preview_bytes):
+        raise ValueError("Explorer file appears to be binary")
+
+    truncated = preview["truncated"]
+    content = preview_bytes.decode("utf-8", errors="replace")
+    preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
+    edit_metadata = _explorer_edit_metadata(preview_bytes, truncated=truncated)
+    git_context, git_statuses = _get_git_context(backend, root_path, backend.file_dirname(file_path))
+    file_git = (
+        _git_status_for_entry(backend, str(git_context["repo_root"]), file_path, git_statuses)
+        if git_context.get("available")
+        else _clean_git_entry_status()
+    )
+    return {
+        "root": root_path,
+        "path": backend.rel_explorer_path(root_path, file_path),
+        "name": backend.basename(file_path),
+        "size": size,
+        "modified": modified,
+        "encoding": "utf-8",
+        "truncated": truncated,
+        "preview_mode": preview["preview_mode"],
+        "preview_start_byte": preview["preview_start_byte"],
+        "preview_end_byte": preview["preview_end_byte"],
+        "total_size": preview["total_size"],
+        "content": content,
+        "preview_type": "markdown" if preview_html is not None else None,
+        "preview_html": preview_html,
+        "language": code_language,
+        "editable": edit_metadata["editable"],
+        "edit_block_reason": edit_metadata["edit_block_reason"],
+        "revision": edit_metadata["revision"],
+        "line_ending": edit_metadata["line_ending"],
+        "utf8_bom": edit_metadata["utf8_bom"],
+        "git": file_git,
+        "git_context": git_context,
+    }
+
+
+def save_explorer_file_payload(
+    backend: Any,
+    requested_path: Any,
+    content: Any,
+    base_revision: Any,
+    *,
+    session_id: str,
+) -> Dict[str, Any]:
+    """Validate and atomically replace one explorer file, returning the read payload.
+
+    Enforces the full save contract: root-confinement, the filename/language
+    gate, the 10 MiB read/write bounds, complete strict-UTF-8 + single
+    line-ending source, and the optimistic-concurrency revision check. The
+    request is always a full-file replacement; a missing revision is a ``400``,
+    never an overwrite escape hatch.
+    """
+    if not isinstance(content, str):
+        raise ExplorerRouteError("File content must be a string")
+    base_revision_value = str(base_revision or "").strip()
+    if not base_revision_value:
+        raise ExplorerRouteError("A base revision is required to save")
+
+    # resolve_file confirms an existing regular file inside the session root.
+    root_path, file_path = backend.resolve_file(requested_path)
+
+    with _explorer_save_claim(session_id, file_path):
+        # Filename/language gate (also raises for unsupported formats).
+        _explorer_editor_language(file_path)
+
+        # Fully read the current file through the bounded read contract; a file
+        # that no longer fits it can no longer be edited in place.
+        raw_current = backend.read_file_prefix(file_path, EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)
+        if len(raw_current) > EXPLORER_FILE_PREVIEW_MAX_BYTES:
+            raise ExplorerFileTooLargeError(
+                "File exceeds the 10 MiB in-place edit limit",
+                max_bytes=EXPLORER_FILE_PREVIEW_MAX_BYTES,
+            )
+        if _explorer_content_looks_binary(raw_current):
+            raise ExplorerRouteError("This file can no longer be edited in place")
+
+        metadata = _explorer_edit_metadata(raw_current, truncated=False)
+        if not metadata["editable"]:
+            if metadata["edit_block_reason"] == "mixed_line_endings":
+                raise ExplorerRouteError("Mixed line endings are view-only in this version")
+            raise ExplorerRouteError("This file is not editable text")
+
+        current_revision = metadata["revision"]
+        if current_revision != base_revision_value:
+            raise ExplorerFileConflictError(
+                "File changed on disk since it was opened",
+                current_revision=current_revision,
+            )
+
+        encoded = _encode_explorer_edit(
+            content,
+            line_ending=metadata["line_ending"],
+            utf8_bom=metadata["utf8_bom"],
+        )
+        if len(encoded) > EXPLORER_FILE_PREVIEW_MAX_BYTES:
+            raise ExplorerFileTooLargeError(
+                "The edited file exceeds the 10 MiB in-place edit limit",
+                max_bytes=EXPLORER_FILE_PREVIEW_MAX_BYTES,
+            )
+
+        # An unchanged buffer is a successful no-op — never touch the file.
+        if encoded != raw_current:
+            backend.replace_file(file_path, encoded)
+
+    return get_explorer_file_payload(backend, requested_path)

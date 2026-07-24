@@ -5599,6 +5599,10 @@
     }
 
     async function closeTerminalPane(index) {
+        // Closing a pane tears down its explorer viewer — confirm any dirty edit.
+        if (!(await confirmDiscardExplorerEdit(index, 'Closing this pane'))) {
+            return;
+        }
         const plan = buildCloseTerminalPlan(index);
         if (!plan) {
             return;
@@ -6652,6 +6656,11 @@
         if (!groupId || groupId === activeGroupId) {
             return;
         }
+        // Switching sessions rebuilds the grid and discards the visible panes'
+        // explorer editors — confirm any unsaved changes first.
+        if (!(await confirmDiscardAllExplorerEdits('Switching sessions'))) {
+            return;
+        }
 
         /* Safety: broadcast typing never survives a group switch. */
         setBroadcastInput(false);
@@ -6738,6 +6747,12 @@
     ───────────────────────────────────────────── */
     async function closeSessionGroup(groupId = activeGroupId) {
         if (!groupId) {
+            return;
+        }
+
+        // Closing the visible group tears down its explorer editors; confirm
+        // unsaved changes before the live-terminal close prompt.
+        if (groupId === visibleGroupId && !(await confirmDiscardAllExplorerEdits('Closing this session'))) {
             return;
         }
 
