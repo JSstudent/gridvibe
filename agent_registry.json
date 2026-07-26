@@ -353,8 +353,8 @@
     ],
     "post_install": "Run claude once and complete browser sign-in.",
     "auto_mode": {
-      "flag": "--enable-auto-mode",
-      "description": "Launches with automatic edit and approval mode enabled."
+      "flag": "--permission-mode auto",
+      "description": "Launches in the auto permission mode: routine edits and commands run without prompting."
     }
   },
   "kimi": {

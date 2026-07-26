@@ -12775,7 +12775,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
 
     def test_agent_options_expose_registry_auto_mode_flags(self):
         options = {item["value"]: item for item in web_agents._agent_options()}
-        self.assertEqual(options["claude"]["auto_mode_flag"], "--enable-auto-mode")
+        self.assertEqual(options["claude"]["auto_mode_flag"], "--permission-mode auto")
         self.assertEqual(
             options["codex"]["auto_mode_flag"],
             "--sandbox workspace-write --ask-for-approval on-request",
@@ -12866,7 +12866,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             return SimpleNamespace(**base)
 
         compose = web_agents._compose_agent_startup_command
-        self.assertEqual(compose(session()), "claude --enable-auto-mode")
+        self.assertEqual(compose(session()), "claude --permission-mode auto")
         self.assertEqual(compose(session(agent_auto_mode=False)), "claude")
         self.assertEqual(
             compose(session(initial_command="opencode", agent_selection="opencode")),
@@ -12899,7 +12899,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         )
         with patch.object(web_terminal_io, "_send_connection_input") as send:
             web_terminal_io._run_startup_sequence(connection, session)
-        send.assert_called_once_with(connection, "claude --enable-auto-mode\n")
+        send.assert_called_once_with(connection, "claude --permission-mode auto\n")
 
         session.agent_auto_mode = False
         with patch.object(web_terminal_io, "_send_connection_input") as send:
