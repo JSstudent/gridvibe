@@ -237,17 +237,23 @@ from web.voice import (  # noqa: F401 - re-exported for backwards compatibility
     _handle_whisper_audio_chunk,
     _load_voice_prefs,
     _pcm16le_to_float32,
+    _reload_voice_backends,
     _restart_vosk_service,
     _save_voice_prefs,
+    _start_voice_dependency_install,
     _start_vosk_voice_session,
     _start_whisper_voice_session,
     _stop_vosk_service,
     _stop_vosk_voice_session,
     _stop_whisper_voice_session,
     _transcribe_whisper_audio,
+    _voice_engine_available,
     _voice_engine_unavailable_message,
+    _voice_engines_available,
+    _voice_install_status,
     _vosk_engine_available,
     _vosk_lock,
+    _vosk_service_packages_available,
     _vosk_service_reachable,
     _vosk_session_locks,
     _vosk_ws_connections,
@@ -477,7 +483,13 @@ def _resolve_group_id() -> str:
 
 
 def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
-    """Return layout metadata for one session group."""
+    """Return layout metadata for one session group.
+
+    ``surface_mode`` is always the current global setting, never a per-group
+    copy: it used to be frozen into the group at launch, so changing the App
+    Setting left every already-launched group (and every workspace restored
+    from a snapshot of one) reporting the value it launched with.
+    """
     group = session_manager.get_group(group_id)
     if not group:
         launch_options = active_launch_options
@@ -496,7 +508,7 @@ def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
         "connection_mode": group.connection_mode,
         "terminal_count": group.terminal_count,
         "workspace_layout": group.workspace_layout,
-        "surface_mode": group.surface_mode,
+        "surface_mode": runtime_config.app_surface_mode,
     }
 
 
@@ -665,11 +677,17 @@ def set_app_config():
         terminal_payload = {}
     apply_scope = str(terminal_payload.get("apply_scope", "")).strip().lower()
 
+    # _normalize_app_config_update fills every section the payload omits from
+    # runtime_config, so the refresh has to happen under the same lock hold:
+    # otherwise a partial POST (the workspace theme toggle sends only
+    # `appearance`) landing between the save and the refresh would write the
+    # pre-save values of every other section straight back over the new ones.
+    # The broadcast stays outside the lock — never emit while holding one.
     with _config_lock:
         current = load_config()
         current = _merge_dicts(current, _normalize_app_config_update(data))
         save_config(current)
-    _refresh_runtime_config()
+        _refresh_runtime_config()
     _broadcast_app_config_update(apply_scope)
     return jsonify(_public_app_config())
 
@@ -1418,7 +1436,6 @@ def create_sessions():
         connection_mode = _normalize_connection_mode(data.get("connection_mode"))
         layout = _normalize_layout(data.get("layout"), len(sessions_config))
         workspace_layout = _normalize_workspace_layout(data.get("workspace_layout"), len(sessions_config))
-        surface_mode = _normalize_surface_mode(data.get("surface_mode"), runtime_config.app_surface_mode)
         session_name = str(data.get("session_name") or "").strip()
         saved_session_id = _normalize_launch_session_id(data.get("saved_session_id"))
         stable_group_id = _build_launch_group_id(saved_session_id) or None
@@ -1517,7 +1534,6 @@ def create_sessions():
             group_id=stable_group_id,
             saved_session_id=saved_session_id,
             workspace_layout=workspace_layout,
-            surface_mode=surface_mode,
         )
         logger.info(
             "Created session group group_id=%s saved_session_id=%r name=%r mode=%s layout=%s terminal_count=%d",
@@ -1579,7 +1595,7 @@ def create_sessions():
             "connection_mode": connection_mode,
             "terminal_count": len(created_sessions),
             "workspace_layout": workspace_layout,
-            "surface_mode": surface_mode,
+            "surface_mode": runtime_config.app_surface_mode,
             "launch_target": "web",
             "warnings": launch_warnings,
         }), 201
@@ -2067,27 +2083,41 @@ def handle_terminal_resize(data):
 # ==================== Voice Input (Vosk / faster-whisper) ====================
 
 
+def _broadcast_voice_install_finished(state: Dict[str, Any]) -> None:
+    """Tell open windows that voice availability changed after an install."""
+    socketio.emit('voice_availability_updated', {
+        'engine': runtime_config.voice_engine,
+        'engine_available': _voice_engine_available(runtime_config.voice_engine),
+        'engines_available': _voice_engines_available(),
+        'install': state,
+        'timestamp': int(time.time() * 1000),
+    })
+
+
 @app.route('/api/voice-status', methods=['GET'])
 def voice_status_endpoint():
     """Check voice input availability and service status."""
     if runtime_config.voice_engine == "vosk":
         service_running: Optional[bool] = _vosk_service_reachable(timeout=1.0)
         service_url = runtime_config.vosk_service_url
-        engine_available = _vosk_engine_available()
     else:
         service_running = None
         service_url = ""
-        engine_available = _whisper_engine_available()
+    engine_available = _voice_engine_available(runtime_config.voice_engine, service_running)
     status_message = (
         "Voice backend is available."
         if engine_available
-        else _voice_engine_unavailable_message(runtime_config.voice_engine)
+        else _voice_engine_unavailable_message(runtime_config.voice_engine, service_running)
     )
     return jsonify({
         'enabled': runtime_config.voice_enabled,
         'engine': runtime_config.voice_engine,
         'engine_available': engine_available,
+        # Per-engine availability so App Settings can annotate the engine the
+        # user is picking, not only the one currently saved.
+        'engines_available': _voice_engines_available(service_running),
         'ws_client_available': _vosk_engine_available(),
+        'vosk_packages_available': _vosk_service_packages_available(),
         'service_running': service_running,
         'service_url': service_url,
         'model': _active_voice_model_name(),
@@ -2096,7 +2126,30 @@ def voice_status_endpoint():
         'whisper_device': runtime_config.whisper_device,
         'whisper_compute_type': runtime_config.whisper_compute_type,
         'status_message': status_message,
+        'install': _voice_install_status(),
     })
+
+
+@app.route('/api/voice-deps-install', methods=['GET'])
+def voice_deps_install_status():
+    """Return the state of the in-app voice dependency install."""
+    return jsonify(_voice_install_status())
+
+
+@app.route('/api/voice-deps-install', methods=['POST'])
+def start_voice_deps_install():
+    """Install requirements-voice.txt into the running interpreter.
+
+    The recovery path for a machine where the launcher's optional voice
+    packages were skipped: without it, enabling voice input in App Settings
+    is a silent no-op until GridVibe is closed and re-launched
+    (docs/stage_j_issues_analysis_2026-07-26.md, issue 2). Same-origin only
+    (the cross-origin write guard covers every state-changing request) and it
+    installs nothing but the repository's own pinned requirements file.
+    """
+    state = _start_voice_dependency_install(on_complete=_broadcast_voice_install_finished)
+    logger.info("Voice dependency install requested (status=%s)", state.get('status'))
+    return jsonify(state), 202
 
 
 @app.route('/api/voice-prefs', methods=['GET'])
@@ -2116,6 +2169,13 @@ def set_voice_prefs():
         if key in data:
             current[key] = data[key]
     _save_voice_prefs(current)
+    # Open workspaces read _voicePrefs at event time but only loaded it at boot,
+    # so a changed push-to-talk keybind used to need a full restart
+    # (docs/stage_j_issues_analysis_2026-07-26.md, issue 3).
+    socketio.emit('voice_prefs_updated', {
+        'prefs': current,
+        'timestamp': int(time.time() * 1000),
+    })
     return jsonify(current)
 
 

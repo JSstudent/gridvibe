@@ -332,6 +332,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("requirements-voice.txt", launcher)
         self.assertIn("choice /C YN", launcher)
 
+    def test_windows_launcher_only_asks_about_voice_when_voice_input_is_enabled(self):
+        """Stage J issue 4: the prompt came back on every launch even though
+        voice input ships disabled, and a decline was never remembered."""
+        launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
+
+        gate_index = launcher.index("get('voice_input', {}).get('enabled')")
+        prompt_index = launcher.index("choice /C YN")
+        marker_index = launcher.index('> ".voice-deps-declined"')
+
+        self.assertLess(gate_index, prompt_index)
+        self.assertLess(prompt_index, marker_index)
+        self.assertEqual(launcher.count("choice /C YN"), 1)
+        self.assertIn(":start_gridvibe", launcher)
+        self.assertIn('if exist ".voice-deps-declined" (', launcher)
+
+    def test_voice_dependency_decline_marker_is_gitignored(self):
+        gitignore = (Path(api.BASE_DIR) / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertIn(".voice-deps-declined", gitignore.split())
+
     def test_windows_launcher_clears_optional_dependency_error_before_start(self):
         launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
 
@@ -580,7 +600,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("workspace_layout: workspaceLayout", html)
         self.assertIn("activeWorkspaceLayout = normalized.workspace_layout || null;", html)
         self.assertIn("workspace_layout: config.workspace_layout", html)
-        self.assertIn("surface_mode: appSettings.workspace?.surface_mode === 'max' ? 'max' : 'normal'", html)
         self.assertIn("initial_command_mode: terminal.startup_mode === 'explorer'", html)
         self.assertIn("agent_selection: terminal.initial_command_mode === 'agent'", html)
         self.assertIn("data-explorer-tree-open=", html)
@@ -2123,6 +2142,37 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("voice-capture-worklet.js", html)
         self.assertIn("base", html)
 
+    def test_launcher_page_gates_voice_settings_on_backend_availability(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn('id="appVoiceAvailability"', html)
+        self.assertIn("async function loadVoiceStatus()", html)
+        self.assertIn("async function installVoiceDependencies()", html)
+        self.assertIn("'/api/voice-deps-install'", html)
+        self.assertIn("engines_available", html)
+        self.assertIn(".voice-availability {", html)
+
+    def test_terminals_page_applies_voice_pref_changes_without_a_restart(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("socket.on('voice_prefs_updated'", html)
+        self.assertIn("socket.on('voice_availability_updated'", html)
+        self.assertIn("function _refreshVoiceRuntimeState() {", html)
+        self.assertIn("_refreshVoiceRuntimeState();", html)
+
+    def test_terminals_page_surfaces_unavailable_voice_backend_visibly(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function _showVoiceAlert(message) {", html)
+        self.assertIn("_showVoiceAlert(backendUnavailableMessage);", html)
+        self.assertIn(".voice-btn.unavailable {", html)
+
     def test_terminals_page_preflights_voice_backend_before_microphone_start(self):
         response = self.client.get("/terminals")
 
@@ -2282,15 +2332,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';", html)
         self.assertIn("const DEFAULT_SURFACE_MODE =", html)
         self.assertIn("applyConfiguredSurfaceMode(data, { refit: gridBuilt });", html)
-        self.assertIn("applySurfaceMode(normalizeSurfaceMode(DEFAULT_SURFACE_MODE) === 'max');", html)
+        self.assertIn("initSurfaceMode();", html)
         self.assertIn("document.body.classList.toggle('surface-max', active);", html)
         self.assertIn("redrawAttachedTerminals(attachedIndices, { forceResize: true });", html)
         self.assertIn("const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';", html)
         self.assertIn("const APP_CONFIG_BROADCAST_CHANNEL = 'gridvibe.appConfig';", html)
         self.assertIn("function applyAppConfigSurfaceMode(message)", html)
-        self.assertIn("surfaceModeChangedManually = true;", html)
-        self.assertIn("surfaceModeAppliedGroups.clear();", html)
-        self.assertIn("applySurfaceMode(mode === 'max', { persist: true, refit: true });", html)
+        self.assertIn("adoptGlobalSurfaceMode(message.workspace.surface_mode, { refit: true });", html)
         self.assertIn("function setupAppConfigUpdateListeners()", html)
         self.assertIn("setupAppConfigUpdateListeners();", html)
         self.assertIn("socket.on('app_config_updated'", html)
@@ -2483,6 +2531,121 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertFalse(payload["engine_available"])
         self.assertIn("faster-whisper", payload["status_message"])
         self.assertIn("pip install -r requirements-voice.txt", payload["status_message"])
+
+    def test_voice_status_endpoint_reports_per_engine_availability(self):
+        with patch.object(api.runtime_config, "voice_engine", "vosk"), patch.object(
+            api, "_vosk_service_reachable", return_value=False
+        ), patch.object(
+            web_voice, "_vosk_service_packages_available", return_value=False
+        ), patch.object(web_voice, "WhisperModel", object()), patch.object(
+            web_voice, "np", object()
+        ):
+            response = self.client.get("/api/voice-status")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload["engine_available"])
+        self.assertFalse(payload["engines_available"]["vosk"])
+        self.assertTrue(payload["engines_available"]["whisper"])
+        self.assertIn("vosk and websockets", payload["status_message"])
+        self.assertIn("install", payload)
+
+    def test_voice_status_endpoint_trusts_a_running_external_vosk_service(self):
+        with patch.object(api.runtime_config, "voice_engine", "vosk"), patch.object(
+            api, "_vosk_service_reachable", return_value=True
+        ), patch.object(
+            web_voice, "_vosk_service_packages_available", return_value=False
+        ):
+            response = self.client.get("/api/voice-status")
+
+        payload = response.get_json()
+        self.assertTrue(payload["engine_available"])
+        self.assertTrue(payload["engines_available"]["vosk"])
+
+    def test_voice_prefs_post_broadcasts_live_update(self):
+        with patch.object(api.socketio, "emit") as emit:
+            response = self.client.post(
+                "/api/voice-prefs", json={"pttKeybind": "Ctrl+Shift+V"}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["pttKeybind"], "Ctrl+Shift+V")
+        events = [call.args[0] for call in emit.call_args_list]
+        self.assertIn("voice_prefs_updated", events)
+        payload = next(
+            call.args[1]
+            for call in emit.call_args_list
+            if call.args[0] == "voice_prefs_updated"
+        )
+        self.assertEqual(payload["prefs"]["pttKeybind"], "Ctrl+Shift+V")
+
+    def test_voice_deps_install_endpoint_starts_background_install(self):
+        state = {"status": "running", "message": "Installing", "output_tail": []}
+        with patch.object(
+            api, "_start_voice_dependency_install", return_value=state
+        ) as start:
+            response = self.client.post("/api/voice-deps-install", json={})
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json()["status"], "running")
+        start.assert_called_once_with(
+            on_complete=api._broadcast_voice_install_finished
+        )
+
+    def test_voice_deps_install_status_endpoint_reports_current_state(self):
+        response = self.client.get("/api/voice-deps-install")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertIn(payload["status"], {"idle", "running", "success", "error"})
+        self.assertIn("output_tail", payload)
+
+    def _reset_voice_install_state(self):
+        web_voice._set_voice_install_state(
+            status="idle",
+            message="",
+            restart_required=False,
+            started_at=None,
+            finished_at=None,
+            output_tail=[],
+        )
+
+    def test_voice_dependency_install_reloads_backends_without_a_restart(self):
+        self.addCleanup(self._reset_voice_install_state)
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="Successfully installed vosk", stderr=""
+        )
+        with patch.object(
+            web_voice.subprocess, "run", return_value=completed
+        ) as run, patch.object(
+            web_voice, "_clear_voice_deps_declined_marker"
+        ) as clear_marker, patch.object(
+            web_voice, "_reload_voice_backends", return_value={"vosk": True, "whisper": True}
+        ) as reload_backends:
+            web_voice._perform_voice_dependency_install()
+
+        self.assertIn("requirements-voice.txt", run.call_args.args[0][-1])
+        clear_marker.assert_called_once_with()
+        reload_backends.assert_called_once_with()
+        state = web_voice._voice_install_status()
+        self.assertEqual(state["status"], "success")
+        self.assertFalse(state["restart_required"])
+
+    def test_voice_dependency_install_failure_reports_pip_exit_code(self):
+        self.addCleanup(self._reset_voice_install_state)
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=2, stdout="", stderr="ERROR: no matching distribution"
+        )
+        with patch.object(
+            web_voice.subprocess, "run", return_value=completed
+        ), patch.object(web_voice, "_reload_voice_backends") as reload_backends:
+            web_voice._perform_voice_dependency_install()
+
+        reload_backends.assert_not_called()
+        state = web_voice._voice_install_status()
+        self.assertEqual(state["status"], "error")
+        self.assertIn("code 2", state["message"])
+        self.assertIn("ERROR: no matching distribution", state["output_tail"])
 
     def test_app_config_endpoint_returns_settings_payload(self):
         response = self.client.get("/api/app-config")
@@ -7142,6 +7305,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         sessions_payload = {
             "connection_mode": "ssh",
             "layout": "vertical",
+            # A launch payload may still carry a surface_mode (older saved
+            # snapshots do) — it is ignored in favour of the global setting.
             "surface_mode": "max",
             "workspace_layout": {
                 "class_name": "layout-split-local",
@@ -7180,19 +7345,61 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(created.status_code, 201)
         data = created.get_json()
         self.assertEqual(data["workspace_layout"]["split_column_weights"], [3.0, 1.0, 1.0, 3.0])
-        self.assertEqual(data["surface_mode"], "max")
-        self.assertEqual(data["group"]["surface_mode"], "max")
+        self.assertEqual(data["surface_mode"], api.runtime_config.app_surface_mode)
+        self.assertNotIn("surface_mode", data["group"])
         self.assertEqual(data["sessions"][0]["initial_command_mode"], "agent")
         self.assertEqual(data["sessions"][0]["agent_selection"], "other")
         self.assertEqual(data["sessions"][0]["custom_agent"], "claude-code")
 
         listed = self.client.get(f"/api/sessions?group={data['group_id']}")
         self.assertEqual(listed.status_code, 200)
-        self.assertEqual(listed.get_json()["surface_mode"], "max")
+        self.assertEqual(listed.get_json()["surface_mode"], api.runtime_config.app_surface_mode)
         self.assertEqual(
             listed.get_json()["workspace_layout"]["split_slot_rects"][1]["x"],
             3,
         )
+
+    def test_surface_mode_setting_reaches_already_launched_groups(self):
+        """A group must never pin the surface mode it launched with.
+
+        It used to be copied into the SessionGroup at launch, so flipping the
+        global App Setting left every open group (and every workspace restored
+        from a snapshot of one) still reporting the old value — which the
+        workspace page re-applied on its next /api/sessions refresh.
+        """
+        cfg = api.load_config()
+        saved_workspace = json.loads(json.dumps(cfg.get("workspace", {})))
+        try:
+            with patch.object(api.socketio, "start_background_task"):
+                created = self.client.post(
+                    "/api/sessions",
+                    json={
+                        "connection_mode": "ssh",
+                        "layout": "single",
+                        "surface_mode": "normal",
+                        "sessions": [{"host": "10.0.0.20", "directory": "/srv/dev"}],
+                    },
+                )
+            self.assertEqual(created.status_code, 201)
+            group_id = created.get_json()["group_id"]
+
+            saved = self.client.post(
+                "/api/app-config", json={"workspace": {"surface_mode": "max"}}
+            )
+            self.assertEqual(saved.status_code, 200)
+
+            listed = self.client.get(f"/api/sessions?group={group_id}")
+            self.assertEqual(listed.get_json()["surface_mode"], "max")
+
+            # The restorable snapshot must not carry it either, or a restart
+            # would replay the stale value into the relaunched group.
+            slot = web_runtime_state.capture_workspace(api.session_manager)
+            self.assertNotIn("surface_mode", slot["groups"][0])
+        finally:
+            cfg = api.load_config()
+            cfg["workspace"] = saved_workspace
+            api.save_config(cfg)
+            api._refresh_runtime_config()
 
     def test_get_saved_session_returns_virtual_default_session(self):
         response = self.client.get(f"/api/saved-sessions/{api.DEFAULT_SAVED_SESSION_ID}")
@@ -10874,25 +11081,29 @@ class ThemeSyncTestCase(unittest.TestCase):
 
     def test_terminals_reconciles_theme_on_reconnect_focus_and_pageshow(self):
         terminals_js = self._static("js/terminals.js")
-        self.assertIn("async function reconcileAppConfigTheme()", terminals_js)
+        self.assertIn("async function reconcileAppConfig()", terminals_js)
         reconcile_fn = terminals_js[
-            terminals_js.index("async function reconcileAppConfigTheme()"):
+            terminals_js.index("async function reconcileAppConfig()"):
             terminals_js.index("function setupAppConfigUpdateListeners()")
         ]
         self.assertIn("fetch('/api/app-config')", reconcile_fn)
-        self.assertIn("applyAppConfigTheme(await response.json());", reconcile_fn)
+        self.assertIn("applyAppConfigTheme(data);", reconcile_fn)
+        # Surface mode reconciles through the change-only path, so a recovery
+        # fetch never discards this window's own surface toggle.
+        self.assertIn("applyConfiguredSurfaceMode(", reconcile_fn)
+        self.assertNotIn("applyAppConfigSurfaceMode(", reconcile_fn)
         # reconnect path (guarded by the not-first-connect flag)
         connect_handler = terminals_js[
             terminals_js.index("let hadSocketConnection = false;"):
             terminals_js.index("socket.on('voice_result'")
         ]
-        self.assertIn("reconcileAppConfigTheme();", connect_handler)
+        self.assertIn("reconcileAppConfig();", connect_handler)
         # focus / pageshow recovery
         focus_wiring = terminals_js[
             terminals_js.index("window.addEventListener('focus'"):
             terminals_js.index("document.addEventListener('fullscreenchange'")
         ]
-        self.assertEqual(focus_wiring.count("reconcileAppConfigTheme();"), 2)
+        self.assertEqual(focus_wiring.count("reconcileAppConfig();"), 2)
 
     def test_shared_init_theme_reacts_to_cross_window_storage_writes(self):
         shared_js = self._static("js/shared.js")
@@ -12144,7 +12355,6 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
                 "connection_mode": group["connection_mode"],
                 "layout": group["layout"],
                 "workspace_layout": group["workspace_layout"],
-                "surface_mode": group["surface_mode"],
                 "session_name": group["name"],
                 "saved_session_id": group["saved_session_id"],
                 "restore": True,
@@ -12609,7 +12819,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
 
     def test_agent_options_expose_registry_auto_mode_flags(self):
         options = {item["value"]: item for item in web_agents._agent_options()}
-        self.assertEqual(options["claude"]["auto_mode_flag"], "--enable-auto-mode")
+        self.assertEqual(options["claude"]["auto_mode_flag"], "--permission-mode auto")
         self.assertEqual(
             options["codex"]["auto_mode_flag"],
             "--sandbox workspace-write --ask-for-approval on-request",
@@ -12700,7 +12910,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             return SimpleNamespace(**base)
 
         compose = web_agents._compose_agent_startup_command
-        self.assertEqual(compose(session()), "claude --enable-auto-mode")
+        self.assertEqual(compose(session()), "claude --permission-mode auto")
         self.assertEqual(compose(session(agent_auto_mode=False)), "claude")
         self.assertEqual(
             compose(session(initial_command="opencode", agent_selection="opencode")),
@@ -12733,7 +12943,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         )
         with patch.object(web_terminal_io, "_send_connection_input") as send:
             web_terminal_io._run_startup_sequence(connection, session)
-        send.assert_called_once_with(connection, "claude --enable-auto-mode\n")
+        send.assert_called_once_with(connection, "claude --permission-mode auto\n")
 
         session.agent_auto_mode = False
         with patch.object(web_terminal_io, "_send_connection_input") as send:

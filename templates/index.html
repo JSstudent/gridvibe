@@ -309,6 +309,13 @@
                         <span>Turns the microphone and speech-to-text path on or off for this machine.</span>
                     </span>
                 </label>
+                <div id="appVoiceAvailability" class="voice-availability hidden">
+                    <div class="voice-availability-copy">
+                        <strong>Voice packages are missing</strong>
+                        <span id="appVoiceAvailabilityMessage"></span>
+                    </div>
+                    <button id="installVoiceDepsBtn" class="ghost-btn" type="button" onclick="installVoiceDependencies()">Install voice dependencies</button>
+                </div>
                 <div id="appVoiceSettingsDetails" class="voice-settings-details">
                     <div class="field">
                         <label>Voice Backend</label>

@@ -535,6 +535,8 @@
         const fontPresetInput = document.getElementById('appTerminalFontPreset');
         const fontCustomField = document.getElementById('appTerminalFontCustomField');
         fontCustomField?.classList.toggle('hidden', fontPresetInput?.value !== 'custom');
+        /* Availability follows the engine picked here, not only the saved one. */
+        syncVoiceAvailability();
     }
 
     function syncAppSettingsForm() {
@@ -637,6 +639,158 @@
 
     function voiceDeviceLabel(device, index) {
         return device.label || `Microphone ${index + 1}`;
+    }
+
+    /* Voice backend availability (stage J issue 2): App Settings used to let
+       voice input be switched on with none of the optional packages present,
+       and the mic button in the workspace then did nothing at all. The modal
+       now reads /api/voice-status, explains what is missing for the engine
+       selected in this form, and can install the packages in place. */
+    let voiceStatus = null;
+    let voiceInstallPolling = false;
+    const VOICE_INSTALL_POLL_MS = 2000;
+
+    function selectedVoiceEngine() {
+        return document.getElementById('appVoiceEngine')?.value
+            || voiceStatus?.engine
+            || DEFAULT_APP_SETTINGS.voice_input.engine;
+    }
+
+    function voiceEngineAvailable(engine = selectedVoiceEngine()) {
+        const engines = voiceStatus?.engines_available;
+        /* Unknown (status never loaded, or an older server): never block on a
+           probe we could not run. */
+        return typeof engines?.[engine] === 'boolean' ? engines[engine] : true;
+    }
+
+    function voiceUnavailableMessage(engine = selectedVoiceEngine()) {
+        if (voiceStatus?.engine === engine && voiceStatus?.engine_available === false && voiceStatus?.status_message) {
+            return voiceStatus.status_message;
+        }
+        return engine === 'whisper'
+            ? 'faster-whisper and numpy are not installed, so voice input cannot start.'
+            : 'The vosk and websockets packages are not installed, so voice input cannot start.';
+    }
+
+    function setVoiceAvailabilityMessage(text) {
+        const message = document.getElementById('appVoiceAvailabilityMessage');
+        if (message) {
+            message.textContent = text;
+        }
+    }
+
+    function setVoiceInstallBusy(busy) {
+        const button = document.getElementById('installVoiceDepsBtn');
+        if (!button) {
+            return;
+        }
+        button.disabled = busy;
+        button.classList.toggle('loading', busy);
+    }
+
+    function syncVoiceAvailability() {
+        const banner = document.getElementById('appVoiceAvailability');
+        if (!banner) {
+            return;
+        }
+        if (voiceInstallPolling) {
+            banner.classList.remove('hidden');
+            return;
+        }
+        /* Only relevant once voice input is switched on — an off feature with
+           uninstalled packages is not a problem to report. */
+        const voiceEnabled = Boolean(document.getElementById('appVoiceEnabled')?.checked);
+        const available = !voiceEnabled || voiceEngineAvailable();
+        banner.classList.toggle('hidden', available);
+        if (!available) {
+            setVoiceAvailabilityMessage(`${voiceUnavailableMessage()} Install them here — GridVibe loads them without a restart.`);
+        }
+    }
+
+    async function loadVoiceStatus() {
+        const response = await fetch('/api/voice-status');
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to load voice status');
+        }
+        voiceStatus = data;
+        syncVoiceAvailability();
+        if (data.install?.status === 'running') {
+            watchVoiceInstall();
+        }
+        return data;
+    }
+
+    function voiceInstallDelay() {
+        return new Promise(resolve => window.setTimeout(resolve, VOICE_INSTALL_POLL_MS));
+    }
+
+    /* pip runs in a worker thread server-side, so progress is polled at a
+       human interval (guardrail: no sub-second polling) only while an install
+       is actually in flight. */
+    async function watchVoiceInstall() {
+        if (voiceInstallPolling) {
+            return;
+        }
+        voiceInstallPolling = true;
+        setVoiceInstallBusy(true);
+        try {
+            for (;;) {
+                await voiceInstallDelay();
+                const response = await fetch('/api/voice-deps-install');
+                const state = await response.json();
+                if (!response.ok) {
+                    throw new Error(state.error || `Install status check failed with status ${response.status}`);
+                }
+                if (state.status === 'running') {
+                    continue;
+                }
+                voiceInstallPolling = false;
+                await loadVoiceStatus().catch(() => {});
+                if (state.status === 'success') {
+                    setVoiceAvailabilityMessage(state.message || 'Voice dependencies installed.');
+                    showMessage(
+                        state.restart_required
+                            ? `${state.message} Use Restart GridVibe to finish.`
+                            : (state.message || 'Voice dependencies installed.'),
+                        state.restart_required ? 'warning' : 'success'
+                    );
+                } else {
+                    const tail = (state.output_tail || []).slice(-1).join(' ');
+                    setVoiceAvailabilityMessage(`${state.message || 'Install failed.'}${tail ? ` (${tail})` : ''}`);
+                    showMessage(state.message || 'Voice dependency install failed.', 'error');
+                }
+                return;
+            }
+        } catch (error) {
+            setVoiceAvailabilityMessage(`Install status unavailable: ${error.message}`);
+            showMessage(`Voice dependency install failed: ${error.message}`, 'error');
+        } finally {
+            voiceInstallPolling = false;
+            setVoiceInstallBusy(false);
+        }
+    }
+
+    async function installVoiceDependencies() {
+        document.getElementById('appVoiceAvailability')?.classList.remove('hidden');
+        setVoiceInstallBusy(true);
+        setVoiceAvailabilityMessage('Installing voice dependencies with pip. This can take a few minutes.');
+        try {
+            const response = await fetch('/api/voice-deps-install', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || `Install request failed with status ${response.status}`);
+            }
+            await watchVoiceInstall();
+        } catch (error) {
+            setVoiceInstallBusy(false);
+            setVoiceAvailabilityMessage(`Install failed: ${error.message}`);
+            showMessage(`Voice dependency install failed: ${error.message}`, 'error');
+        }
     }
 
     function syncVoicePrefsForm() {
@@ -862,6 +1016,7 @@
                 loadVoicePrefs()
             ]);
             refreshLauncherMicrophones().catch(() => {});
+            loadVoiceStatus().catch(() => {});
             const modal = document.getElementById('appSettingsModal');
             modal.classList.add('visible');
             modal.setAttribute('aria-hidden', 'false');
@@ -892,9 +1047,26 @@
 
             applyAppSettings(data);
             notifyAppConfigUpdated(data, settingsForm.terminal.apply_scope);
-            closeAppSettingsModal();
             setUpdateStatus('App settings saved.', 'success');
             showMessage('App settings saved.', 'success');
+
+            /* Turning voice input on with no backend installed used to save
+               happily and then do nothing (stage J issue 2). Offer the install
+               right here and keep the modal open to show its progress. */
+            if (settingsForm.voice_input.enabled && !voiceEngineAvailable(settingsForm.voice_input.engine)) {
+                const install = await openGenericConfirmModal({
+                    title: 'Install voice dependencies?',
+                    copy: voiceUnavailableMessage(settingsForm.voice_input.engine),
+                    note: 'GridVibe installs them into its own environment and loads them without a restart.',
+                    confirmLabel: 'Install now'
+                });
+                if (install) {
+                    installVoiceDependencies();
+                    return;
+                }
+            }
+
+            closeAppSettingsModal();
         } catch (error) {
             showMessage(`Settings save failed: ${error.message}`, 'error');
         } finally {
@@ -2819,7 +2991,6 @@
             connection_mode: group.connection_mode,
             layout: group.layout,
             workspace_layout: group.workspace_layout,
-            surface_mode: group.surface_mode,
             session_name: group.name,
             saved_session_id: group.saved_session_id || '',
             // Replay the workspace verbatim: a cold post-restart agent probe
@@ -3010,7 +3181,6 @@
                     connection_mode: config.connection_mode,
                     layout: config.layout,
                     workspace_layout: config.workspace_layout,
-                    surface_mode: appSettings.workspace?.surface_mode === 'max' ? 'max' : 'normal',
                     saved_session_id: activeSavedSessionId,
                     session_name: sessionName,
                     sessions

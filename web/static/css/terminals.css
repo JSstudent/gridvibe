@@ -1238,6 +1238,12 @@
         .voice-btn:disabled {
             cursor: default;
         }
+        /* Backend installed but unusable: the button stays clickable so the
+           click can explain why nothing happens (stage J issue 2). */
+        .voice-btn.unavailable {
+            color: var(--gv-warning);
+            border-color: var(--gv-warning);
+        }
         .voice-settings-btn {
             min-width: 42px;
             padding-left: 8px;

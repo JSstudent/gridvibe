@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 MAKEFLAGS += --no-print-directory
 
-.PHONY: help venv dev-deps deps-update deps-update-dev check lint fix test test-clean run clean clear-logs cleanup
+.PHONY: help venv dev-deps deps-update deps-update-dev deps-bump deps-bump-check check lint fix test test-clean run clean clear-logs cleanup
 
 VENV_DIR ?= .venv
 ifeq ($(OS),Windows_NT)
@@ -47,6 +47,16 @@ deps-update: dev-deps ## Report outdated packages, upgrade requirement sets, run
 
 deps-update-dev: ## Upgrade development dependencies only, then run make check.
 	@$(MAKE) deps-update UPDATE_REQ_FILES="requirements-dev.txt"
+
+deps-bump: dev-deps ## Rewrite requirements*.txt version floors to the latest PyPI releases, reinstall, then make check.
+	@$(PYTHON) utils/bump_requirements.py $(BUMP_REQ_FILES)
+	@$(PYTHON) -m pip install --upgrade $(PIP_REQUIREMENTS)
+	@$(PYTHON) -m pip check
+	@$(PYTHON) -c "from pathlib import Path; Path('$(DEV_DEPS_STAMP)').touch()"
+	@$(MAKE) check
+
+deps-bump-check: dev-deps ## Report requirements*.txt floors that are behind the latest PyPI release (writes nothing).
+	@$(PYTHON) utils/bump_requirements.py --check $(BUMP_REQ_FILES)
 
 test-clean: clear-logs test ## Clear logs and run tests.
 

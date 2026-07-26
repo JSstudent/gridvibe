@@ -43,7 +43,7 @@ Then follow the Quick Start for your platform.
 .\START_HERE\Start GridVibe.bat
 ```
 
-or run `GridVibe.bat` from the project root directly. The launcher creates/repairs `.venv`, installs the core dependencies, then asks whether to start in **Desktop** (native window) or **Browser** mode. It can also install the optional voice packages for you.
+or run `GridVibe.bat` from the project root directly. The launcher creates/repairs `.venv`, installs the core dependencies, then asks whether to start in **Desktop** (native window) or **Browser** mode. Optional voice packages are only offered once voice input is turned on — see [Voice Input](#voice-input).
 
 ### Linux
 
@@ -65,7 +65,7 @@ python -m pip install --upgrade -r requirements.txt
 python main.py
 ```
 
-Open `http://localhost:5050`. For a native desktop window, also install `requirements-desktop.txt` and run `python webview_launcher.py`.
+Open `http://localhost:5050`. The core requirements already include `pywinpty` on Windows (needed for local cmd/PowerShell/WSL terminals, in browser mode too). For a native desktop window, also install `requirements-desktop.txt` and run `python webview_launcher.py`.
 
 ## Run Modes
 
@@ -123,13 +123,15 @@ Local Repo panes can show an `http://`/`https://` URL in a sandboxed iframe, wit
 
 ## Voice Input
 
-Voice input is optional and fully offline. Install the dependencies first (on Windows, `GridVibe.bat` offers to do this):
+Voice input is optional, fully offline, and **off by default**. Enable it in `App Settings` (launcher gear button), pick a backend — `Vosk` or `faster-whisper` — a language, and optionally a capture profile, microphone, and push-to-talk keybind. Browser mode is the most reliable for microphone permissions.
+
+If the packages for the selected backend are missing, `App Settings` says so and offers **Install voice dependencies**, which installs them into GridVibe's own environment and loads them without restarting. You can also install them yourself:
 
 ```bash
 python -m pip install --upgrade -r requirements-voice.txt
 ```
 
-Enable it in `App Settings` (launcher gear button), pick a backend — `Vosk` or `faster-whisper` — a language, and optionally a capture profile, microphone, and push-to-talk keybind. Browser mode is the most reliable for microphone permissions. Details: `docs/voice_guideline.md`.
+On Windows, `GridVibe.bat` offers the same install — but only when voice input is already enabled, and it never asks twice after a decline. Voice settings, including the push-to-talk keybind, apply to open workspace tabs as soon as they are saved. Details: `docs/voice_guideline.md`.
 
 ## Agent CLI Detection
 

@@ -141,6 +141,12 @@ Launcher App Settings exposes:
 - microphone refresh button
 - push-to-talk toggle
 - push-to-talk keybind capture field
+- an availability banner with an **Install voice dependencies** button, shown
+  when voice input is enabled but the selected engine's packages are missing
+
+A mic click that cannot start capture must surface its reason visibly (the
+workspace toast), never only in the button `title`; the mic button stays
+clickable while the backend is unavailable so the click can explain itself.
 
 ## Frontend Capture Pipeline
 
@@ -252,6 +258,23 @@ REST endpoints:
 - `GET /api/voice-status`
 - `GET /api/voice-prefs`
 - `POST /api/voice-prefs`
+- `GET /api/voice-deps-install`
+- `POST /api/voice-deps-install`
+
+`GET /api/voice-status` reports availability for the configured engine
+(`engine_available`) **and** for both engines (`engines_available`), plus
+`vosk_packages_available` and the current `install` state. Vosk counts as
+available only when `websocket-client` is importable *and* either the bundled
+service's packages (`vosk`, `websockets`) are installed or an external
+vosk-service is already reachable.
+
+`POST /api/voice-deps-install` installs `requirements-voice.txt` into the
+running interpreter in a worker thread and, on success, re-imports the optional
+modules in place (`_reload_voice_backends()`), so voice input becomes usable
+without restarting GridVibe. It also removes the launcher's
+`.voice-deps-declined` marker. `GET /api/voice-deps-install` returns
+`{status, message, restart_required, started_at, finished_at, output_tail}`;
+the launcher polls it at 2 s only while an install is in flight.
 
 Socket.IO events from browser to server:
 
@@ -263,6 +286,10 @@ Socket.IO events from server to browser:
 
 - `voice_status`
 - `voice_result`
+- `voice_prefs_updated` — saved preferences (open workspaces re-read them, so a
+  changed push-to-talk keybind applies without a restart)
+- `voice_availability_updated` — emitted when an in-app dependency install
+  finishes
 
 `voice_result` payload:
 

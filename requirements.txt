@@ -17,5 +17,8 @@ python-engineio>=4.13.3
 cryptography>=49.0.0
 cffi>=2.1.0
 
+# Local Windows terminals (ConPTY; skipped on other platforms)
+pywinpty>=3.0.5; platform_system == "Windows"
+
 # Voice service client
 websocket-client>=1.9.0

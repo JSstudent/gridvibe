@@ -986,7 +986,7 @@ def _connect_local_session(session_id: str, session: Any):
             if WinPtyProcess is None:
                 raise RuntimeError(
                     "Interactive Windows local terminals require pywinpty. "
-                    "Install desktop dependencies with `pip install -r requirements-desktop.txt`."
+                    "Install core dependencies with `pip install -r requirements.txt`."
                 )
 
             command_line = subprocess.list2cmdline(command)
