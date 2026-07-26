@@ -332,6 +332,18 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("requirements-voice.txt", launcher)
         self.assertIn("choice /C YN", launcher)
 
+    def test_windows_launcher_clears_optional_dependency_error_before_start(self):
+        launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
+
+        voice_choice_index = launcher.index("choice /C YN")
+        reset_index = launcher.index("cmd /c exit 0", voice_choice_index)
+        start_index = launcher.index('start "GridVibe"', reset_index)
+        failure_check_index = launcher.index("if errorlevel 1", start_index)
+
+        self.assertLess(voice_choice_index, reset_index)
+        self.assertLess(reset_index, start_index)
+        self.assertLess(start_index, failure_check_index)
+
     def test_windows_launcher_selects_desktop_browser_or_quit_after_core_setup(self):
         launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
 

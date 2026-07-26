@@ -251,6 +251,9 @@ echo  Starting GridVibe...
 echo.
 
 :: Hand off the long-running launcher to a minimized console window.
+:: START can preserve ERRORLEVEL on success (for example, CHOICE leaves 2 after
+:: skipping voice dependencies), so clear any tolerated optional-step result.
+cmd /c exit 0
 start "GridVibe" /min cmd /c ""%VENV_PYTHON%" "%PROJECT_DIR%\webview_launcher.py" --mode %LAUNCH_MODE%"
 if errorlevel 1 (
     echo  Error: Failed to start GridVibe.
