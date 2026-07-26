@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+## 1.2.0 - 2026-07-26
+
 - **Source-archive copies get an honest update message (`docs/release_and_installer_plan_2026-07-25.md` §A2):** the launcher's **Check for updates** no longer answers a copy extracted from a release ZIP with the opaque *"This installation is not running from a git checkout"*. `web/paths.py` gained an `install_kind()` detector (`git` or `source`), `GET /api/app-config` now reports `install_kind` and `version`, and `POST /api/app-update` routes through a new `perform_app_update()` dispatcher in `web/selfupdate.py` that tells source copies to download the latest release or clone the repository for in-app updates — shown in the launcher's in-page modal with a link to the Releases page, never an `alert()`. Cloned checkouts keep today's `git pull --ff-only` behaviour byte for byte.
 - **Version drift is now a test failure (§A1):** new `tests/test_version.py` fails `make check` when `pyproject.toml`'s literal version disagrees with `gridvibe_version.__version__`, or when `CHANGELOG.md` has no dated section for the current version — so a tag can no longer disagree with the version the app reports. It runs inside the existing `ci.yml`, so drift is caught on every push and PR.
 - **Release documentation:** `README.md` gained an **Install** section naming the two ways to get GridVibe (clone vs. release ZIP) and how each updates; `START_HERE/README.md` now addresses release-ZIP users directly; `CONTRIBUTING.md`'s release-versioning rules point at the tagging/release procedure and the test that enforces them.
