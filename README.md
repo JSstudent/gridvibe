@@ -20,6 +20,21 @@
 | --- | --- | --- |
 | ![GridVibe launcher with terminal count, layout, connection, and per-terminal setup controls](docs/images/screenshots/launcher.png) | ![GridVibe terminal workspace showing a four-pane SSH session group](docs/images/screenshots/workspace.png) | ![GridVibe app settings with theme, SSH host-key, and voice options](docs/images/screenshots/settings.PNG) |
 
+## Install
+
+GridVibe runs from source. **Python 3.10+ is the only prerequisite** — the launcher scripts (`GridVibe.bat` on Windows, `GridVibe.sh` on Linux/macOS) create and repair the virtual environment, install dependencies, and start the app for you.
+
+There are two ways to get it:
+
+| | How to get it | How to update |
+| --- | --- | --- |
+| **Clone** (recommended) | `git clone https://github.com/JSstudent/gridvibe.git` | The launcher's **Check for updates** button fast-forwards the checkout in place |
+| **Release ZIP** (no Git needed) | Download **Source code (zip)** from the [Releases page](https://github.com/JSstudent/gridvibe/releases) and extract it | Download the next release. In-app updates need a clone, and the app says so instead of failing with an error |
+
+A Windows installer that bundles Python is planned for **2.0.0**; until then, source is the only distribution channel.
+
+Then follow the Quick Start for your platform.
+
 ## Quick Start
 
 ### Windows (easiest)

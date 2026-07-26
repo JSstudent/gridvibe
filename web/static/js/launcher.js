@@ -167,6 +167,7 @@
     let cachedWslDistros = null;
     let lastTerminalSetupTargetSignature = '';
     let appSettings = JSON.parse(JSON.stringify(DEFAULT_APP_SETTINGS));
+    let installKind = 'git';
     let voicePrefs = { ...DEFAULT_VOICE_PREFS };
     let launcherMicDevices = [];
     const agentPreflightRequestState = new WeakMap();
@@ -479,6 +480,7 @@
     }
 
     function applyAppSettings(data) {
+        installKind = data?.install_kind === 'source' ? 'source' : 'git';
         const appearance = data?.appearance || {};
         const workspace = data?.workspace || {};
         const ssh = data?.ssh || {};
@@ -2526,7 +2528,23 @@
         }
     }
 
+    const RELEASES_URL = 'https://github.com/JSstudent/gridvibe/releases';
+
     async function checkForUpdates() {
+        // Source-ZIP checkouts have no git remote to check; explain that
+        // up front instead of hitting the endpoint just to surface a 400.
+        if (installKind === 'source') {
+            const confirmed = await openGenericConfirmModal({
+                title: 'This copy cannot self-update',
+                copy: 'This copy was extracted from a source archive, so it cannot update itself. Download the latest release, or clone the repository to enable in-app updates.',
+                confirmLabel: 'Open Releases page'
+            });
+            if (confirmed) {
+                window.open(RELEASES_URL, '_blank', 'noopener,noreferrer');
+            }
+            return;
+        }
+
         const button = document.getElementById('checkUpdatesBtn');
         button.disabled = true;
         button.classList.add('loading');

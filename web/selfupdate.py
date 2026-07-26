@@ -4,7 +4,7 @@ import shutil
 import subprocess
 from typing import Any, Dict, List
 
-from web.paths import BASE_DIR
+from web.paths import BASE_DIR, install_kind
 
 SELF_UPDATE_REPO_DIR = BASE_DIR
 
@@ -182,3 +182,17 @@ def perform_self_update() -> Dict[str, Any]:
             else f"GridVibe is already up to date on '{branch}'."
         ),
     }
+
+
+def perform_app_update() -> Dict[str, Any]:
+    """Dispatch the update check based on how this copy is running.
+
+    Part 2 adds a 'frozen' branch here for packaged builds (§C3).
+    """
+    if install_kind() == "git":
+        return perform_self_update()
+    raise AppUpdateError(
+        "This copy was extracted from a source archive, so it cannot update itself. "
+        "Download the latest release, or clone the repository to enable in-app updates.",
+        400,
+    )

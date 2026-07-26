@@ -48,6 +48,14 @@ python -m ruff check .
 
 ## Release Versioning
 
-- Keep `pyproject.toml`, `gridvibe_version.py`, and `CHANGELOG.md` in sync for each release.
-- Use tags in the form `v0.1.0`.
-- Do not publish a release until `python tests/run_tests.py` and `python -m ruff check .` pass.
+- Keep `pyproject.toml`, `gridvibe_version.py`, and `CHANGELOG.md` in sync for each release. This is
+  now enforced: `tests/test_version.py` fails if `pyproject.toml`'s literal version disagrees with
+  `gridvibe_version.__version__`, or if `CHANGELOG.md` has no dated `## <version> - YYYY-MM-DD`
+  section for the current version. A version bump that forgets either one fails `make check`.
+- Use annotated tags (`git tag -a`) in the form `v1.2.0`. A published tag is immutable — fix forward
+  with a new patch version rather than re-pointing it.
+- Do not publish a release until `python tests/run_tests.py` and `python -m ruff check .` pass, on
+  the exact commit you are about to tag.
+- The full procedure lives in `docs/release_and_installer_plan_2026-07-25.md`: §6 is the per-release
+  checklist (roughly ten minutes), §5 covers the everyday Git workflow, and Part 2 covers the
+  packaged-installer roadmap for 2.0.0.
