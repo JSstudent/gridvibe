@@ -133,7 +133,7 @@ from web.hostkeys import (  # noqa: F401 - re-exported for backwards compatibili
     _apply_host_key_policy,
     _load_persistent_host_keys,
 )
-from web.paths import BASE_DIR
+from web.paths import BASE_DIR, install_kind
 from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
     capture_workspace,
     clear_workspace,
@@ -177,7 +177,11 @@ from web.secrets import (  # noqa: F401 - re-exported for backwards compatibilit
     _decrypt_password,
     _encrypt_password,
 )
-from web.selfupdate import AppUpdateError, perform_self_update
+from web.selfupdate import (  # noqa: F401 - perform_self_update re-exported for backwards compatibility
+    AppUpdateError,
+    perform_app_update,
+    perform_self_update,
+)
 from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatibility
     _MAX_TRACKED_SOCKET_CLIENTS,
     _MAX_TRACKED_TERMINAL_COMMAND_LENGTH,
@@ -296,6 +300,8 @@ def _active_voice_model_name() -> str:
 def _public_app_config() -> Dict[str, Any]:
     """Return the subset of app config that the launcher can edit safely."""
     return {
+        "install_kind": install_kind(),
+        "version": __version__,
         "appearance": {
             "theme": runtime_config.app_theme,
         },
@@ -619,9 +625,9 @@ def shutdown_browser_application():
 
 @app.route('/api/app-update', methods=['POST'])
 def update_application():
-    """Check for git updates, apply them when available, and report the outcome."""
+    """Check for updates via the path appropriate to this install and report the outcome."""
     try:
-        result = perform_self_update()
+        result = perform_app_update()
         logger.info(
             "Application update check completed branch=%s updated=%s behind=%s ahead=%s",
             result.get("branch"),

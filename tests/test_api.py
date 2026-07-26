@@ -23,6 +23,7 @@ from web import app as web_app
 from web import config as web_config
 from web import explorer as web_explorer
 from web import hostkeys as web_hostkeys
+from web import paths as web_paths
 from web import runtime_state as web_runtime_state
 from web import saved_sessions as web_saved_sessions
 from web import selfupdate
@@ -2962,6 +2963,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("_loadVoicePrefsFromServer", html)
         self.assertIn("fetch('/api/voice-prefs'", html)
 
+    def test_install_kind_reports_git_for_the_dev_checkout(self):
+        self.assertEqual(web_paths.install_kind(), "git")
+
+    def test_install_kind_reports_source_without_a_git_directory(self):
+        with TemporaryDirectory() as tmp:
+            with patch.object(web_paths, "BASE_DIR", tmp):
+                self.assertEqual(web_paths.install_kind(), "source")
+
     def test_app_update_endpoint_returns_self_update_payload(self):
         update_payload = {
             "updated": True,
@@ -2974,7 +2983,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             "message": "Updated 'main' from abc1234 to def5678.",
         }
 
-        with patch.object(api, "perform_self_update", return_value=update_payload):
+        # perform_app_update() dispatches to perform_self_update() for git
+        # checkouts (§A2); patch it where the dispatcher actually looks it up.
+        with patch.object(selfupdate, "perform_self_update", return_value=update_payload):
             response = self.client.post("/api/app-update")
 
         self.assertEqual(response.status_code, 200)
@@ -2982,7 +2993,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_app_update_endpoint_surfaces_expected_update_errors(self):
         with patch.object(
-            api,
+            selfupdate,
             "perform_self_update",
             side_effect=api.AppUpdateError("Local changes are present.", 409),
         ):
@@ -2990,6 +3001,38 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json(), {"error": "Local changes are present."})
+
+    def test_app_update_endpoint_reports_source_installs_cannot_self_update(self):
+        """§A2 — source-ZIP checkouts get an honest, actionable message."""
+        with patch.object(selfupdate, "install_kind", return_value="source"):
+            response = self.client.post("/api/app-update")
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.get_json()
+        self.assertIn("cannot update itself", payload["error"])
+        self.assertIn("Download the latest release", payload["error"])
+
+    def test_perform_app_update_dispatches_on_install_kind(self):
+        with patch.object(selfupdate, "install_kind", return_value="git"), patch.object(
+            selfupdate, "perform_self_update", return_value={"updated": False}
+        ) as mock_git_update:
+            result = api.perform_app_update()
+        mock_git_update.assert_called_once()
+        self.assertEqual(result, {"updated": False})
+
+        with patch.object(selfupdate, "install_kind", return_value="source"):
+            with self.assertRaises(api.AppUpdateError) as context:
+                api.perform_app_update()
+        self.assertEqual(context.exception.status_code, 400)
+
+    def test_app_config_reports_install_kind_and_version(self):
+        payload = self.client.get("/api/app-config").get_json()
+        self.assertEqual(payload["install_kind"], "git")
+        self.assertEqual(payload["version"], __version__)
+
+        with patch.object(api, "install_kind", return_value="source"):
+            payload = self.client.get("/api/app-config").get_json()
+        self.assertEqual(payload["install_kind"], "source")
 
     def test_perform_self_update_reports_when_checkout_is_current(self):
         git_results = [
@@ -9554,7 +9597,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         launcher_html = self._get_text("/")
         self.assertIn('id="genericConfirmModal"', launcher_html)
         launcher_js = self._get_text("/static/js/launcher.js")
-        for caller in ("shutdownBrowserApp", "restartApplication"):
+        for caller in ("shutdownBrowserApp", "restartApplication", "checkForUpdates"):
             with self.subTest(caller=caller):
                 body = launcher_js[launcher_js.index(f"async function {caller}"):]
                 body = body[:body.index("\n    }")]
