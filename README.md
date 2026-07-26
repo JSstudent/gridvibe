@@ -65,7 +65,7 @@ python -m pip install --upgrade -r requirements.txt
 python main.py
 ```
 
-Open `http://localhost:5050`. For a native desktop window, also install `requirements-desktop.txt` and run `python webview_launcher.py`.
+Open `http://localhost:5050`. The core requirements already include `pywinpty` on Windows (needed for local cmd/PowerShell/WSL terminals, in browser mode too). For a native desktop window, also install `requirements-desktop.txt` and run `python webview_launcher.py`.
 
 ## Run Modes
 

@@ -124,11 +124,11 @@ if errorlevel 1 (
 echo  Verifying core dependencies...
 echo.
 
-"%VENV_PYTHON%" -c "import _cffi_backend, cryptography.fernet, engineio, flask, flask_socketio, paramiko, socketio; print('Core dependency import check passed.')"
+"%VENV_PYTHON%" -c "import _cffi_backend, cryptography.fernet, engineio, flask, flask_socketio, paramiko, socketio, winpty; print('Core dependency import check passed.')"
 if errorlevel 1 (
     echo  Core dependency import check failed. Reinstalling native wheels...
     echo.
-    "%VENV_PYTHON%" -m pip install --upgrade --force-reinstall --no-cache-dir cffi cryptography pynacl bcrypt paramiko
+    "%VENV_PYTHON%" -m pip install --upgrade --force-reinstall --no-cache-dir cffi cryptography pynacl bcrypt paramiko pywinpty
     if errorlevel 1 (
         echo  Error: Failed to repair native core dependencies.
         echo  Manual fix: "%VENV_PYTHON%" -m pip install --upgrade --force-reinstall --no-cache-dir cffi cryptography pynacl bcrypt paramiko
@@ -143,7 +143,7 @@ if errorlevel 1 (
         pause >nul
         exit /b 1
     )
-    "%VENV_PYTHON%" -c "import _cffi_backend, cryptography.fernet, engineio, flask, flask_socketio, paramiko, socketio; print('Core dependency import check passed.')"
+    "%VENV_PYTHON%" -c "import _cffi_backend, cryptography.fernet, engineio, flask, flask_socketio, paramiko, socketio, winpty; print('Core dependency import check passed.')"
     if errorlevel 1 (
         echo  Error: Core dependencies are still not importable after repair.
         echo.

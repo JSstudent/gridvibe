@@ -1,8 +1,9 @@
 # Optional desktop/native-window dependencies for GridVibe.
 # Install this after the core requirements if you want pywebview support.
+# (pywinpty, needed for local Windows terminals, is a core dependency in
+# requirements.txt — it is not specific to the native window.)
 
 -r requirements.txt
 pywebview[qt]>=6.2.1; platform_system == "Linux"
 pywebview>=6.2.1; platform_system != "Linux"
-pywinpty>=3.0.5; platform_system == "Windows"
 

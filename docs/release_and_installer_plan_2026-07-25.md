@@ -74,7 +74,7 @@ already fixed, and several new ones exist. This section is the verified baseline
 | Vosk service | `web/voice.py:_ensure_vosk_service()` spawns `[sys.executable, "services/vosk_service.py"]` | Part 2, Step C2 — breaks when frozen |
 | Whisper models | `WhisperModel(model, device, compute_type)` — no `download_root`, so models land in the user's Hugging Face cache | Part 2, Step B4 |
 | Voice deps | `requirements-voice.txt` = `vosk`, `websockets`, `faster-whisper`, `numpy` — transitively `ctranslate2`, `onnxruntime`, `av`, `tokenizers`, `huggingface-hub` (hundreds of MB) | Part 2 — drives the two-edition decision |
-| Windows PTY | `pywinpty` is imported by `web/terminal_io.py` for local Windows terminals, but lives in **`requirements-desktop.txt`**, not `requirements.txt` | Part 2, Step D1 |
+| Windows PTY | `pywinpty` is imported by `web/terminal_io.py` for local Windows terminals. **Fixed 2026-07-26:** it now lives in `requirements.txt` (Windows-only platform marker), so browser mode and `python main.py` get it without the desktop extras (`docs/stage_j_issues_analysis_2026-07-26.md`, Issue 1) | Done — no Part 2 action |
 | WebSocket transport | `SocketIO(..., async_mode="threading")`. `simple-websocket` + `wsproto` are installed only as **transitive** deps of `python-engineio` and are **not pinned** anywhere | Part 2, Step C5 |
 | Python version | `.python-version` says `3.10`; the dev venv is `3.11.9`; `GridVibe.bat` prefers `py -3.12`; CI matrix tops out at `3.12` | Part 2, Step D1 |
 | Launchers | `GridVibe.bat` bootstraps `.venv`, verifies native imports, offers Desktop/Browser, offers voice extras. `GridVibe.sh` covers Linux. `START_HERE/Start GridVibe.bat` is a findable shim | Part 1, Stage F — this *is* the 1.2.0 delivery mechanism |
@@ -1265,9 +1265,10 @@ catch a bad freeze.
    pyinstaller-hooks-contrib>=2024.10
    ```
 
-   It pulls `requirements-desktop.txt` because `pywinpty` — which local Windows terminals require
-   even in browser mode — lives there rather than in core. Freezing without it produces a build whose
-   local shells fail with "Interactive Windows local terminals require pywinpty"
+   It pulls `requirements-desktop.txt` for `pywebview` (the native window). `pywinpty` — which
+   local Windows terminals require even in browser mode — moved into `requirements.txt` on
+   2026-07-26, so the core freeze gets it automatically; a freeze without it would produce a
+   build whose local shells fail with "Interactive Windows local terminals require pywinpty"
    (`web/terminal_io.py:988`).
 
 2. New `requirements-packaging-voice.txt`: `-r requirements-packaging.txt` + `-r requirements-voice.txt`.
@@ -1822,8 +1823,8 @@ was silently absent, the app kept working, and Socket.IO quietly degraded to lon
 
 | Dependency is… | Goes in | Reaches the frozen build? |
 |---|---|---|
-| Needed to serve a terminal | `requirements.txt` | Yes |
-| Native window / Windows PTY | `requirements-desktop.txt` | Yes — packaging pulls this too |
+| Needed to serve a terminal (incl. the Windows PTY, `pywinpty`) | `requirements.txt` | Yes |
+| Native window | `requirements-desktop.txt` | Yes — packaging pulls this too |
 | Offline speech | `requirements-voice.txt` | **Voice edition only** |
 | Lint/test only | `requirements-dev.txt` | No |
 
@@ -1899,7 +1900,7 @@ the RC, then bump to the final string for the real tag.
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| `pywinpty` missing or broken in the frozen build → no local Windows terminals | **High** | High | Step D1 installs `requirements-desktop.txt`; Step D4 spawns a local pane on a clean VM |
+| `pywinpty` missing or broken in the frozen build → no local Windows terminals | Medium | High | `pywinpty` is core (`requirements.txt`) since 2026-07-26; Step D4 spawns a local pane on a clean VM |
 | `simple-websocket` dropped by PyInstaller → silent long-polling fallback | **High** | Medium | Step C5 pins it, lists it as a hidden import, adds an explicit transport check to Stage J2 |
 | `.encryption_key` lost during Step B5 migration → saved SSH passwords unrecoverable | Medium | **Critical** | Copy never move; key and sessions migrate as a pair or not at all; dedicated unit test; §11.3 backup |
 | WebView2 absent and bootstrapper blocked → no native window | Medium | Low | Non-fatal; browser fallback exists and is exercised in Stage J2 |
