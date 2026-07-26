@@ -2444,9 +2444,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
     def test_voice_status_endpoint_includes_engine_model_and_language(self):
-        with patch.object(api.runtime_config, "voice_engine", "whisper"), patch.object(
-            api.runtime_config, "whisper_model", "base"
-        ):
+        with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
+            api.runtime_config, "voice_engine", "whisper"
+        ), patch.object(api.runtime_config, "whisper_model", "base"):
             response = self.client.get("/api/voice-status")
 
         self.assertEqual(response.status_code, 200)
@@ -8406,9 +8406,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             SimpleNamespace(language="en"),
         )
 
-        with patch.object(web_voice, "_ensure_whisper_model", return_value=mock_model), patch.object(
-            web_voice, "_pcm16le_to_float32", return_value="audio-array"
-        ):
+        with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
+            web_voice, "_ensure_whisper_model", return_value=mock_model
+        ), patch.object(web_voice, "_pcm16le_to_float32", return_value="audio-array"):
             socket_client.emit("voice_start", {"session_id": "session-whisper"})
             start_events = socket_client.get_received()
 

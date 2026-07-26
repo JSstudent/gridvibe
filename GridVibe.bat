@@ -9,6 +9,7 @@ echo                        GRIDVIBE
 echo         Multi-Session SSH Terminal Manager
 echo  ===============================================================
 echo.
+echo  Running from source (no installer - see Releases)
 echo  Server URL: http://localhost:5050
 echo.
 echo  The launcher will minimize after startup.
