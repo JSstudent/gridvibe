@@ -1,4 +1,10 @@
 # Optional offline speech-to-text dependencies
+#
+# Note: this file needs Python 3.11+, one step above the 3.10 the rest of
+# GridVibe supports -- numpy dropped 3.10 after 2.2.6, so the floor below has no
+# 3.10 candidate. Voice input is optional; core, desktop and dev requirements
+# all install on 3.10. Lower the numpy floor to >=2.2.6 if 3.10 voice support
+# is ever needed.
 vosk>=0.3.45
 websockets>=16.1.1
 faster-whisper>=1.2.1
