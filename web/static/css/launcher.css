@@ -138,16 +138,6 @@
             background: rgba(255, 255, 255, 0.99);
         }
 
-        [data-theme="light"] .settings-section {
-            border-color: rgba(75, 85, 99, 0.28);
-            background: rgba(248, 250, 252, 0.98);
-        }
-
-        [data-theme="light"] .voice-settings-panel {
-            border-color: rgba(75, 85, 99, 0.34);
-            background: rgba(229, 231, 235, 0.92);
-        }
-
         [data-theme="light"] .picker-display {
             border-color: rgba(75, 85, 99, 0.38);
             background: rgba(255, 255, 255, 0.99);
@@ -239,16 +229,6 @@
             background: rgba(239, 68, 68, 0.06);
         }
 
-        [data-theme="light"] .button-tooltip-bubble {
-            border-color: rgba(107, 114, 128, 0.22);
-            background: rgba(255, 255, 255, 0.98);
-            box-shadow: 0 14px 30px rgba(17, 24, 39, 0.12);
-        }
-
-        [data-theme="light"] .button-tooltip-bubble::after {
-            border-top-color: rgba(255, 255, 255, 0.98);
-        }
-
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         html,
@@ -270,13 +250,21 @@
             padding: 0;
         }
 
+        /* Rows are placed explicitly because the middle one — the restore
+           banner — is usually absent: with only two named rows the banner
+           landed in the 1fr row and grew to fill whatever the window gave it,
+           which is why it ballooned as the window was resized. */
         .app-frame {
             display: grid;
-            grid-template-rows: auto 1fr;
+            grid-template-rows: auto auto 1fr;
             min-height: 100vh;
             max-height: 100vh;
             overflow: hidden;
         }
+
+        .app-titlebar { grid-row: 1; }
+        .restore-banner { grid-row: 2; }
+        .shell { grid-row: 3; }
 
         .app-titlebar {
             display: flex;
@@ -405,13 +393,17 @@
             padding: 16px 20px;
         }
 
-        /* Restore-previous-workspace banner (feature 10.5). */
+        /* Restore-previous-workspace banner (feature 10.5). Its side margins
+           match the cards below it (.shell's 20px padding + .column's 10px),
+           so it lines up with the Terminal Layout / Terminal Setup columns
+           instead of running wider than them, and its own row is content-
+           sized so the height never changes with the window. */
         .restore-banner {
             display: flex;
             align-items: center;
             justify-content: space-between;
             gap: 12px;
-            margin: 14px 20px 0;
+            margin: 14px 30px 0;
             padding: 10px 16px;
             border: 1px solid var(--accent);
             border-radius: var(--gv-radius-m, 10px);
@@ -422,6 +414,10 @@
 
         .restore-banner[hidden] {
             display: none;
+        }
+
+        .restore-banner-text {
+            min-width: 0;
         }
 
         .restore-banner-actions {
@@ -901,179 +897,6 @@
 
         .add-terminal-btn:hover {
             background: rgba(0, 217, 255, 0.08);
-        }
-
-        .settings-grid {
-            min-height: 0;
-            display: grid;
-            gap: 14px;
-            overflow: auto;
-            padding-right: 4px;
-        }
-
-        .app-settings-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            align-items: start;
-            column-gap: 12px;
-            row-gap: 14px;
-        }
-
-        .settings-section {
-            display: grid;
-            gap: 14px;
-            padding: 14px;
-            border-radius: 14px;
-            border: 1px solid var(--border-muted);
-            background: var(--bg-input);
-        }
-
-        .app-settings-grid > .check-field,
-        .app-settings-grid > .settings-section {
-            grid-column: 1 / -1;
-        }
-
-        .app-settings-grid .field {
-            gap: 5px;
-        }
-
-        .app-settings-grid .field input,
-        .app-settings-grid .field select {
-            padding: 9px 12px;
-            font-size: 0.92rem;
-        }
-
-        .compact-section {
-            gap: 10px;
-            padding: 12px;
-        }
-
-        .voice-settings-panel {
-            grid-column: 1 / -1;
-            display: grid;
-            gap: 12px;
-            padding: 14px;
-            border-radius: 14px;
-            border: 1px solid rgba(0, 217, 255, 0.18);
-            background: rgba(7, 11, 24, 0.46);
-        }
-
-        .app-voice-enable-row {
-            min-height: 58px;
-            padding: 12px;
-            margin-bottom: 0;
-        }
-
-        .voice-settings-panel .app-voice-enable-row {
-            background: rgba(5, 8, 17, 0.5);
-        }
-
-        /* Availability banner (stage J issue 2): shown when the engine picked
-           in this modal cannot start because its optional packages are
-           missing, with the in-app installer next to the explanation. */
-        .voice-availability {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
-            gap: 12px;
-            align-items: center;
-            padding: 12px;
-            border-radius: var(--gv-radius-m);
-            border: 1px solid var(--warning);
-            background: var(--gv-accent-soft);
-        }
-
-        .voice-availability.hidden {
-            display: none;
-        }
-
-        .voice-availability-copy {
-            display: grid;
-            gap: 4px;
-            min-width: 0;
-        }
-
-        .voice-availability-copy strong {
-            color: var(--warning);
-            font-size: 0.86rem;
-        }
-
-        .voice-availability-copy span {
-            color: var(--muted);
-            font-size: 0.78rem;
-            line-height: 1.45;
-        }
-
-        .voice-availability .ghost-btn.loading {
-            opacity: 0.7;
-            cursor: progress;
-        }
-
-        @media (max-width: 640px) {
-            .voice-availability {
-                grid-template-columns: minmax(0, 1fr);
-            }
-        }
-
-        .voice-settings-details {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 12px;
-        }
-
-        .voice-settings-details.hidden {
-            display: none;
-        }
-
-        .app-voice-enable-row .check-copy {
-            gap: 4px;
-        }
-
-        .app-voice-enable-row .check-copy span {
-            line-height: 1.45;
-        }
-
-        .settings-fields-inline {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-            gap: 10px;
-            align-items: start;
-        }
-
-        .settings-field-with-action {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
-            gap: 8px;
-            align-items: end;
-        }
-
-        .settings-field-with-action .field {
-            min-width: 0;
-        }
-
-        .voice-ptt-keybind {
-            cursor: pointer;
-            text-align: center;
-            user-select: none;
-        }
-
-        .settings-section.hidden {
-            display: none;
-        }
-
-        .settings-hint.hidden {
-            display: none;
-        }
-
-        .settings-section-title {
-            font-size: 0.76rem;
-            letter-spacing: 1.2px;
-            text-transform: uppercase;
-            color: var(--muted);
-        }
-
-        .settings-hint {
-            color: var(--muted);
-            font-size: 0.76rem;
-            line-height: 1.45;
         }
 
         @keyframes tf-spin {
@@ -1840,15 +1663,6 @@
             backdrop-filter: blur(16px);
         }
 
-        .app-settings-card {
-            width: min(760px, 100%);
-            max-height: min(92vh, 860px);
-        }
-
-        .app-settings-card.voice-enabled {
-            max-height: min(96vh, 900px);
-        }
-
         .modal-head {
             display: flex;
             justify-content: space-between;
@@ -2006,60 +1820,6 @@
             min-height: 20px;
         }
 
-        .app-settings-actions {
-            justify-content: flex-end;
-        }
-
-        .button-tooltip {
-            position: relative;
-            display: inline-flex;
-        }
-
-        .button-tooltip-bubble {
-            position: absolute;
-            right: 0;
-            bottom: calc(100% + 10px);
-            width: min(320px, 72vw);
-            padding: 10px 12px;
-            border-radius: 10px;
-            border: 1px solid var(--border-muted);
-            background: var(--bg-deep);
-            color: var(--muted);
-            font-size: 0.74rem;
-            line-height: 1.45;
-            box-shadow: 0 14px 30px rgba(4, 8, 20, 0.38);
-            opacity: 0;
-            pointer-events: none;
-            transform: translateY(4px);
-            transition: opacity 0.18s ease, transform 0.18s ease;
-            z-index: 2;
-        }
-
-        .button-tooltip-bubble code {
-            color: var(--text);
-            font-family: Consolas, Monaco, "Courier New", monospace;
-        }
-
-        .button-tooltip-bubble::after {
-            content: "";
-            position: absolute;
-            right: 18px;
-            top: 100%;
-            border-width: 6px;
-            border-style: solid;
-            border-color: var(--bg-deep) transparent transparent transparent;
-        }
-
-        [data-theme="light"] .button-tooltip-bubble::after {
-            border-color: rgba(255, 255, 255, 0.98) transparent transparent transparent;
-        }
-
-        .button-tooltip:hover .button-tooltip-bubble,
-        .button-tooltip:focus-within .button-tooltip-bubble {
-            opacity: 1;
-            transform: translateY(0);
-        }
-
         @media (max-width: 960px) {
             .shell {
                 grid-template-columns: 1fr;
@@ -2210,18 +1970,6 @@
 
             .span-2 {
                 grid-column: 1;
-            }
-
-            .app-settings-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .settings-fields-inline {
-                grid-template-columns: 1fr;
-            }
-
-            .voice-settings-details {
-                grid-template-columns: 1fr;
             }
 
             .modal-card {

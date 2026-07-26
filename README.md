@@ -123,7 +123,7 @@ Local Repo panes can show an `http://`/`https://` URL in a sandboxed iframe, wit
 
 ## Voice Input
 
-Voice input is optional, fully offline, and **off by default**. Enable it in `App Settings` (launcher gear button), pick a backend — `Vosk` or `faster-whisper` — a language, and optionally a capture profile, microphone, and push-to-talk keybind. Browser mode is the most reliable for microphone permissions.
+Voice input is optional, fully offline, and **off by default**. Enable it in `App Settings` (the gear button on either the launcher or the session window), pick a backend — `Vosk` or `faster-whisper` — a language, and optionally a capture profile, microphone, and push-to-talk keybind. Browser mode is the most reliable for microphone permissions.
 
 If the packages for the selected backend are missing, `App Settings` says so and offers **Install voice dependencies**, which installs them into GridVibe's own environment and loads them without restarting. You can also install them yourself:
 
@@ -139,7 +139,7 @@ GridVibe does not bundle agent CLIs; it checks whether each one is on `PATH` in 
 
 ## Configuration
 
-Runtime settings load from `config.json` (git-ignored), falling back to `default_config.json`. Everything is also editable in `App Settings` on the launcher — including terminal font presets and size (applied to the active session or all sessions), max sessions, the workspace autosave interval, SSH host-key policy, and voice options. Example:
+Runtime settings load from `config.json` (git-ignored), falling back to `default_config.json`. Everything is also editable in `App Settings` — the same dialog opens from the gear button on the launcher and on the session window, so settings never require a trip back to the launcher. It covers terminal font presets and size (applied to the active session or all sessions), max sessions, the workspace autosave interval, SSH host-key policy, and voice options. Example:
 
 ```json
 {

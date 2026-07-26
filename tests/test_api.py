@@ -185,7 +185,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = response.get_data(as_text=True)
         for asset in (
             "css/launcher.css",
+            "css/app-settings.css",
             "js/shared.js",
+            "js/app-settings.js",
             "js/launcher.js",
             "css/terminals.css",
             "js/terminal-icons.js",
@@ -466,7 +468,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="appVoiceDevice"', html)
         self.assertIn('id="appVoicePttEnabled"', html)
         self.assertIn('id="appVoicePttKeybind"', html)
-        self.assertIn("function refreshLauncherMicrophones()", html)
+        self.assertIn("function refreshAppMicrophones()", html)
         self.assertIn('/api/voice-prefs', html)
         self.assertIn('<select id="appWhisperModel">', html)
         self.assertIn('<option value="base">base</option>', html)
@@ -649,14 +651,59 @@ class ApiRoutesTestCase(unittest.TestCase):
             html[open_selector_start:go_to_settings_start],
         )
 
-    def test_terminals_page_uses_icon_only_settings_button(self):
+    def test_terminals_page_uses_icon_only_launcher_button(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         self.assertIn('class="btn btn-neutral btn-icon settings-window-btn"', html)
-        self.assertIn('aria-label="Open settings"', html)
+        # Settings themselves now open in-page, so this button only opens the
+        # launcher window and says so.
+        self.assertIn('aria-label="Open launcher"', html)
         self.assertIn('class="vibe-flow-icon"', html)
+
+    def test_terminals_page_opens_app_settings_without_the_launcher(self):
+        """The session window carries its own App Settings dialog (todo 1) —
+        the shared partial plus the shared module, no launcher round-trip."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn('id="appSettingsBtn"', html)
+        self.assertIn('onclick="openAppSettings()"', html)
+        self.assertIn('id="appSettingsModal"', html)
+        self.assertIn('id="appTheme"', html)
+        self.assertIn('id="appTerminalFontSize"', html)
+        self.assertIn('id="appVoiceEngine"', html)
+        self.assertIn("async function openAppSettings()", html)
+        self.assertIn("async function saveAppSettings()", html)
+        # A window never gets its own broadcast, so the save applies here too.
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("function onAppSettingsSaved(_data, payload)", terminals_js)
+        self.assertIn("applyAppConfigUpdate(payload);", terminals_js)
+
+    def test_topbar_icons_state_their_own_size(self):
+        """An unsized inline SVG falls back to 300x150 and only looks right
+        while the button can squeeze it — max surface mode (32x28, no padding)
+        blew up the broadcast and settings cogs."""
+        html = self.client.get("/terminals").get_data(as_text=True)
+        terminals_css = self._static("css/terminals.css")
+        for icon in (
+            "broadcast-icon",
+            "app-settings-icon",
+            "surface-mode-icon",
+            "refresh-all-icon",
+            "fullscreen-icon",
+            "vibe-flow-icon",
+        ):
+            with self.subTest(icon=icon):
+                self.assertIn(f'class="{icon}"', html)
+                rule = re.search(
+                    rf"\.{icon}\b[^{{]*\{{[^}}]*\}}", terminals_css, re.DOTALL
+                )
+                self.assertIsNotNone(rule)
+                self.assertIn("width:", rule.group(0))
+                self.assertIn("height:", rule.group(0))
 
     def test_docs_images_route_serves_gridvibe_icon(self):
         response = self.client.get("/docs/images/GridVibe_icon.ico")
@@ -2284,6 +2331,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".app-menu-panel {", html)
         self.assertIn(".app-menu-item {", html)
         self.assertIn(">Import Session ...</button>", html)
+
+    def test_session_tabs_close_on_middle_click(self):
+        """Todo 3 — middle-click closes a session tab like an explorer tab,
+        through the same closeSessionGroup path (so the live-terminal
+        confirmation still runs), with autoscroll suppressed."""
+        terminals_js = self._static("js/terminals.js")
+        render = terminals_js[
+            terminals_js.index("function renderSessionTabs()"):
+            terminals_js.index("function setSessionGroupsOrder(orderedGroupIds)")
+        ]
+        middle_click = render[render.index("button.addEventListener('mousedown'"):]
+        self.assertIn("event.button === 1", middle_click)
+        self.assertIn("event.preventDefault(); // suppress middle-click autoscroll", middle_click)
+        self.assertIn("button.addEventListener('auxclick'", middle_click)
+        self.assertIn("closeSessionGroup(group.group_id);", middle_click)
 
     def test_terminals_page_numbers_session_tabs_and_exposes_safe_shortcut(self):
         response = self.client.get("/terminals")
@@ -9785,6 +9847,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
     BANNED_GLYPHS = ("📁", "🌐", "🎤", "☾", "☀", "❌")
     STATIC_JS = (
         "js/shared.js",
+        "js/app-settings.js",
         "js/launcher.js",
         "js/terminals.js",
         "js/explorer-viewer.js",
@@ -9867,6 +9930,23 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertIn(f"/static/js/launcher.js?v={__version__}", launcher_html)
         self.assertIn(f"/static/css/terminals.css?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/shared.js?v={__version__}", terminals_html)
+        # The App Settings dialog is shared by both pages (todo 1).
+        for page_html in (launcher_html, terminals_html):
+            self.assertIn(f"/static/css/app-settings.css?v={__version__}", page_html)
+            self.assertIn(f"/static/js/app-settings.js?v={__version__}", page_html)
+            # It reads shared.js helpers (applyTheme, the broadcast keys), so
+            # it loads after shared.js and before the page script.
+            self.assertLess(
+                page_html.index("js/shared.js"), page_html.index("js/app-settings.js")
+            )
+        self.assertLess(
+            launcher_html.index("js/app-settings.js"),
+            launcher_html.index("js/launcher.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/app-settings.js"),
+            terminals_html.index("js/terminals.js"),
+        )
         self.assertIn(f"/static/js/terminal-icons.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/voice-input.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-viewer.js?v={__version__}", terminals_html)
@@ -9908,7 +9988,9 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         for filename in (
             "css/launcher.css",
             "css/terminals.css",
+            "css/app-settings.css",
             "js/shared.js",
+            "js/app-settings.js",
             "js/launcher.js",
             "js/terminal-icons.js",
             "js/voice-input.js",
@@ -10975,9 +11057,15 @@ class StyleThemingTestCase(unittest.TestCase):
     def test_tooltip_arrow_follows_bubble_token(self):
         launcher_css = self._static("css/launcher.css")
         self.assertNotIn("rgba(16, 21, 39", launcher_css)
-        self.assertIn("border-color: var(--bg-deep) transparent", launcher_css)
-        self.assertIn('[data-theme="light"] .button-tooltip-bubble::after',
-                      launcher_css)
+        # The tooltip moved into the shared App Settings stylesheet, where the
+        # arrow and the bubble read the same theme-aware token instead of one
+        # literal per theme.
+        settings_css = self._static("css/app-settings.css")
+        self.assertNotIn("rgba(16, 21, 39", settings_css)
+        self.assertIn("background: var(--gv-dialog-tooltip-bg);", settings_css)
+        self.assertIn(
+            "border-color: var(--gv-dialog-tooltip-bg) transparent", settings_css
+        )
 
     def test_xterm_theme_derived_from_css_variables(self):
         terminals_js = self._static("js/terminals.js")
@@ -11033,10 +11121,10 @@ class ThemeSyncTestCase(unittest.TestCase):
     # ── launcher-side contract ───────────────────────────────────────────────
 
     def test_launcher_notification_payload_includes_theme(self):
-        launcher_js = self._static("js/launcher.js")
-        notify = launcher_js[
-            launcher_js.index("function notifyAppConfigUpdated(appSettings"):
-            launcher_js.index("async function loadAppSettings()")
+        app_settings_js = self._static("js/app-settings.js")
+        notify = app_settings_js[
+            app_settings_js.index("function notifyAppConfigUpdated(appSettings"):
+            app_settings_js.index("async function loadAppSettings()")
         ]
         self.assertIn(
             "theme: normalizeThemePreference(appSettings?.appearance?.theme)",
@@ -11416,7 +11504,7 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         self.assertNotIn("getElementById('updateStatus')", launcher_js)
         set_fn = launcher_js[
             launcher_js.index("function setUpdateStatus"):
-            launcher_js.index("function applyAppSettings")
+            launcher_js.index("function shortCommit")
         ]
         self.assertIn("quickUpdateStatus", set_fn)
         self.assertIn("6000", set_fn)
@@ -11571,9 +11659,9 @@ class HostKeyPolicyTestCase(unittest.TestCase):
         self.assertIn('id="appSshHostKeyPolicy"', html)
         for value in ("auto-add", "known-hosts", "strict"):
             self.assertIn(f'value="{value}"', html)
-        launcher_js = self._static("js/launcher.js")
-        self.assertIn("host_key_policy", launcher_js)
-        self.assertIn("appSshHostKeyPolicy", launcher_js)
+        app_settings_js = self._static("js/app-settings.js")
+        self.assertIn("host_key_policy", app_settings_js)
+        self.assertIn("appSshHostKeyPolicy", app_settings_js)
 
 
 class ExplorerDownloadTestCase(unittest.TestCase):
@@ -12445,6 +12533,29 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         launcher_css = self._static("css/launcher.css")
         self.assertIn(".restore-banner", launcher_css)
 
+    def test_restore_banner_keeps_a_content_sized_row(self):
+        """Todo 2 — the banner used to land in .app-frame's 1fr row and grow
+        with the window. Rows are placed explicitly so its row is content
+        sized, and its margins line it up with the columns below."""
+        launcher_css = self._static("css/launcher.css")
+        app_frame = re.search(r"\n        \.app-frame \{(.*?)\}", launcher_css, re.DOTALL)
+        self.assertIsNotNone(app_frame)
+        self.assertIn("grid-template-rows: auto auto 1fr", app_frame.group(1))
+        for placement in (
+            ".app-titlebar { grid-row: 1; }",
+            ".restore-banner { grid-row: 2; }",
+            ".shell { grid-row: 3; }",
+        ):
+            self.assertIn(placement, launcher_css)
+        # The declaration block, not the one-line grid-row placement above it.
+        banner = re.search(
+            r"\.restore-banner \{[^}]*display: flex[^}]*\}", launcher_css, re.DOTALL
+        )
+        self.assertIsNotNone(banner)
+        # 20px .shell padding + 10px .column padding = the card edge.
+        self.assertIn("margin: 14px 30px 0;", banner.group(0))
+        self.assertNotIn("min-height", banner.group(0))
+
     def test_dismiss_restore_banner_is_hide_only(self):
         """Decision 3: Dismiss only hides the banner client-side — it must not
         call DELETE /api/runtime-state, so the saved slot stays restorable."""
@@ -12521,23 +12632,29 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
     # ── ISSUE-2026-031 — App Settings body scrolls under pinned actions ──
 
     def test_app_settings_body_keeps_modal_scroll_region(self):
-        launcher_css = self._static("css/launcher.css")
+        # The dialog is shared by both pages, so its CSS lives in its own
+        # stylesheet now (todo 1).
+        settings_css = self._static("css/app-settings.css")
         # The override that disabled the scroll region must stay gone.
         self.assertNotIn(
             ".app-settings-card .settings-grid",
-            launcher_css,
+            settings_css,
             "App Settings must not override the shared .settings-grid scroll model",
         )
-        settings_grid = re.search(r"\.settings-grid \{(.*?)\}", launcher_css, re.DOTALL)
+        settings_grid = re.search(
+            r"#appSettingsModal \.settings-grid \{(.*?)\}", settings_css, re.DOTALL
+        )
         self.assertIsNotNone(settings_grid)
         self.assertIn("overflow: auto", settings_grid.group(1))
         self.assertIn("min-height: 0", settings_grid.group(1))
         # Pinned header/body/actions rows: the actions row stays out of the
         # scrollable body, so a taller voice panel can never paint under it.
-        modal_card = re.search(r"\n        \.modal-card \{(.*?)\}", launcher_css, re.DOTALL)
+        modal_card = re.search(
+            r"#appSettingsModal \.modal-card \{(.*?)\}", settings_css, re.DOTALL
+        )
         self.assertIsNotNone(modal_card)
         self.assertIn("grid-template-rows: auto minmax(0, 1fr) auto", modal_card.group(1))
-        self.assertIn(".app-settings-actions", launcher_css)
+        self.assertIn(".app-settings-actions", settings_css)
 
     # ── ISSUE-2026-029 — terminal settings in App Settings ──
 
@@ -12682,18 +12799,18 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertIn('id="appTerminalFontSize"', html)
         self.assertIn('id="appTerminalMaxSessions"', html)
 
-        launcher_js = self._static("js/launcher.js")
-        collect = launcher_js[
-            launcher_js.index("function collectTerminalFontFamily()"):
-            launcher_js.index("function notifyAppConfigUpdated(appSettings")
+        app_settings_js = self._static("js/app-settings.js")
+        collect = app_settings_js[
+            app_settings_js.index("function collectTerminalFontFamily()"):
+            app_settings_js.index("function notifyAppConfigUpdated(appSettings")
         ]
         self.assertIn("terminal: {", collect)
         self.assertIn("appTerminalFontFamily", collect)
         self.assertIn("appTerminalFontSize", collect)
         self.assertIn("appTerminalMaxSessions", collect)
-        notify = launcher_js[
-            launcher_js.index("function notifyAppConfigUpdated(appSettings"):
-            launcher_js.index("async function loadAppSettings()")
+        notify = app_settings_js[
+            app_settings_js.index("function notifyAppConfigUpdated(appSettings"):
+            app_settings_js.index("async function loadAppSettings()")
         ]
         self.assertIn("terminal: {", notify)
 
@@ -12769,22 +12886,25 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertIn('id="appTerminalFontCustomField"', html)
         self.assertIn('id="appTerminalApplyAll"', html)
 
-        launcher_js = self._static("js/launcher.js")
-        self.assertIn("function collectTerminalFontFamily()", launcher_js)
+        app_settings_js = self._static("js/app-settings.js")
+        self.assertIn("function collectTerminalFontFamily()", app_settings_js)
         self.assertIn(
             "apply_scope: document.getElementById('appTerminalApplyAll')?.checked ? 'all' : 'session'",
-            launcher_js,
+            app_settings_js,
         )
         # Presets hide the free-text input; "Custom…" reveals it.
         self.assertIn(
             "fontCustomField?.classList.toggle('hidden', fontPresetInput?.value !== 'custom')",
-            launcher_js,
+            app_settings_js,
         )
         # The one-shot scope checkbox resets whenever the form re-syncs, and
         # the saved scope rides the cross-window notification.
-        self.assertIn("terminalApplyAllInput.checked = false;", launcher_js)
-        self.assertIn("notifyAppConfigUpdated(data, settingsForm.terminal.apply_scope);", launcher_js)
-        self.assertIn("apply_scope: applyScope === 'all' ? 'all' : 'session'", launcher_js)
+        self.assertIn("terminalApplyAllInput.checked = false;", app_settings_js)
+        self.assertIn(
+            "notifyAppConfigUpdated(data, settingsForm.terminal.apply_scope);",
+            app_settings_js,
+        )
+        self.assertIn("apply_scope: applyScope === 'all' ? 'all' : 'session'", app_settings_js)
 
     def test_terminals_page_applies_scoped_font_updates(self):
         # OD-14: default scope restyles every terminal of the ACTIVE session

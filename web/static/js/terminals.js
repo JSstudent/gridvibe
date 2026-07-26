@@ -23,6 +23,18 @@
         return document.documentElement.getAttribute('data-theme') || resolveTheme(getStoredTheme() || 'system');
     }
 
+    /* App Settings dialog hooks (app-settings.js owns the dialog itself, and
+       both pages render it from the same partial). A window never receives its
+       own BroadcastChannel/storage notification, so a save made here is
+       applied to this window straight from the hook. */
+    function appSettingsNotify(text, type = '') {
+        showTerminalToast(text, type);
+    }
+
+    function onAppSettingsSaved(_data, payload) {
+        applyAppConfigUpdate(payload);
+    }
+
     initTheme();
 
     function normalizeSurfaceMode(mode) {
@@ -2072,6 +2084,21 @@
                 closeSessionGroup(group.group_id);
             });
             button.appendChild(closeButton);
+
+            /* Middle-click closes the session, matching the explorer tab strip
+               (and every tabbed UI). Same path as the ×, so the live-terminal
+               confirmation still applies. */
+            button.addEventListener('mousedown', event => {
+                if (event.button === 1) {
+                    event.preventDefault(); // suppress middle-click autoscroll
+                }
+            });
+            button.addEventListener('auxclick', event => {
+                if (event.button === 1) {
+                    event.preventDefault();
+                    closeSessionGroup(group.group_id);
+                }
+            });
 
             wireSessionTabDragAndDrop(button, container);
             container.appendChild(button);

@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/diff2html.min.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/terminals.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app-settings.css') }}?v={{ version }}">
 </head>
 <body
     data-voice-enabled="{{ 'true' if voice_enabled else 'false' }}"
@@ -133,12 +134,25 @@
             aria-label="Enter fullscreen"
             aria-pressed="false"
         ><svg class="fullscreen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg></button>
+        <button
+            class="btn btn-neutral btn-icon"
+            id="appSettingsBtn"
+            type="button"
+            onclick="openAppSettings()"
+            title="App settings"
+            aria-label="App settings"
+        >
+            <svg class="app-settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-.51A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.81-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+        </button>
         <a
             href="/"
             class="btn btn-neutral btn-icon settings-window-btn"
             onclick="return goToSettings(event)"
-            title="Open settings"
-            aria-label="Open settings"
+            title="Open launcher"
+            aria-label="Open launcher"
         >
             <svg class="vibe-flow-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
                 <rect x="5" y="7" width="22" height="18" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
@@ -266,6 +280,8 @@
     </div>
 </div>
 
+{% include 'partials/app_settings_modal.html' %}
+
 <script src="{{ url_for('static', filename='vendor/xterm.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/xterm-addon-fit.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/xterm-addon-search.min.js') }}"></script>
@@ -279,6 +295,7 @@
     const MAX_SESSIONS = {{ max_sessions | tojson }};
 </script>
 <script src="{{ url_for('static', filename='js/shared.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/app-settings.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminal-icons.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/voice-input.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/explorer-viewer.js') }}?v={{ version }}"></script>
