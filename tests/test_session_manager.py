@@ -301,17 +301,21 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(group.workspace_layout, workspace_layout)
         self.assertEqual(group.to_dict()["workspace_layout"], workspace_layout)
 
-    def test_create_group_preserves_surface_mode_metadata(self):
+    def test_create_group_does_not_store_surface_mode(self):
+        """Surface mode is a single global setting read live by every window.
+
+        Storing a copy on the group froze it at launch time, so changing the
+        App Setting never reached an already-open (or restored) workspace.
+        """
         group = self.manager.create_group(
             name="maxed",
             connection_mode="ssh",
             layout="single",
             terminal_count=1,
-            surface_mode="max",
         )
 
-        self.assertEqual(group.surface_mode, "max")
-        self.assertEqual(group.to_dict()["surface_mode"], "max")
+        self.assertFalse(hasattr(group, "surface_mode"))
+        self.assertNotIn("surface_mode", group.to_dict())
 
     def test_update_session_status_marks_connected(self):
         session = self.manager.create_session(

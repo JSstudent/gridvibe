@@ -483,7 +483,13 @@ def _resolve_group_id() -> str:
 
 
 def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
-    """Return layout metadata for one session group."""
+    """Return layout metadata for one session group.
+
+    ``surface_mode`` is always the current global setting, never a per-group
+    copy: it used to be frozen into the group at launch, so changing the App
+    Setting left every already-launched group (and every workspace restored
+    from a snapshot of one) reporting the value it launched with.
+    """
     group = session_manager.get_group(group_id)
     if not group:
         launch_options = active_launch_options
@@ -502,7 +508,7 @@ def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
         "connection_mode": group.connection_mode,
         "terminal_count": group.terminal_count,
         "workspace_layout": group.workspace_layout,
-        "surface_mode": group.surface_mode,
+        "surface_mode": runtime_config.app_surface_mode,
     }
 
 
@@ -671,11 +677,17 @@ def set_app_config():
         terminal_payload = {}
     apply_scope = str(terminal_payload.get("apply_scope", "")).strip().lower()
 
+    # _normalize_app_config_update fills every section the payload omits from
+    # runtime_config, so the refresh has to happen under the same lock hold:
+    # otherwise a partial POST (the workspace theme toggle sends only
+    # `appearance`) landing between the save and the refresh would write the
+    # pre-save values of every other section straight back over the new ones.
+    # The broadcast stays outside the lock — never emit while holding one.
     with _config_lock:
         current = load_config()
         current = _merge_dicts(current, _normalize_app_config_update(data))
         save_config(current)
-    _refresh_runtime_config()
+        _refresh_runtime_config()
     _broadcast_app_config_update(apply_scope)
     return jsonify(_public_app_config())
 
@@ -1424,7 +1436,6 @@ def create_sessions():
         connection_mode = _normalize_connection_mode(data.get("connection_mode"))
         layout = _normalize_layout(data.get("layout"), len(sessions_config))
         workspace_layout = _normalize_workspace_layout(data.get("workspace_layout"), len(sessions_config))
-        surface_mode = _normalize_surface_mode(data.get("surface_mode"), runtime_config.app_surface_mode)
         session_name = str(data.get("session_name") or "").strip()
         saved_session_id = _normalize_launch_session_id(data.get("saved_session_id"))
         stable_group_id = _build_launch_group_id(saved_session_id) or None
@@ -1523,7 +1534,6 @@ def create_sessions():
             group_id=stable_group_id,
             saved_session_id=saved_session_id,
             workspace_layout=workspace_layout,
-            surface_mode=surface_mode,
         )
         logger.info(
             "Created session group group_id=%s saved_session_id=%r name=%r mode=%s layout=%s terminal_count=%d",
@@ -1585,7 +1595,7 @@ def create_sessions():
             "connection_mode": connection_mode,
             "terminal_count": len(created_sessions),
             "workspace_layout": workspace_layout,
-            "surface_mode": surface_mode,
+            "surface_mode": runtime_config.app_surface_mode,
             "launch_target": "web",
             "warnings": launch_warnings,
         }), 201

@@ -29,12 +29,34 @@
         return mode === 'max' ? 'max' : 'normal';
     }
 
-    function getStoredSurfaceMode() {
+    /* Surface mode has exactly one persisted source of truth — the global
+       `workspace.surface_mode` App Setting, which every window reads live.
+       The toolbar toggle is a *per-window* view override on top of it, stored
+       as `<mode>@<global mode it was made against>` so that a later App
+       Settings change always wins instead of being shadowed forever by an old
+       toggle. (This key used to be written and never read back at all.) */
+    function readSurfaceModeOverride(globalMode) {
         try {
-            return localStorage.getItem(SURFACE_MODE_STORAGE_KEY) === 'max';
-        } catch (_) {
-            return false;
-        }
+            const [mode, base] = String(
+                localStorage.getItem(SURFACE_MODE_STORAGE_KEY) || ''
+            ).split('@');
+            if ((mode === 'max' || mode === 'normal') && base === globalMode) {
+                return mode;
+            }
+        } catch (_) {}
+        return '';
+    }
+
+    function storeSurfaceModeOverride(mode, globalMode) {
+        try {
+            localStorage.setItem(SURFACE_MODE_STORAGE_KEY, `${mode}@${globalMode}`);
+        } catch (_) {}
+    }
+
+    function clearSurfaceModeOverride() {
+        try {
+            localStorage.removeItem(SURFACE_MODE_STORAGE_KEY);
+        } catch (_) {}
     }
 
     function updateSurfaceModeButton(enabled) {
@@ -56,44 +78,60 @@
         await redrawAttachedTerminals(attachedIndices, { forceResize: true });
     }
 
-    function applySurfaceMode(enabled, { persist = false, refit = false } = {}) {
+    function applySurfaceMode(enabled, { refit = false } = {}) {
         const active = Boolean(enabled);
         document.body.classList.toggle('surface-max', active);
         updateSurfaceModeButton(active);
-        if (persist) {
-            try {
-                localStorage.setItem(SURFACE_MODE_STORAGE_KEY, active ? 'max' : 'normal');
-            } catch (_) {}
-        }
         if (refit) {
             refitAttachedTerminalsForSurfaceMode();
         }
     }
 
-    function toggleSurfaceMode() {
-        surfaceModeChangedManually = true;
-        applySurfaceMode(!document.body.classList.contains('surface-max'), {
-            persist: true,
-            refit: true
-        });
+    function surfaceModeIsShowing(mode) {
+        return (mode === 'max') === document.body.classList.contains('surface-max');
     }
 
+    function toggleSurfaceMode() {
+        const next = document.body.classList.contains('surface-max') ? 'normal' : 'max';
+        surfaceModeChangedManually = true;
+        storeSurfaceModeOverride(next, currentGlobalSurfaceMode);
+        applySurfaceMode(next === 'max', { refit: true });
+    }
+
+    /* The global setting changed: it wins everywhere, discarding a per-window
+       toggle that was made against the previous value. */
+    function adoptGlobalSurfaceMode(mode, { refit = false } = {}) {
+        currentGlobalSurfaceMode = normalizeSurfaceMode(mode);
+        clearSurfaceModeOverride();
+        surfaceModeChangedManually = false;
+        if (!surfaceModeIsShowing(currentGlobalSurfaceMode)) {
+            applySurfaceMode(currentGlobalSurfaceMode === 'max', { refit });
+        }
+    }
+
+    function initSurfaceMode() {
+        const override = readSurfaceModeOverride(currentGlobalSurfaceMode);
+        if (override) {
+            surfaceModeChangedManually = true;
+        }
+        applySurfaceMode((override || currentGlobalSurfaceMode) === 'max');
+    }
+
+    /* Every /api/sessions refresh reports the *current* global setting (it used
+       to report a copy frozen into the session group at launch, which is why a
+       reload or a restore-after-restart reverted the setting). */
     function applyConfiguredSurfaceMode(data, { refit = false } = {}) {
-        if (surfaceModeChangedManually) {
+        const mode = normalizeSurfaceMode(data?.surface_mode || currentGlobalSurfaceMode);
+        if (mode !== currentGlobalSurfaceMode) {
+            /* Setting changed while this window missed the broadcast (hidden
+               window, dropped socket) — reconcile against the server. */
+            adoptGlobalSurfaceMode(mode, { refit });
             return;
         }
-
-        const groupId = data?.group?.group_id || activeGroupId || '';
-        const mode = normalizeSurfaceMode(data?.surface_mode || DEFAULT_SURFACE_MODE);
-        const applyKey = `${data?.group?.created_at || ''}:${mode}`;
-        if (groupId && surfaceModeAppliedGroups.get(groupId) === applyKey) {
+        if (surfaceModeChangedManually || surfaceModeIsShowing(mode)) {
             return;
         }
-
         applySurfaceMode(mode === 'max', { refit });
-        if (groupId) {
-            surfaceModeAppliedGroups.set(groupId, applyKey);
-        }
     }
 
     function applyAppConfigSurfaceMode(message) {
@@ -101,10 +139,7 @@
             return;
         }
 
-        const mode = normalizeSurfaceMode(message.workspace.surface_mode);
-        surfaceModeChangedManually = true;
-        surfaceModeAppliedGroups.clear();
-        applySurfaceMode(mode === 'max', { persist: true, refit: true });
+        adoptGlobalSurfaceMode(message.workspace.surface_mode, { refit: true });
     }
 
     function applyAppConfigTheme(message) {
@@ -236,13 +271,21 @@
 
     /* Recover app-config changes missed while this window was hidden or its
        socket was disconnected. */
-    async function reconcileAppConfigTheme() {
+    async function reconcileAppConfig() {
         try {
             const response = await fetch('/api/app-config');
             if (!response.ok) {
                 return;
             }
-            applyAppConfigTheme(await response.json());
+            const data = await response.json();
+            applyAppConfigTheme(data);
+            /* Reconciling is not an explicit save, so it goes through the
+               change-only path — it must never discard this window's own
+               surface toggle when the global setting has not moved. */
+            applyConfiguredSurfaceMode(
+                { surface_mode: data?.workspace?.surface_mode },
+                { refit: true }
+            );
         } catch (_error) {}
     }
 
@@ -461,7 +504,7 @@
     let knownGroupIds = [];
     let workspaceSaveTargets = new Map();
     let surfaceModeChangedManually = false;
-    let surfaceModeAppliedGroups = new Map();
+    let currentGlobalSurfaceMode = normalizeSurfaceMode(DEFAULT_SURFACE_MODE);
     let pendingSplitRestore = null;
     /* Live explorer/browser client state captured before a terminal close so the
        forced grid rebuild does not wipe sibling panes (ISSUE-2026-027). */
@@ -1412,7 +1455,6 @@
             connection_mode: connectionMode,
             layout: config.layout || (terminalCount >= 4 ? 'grid' : (terminalCount <= 1 ? 'single' : 'vertical')),
             workspace_layout: config.workspace_layout || null,
-            surface_mode: normalizeSurfaceMode(DEFAULT_SURFACE_MODE),
             saved_session_id: savedSession.id,
             session_name: buildSavedSessionLaunchName(savedSession, config),
             sessions
@@ -6982,7 +7024,7 @@
                 return;
             }
             scheduleStatusRefresh();
-            reconcileAppConfigTheme();
+            reconcileAppConfig();
         });
 
         /* ── Voice transcription results ── */
@@ -7044,17 +7086,17 @@
     });
     window.addEventListener('focus', () => {
         _refreshVoiceRuntimeState();
-        reconcileAppConfigTheme();
+        reconcileAppConfig();
     });
     window.addEventListener('pageshow', () => {
         _refreshVoiceRuntimeState();
-        reconcileAppConfigTheme();
+        reconcileAppConfig();
     });
     document.addEventListener('fullscreenchange', updateFullscreenButton);
     /* ─────────────────────────────────────────────
        Boot
     ───────────────────────────────────────────── */
-    applySurfaceMode(normalizeSurfaceMode(DEFAULT_SURFACE_MODE) === 'max');
+    initSurfaceMode();
     applyTopbarVisibility(getStoredTopbarVisible());
     setupAppConfigUpdateListeners();
     updateFullscreenButton();

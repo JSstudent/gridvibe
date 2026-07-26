@@ -178,7 +178,8 @@ def capture_workspace(
                 "connection_mode": group.connection_mode,
                 "layout": group.layout,
                 "workspace_layout": group.workspace_layout,
-                "surface_mode": group.surface_mode,
+                # No surface_mode: chrome density is a live global setting, so
+                # a restore must never replay the value a group launched with.
                 "saved_session_id": group.saved_session_id,
                 "sessions": [_snapshot_session(session) for session in sessions],
             }

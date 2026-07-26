@@ -109,7 +109,6 @@ class SessionGroup:
     display_order: int = 0
     saved_session_id: str = ""
     workspace_layout: Optional[Dict[str, Any]] = None
-    surface_mode: str = "normal"
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -123,7 +122,6 @@ class SessionGroup:
             "display_order": self.display_order,
             "saved_session_id": self.saved_session_id,
             "workspace_layout": self.workspace_layout,
-            "surface_mode": self.surface_mode,
             "created_at": self.created_at,
         }
 
@@ -151,9 +149,13 @@ class SessionManager:
         group_id: Optional[str] = None,
         saved_session_id: str = "",
         workspace_layout: Optional[Dict[str, Any]] = None,
-        surface_mode: str = "normal",
     ) -> SessionGroup:
-        """Create one group of launched sessions."""
+        """Create one group of launched sessions.
+
+        Workspace chrome density (surface mode) is deliberately *not* stored
+        here: it is a single global App Setting (``workspace.surface_mode``)
+        that every window reads live, so a group can never pin a stale copy.
+        """
         resolved_group_id = str(group_id or uuid.uuid4().hex[:12])
 
         with self.lock:
@@ -173,7 +175,6 @@ class SessionManager:
                 display_order=next_display_order,
                 saved_session_id=str(saved_session_id or "").strip(),
                 workspace_layout=workspace_layout,
-                surface_mode=surface_mode if surface_mode in {"normal", "max"} else "normal",
             )
             self.groups[resolved_group_id] = group
 
