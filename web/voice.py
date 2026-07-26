@@ -9,6 +9,8 @@ backwards compatibility.
 """
 
 import atexit
+import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -16,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from flask_socketio import emit
 
@@ -44,6 +46,47 @@ logger = logging.getLogger(__name__)
 def _vosk_engine_available() -> bool:
     """Return True when the websocket-client package is importable."""
     return ws_client is not None
+
+
+def _vosk_service_packages_available() -> bool:
+    """Return True when the bundled vosk-service can be started locally.
+
+    ``websocket-client`` is a core dependency, so it alone never proves Vosk
+    is usable — ``services/vosk_service.py`` needs the optional ``vosk`` and
+    ``websockets`` packages. Checked through ``find_spec`` so a missing model
+    download is not paid for on a capability probe.
+    """
+    try:
+        return (
+            importlib.util.find_spec("vosk") is not None
+            and importlib.util.find_spec("websockets") is not None
+        )
+    except (ImportError, ValueError):  # pragma: no cover - broken install
+        return False
+
+
+def _voice_engine_available(engine: Optional[str] = None, vosk_service_running: Optional[bool] = None) -> bool:
+    """Return True when ``engine`` can actually start on this machine.
+
+    Vosk stays usable when an external vosk-service is already running, even
+    if the optional packages are missing locally.
+    """
+    selected_engine = engine or runtime_config.voice_engine
+    if selected_engine == "whisper":
+        return _whisper_engine_available()
+    if not _vosk_engine_available():
+        return False
+    if vosk_service_running:
+        return True
+    return _vosk_service_packages_available()
+
+
+def _voice_engines_available(vosk_service_running: Optional[bool] = None) -> Dict[str, bool]:
+    """Return per-engine availability so the UI can gate the engine picker."""
+    return {
+        "vosk": _voice_engine_available("vosk", vosk_service_running),
+        "whisper": _voice_engine_available("whisper"),
+    }
 
 
 def _whisper_language_code(language: Any) -> Optional[str]:
@@ -79,7 +122,7 @@ def _whisper_engine_available() -> bool:
     return WhisperModel is not None and np is not None
 
 
-def _voice_engine_unavailable_message(engine: Optional[str] = None) -> str:
+def _voice_engine_unavailable_message(engine: Optional[str] = None, vosk_service_running: Optional[bool] = None) -> str:
     """Return a user-facing reason the configured voice backend cannot start."""
     selected_engine = engine or runtime_config.voice_engine
     if selected_engine == "whisper":
@@ -102,7 +145,214 @@ def _voice_engine_unavailable_message(engine: Optional[str] = None) -> str:
             "Cannot start Vosk because websocket-client is not installed. "
             "Install optional voice dependencies with: pip install -r requirements-voice.txt"
         )
+    if not vosk_service_running and not _vosk_service_packages_available():
+        return (
+            "Cannot start Vosk because the vosk and websockets packages are not installed. "
+            "Install optional voice dependencies with: pip install -r requirements-voice.txt"
+        )
     return "Voice backend is not available."
+
+
+# ==================== Optional voice dependency install ====================
+# GridVibe.bat only offers the voice packages when voice input is already
+# enabled, and remembers a decline in .voice-deps-declined. This is the
+# in-app recovery path so enabling voice input never dead-ends in a silent
+# no-op (docs/stage_j_issues_analysis_2026-07-26.md, issues 2 and 4).
+
+VOICE_REQUIREMENTS_FILE = os.path.join(BASE_DIR, "requirements-voice.txt")
+VOICE_DEPS_DECLINED_MARKER = os.path.join(BASE_DIR, ".voice-deps-declined")
+VOICE_INSTALL_TIMEOUT_SECONDS = 1800
+VOICE_INSTALL_OUTPUT_TAIL_LINES = 12
+
+_voice_install_lock = threading.Lock()
+_voice_install_state: Dict[str, Any] = {
+    "status": "idle",  # idle | running | success | error
+    "message": "",
+    "restart_required": False,
+    "started_at": None,
+    "finished_at": None,
+    "output_tail": [],
+}
+
+
+def _clear_voice_deps_declined_marker() -> None:
+    """Drop the launcher's "asked and declined" marker after a successful install."""
+    try:
+        os.remove(VOICE_DEPS_DECLINED_MARKER)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:  # pragma: no cover - permission edge case
+        logger.debug("Could not remove %s: %s", VOICE_DEPS_DECLINED_MARKER, exc)
+
+
+def _reload_voice_backends() -> Dict[str, bool]:
+    """Re-attempt the optional voice imports after a runtime install.
+
+    Availability is otherwise decided by module-level imports at boot, so a
+    freshly installed package would need a process restart to be seen. The
+    packages land in the running interpreter's own environment, so re-importing
+    is enough once the import caches are invalidated.
+    """
+    global ws_client, np, WhisperModel
+
+    importlib.invalidate_caches()
+
+    if ws_client is None:
+        try:
+            ws_client = importlib.import_module("websocket")
+        except Exception as exc:  # pragma: no cover - depends on local install
+            logger.debug("websocket-client still unavailable after install: %s", exc)
+    if np is None:
+        try:
+            np = importlib.import_module("numpy")
+        except Exception as exc:  # pragma: no cover - depends on local install
+            logger.debug("numpy still unavailable after install: %s", exc)
+    if WhisperModel is None:
+        try:
+            WhisperModel = importlib.import_module("faster_whisper").WhisperModel
+        except Exception as exc:  # pragma: no cover - depends on local install
+            logger.debug("faster-whisper still unavailable after install: %s", exc)
+
+    return _voice_engines_available()
+
+
+def _voice_install_status() -> Dict[str, Any]:
+    """Return a snapshot of the voice dependency install state."""
+    with _voice_install_lock:
+        snapshot = dict(_voice_install_state)
+    snapshot["output_tail"] = list(snapshot.get("output_tail") or [])
+    return snapshot
+
+
+def _set_voice_install_state(**updates: Any) -> Dict[str, Any]:
+    with _voice_install_lock:
+        _voice_install_state.update(updates)
+        snapshot = dict(_voice_install_state)
+    snapshot["output_tail"] = list(snapshot.get("output_tail") or [])
+    return snapshot
+
+
+def _output_tail(text: str) -> List[str]:
+    lines = [line.rstrip() for line in (text or "").splitlines() if line.strip()]
+    return lines[-VOICE_INSTALL_OUTPUT_TAIL_LINES:]
+
+
+def _perform_voice_dependency_install() -> None:
+    """Install requirements-voice.txt into the running interpreter."""
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "-r",
+        VOICE_REQUIREMENTS_FILE,
+    ]
+    logger.info("Installing optional voice dependencies: %s", " ".join(command))
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=VOICE_INSTALL_TIMEOUT_SECONDS,
+            cwd=BASE_DIR,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("Voice dependency install timed out after %ss", VOICE_INSTALL_TIMEOUT_SECONDS)
+        _set_voice_install_state(
+            status="error",
+            message=(
+                f"Install timed out after {VOICE_INSTALL_TIMEOUT_SECONDS // 60} minutes. "
+                "Run: pip install -r requirements-voice.txt"
+            ),
+            finished_at=time.time(),
+            output_tail=[],
+        )
+        return
+    except Exception as exc:  # pragma: no cover - pip missing/unusable
+        logger.error("Voice dependency install could not start: %s", exc)
+        _set_voice_install_state(
+            status="error",
+            message=f"Install could not start: {exc}",
+            finished_at=time.time(),
+            output_tail=[],
+        )
+        return
+
+    output = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+    if completed.returncode != 0:
+        logger.error("Voice dependency install failed (exit %s)", completed.returncode)
+        _set_voice_install_state(
+            status="error",
+            message=(
+                f"pip exited with code {completed.returncode}. "
+                "Run: pip install -r requirements-voice.txt"
+            ),
+            finished_at=time.time(),
+            output_tail=_output_tail(output),
+        )
+        return
+
+    _clear_voice_deps_declined_marker()
+    engines = _reload_voice_backends()
+    engine_ready = bool(engines.get(runtime_config.voice_engine))
+    logger.info("Voice dependencies installed; engines available: %s", engines)
+    _set_voice_install_state(
+        status="success",
+        message=(
+            "Voice dependencies installed and loaded."
+            if engine_ready
+            else "Voice dependencies installed. Restart GridVibe to load them."
+        ),
+        restart_required=not engine_ready,
+        finished_at=time.time(),
+        output_tail=_output_tail(output),
+    )
+
+
+def _run_voice_dependency_install(on_complete=None) -> None:
+    """Run the install, then hand the final state to ``on_complete``.
+
+    The callback is how ``web.api`` pushes the result to open windows without
+    ``web.voice`` reaching for the Socket.IO server itself.
+    """
+    try:
+        _perform_voice_dependency_install()
+    finally:
+        if on_complete is not None:
+            try:
+                on_complete(_voice_install_status())
+            except Exception as exc:  # pragma: no cover - notification is best effort
+                logger.debug("Voice install completion callback failed: %s", exc)
+
+
+def _start_voice_dependency_install(on_complete=None) -> Dict[str, Any]:
+    """Kick off the install in a worker thread; no-op while one is running."""
+    with _voice_install_lock:
+        if _voice_install_state["status"] == "running":
+            snapshot = dict(_voice_install_state)
+            snapshot["output_tail"] = list(snapshot.get("output_tail") or [])
+            return snapshot
+        _voice_install_state.update(
+            {
+                "status": "running",
+                "message": "Installing voice dependencies (this can take a few minutes)...",
+                "restart_required": False,
+                "started_at": time.time(),
+                "finished_at": None,
+                "output_tail": [],
+            }
+        )
+        snapshot = dict(_voice_install_state)
+        snapshot["output_tail"] = []
+
+    threading.Thread(
+        target=_run_voice_dependency_install,
+        args=(on_complete,),
+        name="voice-deps-install",
+        daemon=True,
+    ).start()
+    return snapshot
 
 
 def _ensure_whisper_model():

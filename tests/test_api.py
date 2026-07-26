@@ -332,6 +332,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("requirements-voice.txt", launcher)
         self.assertIn("choice /C YN", launcher)
 
+    def test_windows_launcher_only_asks_about_voice_when_voice_input_is_enabled(self):
+        """Stage J issue 4: the prompt came back on every launch even though
+        voice input ships disabled, and a decline was never remembered."""
+        launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
+
+        gate_index = launcher.index("get('voice_input', {}).get('enabled')")
+        prompt_index = launcher.index("choice /C YN")
+        marker_index = launcher.index('> ".voice-deps-declined"')
+
+        self.assertLess(gate_index, prompt_index)
+        self.assertLess(prompt_index, marker_index)
+        self.assertEqual(launcher.count("choice /C YN"), 1)
+        self.assertIn(":start_gridvibe", launcher)
+        self.assertIn('if exist ".voice-deps-declined" (', launcher)
+
+    def test_voice_dependency_decline_marker_is_gitignored(self):
+        gitignore = (Path(api.BASE_DIR) / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertIn(".voice-deps-declined", gitignore.split())
+
     def test_windows_launcher_clears_optional_dependency_error_before_start(self):
         launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
 
@@ -2123,6 +2143,37 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("voice-capture-worklet.js", html)
         self.assertIn("base", html)
 
+    def test_launcher_page_gates_voice_settings_on_backend_availability(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn('id="appVoiceAvailability"', html)
+        self.assertIn("async function loadVoiceStatus()", html)
+        self.assertIn("async function installVoiceDependencies()", html)
+        self.assertIn("'/api/voice-deps-install'", html)
+        self.assertIn("engines_available", html)
+        self.assertIn(".voice-availability {", html)
+
+    def test_terminals_page_applies_voice_pref_changes_without_a_restart(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("socket.on('voice_prefs_updated'", html)
+        self.assertIn("socket.on('voice_availability_updated'", html)
+        self.assertIn("function _refreshVoiceRuntimeState() {", html)
+        self.assertIn("_refreshVoiceRuntimeState();", html)
+
+    def test_terminals_page_surfaces_unavailable_voice_backend_visibly(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function _showVoiceAlert(message) {", html)
+        self.assertIn("_showVoiceAlert(backendUnavailableMessage);", html)
+        self.assertIn(".voice-btn.unavailable {", html)
+
     def test_terminals_page_preflights_voice_backend_before_microphone_start(self):
         response = self.client.get("/terminals")
 
@@ -2483,6 +2534,121 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertFalse(payload["engine_available"])
         self.assertIn("faster-whisper", payload["status_message"])
         self.assertIn("pip install -r requirements-voice.txt", payload["status_message"])
+
+    def test_voice_status_endpoint_reports_per_engine_availability(self):
+        with patch.object(api.runtime_config, "voice_engine", "vosk"), patch.object(
+            api, "_vosk_service_reachable", return_value=False
+        ), patch.object(
+            web_voice, "_vosk_service_packages_available", return_value=False
+        ), patch.object(web_voice, "WhisperModel", object()), patch.object(
+            web_voice, "np", object()
+        ):
+            response = self.client.get("/api/voice-status")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload["engine_available"])
+        self.assertFalse(payload["engines_available"]["vosk"])
+        self.assertTrue(payload["engines_available"]["whisper"])
+        self.assertIn("vosk and websockets", payload["status_message"])
+        self.assertIn("install", payload)
+
+    def test_voice_status_endpoint_trusts_a_running_external_vosk_service(self):
+        with patch.object(api.runtime_config, "voice_engine", "vosk"), patch.object(
+            api, "_vosk_service_reachable", return_value=True
+        ), patch.object(
+            web_voice, "_vosk_service_packages_available", return_value=False
+        ):
+            response = self.client.get("/api/voice-status")
+
+        payload = response.get_json()
+        self.assertTrue(payload["engine_available"])
+        self.assertTrue(payload["engines_available"]["vosk"])
+
+    def test_voice_prefs_post_broadcasts_live_update(self):
+        with patch.object(api.socketio, "emit") as emit:
+            response = self.client.post(
+                "/api/voice-prefs", json={"pttKeybind": "Ctrl+Shift+V"}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["pttKeybind"], "Ctrl+Shift+V")
+        events = [call.args[0] for call in emit.call_args_list]
+        self.assertIn("voice_prefs_updated", events)
+        payload = next(
+            call.args[1]
+            for call in emit.call_args_list
+            if call.args[0] == "voice_prefs_updated"
+        )
+        self.assertEqual(payload["prefs"]["pttKeybind"], "Ctrl+Shift+V")
+
+    def test_voice_deps_install_endpoint_starts_background_install(self):
+        state = {"status": "running", "message": "Installing", "output_tail": []}
+        with patch.object(
+            api, "_start_voice_dependency_install", return_value=state
+        ) as start:
+            response = self.client.post("/api/voice-deps-install", json={})
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json()["status"], "running")
+        start.assert_called_once_with(
+            on_complete=api._broadcast_voice_install_finished
+        )
+
+    def test_voice_deps_install_status_endpoint_reports_current_state(self):
+        response = self.client.get("/api/voice-deps-install")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertIn(payload["status"], {"idle", "running", "success", "error"})
+        self.assertIn("output_tail", payload)
+
+    def _reset_voice_install_state(self):
+        web_voice._set_voice_install_state(
+            status="idle",
+            message="",
+            restart_required=False,
+            started_at=None,
+            finished_at=None,
+            output_tail=[],
+        )
+
+    def test_voice_dependency_install_reloads_backends_without_a_restart(self):
+        self.addCleanup(self._reset_voice_install_state)
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="Successfully installed vosk", stderr=""
+        )
+        with patch.object(
+            web_voice.subprocess, "run", return_value=completed
+        ) as run, patch.object(
+            web_voice, "_clear_voice_deps_declined_marker"
+        ) as clear_marker, patch.object(
+            web_voice, "_reload_voice_backends", return_value={"vosk": True, "whisper": True}
+        ) as reload_backends:
+            web_voice._perform_voice_dependency_install()
+
+        self.assertIn("requirements-voice.txt", run.call_args.args[0][-1])
+        clear_marker.assert_called_once_with()
+        reload_backends.assert_called_once_with()
+        state = web_voice._voice_install_status()
+        self.assertEqual(state["status"], "success")
+        self.assertFalse(state["restart_required"])
+
+    def test_voice_dependency_install_failure_reports_pip_exit_code(self):
+        self.addCleanup(self._reset_voice_install_state)
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=2, stdout="", stderr="ERROR: no matching distribution"
+        )
+        with patch.object(
+            web_voice.subprocess, "run", return_value=completed
+        ), patch.object(web_voice, "_reload_voice_backends") as reload_backends:
+            web_voice._perform_voice_dependency_install()
+
+        reload_backends.assert_not_called()
+        state = web_voice._voice_install_status()
+        self.assertEqual(state["status"], "error")
+        self.assertIn("code 2", state["message"])
+        self.assertIn("ERROR: no matching distribution", state["output_tail"])
 
     def test_app_config_endpoint_returns_settings_payload(self):
         response = self.client.get("/api/app-config")

@@ -1,0 +1,50 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 5050,
+    "debug": false
+  },
+  "ssh": {
+    "default_port": 22,
+    "connection_timeout": 30,
+    "keepalive_interval": 60,
+    "host_key_policy": "auto-add",
+    "default_username": "root"
+  },
+  "terminal": {
+    "max_sessions": 8,
+    "font_family": "'Cascadia Code', 'Cascadia Mono', Consolas, monospace",
+    "font_size": 15,
+    "default_rows": 24,
+    "default_cols": 80
+  },
+  "security": {
+    "cors_origins": [
+      "*"
+    ]
+  },
+  "appearance": {
+    "theme": "dark"
+  },
+  "workspace": {
+    "surface_mode": "max",
+    "autosave_interval_minutes": 10
+  },
+  "voice_input": {
+    "enabled": false,
+    "engine": "whisper",
+    "vosk_service_url": "ws://localhost:2700",
+    "vosk_model": "vosk-model-en-us-0.22",
+    "whisper_model": "base",
+    "whisper_device": "cpu",
+    "whisper_compute_type": "int8",
+    "language": "en-US",
+    "vosk_service_port": 2700
+  },
+  "voice_prefs": {
+    "profile": "headset",
+    "deviceId": "",
+    "pttEnabled": true,
+    "pttKeybind": "Ctrl+Dead"
+  }
+}

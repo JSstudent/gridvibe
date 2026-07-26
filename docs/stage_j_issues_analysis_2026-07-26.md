@@ -9,6 +9,8 @@ Issues covered:
 1. **Browser-mode local terminals fail without pywinpty** — see `docs/browser_terminal_issue.png`.
 2. **Voice silently does nothing when dependencies were declined** at first launch.
 3. **Push-to-talk shortcut changes need a full restart** to take effect in open tabs.
+4. **`GridVibe.bat` re-asks for voice dependencies on every launch**, even though
+   voice input ships disabled.
 
 ---
 
@@ -117,24 +119,35 @@ everything, re-running `GridVibe.bat`, and answering yes to the voice prompt.
   `web/webview_launcher.py:795-807`; frontend wrapper `restartApplication()`,
   `launcher.js:2635-2687`, degrading to "restart manually" text in browser mode).
 
-### Proposed fix — availability UX + recovery without a hard reset
+### Fix — availability UX + in-app recovery (**implemented 2026-07-26**)
 
-1. **Gate:** fetch `/api/voice-status` when opening the launcher settings modal
-   (`openAppSettings`, `launcher.js:858-871`); show `status_message` in
-   `#appVoicePrefsStatus` (`index.html:410`); mark/disable the voice toggle and
-   the mic button when `engine_available === false`.
-2. **Feedback:** on mic click with an unavailable backend, show the message
-   visibly (toast / `openGenericConfirmModal` — guardrail: no native
-   `alert`/`confirm`) instead of tooltip-only.
-3. **Recovery (can be deferred):** add a guarded
-   `POST /api/install-voice-deps` endpoint that runs
-   `sys.executable -m pip install -r requirements-voice.txt`, then prompt
-   "restart now" — native mode reuses the existing restart bridge
-   (`webview_launcher.py:795`, `launcher.js:2635`); browser mode instructs a
-   manual restart.
-
-Steps 1+2 alone already kill the silent-failure confusion; step 3 removes the
-"close everything and re-run the bat" dance.
+1. **Honest availability.** `_voice_engine_available()` / `_voice_engines_available()`
+   (`web/voice.py`) replace the old per-engine checks, and `/api/voice-status`
+   now returns `engines_available` (both engines), `vosk_packages_available`
+   and the current `install` state. Vosk no longer counts as available just
+   because the core `websocket-client` is importable — the bundled service
+   needs `vosk` + `websockets` — while a *running* external vosk-service still
+   counts.
+2. **Gate + explanation.** App Settings fetches `/api/voice-status` on open
+   (`loadVoiceStatus()`, `launcher.js`) and shows the
+   `#appVoiceAvailability` banner for whichever engine is selected **in the
+   form**, refreshed from `updateAppSettingsVisibility()`.
+3. **Feedback in the workspace.** `_startVoice()` now raises the message through
+   `_showVoiceAlert()` → `showTerminalToast()` (guardrail #4: no native
+   `alert`/`confirm`) instead of writing it only to the button `title`, and the
+   mic button gets a `.voice-btn.unavailable` state while staying clickable —
+   a disabled button cannot explain itself.
+4. **Recovery without a hard reset.** `POST /api/voice-deps-install` runs
+   `sys.executable -m pip install -r requirements-voice.txt` in a worker
+   thread; `GET /api/voice-deps-install` reports progress (polled at 2 s only
+   while an install is in flight). On success it removes the
+   `.voice-deps-declined` marker and calls `_reload_voice_backends()`, which
+   re-imports the optional modules into the running process — so voice works
+   **without** a restart. If the re-import still fails, the response sets
+   `restart_required` and the UI points at the existing restart affordance.
+   Completion is broadcast as `voice_availability_updated` so open workspaces
+   pick it up live. Saving App Settings with voice enabled but no backend
+   installed offers the install through `openGenericConfirmModal`.
 
 ---
 
@@ -166,26 +179,69 @@ tabs until a full restart. Enabling voice itself *does* appear to propagate live
   `/api/voice-status` on window `focus`/`pageshow` (`terminals.js:7031-7038`),
   which un-hides the mic controls (`voice-input.js:231-236`).
 
-### Proposed fix — live-apply voice prefs
+### Fix — live-apply voice prefs (**implemented 2026-07-26**)
 
-- Emit a `voice_prefs_updated` Socket.IO event from `POST /api/voice-prefs`
-  (and/or include voice prefs in the existing broadcast payloads).
-- Handle it in `terminals.js` (next to `terminals.js:6954`) by re-running
-  `_loadVoicePrefsFromServer()` — no re-binding needed since the key handlers
-  read at event time.
-- Belt-and-braces: also re-fetch prefs in the existing `focus`/`pageshow`
-  handler (`terminals.js:7031-7038`), matching how voice-enable propagates.
+- `POST /api/voice-prefs` emits a `voice_prefs_updated` Socket.IO event with the
+  saved prefs; `terminals.js` handles it by re-running
+  `_loadVoicePrefsFromServer()`. No re-binding is needed because the key
+  handlers already read `_voicePrefs` at event time.
+- `applyAppConfigUpdate()` (every delivery path: Socket.IO, `BroadcastChannel`,
+  `storage`) and the `focus`/`pageshow` handlers now call the new
+  `_refreshVoiceRuntimeState()` in `voice-input.js`, which refreshes both
+  `/api/voice-status` and `/api/voice-prefs` — so enabling voice, switching
+  engine, and changing the keybind all land in open tabs without a restart.
+
+---
+
+## Issue 4 — `GridVibe.bat` asks for voice dependencies on every launch
+
+### Symptom
+
+Every start via `GridVibe.bat`, until the voice packages are installed:
+a raw `ModuleNotFoundError: No module named 'faster_whisper'` traceback,
+then *"Install optional voice dependencies now? [Y/N]"* — again, and again,
+regardless of how often it was declined (notes in `docs/r&d/todos.txt`, item 3).
+
+### Root cause
+
+- `:check_voice_dependencies` ran unconditionally for both launch modes and had
+  no memory of a decline: the import probe fails → prompt, every single time.
+- It also ignored the app's own configuration. `default_config.json` ships
+  `voice_input.enabled: false` (flipped in commit `2f06269`), so on a fresh
+  clone the launcher was pushing an optional, multi-hundred-MB install for a
+  feature that is switched off.
+- The probe printed the interpreter's traceback straight into the console,
+  which reads like a crash rather than an optional-feature notice.
+
+### Fix (**implemented 2026-07-26**)
+
+- The check now runs **only when voice input is actually enabled** in the
+  effective config (`config.json`, falling back to `default_config.json`),
+  probed through the venv interpreter's exit code. Disabled (the default) →
+  one explanatory line and straight to `:start_gridvibe`.
+- A decline writes `.voice-deps-declined` (gitignored). While that marker
+  exists the prompt is replaced by a one-line pointer to App Settings and the
+  manual pip command. A passing import check — or a successful install from
+  either the bat or `POST /api/voice-deps-install` — removes the marker.
+- Import probes redirect stderr to `nul`, so a missing optional package no
+  longer prints a traceback.
 
 ---
 
 ## Implementation order
 
-| # | Fix | Size | Risk |
-|---|-----|------|------|
-| 1 | Re-file pywinpty into `requirements.txt` (+ bat check, README/doc wording) | Small | Low — no code changes |
-| 2 | Live-apply voice prefs (`voice_prefs_updated` event + re-fetch) | Small | Low |
-| 3.1–3.2 | Voice availability gating + visible feedback | Medium | Low |
-| 3.3 | Runtime `install-voice-deps` endpoint + restart affordance | Medium | Medium — new write endpoint, must respect same-origin write guard and guardrails #5/#8 |
+| # | Fix | Size | Risk | Status |
+|---|-----|------|------|--------|
+| 1 | Re-file pywinpty into `requirements.txt` (+ bat check, README/doc wording) | Small | Low — no code changes | Done 2026-07-26 |
+| 2 | Gate the bat's voice prompt on config + remember a decline (issue 4) | Small | Low | Done 2026-07-26 |
+| 3 | Live-apply voice prefs (`voice_prefs_updated` event + re-fetch) | Small | Low | Done 2026-07-26 |
+| 4 | Voice availability gating + visible feedback | Medium | Low | Done 2026-07-26 |
+| 5 | Runtime `voice-deps-install` endpoint + in-process reload | Medium | Medium — new write endpoint behind the same-origin write guard; installs only the repo's own pinned `requirements-voice.txt` | Done 2026-07-26 |
 
-Each fix is independently shippable; 1–3.2 are candidates for the current
-release, 3.3 can be deferred without leaving confusing behavior behind.
+Coverage for the fixes lives in `tests/test_api.py`
+(`test_windows_launcher_only_asks_about_voice_when_voice_input_is_enabled`,
+`test_voice_status_endpoint_reports_per_engine_availability`,
+`test_voice_prefs_post_broadcasts_live_update`,
+`test_voice_deps_install_endpoint_starts_background_install`,
+`test_voice_dependency_install_reloads_backends_without_a_restart`, and the
+three page-level assertions for the launcher and workspace surfaces).

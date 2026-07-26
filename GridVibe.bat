@@ -201,52 +201,79 @@ if errorlevel 1 (
 )
 
 :check_voice_dependencies
+:: Voice input is optional and ships disabled (default_config.json), so this
+:: check only runs when voice input is actually enabled in the effective
+:: config. A decline is remembered in .voice-deps-declined so the prompt never
+:: comes back; App Settings can install the packages later without a restart.
+"%VENV_PYTHON%" -c "import json, os, sys; path = 'config.json' if os.path.exists('config.json') else 'default_config.json'; sys.exit(0 if json.load(open(path, encoding='utf-8')).get('voice_input', {}).get('enabled') else 1)" >nul 2>&1
+if errorlevel 1 (
+    echo  Voice input is off, so the optional voice dependency check is skipped.
+    echo  Turn it on in App Settings; GridVibe can install the packages from there.
+    echo.
+    goto start_gridvibe
+)
+
 echo  Checking optional voice dependencies...
 echo.
 
-"%VENV_PYTHON%" -c "import faster_whisper, numpy, vosk, websockets; print('Voice dependency import check passed.')"
-if errorlevel 1 (
-    echo.
-    echo  Voice input needs optional packages for Vosk and faster-whisper, or an installed voice package needs repair.
-    choice /C YN /N /M " Install optional voice dependencies now? [Y/N] "
-    if errorlevel 2 (
-        echo.
-        echo  Skipping voice dependencies. GridVibe will run, but voice input may be unavailable.
-        echo  Manual fix: "%VENV_PYTHON%" -m pip install -r requirements-voice.txt
-        echo.
-    ) else (
-        echo.
-        echo  Installing optional voice dependencies...
-        echo.
-        "%VENV_PYTHON%" -m pip install --upgrade --upgrade-strategy eager -r requirements-voice.txt
-        if errorlevel 1 (
-            echo  Warning: Failed to install optional voice dependencies.
-            echo  GridVibe will still run, but voice input may be unavailable.
-            echo  Manual fix: "%VENV_PYTHON%" -m pip install --upgrade -r requirements-voice.txt
-            echo.
-        ) else (
-            "%VENV_PYTHON%" -c "import faster_whisper, numpy, vosk, websockets; print('Voice dependency import check passed.')"
-            if errorlevel 1 (
-                echo  Voice dependency import check failed. Reinstalling native voice wheels...
-                echo.
-                "%VENV_PYTHON%" -m pip install --upgrade --force-reinstall --no-cache-dir numpy ctranslate2 onnxruntime av faster-whisper vosk websockets
-                if errorlevel 1 (
-                    echo  Warning: Failed to repair optional voice dependencies.
-                    echo  GridVibe will still run, but voice input may be unavailable.
-                    echo.
-                ) else (
-                    "%VENV_PYTHON%" -c "import faster_whisper, numpy, vosk, websockets; print('Voice dependency import check passed.')"
-                    if errorlevel 1 (
-                        echo  Warning: Optional voice dependencies are still not importable after repair.
-                        echo  GridVibe will still run, but voice input may be unavailable.
-                        echo.
-                    )
-                )
-            )
-        )
-    )
+"%VENV_PYTHON%" -c "import faster_whisper, numpy, vosk, websockets; print('Voice dependency import check passed.')" 2>nul
+if not errorlevel 1 (
+    if exist ".voice-deps-declined" del /q ".voice-deps-declined" >nul 2>&1
+    goto start_gridvibe
 )
 
+if exist ".voice-deps-declined" (
+    echo  Voice packages are missing and were declined earlier, so this prompt stays off.
+    echo  Install them from App Settings ^> Install voice dependencies, or run:
+    echo    "%VENV_PYTHON%" -m pip install -r requirements-voice.txt
+    echo.
+    goto start_gridvibe
+)
+
+echo  Voice input is enabled, but its optional packages for Vosk and faster-whisper are missing or need repair.
+choice /C YN /N /M " Install optional voice dependencies now? [Y/N] "
+if errorlevel 2 (
+    echo.
+    echo  Skipping voice dependencies. GridVibe will run, but voice input stays unavailable.
+    echo  You will not be asked again - install them from App Settings when you want voice input.
+    echo.
+    > ".voice-deps-declined" echo Voice dependency install declined in GridVibe.bat. Delete this file to be asked again.
+    goto start_gridvibe
+)
+
+echo.
+echo  Installing optional voice dependencies...
+echo.
+"%VENV_PYTHON%" -m pip install --upgrade --upgrade-strategy eager -r requirements-voice.txt
+if errorlevel 1 (
+    echo  Warning: Failed to install optional voice dependencies.
+    echo  GridVibe will still run, but voice input may be unavailable.
+    echo  Manual fix: "%VENV_PYTHON%" -m pip install --upgrade -r requirements-voice.txt
+    echo.
+    goto start_gridvibe
+)
+
+"%VENV_PYTHON%" -c "import faster_whisper, numpy, vosk, websockets; print('Voice dependency import check passed.')" 2>nul
+if not errorlevel 1 goto start_gridvibe
+
+echo  Voice dependency import check failed. Reinstalling native voice wheels...
+echo.
+"%VENV_PYTHON%" -m pip install --upgrade --force-reinstall --no-cache-dir numpy ctranslate2 onnxruntime av faster-whisper vosk websockets
+if errorlevel 1 (
+    echo  Warning: Failed to repair optional voice dependencies.
+    echo  GridVibe will still run, but voice input may be unavailable.
+    echo.
+    goto start_gridvibe
+)
+
+"%VENV_PYTHON%" -c "import faster_whisper, numpy, vosk, websockets; print('Voice dependency import check passed.')" 2>nul
+if errorlevel 1 (
+    echo  Warning: Optional voice dependencies are still not importable after repair.
+    echo  GridVibe will still run, but voice input may be unavailable.
+    echo.
+)
+
+:start_gridvibe
 echo.
 echo  Starting GridVibe...
 echo.

@@ -251,6 +251,26 @@
         }
     }
 
+    /* One entry point for "voice settings changed somewhere else": an open
+       workspace re-reads availability and prefs instead of needing a restart.
+       Prefs matter because the push-to-talk handlers read _voicePrefs at event
+       time but the object itself was only loaded at boot
+       (docs/stage_j_issues_analysis_2026-07-26.md, issues 2 and 3). */
+    function _refreshVoiceRuntimeState() {
+        _loadVoiceServiceStatus();
+        _loadVoicePrefsFromServer();
+    }
+
+    /* Guardrail #4: never window.alert/confirm (WebView2 blocks them). The
+       shared toast is the visible surface for a mic click that cannot start. */
+    function _showVoiceAlert(message) {
+        if (typeof showTerminalToast === 'function') {
+            showTerminalToast(message, 'error');
+            return;
+        }
+        console.warn(`${VOICE_LOG_PREFIX} ${message}`);
+    }
+
     function _voiceBackendUnavailableMessage() {
         if (_voiceServiceStatus.enabled === false) {
             return 'Voice input is disabled in app settings.';
@@ -340,11 +360,24 @@
     }
 
     function _setVoiceBtnsDisabled(activeIndex) {
+        const unavailableMessage = _voiceBackendUnavailableMessage();
         document.querySelectorAll('.voice-btn').forEach(btn => {
             const btnIdx = parseInt(btn.dataset.terminalVoice, 10);
+            btn.classList.toggle(
+                'unavailable',
+                Boolean(unavailableMessage) && _voiceServiceStatus.enabled !== false
+            );
             if (_voiceServiceStatus.enabled === false) {
                 btn.disabled = true;
                 btn.title = 'Voice input is disabled in app settings';
+                return;
+            }
+            if (unavailableMessage) {
+                /* Deliberately still clickable: a disabled button cannot
+                   explain itself, and the click is what raises the toast
+                   telling the user the packages are missing (issue 2). */
+                btn.disabled = false;
+                btn.title = unavailableMessage;
                 return;
             }
             if (activeIndex === -1) {
@@ -387,6 +420,7 @@
                 message: backendUnavailableMessage
             });
             _setVoicePanelStatus(index, backendUnavailableMessage);
+            _showVoiceAlert(backendUnavailableMessage);
             return;
         }
 
@@ -394,12 +428,11 @@
             _voiceLog('Voice start aborted because getUserMedia is unavailable', {
                 terminalIndex: index
             });
-            _setVoicePanelStatus(
-                index,
-                isPywebviewAvailable()
-                    ? 'This pywebview environment does not expose getUserMedia() for microphone capture. Use browser mode for voice input on this machine.'
-                    : 'This browser does not expose getUserMedia() for microphone capture.'
-            );
+            const noCaptureMessage = isPywebviewAvailable()
+                ? 'This pywebview environment does not expose getUserMedia() for microphone capture. Use browser mode for voice input on this machine.'
+                : 'This browser does not expose getUserMedia() for microphone capture.';
+            _setVoicePanelStatus(index, noCaptureMessage);
+            _showVoiceAlert(noCaptureMessage);
             return;
         }
 
@@ -407,7 +440,9 @@
             _voiceLog('Voice start aborted because AudioWorklet is unavailable', {
                 terminalIndex: index
             });
-            _setVoicePanelStatus(index, 'AudioWorklet is not available in this browser, so the upgraded capture pipeline cannot start.');
+            const noWorkletMessage = 'AudioWorklet is not available in this browser, so the upgraded capture pipeline cannot start.';
+            _setVoicePanelStatus(index, noWorkletMessage);
+            _showVoiceAlert(noWorkletMessage);
             return;
         }
 

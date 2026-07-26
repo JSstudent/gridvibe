@@ -130,6 +130,10 @@
         applyAppConfigTheme(message);
         applyAppConfigSurfaceMode(message);
         applyAppConfigTerminalFont(message);
+        /* Voice enable/engine and the push-to-talk keybind are saved from the
+           same App Settings dialog, so re-read both here instead of leaving
+           open tabs on boot-time values until a restart (stage J issue 3). */
+        _refreshVoiceRuntimeState();
     }
 
     /* Per-session font overrides (OD-14): keyed by session-group id — the
@@ -6959,6 +6963,16 @@
             scheduleStatusRefresh();
         });
 
+        /* Voice preferences and backend availability can change from the
+           launcher window (or from another workspace tab) at any time. */
+        socket.on('voice_prefs_updated', () => {
+            _loadVoicePrefsFromServer();
+        });
+
+        socket.on('voice_availability_updated', () => {
+            _loadVoiceServiceStatus();
+        });
+
         /* Reconcile anything missed while the socket was disconnected.
            Skipped on the first connect — initialLoad() covers boot. */
         let hadSocketConnection = false;
@@ -7029,11 +7043,11 @@
         syncNativeFullscreenState();
     });
     window.addEventListener('focus', () => {
-        _loadVoiceServiceStatus();
+        _refreshVoiceRuntimeState();
         reconcileAppConfigTheme();
     });
     window.addEventListener('pageshow', () => {
-        _loadVoiceServiceStatus();
+        _refreshVoiceRuntimeState();
         reconcileAppConfigTheme();
     });
     document.addEventListener('fullscreenchange', updateFullscreenButton);
