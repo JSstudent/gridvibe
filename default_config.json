@@ -30,7 +30,7 @@
     "max_matches": 5000,
     "max_matches_per_file": 200,
     "max_file_bytes": 2097152,
-    "timeout_seconds": 8
+    "timeout_seconds": 20
   },
   "voice_input": {
     "enabled": false,

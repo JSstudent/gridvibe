@@ -274,6 +274,46 @@ class WalkEngineTestCase(unittest.TestCase):
         self.assertNotIn("escape.txt", paths)
         self.assertFalse(any(path.startswith("escape/") for path in paths))
 
+    def test_heavy_directories_are_pruned(self):
+        """The walk shares the remote fallback's deny-list — without it one
+        node_modules/ or .venv/ burns the whole deadline."""
+        for dirname in ("node_modules", ".venv", "__pycache__"):
+            os.makedirs(os.path.join(self.root, dirname))
+            with open(
+                os.path.join(self.root, dirname, "d.txt"), "w", encoding="utf-8"
+            ) as handle:
+                handle.write("hello vendored\n")
+        paths = {path for path, _line, _raw in self._walk()}
+        self.assertIn("a.txt", paths)
+        for dirname in ("node_modules", ".venv", "__pycache__"):
+            self.assertFalse(
+                any(path.startswith(f"{dirname}/") for path in paths), dirname
+            )
+
+    def test_literal_prefilter_does_not_change_results(self):
+        """The whole-file literal prefilter only skips files with no match at
+        all; every line the per-line matcher would yield still comes back."""
+        with open(os.path.join(self.root, "quiet.txt"), "w", encoding="utf-8") as handle:
+            handle.write("nothing to see\nnor here\n")
+        with open(os.path.join(self.root, "edge.txt"), "w", encoding="utf-8") as handle:
+            handle.write("tail hello\r\nHELLO lead\n")
+        found = {(path, line) for path, line, _raw in self._walk()}
+        self.assertFalse(any(path == "quiet.txt" for path, _line in found))
+        self.assertIn(("edge.txt", 1), found)
+        self.assertIn(("edge.txt", 2), found)
+        # Whole-word at a line boundary sees the same non-word neighbour with
+        # or without the prefilter.
+        word_hits = {(path, line) for path, line, _raw in self._walk(whole_word=True)}
+        self.assertIn(("edge.txt", 1), word_hits)
+
+    def test_regex_queries_keep_the_per_line_path(self):
+        """`$` is per line, so an anchored regex must still match — a
+        whole-file prefilter would have to be MULTILINE to agree."""
+        with open(os.path.join(self.root, "anchor.txt"), "w", encoding="utf-8") as handle:
+            handle.write("say hello\ntrailing\n")
+        matches = self._walk(query="hello$", regex=True)
+        self.assertIn(("anchor.txt", 1), {(path, line) for path, line, _raw in matches})
+
 
 class CompileMatcherTestCase(unittest.TestCase):
     def test_invalid_regex_raises_route_error_400(self):
@@ -368,7 +408,7 @@ class RuntimeConfigClampTestCase(unittest.TestCase):
         self.assertEqual(config.explorer_search_max_matches, 5000)
         self.assertEqual(config.explorer_search_max_matches_per_file, 200)
         self.assertEqual(config.explorer_search_max_file_bytes, 2097152)
-        self.assertEqual(config.explorer_search_timeout_seconds, 8)
+        self.assertEqual(config.explorer_search_timeout_seconds, 20)
 
 
 if __name__ == "__main__":

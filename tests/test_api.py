@@ -1429,9 +1429,25 @@ class ApiRoutesTestCase(unittest.TestCase):
         dispatch_end = html.index("const index = findTerminalSearchTargetIndex();", dispatch_start)
         dispatch_html = html[dispatch_start:dispatch_end]
         self.assertIn(
-            "focusExplorerRepoSearch(explorerIndex, explorerSelectionQuery(explorerIndex))",
+            "toggleExplorerRepoSearchShortcut(explorerIndex, explorerSelectionQuery(explorerIndex))",
             dispatch_html,
         )
+        # The shortcut is a toggle: an already-open panel closes from anywhere
+        # in the pane, not only while the panel input holds focus.
+        self.assertIn(
+            "function toggleExplorerRepoSearchShortcut(index, seedQuery = '')",
+            html,
+        )
+        toggle_start = html.index("function toggleExplorerRepoSearchShortcut(index, seedQuery = '')")
+        toggle_end = html.index("\n    }", toggle_start)
+        self.assertIn(
+            "setExplorerSearchSidebarOpen(index, false);",
+            html[toggle_start:toggle_end],
+        )
+        # The .gitignore filter is reachable from the panel, so the backend's
+        # `ignored` flag is wired end-to-end rather than dead (guardrail 5).
+        self.assertIn("data-explorer-repo-search-ignored", html)
+        self.assertIn("if (state.ignored) params.set('ignored', '1');", html)
 
     def test_terminals_page_explorer_uses_tabbed_file_viewer(self):
         """ISSUE-2026-014: main pane is a persistent tabbed read-only viewer."""
@@ -1975,6 +1991,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("main.classList.toggle(panel.mainClass, isOpen);", html)
         self.assertIn("sidebar.style.gridTemplateRows = tracks.join(' ');", html)
         self.assertNotIn("--explorer-sidebar-tree-height", html)
+        # Splitters live at fixed DOM slots between adjacent registry panels,
+        # so visibility and drag targets resolve through the slot map rather
+        # than assuming slot n == position n in the open set (Git+Search with
+        # Files closed must use slot 1, not slot 0).
+        self.assertIn("function explorerSidebarSplitterSlots(pane)", html)
+        self.assertIn("splitter.hidden = !visibleSlots.has(n);", html)
+        self.assertIn(
+            "const slot = explorerSidebarSplitterSlots(pane).find(entry => entry.slot === n);",
+            html,
+        )
+        # Dropping back to a single panel must clear the inline row tracks, so
+        # the survivor fills the sidebar instead of keeping its split height.
+        sync_start = html.index("function syncExplorerSidebar(index)")
+        sync_end = html.index("function restoreExplorerSidebarState(index)", sync_start)
+        self.assertIn("applyExplorerSidebarSplit(index);", html[sync_start:sync_end])
+        self.assertNotIn("if (openCount >= 2) {", html[sync_start:sync_end])
 
     def test_terminals_page_explorer_diff_search_hooks_are_present(self):
         response = self.client.get("/terminals")

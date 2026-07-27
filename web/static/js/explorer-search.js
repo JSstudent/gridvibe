@@ -30,6 +30,7 @@
                 case: false,
                 word: false,
                 regex: false,
+                ignored: false,
                 scope: '',
                 includeText: '',
                 loading: false,
@@ -80,6 +81,9 @@
         if (state.case) params.set('case', '1');
         if (state.word) params.set('word', '1');
         if (state.regex) params.set('regex', '1');
+        /* Off, `git grep` skips .gitignored files; on, the request routes to
+           the walk / remote-grep engine, which sees every file under the root. */
+        if (state.ignored) params.set('ignored', '1');
         /* "Current folder" scope re-reads the pane path at run time, so
            navigating between runs narrows correctly. */
         if (state.scope === 'current') {
@@ -334,6 +338,8 @@
                 <div class="explorer-search-panel-options">
                     <button type="button" class="explorer-search-btn explorer-search-scope-btn"
                             data-explorer-repo-search-scope title="Toggle search scope"></button>
+                    <button type="button" class="explorer-search-btn explorer-search-scope-btn"
+                            data-explorer-repo-search-ignored title="Toggle .gitignore filtering"></button>
                     <input class="explorer-search-include" data-explorer-repo-search-include="${index}"
                            placeholder="include: *.py, web/**" aria-label="Include glob filter"
                            spellcheck="false" autocomplete="off">
@@ -368,6 +374,14 @@
             scopeButton.title = currentFolder
                 ? 'Searching the current folder — click to search the whole root'
                 : 'Searching the whole root — click to search the current folder';
+        }
+        const ignoredButton = panel.querySelector('[data-explorer-repo-search-ignored]');
+        if (ignoredButton) {
+            ignoredButton.textContent = state.ignored ? 'all' : 'git';
+            ignoredButton.setAttribute('aria-pressed', state.ignored ? 'true' : 'false');
+            ignoredButton.title = state.ignored
+                ? 'Searching every file, including .gitignored ones — click to skip ignored files'
+                : 'Searching tracked and new files, skipping .gitignored ones — click to include them';
         }
         renderExplorerSearchResults(index);
     }
@@ -421,6 +435,15 @@
             scopeButton.dataset.bound = 'true';
             scopeButton.addEventListener('click', () => {
                 state.scope = state.scope === 'current' ? '' : 'current';
+                renderExplorerSearchPanel(index);
+                scheduleExplorerRepoSearch(index, { delay: 0 });
+            });
+        }
+        const ignoredButton = panel.querySelector('[data-explorer-repo-search-ignored]');
+        if (ignoredButton && !ignoredButton.dataset.bound) {
+            ignoredButton.dataset.bound = 'true';
+            ignoredButton.addEventListener('click', () => {
+                state.ignored = !state.ignored;
                 renderExplorerSearchPanel(index);
                 scheduleExplorerRepoSearch(index, { delay: 0 });
             });
@@ -551,4 +574,20 @@
         input.focus();
         input.select();
         return true;
+    }
+
+    /* Ctrl+Shift+F is a toggle, not just an opener: an already-open panel
+       closes from anywhere in the pane, so the shortcut still dismisses the
+       panel after focus has moved off its input (Escape only reaches the
+       panel-scoped handler while the input itself is focused). */
+    function toggleExplorerRepoSearchShortcut(index, seedQuery = '') {
+        const pane = terminals[index];
+        if (!pane) {
+            return false;
+        }
+        if (pane._explorerSearchSidebarOpen) {
+            setExplorerSearchSidebarOpen(index, false);
+            return true;
+        }
+        return focusExplorerRepoSearch(index, seedQuery);
     }

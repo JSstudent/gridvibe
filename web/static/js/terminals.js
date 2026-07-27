@@ -6109,7 +6109,9 @@
     /* Ctrl+Shift+F is shared between the explorer repository search panel and
        the terminal scrollback overlay (finding 10.3). The explorer wins only
        when focus is genuinely on an explorer pane; a focused terminal keeps
-       the overlay. Deliberately stricter than findExplorerSearchTargetIndex()
+       the overlay. On an explorer pane the shortcut toggles: it opens and
+       seeds the panel, and closes it again when it is already open.
+       Deliberately stricter than findExplorerSearchTargetIndex()
        — its "any explorer pane in the group" last resort would steal the
        shortcut from a genuinely focused terminal. */
     function isExplorerRepoSearchablePane(index) {
@@ -6147,7 +6149,7 @@
             return;
         }
         const explorerIndex = findExplorerRepoSearchTargetIndex();
-        if (explorerIndex !== -1 && focusExplorerRepoSearch(explorerIndex, explorerSelectionQuery(explorerIndex))) {
+        if (explorerIndex !== -1 && toggleExplorerRepoSearchShortcut(explorerIndex, explorerSelectionQuery(explorerIndex))) {
             event.preventDefault();
             event.stopPropagation();
             return;

@@ -1938,9 +1938,22 @@
         }
 
         /* ── Repository search panel (third sidebar panel) ── */
+        /* The hit list is the only scrolling part: the panel itself must not
+           scroll (that would carry the input off the top), and the chrome rows
+           must not shrink. Without this the results box — flex-shrink 1 with
+           min-height 0 — collapsed to zero height under the shared panel
+           overflow and its content painted over the footer. */
         .explorer-search-panel {
             display: flex;
             flex-direction: column;
+            overflow: hidden;
+        }
+
+        .explorer-search-panel-head,
+        .explorer-search-panel-options,
+        .explorer-search-summary,
+        .explorer-search-footer {
+            flex: 0 0 auto;
         }
 
         .explorer-search-panel-head,
@@ -1988,6 +2001,18 @@
             font-size: .68rem;
         }
 
+        /* The options row carries two text toggles plus the include field, so
+           it wraps rather than squeezing the input to nothing in a narrow
+           sidebar. */
+        .explorer-search-panel-options {
+            flex-wrap: wrap;
+            row-gap: 6px;
+        }
+
+        .explorer-search-panel-options .explorer-search-include {
+            flex: 1 1 90px;
+        }
+
         .explorer-search-summary {
             padding: 6px 10px 2px;
             color: var(--explorer-muted);
@@ -2002,6 +2027,7 @@
         .explorer-search-results {
             flex: 1 1 auto;
             min-height: 0;
+            overflow: auto;
         }
 
         .explorer-search-panel.loading .explorer-search-results {
@@ -2108,6 +2134,7 @@
         }
 
         .explorer-search-footer {
+            border-top: 1px solid var(--explorer-row-border);
             padding: 4px 10px 6px;
             color: var(--explorer-muted);
             font-size: .66rem;

@@ -33,9 +33,10 @@ SEARCH_LINE_WINDOW_CHARS = 400
 # Cap on a remote `grep -r` stdout so one command can never stream an
 # unbounded result set back over SSH.
 SEARCH_REMOTE_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
-# Directories the remote-grep fallback never descends into (the `walk` engine
-# prunes `.git` explicitly and everything else via its own traversal).
-SEARCH_REMOTE_EXCLUDE_DIRS = (
+# Directories neither fallback engine descends into. `git grep` gets this for
+# free from `.gitignore`; the walk and remote-grep engines do not, and without
+# the deny-list a single `node_modules/` or `.venv/` burns the whole deadline.
+SEARCH_EXCLUDE_DIRS = (
     ".git",
     ".hg",
     ".svn",
@@ -255,9 +256,19 @@ def walk_matches(
     """Local fallback engine: an os.scandir-style walk + line matcher.
 
     Honours the explorer's confinement and preview rules: no symlink escapes,
-    `.git/` pruned, binary and oversized files skipped, deadline enforced.
+    SEARCH_EXCLUDE_DIRS pruned, binary and oversized files skipped, deadline
+    enforced.
     """
     matcher = compile_search_matcher(options)
+    # Decoding and matching every line of every file is what makes this engine
+    # hit the deadline on log-heavy trees, and almost every file holds no match
+    # at all. A literal query can be prefiltered against the whole decoded file
+    # in one C-level scan: a literal cannot contain a newline or anchor to one,
+    # so "absent from the file" implies "absent from every line" — and \b sees
+    # the same non-word neighbour ("\n"/"\r") either way. Regex queries keep the
+    # per-line path, where ^/$/\A stay per line. A false positive is harmless;
+    # it just falls through to the loop below.
+    prefilter = None if options.regex else matcher
     root_real = os.path.realpath(os.path.abspath(root_path))
 
     def inside_root(candidate: str) -> bool:
@@ -272,7 +283,7 @@ def walk_matches(
             raise SearchDeadlineExceeded()
         kept = []
         for dirname in dirnames:
-            if dirname == ".git":
+            if dirname in SEARCH_EXCLUDE_DIRS:
                 continue
             full = os.path.join(dirpath, dirname)
             if os.path.islink(full) and not inside_root(os.path.realpath(full)):
@@ -298,6 +309,10 @@ def walk_matches(
             rel_path = os.path.relpath(real, root_real).replace(os.sep, "/")
             if not include_match(rel_path, options.include):
                 continue
+            if prefilter is not None and not prefilter.search(
+                data.decode("utf-8", errors="replace")
+            ):
+                continue
             for line_number, line_bytes in enumerate(data.split(b"\n"), 1):
                 text = line_bytes.rstrip(b"\r").decode("utf-8", errors="replace")
                 if matcher.search(text):
@@ -307,7 +322,7 @@ def walk_matches(
 def build_remote_grep_command(scope_path: str, options: SearchOptions) -> str:
     """Build the bounded `grep -rIn` fallback command for a remote POSIX shell."""
     parts = ["grep", "-rInI"]
-    for dirname in SEARCH_REMOTE_EXCLUDE_DIRS:
+    for dirname in SEARCH_EXCLUDE_DIRS:
         parts.append(f"--exclude-dir={dirname}")
     parts.append("-E" if options.regex else "-F")
     if not options.case_sensitive:

@@ -1428,6 +1428,30 @@
         return EXPLORER_SIDEBAR_PANELS.filter(panel => Boolean(pane?.[panel.openFlag]));
     }
 
+    /* Splitters sit at fixed DOM slots between adjacent registry panels, so
+       slot n is only usable when panel n is open and something below it is
+       open too. With Files closed, the Git/Search pair must use slot 1, not
+       slot 0 — otherwise the divider renders above the first visible panel
+       and the grid tracks land on the wrong elements. Each entry also carries
+       the position, within the open set, of the panel the splitter drags. */
+    function explorerSidebarSplitterSlots(pane) {
+        const slots = [];
+        let openSoFar = 0;
+        EXPLORER_SIDEBAR_PANELS.forEach((panel, n) => {
+            if (!pane?.[panel.openFlag]) {
+                return;
+            }
+            openSoFar += 1;
+            const hasOpenBelow = EXPLORER_SIDEBAR_PANELS
+                .slice(n + 1)
+                .some(entry => Boolean(pane?.[entry.openFlag]));
+            if (hasOpenBelow) {
+                slots.push({ slot: n, aboveIndex: openSoFar - 1 });
+            }
+        });
+        return slots;
+    }
+
     function ensureExplorerSidebarPanelHeights(pane) {
         if (!(pane._explorerSidebarPanelHeights instanceof Map)) {
             pane._explorerSidebarPanelHeights = new Map();
@@ -1459,10 +1483,11 @@
         });
         sidebar.hidden = openCount === 0;
         sidebar.dataset.panels = String(openCount);
+        const visibleSlots = new Set(explorerSidebarSplitterSlots(pane).map(entry => entry.slot));
         for (let n = 0; n < EXPLORER_SIDEBAR_PANELS.length - 1; n += 1) {
             const splitter = document.getElementById(`explorer-sidebar-splitter-${index}-${n}`);
             if (splitter) {
-                splitter.hidden = n >= openCount - 1;
+                splitter.hidden = !visibleSlots.has(n);
             }
         }
         const handle = document.getElementById(`explorer-sidebar-resizer-${index}`);
@@ -1474,9 +1499,11 @@
             applyExplorerSidebarWidth(index);
             wireExplorerSidebarResize(index);
         }
-        if (openCount >= 2) {
-            applyExplorerSidebarSplit(index);
-        }
+        /* Always re-apply, including below two panels: closing one back down
+           to a single panel has to clear the inline grid-template-rows, or
+           the survivor keeps the pixel height it held in the split and the
+           rest of the sidebar stays blank and unresizable. */
+        applyExplorerSidebarSplit(index);
         wireExplorerSidebarSplitter(index);
     }
 
@@ -1636,21 +1663,25 @@
             splitter.dataset.bound = 'true';
             splitter.addEventListener('pointerdown', event => {
                 const openPanels = explorerOpenSidebarPanels(pane);
-                if (n >= openPanels.length - 1) {
+                /* The DOM slot is not the position in the open set — resolve
+                   which open panel actually sits above this splitter. */
+                const slot = explorerSidebarSplitterSlots(pane).find(entry => entry.slot === n);
+                if (!slot) {
                     return;
                 }
+                const above = slot.aboveIndex;
                 event.preventDefault();
                 splitter.classList.add('dragging');
                 splitter.setPointerCapture?.(event.pointerId);
                 const heights = ensureExplorerSidebarPanelHeights(pane);
-                const panelEl = document.getElementById(openPanels[n].panelId(index));
+                const panelEl = document.getElementById(openPanels[above].panelId(index));
                 const startHeight = panelEl ? panelEl.getBoundingClientRect().height : 0;
                 const startClientY = event.clientY;
-                const panelsBelow = openPanels.length - 1 - n;
+                const panelsBelow = openPanels.length - 1 - above;
                 const onMove = moveEvent => {
                     const rect = sidebar.getBoundingClientRect();
                     let prefix = 0;
-                    for (let k = 0; k < n; k += 1) {
+                    for (let k = 0; k < above; k += 1) {
                         const aboveEl = document.getElementById(openPanels[k].panelId(index));
                         prefix += aboveEl ? aboveEl.getBoundingClientRect().height : 0;
                     }
@@ -1660,7 +1691,7 @@
                         EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT,
                         Math.min(Math.round(startHeight + (moveEvent.clientY - startClientY)), maxNext)
                     );
-                    heights.set(openPanels[n].key, next);
+                    heights.set(openPanels[above].key, next);
                     applyExplorerSidebarSplit(index);
                 };
                 const onEnd = endEvent => {
