@@ -6,6 +6,7 @@
     <title>GridVibe</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/launcher.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app-settings.css') }}?v={{ version }}">
 </head>
 <body>
 <div class="app-frame">
@@ -232,204 +233,7 @@
     </div>
 </div>
 
-<div id="appSettingsModal" class="modal-shell" aria-hidden="true">
-    <div class="modal-card app-settings-card" role="dialog" aria-modal="true" aria-labelledby="appSettingsTitle">
-        <div class="modal-head">
-            <div>
-                <div id="appSettingsTitle" class="modal-title">App Settings</div>
-                <div class="modal-copy">Machine-level launcher and voice settings live here. They are not stored inside saved session presets.</div>
-            </div>
-            <button class="ghost-btn" type="button" onclick="closeAppSettingsModal()">Close</button>
-        </div>
-        <div class="settings-grid app-settings-grid">
-            <div class="field">
-                <label>Theme</label>
-                <select id="appTheme">
-                    <option value="system">System</option>
-                    <option value="light">Light</option>
-                    <option value="dark">Dark</option>
-                </select>
-            </div>
-            <div class="field">
-                <label>Session Window</label>
-                <select id="appSurfaceMode">
-                    <option value="normal">Normal surface</option>
-                    <option value="max">Max surface</option>
-                </select>
-            </div>
-            <div class="field">
-                <label>Auto-save workspace every <span id="appWorkspaceAutosaveIntervalValue">5</span> min</label>
-                <input id="appWorkspaceAutosaveInterval" type="range" min="1" max="15" step="1" value="5" oninput="syncAutosaveIntervalLabel()" aria-label="Workspace auto-save interval in minutes">
-            </div>
-            <div class="field">
-                <label>SSH Host Keys</label>
-                <select id="appSshHostKeyPolicy" aria-label="SSH host key verification policy">
-                    <option value="auto-add">Auto-add (accept new hosts)</option>
-                    <option value="known-hosts">Known hosts (warn on new hosts)</option>
-                    <option value="strict">Strict (reject unknown hosts)</option>
-                </select>
-            </div>
-            <div class="settings-section compact-section">
-                <div class="settings-section-title">Terminal</div>
-                <div class="settings-fields-inline">
-                    <div class="field">
-                        <label>Font</label>
-                        <select id="appTerminalFontPreset" aria-label="Terminal font preset" onchange="updateAppSettingsVisibility()">
-                            <option value="Consolas, Monaco, 'Courier New', monospace" style="font-family: Consolas, Monaco, 'Courier New', monospace">Consolas</option>
-                            <option value="'Cascadia Code', 'Cascadia Mono', Consolas, monospace" style="font-family: 'Cascadia Code', 'Cascadia Mono', Consolas, monospace">Cascadia Code</option>
-                            <option value="'JetBrains Mono', Consolas, monospace" style="font-family: 'JetBrains Mono', Consolas, monospace">JetBrains Mono</option>
-                            <option value="'Courier New', Courier, monospace" style="font-family: 'Courier New', Courier, monospace">Courier New</option>
-                            <option value="custom">Custom…</option>
-                        </select>
-                    </div>
-                    <div class="field hidden" id="appTerminalFontCustomField">
-                        <label>Custom Font Family</label>
-                        <input id="appTerminalFontFamily" type="text" placeholder="Consolas, Monaco, 'Courier New', monospace" aria-label="Terminal font family">
-                    </div>
-                    <div class="field">
-                        <label>Font Size</label>
-                        <input id="appTerminalFontSize" type="number" min="6" max="48" step="1" aria-label="Terminal font size">
-                    </div>
-                    <div class="field">
-                        <label>Max Sessions</label>
-                        <input id="appTerminalMaxSessions" type="number" min="1" max="16" step="1" aria-label="Maximum terminal sessions">
-                    </div>
-                </div>
-                <label class="check-field">
-                    <input id="appTerminalApplyAll" type="checkbox">
-                    <span>Apply to all active sessions</span>
-                </label>
-                <div class="settings-hint">Font and size apply to every terminal in the current session (and to new sessions); check the box to push them to all active sessions. Max sessions applies to new launches.</div>
-            </div>
-            <div class="voice-settings-panel">
-                <label class="check-field app-voice-enable-row">
-                    <input id="appVoiceEnabled" type="checkbox" onchange="updateAppSettingsVisibility()">
-                    <span class="check-copy">
-                        <strong>Enable voice input</strong>
-                        <span>Turns the microphone and speech-to-text path on or off for this machine.</span>
-                    </span>
-                </label>
-                <div id="appVoiceAvailability" class="voice-availability hidden">
-                    <div class="voice-availability-copy">
-                        <strong>Voice packages are missing</strong>
-                        <span id="appVoiceAvailabilityMessage"></span>
-                    </div>
-                    <button id="installVoiceDepsBtn" class="ghost-btn" type="button" onclick="installVoiceDependencies()">Install voice dependencies</button>
-                </div>
-                <div id="appVoiceSettingsDetails" class="voice-settings-details">
-                    <div class="field">
-                        <label>Voice Backend</label>
-                        <select id="appVoiceEngine" onchange="updateAppSettingsVisibility()">
-                            <option value="vosk">Vosk</option>
-                            <option value="whisper">faster-whisper</option>
-                        </select>
-                    </div>
-                    <div class="field">
-                        <label>Language</label>
-                        <input id="appVoiceLanguage" type="text" placeholder="en-US">
-                    </div>
-                    <div id="appVoskSettings" class="settings-section compact-section">
-                        <div class="settings-section-title">Vosk</div>
-                        <div class="settings-fields-inline">
-                            <div class="field">
-                                <label>Vosk Model</label>
-                                <input id="appVoskModel" type="text" placeholder="vosk-model-en-us-0.22">
-                            </div>
-                        </div>
-                    </div>
-                    <div id="appWhisperSettings" class="settings-section compact-section">
-                        <div class="settings-section-title">faster-whisper</div>
-                        <div class="settings-fields-inline">
-                            <div class="field">
-                                <label>Whisper Model</label>
-                                <select id="appWhisperModel">
-                                    <option value="tiny.en">tiny.en</option>
-                                    <option value="tiny">tiny</option>
-                                    <option value="base.en">base.en</option>
-                                    <option value="base">base</option>
-                                    <option value="small.en">small.en</option>
-                                    <option value="small">small</option>
-                                    <option value="medium.en">medium.en</option>
-                                    <option value="medium">medium</option>
-                                    <option value="large-v1">large-v1</option>
-                                    <option value="large-v2">large-v2</option>
-                                    <option value="large-v3">large-v3</option>
-                                    <option value="large">large</option>
-                                    <option value="distil-large-v2">distil-large-v2</option>
-                                    <option value="distil-medium.en">distil-medium.en</option>
-                                    <option value="distil-small.en">distil-small.en</option>
-                                    <option value="distil-large-v3">distil-large-v3</option>
-                                    <option value="distil-large-v3.5">distil-large-v3.5</option>
-                                    <option value="large-v3-turbo">large-v3-turbo</option>
-                                    <option value="turbo">turbo</option>
-                                </select>
-                            </div>
-                            <div class="field">
-                                <label>Device</label>
-                                <select id="appWhisperDevice" onchange="updateAppSettingsVisibility()">
-                                    <option value="cpu">CPU</option>
-                                    <option value="cuda">GPU (CUDA)</option>
-                                </select>
-                            </div>
-                            <div class="field">
-                                <label>Compute Type</label>
-                                <select id="appWhisperComputeType">
-                                    <option value="int8">int8</option>
-                                    <option value="float32">float32</option>
-                                    <option value="float16">float16</option>
-                                    <option value="int8_float16">int8_float16</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div id="appWhisperGpuHint" class="settings-hint hidden">GPU mode requires a working NVIDIA CUDA setup on this machine. If startup fails, switch the device back to CPU.</div>
-                    </div>
-                    <div id="appMicSettings" class="settings-section compact-section">
-                        <div class="settings-section-title">Microphone</div>
-                        <div class="settings-fields-inline">
-                            <div class="field">
-                                <label>Capture Profile</label>
-                                <select id="appVoiceProfile">
-                                    <option value="headset">Headset</option>
-                                    <option value="laptop">Laptop</option>
-                                </select>
-                            </div>
-                            <div class="settings-field-with-action">
-                                <div class="field">
-                                    <label>Microphone</label>
-                                    <select id="appVoiceDevice">
-                                        <option value="">Default input</option>
-                                    </select>
-                                </div>
-                                <button id="refreshMicDevicesBtn" class="ghost-btn icon-btn" type="button" onclick="refreshLauncherMicrophones()" title="Refresh available microphones" aria-label="Refresh available microphones"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><polyline points="21 3 21 9 15 9"></polyline></svg></button>
-                            </div>
-                            <label class="check-field compact-check">
-                                <input id="appVoicePttEnabled" type="checkbox">
-                                <span class="check-copy">
-                                    <strong>Push-to-talk</strong>
-                                    <span>Hold the configured keybind to record in the terminal window.</span>
-                                </span>
-                            </label>
-                            <div class="field">
-                                <label>Push-to-talk Keybind</label>
-                                <input id="appVoicePttKeybind" class="voice-ptt-keybind" type="text" readonly placeholder="Click and press keys">
-                            </div>
-                        </div>
-                        <div id="appVoicePrefsStatus" class="settings-hint"></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div class="modal-actions app-settings-actions">
-            <div class="modal-actions-buttons">
-                <div class="button-tooltip">
-                    <button id="saveAppSettingsBtn" class="ghost-btn" type="button" onclick="saveAppSettings()" aria-describedby="saveAppSettingsTip">Save Settings</button>
-                    <div id="saveAppSettingsTip" class="button-tooltip-bubble" role="tooltip">Saves to <code>config.json</code>. If that file is missing, GridVibe falls back to the committed <code>default_config.json</code>.</div>
-                </div>
-                <button class="ghost-btn" type="button" onclick="closeAppSettingsModal()">Cancel</button>
-            </div>
-        </div>
-    </div>
-</div>
+{% include 'partials/app_settings_modal.html' %}
 
 <script>
     const BROWSER_SHUTDOWN_TOKEN = {{ browser_shutdown_token | tojson }};
@@ -437,6 +241,7 @@
     const LOCAL_WINDOWS_SHELLS_AVAILABLE = {{ local_windows_shells_available|tojson }};
 </script>
 <script src="{{ url_for('static', filename='js/shared.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/app-settings.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/launcher.js') }}?v={{ version }}"></script>
 </body>
 </html>

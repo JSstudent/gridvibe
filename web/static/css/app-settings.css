@@ -1,0 +1,452 @@
+/* App Settings dialog — shared by the launcher and the session workspace.
+
+   Both pages include templates/partials/app_settings_modal.html and load
+   js/app-settings.js, so the dialog must look the same on a page whose own
+   stylesheet knows nothing about it. Every rule here is scoped to
+   #appSettingsModal and every colour comes from tokens.css, so this file
+   neither depends on nor leaks into launcher.css / terminals.css. */
+
+#appSettingsModal {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: var(--gv-dialog-scrim);
+    backdrop-filter: blur(12px);
+    color: var(--gv-dialog-text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    z-index: 12000;
+}
+
+#appSettingsModal.visible {
+    display: flex;
+}
+
+#appSettingsModal .modal-card {
+    width: min(760px, 100%);
+    max-height: min(92vh, 860px);
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    gap: 16px;
+    padding: 20px;
+    border-radius: var(--gv-radius-l);
+    background: var(--gv-dialog-bg);
+    border: 1px solid var(--gv-dialog-border);
+    box-shadow: var(--gv-dialog-shadow);
+    backdrop-filter: blur(16px);
+}
+
+#appSettingsModal .modal-card.voice-enabled {
+    max-height: min(96vh, 900px);
+}
+
+#appSettingsModal .modal-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+}
+
+#appSettingsModal .modal-title {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--gv-dialog-text);
+}
+
+#appSettingsModal .modal-copy {
+    color: var(--gv-dialog-muted);
+    font-size: 0.82rem;
+    line-height: 1.45;
+}
+
+#appSettingsModal .modal-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+/* Pinned card row — the actions never scroll with the settings body, so a
+   tall voice panel can never paint under them (ISSUE-2026-031). */
+#appSettingsModal .app-settings-actions {
+    justify-content: flex-end;
+}
+
+#appSettingsModal .modal-actions-buttons {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+/* Buttons: the partial uses its own class so neither page's button styles
+   are required (or overridden) here. */
+#appSettingsModal .app-settings-btn {
+    padding: 9px 14px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-m);
+    background: var(--gv-dialog-field-bg);
+    color: var(--gv-dialog-text);
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease, transform 0.15s ease;
+}
+
+#appSettingsModal .app-settings-btn:hover {
+    border-color: color-mix(in srgb, var(--gv-accent) 50%, transparent);
+    transform: translateY(-1px);
+}
+
+#appSettingsModal .app-settings-btn:disabled {
+    cursor: wait;
+    opacity: 0.65;
+    transform: none;
+}
+
+#appSettingsModal .app-settings-btn.loading {
+    opacity: 0.7;
+    cursor: progress;
+}
+
+#appSettingsModal .icon-btn {
+    width: 42px;
+    height: 42px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+}
+
+#appSettingsModal .icon-btn svg {
+    width: 18px;
+    height: 18px;
+    margin: 0;
+}
+
+#appSettingsModal .icon-btn.loading svg {
+    animation: app-settings-spin 0.9s linear infinite;
+}
+
+@keyframes app-settings-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* Layout */
+#appSettingsModal .settings-grid {
+    min-height: 0;
+    display: grid;
+    gap: 14px;
+    overflow: auto;
+    padding-right: 4px;
+}
+
+#appSettingsModal .app-settings-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    column-gap: 12px;
+    row-gap: 14px;
+}
+
+#appSettingsModal .app-settings-grid > .check-field,
+#appSettingsModal .app-settings-grid > .settings-section {
+    grid-column: 1 / -1;
+}
+
+#appSettingsModal .settings-section {
+    display: grid;
+    gap: 14px;
+    padding: 14px;
+    border-radius: 14px;
+    border: 1px solid var(--gv-dialog-border);
+    background: var(--gv-dialog-field-bg);
+}
+
+#appSettingsModal .compact-section {
+    gap: 10px;
+    padding: 12px;
+}
+
+#appSettingsModal .settings-section.hidden,
+#appSettingsModal .settings-hint.hidden,
+#appSettingsModal .field.hidden {
+    display: none;
+}
+
+#appSettingsModal .settings-section-title {
+    font-size: 0.76rem;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--gv-dialog-muted);
+}
+
+#appSettingsModal .settings-hint {
+    color: var(--gv-dialog-muted);
+    font-size: 0.76rem;
+    line-height: 1.45;
+}
+
+#appSettingsModal .settings-hint.success { color: var(--gv-success); }
+#appSettingsModal .settings-hint.error { color: var(--gv-danger); }
+
+#appSettingsModal .settings-fields-inline {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 10px;
+    align-items: start;
+}
+
+#appSettingsModal .settings-field-with-action {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: end;
+}
+
+#appSettingsModal .settings-field-with-action .field {
+    min-width: 0;
+}
+
+/* Fields */
+#appSettingsModal .field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+#appSettingsModal .field label {
+    color: var(--gv-dialog-muted);
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+#appSettingsModal .field input,
+#appSettingsModal .field select {
+    width: 100%;
+    padding: 9px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--gv-dialog-border);
+    background: var(--gv-dialog-field-bg);
+    color: var(--gv-dialog-text);
+    font: inherit;
+    font-size: 0.92rem;
+    outline: none;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+#appSettingsModal .field input:focus,
+#appSettingsModal .field select:focus {
+    border-color: var(--gv-accent);
+    box-shadow: 0 0 0 3px var(--gv-accent-soft);
+}
+
+#appSettingsModal .field select {
+    appearance: none;
+    cursor: pointer;
+}
+
+#appSettingsModal .field input[type="range"] {
+    padding: 0;
+    accent-color: var(--gv-accent);
+    cursor: pointer;
+}
+
+#appSettingsModal .field input::placeholder {
+    color: var(--gv-dialog-placeholder);
+}
+
+#appSettingsModal .check-field {
+    min-height: 41px;
+    padding: 10px 12px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    border-radius: 10px;
+    border: 1px solid var(--gv-dialog-border);
+    background: var(--gv-dialog-field-bg);
+    font-size: 0.84rem;
+}
+
+#appSettingsModal .check-field input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    margin-top: 2px;
+    accent-color: var(--gv-accent-hover);
+    flex: 0 0 auto;
+}
+
+#appSettingsModal .compact-check {
+    min-height: 0;
+    padding: 9px 12px;
+}
+
+#appSettingsModal .check-copy {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+}
+
+#appSettingsModal .check-copy strong {
+    font-size: 0.84rem;
+    font-weight: 600;
+}
+
+#appSettingsModal .check-copy span {
+    display: block;
+    color: var(--gv-dialog-muted);
+    font-size: 0.72rem;
+    line-height: 1.35;
+}
+
+/* Voice */
+#appSettingsModal .voice-settings-panel {
+    grid-column: 1 / -1;
+    display: grid;
+    gap: 12px;
+    padding: 14px;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--gv-accent) 18%, transparent);
+    background: var(--gv-dialog-panel-soft);
+}
+
+#appSettingsModal .app-voice-enable-row {
+    min-height: 58px;
+    padding: 12px;
+    margin-bottom: 0;
+}
+
+#appSettingsModal .app-voice-enable-row .check-copy {
+    gap: 4px;
+}
+
+#appSettingsModal .app-voice-enable-row .check-copy span {
+    line-height: 1.45;
+}
+
+/* Availability banner (stage J issue 2): shown when the engine picked in this
+   dialog cannot start because its optional packages are missing, with the
+   in-app installer next to the explanation. */
+#appSettingsModal .voice-availability {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    padding: 12px;
+    border-radius: var(--gv-radius-m);
+    border: 1px solid var(--gv-warning);
+    background: var(--gv-accent-soft);
+}
+
+#appSettingsModal .voice-availability.hidden {
+    display: none;
+}
+
+#appSettingsModal .voice-availability-copy {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+
+#appSettingsModal .voice-availability-copy strong {
+    color: var(--gv-warning);
+    font-size: 0.86rem;
+}
+
+#appSettingsModal .voice-availability-copy span {
+    color: var(--gv-dialog-muted);
+    font-size: 0.78rem;
+    line-height: 1.45;
+}
+
+#appSettingsModal .voice-settings-details {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+#appSettingsModal .voice-settings-details.hidden {
+    display: none;
+}
+
+#appSettingsModal .voice-ptt-keybind {
+    cursor: pointer;
+    text-align: center;
+    user-select: none;
+}
+
+/* Save-button tooltip */
+#appSettingsModal .button-tooltip {
+    position: relative;
+    display: inline-flex;
+}
+
+#appSettingsModal .button-tooltip-bubble {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 10px);
+    width: min(320px, 72vw);
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--gv-dialog-border);
+    background: var(--gv-dialog-tooltip-bg);
+    color: var(--gv-dialog-muted);
+    font-size: 0.74rem;
+    line-height: 1.45;
+    box-shadow: var(--gv-dialog-shadow);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(4px);
+    transition: opacity 0.18s ease, transform 0.18s ease;
+    z-index: 2;
+}
+
+#appSettingsModal .button-tooltip-bubble code {
+    color: var(--gv-dialog-text);
+    font-family: Consolas, Monaco, "Courier New", monospace;
+}
+
+#appSettingsModal .button-tooltip-bubble::after {
+    content: "";
+    position: absolute;
+    right: 18px;
+    top: 100%;
+    border-width: 6px;
+    border-style: solid;
+    border-color: var(--gv-dialog-tooltip-bg) transparent transparent transparent;
+}
+
+#appSettingsModal .button-tooltip:hover .button-tooltip-bubble,
+#appSettingsModal .button-tooltip:focus-within .button-tooltip-bubble {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+@media (max-width: 640px) {
+    #appSettingsModal .voice-availability {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 900px) {
+    #appSettingsModal .app-settings-grid,
+    #appSettingsModal .settings-fields-inline,
+    #appSettingsModal .voice-settings-details {
+        grid-template-columns: 1fr;
+    }
+
+    #appSettingsModal .modal-card {
+        max-height: calc(100vh - 32px);
+    }
+
+    #appSettingsModal .modal-head,
+    #appSettingsModal .modal-actions {
+        align-items: stretch;
+    }
+}
