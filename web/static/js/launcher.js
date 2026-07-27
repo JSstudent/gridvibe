@@ -102,6 +102,7 @@
         custom_agent: '',
         explorer_tree_open: false,
         explorer_git_open: false,
+        explorer_search_open: false,
         explorer_open_tabs: [],
         explorer_active_tab: '',
         explorer_tab_views: {},
@@ -679,6 +680,7 @@
                     && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
+                explorer_search_open: commandMode === 'explorer' && row.dataset.explorerSearchOpen === 'true',
                 explorer_open_tabs: commandMode === 'explorer' ? parseExplorerOpenTabsDataset(row.dataset.explorerOpenTabs) : [],
                 explorer_active_tab: commandMode === 'explorer' ? (row.dataset.explorerActiveTab || '') : '',
                 explorer_tab_views: commandMode === 'explorer' ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews) : {},
@@ -1505,6 +1507,7 @@
                     data-command-mode="${escHtml(commandUi.mode)}"
                     data-explorer-tree-open="${terminal.explorer_tree_open ? 'true' : 'false'}"
                     data-explorer-git-open="${terminal.explorer_git_open ? 'true' : 'false'}"
+                    data-explorer-search-open="${terminal.explorer_search_open ? 'true' : 'false'}"
                     data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
                     data-explorer-active-tab="${escHtml(terminal.explorer_active_tab || '')}"
                     data-explorer-tab-views="${escHtml(JSON.stringify(terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object' ? terminal.explorer_tab_views : {}))}"
@@ -2461,6 +2464,9 @@
                     : false,
                 explorer_git_open: terminal.startup_mode === 'explorer'
                     ? Boolean(terminal.explorer_git_open)
+                    : false,
+                explorer_search_open: terminal.startup_mode === 'explorer'
+                    ? Boolean(terminal.explorer_search_open)
                     : false,
                 explorer_open_tabs: terminal.startup_mode === 'explorer' && Array.isArray(terminal.explorer_open_tabs)
                     ? terminal.explorer_open_tabs

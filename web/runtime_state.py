@@ -49,6 +49,7 @@ _SESSION_SNAPSHOT_FIELDS = (
     "explorer_root_directory",
     "explorer_tree_open",
     "explorer_git_open",
+    "explorer_search_open",
     "explorer_open_tabs",
     "explorer_active_tab",
     "explorer_tab_views",

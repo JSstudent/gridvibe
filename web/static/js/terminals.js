@@ -1428,6 +1428,7 @@
                 agent_auto_mode: startupMode === 'agent' && Boolean(terminal?.agent_auto_mode),
                 explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_tree_open) : false,
                 explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_git_open) : false,
+                explorer_search_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_search_open) : false,
                 explorer_open_tabs: startupMode === 'explorer' && Array.isArray(terminal?.explorer_open_tabs) ? terminal.explorer_open_tabs : [],
                 explorer_active_tab: startupMode === 'explorer' ? (terminal?.explorer_active_tab || '') : '',
                 explorer_tab_views: startupMode === 'explorer' && terminal?.explorer_tab_views && typeof terminal.explorer_tab_views === 'object'
@@ -1775,6 +1776,7 @@
             agent_auto_mode: commandMode === 'agent' ? Boolean(session.agent_auto_mode) : false,
             explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?._explorerTreeSidebarOpen) : false,
             explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
+            explorer_search_open: startupMode === 'explorer' ? Boolean(terminal?._explorerSearchSidebarOpen) : false,
             explorer_open_tabs: explorerTabs.open_tabs,
             explorer_active_tab: explorerTabs.active_tab,
             explorer_tab_views: explorerTabs.tab_views,
@@ -4100,7 +4102,8 @@
                 _paneType: 'explorer',
                 _attached: false,
                 _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
-                _explorerGitSidebarOpen: Boolean(session.explorer_git_open)
+                _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
+                _explorerSearchSidebarOpen: Boolean(session.explorer_search_open)
             };
         }
         if (isBrowserSession(session)) {
@@ -4429,6 +4432,7 @@
                                      <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
                                      <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${i}" data-explorer-tree-toggle="${i}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                                      <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
+                                     <button type="button" class="explorer-search-toggle" id="explorer-search-toggle-${i}" data-explorer-search-toggle="${i}" title="Search in folder (Ctrl+Shift+F)" aria-label="Search in folder" aria-pressed="false">${EXPLORER_SEARCH_TOGGLE_ICON}</button>
                                      ${session.mode === 'ssh' ? '' : `<button type="button" class="explorer-os-open" id="explorer-os-open-${i}" data-explorer-os-open="${i}" title="Open current location in system file manager" aria-label="Open current location in system file manager">${EXPLORER_OS_OPEN_ICON}</button>`}
                                      <div class="explorer-git-summary" id="explorer-git-${i}" aria-live="polite"></div>
                                      <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
@@ -4437,8 +4441,10 @@
                                  <div class="explorer-main" id="explorer-main-${i}">
                                      <aside class="explorer-sidebar" id="explorer-sidebar-${i}" hidden>
                                          <div class="explorer-tree-panel" id="explorer-tree-panel-${i}" hidden></div>
-                                         <button type="button" class="explorer-sidebar-splitter" id="explorer-sidebar-splitter-${i}" data-explorer-sidebar-splitter="${i}" aria-label="Resize file tree and Git panels" hidden></button>
+                                         <button type="button" class="explorer-sidebar-splitter" id="explorer-sidebar-splitter-${i}-0" data-explorer-sidebar-splitter="${i}" aria-label="Resize explorer sidebar panels" hidden></button>
                                          <div class="explorer-git-panel" id="explorer-git-panel-${i}" hidden></div>
+                                         <button type="button" class="explorer-sidebar-splitter" id="explorer-sidebar-splitter-${i}-1" data-explorer-sidebar-splitter="${i}" aria-label="Resize explorer sidebar panels" hidden></button>
+                                         <div class="explorer-search-panel" id="explorer-search-panel-${i}" hidden></div>
                                      </aside>
                                      <button type="button" class="explorer-sidebar-resizer" id="explorer-sidebar-resizer-${i}" data-explorer-sidebar-resizer="${i}" aria-label="Resize explorer sidebar" hidden></button>
                                      <div class="explorer-list" id="explorer-list-${i}">
@@ -4517,6 +4523,7 @@
         });
         wireCardButton(card, `[data-explorer-git-toggle="${i}"]`, () => toggleExplorerGitSidebar(i));
         wireCardButton(card, `[data-explorer-tree-toggle="${i}"]`, () => toggleExplorerTreeSidebar(i));
+        wireCardButton(card, `[data-explorer-search-toggle="${i}"]`, () => toggleExplorerSearchSidebar(i));
         wireCardButton(card, `[data-explorer-os-open="${i}"]`, () => revealExplorerInOs(i));
     }
 
@@ -5132,6 +5139,21 @@
                 revealExplorerInOs(index);
             });
         }
+
+        const explorerSearchToggle = card.querySelector(`[data-explorer-search-toggle="${index}"]`);
+        if (explorerSearchToggle && !explorerSearchToggle.dataset.bound) {
+            explorerSearchToggle.dataset.bound = 'true';
+            explorerSearchToggle.draggable = false;
+            explorerSearchToggle.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            explorerSearchToggle.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleExplorerSearchSidebar(index);
+            });
+        }
     }
 
     function ensureExplorerThemeButton(card, index) {
@@ -5239,7 +5261,8 @@
             _paneType: 'explorer',
             _attached: false,
             _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
-            _explorerGitSidebarOpen: Boolean(session.explorer_git_open)
+            _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
+            _explorerSearchSidebarOpen: Boolean(session.explorer_search_open)
         };
         sessionIds[index] = session.session_id;
         setSessionRoute(session.session_id, activeGroupId, index);
@@ -5273,6 +5296,7 @@
                         <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
                         <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${index}" data-explorer-tree-toggle="${index}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                         <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
+                        <button type="button" class="explorer-search-toggle" id="explorer-search-toggle-${index}" data-explorer-search-toggle="${index}" title="Search in folder (Ctrl+Shift+F)" aria-label="Search in folder" aria-pressed="false">${EXPLORER_SEARCH_TOGGLE_ICON}</button>
                         ${session.mode === 'ssh' ? '' : `<button type="button" class="explorer-os-open" id="explorer-os-open-${index}" data-explorer-os-open="${index}" title="Open current location in system file manager" aria-label="Open current location in system file manager">${EXPLORER_OS_OPEN_ICON}</button>`}
                         <div class="explorer-git-summary" id="explorer-git-${index}" aria-live="polite"></div>
                         <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
@@ -5281,8 +5305,10 @@
                     <div class="explorer-main" id="explorer-main-${index}">
                         <aside class="explorer-sidebar" id="explorer-sidebar-${index}" hidden>
                             <div class="explorer-tree-panel" id="explorer-tree-panel-${index}" hidden></div>
-                            <button type="button" class="explorer-sidebar-splitter" id="explorer-sidebar-splitter-${index}" data-explorer-sidebar-splitter="${index}" aria-label="Resize file tree and Git panels" hidden></button>
+                            <button type="button" class="explorer-sidebar-splitter" id="explorer-sidebar-splitter-${index}-0" data-explorer-sidebar-splitter="${index}" aria-label="Resize explorer sidebar panels" hidden></button>
                             <div class="explorer-git-panel" id="explorer-git-panel-${index}" hidden></div>
+                            <button type="button" class="explorer-sidebar-splitter" id="explorer-sidebar-splitter-${index}-1" data-explorer-sidebar-splitter="${index}" aria-label="Resize explorer sidebar panels" hidden></button>
+                            <div class="explorer-search-panel" id="explorer-search-panel-${index}" hidden></div>
                         </aside>
                         <button type="button" class="explorer-sidebar-resizer" id="explorer-sidebar-resizer-${index}" data-explorer-sidebar-resizer="${index}" aria-label="Resize explorer sidebar" hidden></button>
                         <div class="explorer-list" id="explorer-list-${index}">
@@ -5605,6 +5631,7 @@
                     type: 'explorer',
                     explorer_tree_open: Boolean(pane._explorerTreeSidebarOpen),
                     explorer_git_open: Boolean(pane._explorerGitSidebarOpen),
+                    explorer_search_open: Boolean(pane._explorerSearchSidebarOpen),
                     explorer_open_tabs: tabs.open_tabs,
                     explorer_active_tab: tabs.active_tab,
                     explorer_tab_views: tabs.tab_views,
@@ -6079,8 +6106,50 @@
         terminals[index]?.term?.focus();
     }
 
+    /* Ctrl+Shift+F is shared between the explorer repository search panel and
+       the terminal scrollback overlay (finding 10.3). The explorer wins only
+       when focus is genuinely on an explorer pane; a focused terminal keeps
+       the overlay. Deliberately stricter than findExplorerSearchTargetIndex()
+       — its "any explorer pane in the group" last resort would steal the
+       shortcut from a genuinely focused terminal. */
+    function isExplorerRepoSearchablePane(index) {
+        const card = document.getElementById(`tc-${index}`);
+        return Boolean(
+            card?.classList.contains('explorer-pane') && terminals[index] && sessionIds[index]
+        );
+    }
+
+    function findExplorerRepoSearchTargetIndex() {
+        const activeCard = document.activeElement?.closest?.('.explorer-pane');
+        const activeSlot = activeCard ? Number(activeCard.dataset.slot) : -1;
+        if (Number.isInteger(activeSlot) && isExplorerRepoSearchablePane(activeSlot)) {
+            return activeSlot;
+        }
+        if (_focusedTerminalIndex !== -1 && isExplorerRepoSearchablePane(_focusedTerminalIndex)) {
+            return _focusedTerminalIndex;
+        }
+        /* Only when no terminal-searchable pane exists either does the
+           shortcut fall back to the first explorer pane, so a workspace of
+           explorer panes with focus nowhere still responds. */
+        if (findTerminalSearchTargetIndex() !== -1) {
+            return -1;
+        }
+        for (let i = 0; i < terminals.length; i++) {
+            if (isExplorerRepoSearchablePane(i)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     document.addEventListener('keydown', event => {
         if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey || event.code !== 'KeyF') {
+            return;
+        }
+        const explorerIndex = findExplorerRepoSearchTargetIndex();
+        if (explorerIndex !== -1 && focusExplorerRepoSearch(explorerIndex, explorerSelectionQuery(explorerIndex))) {
+            event.preventDefault();
+            event.stopPropagation();
             return;
         }
         const index = findTerminalSearchTargetIndex();
@@ -6292,6 +6361,7 @@
                     if (snapshot.type === 'explorer') {
                         entry.explorer_tree_open = snapshot.explorer_tree_open;
                         entry.explorer_git_open = snapshot.explorer_git_open;
+                        entry.explorer_search_open = snapshot.explorer_search_open;
                         entry.explorer_open_tabs = snapshot.explorer_open_tabs;
                         entry.explorer_active_tab = snapshot.explorer_active_tab;
                         entry.explorer_tab_views = snapshot.explorer_tab_views;
