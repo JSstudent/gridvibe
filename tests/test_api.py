@@ -746,6 +746,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const explorerRefreshButton = document.getElementById(`explorer-refresh-${index}`);", html)
         self.assertIn("explorerRefreshButton.disabled = isBusy;", html)
 
+    def test_terminals_page_explorer_shortcuts_refresh_and_navigate_parent(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn('title="Refresh explorer (F5)"', html)
+        self.assertIn('title="Go to parent directory (Mouse Back)"', html)
+        self.assertIn("function findExplorerShortcutTargetIndex(", html)
+        self.assertIn("function navigateExplorerToParent(index)", html)
+        self.assertIn("event.key !== 'F5'", html)
+        self.assertIn("refreshTerminalDisplay(index);", html)
+        self.assertIn("event.button !== 3", html)
+        self.assertIn("const index = explorerPaneIndexFromTarget(event.target);", html)
+        self.assertIn("navigateExplorerToParent(index);", html)
+
     def test_terminals_page_exposes_per_terminal_close_control(self):
         response = self.client.get("/terminals")
 

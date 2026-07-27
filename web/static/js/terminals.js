@@ -499,6 +499,7 @@
     let sessionIds = [];
     let gridBuilt  = false;
     let _focusedTerminalIndex = -1;
+    let _activeExplorerIndex = -1;
     let socket     = null;   // set at the bottom after all defs
     let resizeObservers = [];
     let cachedGroupViews = new Map();
@@ -4428,8 +4429,8 @@
                         ` : (isExplorer ? `
                             <div class="explorer-surface" id="explorer-${i}">
                                 <div class="explorer-bar">
-                                     <button type="button" class="explorer-refresh" id="explorer-refresh-${i}" data-explorer-refresh="${i}" title="Refresh explorer" aria-label="Refresh explorer">${TERMINAL_REFRESH_ICON}</button>
-                                     <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory">↑</button>
+                                     <button type="button" class="explorer-refresh" id="explorer-refresh-${i}" data-explorer-refresh="${i}" title="Refresh explorer (F5)" aria-label="Refresh explorer">${TERMINAL_REFRESH_ICON}</button>
+                                     <button type="button" class="explorer-up" id="explorer-up-${i}" data-explorer-up="${i}" title="Go to parent directory (Mouse Back)">↑</button>
                                      <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${i}" data-explorer-tree-toggle="${i}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                                      <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
                                      <button type="button" class="explorer-search-toggle" id="explorer-search-toggle-${i}" data-explorer-search-toggle="${i}" title="Search in folder (Ctrl+Shift+F)" aria-label="Search in folder" aria-pressed="false">${EXPLORER_SEARCH_TOGGLE_ICON}</button>
@@ -4514,13 +4515,7 @@
         _wireVoiceHoldToTalk(card, i);
         _syncVoiceControls(i);
         wireCardButton(card, `[data-explorer-refresh="${i}"]`, () => refreshTerminalDisplay(i));
-        wireCardButton(card, `[data-explorer-up="${i}"]`, () => {
-            const pane = terminals[i];
-            const targetPath = pane?._explorerMode === 'file'
-                ? (pane._explorerPath || '')
-                : (pane?._explorerParentPath || '');
-            loadExplorerPane(i, targetPath);
-        });
+        wireCardButton(card, `[data-explorer-up="${i}"]`, () => navigateExplorerToParent(i));
         wireCardButton(card, `[data-explorer-git-toggle="${i}"]`, () => toggleExplorerGitSidebar(i));
         wireCardButton(card, `[data-explorer-tree-toggle="${i}"]`, () => toggleExplorerTreeSidebar(i));
         wireCardButton(card, `[data-explorer-search-toggle="${i}"]`, () => toggleExplorerSearchSidebar(i));
@@ -4617,6 +4612,43 @@
         return Number.isInteger(slot) ? slot : -1;
     }
 
+    function explorerPaneIndexFromTarget(target) {
+        const card = target?.closest?.('.terminal-container');
+        const index = terminalCardSlot(card);
+        return index !== -1
+            && card.classList.contains('explorer-pane')
+            && isExplorerSession(terminals[index]?._session)
+            ? index
+            : -1;
+    }
+
+    function findExplorerShortcutTargetIndex(target = document.activeElement) {
+        const targetCard = target?.closest?.('.terminal-container');
+        if (targetCard) {
+            return explorerPaneIndexFromTarget(target);
+        }
+        if (_activeExplorerIndex !== -1
+            && isExplorerSession(terminals[_activeExplorerIndex]?._session)) {
+            return _activeExplorerIndex;
+        }
+        const explorerIndexes = terminals
+            .map((pane, index) => isExplorerSession(pane?._session) ? index : -1)
+            .filter(index => index !== -1);
+        return explorerIndexes.length === 1 ? explorerIndexes[0] : -1;
+    }
+
+    function navigateExplorerToParent(index) {
+        const pane = terminals[index];
+        if (!pane || !isExplorerSession(pane._session)) {
+            return false;
+        }
+        const targetPath = pane._explorerMode === 'file'
+            ? (pane._explorerPath || '')
+            : (pane._explorerParentPath || '');
+        loadExplorerPane(index, targetPath);
+        return true;
+    }
+
     /* Visual only: give exactly one plain terminal card the `terminal-active`
        treatment (plus accessible state) and clear it from every other pane.
        An invalid/missing index clears the highlight from all panes. */
@@ -4664,6 +4696,7 @@
     /* Full reset on teardown. */
     function resetFocusedTerminal() {
         clearActiveTerminalHighlight();
+        _activeExplorerIndex = -1;
     }
 
     /* Pick an attached plain terminal to receive keyboard focus, preferring the
@@ -4701,6 +4734,7 @@
        terminal (whose focusin will repaint it). */
     document.addEventListener('focusin', event => {
         const card = event.target?.closest?.('.terminal-container');
+        _activeExplorerIndex = explorerPaneIndexFromTarget(event.target);
         if (isPlainTerminalCard(card)) {
             setFocusedTerminal(terminalCardSlot(card));
         }
@@ -5087,11 +5121,7 @@
             explorerUpButton.addEventListener('click', event => {
                 event.preventDefault();
                 event.stopPropagation();
-                const pane = terminals[index];
-                const targetPath = pane?._explorerMode === 'file'
-                    ? (pane._explorerPath || '')
-                    : (pane?._explorerParentPath || '');
-                loadExplorerPane(index, targetPath);
+                navigateExplorerToParent(index);
             });
         }
 
@@ -5292,8 +5322,8 @@
             <div class="terminal-surface">
                 <div class="explorer-surface" id="explorer-${index}">
                     <div class="explorer-bar">
-                        <button type="button" class="explorer-refresh" id="explorer-refresh-${index}" data-explorer-refresh="${index}" title="Refresh explorer" aria-label="Refresh explorer">${TERMINAL_REFRESH_ICON}</button>
-                        <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory">↑</button>
+                        <button type="button" class="explorer-refresh" id="explorer-refresh-${index}" data-explorer-refresh="${index}" title="Refresh explorer (F5)" aria-label="Refresh explorer">${TERMINAL_REFRESH_ICON}</button>
+                        <button type="button" class="explorer-up" id="explorer-up-${index}" data-explorer-up="${index}" title="Go to parent directory (Mouse Back)">↑</button>
                         <button type="button" class="explorer-tree-toggle" id="explorer-tree-toggle-${index}" data-explorer-tree-toggle="${index}" title="Show file tree" aria-label="Show file tree" aria-pressed="false">${EXPLORER_TREE_TOGGLE_ICON}</button>
                         <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
                         <button type="button" class="explorer-search-toggle" id="explorer-search-toggle-${index}" data-explorer-search-toggle="${index}" title="Search in folder (Ctrl+Shift+F)" aria-label="Search in folder" aria-pressed="false">${EXPLORER_SEARCH_TOGGLE_ICON}</button>
@@ -6005,6 +6035,32 @@
         }
         event.preventDefault();
         event.stopPropagation();
+    });
+
+    document.addEventListener('keydown', event => {
+        if (event.key !== 'F5' || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || event.repeat) {
+            return;
+        }
+        const index = findExplorerShortcutTargetIndex();
+        if (index === -1) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        refreshTerminalDisplay(index);
+    });
+
+    document.addEventListener('auxclick', event => {
+        if (event.button !== 3) {
+            return;
+        }
+        const index = explorerPaneIndexFromTarget(event.target);
+        if (index === -1) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        navigateExplorerToParent(index);
     });
 
     /* Ctrl+Shift+F opens the scrollback search overlay on the focused terminal
@@ -6965,6 +7021,7 @@
 
     /* Dismiss any open header overflow menu on an outside click or Escape. */
     document.addEventListener('pointerdown', event => {
+        _activeExplorerIndex = explorerPaneIndexFromTarget(event.target);
         if (event.target.closest('.terminal-actions-more-btn') || event.target.closest('.terminal-container.actions-open .terminal-actions')) {
             return;
         }
