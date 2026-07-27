@@ -248,6 +248,7 @@ def _default_terminal_entries():
             "agent_auto_mode": False,
             "explorer_tree_open": False,
             "explorer_git_open": False,
+            "explorer_search_open": False,
             "explorer_open_tabs": [],
             "explorer_active_tab": "",
             "explorer_tab_views": {},
@@ -440,6 +441,7 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
                 "agent_auto_mode": startup_mode == "agent" and bool(entry.get("agent_auto_mode")),
                 "explorer_tree_open": bool(entry.get("explorer_tree_open")),
                 "explorer_git_open": bool(entry.get("explorer_git_open")),
+                "explorer_search_open": bool(entry.get("explorer_search_open")),
                 "explorer_open_tabs": open_tabs,
                 "explorer_active_tab": _normalize_explorer_active_tab(entry.get("explorer_active_tab"), open_tabs),
                 "explorer_tab_views": _normalize_explorer_tab_views(entry.get("explorer_tab_views"), open_tabs),
@@ -551,6 +553,9 @@ def _merge_workspace_session_config(
         )
         saved_terminal["explorer_git_open"] = (
             startup_mode == "explorer" and workspace_terminal["explorer_git_open"]
+        )
+        saved_terminal["explorer_search_open"] = (
+            startup_mode == "explorer" and workspace_terminal.get("explorer_search_open", False)
         )
         saved_terminal["explorer_open_tabs"] = (
             workspace_terminal["explorer_open_tabs"] if startup_mode == "explorer" else []

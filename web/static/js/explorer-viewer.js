@@ -1387,6 +1387,78 @@
         renderExplorerGitPanels(index);
     }
 
+    /* Ordered sidebar panel registry. The sidebar stacks any subset of these
+       in registry order with a 6px splitter between each adjacent open pair.
+       Every open panel except the last can carry a pinned pixel height in
+       pane._explorerSidebarPanelHeights (panel key → px); unpinned panels and
+       the last open one share the remaining space as flex tracks. */
+    const EXPLORER_SIDEBAR_PANELS = [
+        {
+            key: 'tree',
+            openFlag: '_explorerTreeSidebarOpen',
+            panelId: index => `explorer-tree-panel-${index}`,
+            buttonId: index => `explorer-tree-toggle-${index}`,
+            mainClass: 'tree-open',
+            onOpen: index => loadExplorerTree(index)
+        },
+        {
+            key: 'git',
+            openFlag: '_explorerGitSidebarOpen',
+            panelId: index => `explorer-git-panel-${index}`,
+            buttonId: index => `explorer-git-toggle-${index}`,
+            mainClass: 'git-open',
+            onOpen: index => loadExplorerGitRepo(index)
+        },
+        {
+            key: 'search',
+            openFlag: '_explorerSearchSidebarOpen',
+            panelId: index => `explorer-search-panel-${index}`,
+            buttonId: index => `explorer-search-toggle-${index}`,
+            mainClass: 'search-open',
+            /* Search results are pane-scoped and never persisted; opening only
+               (re)builds the panel chrome (see explorer-search.js, loaded
+               before terminals.js — the reference resolves at call time). */
+            onOpen: index => (typeof renderExplorerSearchPanel === 'function'
+                ? renderExplorerSearchPanel(index)
+                : null)
+        }
+    ];
+
+    function explorerOpenSidebarPanels(pane) {
+        return EXPLORER_SIDEBAR_PANELS.filter(panel => Boolean(pane?.[panel.openFlag]));
+    }
+
+    /* Splitters sit at fixed DOM slots between adjacent registry panels, so
+       slot n is only usable when panel n is open and something below it is
+       open too. With Files closed, the Git/Search pair must use slot 1, not
+       slot 0 — otherwise the divider renders above the first visible panel
+       and the grid tracks land on the wrong elements. Each entry also carries
+       the position, within the open set, of the panel the splitter drags. */
+    function explorerSidebarSplitterSlots(pane) {
+        const slots = [];
+        let openSoFar = 0;
+        EXPLORER_SIDEBAR_PANELS.forEach((panel, n) => {
+            if (!pane?.[panel.openFlag]) {
+                return;
+            }
+            openSoFar += 1;
+            const hasOpenBelow = EXPLORER_SIDEBAR_PANELS
+                .slice(n + 1)
+                .some(entry => Boolean(pane?.[entry.openFlag]));
+            if (hasOpenBelow) {
+                slots.push({ slot: n, aboveIndex: openSoFar - 1 });
+            }
+        });
+        return slots;
+    }
+
+    function ensureExplorerSidebarPanelHeights(pane) {
+        if (!(pane._explorerSidebarPanelHeights instanceof Map)) {
+            pane._explorerSidebarPanelHeights = new Map();
+        }
+        return pane._explorerSidebarPanelHeights;
+    }
+
     function syncExplorerSidebar(index) {
         const pane = terminals[index];
         const main = document.getElementById(`explorer-main-${index}`);
@@ -1395,47 +1467,44 @@
             return;
         }
 
-        const treeOpen = Boolean(pane._explorerTreeSidebarOpen);
-        const gitOpen = Boolean(pane._explorerGitSidebarOpen);
-        const anyOpen = treeOpen || gitOpen;
-        const treePanel = document.getElementById(`explorer-tree-panel-${index}`);
-        const gitPanel = document.getElementById(`explorer-git-panel-${index}`);
-        const splitter = document.getElementById(`explorer-sidebar-splitter-${index}`);
+        const openPanels = explorerOpenSidebarPanels(pane);
+        const openCount = openPanels.length;
+        EXPLORER_SIDEBAR_PANELS.forEach(panel => {
+            const isOpen = openPanels.includes(panel);
+            const el = document.getElementById(panel.panelId(index));
+            if (el) {
+                el.hidden = !isOpen;
+            }
+            const button = document.getElementById(panel.buttonId(index));
+            if (button) {
+                button.setAttribute('aria-pressed', isOpen ? 'true' : 'false');
+            }
+            main.classList.toggle(panel.mainClass, isOpen);
+        });
+        sidebar.hidden = openCount === 0;
+        sidebar.dataset.panels = String(openCount);
+        const visibleSlots = new Set(explorerSidebarSplitterSlots(pane).map(entry => entry.slot));
+        for (let n = 0; n < EXPLORER_SIDEBAR_PANELS.length - 1; n += 1) {
+            const splitter = document.getElementById(`explorer-sidebar-splitter-${index}-${n}`);
+            if (splitter) {
+                splitter.hidden = !visibleSlots.has(n);
+            }
+        }
         const handle = document.getElementById(`explorer-sidebar-resizer-${index}`);
-        const treeButton = document.getElementById(`explorer-tree-toggle-${index}`);
-        const gitButton = document.getElementById(`explorer-git-toggle-${index}`);
-
-        main.classList.toggle('tree-open', treeOpen);
-        main.classList.toggle('git-open', gitOpen);
-        sidebar.hidden = !anyOpen;
-        sidebar.classList.toggle('split', treeOpen && gitOpen);
-        if (treePanel) {
-            treePanel.hidden = !treeOpen;
-        }
-        if (gitPanel) {
-            gitPanel.hidden = !gitOpen;
-        }
-        if (splitter) {
-            splitter.hidden = !(treeOpen && gitOpen);
-        }
         if (handle) {
-            handle.hidden = !anyOpen;
-        }
-        if (treeButton) {
-            treeButton.setAttribute('aria-pressed', treeOpen ? 'true' : 'false');
-        }
-        if (gitButton) {
-            gitButton.setAttribute('aria-pressed', gitOpen ? 'true' : 'false');
+            handle.hidden = openCount === 0;
         }
 
-        if (anyOpen) {
+        if (openCount > 0) {
             applyExplorerSidebarWidth(index);
             wireExplorerSidebarResize(index);
         }
-        if (treeOpen && gitOpen) {
-            applyExplorerSidebarSplit(index);
-            wireExplorerSidebarSplitter(index);
-        }
+        /* Always re-apply, including below two panels: closing one back down
+           to a single panel has to clear the inline grid-template-rows, or
+           the survivor keeps the pixel height it held in the split and the
+           rest of the sidebar stays blank and unresizable. */
+        applyExplorerSidebarSplit(index);
+        wireExplorerSidebarSplitter(index);
     }
 
     function restoreExplorerSidebarState(index) {
@@ -1444,24 +1513,26 @@
             return;
         }
         syncExplorerSidebar(index);
-        if (pane._explorerTreeSidebarOpen) {
-            loadExplorerTree(index);
+        explorerOpenSidebarPanels(pane).forEach(panel => {
+            panel.onOpen?.(index);
+        });
+    }
+
+    function setExplorerSidebarPanelOpen(index, key, open) {
+        const panel = EXPLORER_SIDEBAR_PANELS.find(entry => entry.key === key);
+        const pane = terminals[index];
+        if (!panel || !pane) {
+            return;
         }
-        if (pane._explorerGitSidebarOpen) {
-            loadExplorerGitRepo(index);
+        pane[panel.openFlag] = Boolean(open);
+        syncExplorerSidebar(index);
+        if (pane[panel.openFlag]) {
+            panel.onOpen?.(index);
         }
     }
 
     function setExplorerGitSidebarOpen(index, open) {
-        const pane = terminals[index];
-        if (!pane) {
-            return;
-        }
-        pane._explorerGitSidebarOpen = Boolean(open);
-        syncExplorerSidebar(index);
-        if (pane._explorerGitSidebarOpen) {
-            loadExplorerGitRepo(index);
-        }
+        setExplorerSidebarPanelOpen(index, 'git', open);
     }
 
     function toggleExplorerGitSidebar(index) {
@@ -1470,15 +1541,7 @@
     }
 
     function setExplorerTreeSidebarOpen(index, open) {
-        const pane = terminals[index];
-        if (!pane) {
-            return;
-        }
-        pane._explorerTreeSidebarOpen = Boolean(open);
-        syncExplorerSidebar(index);
-        if (pane._explorerTreeSidebarOpen) {
-            loadExplorerTree(index);
-        }
+        setExplorerSidebarPanelOpen(index, 'tree', open);
     }
 
     function toggleExplorerTreeSidebar(index) {
@@ -1534,62 +1597,115 @@
         });
     }
 
-    /* Unset tree height means the two stacked panels share the sidebar evenly. */
+    /* Writes grid-template-rows from the open panel set: pinned panels get
+       their stored pixel height (clamped so the panels below keep the
+       minimum), unpinned panels and the last open one stay flex. A sidebar
+       too short for the minimums degrades to an even flex split and each
+       panel scrolls internally. */
     function applyExplorerSidebarSplit(index) {
         const pane = terminals[index];
         const sidebar = document.getElementById(`explorer-sidebar-${index}`);
         if (!pane || !sidebar) {
             return;
         }
-        const stored = Number(pane._explorerSidebarTreeHeight || 0);
-        if (!stored) {
-            sidebar.style.removeProperty('--explorer-sidebar-tree-height');
+        const openPanels = explorerOpenSidebarPanels(pane);
+        if (openPanels.length < 2) {
+            sidebar.style.removeProperty('grid-template-rows');
             return;
         }
+        const heights = ensureExplorerSidebarPanelHeights(pane);
         const height = sidebar.getBoundingClientRect().height;
-        const maxTop = Math.max(EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT, height - EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT - 6);
-        const top = Math.max(EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT, Math.min(stored, maxTop));
-        pane._explorerSidebarTreeHeight = top;
-        sidebar.style.setProperty('--explorer-sidebar-tree-height', `${top}px`);
+        const available = height - 6 * (openPanels.length - 1);
+        const minTotal = EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT * openPanels.length;
+        const tracks = [];
+        if (!(available >= minTotal)) {
+            for (let n = 0; n < openPanels.length; n += 1) {
+                if (n > 0) {
+                    tracks.push('6px');
+                }
+                tracks.push('minmax(0,1fr)');
+            }
+            sidebar.style.gridTemplateRows = tracks.join(' ');
+            return;
+        }
+        let remaining = available;
+        let panelsBelow = openPanels.length;
+        for (let n = 0; n < openPanels.length; n += 1) {
+            if (n > 0) {
+                tracks.push('6px');
+            }
+            panelsBelow -= 1;
+            const stored = Number(heights.get(openPanels[n].key) || 0);
+            if (stored <= 0 || panelsBelow === 0) {
+                tracks.push('minmax(0,1fr)');
+                continue;
+            }
+            const maxForPanel = remaining - EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT * panelsBelow;
+            const clamped = Math.max(EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT, Math.min(stored, maxForPanel));
+            heights.set(openPanels[n].key, clamped);
+            remaining -= clamped;
+            tracks.push(`${clamped}px`);
+        }
+        sidebar.style.gridTemplateRows = tracks.join(' ');
     }
 
     function wireExplorerSidebarSplitter(index) {
         const pane = terminals[index];
         const sidebar = document.getElementById(`explorer-sidebar-${index}`);
-        const splitter = document.getElementById(`explorer-sidebar-splitter-${index}`);
-        if (!pane || !sidebar || !splitter || splitter.dataset.bound) {
+        if (!pane || !sidebar) {
             return;
         }
-
-        splitter.dataset.bound = 'true';
-        splitter.addEventListener('pointerdown', event => {
-            event.preventDefault();
-            splitter.classList.add('dragging');
-            splitter.setPointerCapture?.(event.pointerId);
-            const onMove = moveEvent => {
-                const rect = sidebar.getBoundingClientRect();
-                const maxTop = Math.max(
-                    EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT,
-                    rect.height - EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT - 6
-                );
-                const nextTop = Math.max(
-                    EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT,
-                    Math.min(Math.round(moveEvent.clientY - rect.top), maxTop)
-                );
-                pane._explorerSidebarTreeHeight = nextTop;
-                sidebar.style.setProperty('--explorer-sidebar-tree-height', `${nextTop}px`);
-            };
-            const onEnd = endEvent => {
-                splitter.classList.remove('dragging');
-                splitter.releasePointerCapture?.(endEvent.pointerId);
-                window.removeEventListener('pointermove', onMove);
-                window.removeEventListener('pointerup', onEnd);
-                window.removeEventListener('pointercancel', onEnd);
-            };
-            window.addEventListener('pointermove', onMove);
-            window.addEventListener('pointerup', onEnd, { once: true });
-            window.addEventListener('pointercancel', onEnd, { once: true });
-        });
+        for (let n = 0; n < EXPLORER_SIDEBAR_PANELS.length - 1; n += 1) {
+            const splitter = document.getElementById(`explorer-sidebar-splitter-${index}-${n}`);
+            if (!splitter || splitter.dataset.bound) {
+                continue;
+            }
+            splitter.dataset.bound = 'true';
+            splitter.addEventListener('pointerdown', event => {
+                const openPanels = explorerOpenSidebarPanels(pane);
+                /* The DOM slot is not the position in the open set — resolve
+                   which open panel actually sits above this splitter. */
+                const slot = explorerSidebarSplitterSlots(pane).find(entry => entry.slot === n);
+                if (!slot) {
+                    return;
+                }
+                const above = slot.aboveIndex;
+                event.preventDefault();
+                splitter.classList.add('dragging');
+                splitter.setPointerCapture?.(event.pointerId);
+                const heights = ensureExplorerSidebarPanelHeights(pane);
+                const panelEl = document.getElementById(openPanels[above].panelId(index));
+                const startHeight = panelEl ? panelEl.getBoundingClientRect().height : 0;
+                const startClientY = event.clientY;
+                const panelsBelow = openPanels.length - 1 - above;
+                const onMove = moveEvent => {
+                    const rect = sidebar.getBoundingClientRect();
+                    let prefix = 0;
+                    for (let k = 0; k < above; k += 1) {
+                        const aboveEl = document.getElementById(openPanels[k].panelId(index));
+                        prefix += aboveEl ? aboveEl.getBoundingClientRect().height : 0;
+                    }
+                    const maxNext = rect.height - 6 * (openPanels.length - 1) - prefix
+                        - EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT * panelsBelow;
+                    const next = Math.max(
+                        EXPLORER_SIDEBAR_MIN_PANEL_HEIGHT,
+                        Math.min(Math.round(startHeight + (moveEvent.clientY - startClientY)), maxNext)
+                    );
+                    heights.set(openPanels[above].key, next);
+                    applyExplorerSidebarSplit(index);
+                };
+                const onEnd = endEvent => {
+                    splitter.classList.remove('dragging');
+                    splitter.releasePointerCapture?.(endEvent.pointerId);
+                    window.removeEventListener('pointermove', onMove);
+                    window.removeEventListener('pointerup', onEnd);
+                    window.removeEventListener('pointercancel', onEnd);
+                };
+                window.addEventListener('pointermove', onMove);
+                window.addEventListener('pointerup', onEnd, { once: true });
+                window.addEventListener('pointercancel', onEnd, { once: true });
+            });
+        }
     }
 
     function ensureExplorerTreeState(pane) {
@@ -2925,7 +3041,7 @@
                 ? `<span class="explorer-md-source-heading explorer-md-source-heading-${headingLevel}">${lineHtml}</span>`
                 : lineHtml;
             rows.push(`
-                <div class="explorer-source-line">
+                <div class="explorer-source-line" data-explorer-line="${record.number}">
                     ${explorerSourceLineNumberHtml(record, headingLevel, collapsed)}
                     <code class="explorer-source-line-code${codeClass}">${contentHtml || '&nbsp;'}</code>
                 </div>
@@ -4574,7 +4690,7 @@
         pane._attached = true;
         document.getElementById(`ph-${index}`)?.remove();
         renderExplorerViewerEmpty(index);
-        if (!pane._explorerTreeSidebarOpen && !pane._explorerGitSidebarOpen) {
+        if (explorerOpenSidebarPanels(pane).length === 0) {
             setExplorerTreeSidebarOpen(index, true);
         }
         applyExplorerSessionMarkdownAppearance(index);

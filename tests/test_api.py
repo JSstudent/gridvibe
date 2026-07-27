@@ -194,6 +194,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/voice-input.js",
             "js/explorer-viewer.js",
             "js/explorer-editor.js",
+            "js/explorer-search.js",
             "js/terminals.js",
         ):
             marker = f"/static/{asset}"
@@ -589,6 +590,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function restoreExplorerSidebarState(index)", html)
         self.assertIn("_explorerTreeSidebarOpen: Boolean(session.explorer_tree_open)", html)
         self.assertIn("_explorerGitSidebarOpen: Boolean(session.explorer_git_open)", html)
+        self.assertIn("_explorerSearchSidebarOpen: Boolean(session.explorer_search_open)", html)
         self.assertIn("workspace_only: true", save_handler_html)
         self.assertIn("source_saved_session_id: saveTarget.id || undefined", save_handler_html)
 
@@ -606,8 +608,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("agent_selection: terminal.initial_command_mode === 'agent'", html)
         self.assertIn("data-explorer-tree-open=", html)
         self.assertIn("data-explorer-git-open=", html)
+        self.assertIn("data-explorer-search-open=", html)
         self.assertIn("explorer_tree_open: terminal.startup_mode === 'explorer'", html)
         self.assertIn("explorer_git_open: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_search_open: terminal.startup_mode === 'explorer'", html)
         self.assertIn('<option value="browser"', html)
         self.assertIn('class="field t-browser-field', html)
         self.assertIn("function normalizeBrowserPaneUrl(value)", html)
@@ -742,6 +746,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const explorerRefreshButton = document.getElementById(`explorer-refresh-${index}`);", html)
         self.assertIn("explorerRefreshButton.disabled = isBusy;", html)
 
+    def test_terminals_page_explorer_shortcuts_refresh_and_navigate_parent(self):
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn('title="Refresh explorer (F5)"', html)
+        self.assertIn('title="Go to parent directory (Mouse Back)"', html)
+        self.assertIn("function findExplorerShortcutTargetIndex(", html)
+        self.assertIn("function navigateExplorerToParent(index)", html)
+        self.assertIn("event.key !== 'F5'", html)
+        self.assertIn("refreshTerminalDisplay(index);", html)
+        self.assertIn("event.button !== 3", html)
+        self.assertIn("const index = explorerPaneIndexFromTarget(event.target);", html)
+        self.assertIn("navigateExplorerToParent(index);", html)
+
     def test_terminals_page_exposes_per_terminal_close_control(self):
         response = self.client.get("/terminals")
 
@@ -842,6 +861,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # keep their URL — all overlaid onto the fetched session objects.
         self.assertIn("entry.explorer_tree_open = snapshot.explorer_tree_open;", html)
         self.assertIn("entry.explorer_git_open = snapshot.explorer_git_open;", html)
+        self.assertIn("entry.explorer_search_open = snapshot.explorer_search_open;", html)
         self.assertIn("entry.explorer_open_tabs = snapshot.explorer_open_tabs;", html)
         self.assertIn("entry.explorer_active_tab = snapshot.explorer_active_tab;", html)
         self.assertIn("entry.initial_command = snapshot.browser_url;", html)
@@ -1392,6 +1412,58 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertIn(".filter(entry => !entry.deleted)", html)
 
+    def test_terminals_page_explorer_repo_search_hooks_are_present(self):
+        """Repository-wide search: third sidebar panel, magnifier toggle,
+        shared Ctrl+Shift+F dispatch (explorer before terminal overlay)."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("data-explorer-search-toggle", html)
+        self.assertIn("explorer-search-panel", html)
+        self.assertIn("const EXPLORER_SEARCH_TOGGLE_ICON = ", html)
+        self.assertIn("function toggleExplorerSearchSidebar(index)", html)
+        self.assertIn("function setExplorerSearchSidebarOpen(index, open)", html)
+        self.assertIn("function renderExplorerSearchPanel(index)", html)
+        self.assertIn("function runExplorerRepoSearch(index)", html)
+        self.assertIn("function activateExplorerSearchHit(index, path, line,", html)
+        self.assertIn("function focusExplorerRepoSearch(index, seedQuery = '')", html)
+        self.assertIn("function findExplorerRepoSearchTargetIndex()", html)
+        self.assertIn("data-explorer-repo-search-input", html)
+        self.assertIn("/api/explorer/${encodeURIComponent(sessionId)}/search?", html)
+        self.assertIn(
+            'wireCardButton(card, `[data-explorer-search-toggle="${i}"]`, () => toggleExplorerSearchSidebar(i));',
+            html,
+        )
+        # Result activation: source rows carry line identity for scroll+flash.
+        self.assertIn('data-explorer-line="${record.number}"', html)
+        # Ctrl+Shift+F dispatch tries the explorer target before the terminal
+        # scrollback overlay, so a focused explorer pane wins the shared
+        # shortcut deterministically.
+        dispatch_start = html.index("const explorerIndex = findExplorerRepoSearchTargetIndex();")
+        dispatch_end = html.index("const index = findTerminalSearchTargetIndex();", dispatch_start)
+        dispatch_html = html[dispatch_start:dispatch_end]
+        self.assertIn(
+            "toggleExplorerRepoSearchShortcut(explorerIndex, explorerSelectionQuery(explorerIndex))",
+            dispatch_html,
+        )
+        # The shortcut is a toggle: an already-open panel closes from anywhere
+        # in the pane, not only while the panel input holds focus.
+        self.assertIn(
+            "function toggleExplorerRepoSearchShortcut(index, seedQuery = '')",
+            html,
+        )
+        toggle_start = html.index("function toggleExplorerRepoSearchShortcut(index, seedQuery = '')")
+        toggle_end = html.index("\n    }", toggle_start)
+        self.assertIn(
+            "setExplorerSearchSidebarOpen(index, false);",
+            html[toggle_start:toggle_end],
+        )
+        # The .gitignore filter is reachable from the panel, so the backend's
+        # `ignored` flag is wired end-to-end rather than dead (guardrail 5).
+        self.assertIn("data-explorer-repo-search-ignored", html)
+        self.assertIn("if (state.ignored) params.set('ignored', '1');", html)
+
     def test_terminals_page_explorer_uses_tabbed_file_viewer(self):
         """ISSUE-2026-014: main pane is a persistent tabbed read-only viewer."""
         response = self.client.get("/terminals")
@@ -1925,14 +1997,31 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function syncExplorerSidebar(index)", html)
         self.assertIn("function applyExplorerSidebarSplit(index)", html)
         self.assertIn("function wireExplorerSidebarSplitter(index)", html)
-        self.assertIn("sidebar.classList.toggle('split', treeOpen && gitOpen);", html)
-        self.assertIn("main.classList.toggle('tree-open', treeOpen);", html)
-        self.assertIn("main.classList.toggle('git-open', gitOpen);", html)
+        # The sidebar is an ordered N-panel registry with indexed splitters;
+        # the inline grid-template-rows replaced the old .split/CSS-var split.
+        self.assertIn("const EXPLORER_SIDEBAR_PANELS = [", html)
+        self.assertIn("function explorerOpenSidebarPanels(pane)", html)
+        self.assertIn("explorer-sidebar-splitter-${index}-${n}", html)
+        self.assertIn("sidebar.dataset.panels = String(openCount);", html)
+        self.assertIn("main.classList.toggle(panel.mainClass, isOpen);", html)
+        self.assertIn("sidebar.style.gridTemplateRows = tracks.join(' ');", html)
+        self.assertNotIn("--explorer-sidebar-tree-height", html)
+        # Splitters live at fixed DOM slots between adjacent registry panels,
+        # so visibility and drag targets resolve through the slot map rather
+        # than assuming slot n == position n in the open set (Git+Search with
+        # Files closed must use slot 1, not slot 0).
+        self.assertIn("function explorerSidebarSplitterSlots(pane)", html)
+        self.assertIn("splitter.hidden = !visibleSlots.has(n);", html)
         self.assertIn(
-            ".explorer-sidebar.split {\n            grid-template-rows:"
-            " var(--explorer-sidebar-tree-height, minmax(0, 1fr)) 6px minmax(0, 1fr);",
+            "const slot = explorerSidebarSplitterSlots(pane).find(entry => entry.slot === n);",
             html,
         )
+        # Dropping back to a single panel must clear the inline row tracks, so
+        # the survivor fills the sidebar instead of keeping its split height.
+        sync_start = html.index("function syncExplorerSidebar(index)")
+        sync_end = html.index("function restoreExplorerSidebarState(index)", sync_start)
+        self.assertIn("applyExplorerSidebarSplit(index);", html[sync_start:sync_end])
+        self.assertNotIn("if (openCount >= 2) {", html[sync_start:sync_end])
 
     def test_terminals_page_explorer_diff_search_hooks_are_present(self):
         response = self.client.get("/terminals")
@@ -4375,6 +4464,202 @@ class ApiRoutesTestCase(unittest.TestCase):
         changes = {change["path"]: change for change in response.get_json()["changes"]}
         self.assertEqual(set(changes), {"new/nested/first.txt", "new/second.txt"})
         self.assertTrue(all(change["git"]["status"] == "untracked" for change in changes.values()))
+
+    def test_explorer_search_requires_query(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session_id = self._create_explorer_session(repo_dir)
+
+        missing = self.client.get(f"/api/explorer/{session_id}/search")
+        empty = self.client.get(f"/api/explorer/{session_id}/search", query_string={"q": ""})
+
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(empty.status_code, 400)
+
+    def test_explorer_search_rejects_scope_outside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/search",
+            query_string={"q": "hello", "scope": ".."},
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_explorer_search_rejects_non_explorer_session(self):
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="localhost",
+            directory=str(Path(self.temp_dir.name)),
+            mode="wsl",
+            startup_mode="terminal",
+        )
+
+        response = self.client.get(
+            f"/api/explorer/{session.session_id}/search",
+            query_string={"q": "hello"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_explorer_search_walk_payload_shape(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "notes.txt").write_text("say hello\nhello again\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/search",
+            query_string={"q": "hello"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        for key in (
+            "query", "options", "engine", "files", "total_files",
+            "total_matches", "truncated", "elapsed_ms", "error",
+        ):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["query"], "hello")
+        self.assertEqual(payload["engine"], "walk")
+        self.assertEqual(payload["total_files"], 1)
+        self.assertEqual(payload["total_matches"], 2)
+        self.assertEqual(
+            payload["truncated"], {"files": False, "matches": False, "deadline": False}
+        )
+        entry = payload["files"][0]
+        self.assertEqual(entry["path"], "notes.txt")
+        self.assertEqual(entry["name"], "notes.txt")
+        self.assertEqual(entry["match_count"], 2)
+        self.assertFalse(entry["truncated"])
+        match = entry["matches"][0]
+        for key in ("line", "text", "text_offset", "ranges"):
+            self.assertIn(key, match)
+        self.assertEqual(match["line"], 1)
+        self.assertEqual(match["text"], "say hello")
+        self.assertEqual(match["ranges"], [[4, 9]])
+
+    def test_explorer_search_uses_git_grep_inside_work_tree(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "app.py").write_text("print('hello')\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/search",
+            query_string={"q": "hello"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["engine"], "git-grep")
+        self.assertEqual([entry["path"] for entry in payload["files"]], ["app.py"])
+
+    def test_explorer_search_invalid_regex_returns_400(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "notes.txt").write_text("hello\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/search",
+            query_string={"q": "([", "regex": "1"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Invalid regular expression", response.get_json()["error"])
+
+    def test_explorer_search_remote_git_grep(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp({"/srv/app": {"type": "directory"}})
+        fake_client = FakeSshExecClient(
+            [
+                (0, b"/srv/app\ntrue\n", b""),
+                (0, b"src/main.py\0" b"3\0" b"print('hello')\n", b""),
+            ]
+        )
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/search",
+                query_string={"q": "hello"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["engine"], "git-grep")
+        self.assertEqual(payload["total_matches"], 1)
+        entry = payload["files"][0]
+        self.assertEqual(entry["path"], "src/main.py")
+        self.assertEqual(entry["matches"][0]["line"], 3)
+        self.assertEqual(entry["matches"][0]["ranges"], [[7, 12]])
+
+    def test_explorer_search_remote_grep_fallback_is_confined(self):
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp({"/srv/app": {"type": "directory"}})
+        fake_client = FakeSshExecClient(
+            [
+                # Not a work tree → bounded `grep -rIn` fallback.
+                (1, b"", b""),
+                (
+                    0,
+                    b"/srv/app/notes.txt:1:say hello\n"
+                    b"/etc/passwd:4:hello outside\n",
+                    b"",
+                ),
+            ]
+        )
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(fake_client, fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/search",
+                query_string={"q": "hello"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["engine"], "remote-grep")
+        # The /etc hit is outside the explorer root and never reaches the payload.
+        self.assertEqual([entry["path"] for entry in payload["files"]], ["notes.txt"])
+        self.assertEqual(payload["total_matches"], 1)
+
 
     def test_explorer_git_stage_and_unstage_roundtrip(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -9852,6 +10137,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/terminals.js",
         "js/explorer-viewer.js",
         "js/explorer-editor.js",
+        "js/explorer-search.js",
     )
 
     def setUp(self):
@@ -9979,8 +10265,15 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             terminals_html.index("js/explorer-viewer.js"),
             terminals_html.index("js/explorer-editor.js"),
         )
+        # explorer-search.js (repository search panel) loads after
+        # explorer-editor.js and before terminals.js.
+        self.assertIn(f"/static/js/explorer-search.js?v={__version__}", terminals_html)
         self.assertLess(
             terminals_html.index("js/explorer-editor.js"),
+            terminals_html.index("js/explorer-search.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-search.js"),
             terminals_html.index("js/terminals.js"),
         )
 
@@ -9996,6 +10289,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/voice-input.js",
             "js/explorer-viewer.js",
             "js/explorer-editor.js",
+            "js/explorer-search.js",
             "js/terminals.js",
         ):
             with self.subTest(filename=filename):

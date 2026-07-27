@@ -25,6 +25,13 @@
     "surface_mode": "normal",
     "autosave_interval_minutes": 5
   },
+  "explorer_search": {
+    "max_files": 2000,
+    "max_matches": 5000,
+    "max_matches_per_file": 200,
+    "max_file_bytes": 2097152,
+    "timeout_seconds": 20
+  },
   "voice_input": {
     "enabled": false,
     "engine": "whisper",

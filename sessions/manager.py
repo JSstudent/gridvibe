@@ -51,6 +51,7 @@ class TerminalSession:
     explorer_root_directory: Optional[str] = None
     explorer_tree_open: bool = False
     explorer_git_open: bool = False
+    explorer_search_open: bool = False
     explorer_open_tabs: List[str] = field(default_factory=list)
     explorer_active_tab: str = ""
     explorer_tab_views: Dict[str, Any] = field(default_factory=dict)
@@ -85,6 +86,7 @@ class TerminalSession:
             "explorer_root_directory": self.explorer_root_directory,
             "explorer_tree_open": self.explorer_tree_open,
             "explorer_git_open": self.explorer_git_open,
+            "explorer_search_open": self.explorer_search_open,
             "explorer_open_tabs": list(self.explorer_open_tabs),
             "explorer_active_tab": self.explorer_active_tab,
             "explorer_tab_views": dict(self.explorer_tab_views),
@@ -275,6 +277,7 @@ class SessionManager:
                     explorer_root_directory=config.get("explorer_root_directory"),
                     explorer_tree_open=bool(config.get("explorer_tree_open")),
                     explorer_git_open=bool(config.get("explorer_git_open")),
+                    explorer_search_open=bool(config.get("explorer_search_open")),
                     explorer_open_tabs=list(config.get("explorer_open_tabs") or []),
                     explorer_active_tab=str(config.get("explorer_active_tab") or ""),
                     explorer_tab_views=dict(config.get("explorer_tab_views") or {}),
@@ -315,6 +318,7 @@ class SessionManager:
             "explorer_root_directory",
             "explorer_tree_open",
             "explorer_git_open",
+            "explorer_search_open",
             "explorer_open_tabs",
             "explorer_active_tab",
             "explorer_tab_views",

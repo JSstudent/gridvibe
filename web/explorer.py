@@ -20,6 +20,7 @@ import os
 import posixpath
 import re
 import shlex
+import socket
 import stat as stat_module
 import subprocess
 import sys
@@ -1257,6 +1258,29 @@ class _LocalExplorerBackend:
             return ""
         return _relative_explorer_path(root_path, os.path.dirname(current_path))
 
+    # -- repository-wide search (read-only) -----------------------------------
+    def search_lines(
+        self,
+        options: Any,
+        *,
+        root_path: str,
+        scope_path: str,
+        limits: Any,
+        deadline: float,
+    ) -> Tuple[str, Any]:
+        """Yield bounded search matches via `git grep`, else the local walk."""
+        from web import explorer_search
+
+        if not options.include_ignored:
+            matches = explorer_search.git_grep_matches(
+                self, root_path, scope_path, options, limits.timeout_seconds
+            )
+            if matches is not None:
+                return "git-grep", matches
+        return "walk", explorer_search.walk_matches(
+            root_path, scope_path, options, limits, deadline
+        )
+
 
 class _SftpExplorerBackend:
     """SSH/SFTP implementation of the explorer backend."""
@@ -1424,6 +1448,41 @@ class _SftpExplorerBackend:
         if _remote_compare_path(current_path) == _remote_compare_path(root_path):
             return ""
         return _relative_remote_explorer_path(root_path, _remote_path_dirname(current_path))
+
+    # -- repository-wide search (read-only) -----------------------------------
+    def search_lines(
+        self,
+        options: Any,
+        *,
+        root_path: str,
+        scope_path: str,
+        limits: Any,
+        deadline: float,
+    ) -> Tuple[str, Any]:
+        """Yield bounded search matches via `git grep`, else remote `grep -rIn`."""
+        from web import explorer_search
+
+        if not options.include_ignored:
+            matches = explorer_search.git_grep_matches(
+                self, root_path, scope_path, options, limits.timeout_seconds
+            )
+            if matches is not None:
+                return "git-grep", matches
+
+        def generate() -> Any:
+            command = explorer_search.build_remote_grep_command(scope_path, options)
+            try:
+                _stdin, stdout, _stderr = self.client.exec_command(
+                    command, timeout=limits.timeout_seconds
+                )
+                stream = stdout.read()
+            except (socket.timeout, TimeoutError) as exc:
+                raise explorer_search.SearchDeadlineExceeded() from exc
+            if isinstance(stream, str):
+                stream = stream.encode("utf-8", errors="replace")
+            yield from explorer_search.parse_remote_grep_output(self, root_path, stream)
+
+        return "remote-grep", generate()
 
 
 @contextmanager

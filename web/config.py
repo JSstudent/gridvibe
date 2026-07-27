@@ -40,6 +40,24 @@ AUTOSAVE_INTERVAL_MINUTES_MIN = 1
 AUTOSAVE_INTERVAL_MINUTES_MAX = 15
 AUTOSAVE_INTERVAL_MINUTES_DEFAULT = 5
 
+# Bounds for the explorer repository search (backend-only caps; the frontend
+# learns the effective limits from each response's `truncated` block).
+EXPLORER_SEARCH_MAX_FILES_MIN = 1
+EXPLORER_SEARCH_MAX_FILES_MAX = 20000
+EXPLORER_SEARCH_MAX_FILES_DEFAULT = 2000
+EXPLORER_SEARCH_MAX_MATCHES_MIN = 1
+EXPLORER_SEARCH_MAX_MATCHES_MAX = 100000
+EXPLORER_SEARCH_MAX_MATCHES_DEFAULT = 5000
+EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_MIN = 1
+EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_MAX = 5000
+EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_DEFAULT = 200
+EXPLORER_SEARCH_MAX_FILE_BYTES_MIN = 4096
+EXPLORER_SEARCH_MAX_FILE_BYTES_MAX = 100 * 1024 * 1024
+EXPLORER_SEARCH_MAX_FILE_BYTES_DEFAULT = 2 * 1024 * 1024
+EXPLORER_SEARCH_TIMEOUT_SECONDS_MIN = 1
+EXPLORER_SEARCH_TIMEOUT_SECONDS_MAX = 60
+EXPLORER_SEARCH_TIMEOUT_SECONDS_DEFAULT = 20
+
 WHISPER_MODEL_OPTIONS = {
     "tiny.en",
     "tiny",
@@ -163,6 +181,15 @@ def _normalize_surface_mode(value: Any, default: str = "normal") -> str:
     return default if default in {"normal", "max"} else "normal"
 
 
+def _clamped_int(value: Any, minimum: int, maximum: int, default: int) -> int:
+    """Parse an integer config value into [minimum, maximum], else default."""
+    try:
+        parsed = int(value)
+    except (ValueError, TypeError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
 class RuntimeConfig:
     """Config-backed runtime settings shared across the app.
 
@@ -180,6 +207,11 @@ class RuntimeConfig:
         self.app_theme = "system"
         self.app_surface_mode = "normal"
         self.workspace_autosave_interval_minutes = AUTOSAVE_INTERVAL_MINUTES_DEFAULT
+        self.explorer_search_max_files = EXPLORER_SEARCH_MAX_FILES_DEFAULT
+        self.explorer_search_max_matches = EXPLORER_SEARCH_MAX_MATCHES_DEFAULT
+        self.explorer_search_max_matches_per_file = EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_DEFAULT
+        self.explorer_search_max_file_bytes = EXPLORER_SEARCH_MAX_FILE_BYTES_DEFAULT
+        self.explorer_search_timeout_seconds = EXPLORER_SEARCH_TIMEOUT_SECONDS_DEFAULT
         self.voice_enabled = True
         self.voice_engine = "vosk"
         self.vosk_service_url = "ws://localhost:2700"
@@ -237,6 +269,42 @@ class RuntimeConfig:
             )
         except (ValueError, TypeError):
             self.workspace_autosave_interval_minutes = AUTOSAVE_INTERVAL_MINUTES_DEFAULT
+
+        search_config = self.app_config.get("explorer_search", {})
+        if not isinstance(search_config, dict):
+            search_config = {}
+        self.explorer_search_max_files = _clamped_int(
+            search_config.get("max_files", EXPLORER_SEARCH_MAX_FILES_DEFAULT),
+            EXPLORER_SEARCH_MAX_FILES_MIN,
+            EXPLORER_SEARCH_MAX_FILES_MAX,
+            EXPLORER_SEARCH_MAX_FILES_DEFAULT,
+        )
+        self.explorer_search_max_matches = _clamped_int(
+            search_config.get("max_matches", EXPLORER_SEARCH_MAX_MATCHES_DEFAULT),
+            EXPLORER_SEARCH_MAX_MATCHES_MIN,
+            EXPLORER_SEARCH_MAX_MATCHES_MAX,
+            EXPLORER_SEARCH_MAX_MATCHES_DEFAULT,
+        )
+        self.explorer_search_max_matches_per_file = _clamped_int(
+            search_config.get(
+                "max_matches_per_file", EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_DEFAULT
+            ),
+            EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_MIN,
+            EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_MAX,
+            EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_DEFAULT,
+        )
+        self.explorer_search_max_file_bytes = _clamped_int(
+            search_config.get("max_file_bytes", EXPLORER_SEARCH_MAX_FILE_BYTES_DEFAULT),
+            EXPLORER_SEARCH_MAX_FILE_BYTES_MIN,
+            EXPLORER_SEARCH_MAX_FILE_BYTES_MAX,
+            EXPLORER_SEARCH_MAX_FILE_BYTES_DEFAULT,
+        )
+        self.explorer_search_timeout_seconds = _clamped_int(
+            search_config.get("timeout_seconds", EXPLORER_SEARCH_TIMEOUT_SECONDS_DEFAULT),
+            EXPLORER_SEARCH_TIMEOUT_SECONDS_MIN,
+            EXPLORER_SEARCH_TIMEOUT_SECONDS_MAX,
+            EXPLORER_SEARCH_TIMEOUT_SECONDS_DEFAULT,
+        )
 
         voice_config = self.app_config.get("voice_input", {})
         self.voice_enabled = voice_config.get("enabled", True)
