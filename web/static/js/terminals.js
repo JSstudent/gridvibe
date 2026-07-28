@@ -527,6 +527,7 @@
     let saveSessionAsResolver = null;
     let closeSessionConfirmResolver = null;
     let genericConfirmResolver = null;
+    let genericConfirmOwner = null;
     const MAX_SPLIT_TERMINALS = Math.min(16, Number(MAX_SESSIONS || 16));
     const MIN_SPLIT_COLS = 8;
     /* A stacked (horizontal) split must leave each half with at least this many
@@ -1002,6 +1003,7 @@
             return;
         }
 
+        (cached.sessionIds || []).forEach(cancelExplorerFilesystemUiForSession);
         clearFitTimers(cached.terminals || []);
         disconnectObservers(cached.resizeObservers || []);
         if (socket) {
@@ -1328,18 +1330,28 @@
         if (genericConfirmResolver) {
             const resolver = genericConfirmResolver;
             genericConfirmResolver = null;
+            genericConfirmOwner = null;
             resolver(result);
         }
     }
 
+    function closeGenericConfirmModalForOwner(owner, result = false) {
+        if (!owner || genericConfirmOwner !== owner) {
+            return false;
+        }
+        closeGenericConfirmModal(result);
+        return true;
+    }
+
     /* Reusable in-page confirm shell for irreversible actions (WebView2 blocks
        window.confirm). Resolves true on accept, false on cancel/dismiss. */
-    function openGenericConfirmModal({ title = 'Are you sure?', copy = '', note = '', confirmLabel = 'Confirm', danger = false } = {}) {
+    function openGenericConfirmModal({ title = 'Are you sure?', copy = '', note = '', confirmLabel = 'Confirm', danger = false, owner = null } = {}) {
         const modal = document.getElementById('genericConfirmModal');
         if (!modal) {
             return Promise.resolve(false);
         }
         closeGenericConfirmModal(false);
+        genericConfirmOwner = owner;
         document.getElementById('genericConfirmTitle').textContent = title;
         document.getElementById('genericConfirmCopy').textContent = copy;
         const noteEl = document.getElementById('genericConfirmNote');
@@ -4067,6 +4079,8 @@
     ───────────────────────────────────────────── */
     function teardownCurrentGrid() {
         _stopAllVoice();
+        resetFocusedTerminal();
+        sessionIds.forEach(cancelExplorerFilesystemUiForSession);
         // Leave all active SocketIO rooms so the backend clears
         // client_joined_sessions — buffer will replay on re-join.
         if (socket) {
@@ -4089,7 +4103,6 @@
         terminals  = [];
         sessionIds = [];
         gridBuilt  = false;
-        resetFocusedTerminal();
         visibleGroupId = '';
     }
 
@@ -5729,6 +5742,12 @@
     }
 
     async function closeTerminalPane(index) {
+        const explorerSessionId = sessionIds[index];
+        if (hasActiveExplorerFilesystemOperation(index)) {
+            showTerminalToast('A copy or delete is finishing. Try closing this pane again shortly.', 'error');
+            return;
+        }
+        cancelExplorerFilesystemUiForSession(explorerSessionId);
         // Closing a pane tears down its explorer viewer — confirm any dirty edit.
         if (!(await confirmDiscardExplorerEdit(index, 'Closing this pane'))) {
             return;
@@ -6857,6 +6876,11 @@
         if (!groupId || groupId === activeGroupId) {
             return;
         }
+        if (hasActiveExplorerFilesystemOperationForSessions(sessionIds)) {
+            showTerminalToast('A copy or delete is finishing. Try switching sessions again shortly.', 'error');
+            return;
+        }
+        sessionIds.forEach(cancelExplorerFilesystemUiForSession);
         // Switching sessions rebuilds the grid and discards the visible panes'
         // explorer editors — confirm any unsaved changes first.
         if (!(await confirmDiscardAllExplorerEdits('Switching sessions'))) {
@@ -6950,6 +6974,13 @@
         if (!groupId) {
             return;
         }
+        const cachedClosingIds = cachedGroupViews.get(groupId)?.sessionIds || [];
+        const closingSessionIds = groupId === visibleGroupId ? sessionIds : cachedClosingIds;
+        if (hasActiveExplorerFilesystemOperationForSessions(closingSessionIds)) {
+            showTerminalToast('A copy or delete is finishing. Try closing this session again shortly.', 'error');
+            return;
+        }
+        closingSessionIds.forEach(cancelExplorerFilesystemUiForSession);
 
         // Closing the visible group tears down its explorer editors; confirm
         // unsaved changes before the live-terminal close prompt.

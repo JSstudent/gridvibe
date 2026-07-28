@@ -98,6 +98,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _explorer_editor_language,
     _explorer_image_mimetype,
     _explorer_root_directory,
+    _fs_root_revision,
     _get_git_context,
     _get_git_diff,
     _get_git_repo_summary,
@@ -128,6 +129,10 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     open_path_in_os_file_manager,
     read_explorer_file_preview,
     save_explorer_file_payload,
+)
+from web.explorer_fs import (
+    delete_explorer_entry_payload,
+    paste_explorer_entry_payload,
 )
 from web.explorer_search import (  # noqa: F401 - re-exported for backwards compatibility
     run_explorer_search,
@@ -746,11 +751,135 @@ def get_explorer_entries(session_id: str):
         entries.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
         return {
             "root": root_path,
+            "root_revision": _fs_root_revision(root_path),
             "path": backend.rel_explorer_path(root_path, current_path),
             "parent_path": backend.parent_explorer_path(root_path, current_path),
             "git": git_context,
             "entries": entries,
         }
+
+    return _explorer_route_response(session, handler)
+
+
+def _explorer_mutation_json(
+    allowed_fields: set,
+) -> Any:
+    """Return a mutation JSON object or one shared invalid-request response."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, (
+            jsonify(
+                {
+                    "error": "Request body must be a JSON object",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+    unexpected = sorted(set(data) - allowed_fields)
+    if unexpected:
+        return None, (
+            jsonify(
+                {
+                    "error": f"Unsupported request field: {unexpected[0]}",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+    return data, None
+
+
+@app.route('/api/explorer/<session_id>/paste', methods=['POST'])
+def paste_explorer_entry(session_id: str):
+    """Copy one entry inside the same live explorer root without overwrite."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if not _is_explorer_session(session):
+        return jsonify({"error": "Session is not a file explorer pane"}), 400
+    data, error_response = _explorer_mutation_json(
+        {
+            "root_revision",
+            "source_path",
+            "source_revision",
+            "destination_directory",
+        }
+    )
+    if error_response is not None:
+        return error_response
+    required_strings = ("root_revision", "source_path", "source_revision")
+    if any(
+        not isinstance(data.get(field), str) or not data.get(field)
+        for field in required_strings
+    ) or not isinstance(data.get("destination_directory"), str):
+        return (
+            jsonify(
+                {
+                    "error": "Paste requires root/source revisions, a source path, and a destination directory",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return paste_explorer_entry_payload(
+            backend,
+            root_revision=data["root_revision"],
+            source_path=data["source_path"],
+            source_revision=data["source_revision"],
+            destination_directory=data["destination_directory"],
+            session_id=session_id,
+        )
+
+    return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/delete', methods=['POST'])
+def delete_explorer_entry(session_id: str):
+    """Permanently delete one entry, requiring an explicit recursive flag."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if not _is_explorer_session(session):
+        return jsonify({"error": "Session is not a file explorer pane"}), 400
+    data, error_response = _explorer_mutation_json(
+        {"root_revision", "path", "base_revision", "recursive"}
+    )
+    if error_response is not None:
+        return error_response
+    required_strings = ("root_revision", "path", "base_revision")
+    if (
+        any(
+            not isinstance(data.get(field), str) or not data.get(field)
+            for field in required_strings
+        )
+        or not isinstance(data.get("recursive"), bool)
+    ):
+        return (
+            jsonify(
+                {
+                    "error": "Delete requires root/entry revisions, a path, and a recursive boolean",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return delete_explorer_entry_payload(
+            backend,
+            root_revision=data["root_revision"],
+            path=data["path"],
+            base_revision=data["base_revision"],
+            recursive=data["recursive"],
+            session_id=session_id,
+        )
 
     return _explorer_route_response(session, handler)
 

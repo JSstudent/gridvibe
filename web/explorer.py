@@ -5,15 +5,14 @@ abstraction). Contains session classification, explorer path resolution, the
 local and SFTP explorer backends, the single set of Git helpers parameterised
 by backend, and the per-session SSH client pool (finding 3.1).
 
-Filesystem access is read-only with one bounded exception: the in-place file
-editor. Explorer filesystem writes are allowed only through the root-confined,
-size/format/encoding/revision-guarded ``replace_file`` save path
-(``save_explorer_file_payload``); all other direct move/delete/upload/create
-operations remain out of scope. The existing guarded Git mutations are
-unchanged.
+Filesystem access is read-only with two bounded exceptions: the in-place file
+editor and the root-confined copy/delete policy in ``web.explorer_fs``.
+Move, rename, create, upload, and overwrite remain out of scope. The existing
+guarded Git mutations are unchanged.
 """
 
 import codecs
+import errno
 import hashlib
 import logging
 import os
@@ -511,6 +510,12 @@ class ExplorerSaveInProgressError(ExplorerRouteError):
     code = "save_in_progress"
 
 
+class ExplorerOperationInProgressError(ExplorerSaveInProgressError):
+    """An overlapping explorer save/copy/delete already owns this path."""
+
+    code = "operation_in_progress"
+
+
 class ExplorerFileTooLargeError(ExplorerRouteError):
     """The current file or its replacement exceeds the in-place edit limit."""
 
@@ -518,29 +523,77 @@ class ExplorerFileTooLargeError(ExplorerRouteError):
     code = "file_too_large"
 
 
-# A short-held claim set prevents two of GridVibe's *own* saves from racing on
-# one file. This is not an OS compare-and-swap — external software can still
-# change a file in the narrow window between the revision check and the
-# replacement; the revision check plus atomic replace are the real guard.
+# A short-held claim set prevents GridVibe's own saves, copies, and deletes from
+# racing on the same path or an ancestor/descendant. Keys are backend-namespaced
+# absolute paths, so panes on one root conflict even when their session ids
+# differ, while identical strings on different SSH hosts do not. This is not an
+# OS compare-and-swap — external software can still change a path.
 _explorer_save_claims: set = set()
 _explorer_save_claims_lock = threading.Lock()
 
 
+def _explorer_claim_parts(claim_key: str) -> Tuple[str, str]:
+    """Split one claim key into namespace/path for segment-aware comparisons."""
+    raw = str(claim_key or "")
+    namespace, separator, path = raw.partition("|")
+    if not separator:
+        namespace, path = "", raw
+    normalized = path.replace("\\", "/")
+    if normalized != "/":
+        normalized = normalized.rstrip("/")
+    return namespace, normalized or "/"
+
+
+def _explorer_claim_keys_conflict(left: str, right: str) -> bool:
+    """Return whether equal/ancestor/descendant claim keys overlap."""
+    left_namespace, left_path = _explorer_claim_parts(left)
+    right_namespace, right_path = _explorer_claim_parts(right)
+    if left_namespace != right_namespace:
+        return False
+    if left_path == right_path:
+        return True
+    left_prefix = "/" if left_path == "/" else f"{left_path}/"
+    right_prefix = "/" if right_path == "/" else f"{right_path}/"
+    return left_path.startswith(right_prefix) or right_path.startswith(left_prefix)
+
+
 @contextmanager
-def _explorer_save_claim(session_id: str, resolved_path: str):
-    """Claim ``(session_id, resolved_path)`` for one save; no I/O under the lock."""
-    key = (str(session_id or ""), str(resolved_path or ""))
+def _explorer_path_claims(
+    claim_keys: Any,
+    *,
+    error_type: type = ExplorerOperationInProgressError,
+    message: str = "Another explorer filesystem operation overlaps this path",
+):
+    """Atomically claim paths, releasing the mutex before any caller I/O."""
+    keys = tuple(dict.fromkeys(str(key or "") for key in claim_keys if str(key or "")))
+    if not keys:
+        raise ExplorerRouteError("An explorer filesystem claim path is required")
     with _explorer_save_claims_lock:
-        if key in _explorer_save_claims:
-            raise ExplorerSaveInProgressError(
-                "Another save for this file is already in progress"
-            )
-        _explorer_save_claims.add(key)
+        if any(
+            _explorer_claim_keys_conflict(requested, claimed)
+            for requested in keys
+            for claimed in _explorer_save_claims
+        ):
+            raise error_type(message)
+        _explorer_save_claims.update(keys)
     try:
         yield
     finally:
         with _explorer_save_claims_lock:
-            _explorer_save_claims.discard(key)
+            for key in keys:
+                _explorer_save_claims.discard(key)
+
+
+@contextmanager
+def _explorer_save_claim(session_id: str, resolved_path: str):
+    """Claim one save path; keep the historical two-argument API."""
+    _ = session_id  # Cross-session safety comes from the namespaced path key.
+    with _explorer_path_claims(
+        (resolved_path,),
+        error_type=ExplorerSaveInProgressError,
+        message="Another save or filesystem operation for this path is already in progress",
+    ):
+        yield
 
 
 # GitHub-style admonition callouts (ISSUE-2026-017). Each label maps a
@@ -784,14 +837,87 @@ def _relative_explorer_path(root_path: str, path: str) -> str:
     return "" if relative == "." else relative.replace(os.sep, "/")
 
 
+def _explorer_entry_kind(mode: Any, file_attributes: Any = 0) -> str:
+    """Classify one lstat result without following links/reparse points."""
+    reparse_flag = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if int(file_attributes or 0) & reparse_flag:
+        return "link"
+    if mode is None:
+        return "other"
+    if stat_module.S_ISLNK(mode):
+        return "link"
+    if stat_module.S_ISDIR(mode):
+        return "directory"
+    if stat_module.S_ISREG(mode):
+        return "file"
+    return "other"
+
+
+def _fs_revision(stat_info: Dict[str, Any]) -> str:
+    """Return an opaque optimistic-concurrency token for one entry."""
+    parts = (
+        stat_info.get("kind"),
+        stat_info.get("size"),
+        stat_info.get("mode"),
+        stat_info.get("mtime_ns"),
+        stat_info.get("dev"),
+        stat_info.get("ino"),
+    )
+    material = "|".join("" if part is None else str(part) for part in parts)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def _fs_root_revision(root_path: str) -> str:
+    """Return a stable token for one already-canonical explorer root."""
+    return hashlib.sha256(str(root_path or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _local_fs_stat_dict(stat_result: Any) -> Dict[str, Any]:
+    """Normalize a local lstat result for shared mutation policy."""
+    kind = _explorer_entry_kind(
+        getattr(stat_result, "st_mode", None),
+        getattr(stat_result, "st_file_attributes", 0),
+    )
+    return {
+        "kind": kind,
+        "size": getattr(stat_result, "st_size", None),
+        "mode": getattr(stat_result, "st_mode", None),
+        "mtime": getattr(stat_result, "st_mtime", None),
+        "mtime_ns": getattr(stat_result, "st_mtime_ns", None),
+        "dev": getattr(stat_result, "st_dev", None),
+        "ino": getattr(stat_result, "st_ino", None),
+    }
+
+
+def _remote_fs_stat_dict(stat_result: Any) -> Dict[str, Any]:
+    """Normalize an SFTP lstat result without adding a network round trip."""
+    mtime = getattr(stat_result, "st_mtime", None)
+    return {
+        "kind": _explorer_entry_kind(getattr(stat_result, "st_mode", None)),
+        "size": getattr(stat_result, "st_size", None),
+        "mode": getattr(stat_result, "st_mode", None),
+        "mtime": mtime,
+        # SFTP commonly exposes whole-second mtimes only. It still participates
+        # in the token, but cannot detect same-second/same-size replacement.
+        "mtime_ns": mtime,
+        "dev": None,
+        "ino": None,
+    }
+
+
 def _explorer_entry_payload(root_path: str, entry: os.DirEntry) -> Dict[str, Any]:
     """Return metadata for one explorer entry."""
     try:
-        stat_result = entry.stat(follow_symlinks=False)
-        is_dir = entry.is_dir(follow_symlinks=False)
+        # Use the same path-based lstat as mutation validation. On Windows,
+        # DirEntry.stat can expose a different inode surrogate than os.lstat,
+        # which would make a freshly rendered revision fail immediately.
+        stat_result = os.lstat(entry.path)
+        stat_info = _local_fs_stat_dict(stat_result)
     except OSError:
         stat_result = None
-        is_dir = False
+        stat_info = None
+    kind = stat_info["kind"] if stat_info is not None else "other"
+    is_dir = kind == "directory"
 
     return {
         "name": entry.name,
@@ -799,6 +925,8 @@ def _explorer_entry_payload(root_path: str, entry: os.DirEntry) -> Dict[str, Any
         "type": "directory" if is_dir else "file",
         "size": None if is_dir or stat_result is None else stat_result.st_size,
         "modified": None if stat_result is None else stat_result.st_mtime,
+        "entry_kind": kind,
+        "revision": None if stat_info is None else _fs_revision(stat_info),
     }
 
 
@@ -1191,7 +1319,78 @@ class _LocalExplorerBackend:
         root_path = _explorer_root_directory(self.session)
         if not root_path:
             raise ValueError("Explorer root directory is not configured")
-        return root_path
+        return os.path.realpath(os.path.abspath(os.path.expanduser(root_path)))
+
+    # -- confined filesystem mutation mechanics -------------------------------
+    def fs_lstat(self, path: str) -> Optional[Dict[str, Any]]:
+        try:
+            return _local_fs_stat_dict(os.lstat(path))
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError) or exc.errno == errno.ENOENT:
+                return None
+            raise
+
+    def fs_listdir(self, path: str) -> List[Tuple[str, Dict[str, Any]]]:
+        entries: List[Tuple[str, Dict[str, Any]]] = []
+        with os.scandir(path) as iterator:
+            for entry in iterator:
+                entries.append(
+                    (entry.name, _local_fs_stat_dict(entry.stat(follow_symlinks=False)))
+                )
+        return entries
+
+    def fs_join(self, parent: str, name: str) -> str:
+        return os.path.join(parent, name)
+
+    def fs_mkdir_exclusive(self, path: str) -> None:
+        os.mkdir(path)
+
+    def fs_create_exclusive(self, path: str) -> Any:
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+        try:
+            return os.fdopen(descriptor, "wb")
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    def fs_read_chunks(self, path: str, chunk_size: int) -> Any:
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    return
+                yield chunk
+
+    def fs_remove_file(self, path: str) -> None:
+        os.remove(path)
+
+    def fs_rmdir(self, path: str) -> None:
+        os.rmdir(path)
+
+    def fs_rename(self, source: str, destination: str) -> None:
+        os.rename(source, destination)
+
+    def fs_chmod(self, path: str, mode: int) -> None:
+        os.chmod(path, mode, follow_symlinks=False)
+
+    def fs_utime(self, path: str, mtime: float) -> None:
+        os.utime(path, (mtime, mtime), follow_symlinks=False)
+
+    def fs_claim_namespace(self) -> str:
+        return "local"
+
+    def fs_claim_key(self, path: str) -> str:
+        normalized = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        return f"{self.fs_claim_namespace()}|{normalized}"
+
+    def fs_path_is_same_or_descendant(self, parent: str, candidate: str) -> bool:
+        parent_normalized = os.path.normcase(os.path.normpath(os.path.abspath(parent)))
+        candidate_normalized = os.path.normcase(os.path.normpath(os.path.abspath(candidate)))
+        try:
+            common = os.path.commonpath([parent_normalized, candidate_normalized])
+        except ValueError:
+            return False
+        return common == parent_normalized
 
     # -- read-only filesystem access ------------------------------------------
     def list_entries(self, root_path: str, directory_path: str) -> List[Dict[str, Any]]:
@@ -1359,6 +1558,73 @@ class _SftpExplorerBackend:
         if not root_path:
             raise ValueError("Explorer root directory is not configured")
         return self.sftp.normalize(root_path)
+
+    # -- confined filesystem mutation mechanics -------------------------------
+    def fs_lstat(self, path: str) -> Optional[Dict[str, Any]]:
+        lstat = getattr(self.sftp, "lstat", None) or self.sftp.stat
+        try:
+            return _remote_fs_stat_dict(lstat(path))
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError) or exc.errno == errno.ENOENT:
+                return None
+            raise
+
+    def fs_listdir(self, path: str) -> List[Tuple[str, Dict[str, Any]]]:
+        return [
+            (getattr(entry, "filename", ""), _remote_fs_stat_dict(entry))
+            for entry in self.sftp.listdir_attr(path)
+        ]
+
+    def fs_join(self, parent: str, name: str) -> str:
+        return _remote_path_join(parent, name)
+
+    def fs_mkdir_exclusive(self, path: str) -> None:
+        self.sftp.mkdir(path)
+
+    def fs_create_exclusive(self, path: str) -> Any:
+        # Unlike replace_file's UUID temp, this is the final destination:
+        # exclusive-create is mandatory and there is deliberately no "wb"
+        # fallback that could truncate an external writer's entry.
+        return self.sftp.open(path, "x+b")
+
+    def fs_read_chunks(self, path: str, chunk_size: int) -> Any:
+        handle = self.sftp.open(path, "rb")
+        try:
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    return
+                yield chunk
+        finally:
+            handle.close()
+
+    def fs_remove_file(self, path: str) -> None:
+        self.sftp.remove(path)
+
+    def fs_rmdir(self, path: str) -> None:
+        self.sftp.rmdir(path)
+
+    def fs_rename(self, source: str, destination: str) -> None:
+        self.sftp.rename(source, destination)
+
+    def fs_chmod(self, path: str, mode: int) -> None:
+        self.sftp.chmod(path, mode)
+
+    def fs_utime(self, path: str, mtime: float) -> None:
+        self.sftp.utime(path, (mtime, mtime))
+
+    def fs_claim_namespace(self) -> str:
+        session = self.session
+        return (
+            f"ssh:{getattr(session, 'host', '')}:"
+            f"{getattr(session, 'port', 22)}:{getattr(session, 'username', '')}"
+        )
+
+    def fs_claim_key(self, path: str) -> str:
+        return f"{self.fs_claim_namespace()}|{_remote_compare_path(path)}"
+
+    def fs_path_is_same_or_descendant(self, parent: str, candidate: str) -> bool:
+        return _remote_path_inside(parent, candidate)
 
     # -- read-only filesystem access ------------------------------------------
     def list_entries(self, root_path: str, directory_path: str) -> List[Dict[str, Any]]:
@@ -2211,8 +2477,9 @@ def _relative_remote_explorer_path(root_path: str, path: str) -> str:
 
 def _remote_explorer_entry_payload(root_path: str, directory_path: str, entry: Any) -> Dict[str, Any]:
     """Return metadata for one remote explorer entry."""
-    mode = getattr(entry, "st_mode", None)
-    is_dir = stat_module.S_ISDIR(mode) if mode is not None else False
+    stat_info = _remote_fs_stat_dict(entry)
+    kind = stat_info["kind"]
+    is_dir = kind == "directory"
     entry_path = _remote_path_join(directory_path, getattr(entry, "filename", ""))
     return {
         "name": getattr(entry, "filename", ""),
@@ -2220,6 +2487,8 @@ def _remote_explorer_entry_payload(root_path: str, directory_path: str, entry: A
         "type": "directory" if is_dir else "file",
         "size": None if is_dir else getattr(entry, "st_size", None),
         "modified": getattr(entry, "st_mtime", None),
+        "entry_kind": kind,
+        "revision": _fs_revision(stat_info),
     }
 
 
@@ -2569,7 +2838,7 @@ def save_explorer_file_payload(
     # resolve_file confirms an existing regular file inside the session root.
     root_path, file_path = backend.resolve_file(requested_path)
 
-    with _explorer_save_claim(session_id, file_path):
+    with _explorer_save_claim(session_id, backend.fs_claim_key(file_path)):
         # Filename/language gate (also raises for unsupported formats).
         _explorer_editor_language(file_path)
 

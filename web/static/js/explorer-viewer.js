@@ -1107,10 +1107,20 @@
         return `${trimmedBase}${separator}${nativeRel}`;
     }
 
+    let _explorerContextMenuInvoker = null;
+
     function dismissExplorerContextMenu() {
+        const { restoreFocus = true } = arguments[0] || {};
         document.getElementById('explorer-ctx-menu')?.remove();
         document.removeEventListener('keydown', _explorerContextMenuKeydown, true);
         document.removeEventListener('mousedown', _explorerContextMenuOutside, true);
+        document.querySelectorAll('.explorer-context-target')
+            .forEach(node => node.classList.remove('explorer-context-target'));
+        const invoker = _explorerContextMenuInvoker;
+        _explorerContextMenuInvoker = null;
+        if (restoreFocus && invoker?.isConnected) {
+            invoker.focus({ preventScroll: true });
+        }
     }
 
     function _explorerContextMenuOutside(event) {
@@ -1125,7 +1135,7 @@
         if (!menu) {
             return;
         }
-        const items = Array.from(menu.querySelectorAll('button'));
+        const items = Array.from(menu.querySelectorAll('button:not(:disabled)'));
         if (!items.length) {
             return;
         }
@@ -1149,15 +1159,41 @@
         const menu = document.createElement('div');
         menu.id = 'explorer-ctx-menu';
         menu.setAttribute('role', 'menu');
-        items.forEach(({ label, action }) => {
+        items.forEach(({
+            label,
+            action,
+            disabled = false,
+            danger = false,
+            separatorBefore = false,
+            title = ''
+        }) => {
+            if (separatorBefore) {
+                const separator = document.createElement('div');
+                separator.className = 'explorer-ctx-separator';
+                separator.setAttribute('role', 'separator');
+                menu.appendChild(separator);
+            }
             const button = document.createElement('button');
             button.type = 'button';
             button.setAttribute('role', 'menuitem');
             button.textContent = label;
-            button.addEventListener('click', () => {
-                action();
-                dismissExplorerContextMenu();
-            });
+            button.disabled = Boolean(disabled);
+            button.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+            if (danger) {
+                button.classList.add('danger');
+            }
+            if (title) {
+                button.title = title;
+            }
+            if (!disabled && typeof action === 'function') {
+                button.addEventListener('click', () => {
+                    const result = action();
+                    dismissExplorerContextMenu();
+                    Promise.resolve(result).catch(error => {
+                        console.error('[GridVibe Sessions] Explorer menu action failed:', error);
+                    });
+                });
+            }
             menu.appendChild(button);
         });
         menu.style.visibility = 'hidden';
@@ -1169,7 +1205,9 @@
         menu.style.left = `${Math.max(8, Math.min(x, vw - rect.width - 8))}px`;
         menu.style.top = `${Math.max(8, Math.min(y, vh - rect.height - 8))}px`;
         menu.style.visibility = 'visible';
-        menu.querySelector('button')?.focus();
+        const initialItem = Array.from(menu.querySelectorAll('button:not(:disabled)'))
+            .find(button => !button.classList.contains('danger'));
+        initialItem?.focus();
 
         // Defer the outside-dismiss listener so the opening interaction does not
         // immediately close the menu.
@@ -1179,29 +1217,68 @@
         document.addEventListener('keydown', _explorerContextMenuKeydown, true);
     }
 
-    function handleExplorerCopyPathMenu(event, index) {
+    function handleExplorerContextMenu(event, index) {
         const row = event.target.closest('[data-explorer-copy-path]');
         if (!row) {
             return;
         }
         event.preventDefault();
+        document.querySelectorAll('.explorer-context-target')
+            .forEach(node => node.classList.remove('explorer-context-target'));
+        row.classList.add('explorer-context-target');
+        _explorerContextMenuInvoker = row.matches('button') ? row : (row.querySelector('button') || row);
         const relativePath = row.dataset.explorerCopyPath || '';
         const absolutePath = explorerJoinRootPath(explorerRootDirectory(index), relativePath);
-        const items = [
+        const filesystemItems = row.dataset.explorerContextKind
+            && typeof explorerFilesystemMenuItems === 'function'
+            ? explorerFilesystemMenuItems(index, {
+                path: row.dataset.explorerContextPath || relativePath,
+                kind: row.dataset.explorerContextKind || '',
+                revision: row.dataset.explorerContextRevision || '',
+                surface: row.dataset.explorerContextSurface || ''
+            })
+            : [];
+        const beforePath = filesystemItems.filter(item => item.placement !== 'after-path');
+        const afterPath = filesystemItems.filter(item => item.placement === 'after-path');
+        const pathItems = [
             { label: 'Copy path', action: () => _copyText(absolutePath || relativePath) },
         ];
         if (relativePath) {
-            items.push({ label: 'Copy relative path', action: () => _copyText(relativePath) });
+            pathItems.push({ label: 'Copy relative path', action: () => _copyText(relativePath) });
         }
-        showExplorerContextMenu(event.clientX, event.clientY, items);
+        if (beforePath.length) {
+            pathItems[0].separatorBefore = true;
+        }
+        if (afterPath.length) {
+            afterPath[0].separatorBefore = true;
+        }
+        const items = [...beforePath, ...pathItems, ...afterPath];
+        let x = event.clientX;
+        let y = event.clientY;
+        if (x <= 0 && y <= 0) {
+            const rect = row.getBoundingClientRect();
+            x = rect.left + Math.min(24, rect.width);
+            y = rect.top + Math.min(rect.height, 24);
+        }
+        showExplorerContextMenu(x, y, items);
+    }
+
+    function wireExplorerContextMenu(panel, index) {
+        if (!panel || panel.dataset.contextMenuWired === 'true') {
+            return;
+        }
+        panel.dataset.contextMenuWired = 'true';
+        panel.addEventListener('contextmenu', event => handleExplorerContextMenu(event, index));
+    }
+
+    /* Backwards-compatible name retained for extracted-page contract tests and
+       callers outside this module; all behavior lives in the generalized menu. */
+    function handleExplorerCopyPathMenu(event, index) {
+        handleExplorerContextMenu(event, index);
     }
 
     function wireExplorerCopyPathMenu(panel, index) {
-        if (!panel || panel.dataset.copyPathMenuWired === 'true') {
-            return;
-        }
-        panel.dataset.copyPathMenuWired = 'true';
-        panel.addEventListener('contextmenu', event => handleExplorerCopyPathMenu(event, index));
+        wireExplorerContextMenu(panel, index);
     }
 
     function renderExplorerGitPanel(index) {
@@ -1754,6 +1831,7 @@
             if (!response.ok) {
                 throw new Error(data.error || 'Failed to load directory');
             }
+            updateExplorerFilesystemRootRevision(index, data.root_revision || '');
             const entries = (Array.isArray(data.entries) ? data.entries : []).filter(entry => !entry.deleted);
             pane._explorerTreeChildren.set(key, entries);
             return entries;
@@ -1793,7 +1871,14 @@
             : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">↗</button>`;
 
         return `
-            <div class="explorer-tree-row${active ? ' active' : ''}" data-explorer-copy-path="${escHtml(path)}">
+            <div
+                class="explorer-tree-row${active ? ' active' : ''}"
+                data-explorer-copy-path="${escHtml(path)}"
+                data-explorer-context-path="${escHtml(path)}"
+                data-explorer-context-kind="${escHtml(entry.entry_kind || '')}"
+                data-explorer-context-revision="${escHtml(entry.revision || '')}"
+                data-explorer-context-surface="tree"
+            >
                 <button type="button" class="explorer-tree-main" ${action} style="padding-left:${7 + depth * EXPLORER_TREE_INDENT_PX}px" title="${escHtml(path)}">
                     <span class="explorer-tree-chevron" aria-hidden="true">${chevron}</span>
                     ${isDirectory ? EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(entry.name || path)}
@@ -3465,12 +3550,19 @@
             end: matchIndex + String(query).length,
             active
         }];
+        const contextAttributes = isDeleted ? '' : `
+                data-explorer-copy-path="${escHtml(entry.path || '')}"
+                data-explorer-context-path="${escHtml(entry.path || '')}"
+                data-explorer-context-kind="${escHtml(entry.entry_kind || '')}"
+                data-explorer-context-revision="${escHtml(entry.revision || '')}"
+                data-explorer-context-surface="preview"`;
 
         return `
             <button
                 type="button"
                 class="explorer-row ${isDirectory ? 'directory' : 'file'}${isDeleted ? ' deleted' : ''}"
                 data-explorer-path="${escHtml(entry.path || '')}"
+                ${contextAttributes}
                 ${isDeleted ? 'disabled' : ''}
             >
                 ${isDirectory ? EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(name || entry.path)}
@@ -4297,6 +4389,7 @@
         if (!list) {
             return null;
         }
+        wireExplorerContextMenu(list, index);
         let viewer = document.getElementById(`explorer-viewer-${index}`);
         if (!viewer) {
             list.innerHTML =
@@ -5749,6 +5842,7 @@
                 throw new Error(data.error || 'Failed to load directory');
             }
 
+            updateExplorerFilesystemRootRevision(index, data.root_revision || '');
             pane._attached = true;
             pane._explorerMode = 'directory';
             pane._explorerFilePath = '';

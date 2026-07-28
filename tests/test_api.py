@@ -195,6 +195,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/explorer-viewer.js",
             "js/explorer-editor.js",
             "js/explorer-search.js",
+            "js/explorer-fs.js",
             "js/terminals.js",
         ):
             marker = f"/static/{asset}"
@@ -10138,6 +10139,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/explorer-viewer.js",
         "js/explorer-editor.js",
         "js/explorer-search.js",
+        "js/explorer-fs.js",
     )
 
     def setUp(self):
@@ -10237,6 +10239,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertIn(f"/static/js/voice-input.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-viewer.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-editor.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/explorer-fs.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/terminals.js?v={__version__}", terminals_html)
         # shared.js must load before each page script so its globals exist first.
         self.assertLess(
@@ -10274,6 +10277,10 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         )
         self.assertLess(
             terminals_html.index("js/explorer-search.js"),
+            terminals_html.index("js/explorer-fs.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-fs.js"),
             terminals_html.index("js/terminals.js"),
         )
 
@@ -10290,6 +10297,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/explorer-viewer.js",
             "js/explorer-editor.js",
             "js/explorer-search.js",
+            "js/explorer-fs.js",
             "js/terminals.js",
         ):
             with self.subTest(filename=filename):
@@ -10536,6 +10544,16 @@ class CrossOriginWriteGuardTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertIn("Cross-origin", response.get_json()["error"])
+
+    def test_cross_origin_explorer_mutations_are_rejected(self):
+        for action in ("paste", "delete"):
+            with self.subTest(action=action):
+                response = self.client.post(
+                    f"/api/explorer/missing/{action}",
+                    json={},
+                    headers={"Origin": "http://evil.example"},
+                )
+                self.assertEqual(response.status_code, 403)
 
     def test_cross_origin_delete_is_rejected(self):
         response = self.client.delete(

@@ -4376,6 +4376,83 @@
             background: var(--t-ctx-hover);
             outline: none;
         }
+        #explorer-ctx-menu .explorer-ctx-separator {
+            height: 1px;
+            margin: 4px 0;
+            background: var(--t-ctx-border);
+        }
+        #explorer-ctx-menu button:disabled {
+            color: var(--t-text-muted);
+            cursor: default;
+            opacity: .65;
+        }
+        #explorer-ctx-menu button:disabled:hover {
+            background: none;
+        }
+        #explorer-ctx-menu button.danger {
+            color: var(--gv-danger);
+        }
+        .explorer-context-target {
+            outline: 1px solid var(--t-accent);
+            outline-offset: -1px;
+        }
+        .explorer-fs-highlight {
+            background: var(--explorer-row-active);
+            outline: 1px solid var(--t-accent);
+            outline-offset: -1px;
+        }
+        .terminal-container.explorer-fs-busy {
+            cursor: progress;
+        }
+        .explorer-fs-busy-label {
+            position: absolute;
+            z-index: 8;
+            right: 12px;
+            bottom: 12px;
+            max-width: calc(100% - 24px);
+            padding: 6px 10px;
+            border: 1px solid var(--explorer-btn-border);
+            border-radius: 6px;
+            background: var(--t-ctx-bg);
+            color: var(--t-text);
+            box-shadow: 0 4px 12px color-mix(in srgb, var(--t-bg) 60%, transparent);
+            font-size: .75rem;
+            pointer-events: none;
+        }
+        .explorer-fs-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            padding: 7px 12px;
+            border-bottom: 1px solid var(--explorer-row-border);
+            background: var(--explorer-row-active);
+            color: var(--gv-danger);
+            font-size: .74rem;
+        }
+        .explorer-fs-bar-message {
+            flex: 1 1 200px;
+            min-width: 0;
+        }
+        .explorer-fs-bar-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .explorer-fs-bar-action {
+            padding: 4px 8px;
+            border: 1px solid var(--explorer-btn-border);
+            border-radius: 5px;
+            background: var(--explorer-btn-bg);
+            color: var(--explorer-btn-text);
+            cursor: pointer;
+            font: inherit;
+        }
+        .explorer-fs-bar-action:hover,
+        .explorer-fs-bar-action:focus-visible {
+            border-color: var(--t-accent);
+            outline: none;
+        }
 
         /* placeholder states */
         .placeholder {
