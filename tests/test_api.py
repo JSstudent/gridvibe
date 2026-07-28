@@ -1404,7 +1404,8 @@ class ApiRoutesTestCase(unittest.TestCase):
             "new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs)",
             html,
         )
-        # Render path prefers Diff2Html, falling back to the handwritten renderer.
+        # Both wrapped and unwrapped paths prefer Diff2Html; only unavailable
+        # vendor assets use the handwritten renderer.
         self.assertIn("function renderExplorerDiffWithDiff2Html(index, code, diff, banner)", html)
         self.assertIn(
             "if (!renderExplorerDiffWithDiff2Html(index, code, diff, banner)) {",
@@ -2122,6 +2123,41 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("renderExplorerDiff(index);", html)
         self.assertIn("if (activeExplorerFileView(index) === 'diff')", html)
         self.assertIn('data-explorer-file-panel="diff"', html)
+
+    def test_terminals_page_markdown_and_diff_line_wrap_preferences(self):
+        """Preview and diff expose persisted, gutter-safe opt-in wrapping."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("preview: 'gridvibe.mdPreviewWrap'", html)
+        self.assertIn("diff: 'gridvibe.diffWrap'", html)
+        self.assertIn('data-explorer-line-wrap="${index}"', html)
+        self.assertIn("function setExplorerLineWrapPreference(mode, enabled)", html)
+        self.assertIn("applyExplorerLineWrapState(index, selectedMode);", html)
+        # Wrapped diffs retain Diff2Html's intraline markup; paired row heights
+        # are synchronized around the fixed middle number gutter.
+        self.assertIn(
+            "function synchroniseExplorerDiffWrappedRows(host)",
+            html,
+        )
+        self.assertIn("row.style.height = `${maxHeight}px`;", html)
+        self.assertIn(
+            ".explorer-diff-content.wrap-lines .explorer-diff2html .d2h-code-line-ctn {",
+            html,
+        )
+        self.assertIn("display: inline;", html)
+        self.assertIn("white-space: pre-wrap;", html)
+        self.assertIn(
+            ":is(.d2h-code-side-line ins, .d2h-code-side-line del) {",
+            html,
+        )
+        self.assertIn("max-width: 4em;", html)
+        self.assertIn(".explorer-markdown-preview.wrap-lines > * {", html)
+        self.assertIn(".explorer-markdown-preview p,", html)
+        self.assertIn("text-align: justify;", html)
+        self.assertIn("const EXPLORER_LINE_WRAP_ICON =", html)
+        self.assertIn('stroke="currentColor"', html)
 
     def test_terminals_page_explorer_markdown_source_sections_can_be_collapsed(self):
         response = self.client.get("/terminals")

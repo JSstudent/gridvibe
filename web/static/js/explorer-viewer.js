@@ -2299,6 +2299,34 @@
         });
     }
 
+    function synchroniseExplorerDiffWrappedRows(host) {
+        const sides = host?._explorerDiffSides || [];
+        const rowsBySide = sides.map(side => [
+            ...side.querySelectorAll('.d2h-diff-tbody > tr')
+        ]);
+        rowsBySide.flat().forEach(row => {
+            row.style.height = '';
+        });
+        if (sides.length !== 2
+            || !host.closest('.explorer-diff-content')?.classList.contains('wrap-lines')) {
+            return;
+        }
+
+        const rowCount = Math.max(...rowsBySide.map(rows => rows.length), 0);
+        for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+            const pairedRows = rowsBySide
+                .map(rows => rows[rowIndex])
+                .filter(Boolean);
+            const heights = pairedRows.map(row => row.getBoundingClientRect().height);
+            const maxHeight = Math.max(...heights, 0);
+            pairedRows.forEach((row, sideIndex) => {
+                if (maxHeight - heights[sideIndex] > 0.5) {
+                    row.style.height = `${maxHeight}px`;
+                }
+            });
+        }
+    }
+
     function scheduleExplorerDiffScrollbarSync(host) {
         if (!host || host._explorerDiffScrollbarFrame) {
             return;
@@ -2306,6 +2334,7 @@
         const sync = () => {
             host._explorerDiffScrollbarFrame = null;
             if (host.isConnected) {
+                synchroniseExplorerDiffWrappedRows(host);
                 synchroniseExplorerDiffScrollbars(host);
             }
         };
@@ -2360,10 +2389,14 @@
 
         if (typeof window.ResizeObserver === 'function') {
             const observer = new window.ResizeObserver(entries => {
-                if (entries.length) {
+                const width = entries[0]?.contentRect?.width;
+                if (Number.isFinite(width)
+                    && Math.abs(width - (host._explorerDiffObservedWidth || 0)) > 0.5) {
+                    host._explorerDiffObservedWidth = width;
                     scheduleExplorerDiffScrollbarSync(host);
                 }
             });
+            host._explorerDiffObservedWidth = filesDiff.getBoundingClientRect().width;
             observer.observe(filesDiff);
             host._explorerDiffResizeObserver = observer;
         }
@@ -2411,6 +2444,8 @@
             return;
         }
         disconnectExplorerDiffLayout(code.querySelector('.explorer-diff2html'));
+        const wrapLines = explorerLineWrapPreference('diff');
+        code.classList.toggle('wrap-lines', wrapLines);
         const diff = pane._explorerDiffContent || '';
         if (!diff) {
             code.innerHTML = '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
@@ -2641,6 +2676,7 @@
         list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
             panel.hidden = panel.dataset.explorerFilePanel !== selectedMode;
         });
+        applyExplorerLineWrapState(index, selectedMode);
         if (isDiffMode) {
             loadExplorerDiff(index);
             const state = pane ? ensureExplorerSearchState(pane, 'file') : null;
@@ -2781,6 +2817,11 @@
     const EXPLORER_MD_FONT_DEFAULT = 'system';
     const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';
     const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';
+    const EXPLORER_LINE_WRAP_KEYS = Object.freeze({
+        preview: 'gridvibe.mdPreviewWrap',
+        diff: 'gridvibe.diffWrap',
+    });
+    const _explorerLineWrapSession = Object.create(null);
     const EXPLORER_MD_PRESET_LABELS = {
         default: 'Default',
         paper: 'Paper',
@@ -2795,6 +2836,105 @@
         'jetbrains-mono': 'JetBrains Mono',
         'courier-new': 'Courier New',
     };
+
+    function explorerLineWrapPreference(mode) {
+        if (!Object.prototype.hasOwnProperty.call(EXPLORER_LINE_WRAP_KEYS, mode)) {
+            return false;
+        }
+        if (typeof _explorerLineWrapSession[mode] === 'boolean') {
+            return _explorerLineWrapSession[mode];
+        }
+        try {
+            return window.localStorage.getItem(EXPLORER_LINE_WRAP_KEYS[mode]) === 'true';
+        } catch (err) {
+            return false;
+        }
+    }
+
+    function explorerLineWrapControlText(mode, enabled) {
+        const viewLabel = mode === 'preview' ? 'Markdown preview' : 'diff';
+        return `${enabled ? 'Disable' : 'Enable'} line wrapping in ${viewLabel}`;
+    }
+
+    function explorerLineWrapControlHtml(index, initialMode = 'source') {
+        const mode = initialMode === 'preview' || initialMode === 'diff' ? initialMode : '';
+        const enabled = mode ? explorerLineWrapPreference(mode) : false;
+        const label = mode ? explorerLineWrapControlText(mode, enabled) : 'Wrap lines';
+        return `
+            <button
+                type="button"
+                class="explorer-line-wrap-btn"
+                data-explorer-line-wrap="${index}"
+                data-explorer-wrap-mode="${mode}"
+                title="${label}"
+                aria-label="${label}"
+                aria-pressed="${enabled ? 'true' : 'false'}"
+                ${mode ? '' : 'hidden'}
+            >${EXPLORER_LINE_WRAP_ICON}</button>
+        `;
+    }
+
+    function applyExplorerLineWrapState(index, selectedMode = activeExplorerFileView(index)) {
+        const preview = document.getElementById(`explorer-preview-${index}`);
+        const diff = document.getElementById(`explorer-diff-code-${index}`);
+        const previewWrap = explorerLineWrapPreference('preview');
+        const diffWrap = explorerLineWrapPreference('diff');
+        preview?.classList.toggle('wrap-lines', previewWrap);
+        diff?.classList.toggle('wrap-lines', diffWrap);
+
+        const button = document.querySelector(`[data-explorer-line-wrap="${index}"]`);
+        if (!button) {
+            return;
+        }
+        const modeAvailable = (selectedMode === 'preview' && preview)
+            || (selectedMode === 'diff' && diff);
+        button.hidden = !modeAvailable;
+        if (!modeAvailable) {
+            button.dataset.explorerWrapMode = '';
+            button.setAttribute('aria-pressed', 'false');
+            return;
+        }
+        const enabled = selectedMode === 'preview' ? previewWrap : diffWrap;
+        const label = explorerLineWrapControlText(selectedMode, enabled);
+        button.dataset.explorerWrapMode = selectedMode;
+        button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+        button.setAttribute('title', label);
+        button.setAttribute('aria-label', label);
+    }
+
+    function setExplorerLineWrapPreference(mode, enabled) {
+        if (!Object.prototype.hasOwnProperty.call(EXPLORER_LINE_WRAP_KEYS, mode)) {
+            return;
+        }
+        _explorerLineWrapSession[mode] = Boolean(enabled);
+        try {
+            window.localStorage.setItem(EXPLORER_LINE_WRAP_KEYS[mode], enabled ? 'true' : 'false');
+        } catch (err) {
+            // Non-fatal: the in-memory preference still applies this session.
+        }
+        terminals.forEach((pane, index) => {
+            applyExplorerLineWrapState(index);
+            if (mode === 'diff' && pane?._explorerDiffLoaded) {
+                applyExplorerSearch(index);
+            }
+        });
+    }
+
+    function wireExplorerLineWrapControl(index) {
+        const button = document.querySelector(`[data-explorer-line-wrap="${index}"]`);
+        if (!button || button.dataset.bound) {
+            applyExplorerLineWrapState(index);
+            return;
+        }
+        button.dataset.bound = 'true';
+        button.addEventListener('click', () => {
+            const mode = button.dataset.explorerWrapMode;
+            if (mode === 'preview' || mode === 'diff') {
+                setExplorerLineWrapPreference(mode, !explorerLineWrapPreference(mode));
+            }
+        });
+        applyExplorerLineWrapState(index);
+    }
 
     function readExplorerMarkdownPref(key, allowed, fallback) {
         let stored = '';
@@ -5454,6 +5594,7 @@
                         <span class="explorer-zoom-value" data-explorer-zoom-value="${index}"></span>
                         <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">+</button>
                     </div>
+                    ${(hasPreview || hasGitDiff) ? explorerLineWrapControlHtml(index, initialFileView) : ''}
                     ${hasPreview ? `<button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Markdown appearance" aria-label="Markdown preview appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>` : ''}
                     ${explorerEditorControlsHtml(index)}
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
@@ -5505,6 +5646,7 @@
                 }
             });
         }
+        wireExplorerLineWrapControl(index);
 
         const downloadButton = list.querySelector(`[data-explorer-download="${index}"]`);
         if (downloadButton) {
@@ -5676,6 +5818,7 @@
                     <div class="explorer-editor-tabs" role="tablist" aria-label="File view">
                         <button type="button" class="explorer-editor-tab" data-explorer-file-view="diff" data-explorer-diff-toggle="${index}" role="tab" aria-selected="true" aria-pressed="true">Diff</button>
                     </div>
+                    ${explorerLineWrapControlHtml(index, 'diff')}
                     <div class="explorer-editor-search" data-explorer-search="${index}">
                         <input
                             type="search"
@@ -5705,6 +5848,7 @@
                 }
             });
         });
+        wireExplorerLineWrapControl(index);
         wireExplorerSearchControls(index);
         applyExplorerEditorFontSize(index);
         loadExplorerDiff(index);

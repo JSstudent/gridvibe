@@ -2889,7 +2889,8 @@
         }
 
         .explorer-download-btn,
-        .explorer-md-appearance-btn {
+        .explorer-md-appearance-btn,
+        .explorer-line-wrap-btn {
             width: 28px;
             height: 28px;
             display: inline-flex;
@@ -2905,8 +2906,14 @@
 
         .explorer-download-btn:hover,
         .explorer-md-appearance-btn:hover,
-        .explorer-md-appearance-btn[aria-expanded="true"] {
+        .explorer-md-appearance-btn[aria-expanded="true"],
+        .explorer-line-wrap-btn:hover,
+        .explorer-line-wrap-btn[aria-pressed="true"] {
             color: var(--t-accent);
+        }
+
+        .explorer-line-wrap-btn[hidden] {
+            display: none;
         }
 
         .terminal-toast {
@@ -2944,7 +2951,8 @@
         }
 
         .explorer-download-btn svg,
-        .explorer-md-appearance-btn svg {
+        .explorer-md-appearance-btn svg,
+        .explorer-line-wrap-btn svg {
             width: 14px;
             height: 14px;
         }
@@ -3033,7 +3041,8 @@
 
         .explorer-editor.is-editing .explorer-editor-tab,
         .explorer-editor.is-editing .explorer-download-btn,
-        .explorer-editor.is-editing .explorer-md-appearance-btn {
+        .explorer-editor.is-editing .explorer-md-appearance-btn,
+        .explorer-editor.is-editing .explorer-line-wrap-btn {
             opacity: .5;
         }
 
@@ -3940,6 +3949,48 @@
             max-width: 4em;
         }
 
+        /* Wrapped mode keeps Diff2Html's syntax + intraline markup. The existing
+           4em number cell reserves the gutter; JS equalises each pair of row
+           heights after wrapping so the two sides cannot drift vertically. */
+        .explorer-diff-content.wrap-lines .explorer-diff2html .d2h-file-side-diff {
+            overflow-x: hidden;
+        }
+
+        .explorer-diff-content.wrap-lines .explorer-diff2html .d2h-code-side-line {
+            display: block;
+            /* Do not preserve the template's formatting whitespace between the
+               prefix/code spans; only the actual code span wraps below. */
+            white-space: nowrap;
+        }
+
+        .explorer-diff-content.wrap-lines .explorer-diff2html .d2h-code-line-ctn {
+            display: inline;
+            width: auto;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            vertical-align: top;
+        }
+
+        .explorer-diff-content.wrap-lines .explorer-diff2html .d2h-code-line-prefix {
+            white-space: pre;
+        }
+
+        .explorer-diff-content.wrap-lines
+        .explorer-diff2html
+        :is(.d2h-code-side-line ins, .d2h-code-side-line del) {
+            display: inline;
+            white-space: inherit;
+        }
+
+        .explorer-diff-content.wrap-lines .explorer-diff2html .d2h-code-side-linenumber {
+            vertical-align: top;
+        }
+
+        .explorer-diff-content.wrap-lines .explorer-diff-horizontal-scrollbars {
+            display: none;
+        }
+
         .explorer-diff2html .d2h-file-header {
             display: none;
         }
@@ -4079,6 +4130,40 @@
 
         .explorer-markdown-preview > * {
             max-width: var(--md-preview-measure);
+        }
+
+        /* Opt-in full-pane wrapping keeps the existing reading measure as the
+           default, while allowing long prose/URLs to use the whole viewer. */
+        .explorer-markdown-preview.wrap-lines > * {
+            box-sizing: border-box;
+            max-width: 100%;
+        }
+
+        .explorer-markdown-preview p,
+        .explorer-markdown-preview li {
+            text-align: justify;
+            text-justify: inter-word;
+        }
+
+        .explorer-markdown-preview.wrap-lines :is(p, li, blockquote, dd, th, td) {
+            overflow-wrap: anywhere;
+        }
+
+        .explorer-markdown-preview.wrap-lines table {
+            width: 100%;
+            table-layout: fixed;
+        }
+
+        .explorer-markdown-preview pre,
+        .explorer-markdown-preview table,
+        .explorer-markdown-preview .explorer-mermaid,
+        .explorer-markdown-preview h1,
+        .explorer-markdown-preview h2,
+        .explorer-markdown-preview h3,
+        .explorer-markdown-preview h4,
+        .explorer-markdown-preview h5,
+        .explorer-markdown-preview h6 {
+            text-align: left;
         }
 
         /* Reading-surface presets (ISSUE-2026-030). */
