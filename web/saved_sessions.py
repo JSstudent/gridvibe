@@ -121,6 +121,20 @@ def _normalize_explorer_tab_font_size(value: Any) -> int:
     return max(EXPLORER_EDITOR_FONT_MIN, min(EXPLORER_EDITOR_FONT_MAX, font_size))
 
 
+def _normalize_explorer_line_wrap(raw_view: Dict[str, Any]) -> Dict[str, bool]:
+    """Return the per-tab preview/diff line-wrap opt-outs.
+
+    Wrapping is on by default, so only an explicit off flag persists — an absent
+    key restores wrapped, which is also what tabs saved before wrapping existed
+    (and every never-touched tab) get.
+    """
+    return {
+        key: False
+        for key in ("wrap_preview", "wrap_diff")
+        if key in raw_view and not raw_view[key]
+    }
+
+
 def _normalize_explorer_markdown_folds(value: Any) -> List[int]:
     """Return bounded, unique Markdown heading line numbers in document order."""
     if not isinstance(value, list):
@@ -183,14 +197,15 @@ def _normalize_explorer_view_snapshot(raw_view: Dict[str, Any]) -> Dict[str, Any
 
 
 def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str, Any]:
-    """Validate the per-tab view map: mode + scroll fraction + identity + zoom.
+    """Validate the per-tab view map: mode + scroll + identity + zoom + wrapping.
 
     Only entries for persisted open tabs survive (plus the reserved Preview
-    key, which keeps zoom, Markdown folds, and the tab's own separated path —
-    shown file and/or browsed directory); the mode must be a known file view,
-    the scroll is clamped to a [0, 1] fraction (OD-4), content identities are
-    short opaque tokens, and the font size and fold lines are bounded — anything
-    else is dropped rather than restored.
+    key, which keeps zoom, line wrapping, Markdown folds, and the tab's own
+    separated path — shown file and/or browsed directory); the mode must be a
+    known file view, the scroll is clamped to a [0, 1] fraction (OD-4), content
+    identities are short opaque tokens, line-wrap flags are booleans, and the
+    font size and fold lines are bounded — anything else is dropped rather than
+    restored.
     """
     if not isinstance(value, dict):
         return {}
@@ -203,6 +218,7 @@ def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str,
             font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
             if font_size:
                 record["font_size"] = font_size
+            record.update(_normalize_explorer_line_wrap(raw_view))
             preview_path = _normalize_explorer_tab_path(raw_view.get("path"))
             if preview_path:
                 record["path"] = preview_path
@@ -224,6 +240,7 @@ def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str,
         font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
         if font_size:
             record["font_size"] = font_size
+        record.update(_normalize_explorer_line_wrap(raw_view))
         folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
         fold_identity = _normalize_explorer_view_identity(raw_view.get("fold_identity"))
         if folds and fold_identity:

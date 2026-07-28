@@ -5,10 +5,12 @@ design, but the workspace *shape* (groups + per-session launch config) can.
 Schema v2 stores one slot per workspace id (``workspaces`` dict) so a future
 multi-window upgrade is additive; today there is exactly one ``"default"``
 workspace. Exactly two writers exist — the autosave timer and the explicit
-Save Workspace action — and both funnel through ``capture_workspace``. The
-snapshot never contains passwords — a restored SSH session re-authenticates
-with keys or a saved-session password. ``runtime_state.json`` is local state
-and gitignored.
+Save Workspace action — and both funnel through ``capture_workspace``. A slot
+also records which group was in front (``active_group_id``) so the restore
+reopens the workspace on it rather than on whichever group happens to be
+newest. The snapshot never contains passwords — a restored SSH session
+re-authenticates with keys or a saved-session password. ``runtime_state.json``
+is local state and gitignored.
 """
 
 import json
@@ -134,6 +136,9 @@ def _read_state_locked() -> Dict[str, Any]:
         "label": _derive_workspace_label(groups),
         "origin": "auto",
         "saved_at": data.get("saved_at") if isinstance(data.get("saved_at"), (int, float)) else time.time(),
+        # v1 predates the active-group hint; a restore falls back to the
+        # workspace's own group ordering, exactly as it did before.
+        "active_group_id": "",
         "groups": groups,
     }
     return state
@@ -160,6 +165,7 @@ def capture_workspace(
     workspace_id: str = DEFAULT_WORKSPACE_ID,
     origin: str = "auto",
     label: Optional[str] = None,
+    active_group_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Capture one workspace's shape from the live manager and persist its slot.
 
@@ -167,6 +173,11 @@ def capture_workspace(
     Returns the stored slot dict, or ``None`` when the workspace has no live
     groups (the existing slot, if any, is left untouched — a slot is only ever
     overwritten by a non-empty capture, never cleared by the timer).
+
+    ``active_group_id`` names the group the restore should reopen on; ``None``
+    (the autosave timer's case) asks the manager for its live hint. Either way
+    it only survives if it names a group this capture actually stored, so a
+    restore never targets a group that was skipped for having no sessions.
     """
     workspace_id = str(workspace_id or DEFAULT_WORKSPACE_ID).strip() or DEFAULT_WORKSPACE_ID
     groups = []
@@ -190,11 +201,18 @@ def capture_workspace(
     if not groups:
         return None
 
+    if active_group_id is None:
+        getter = getattr(session_manager, "get_active_group_id", None)
+        active_group_id = getter() if callable(getter) else ""
+    active_group_id = str(active_group_id or "").strip()
+    captured_group_ids = {group["group_id"] for group in groups}
+
     slot = {
         "workspace_id": workspace_id,
         "label": str(label or "").strip() or _derive_workspace_label(groups),
         "origin": "manual" if origin == "manual" else "auto",
         "saved_at": time.time(),
+        "active_group_id": active_group_id if active_group_id in captured_group_ids else "",
         "groups": groups,
     }
     with _runtime_state_lock:
@@ -220,6 +238,16 @@ def load_restorable_workspace(workspace_id: str = DEFAULT_WORKSPACE_ID) -> Optio
         return None
     if slot.get("origin") not in RESTORABLE_ORIGINS:
         return None
+    # Re-validate the hint on read: the file is local state a user may edit, and
+    # an id naming no stored group must degrade to "no preference", never send
+    # the restore looking for a group it will not create.
+    active_group_id = str(slot.get("active_group_id") or "").strip()
+    stored_group_ids = {
+        str(group.get("group_id") or "")
+        for group in groups
+        if isinstance(group, dict)
+    }
+    slot["active_group_id"] = active_group_id if active_group_id in stored_group_ids else ""
     return slot
 
 

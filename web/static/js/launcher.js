@@ -2253,13 +2253,16 @@
         console.info(`[GridVibe Launcher] ${action}`, details);
     }
 
-    async function viewActiveTerminals(event) {
+    async function viewActiveTerminals(event, preferredGroupId = '') {
         event.preventDefault();
         logLauncherWindowAction('View Active Terminals clicked', {
             pywebview: Boolean(window.pywebview?.api)
         });
 
-        if (window.pywebview?.api?.focus_session_window) {
+        /* A plain focus deliberately leaves the session window's URL alone, so
+           it cannot honour a requested group — a restore goes straight to
+           open_session_window, which retargets an existing window. */
+        if (!preferredGroupId && window.pywebview?.api?.focus_session_window) {
             try {
                 const result = await window.pywebview.api.focus_session_window();
                 logLauncherWindowAction('focus_session_window result', result || {});
@@ -2271,11 +2274,11 @@
             }
         }
 
-        await openTerminalsIfActive();
+        await openTerminalsIfActive(preferredGroupId);
         return false;
     }
 
-    async function openTerminalsIfActive() {
+    async function openTerminalsIfActive(preferredGroupId = '') {
         try {
             const resp = await fetch('/api/sessions');
             const data = await resp.json();
@@ -2290,12 +2293,19 @@
                 return;
             }
 
-            const firstGroupId = data.sessions.find(session => session.group_id)?.group_id || '';
+            /* A workspace restore names the group that was in front when the
+               workspace was saved; otherwise fall back to the first live one. */
+            const liveGroupIds = new Set(
+                data.sessions.map(session => session.group_id).filter(Boolean)
+            );
+            const targetGroupId = liveGroupIds.has(preferredGroupId)
+                ? preferredGroupId
+                : (data.sessions.find(session => session.group_id)?.group_id || '');
             if (window.pywebview?.api?.open_session_window) {
                 try {
-                    const result = await window.pywebview.api.open_session_window(firstGroupId);
+                    const result = await window.pywebview.api.open_session_window(targetGroupId);
                     logLauncherWindowAction('open_session_window result', {
-                        requested_group_id: firstGroupId || 'all',
+                        requested_group_id: targetGroupId || 'all',
                         ...(result || {})
                     });
                     if (result?.ok) {
@@ -2306,9 +2316,12 @@
                 }
             }
 
-            window.open('/terminals', 'gridvibe-sessions');
+            window.open(
+                targetGroupId ? `/terminals?group=${encodeURIComponent(targetGroupId)}` : '/terminals',
+                'gridvibe-sessions'
+            );
             logLauncherWindowAction('Opened browser terminals window fallback', {
-                requested_group_id: firstGroupId || 'all'
+                requested_group_id: targetGroupId || 'all'
             });
         } catch {
             showMessage('Could not check active sessions.', 'error');
@@ -2323,6 +2336,10 @@
        Passwords are never persisted — restored SSH panes use key auth or fail
        into the error placeholder (which has a Retry button). */
     let restorableWorkspaceGroups = [];
+    /* Snapshot id of the group that was in front when the workspace was saved.
+       Restored groups are minted with fresh ids, so it is resolved to the newly
+       created group by position during the replay below. */
+    let restorableActiveGroupId = '';
 
     function formatWorkspaceSavedAgo(savedAt) {
         const savedSeconds = Number(savedAt);
@@ -2354,6 +2371,7 @@
             return;
         }
         restorableWorkspaceGroups = data.groups;
+        restorableActiveGroupId = String(data.active_group_id || '');
         const groupCount = data.groups.length;
         const paneCount = data.groups.reduce(
             (total, group) => total + (Array.isArray(group.sessions) ? group.sessions.length : 0),
@@ -2419,6 +2437,7 @@
         const banner = document.getElementById('restoreWorkspaceBanner');
         if (banner) banner.hidden = true;
         restorableWorkspaceGroups = [];
+        restorableActiveGroupId = '';
     }
 
     async function restorePreviousWorkspace() {
@@ -2429,6 +2448,10 @@
             button.textContent = 'Restoring…';
         }
         let restored = 0;
+        /* Live id of the group that was in front when the workspace was saved,
+           resolved as the replay creates it — the restore opens the workspace
+           on this group instead of on whichever one ends up newest. */
+        let activeGroupId = '';
         try {
             for (const group of restorableWorkspaceGroups) {
                 const response = await fetch('/api/sessions', {
@@ -2436,13 +2459,19 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(await buildRestoreGroupBody(group))
                 });
-                if (response.ok) restored += 1;
+                if (!response.ok) continue;
+                restored += 1;
+                if (restorableActiveGroupId && group.group_id === restorableActiveGroupId) {
+                    const created = await response.json().catch(() => ({}));
+                    activeGroupId = String(created.group_id || '');
+                }
             }
             document.getElementById('restoreWorkspaceBanner')?.setAttribute('hidden', '');
             restorableWorkspaceGroups = [];
+            restorableActiveGroupId = '';
             if (restored > 0) {
                 showMessage(`Restored ${restored} session${restored === 1 ? '' : 's'} from the previous workspace.`, 'success');
-                await viewActiveTerminals({ preventDefault: () => {} });
+                await viewActiveTerminals({ preventDefault: () => {} }, activeGroupId);
             } else {
                 showMessage('Could not restore the previous workspace.', 'error');
             }

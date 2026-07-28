@@ -2444,7 +2444,7 @@
             return;
         }
         disconnectExplorerDiffLayout(code.querySelector('.explorer-diff2html'));
-        const wrapLines = explorerLineWrapPreference('diff');
+        const wrapLines = explorerLineWrapPreference(index, 'diff');
         code.classList.toggle('wrap-lines', wrapLines);
         const diff = pane._explorerDiffContent || '';
         if (!diff) {
@@ -2817,11 +2817,13 @@
     const EXPLORER_MD_FONT_DEFAULT = 'system';
     const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';
     const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';
-    const EXPLORER_LINE_WRAP_KEYS = Object.freeze({
-        preview: 'gridvibe.mdPreviewWrap',
-        diff: 'gridvibe.diffWrap',
-    });
-    const _explorerLineWrapSession = Object.create(null);
+    /* Line wrapping is per explorer tab, like the editor zoom above: each tab
+       record carries its own preview/diff flags instead of one workspace-global
+       preference, so every tab keeps the wrapping it was left at and the flags
+       ride along in the saved session's per-tab views. Both default to ON — a
+       wrapped view never hides content off to the right — so it is the *opt-out*
+       that is tracked and persisted, and an absent flag means wrapped. */
+    const EXPLORER_LINE_WRAP_MODES = Object.freeze(['preview', 'diff']);
     const EXPLORER_MD_PRESET_LABELS = {
         default: 'Default',
         paper: 'Paper',
@@ -2837,18 +2839,24 @@
         'courier-new': 'Courier New',
     };
 
-    function explorerLineWrapPreference(mode) {
-        if (!Object.prototype.hasOwnProperty.call(EXPLORER_LINE_WRAP_KEYS, mode)) {
+    function ensureExplorerTabLineWrap(tab) {
+        if (!tab) {
+            return { preview: true, diff: true };
+        }
+        const current = tab.lineWrap && typeof tab.lineWrap === 'object' ? tab.lineWrap : {};
+        tab.lineWrap = {
+            preview: current.preview !== false,
+            diff: current.diff !== false,
+        };
+        return tab.lineWrap;
+    }
+
+    function explorerLineWrapPreference(index, mode) {
+        const pane = terminals[index];
+        if (!pane || !EXPLORER_LINE_WRAP_MODES.includes(mode)) {
             return false;
         }
-        if (typeof _explorerLineWrapSession[mode] === 'boolean') {
-            return _explorerLineWrapSession[mode];
-        }
-        try {
-            return window.localStorage.getItem(EXPLORER_LINE_WRAP_KEYS[mode]) === 'true';
-        } catch (err) {
-            return false;
-        }
+        return ensureExplorerTabLineWrap(explorerActiveTab(pane))[mode];
     }
 
     function explorerLineWrapControlText(mode, enabled) {
@@ -2858,7 +2866,7 @@
 
     function explorerLineWrapControlHtml(index, initialMode = 'source') {
         const mode = initialMode === 'preview' || initialMode === 'diff' ? initialMode : '';
-        const enabled = mode ? explorerLineWrapPreference(mode) : false;
+        const enabled = mode ? explorerLineWrapPreference(index, mode) : false;
         const label = mode ? explorerLineWrapControlText(mode, enabled) : 'Wrap lines';
         return `
             <button
@@ -2877,8 +2885,8 @@
     function applyExplorerLineWrapState(index, selectedMode = activeExplorerFileView(index)) {
         const preview = document.getElementById(`explorer-preview-${index}`);
         const diff = document.getElementById(`explorer-diff-code-${index}`);
-        const previewWrap = explorerLineWrapPreference('preview');
-        const diffWrap = explorerLineWrapPreference('diff');
+        const previewWrap = explorerLineWrapPreference(index, 'preview');
+        const diffWrap = explorerLineWrapPreference(index, 'diff');
         preview?.classList.toggle('wrap-lines', previewWrap);
         diff?.classList.toggle('wrap-lines', diffWrap);
 
@@ -2902,22 +2910,17 @@
         button.setAttribute('aria-label', label);
     }
 
-    function setExplorerLineWrapPreference(mode, enabled) {
-        if (!Object.prototype.hasOwnProperty.call(EXPLORER_LINE_WRAP_KEYS, mode)) {
+    function setExplorerLineWrapPreference(index, mode, enabled) {
+        const pane = terminals[index];
+        if (!pane || !EXPLORER_LINE_WRAP_MODES.includes(mode)) {
             return;
         }
-        _explorerLineWrapSession[mode] = Boolean(enabled);
-        try {
-            window.localStorage.setItem(EXPLORER_LINE_WRAP_KEYS[mode], enabled ? 'true' : 'false');
-        } catch (err) {
-            // Non-fatal: the in-memory preference still applies this session.
+        ensureExplorerTabLineWrap(explorerActiveTab(pane))[mode] = Boolean(enabled);
+        applyExplorerLineWrapState(index);
+        if (mode === 'diff' && pane._explorerDiffLoaded) {
+            applyExplorerSearch(index);
         }
-        terminals.forEach((pane, index) => {
-            applyExplorerLineWrapState(index);
-            if (mode === 'diff' && pane?._explorerDiffLoaded) {
-                applyExplorerSearch(index);
-            }
-        });
+        persistExplorerTabsToSession(index);
     }
 
     function wireExplorerLineWrapControl(index) {
@@ -2930,7 +2933,7 @@
         button.addEventListener('click', () => {
             const mode = button.dataset.explorerWrapMode;
             if (mode === 'preview' || mode === 'diff') {
-                setExplorerLineWrapPreference(mode, !explorerLineWrapPreference(mode));
+                setExplorerLineWrapPreference(index, mode, !explorerLineWrapPreference(index, mode));
             }
         });
         applyExplorerLineWrapState(index);
@@ -4766,6 +4769,9 @@
         if (preview.fontSize) {
             pinnedTab.fontSize = preview.fontSize;
         }
+        if (preview.lineWrap) {
+            pinnedTab.lineWrap = { ...preview.lineWrap };
+        }
         if (preview.preferredMode) {
             pinnedTab.preferredMode = preview.preferredMode;
         }
@@ -5078,8 +5084,10 @@
     /* Reduce a tab's live view snapshot to the persisted shape (OD-5, amended
        per user feedback to include zoom): view mode, the primary panel's
        scroll as a fraction of scroll height (OD-4), the content-identity hash
-       the restore-side skip rule compares, and the tab's editor font size
-       (omitted at the default so unzoomed tabs persist nothing). */
+       the restore-side skip rule compares, the tab's editor font size
+       (omitted at the default so unzoomed tabs persist nothing), and its
+       preview/diff line-wrap opt-outs (wrapping defaults on, so only an
+       explicit off persists — same reason). */
     function explorerPersistableTabView(tab) {
         if (!tab) {
             return null;
@@ -5107,6 +5115,12 @@
         if (fontSize && fontSize !== EXPLORER_EDITOR_FONT_DEFAULT) {
             record.font_size = fontSize;
         }
+        if (tab.lineWrap && tab.lineWrap.preview === false) {
+            record.wrap_preview = false;
+        }
+        if (tab.lineWrap && tab.lineWrap.diff === false) {
+            record.wrap_diff = false;
+        }
         if (tab.collapsedLines instanceof Set && tab.collapsedLines.size) {
             record.folds = Array.from(tab.collapsedLines)
                 .filter(line => Number.isInteger(line) && line > 0)
@@ -5126,6 +5140,17 @@
             return 0;
         }
         return clampExplorerEditorFontSize(fontSize);
+    }
+
+    /* Per-tab line-wrap flags from one persisted tab view record. Wrapping is
+       on by default, so only an explicit `false` turns it off — which also
+       means tabs saved before wrapping existed restore wrapped. */
+    function explorerPersistedTabLineWrap(raw) {
+        const view = raw && typeof raw === 'object' ? raw : {};
+        return {
+            preview: view.wrap_preview !== false,
+            diff: view.wrap_diff !== false,
+        };
     }
 
     function explorerPersistedMarkdownFolds(raw) {
@@ -5269,6 +5294,7 @@
         if (previewFont) {
             previewTab.fontSize = previewFont;
         }
+        previewTab.lineWrap = explorerPersistedTabLineWrap(rawPreviewView);
         previewTab.collapsedLines = explorerPersistedMarkdownFolds(rawPreviewView);
         previewTab.collapsedIdentity = explorerPersistedMarkdownFoldIdentity(rawPreviewView);
         const savedPreviewPath = explorerNormalizeTabPath(
@@ -5327,6 +5353,7 @@
             if (fontSize) {
                 record.fontSize = fontSize;
             }
+            record.lineWrap = explorerPersistedTabLineWrap(rawViews[key]);
             record.collapsedLines = explorerPersistedMarkdownFolds(rawViews[key]);
             record.collapsedIdentity = explorerPersistedMarkdownFoldIdentity(rawViews[key]);
             pane._explorerTabs.push(record);

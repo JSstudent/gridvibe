@@ -1006,6 +1006,28 @@
         cachedGroupViews.delete(groupId);
     }
 
+    /* Tell the backend which group this window has in front, so the workspace
+       *autosave timer* can capture it — the timer has no window to ask, and
+       without it only an explicit Save Workspace could record where to reopen.
+       Fire-and-forget and change-only: a group switch is a user action, never a
+       poll. A failure just leaves the restore with no group preference. */
+    let reportedActiveGroupId = '';
+
+    function reportActiveSessionGroup(groupId) {
+        const normalized = String(groupId || '');
+        if (!normalized || normalized === reportedActiveGroupId) {
+            return;
+        }
+        reportedActiveGroupId = normalized;
+        fetch('/api/session-groups/active', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ group_id: normalized })
+        }).catch(() => {
+            reportedActiveGroupId = '';
+        });
+    }
+
     function syncLocationToGroup(groupId) {
         const url = new URL(window.location.href);
         if (groupId) {
@@ -1014,6 +1036,7 @@
             url.searchParams.delete('group');
         }
         window.history.replaceState({}, '', url);
+        reportActiveSessionGroup(groupId);
     }
 
     const TAB_COLOUR_PALETTE = [
@@ -2016,7 +2039,8 @@
             const response = await fetch('/api/runtime-state/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({})
+                // Name the group this window is on, so the restore reopens here.
+                body: JSON.stringify({ active_group_id: activeGroupId })
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {

@@ -2060,6 +2060,38 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorer_open_tabs: commandMode === 'explorer'", html)
         self.assertIn("explorer_open_tabs: terminal.startup_mode === 'explorer'", html)
 
+    def test_pages_carry_the_active_session_group_through_workspace_restore(self):
+        """Both save paths record the front group; the restore reopens on it."""
+        terminals_html = self._page_html(self.client.get("/terminals"))
+        # Every activeGroupId change reports the front group, so the autosave
+        # timer can capture it without a window to ask.
+        self.assertIn("function reportActiveSessionGroup(groupId)", terminals_html)
+        self.assertIn("fetch('/api/session-groups/active', {", terminals_html)
+        self.assertIn("reportActiveSessionGroup(groupId);", terminals_html)
+        # An explicit Save Workspace names the saving window's own group.
+        self.assertIn(
+            "body: JSON.stringify({ active_group_id: activeGroupId })", terminals_html
+        )
+
+        launcher_html = self._page_html(self.client.get("/"))
+        self.assertIn(
+            "restorableActiveGroupId = String(data.active_group_id || '');",
+            launcher_html,
+        )
+        # Restored groups get fresh ids, so the saved one is resolved to the
+        # group the replay actually created before opening the workspace on it.
+        self.assertIn(
+            "if (restorableActiveGroupId && group.group_id === restorableActiveGroupId) {",
+            launcher_html,
+        )
+        self.assertIn(
+            "await viewActiveTerminals({ preventDefault: () => {} }, activeGroupId);",
+            launcher_html,
+        )
+        self.assertIn(
+            "`/terminals?group=${encodeURIComponent(targetGroupId)}`", launcher_html
+        )
+
     def test_launcher_round_trips_explorer_tab_views_and_markdown_appearance(self):
         """2.f: launcher carries tab views + Markdown appearance without editing them."""
         response = self.client.get("/")
@@ -2125,16 +2157,37 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('data-explorer-file-panel="diff"', html)
 
     def test_terminals_page_markdown_and_diff_line_wrap_preferences(self):
-        """Preview and diff expose persisted, gutter-safe opt-in wrapping."""
+        """Preview and diff expose per-tab, persisted, gutter-safe opt-in wrapping."""
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        self.assertIn("preview: 'gridvibe.mdPreviewWrap'", html)
-        self.assertIn("diff: 'gridvibe.diffWrap'", html)
         self.assertIn('data-explorer-line-wrap="${index}"', html)
-        self.assertIn("function setExplorerLineWrapPreference(mode, enabled)", html)
         self.assertIn("applyExplorerLineWrapState(index, selectedMode);", html)
+        # Wrapping lives on the active explorer tab (like the editor zoom), not
+        # in one workspace-global preference, and saves with the session.
+        self.assertIn(
+            "const EXPLORER_LINE_WRAP_MODES = Object.freeze(['preview', 'diff']);",
+            html,
+        )
+        self.assertIn("function setExplorerLineWrapPreference(index, mode, enabled)", html)
+        self.assertIn(
+            "return ensureExplorerTabLineWrap(explorerActiveTab(pane))[mode];",
+            html,
+        )
+        self.assertIn(
+            "ensureExplorerTabLineWrap(explorerActiveTab(pane))[mode] = Boolean(enabled);",
+            html,
+        )
+        # Wrapping defaults ON, so the persisted flag is the opt-out: an absent
+        # key restores wrapped.
+        self.assertIn("preview: current.preview !== false,", html)
+        self.assertIn("diff: current.diff !== false,", html)
+        self.assertIn("record.wrap_preview = false;", html)
+        self.assertIn("record.wrap_diff = false;", html)
+        self.assertIn("preview: view.wrap_preview !== false,", html)
+        self.assertIn("function explorerPersistedTabLineWrap(raw)", html)
+        self.assertIn("record.lineWrap = explorerPersistedTabLineWrap(rawViews[key]);", html)
         # Wrapped diffs retain Diff2Html's intraline markup; paired row heights
         # are synchronized around the fixed middle number gutter.
         self.assertIn(
@@ -7276,6 +7329,8 @@ class ApiRoutesTestCase(unittest.TestCase):
                         "scroll": 0.5,
                         "identity": "abc123",
                         "font_size": 18,
+                        "wrap_preview": True,
+                        "wrap_diff": False,
                         "folds": [9, 2, 9, 0, "4", True],
                         "fold_identity": "abc123",
                     },
@@ -7284,10 +7339,11 @@ class ApiRoutesTestCase(unittest.TestCase):
                         "scroll": 7,
                         "identity": "x" * 100,
                         "font_size": 99,
+                        "wrap_diff": 1,
                         "diff_mode": "staged",
                     },
                     "c.md": {"mode": "bogus", "scroll": 0.1, "identity": "ok"},
-                    "e.md": {"font_size": 12},
+                    "e.md": {"font_size": 12, "wrap_preview": 0},
                     "../escape.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "not-open.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "d.md": "not-a-dict",
@@ -7297,6 +7353,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                         "identity": "zz",
                         "diff_mode": "worktree",
                         "font_size": 16,
+                        "wrap_preview": False,
                         "path": "docs\\a.md",
                         "dir": "../escape",
                         "folds": [3],
@@ -7323,13 +7380,15 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "scroll": 0.5,
                 "identity": "abc123",
                 "font_size": 18,
+                "wrap_diff": False,
                 "folds": [2, 4, 9],
                 "fold_identity": "abc123",
             },
         )
         # Keys normalize like tab paths; out-of-range scroll fractions clamp to
         # [0, 1]; oversized identity tokens are dropped rather than restored;
-        # font sizes clamp to the editor zoom bounds.
+        # font sizes clamp to the editor zoom bounds. Line wrapping is on by
+        # default, so a truthy flag is the default and persists nothing.
         self.assertEqual(
             views["sub/b.md"],
             {
@@ -7341,9 +7400,10 @@ class ApiRoutesTestCase(unittest.TestCase):
             },
         )
         # A record may carry only a zoom (a zoomed tab whose view was never
-        # captured), and the reserved Preview key keeps its view, zoom, and own
-        # separated path — file and browsed directory.
-        self.assertEqual(views["e.md"], {"font_size": 12})
+        # captured), a falsy wrap flag normalizes to an explicit `False`
+        # opt-out, and the reserved Preview key keeps its view, zoom, wrapping,
+        # and own separated path — file and browsed directory.
+        self.assertEqual(views["e.md"], {"font_size": 12, "wrap_preview": False})
         self.assertEqual(
             views["__preview__"],
             {
@@ -7352,6 +7412,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "identity": "zz",
                 "diff_mode": "worktree",
                 "font_size": 16,
+                "wrap_preview": False,
                 "path": "docs/a.md",
                 "folds": [3],
                 "fold_identity": "preview-hash",
@@ -12976,6 +13037,73 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         response = self.client.post("/api/runtime-state/save", json={})
         self.assertEqual(response.status_code, 409)
         self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
+
+    def test_autosave_captures_the_reported_front_group(self):
+        """The timer has no window to ask, so it uses the reported hint."""
+        first = self._launch_explorer_group("First")
+        self._launch_explorer_group("Second")
+        # Launching switches the workspace to the newest group; going back to
+        # the first one must be what a later timed save records.
+        response = self.client.post(
+            "/api/session-groups/active", json={"group_id": first}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["active_group_id"], first)
+
+        api._run_workspace_autosave_tick()
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertEqual(slot["active_group_id"], first)
+        payload = self.client.get("/api/runtime-state").get_json()
+        self.assertEqual(payload["active_group_id"], first)
+
+    def test_manual_save_records_the_saving_windows_front_group(self):
+        first = self._launch_explorer_group("First")
+        second = self._launch_explorer_group("Second")
+        response = self.client.post(
+            "/api/runtime-state/save", json={"active_group_id": first}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["active_group_id"], first)
+        self.assertEqual(
+            web_runtime_state.load_restorable_workspace()["active_group_id"], first
+        )
+        # The manual save also updates the live hint, so the next timed save
+        # agrees with it instead of reverting to the newest group.
+        api._run_workspace_autosave_tick()
+        self.assertEqual(
+            web_runtime_state.load_restorable_workspace()["active_group_id"], first
+        )
+        self.assertNotEqual(first, second)
+
+    def test_unknown_or_closed_front_group_degrades_to_no_preference(self):
+        first = self._launch_explorer_group("First")
+        self._launch_explorer_group("Second")
+        self.client.post("/api/session-groups/active", json={"group_id": first})
+        # An id naming no live group leaves the standing hint alone rather than
+        # blanking it (a stale tab must not lose the real answer).
+        response = self.client.post(
+            "/api/session-groups/active", json={"group_id": "does-not-exist"}
+        )
+        self.assertEqual(response.get_json()["active_group_id"], first)
+
+        # Once that group is closed the hint is gone, and a capture falls back
+        # to no preference rather than naming a group it did not store.
+        self.assertEqual(
+            self.client.delete(f"/api/sessions?group={first}").status_code, 200
+        )
+        slot = web_runtime_state.capture_workspace(api.session_manager)
+        self.assertEqual(slot["active_group_id"], "")
+
+    def test_stored_front_group_is_revalidated_against_the_slots_groups(self):
+        """A hand-edited id naming no stored group must not reach the restore."""
+        self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        data["workspaces"]["default"]["active_group_id"] = "ghost-group"
+        self.state_path.write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual(
+            web_runtime_state.load_restorable_workspace()["active_group_id"], ""
+        )
 
     def test_group_events_do_not_write_the_snapshot(self):
         group_id = self._launch_explorer_group()

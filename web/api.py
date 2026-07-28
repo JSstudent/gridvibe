@@ -1273,6 +1273,20 @@ def reorder_session_groups():
     return jsonify({"groups": groups, "count": len(groups)})
 
 
+@app.route('/api/session-groups/active', methods=['POST'])
+def set_active_session_group():
+    """Record which group the session window has in front.
+
+    A workspace-shape hint, not session state: nothing about the group changes,
+    so there is no broadcast. It exists because the autosave *timer* has no
+    window to ask — without it, only an explicit Save Workspace could know which
+    group to reopen on. An unknown id leaves the previous hint standing.
+    """
+    data = request.get_json(silent=True) or {}
+    active_group_id = session_manager.set_active_group(data.get("group_id"))
+    return jsonify({"active_group_id": active_group_id})
+
+
 @app.route('/api/runtime-state', methods=['GET'])
 def get_runtime_state():
     """Return the restorable previous-workspace slot, if any (10.5).
@@ -1291,18 +1305,29 @@ def get_runtime_state():
         "origin": slot.get("origin") if slot else None,
         "saved_at": slot.get("saved_at") if slot else None,
         "groups": slot.get("groups", []) if slot else [],
+        # The group the restore should reopen on; "" means no preference.
+        "active_group_id": slot.get("active_group_id", "") if slot else "",
         "active_group_count": len(active_groups),
     })
 
 
 @app.route('/api/runtime-state/save', methods=['POST'])
 def save_runtime_state():
-    """Capture the workspace now (Workspace ▸ Save Workspace), origin manual."""
+    """Capture the workspace now (Workspace ▸ Save Workspace), origin manual.
+
+    The saving window names its own front group in ``active_group_id``; it is
+    also recorded as the live hint so the next autosave agrees with this save.
+    """
     data = request.get_json(silent=True) or {}
     workspace_id = str(data.get("workspace_id") or "default").strip() or "default"
     label = str(data.get("label") or "").strip() or None
+    active_group_id = session_manager.set_active_group(data.get("active_group_id"))
     slot = capture_workspace(
-        session_manager, workspace_id=workspace_id, origin="manual", label=label
+        session_manager,
+        workspace_id=workspace_id,
+        origin="manual",
+        label=label,
+        active_group_id=active_group_id,
     )
     if slot is None:
         # An empty workspace is never captured, so it never overwrites (or
@@ -1314,6 +1339,7 @@ def save_runtime_state():
         "label": slot["label"],
         "origin": slot["origin"],
         "saved_at": slot["saved_at"],
+        "active_group_id": slot["active_group_id"],
         "groups": slot["groups"],
     })
 

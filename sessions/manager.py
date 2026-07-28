@@ -145,6 +145,10 @@ class SessionManager:
         """Initialize the session manager."""
         self.sessions: Dict[str, TerminalSession] = {}
         self.groups: Dict[str, SessionGroup] = {}
+        # Which group the session window last had in front. A workspace-shape
+        # hint only — never session state — captured with the workspace so a
+        # restore reopens on the group the user was actually working in.
+        self._active_group_id: str = ""
         # Lock ordering: web/api.py's connection_lock may be held while taking
         # this lock; code holding this lock must never take connection_lock.
         self.lock = threading.RLock()
@@ -186,8 +190,30 @@ class SessionManager:
                 workspace_layout=workspace_layout,
             )
             self.groups[resolved_group_id] = group
+            # The session window switches to a newly launched group, so mirror
+            # that here: the hint is then right even before a window reports.
+            self._active_group_id = resolved_group_id
 
         return group
+
+    def set_active_group(self, group_id: str) -> str:
+        """Record which group the session window has in front; return the hint.
+
+        Unknown ids are ignored rather than stored, so a stale tab can never
+        point a workspace restore at a group that no longer exists.
+        """
+        candidate = str(group_id or "").strip()
+        with self.lock:
+            if candidate and candidate in self.groups:
+                self._active_group_id = candidate
+            return self.get_active_group_id()
+
+    def get_active_group_id(self) -> str:
+        """Return the active-group hint, or "" once that group is gone."""
+        with self.lock:
+            if self._active_group_id not in self.groups:
+                self._active_group_id = ""
+            return self._active_group_id
 
     def _generate_session_id(self) -> str:
         """Return a short session id that is not already in use.
