@@ -109,6 +109,8 @@
         explorer_md_preset: '',
         explorer_md_font: '',
         explorer_theme: 'dark',
+        browser_tabs: [],
+        browser_active_tab: 0,
         distribution: '',
         use_wsl: false,
         use_powershell: false
@@ -627,7 +629,7 @@
     /* Explorer file tabs are not editable in the launcher form; they are
        carried invisibly through the terminal row dataset so resaving a preset
        preserves them (ISSUE-2026-015). */
-    function parseExplorerOpenTabsDataset(value) {
+    function parseStringArrayDataset(value) {
         if (!value) {
             return [];
         }
@@ -659,10 +661,27 @@
 
         const drafts = rows.map((row, index) => {
             const commandMode = getTerminalCommandMode(row);
+            const initialCommand = buildTerminalInitialCommand(row);
+            /* Browser rows only expose the active URL as an input; the rest of
+               the tab strip rides along in the dataset so importing a saved
+               multi-tab pane and re-saving it keeps every tab. The visible
+               input is authoritative for the active slot — otherwise editing
+               the URL here would be overwritten by the stale stored tab. */
+            const browserActiveTab = Number(row.dataset.browserActiveTab) || 0;
+            const browserTabs = commandMode === 'browser'
+                ? parseStringArrayDataset(row.dataset.browserTabs)
+                : [];
+            if (commandMode === 'browser' && initialCommand) {
+                if (browserActiveTab < browserTabs.length) {
+                    browserTabs[browserActiveTab] = initialCommand;
+                } else {
+                    browserTabs.push(initialCommand);
+                }
+            }
             return {
                 title: row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`,
                 directory: row.querySelector('.t-dir').value.trim(),
-                initial_command: buildTerminalInitialCommand(row),
+                initial_command: initialCommand,
                 initial_command_mode: commandMode === 'agent'
                     ? 'agent'
                     : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'command'),
@@ -681,12 +700,19 @@
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
                 explorer_search_open: commandMode === 'explorer' && row.dataset.explorerSearchOpen === 'true',
-                explorer_open_tabs: commandMode === 'explorer' ? parseExplorerOpenTabsDataset(row.dataset.explorerOpenTabs) : [],
+                explorer_open_tabs: commandMode === 'explorer' ? parseStringArrayDataset(row.dataset.explorerOpenTabs) : [],
                 explorer_active_tab: commandMode === 'explorer' ? (row.dataset.explorerActiveTab || '') : '',
                 explorer_tab_views: commandMode === 'explorer' ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews) : {},
                 explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
                 explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
                 explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : '',
+                /* Browser rows only expose the active URL as an input; the rest
+                   of the tab strip rides along in the dataset so importing a
+                   saved multi-tab pane and re-saving it keeps every tab. */
+                browser_tabs: browserTabs,
+                browser_active_tab: commandMode === 'browser'
+                    ? Math.max(0, Math.min(browserTabs.length - 1, browserActiveTab))
+                    : 0,
                 distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
                 use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
                     ? Boolean(row.querySelector('.t-use-wsl')?.checked)
@@ -1514,6 +1540,8 @@
                     data-explorer-md-preset="${escHtml(terminal.explorer_md_preset || '')}"
                     data-explorer-md-font="${escHtml(terminal.explorer_md_font || '')}"
                     data-explorer-theme="${escHtml(terminal.explorer_theme || 'dark')}"
+                    data-browser-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.browser_tabs) ? terminal.browser_tabs : []))}"
+                    data-browser-active-tab="${escHtml(String(Number(terminal.browser_active_tab) || 0))}"
                 >
                     <div class="t-row-head">
                         <span class="t-badge">T${index + 1}</span>
@@ -2486,6 +2514,12 @@
                 explorer_theme: terminal.startup_mode === 'explorer'
                     ? (terminal.explorer_theme || 'dark')
                     : '',
+                browser_tabs: terminal.startup_mode === 'browser' && Array.isArray(terminal.browser_tabs)
+                    ? terminal.browser_tabs
+                    : [],
+                browser_active_tab: terminal.startup_mode === 'browser'
+                    ? (Number(terminal.browser_active_tab) || 0)
+                    : 0,
                 startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
                     ? terminal.startup_mode
                     : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')

@@ -1615,15 +1615,104 @@
             display: none;
         }
 
+        /* Tab strip, URL bar, then the stacked frames (one per tab; only the
+           active one is visible, the rest stay loaded and hidden). */
         .browser-surface {
             height: 100%;
             display: grid;
-            grid-template-rows: auto minmax(0, 1fr);
+            grid-template-rows: auto auto minmax(0, 1fr);
             color: var(--explorer-text);
             background: var(--explorer-bg);
             border: 1px solid var(--explorer-border);
             border-radius: 6px;
             overflow: hidden;
+        }
+
+        .browser-tabstrip {
+            display: flex;
+            align-items: stretch;
+            gap: 2px;
+            min-height: 0;
+            padding: 4px 6px 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            border-bottom: 1px solid var(--explorer-row-border);
+            background: var(--explorer-bar-bg);
+            scrollbar-width: thin;
+        }
+
+        .browser-tab {
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            max-width: 200px;
+            padding: 6px 4px 6px 8px;
+            border: 1px solid transparent;
+            border-bottom: none;
+            border-radius: 6px 6px 0 0;
+            background: transparent;
+            color: var(--explorer-muted);
+            cursor: pointer;
+            font-size: .72rem;
+        }
+
+        .browser-tab.active {
+            border-color: var(--explorer-row-border);
+            background: var(--explorer-bg);
+            color: var(--explorer-text);
+        }
+
+        .browser-tab:hover:not(.active) {
+            color: var(--explorer-text);
+        }
+
+        .browser-tab-label {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .browser-tab.active .browser-tab-label {
+            font-weight: 600;
+        }
+
+        .browser-tab-close,
+        .browser-tab-new {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            flex: none;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: var(--explorer-muted);
+            cursor: pointer;
+            font-size: .95rem;
+            line-height: 1;
+        }
+
+        .browser-tab-new {
+            align-self: center;
+            margin-left: 2px;
+        }
+
+        .browser-tab-close:hover,
+        .browser-tab-new:hover:not(:disabled) {
+            background: var(--explorer-row-hover);
+            color: var(--explorer-text);
+        }
+
+        .browser-tab-new:disabled {
+            cursor: default;
+            opacity: .4;
+        }
+
+        .browser-frames {
+            position: relative;
+            min-height: 0;
+            height: 100%;
         }
 
         .browser-bar {
@@ -1689,6 +1778,36 @@
             height: 100%;
             border: 0;
             background: #fff;
+        }
+
+        .browser-frame[hidden] {
+            display: none;
+        }
+
+        /* Stand-in for a frame that would re-embed GridVibe inside itself. */
+        .browser-frame-blocked {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            width: 100%;
+            height: 100%;
+            padding: 16px;
+            text-align: center;
+            color: var(--explorer-muted);
+            background: var(--explorer-bg);
+            font-size: .78rem;
+        }
+
+        .browser-frame-blocked[hidden] {
+            display: none;
+        }
+
+        .browser-frame-blocked-hint {
+            max-width: 42ch;
+            line-height: 1.5;
+            overflow-wrap: anywhere;
         }
 
         .explorer-surface {

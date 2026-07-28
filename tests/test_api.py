@@ -196,6 +196,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/explorer-editor.js",
             "js/explorer-search.js",
             "js/explorer-fs.js",
+            "js/browser-pane.js",
             "js/terminals.js",
         ):
             marker = f"/static/{asset}"
@@ -950,15 +951,82 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function getBrowserSessionUrl(session)", html)
         self.assertIn("function normalizeBrowserUrlInput(value)", html)
         self.assertIn("class=\"browser-surface\"", html)
-        self.assertIn("class=\"browser-frame\"", html)
+        self.assertIn("class=\"browser-frame${isActive ? ' active' : ''}\"", html)
         self.assertIn("class=\"browser-url-input\"", html)
-        self.assertIn("data-browser-open=\"${i}\"", html)
+        self.assertIn("data-browser-open=\"${index}\"", html)
         self.assertIn("data-session-browser-toggle=\"${i}\"", html)
         self.assertIn("function reloadBrowserPane(index)", html)
         self.assertIn("function openBrowserPaneExternally(index)", html)
         self.assertIn("async function switchSessionBrowserMode(index)", html)
         self.assertIn("async function navigateBrowserPane(index, value)", html)
-        self.assertIn("sandbox=\"allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts\"", html)
+        self.assertIn(
+            "'allow-downloads allow-forms allow-modals allow-popups '",
+            html,
+        )
+        self.assertIn("'allow-popups-to-escape-sandbox allow-same-origin allow-scripts'", html)
+
+    def test_terminals_page_exposes_browser_pane_tab_strip(self):
+        """Browser panes are tabbed: one frame per tab, persisted as a strip."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("const BROWSER_MAX_TABS = 8;", html)
+        self.assertIn("class=\"browser-tabstrip\"", html)
+        self.assertIn("data-browser-tab-new=\"${index}\"", html)
+        self.assertIn("data-browser-tab-close=\"${index}\"", html)
+        self.assertIn("function browserOpenTab(index, url", html)
+        self.assertIn("function browserCloseTab(index, tabIndex)", html)
+        self.assertIn("function browserSelectTab(index, tabIndex)", html)
+        self.assertIn("function browserSerializeTabs(pane, session = null)", html)
+        # Same-origin popups become pane tabs instead of escaping to the OS
+        # browser; cross-origin access throws and is swallowed.
+        self.assertIn("function browserHookFrameWindow(index, frame)", html)
+        self.assertIn("win.__gridvibeBrowserPaneHooked", html)
+        self.assertIn("a[target=\"_blank\"], a[target=\"_new\"]", html)
+        # Save Workspace and the saved-session launch payload carry the strip.
+        self.assertIn("browser_tabs: browserTabs.tabs", html)
+        self.assertIn("browser_active_tab: browserTabs.active_tab", html)
+
+    def test_browser_pane_new_tab_never_duplicates_the_active_tab(self):
+        """A '+' that copied the active URL made a pane showing GridVibe
+        re-embed its own workspace, one level deeper on every render."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        new_tab_start = html.index('[data-browser-tab-new="${index}"]`)')
+        new_tab_end = html.index("const tab = event.target.closest", new_tab_start)
+        handler = html[new_tab_start:new_tab_end]
+        self.assertIn("browserOpenTab(index, BROWSER_DEFAULT_URL)", handler)
+        # The old duplicating call must be gone from the handler entirely.
+        self.assertNotIn("current.url", handler)
+        self.assertNotIn("browserActiveTab(pane)", handler)
+
+    def test_browser_pane_blocks_nested_self_embedding(self):
+        """A GridVibe page inside a browser pane renders no browser frames."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function browserIsNestedPreview()", html)
+        self.assertIn("window.frameElement?.classList.contains('browser-frame')", html)
+        self.assertIn("if (browserIsNestedPreview()) {", html)
+        self.assertIn("browser-frame-blocked", html)
+        # The stand-in must not carry the class the guard looks for, or a page
+        # one level deeper would not detect that it is nested.
+        self.assertNotIn('class="browser-frame${isActive', html.split("browser-frame-blocked")[0][-400:])
+
+    def test_browser_pane_reuses_named_window_targets(self):
+        """window.open(url, 'name') reuses that tab instead of stacking tabs."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("tab.windowName === windowName", html)
+        # _self/_top/_parent navigate an existing window, so they stay native.
+        self.assertIn("['_self', '_top', '_parent'].includes(name)", html)
+        self.assertIn("['_blank', '_new', ''].includes(name) ? '' : name", html)
 
     def test_terminals_page_explorer_refresh_requires_initial_navigation_or_force(self):
         response = self.client.get("/terminals")
@@ -1965,7 +2033,8 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        self.assertIn("function parseExplorerOpenTabsDataset(value)", html)
+        # Shared with the browser-pane tab strip, hence the neutral name.
+        self.assertIn("function parseStringArrayDataset(value)", html)
         self.assertIn("data-explorer-open-tabs=", html)
         self.assertIn("data-explorer-active-tab=", html)
         self.assertIn("explorer_open_tabs: commandMode === 'explorer'", html)
@@ -3815,6 +3884,169 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("http:// and https://", response.get_json()["error"])
+
+    def test_create_sessions_browser_mode_keeps_every_tab(self):
+        """A saved multi-tab browser pane relaunches with its whole strip."""
+        sessions_payload = {
+            "connection_mode": "wsl",
+            "sessions": [
+                {
+                    "directory": self.temp_dir.name,
+                    "title": "Preview",
+                    "initial_command": "http://127.0.0.1:3000",
+                    "startup_mode": "browser",
+                    "browser_tabs": [
+                        "http://127.0.0.1:3000",
+                        "http://127.0.0.1:5050/",
+                        "localhost:8080",
+                    ],
+                    "browser_active_tab": 1,
+                }
+            ],
+        }
+
+        response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertEqual(session.startup_mode, "browser")
+        self.assertEqual(
+            session.browser_tabs,
+            ["http://127.0.0.1:3000", "http://127.0.0.1:5050/", "http://localhost:8080"],
+        )
+        self.assertEqual(session.browser_active_tab, 1)
+        # The active tab's URL stays mirrored into the single-URL contract.
+        self.assertEqual(session.initial_command, "http://127.0.0.1:5050/")
+
+    def test_create_sessions_browser_mode_drops_unusable_tabs(self):
+        """Bad entries are dropped, not launched, and cannot shift the active tab."""
+        sessions_payload = {
+            "connection_mode": "wsl",
+            "sessions": [
+                {
+                    "directory": self.temp_dir.name,
+                    "title": "Preview",
+                    "startup_mode": "browser",
+                    "browser_tabs": ["file:///tmp/a.html", "http://127.0.0.1:4000", ""],
+                    "browser_active_tab": 9,
+                }
+            ],
+        }
+
+        response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertEqual(session.browser_tabs, ["http://127.0.0.1:4000"])
+        self.assertEqual(session.browser_active_tab, 0)
+
+    def test_switch_browser_pane_replaces_whole_tab_strip(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:3000",
+            initial_command_mode="browser",
+            browser_tabs=["http://127.0.0.1:3000"],
+        )
+
+        with patch.object(api, "_close_ssh_connection"):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={
+                    "startup_mode": "browser",
+                    "tabs": ["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
+                    "active_tab": 1,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(
+            updated.browser_tabs,
+            ["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
+        )
+        self.assertEqual(updated.browser_active_tab, 1)
+        self.assertEqual(updated.initial_command, "http://127.0.0.1:5050/")
+
+    def test_switch_browser_pane_navigation_only_moves_active_tab(self):
+        """A plain single-URL navigate edits the active tab and leaves siblings."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:5050/",
+            initial_command_mode="browser",
+            browser_tabs=["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
+            browser_active_tab=1,
+        )
+
+        with patch.object(api, "_close_ssh_connection"):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "browser", "url": "localhost:5173"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(
+            updated.browser_tabs,
+            ["http://127.0.0.1:3000", "http://localhost:5173"],
+        )
+        self.assertEqual(updated.browser_active_tab, 1)
+
+    def test_switch_pane_away_from_browser_clears_tab_strip(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:5050/",
+            initial_command_mode="browser",
+            browser_tabs=["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
+            browser_active_tab=1,
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "terminal"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertEqual(updated.browser_tabs, [])
+        self.assertEqual(updated.browser_active_tab, 0)
 
     def test_normalize_startup_mode_allows_browser_only_for_local_repo(self):
         self.assertEqual(api._normalize_startup_mode("browser", "wsl"), "browser")
@@ -10140,6 +10372,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/explorer-editor.js",
         "js/explorer-search.js",
         "js/explorer-fs.js",
+        "js/browser-pane.js",
     )
 
     def setUp(self):
@@ -10279,8 +10512,15 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             terminals_html.index("js/explorer-search.js"),
             terminals_html.index("js/explorer-fs.js"),
         )
+        # browser-pane.js (tabbed browser preview surface) loads after the
+        # explorer modules and before terminals.js.
+        self.assertIn(f"/static/js/browser-pane.js?v={__version__}", terminals_html)
         self.assertLess(
             terminals_html.index("js/explorer-fs.js"),
+            terminals_html.index("js/browser-pane.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/browser-pane.js"),
             terminals_html.index("js/terminals.js"),
         )
 
@@ -10298,6 +10538,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/explorer-editor.js",
             "js/explorer-search.js",
             "js/explorer-fs.js",
+            "js/browser-pane.js",
             "js/terminals.js",
         ):
             with self.subTest(filename=filename):
@@ -13430,6 +13671,87 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         workspace["terminals"][0] = {"startup_mode": "terminal"}
         merged = web_saved_sessions._merge_workspace_session_config(base, workspace)
         self.assertFalse(merged["terminals"][0]["agent_auto_mode"])
+
+    def test_workspace_merge_persists_live_browser_tabs(self):
+        """Save Workspace captures the pane's live strip, not its launch URL."""
+        base = {
+            "connection_mode": "wsl",
+            "terminal_count": 1,
+            "terminals": [
+                {
+                    "startup_mode": "browser",
+                    "initial_command": "http://127.0.0.1:3000",
+                    "browser_tabs": ["http://127.0.0.1:3000"],
+                }
+            ],
+        }
+        workspace = {
+            "terminal_count": 1,
+            "terminals": [
+                {
+                    "startup_mode": "browser",
+                    "initial_command": "http://127.0.0.1:5050/",
+                    "browser_tabs": [
+                        "http://127.0.0.1:5050/",
+                        "http://127.0.0.1:5050/terminals",
+                    ],
+                    "browser_active_tab": 1,
+                }
+            ],
+        }
+
+        merged = web_saved_sessions._merge_workspace_session_config(base, workspace)
+
+        terminal = merged["terminals"][0]
+        self.assertEqual(
+            terminal["browser_tabs"],
+            ["http://127.0.0.1:5050/", "http://127.0.0.1:5050/terminals"],
+        )
+        self.assertEqual(terminal["browser_active_tab"], 1)
+        self.assertEqual(terminal["initial_command"], "http://127.0.0.1:5050/terminals")
+
+    def test_workspace_merge_clears_browser_tabs_when_pane_leaves_browser_mode(self):
+        base = {
+            "connection_mode": "wsl",
+            "terminal_count": 1,
+            "terminals": [
+                {
+                    "startup_mode": "browser",
+                    "initial_command": "http://127.0.0.1:3000",
+                    "browser_tabs": ["http://127.0.0.1:3000"],
+                }
+            ],
+        }
+        workspace = {"terminal_count": 1, "terminals": [{"startup_mode": "terminal"}]}
+
+        merged = web_saved_sessions._merge_workspace_session_config(base, workspace)
+
+        self.assertEqual(merged["terminals"][0]["browser_tabs"], [])
+        self.assertEqual(merged["terminals"][0]["browser_active_tab"], 0)
+
+    def test_normalize_terminal_entries_upgrades_pre_tabs_browser_pane(self):
+        """A preset saved before tabs existed becomes a one-tab strip."""
+        normalized = web_saved_sessions._normalize_terminal_entries(
+            [{"startup_mode": "browser", "initial_command": "http://127.0.0.1:5050/"}],
+            connection_mode="wsl",
+        )
+        self.assertEqual(normalized[0]["browser_tabs"], ["http://127.0.0.1:5050/"])
+        self.assertEqual(normalized[0]["browser_active_tab"], 0)
+        self.assertEqual(normalized[0]["initial_command"], "http://127.0.0.1:5050/")
+
+    def test_normalize_terminal_entries_bounds_browser_tabs(self):
+        many = [f"http://127.0.0.1:{4000 + index}" for index in range(20)]
+        normalized = web_saved_sessions._normalize_terminal_entries(
+            [{"startup_mode": "browser", "browser_tabs": many, "browser_active_tab": 19}],
+            connection_mode="wsl",
+        )
+        self.assertEqual(
+            len(normalized[0]["browser_tabs"]), web_saved_sessions.BROWSER_MAX_TABS
+        )
+        self.assertEqual(
+            normalized[0]["browser_active_tab"],
+            web_saved_sessions.BROWSER_MAX_TABS - 1,
+        )
 
     def test_sessions_post_round_trips_agent_auto_mode(self):
         api.session_manager.reset_sessions()

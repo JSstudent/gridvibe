@@ -107,6 +107,16 @@ python webview_launcher.py --mode native
 - moon / sun — toggle an explorer pane between its dark and light theme
 - Drag the dividers between panes to resize them.
 
+## Browser Preview Panes
+
+A Local Repo pane can be switched to a browser preview (the globe button) to keep the app you are working on next to the terminal running it. Each pane is tabbed — up to 8 tabs, with per-tab close and a **+** button that opens a blank tab at the default URL (`http://127.0.0.1:3000`) — and every tab keeps its own live frame, so switching tabs does not reload the page. The URL bar navigates the active tab (http/https only); **Open** sends it to a real OS browser tab.
+
+When the previewed page is served from GridVibe's own origin, links and `window.open` calls that would open a new window become new tabs in the pane instead of escaping to the OS browser — which is what lets you drive GridVibe's launcher → workspace flow inside a pane. A call that targets a *named* window reuses the tab already opened under that name, so repeatedly pressing the same button re-uses one tab rather than piling up new ones. Pages from other origins cannot be instrumented by any web page, so their popups still open externally.
+
+You can preview GridVibe itself one level deep. A GridVibe page that is already inside a browser pane will not render browser frames of its own — those tabs show a *Nested preview disabled* notice, because a pane pointed back at GridVibe would otherwise re-embed the workspace it lives in, endlessly.
+
+The whole tab strip is part of the pane's saved state: `Save Workspace` and saved session presets record every open tab and which one was selected, and the strip is restored after a GridVibe restart and after a sibling pane is closed.
+
 ## File Explorer Panes
 
 Explorers are read-only views of a local repo folder or a remote SSH host (over SFTP), rooted at the folder you picked, with three bounded mutation families: guarded Git actions, in-place text editing, and same-session copy/paste plus confirmed delete. The viewer is tabbed: a permanent Preview tab for browsing plus pinned file tabs (drag to reorder, middle-click to close) that each remember their Source/Preview/Diff mode, scroll position, and font zoom — across tab swaps, workspace saves, and restarts. Around it: a clickable breadcrumb path bar, directory search, a lazily loaded file tree sidebar, in-file find (`Ctrl+F`), and file download (100 MB cap). Text previews are capped at 10 MiB (plain text above ~2 MiB); images (`.png`, `.jpg`, `.gif`, `.webp`, `.svg`, and friends) open in an inline viewer (25 MB cap).

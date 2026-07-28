@@ -58,6 +58,11 @@ class TerminalSession:
     explorer_md_preset: str = ""
     explorer_md_font: str = ""
     explorer_theme: str = "dark"
+    # Browser panes are tabbed: `browser_tabs` holds one HTTP(S) URL per open
+    # tab and `browser_active_tab` indexes into it. `initial_command` stays the
+    # active tab's URL so every existing browser-pane reader keeps working.
+    browser_tabs: List[str] = field(default_factory=list)
+    browser_active_tab: int = 0
     status: SessionStatus = SessionStatus.PENDING
     created_at: float = field(default_factory=time.time)
     connected_at: Optional[float] = None
@@ -93,6 +98,8 @@ class TerminalSession:
             "explorer_md_preset": self.explorer_md_preset,
             "explorer_md_font": self.explorer_md_font,
             "explorer_theme": self.explorer_theme,
+            "browser_tabs": list(self.browser_tabs),
+            "browser_active_tab": self.browser_active_tab,
             "status": self.status.value,
             "created_at": self.created_at,
             "connected_at": self.connected_at,
@@ -284,6 +291,8 @@ class SessionManager:
                     explorer_md_preset=str(config.get("explorer_md_preset") or ""),
                     explorer_md_font=str(config.get("explorer_md_font") or ""),
                     explorer_theme="light" if config.get("explorer_theme") == "light" else "dark",
+                    browser_tabs=list(config.get("browser_tabs") or []),
+                    browser_active_tab=int(config.get("browser_active_tab") or 0),
                 )
                 created.append(session)
             except Exception as e:
@@ -325,6 +334,8 @@ class SessionManager:
             "explorer_md_preset",
             "explorer_md_font",
             "explorer_theme",
+            "browser_tabs",
+            "browser_active_tab",
         }
         with self.lock:
             session = self.sessions.get(session_id)

@@ -149,6 +149,7 @@ from web.runtime_state import (  # noqa: F401 - re-exported for backwards compat
     load_restorable_workspace,
 )
 from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compatibility
+    BROWSER_MAX_TABS,
     DEFAULT_BROWSER_URL,
     DEFAULT_SAVED_SESSION_ID,
     DEFAULT_SAVED_SESSION_NAME,
@@ -161,6 +162,8 @@ from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compa
     _generate_saved_session_id,
     _load_saved_sessions_payload,
     _merge_workspace_session_config,
+    _normalize_browser_active_tab,
+    _normalize_browser_tabs,
     _normalize_browser_url,
     _normalize_connection_mode,
     _normalize_launch_session_id,
@@ -1610,9 +1613,24 @@ def create_sessions():
                 if startup_mode == "browser":
                     use_powershell = False
                     use_wsl = False
-                    prepared["initial_command"] = _normalize_browser_url(
-                        prepared.get("initial_command")
+                    browser_tabs = _normalize_browser_tabs(
+                        prepared.get("browser_tabs"),
+                        prepared.get("initial_command") or DEFAULT_BROWSER_URL,
                     )
+                    if not browser_tabs:
+                        # Every entry was rejected. Re-validate the seed so the
+                        # 400 carries the precise reason (bad scheme, too long,
+                        # ...) rather than a generic "needs a URL".
+                        _normalize_browser_url(
+                            prepared.get("initial_command") or DEFAULT_BROWSER_URL
+                        )
+                        raise ValueError("Browser panes require an HTTP or HTTPS URL")
+                    browser_active_tab = _normalize_browser_active_tab(
+                        prepared.get("browser_active_tab"), browser_tabs
+                    )
+                    prepared["browser_tabs"] = browser_tabs
+                    prepared["browser_active_tab"] = browser_active_tab
+                    prepared["initial_command"] = browser_tabs[browser_active_tab]
                     prepared["initial_command_mode"] = "browser"
                     prepared["explorer_root_directory"] = None
                     prepared["distribution"] = ""
@@ -1870,13 +1888,34 @@ def change_session_mode(session_id: str):
     if target_mode == "browser":
         if session.mode != "wsl":
             return jsonify({"error": "Browser mode is only available for Local Repo sessions"}), 400
+        # One endpoint serves three client actions — switching a terminal into
+        # browser mode, navigating the active tab, and opening/closing tabs — so
+        # the tab strip never needs a second route. `tabs` wins when present;
+        # otherwise the pane's existing strip is kept and only the active tab's
+        # URL moves, which keeps the plain single-URL navigate call working.
         try:
-            browser_url = _normalize_browser_url(
-                data.get("url")
-                or data.get("initial_command")
-                or session.initial_command
-                or DEFAULT_BROWSER_URL
-            )
+            if "tabs" in data:
+                browser_tabs = _normalize_browser_tabs(data.get("tabs"))
+                if not browser_tabs:
+                    raise ValueError("Browser panes require at least one HTTP or HTTPS tab")
+                browser_active_tab = _normalize_browser_active_tab(
+                    data.get("active_tab"), browser_tabs
+                )
+                browser_url = browser_tabs[browser_active_tab]
+            else:
+                browser_url = _normalize_browser_url(
+                    data.get("url")
+                    or data.get("initial_command")
+                    or session.initial_command
+                    or DEFAULT_BROWSER_URL
+                )
+                browser_tabs = _normalize_browser_tabs(
+                    list(session.browser_tabs), session.initial_command
+                ) or [browser_url]
+                browser_active_tab = _normalize_browser_active_tab(
+                    data.get("active_tab", session.browser_active_tab), browser_tabs
+                )
+                browser_tabs[browser_active_tab] = browser_url
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -1889,6 +1928,8 @@ def change_session_mode(session_id: str):
             initial_command=browser_url,
             initial_command_mode="browser",
             startup_mode="browser",
+            browser_tabs=browser_tabs,
+            browser_active_tab=browser_active_tab,
         )
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         _close_ssh_connection(session_id, clear_buffer=True)
@@ -1965,6 +2006,8 @@ def change_session_mode(session_id: str):
                 password=None,
                 initial_command="",
                 startup_mode="explorer",
+                browser_tabs=[],
+                browser_active_tab=0,
             )
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         _close_ssh_connection(session_id, clear_buffer=True)
@@ -2013,6 +2056,10 @@ def change_session_mode(session_id: str):
         "initial_command": "",
         "initial_command_mode": "command",
         "startup_mode": "terminal",
+        # A pane leaving browser mode drops its tab strip; a stale strip would
+        # otherwise be re-persisted and reopen browser tabs on a shell pane.
+        "browser_tabs": [],
+        "browser_active_tab": 0,
     }
     if session.mode == "wsl":
         updates["host"] = _local_shell_display_name(
