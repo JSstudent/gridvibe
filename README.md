@@ -109,7 +109,7 @@ python webview_launcher.py --mode native
 
 ## Browser Preview Panes
 
-A Local Repo pane can be switched to a browser preview (the globe button) to keep the app you are working on next to the terminal running it. Each pane is tabbed — up to 8 tabs, with per-tab close and a **+** button that opens a blank tab at the default URL (`http://127.0.0.1:3000`) — and every tab keeps its own live frame, so switching tabs does not reload the page. The URL bar navigates the active tab (http/https only); **Open** sends it to a real OS browser tab.
+A Local Repo pane can be switched to a browser preview (the globe button) to keep the app you are working on next to the terminal running it. Each pane is tabbed — up to 8 tabs, with per-tab close, drag to reorder, and a **+** button that opens a blank tab at the default URL (`http://127.0.0.1:3000`) — and every tab keeps its own live frame, so switching tabs does not reload the page (reordering does not either). The URL bar navigates the active tab (http/https only); **Open** sends it to a real OS browser tab.
 
 When the previewed page is served from GridVibe's own origin, links and `window.open` calls that would open a new window become new tabs in the pane instead of escaping to the OS browser — which is what lets you drive GridVibe's launcher → workspace flow inside a pane. A call that targets a *named* window reuses the tab already opened under that name, so repeatedly pressing the same button re-uses one tab rather than piling up new ones. Pages from other origins cannot be instrumented by any web page, so their popups still open externally.
 

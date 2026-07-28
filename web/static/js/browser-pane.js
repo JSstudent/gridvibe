@@ -252,6 +252,8 @@
                 class="browser-tab${tabIndex === pane._browserActiveTab ? ' active' : ''}"
                 data-browser-tab="${index}"
                 data-browser-tab-index="${tabIndex}"
+                data-browser-tab-id="${escHtml(tab.id)}"
+                draggable="true"
                 role="tab"
                 tabindex="0"
                 aria-selected="${tabIndex === pane._browserActiveTab ? 'true' : 'false'}"
@@ -492,6 +494,40 @@
         browserPersistTabs(index);
     }
 
+    /* Drag-reorder one tab before/after another, matching the session-tab and
+       explorer-tab strips. Only the strip markup is re-rendered — the frames
+       keep their DOM, so moving a tab never reloads the page it is showing.
+       The active tab is re-resolved by identity rather than by its old index,
+       so the pane keeps showing the same page whichever way the move went.
+       Persisted order follows automatically: browserSerializeTabs reads the
+       array in order. */
+    function browserReorderTab(index, draggedId, targetId, before) {
+        const pane = browserPaneAt(index);
+        if (!pane || !draggedId || draggedId === targetId) {
+            return;
+        }
+        const tabs = pane._browserTabs;
+        const from = tabs.findIndex(tab => tab.id === draggedId);
+        if (from === -1 || !tabs.some(tab => tab.id === targetId)) {
+            return;
+        }
+
+        const activeTab = tabs[pane._browserActiveTab];
+        const [dragged] = tabs.splice(from, 1);
+        const insertAt = tabs.findIndex(tab => tab.id === targetId) + (before ? 0 : 1);
+        tabs.splice(insertAt, 0, dragged);
+        pane._browserActiveTab = Math.max(0, tabs.indexOf(activeTab));
+
+        browserRenderTabStrip(index);
+        browserPersistTabs(index);
+    }
+
+    function browserClearTabDragMarkers(index) {
+        document.getElementById(`browser-tabs-${index}`)
+            ?.querySelectorAll('.browser-tab')
+            .forEach(el => el.classList.remove('dragging', 'drag-before', 'drag-after'));
+    }
+
     function reloadBrowserPane(index) {
         const frame = browserActiveFrame(index);
         const pane = browserPaneAt(index);
@@ -718,6 +754,81 @@
             }
             event.preventDefault();
             browserSelectTab(index, Number(tab.dataset.browserTabIndex));
+        });
+
+        /* Drag-reorder, delegated on the strip so it survives a re-render.
+           Drag events bubble, and the dragged tab is tracked by id rather than
+           by index so a mid-drag re-render cannot retarget the move. The pane
+           card's own dragover/drop guard on `draggedCard` (set only by a pane
+           header dragstart), so a tab drag never starts a pane swap. */
+        strip.addEventListener('dragstart', event => {
+            const tab = event.target.closest?.(`[data-browser-tab="${index}"]`);
+            if (!tab) {
+                return;
+            }
+            const pane = browserPaneAt(index);
+            if (pane) {
+                pane._browserDraggedTabId = tab.dataset.browserTabId || '';
+            }
+            if (event.dataTransfer) {
+                event.dataTransfer.effectAllowed = 'move';
+                try {
+                    event.dataTransfer.setData('text/plain', tab.dataset.browserTabId || '');
+                } catch (_) {
+                    /* setData throws in some embedded WebViews; the drag still
+                       works off the id held on the pane. */
+                }
+            }
+            tab.classList.add('dragging');
+        });
+
+        strip.addEventListener('dragend', () => {
+            const pane = browserPaneAt(index);
+            if (pane) {
+                pane._browserDraggedTabId = '';
+            }
+            browserClearTabDragMarkers(index);
+        });
+
+        strip.addEventListener('dragover', event => {
+            const draggedId = browserPaneAt(index)?._browserDraggedTabId || '';
+            const tab = event.target.closest?.(`[data-browser-tab="${index}"]`);
+            if (!draggedId || !tab || tab.dataset.browserTabId === draggedId) {
+                return;
+            }
+            event.preventDefault();
+            if (event.dataTransfer) {
+                event.dataTransfer.dropEffect = 'move';
+            }
+            const rect = tab.getBoundingClientRect();
+            const before = event.clientX < rect.left + rect.width / 2;
+            tab.classList.toggle('drag-before', before);
+            tab.classList.toggle('drag-after', !before);
+        });
+
+        strip.addEventListener('dragleave', event => {
+            const tab = event.target.closest?.(`[data-browser-tab="${index}"]`);
+            if (tab && !tab.contains(event.relatedTarget)) {
+                tab.classList.remove('drag-before', 'drag-after');
+            }
+        });
+
+        strip.addEventListener('drop', event => {
+            const pane = browserPaneAt(index);
+            const draggedId = pane?._browserDraggedTabId || '';
+            const tab = event.target.closest?.(`[data-browser-tab="${index}"]`);
+            if (!draggedId || !tab || tab.dataset.browserTabId === draggedId) {
+                return;
+            }
+            event.preventDefault();
+            /* Cleared here, not in `dragend`: the drop re-renders the strip, so
+               the drag source (and this delegating listener) is detached before
+               `dragend` would fire, which would otherwise leave the pane stuck
+               believing a drag is still in progress. */
+            pane._browserDraggedTabId = '';
+            const rect = tab.getBoundingClientRect();
+            const before = event.clientX < rect.left + rect.width / 2;
+            browserReorderTab(index, draggedId, tab.dataset.browserTabId || '', before);
         });
     }
 

@@ -1672,6 +1672,21 @@
             white-space: nowrap;
         }
 
+        /* Drag-reorder feedback, matching the explorer tab strip: the dragged
+           tab dims, the hovered drop target shows an accent edge on the side
+           the tab will land. */
+        .browser-tab.dragging {
+            opacity: .55;
+        }
+
+        .browser-tab.drag-before {
+            box-shadow: inset 2px 0 0 var(--t-accent);
+        }
+
+        .browser-tab.drag-after {
+            box-shadow: inset -2px 0 0 var(--t-accent);
+        }
+
         .browser-tab.active .browser-tab-label {
             font-weight: 600;
         }

@@ -1017,6 +1017,25 @@ class ApiRoutesTestCase(unittest.TestCase):
         # one level deeper would not detect that it is nested.
         self.assertNotIn('class="browser-frame${isActive', html.split("browser-frame-blocked")[0][-400:])
 
+    def test_browser_pane_tabs_drag_reorder(self):
+        """Tabs drag-reorder like the session and explorer strips."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn('draggable="true"', html)
+        self.assertIn("function browserReorderTab(index, draggedId, targetId, before)", html)
+        self.assertIn("function browserClearTabDragMarkers(index)", html)
+        # Drag state is held as a tab id, not an index, so a re-render mid-drag
+        # cannot retarget the move.
+        self.assertIn("pane._browserDraggedTabId = tab.dataset.browserTabId", html)
+        self.assertIn("data-browser-tab-id=", html)
+        # The shown page must survive a reorder: the active tab is re-resolved
+        # by identity, never left pointing at whatever slid into its old index.
+        self.assertIn("pane._browserActiveTab = Math.max(0, tabs.indexOf(activeTab))", html)
+        self.assertIn(".browser-tab.drag-before", html)
+        self.assertIn(".browser-tab.drag-after", html)
+
     def test_browser_pane_reuses_named_window_targets(self):
         """window.open(url, 'name') reuses that tab instead of stacking tabs."""
         response = self.client.get("/terminals")
