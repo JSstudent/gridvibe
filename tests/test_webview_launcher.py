@@ -308,6 +308,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertTrue(fake_webview.create_window.call_args.kwargs["resizable"])
         self.assertFalse(fake_webview.create_window.call_args.kwargs["frameless"])
         self.assertFalse(fake_webview.create_window.call_args.kwargs["easy_drag"])
+        self.assertTrue(fake_webview.create_window.call_args.kwargs["zoomable"])
         self.assertEqual(
             fake_webview.create_window.call_args.kwargs["background_color"],
             "#070b18",
@@ -329,6 +330,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertTrue(fake_webview.create_window.call_args.kwargs["resizable"])
         self.assertFalse(fake_webview.create_window.call_args.kwargs["frameless"])
         self.assertFalse(fake_webview.create_window.call_args.kwargs["easy_drag"])
+        self.assertTrue(fake_webview.create_window.call_args.kwargs["zoomable"])
         self.assertEqual(
             fake_webview.create_window.call_args.kwargs["background_color"],
             "#0d0d0d",

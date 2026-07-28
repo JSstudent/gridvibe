@@ -746,6 +746,7 @@ class GridVibeApi:
                 easy_drag=False,
                 background_color="#0d0d0d",
                 text_select=True,
+                zoomable=True,
                 js_api=self,
             )
             if window is None:
@@ -1103,6 +1104,7 @@ def main():
         easy_drag=False,
         background_color="#070b18",
         text_select=True,
+        zoomable=True,
         js_api=api_bridge,
     )
     if window is None:
