@@ -3012,8 +3012,9 @@
             cursor: default;
         }
 
-        /* The full-height edit surface: no soft wrap, scrolls both directions,
-           inherits the per-tab editor font-size variable. */
+        /* The full-height edit surface: follows the Source view's per-tab line
+           wrap flag (unwrapped it scrolls both directions), inherits the per-tab
+           editor font-size variable. */
         .explorer-source-editor {
             display: block;
             width: 100%;
@@ -3034,15 +3035,22 @@
             tab-size: 4;
         }
 
+        .explorer-source-view.wrap-lines .explorer-source-editor {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
         .explorer-source-editor:focus {
             outline: 2px solid var(--t-accent);
             outline-offset: -2px;
         }
 
+        /* Line wrapping stays live while editing (like zoom, it only restyles the
+           surface), so its button is not dimmed with the disabled chrome. */
         .explorer-editor.is-editing .explorer-editor-tab,
         .explorer-editor.is-editing .explorer-download-btn,
-        .explorer-editor.is-editing .explorer-md-appearance-btn,
-        .explorer-editor.is-editing .explorer-line-wrap-btn {
+        .explorer-editor.is-editing .explorer-md-appearance-btn {
             opacity: .5;
         }
 
@@ -3246,8 +3254,16 @@
             tab-size: 4;
         }
 
+        /* Unwrapped source keeps every line on one row and scrolls sideways, so
+           the lines block grows to the widest line. Wrapped source (the default,
+           per-tab like the preview/diff toggles) drops that floor so the code
+           column can reflow inside the pane instead. */
         .explorer-source-lines {
             min-width: max-content;
+        }
+
+        .explorer-source-view.wrap-lines .explorer-source-lines {
+            min-width: 0;
         }
 
         .explorer-source-line {
@@ -3299,6 +3315,12 @@
         .explorer-source-line-code {
             min-width: 0;
             padding: 0 14px;
+            white-space: pre;
+        }
+
+        /* Wrapped rows grow downward; the number gutter is a stretched grid cell
+           in the same row, so it stays aligned with the line it belongs to. */
+        .explorer-source-view.wrap-lines .explorer-source-line-code {
             white-space: pre-wrap;
             overflow-wrap: anywhere;
             word-break: break-word;

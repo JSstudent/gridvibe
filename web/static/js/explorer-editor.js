@@ -218,7 +218,10 @@
         if (!pane || !code || !state) {
             return;
         }
-        code.innerHTML = `<textarea id="explorer-edit-textarea-${index}" class="explorer-source-editor" spellcheck="false" wrap="off" aria-label="Edit ${escHtml(pane._explorerFileName || 'file')}"></textarea>`;
+        // The editor honours the tab's Source line-wrap flag; `soft` never
+        // rewrites the value, so the saved bytes are the same either way.
+        const wrap = explorerLineWrapPreference(index, 'source') ? 'soft' : 'off';
+        code.innerHTML = `<textarea id="explorer-edit-textarea-${index}" class="explorer-source-editor" spellcheck="false" wrap="${wrap}" aria-label="Edit ${escHtml(pane._explorerFileName || 'file')}"></textarea>`;
         const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
         if (!textarea) {
             return;

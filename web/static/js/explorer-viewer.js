@@ -2818,12 +2818,13 @@
     const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';
     const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';
     /* Line wrapping is per explorer tab, like the editor zoom above: each tab
-       record carries its own preview/diff flags instead of one workspace-global
-       preference, so every tab keeps the wrapping it was left at and the flags
-       ride along in the saved session's per-tab views. Both default to ON — a
-       wrapped view never hides content off to the right — so it is the *opt-out*
-       that is tracked and persisted, and an absent flag means wrapped. */
-    const EXPLORER_LINE_WRAP_MODES = Object.freeze(['preview', 'diff']);
+       record carries its own source/preview/diff flags instead of one
+       workspace-global preference, so every tab keeps the wrapping it was left
+       at and the flags ride along in the saved session's per-tab views. All
+       three default to ON — a wrapped view never hides content off to the
+       right — so it is the *opt-out* that is tracked and persisted, and an
+       absent flag means wrapped. */
+    const EXPLORER_LINE_WRAP_MODES = Object.freeze(['source', 'preview', 'diff']);
     const EXPLORER_MD_PRESET_LABELS = {
         default: 'Default',
         paper: 'Paper',
@@ -2841,10 +2842,11 @@
 
     function ensureExplorerTabLineWrap(tab) {
         if (!tab) {
-            return { preview: true, diff: true };
+            return { source: true, preview: true, diff: true };
         }
         const current = tab.lineWrap && typeof tab.lineWrap === 'object' ? tab.lineWrap : {};
         tab.lineWrap = {
+            source: current.source !== false,
             preview: current.preview !== false,
             diff: current.diff !== false,
         };
@@ -2860,12 +2862,14 @@
     }
 
     function explorerLineWrapControlText(mode, enabled) {
-        const viewLabel = mode === 'preview' ? 'Markdown preview' : 'diff';
+        const viewLabel = mode === 'preview'
+            ? 'Markdown preview'
+            : (mode === 'source' ? 'source view' : 'diff');
         return `${enabled ? 'Disable' : 'Enable'} line wrapping in ${viewLabel}`;
     }
 
-    function explorerLineWrapControlHtml(index, initialMode = 'source') {
-        const mode = initialMode === 'preview' || initialMode === 'diff' ? initialMode : '';
+    function explorerLineWrapControlHtml(index, initialMode = '') {
+        const mode = EXPLORER_LINE_WRAP_MODES.includes(initialMode) ? initialMode : '';
         const enabled = mode ? explorerLineWrapPreference(index, mode) : false;
         const label = mode ? explorerLineWrapControlText(mode, enabled) : 'Wrap lines';
         return `
@@ -2883,26 +2887,38 @@
     }
 
     function applyExplorerLineWrapState(index, selectedMode = activeExplorerFileView(index)) {
-        const preview = document.getElementById(`explorer-preview-${index}`);
-        const diff = document.getElementById(`explorer-diff-code-${index}`);
-        const previewWrap = explorerLineWrapPreference(index, 'preview');
-        const diffWrap = explorerLineWrapPreference(index, 'diff');
-        preview?.classList.toggle('wrap-lines', previewWrap);
-        diff?.classList.toggle('wrap-lines', diffWrap);
+        const panels = {
+            source: document.getElementById(`explorer-code-${index}`),
+            preview: document.getElementById(`explorer-preview-${index}`),
+            diff: document.getElementById(`explorer-diff-code-${index}`),
+        };
+        const wraps = {};
+        EXPLORER_LINE_WRAP_MODES.forEach(mode => {
+            wraps[mode] = explorerLineWrapPreference(index, mode);
+            panels[mode]?.classList.toggle('wrap-lines', wraps[mode]);
+        });
+        /* The in-place editor replaces the Source panel's contents, so the same
+           per-tab flag drives the textarea: the CSS class above styles it and
+           the `wrap` attribute keeps the control's own soft wrapping in step
+           (never `hard`, which would inject newlines into the saved value). */
+        const textarea = panels.source?.querySelector('.explorer-source-editor');
+        if (textarea) {
+            textarea.wrap = wraps.source ? 'soft' : 'off';
+        }
 
         const button = document.querySelector(`[data-explorer-line-wrap="${index}"]`);
         if (!button) {
             return;
         }
-        const modeAvailable = (selectedMode === 'preview' && preview)
-            || (selectedMode === 'diff' && diff);
+        const modeAvailable = EXPLORER_LINE_WRAP_MODES.includes(selectedMode)
+            && Boolean(panels[selectedMode]);
         button.hidden = !modeAvailable;
         if (!modeAvailable) {
             button.dataset.explorerWrapMode = '';
             button.setAttribute('aria-pressed', 'false');
             return;
         }
-        const enabled = selectedMode === 'preview' ? previewWrap : diffWrap;
+        const enabled = wraps[selectedMode];
         const label = explorerLineWrapControlText(selectedMode, enabled);
         button.dataset.explorerWrapMode = selectedMode;
         button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
@@ -5086,7 +5102,7 @@
        scroll as a fraction of scroll height (OD-4), the content-identity hash
        the restore-side skip rule compares, the tab's editor font size
        (omitted at the default so unzoomed tabs persist nothing), and its
-       preview/diff line-wrap opt-outs (wrapping defaults on, so only an
+       source/preview/diff line-wrap opt-outs (wrapping defaults on, so only an
        explicit off persists — same reason). */
     function explorerPersistableTabView(tab) {
         if (!tab) {
@@ -5114,6 +5130,9 @@
         const fontSize = tab.fontSize ? clampExplorerEditorFontSize(tab.fontSize) : 0;
         if (fontSize && fontSize !== EXPLORER_EDITOR_FONT_DEFAULT) {
             record.font_size = fontSize;
+        }
+        if (tab.lineWrap && tab.lineWrap.source === false) {
+            record.wrap_source = false;
         }
         if (tab.lineWrap && tab.lineWrap.preview === false) {
             record.wrap_preview = false;
@@ -5148,6 +5167,7 @@
     function explorerPersistedTabLineWrap(raw) {
         const view = raw && typeof raw === 'object' ? raw : {};
         return {
+            source: view.wrap_source !== false,
             preview: view.wrap_preview !== false,
             diff: view.wrap_diff !== false,
         };
@@ -5621,7 +5641,7 @@
                         <span class="explorer-zoom-value" data-explorer-zoom-value="${index}"></span>
                         <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">+</button>
                     </div>
-                    ${(hasPreview || hasGitDiff) ? explorerLineWrapControlHtml(index, initialFileView) : ''}
+                    ${explorerLineWrapControlHtml(index, initialFileView)}
                     ${hasPreview ? `<button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Markdown appearance" aria-label="Markdown preview appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>` : ''}
                     ${explorerEditorControlsHtml(index)}
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>

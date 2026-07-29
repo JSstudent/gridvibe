@@ -16,10 +16,9 @@
 
 ## Screenshots
 
-| Launcher | Terminal Workspace | App Settings |
-| --- | --- | --- |
-| ![GridVibe launcher with terminal count, layout, connection, and per-terminal setup controls](docs/images/screenshots/launcher.png) | ![GridVibe terminal workspace showing a four-pane SSH session group](docs/images/screenshots/workspace.png) | ![GridVibe app settings with theme, SSH host-key, and voice options](docs/images/screenshots/settings.PNG) |
-
+| Launcher | Terminal Workspace | Browser | App Settings |
+| --- | --- | --- | --- |
+| ![GridVibe launcher with terminal count, layout, connection, and per-terminal setup controls](docs/images/screenshots/launcher.png) | ![GridVibe terminal workspace showing a four-pane SSH session group](docs/images/screenshots/workspace.png) | ![GridVibe app browser terminal mode with tabs](docs/images/screenshots/browser_view.png) |![GridVibe app settings with theme, SSH host-key, and voice options](docs/images/screenshots/settings.PNG) |
 ## Install
 
 GridVibe runs from source. **Python 3.10+ is the only prerequisite** — the launcher scripts (`GridVibe.bat` on Windows, `GridVibe.sh` on Linux/macOS) create and repair the virtual environment, install dependencies, and start the app for you.

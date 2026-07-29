@@ -1616,8 +1616,13 @@ class ApiRoutesTestCase(unittest.TestCase):
             "function cancelExplorerEdit(index)",
         ):
             self.assertIn(hook, editor)
-        # Textarea attributes: spellcheck off, no soft wrap, accessible label.
-        self.assertIn('class="explorer-source-editor" spellcheck="false" wrap="off"', editor)
+        # Textarea attributes: spellcheck off, the tab's own Source wrap flag
+        # (never `hard`, which would rewrite the saved value), accessible label.
+        self.assertIn('class="explorer-source-editor" spellcheck="false" wrap="${wrap}"', editor)
+        self.assertIn(
+            "const wrap = explorerLineWrapPreference(index, 'source') ? 'soft' : 'off';",
+            editor,
+        )
         self.assertIn('aria-label="Edit ', editor)
         # Tab inserts a literal tab; Ctrl/Cmd+S saves; Escape cancels.
         self.assertIn("textarea.setRangeText('\\t', start, end, 'end');", editor)
@@ -2162,7 +2167,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('data-explorer-file-panel="diff"', html)
 
     def test_terminals_page_markdown_and_diff_line_wrap_preferences(self):
-        """Preview and diff expose per-tab, persisted, gutter-safe opt-in wrapping."""
+        """Source, preview and diff expose per-tab, persisted, gutter-safe wrapping."""
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
@@ -2172,7 +2177,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Wrapping lives on the active explorer tab (like the editor zoom), not
         # in one workspace-global preference, and saves with the session.
         self.assertIn(
-            "const EXPLORER_LINE_WRAP_MODES = Object.freeze(['preview', 'diff']);",
+            "const EXPLORER_LINE_WRAP_MODES = Object.freeze(['source', 'preview', 'diff']);",
             html,
         )
         self.assertIn("function setExplorerLineWrapPreference(index, mode, enabled)", html)
@@ -2186,11 +2191,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         # Wrapping defaults ON, so the persisted flag is the opt-out: an absent
         # key restores wrapped.
+        self.assertIn("source: current.source !== false,", html)
         self.assertIn("preview: current.preview !== false,", html)
         self.assertIn("diff: current.diff !== false,", html)
+        self.assertIn("record.wrap_source = false;", html)
         self.assertIn("record.wrap_preview = false;", html)
         self.assertIn("record.wrap_diff = false;", html)
+        self.assertIn("source: view.wrap_source !== false,", html)
         self.assertIn("preview: view.wrap_preview !== false,", html)
+        # Unwrapped source keeps one row per line and scrolls sideways; the
+        # wrapped variant drops the max-content floor so the code column reflows,
+        # and the in-place editor follows the same per-tab flag.
+        self.assertIn(".explorer-source-view.wrap-lines .explorer-source-lines {", html)
+        self.assertIn(".explorer-source-view.wrap-lines .explorer-source-line-code {", html)
+        self.assertIn(".explorer-source-view.wrap-lines .explorer-source-editor {", html)
+        self.assertIn("textarea.wrap = wraps.source ? 'soft' : 'off';", html)
         self.assertIn("function explorerPersistedTabLineWrap(raw)", html)
         self.assertIn("record.lineWrap = explorerPersistedTabLineWrap(rawViews[key]);", html)
         # Wrapped diffs retain Diff2Html's intraline markup; paired row heights
@@ -7348,7 +7363,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                         "diff_mode": "staged",
                     },
                     "c.md": {"mode": "bogus", "scroll": 0.1, "identity": "ok"},
-                    "e.md": {"font_size": 12, "wrap_preview": 0},
+                    "e.md": {"font_size": 12, "wrap_preview": 0, "wrap_source": False},
                     "../escape.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "not-open.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "d.md": "not-a-dict",
@@ -7408,7 +7423,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         # captured), a falsy wrap flag normalizes to an explicit `False`
         # opt-out, and the reserved Preview key keeps its view, zoom, wrapping,
         # and own separated path — file and browsed directory.
-        self.assertEqual(views["e.md"], {"font_size": 12, "wrap_preview": False})
+        self.assertEqual(
+            views["e.md"],
+            {"font_size": 12, "wrap_source": False, "wrap_preview": False},
+        )
         self.assertEqual(
             views["__preview__"],
             {

@@ -122,7 +122,7 @@ def _normalize_explorer_tab_font_size(value: Any) -> int:
 
 
 def _normalize_explorer_line_wrap(raw_view: Dict[str, Any]) -> Dict[str, bool]:
-    """Return the per-tab preview/diff line-wrap opt-outs.
+    """Return the per-tab source/preview/diff line-wrap opt-outs.
 
     Wrapping is on by default, so only an explicit off flag persists — an absent
     key restores wrapped, which is also what tabs saved before wrapping existed
@@ -130,7 +130,7 @@ def _normalize_explorer_line_wrap(raw_view: Dict[str, Any]) -> Dict[str, bool]:
     """
     return {
         key: False
-        for key in ("wrap_preview", "wrap_diff")
+        for key in ("wrap_source", "wrap_preview", "wrap_diff")
         if key in raw_view and not raw_view[key]
     }
 
