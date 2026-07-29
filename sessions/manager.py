@@ -392,6 +392,59 @@ class SessionManager:
             session.initial_command = initial_command
             return session.to_dict()
 
+    def merge_browser_tabs(
+        self,
+        session_id: str,
+        *,
+        browser_url: Optional[str],
+        browser_active_tab: Any,
+        default_browser_url: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically merge a single-URL browser request into the live tab strip.
+
+        ``browser_url`` and ``default_browser_url`` are normalized by the web
+        boundary. Existing tabs belong to an already-normalized browser
+        session, so the read/merge/write transaction can stay inside one lock
+        hold without making the session layer depend on web normalization.
+        """
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                return None
+
+            was_browser = session.startup_mode == "browser"
+            resolved_url = (
+                browser_url
+                or (session.initial_command if was_browser else "")
+                or default_browser_url
+            )
+            browser_tabs = list(session.browser_tabs) if was_browser else []
+            if not browser_tabs:
+                browser_tabs = [resolved_url]
+
+            requested_active_tab = (
+                session.browser_active_tab
+                if browser_active_tab is None
+                else browser_active_tab
+            )
+            try:
+                active_tab = int(requested_active_tab)
+            except (TypeError, ValueError):
+                active_tab = 0
+            active_tab = max(0, min(len(browser_tabs) - 1, active_tab))
+            browser_tabs[active_tab] = resolved_url
+
+            session.host = "Browser"
+            session.username = ""
+            session.port = 22
+            session.password = None
+            session.initial_command = resolved_url
+            session.initial_command_mode = "browser"
+            session.startup_mode = "browser"
+            session.browser_tabs = browser_tabs
+            session.browser_active_tab = active_tab
+            return session.to_dict()
+
     def get_all_sessions(self) -> List[TerminalSession]:
         """Get all sessions."""
         with self.lock:

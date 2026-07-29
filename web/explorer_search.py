@@ -436,6 +436,9 @@ def collect_search_payload(
         rel_path = str(rel_path).replace(os.sep, "/")
         if not include_match(rel_path, options.include):
             continue
+        if total_matches >= limits.max_matches:
+            truncated["matches"] = True
+            break
         entry = index_by_path.get(rel_path)
         if entry is None:
             if len(files) >= limits.max_files:
@@ -451,9 +454,6 @@ def collect_search_payload(
             }
             index_by_path[rel_path] = entry
             files.append(entry)
-        if total_matches >= limits.max_matches:
-            truncated["matches"] = True
-            break
         entry["match_count"] += 1
         total_matches += 1
         if len(entry["matches"]) >= limits.max_matches_per_file:

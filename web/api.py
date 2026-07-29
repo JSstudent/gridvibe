@@ -1943,38 +1943,27 @@ def change_session_mode(session_id: str):
                 _broadcast_session_status(session_id)
                 return jsonify(browser_snapshot)
             else:
-                browser_url = _normalize_browser_url(
-                    data.get("url")
-                    or data.get("initial_command")
-                    or session.initial_command
-                    or DEFAULT_BROWSER_URL
+                requested_browser_url = data.get("url") or data.get("initial_command")
+                browser_url = (
+                    _normalize_browser_url(requested_browser_url)
+                    if requested_browser_url
+                    else None
                 )
-                browser_tabs = _normalize_browser_tabs(
-                    list(session.browser_tabs), session.initial_command
-                ) or [browser_url]
-                browser_active_tab = _normalize_browser_active_tab(
-                    data.get("active_tab", session.browser_active_tab), browser_tabs
+                browser_snapshot = session_manager.merge_browser_tabs(
+                    session_id,
+                    browser_url=browser_url,
+                    browser_active_tab=data.get("active_tab"),
+                    default_browser_url=DEFAULT_BROWSER_URL,
                 )
-                browser_tabs[browser_active_tab] = browser_url
+                if browser_snapshot is None:
+                    return jsonify({"error": "Session not found"}), 404
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
-        session_manager.update_session_metadata(
-            session_id,
-            host="Browser",
-            username="",
-            port=22,
-            password=None,
-            initial_command=browser_url,
-            initial_command_mode="browser",
-            startup_mode="browser",
-            browser_tabs=browser_tabs,
-            browser_active_tab=browser_active_tab,
-        )
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         _close_ssh_connection(session_id, clear_buffer=True)
         _broadcast_session_status(session_id)
-        return jsonify(session_manager.get_session(session_id).to_dict())
+        return jsonify(browser_snapshot)
 
     if target_mode == "explorer":
         requested_directory = data.get("directory")

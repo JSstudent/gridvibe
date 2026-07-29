@@ -217,7 +217,7 @@
         return `
             <div class="explorer-search-group" data-explorer-search-file="${escHtml(path)}">
                 <button type="button" class="explorer-search-group-head" data-explorer-search-fold="${escHtml(path)}" aria-expanded="${collapsed ? 'false' : 'true'}">
-                    <span class="explorer-search-group-toggle" aria-hidden="true">${collapsed ? '▸' : '▾'}</span>
+                    <span class="explorer-search-group-toggle" aria-hidden="true">${collapsed ? UI_CHEVRON_RIGHT_ICON : UI_CHEVRON_DOWN_ICON}</span>
                     ${explorerFileTypeIconHtml(path)}
                     <span class="explorer-search-group-name">${escHtml(file.name || path)}</span>
                     <span class="explorer-search-group-dir">${escHtml(file.dir || '')}</span>
@@ -348,9 +348,9 @@
                            placeholder="include: *.py, web/**" aria-label="Include glob filter"
                            spellcheck="false" autocomplete="off">
                     <button type="button" class="explorer-search-btn" data-explorer-repo-search-expand-all
-                            title="Expand all" aria-label="Expand all">+</button>
+                            title="Expand all" aria-label="Expand all">${UI_PLUS_ICON}</button>
                     <button type="button" class="explorer-search-btn" data-explorer-repo-search-collapse-all
-                            title="Collapse all" aria-label="Collapse all">−</button>
+                            title="Collapse all" aria-label="Collapse all">${UI_MINUS_ICON}</button>
                 </div>
                 <div class="explorer-search-summary" aria-live="polite"></div>
                 <div class="explorer-search-results"></div>

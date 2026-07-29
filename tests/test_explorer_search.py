@@ -181,6 +181,11 @@ class CollectSearchPayloadTestCase(unittest.TestCase):
         raw = [(f"f{index}.txt", 1, b"hello") for index in range(10)]
         payload = self._collect(raw, limits=self._limits(max_matches=4))
         self.assertEqual(payload["total_matches"], 4)
+        self.assertEqual(
+            [entry["path"] for entry in payload["files"]],
+            ["f0.txt", "f1.txt", "f2.txt", "f3.txt"],
+        )
+        self.assertTrue(all(entry["match_count"] > 0 for entry in payload["files"]))
         self.assertTrue(payload["truncated"]["matches"])
 
     def test_file_cap(self):

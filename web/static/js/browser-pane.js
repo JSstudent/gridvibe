@@ -286,7 +286,7 @@
                         data-browser-tab-index="${tabIndex}"
                         title="Close tab"
                         aria-label="Close tab"
-                    >×</button>
+                    >${UI_CLOSE_ICON}</button>
                 ` : ''}
             </div>
         `).join('');
@@ -301,7 +301,7 @@
                     title="Open a new tab in this pane"
                     aria-label="Open a new tab in this pane"
                     ${pane._browserTabs.length >= BROWSER_MAX_TABS ? 'disabled' : ''}
-                >+</button>
+                >${UI_PLUS_ICON}</button>
             </div>
         `;
     }

@@ -988,6 +988,47 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("browser_tabs: browserTabs.tabs", html)
         self.assertIn("browser_active_tab: browserTabs.active_tab", html)
 
+    def test_compact_action_controls_use_shared_svg_icons(self):
+        """F8 — action buttons use currentColor SVGs; search mnemonics stay text."""
+        icons = self._static("js/terminal-icons.js")
+        search = self._static("js/explorer-search.js")
+        browser = self._static("js/browser-pane.js")
+
+        for icon in (
+            "UI_CHEVRON_RIGHT_ICON",
+            "UI_CHEVRON_DOWN_ICON",
+            "UI_PLUS_ICON",
+            "UI_MINUS_ICON",
+            "UI_CLOSE_ICON",
+        ):
+            marker = f"const {icon} = '"
+            self.assertIn(marker, icons)
+            svg = icons[icons.index(marker) + len(marker):]
+            svg = svg[:svg.index("';")]
+            self.assertIn('stroke="currentColor"', svg)
+            self.assertNotIn('fill="#', svg)
+
+        self.assertIn(
+            "collapsed ? UI_CHEVRON_RIGHT_ICON : UI_CHEVRON_DOWN_ICON",
+            search,
+        )
+        self.assertIn('aria-label="Expand all">${UI_PLUS_ICON}</button>', search)
+        self.assertIn('aria-label="Collapse all">${UI_MINUS_ICON}</button>', search)
+        self.assertNotIn("▸", search)
+        self.assertNotIn("▾", search)
+        self.assertNotIn('aria-label="Expand all">+</button>', search)
+        self.assertNotIn('aria-label="Collapse all">−</button>', search)
+
+        self.assertIn(">${UI_CLOSE_ICON}</button>", browser)
+        self.assertIn(">${UI_PLUS_ICON}</button>", browser)
+        self.assertNotIn(">×</button>", browser)
+        self.assertNotIn(">+</button>", browser)
+
+        # These are search-language labels, not stand-ins for graphical actions.
+        self.assertIn('title="Match case">Aa</button>', search)
+        self.assertIn('title="Match whole word">ab</button>', search)
+        self.assertIn('title="Use regular expression">.*</button>', search)
+
     def test_browser_tab_persist_is_cancelled_and_revalidated_before_post(self):
         """F1 — a stale debounce must not switch a terminal back to browser mode."""
         browser_response = self.client.get("/static/js/browser-pane.js")
@@ -4324,6 +4365,61 @@ class ApiRoutesTestCase(unittest.TestCase):
             ["http://127.0.0.1:3000", "http://localhost:5173"],
         )
         self.assertEqual(updated.browser_active_tab, 1)
+
+    def test_switch_browser_navigation_merges_with_latest_tab_strip(self):
+        """F6 — a concurrent strip update cannot be lost by URL navigation."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:5050/",
+            initial_command_mode="browser",
+            browser_tabs=["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
+            browser_active_tab=1,
+        )
+        original_merge = api.session_manager.merge_browser_tabs
+
+        def merge_after_concurrent_strip_update(session_id, **kwargs):
+            api.session_manager.update_browser_tab_strip(
+                session_id,
+                browser_tabs=["http://127.0.0.1:6000", "http://127.0.0.1:7000"],
+                browser_active_tab=0,
+                initial_command="http://127.0.0.1:6000",
+            )
+            return original_merge(session_id, **kwargs)
+
+        with patch.object(
+            api.session_manager,
+            "merge_browser_tabs",
+            side_effect=merge_after_concurrent_strip_update,
+        ), patch.object(api, "_close_ssh_connection"):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={
+                    "startup_mode": "browser",
+                    "url": "localhost:5173",
+                    "active_tab": 1,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(
+            updated.browser_tabs,
+            ["http://127.0.0.1:6000", "http://localhost:5173"],
+        )
+        self.assertEqual(updated.browser_active_tab, 1)
+        self.assertEqual(updated.initial_command, "http://localhost:5173")
 
     def test_switch_pane_away_from_browser_clears_tab_strip(self):
         repo_dir = Path(self.temp_dir.name) / "repo"

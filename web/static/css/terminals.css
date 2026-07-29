@@ -1708,6 +1708,14 @@
             line-height: 1;
         }
 
+        .browser-tab-close svg,
+        .browser-tab-new svg {
+            display: block;
+            width: 12px;
+            height: 12px;
+            pointer-events: none;
+        }
+
         .browser-tab-new {
             align-self: center;
             margin-left: 2px;
@@ -2119,8 +2127,18 @@
         }
 
         .explorer-search-panel .explorer-search-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             width: 26px;
             height: 26px;
+        }
+
+        .explorer-search-panel .explorer-search-btn svg {
+            display: block;
+            width: 14px;
+            height: 14px;
+            pointer-events: none;
         }
 
         .explorer-search-panel .explorer-search-btn[aria-pressed="true"] {
@@ -2188,9 +2206,17 @@
         }
 
         .explorer-search-group-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             color: var(--explorer-muted);
-            font-size: .66rem;
             text-align: center;
+        }
+
+        .explorer-search-group-toggle svg {
+            display: block;
+            width: 12px;
+            height: 12px;
         }
 
         .explorer-search-group-name {
