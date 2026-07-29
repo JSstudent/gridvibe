@@ -13,6 +13,20 @@ from web import explorer as web_explorer
 from web import explorer_fs
 
 
+def _canonical_temp_root(root: Path) -> Path:
+    """Create a temporary explorer root the backend resolves to unchanged.
+
+    The local backend canonicalizes every path with ``os.path.realpath``, so a
+    test that derives claim keys or root revisions from the raw ``tempfile``
+    path silently disagrees with it wherever the two differ: the Windows CI
+    runner's temporary directory carries 8.3 short components
+    (``C:\\Users\\RUNNER~1\\...``) and macOS resolves ``/tmp`` to
+    ``/private/tmp``. Resolving here keeps both sides on one spelling.
+    """
+    root.mkdir()
+    return Path(os.path.realpath(root))
+
+
 def _local_session(root: Path, session_id: str = "explorer-fs-test"):
     return SimpleNamespace(
         session_id=session_id,
@@ -173,8 +187,7 @@ class ExplorerFilesystemPolicyTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
-        self.root = Path(self.temp_dir.name) / "root"
-        self.root.mkdir()
+        self.root = _canonical_temp_root(Path(self.temp_dir.name) / "root")
         self.backend = web_explorer._LocalExplorerBackend(_local_session(self.root))
 
     def test_copy_name_allocation_is_extension_aware(self):
@@ -421,8 +434,7 @@ class ExplorerFilesystemRoutesTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
-        self.root = Path(self.temp_dir.name) / "repo"
-        self.root.mkdir()
+        self.root = _canonical_temp_root(Path(self.temp_dir.name) / "repo")
         self.session_id = f"explorer-fs-{id(self)}"
         self.session = _local_session(self.root, self.session_id)
         api.app.config["TESTING"] = True
