@@ -2444,6 +2444,15 @@
             height: 14px;
         }
 
+        .explorer-tab-main > .explorer-git-badge {
+            flex: none;
+            min-width: 16px;
+            width: 16px;
+            height: 16px;
+            border: 0;
+            background: transparent;
+        }
+
         .explorer-tab-name {
             overflow: hidden;
             text-overflow: ellipsis;
@@ -3622,6 +3631,7 @@
         }
 
         .explorer-diff-line-number {
+            position: relative;
             padding: 2px 8px;
             color: var(--explorer-muted);
             text-align: right;
@@ -3665,6 +3675,48 @@
             background: var(--explorer-bar-bg);
             border-right: 0;
             font-weight: 700;
+        }
+
+        .explorer-diff-undo-line {
+            position: absolute;
+            inset-inline-start: 2px;
+            top: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            padding: 0;
+            transform: translateY(-50%);
+            border: 1px solid var(--explorer-btn-border);
+            border-radius: var(--gv-radius-s);
+            background: var(--explorer-btn-bg);
+            color: var(--t-accent);
+            cursor: pointer;
+            opacity: .72;
+            transition: opacity .12s ease, background-color .12s ease;
+        }
+
+        .explorer-diff-undo-line .explorer-btn-icon {
+            width: 13px;
+            height: 13px;
+        }
+
+        :is(.explorer-diff-line-number, .d2h-code-side-linenumber):hover
+        > .explorer-diff-undo-line,
+        .explorer-diff-undo-line:focus-visible,
+        .explorer-diff-undo-line.is-busy {
+            opacity: 1;
+        }
+
+        .explorer-diff-undo-line:hover:not(:disabled),
+        .explorer-diff-undo-line:focus-visible {
+            background: var(--explorer-btn-hover-bg);
+            outline: none;
+        }
+
+        .explorer-diff-undo-line:disabled {
+            cursor: wait;
         }
 
         .explorer-diff-empty {

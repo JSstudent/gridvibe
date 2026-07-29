@@ -1672,6 +1672,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("save_in_progress", editor)
         self.assertIn("file_too_large", editor)
 
+    def test_terminals_page_explorer_editor_clears_dirty_tab_marker_immediately(self):
+        """Save/cancel/discard exits synchronise the transient tab dirty class."""
+        editor = self._static("js/explorer-editor.js")
+        clear_state = editor[
+            editor.index("function clearExplorerEditState(index)"):
+            editor.index("async function confirmDiscardExplorerEdit", editor.index("function clearExplorerEditState(index)"))
+        ]
+        self.assertIn("pane._explorerEdit = null;", clear_state)
+        self.assertIn("updateExplorerEditTabDirty(index);", clear_state)
+        # Confirmed discard, Cancel, Save success, and conflict reload all share
+        # the same immediate state-drop path.
+        self.assertGreaterEqual(editor.count("clearExplorerEditState(index);"), 4)
+
     def test_terminals_page_explorer_editor_guards_dirty_teardown(self):
         """§5.6: every deliberate teardown consults the discard guard."""
         editor = self._static("js/explorer-editor.js")
@@ -1726,6 +1739,71 @@ class ApiRoutesTestCase(unittest.TestCase):
         # No raw hex palette literals in the new editor rules.
         editor_css = css[css.index("/* ── In-app editor controls"):css.index(".explorer-tab.is-dirty .explorer-tab-name::after")]
         self.assertNotRegex(editor_css, r":\s*#[0-9a-fA-F]{3,6}\b")
+
+    def test_terminals_page_explorer_tabs_show_unstaged_git_status(self):
+        """Open tabs mirror only the worktree/unstaged status column."""
+        viewer = self._static("js/explorer-viewer.js")
+        css = self._static("css/terminals.css")
+        helper = viewer[
+            viewer.index("function explorerTabUnstagedGit(git)"):
+            viewer.index("function syncExplorerTabGitFromRepo", viewer.index("function explorerTabUnstagedGit(git)"))
+        ]
+        self.assertIn("const worktreeCode = git.worktree_status || ' ';", helper)
+        self.assertIn("if (explorerGitCodeUnmodified(worktreeCode)) {", helper)
+        self.assertIn("explorerGitStatusFromCode(worktreeCode)", helper)
+        self.assertIn("assignedTab.git = data.git || null;", viewer)
+        self.assertIn("renderedTab.git = data.git || null;", viewer)
+        self.assertIn("syncExplorerTabGitFromRepo(index, data);", viewer)
+        self.assertIn("${gitBadge}", viewer)
+        self.assertIn(".explorer-tab-main > .explorer-git-badge {", css)
+
+    def test_terminals_page_explorer_diff_line_undo_is_revision_guarded(self):
+        """Per-line discard stays inside the existing bounded editor save route."""
+        viewer = self._static("js/explorer-viewer.js")
+        css = self._static("css/terminals.css")
+        line_undo = viewer[
+            viewer.index("function explorerDiffShowsOnlyWorktreeChanges(pane)"):
+            viewer.index(
+                "/* Render the patch with the pinned Diff2Html build",
+                viewer.index("function explorerDiffShowsOnlyWorktreeChanges(pane)"),
+            )
+        ]
+        # It is offered only for complete editable unstaged worktree diffs.
+        for guard in (
+            "pane._explorerDiffMode === 'worktree'",
+            "explorerDiffShowsOnlyWorktreeChanges(pane)",
+            "!pane._explorerDiffCommit",
+            "pane._explorerFileEditable",
+            "!pane._explorerFileTruncated",
+            "!pane._explorerDiffTruncated",
+            "pane._explorerFileRevision",
+            "'\\\\ No newline at end of file'",
+        ):
+            self.assertIn(guard, line_undo)
+        # A directly opened tab uses HEAD mode. Permit it only when HEAD and the
+        # worktree diff are identical: an unchanged index plus an unstaged edit.
+        self.assertIn("const indexCode = git.index_status || ' ';", line_undo)
+        self.assertIn("const worktreeCode = git.worktree_status || ' ';", line_undo)
+        self.assertIn("explorerGitCodeUnmodified(indexCode)", line_undo)
+        self.assertIn("!explorerGitCodeUnmodified(worktreeCode)", line_undo)
+        self.assertIn("git.status === 'conflicted'", line_undo)
+        # The action confirms in-page and reuses the optimistic full-file save
+        # contract; it does not add a patch-accepting Git endpoint.
+        self.assertIn("await openGenericConfirmModal({", line_undo)
+        self.assertIn("/file`, {", line_undo)
+        self.assertIn("const baseRevision = pane._explorerFileRevision;", line_undo)
+        self.assertIn("pane._explorerFileRevision !== baseRevision", line_undo)
+        self.assertIn("base_revision: baseRevision", line_undo)
+        self.assertNotIn("/git/", line_undo)
+        self.assertIn("wireExplorerDiffUndoControls(index, host);", viewer)
+        self.assertIn("wireExplorerDiffUndoControls(index, code);", viewer)
+        self.assertIn(".explorer-diff-undo-line {", css)
+        undo_css = css[
+            css.index(".explorer-diff-undo-line {"):
+            css.index(".explorer-diff-empty {")
+        ]
+        self.assertIn("border-radius: var(--gv-radius-s);", undo_css)
+        self.assertNotRegex(undo_css, r":\s*#[0-9a-fA-F]{3,6}\b")
 
     def test_terminals_page_explorer_markdown_links_open_tabs(self):
         """ISSUE-2026-016: Markdown preview links resolve and open explorer tabs."""
