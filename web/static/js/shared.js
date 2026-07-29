@@ -121,6 +121,58 @@
         }
         return resolveTerminalDirectory(baseDirectory, rawDirectory, mode);
     }
+    function resolvePaneStartupMode(terminal) {
+        const savedStartupMode = String(terminal?.startup_mode || '').trim();
+        const savedCommandMode = String(terminal?.initial_command_mode || '').trim();
+        if (savedStartupMode === 'explorer' || savedCommandMode === 'explorer') {
+            return 'explorer';
+        }
+        if (savedStartupMode === 'browser' || savedCommandMode === 'browser') {
+            return 'browser';
+        }
+        if (savedStartupMode === 'agent' || savedCommandMode === 'agent') {
+            return 'agent';
+        }
+        return 'terminal';
+    }
+    function buildPaneLaunchFields(terminal, startupMode = resolvePaneStartupMode(terminal)) {
+        const requestedMode = String(startupMode || '').trim();
+        const resolvedStartupMode = ['explorer', 'browser', 'agent', 'terminal'].includes(requestedMode)
+            ? requestedMode
+            : resolvePaneStartupMode(terminal);
+        const shellFlagsAllowed = !['explorer', 'browser'].includes(resolvedStartupMode);
+        return {
+            initial_command: resolvedStartupMode === 'explorer' ? null : (terminal?.initial_command || null),
+            initial_command_mode: resolvedStartupMode === 'explorer' || resolvedStartupMode === 'browser'
+                ? resolvedStartupMode
+                : (resolvedStartupMode === 'agent' ? 'agent' : 'command'),
+            browser_tabs: resolvedStartupMode === 'browser' && Array.isArray(terminal?.browser_tabs)
+                ? terminal.browser_tabs
+                : [],
+            browser_active_tab: resolvedStartupMode === 'browser'
+                ? (Number(terminal?.browser_active_tab) || 0)
+                : 0,
+            agent_selection: resolvedStartupMode === 'agent' ? (terminal?.agent_selection || '') : '',
+            custom_agent: resolvedStartupMode === 'agent' ? (terminal?.custom_agent || '') : '',
+            agent_auto_mode: resolvedStartupMode === 'agent' && Boolean(terminal?.agent_auto_mode),
+            explorer_tree_open: resolvedStartupMode === 'explorer' ? Boolean(terminal?.explorer_tree_open) : false,
+            explorer_git_open: resolvedStartupMode === 'explorer' ? Boolean(terminal?.explorer_git_open) : false,
+            explorer_search_open: resolvedStartupMode === 'explorer' ? Boolean(terminal?.explorer_search_open) : false,
+            explorer_open_tabs: resolvedStartupMode === 'explorer' && Array.isArray(terminal?.explorer_open_tabs)
+                ? terminal.explorer_open_tabs
+                : [],
+            explorer_active_tab: resolvedStartupMode === 'explorer' ? (terminal?.explorer_active_tab || '') : '',
+            explorer_tab_views: resolvedStartupMode === 'explorer' && terminal?.explorer_tab_views && typeof terminal.explorer_tab_views === 'object'
+                ? terminal.explorer_tab_views
+                : {},
+            explorer_md_preset: resolvedStartupMode === 'explorer' ? (terminal?.explorer_md_preset || '') : '',
+            explorer_md_font: resolvedStartupMode === 'explorer' ? (terminal?.explorer_md_font || '') : '',
+            explorer_theme: resolvedStartupMode === 'explorer' ? (terminal?.explorer_theme || 'dark') : '',
+            startup_mode: resolvedStartupMode,
+            use_wsl: shellFlagsAllowed && Boolean(terminal?.use_wsl),
+            use_powershell: shellFlagsAllowed && Boolean(terminal?.use_powershell)
+        };
+    }
     function getDirectoryName(path) {
         const trimmed = String(path || '').trim().replace(/[\\/]+$/, '');
         if (!trimmed) {
@@ -151,6 +203,27 @@
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;');
+    }
+    const NATIVE_ZOOM_FACTOR_MIN = 0.25;
+    const NATIVE_ZOOM_FACTOR_MAX = 5;
+    function normalizeNativeZoomFactor(value) {
+        const factor = Number(value);
+        if (!Number.isFinite(factor) || factor < NATIVE_ZOOM_FACTOR_MIN || factor > NATIVE_ZOOM_FACTOR_MAX) {
+            return null;
+        }
+        return Math.round(factor * 1000) / 1000;
+    }
+    async function getNativeSessionZoomFactor() {
+        try {
+            const bridge = window.pywebview?.api;
+            if (!bridge?.get_session_native_zoom) {
+                return null;
+            }
+            const result = await bridge.get_session_native_zoom();
+            return result?.ok ? normalizeNativeZoomFactor(result.zoom_factor) : null;
+        } catch (_) {
+            return null;
+        }
     }
     function syncNativeTheme() {
         try {

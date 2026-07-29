@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from web import explorer_search
 from web.config import RuntimeConfig
-from web.explorer import ExplorerRouteError, _LocalExplorerBackend
+from web.explorer import ExplorerRouteError, _LocalExplorerBackend, _remote_git_shell_command
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -79,6 +79,14 @@ class GitGrepArgsTestCase(unittest.TestCase):
         self.assertNotIn("-i", args)
         self.assertIn("-w", args)
         self.assertEqual(args[-2:], ["--", "web"])
+
+    def test_remote_git_grep_command_has_output_cap(self):
+        command = _remote_git_shell_command(
+            ["grep", "-F", "-e", "hello", "--", "."],
+            "/srv/app",
+            max_output_bytes=1234,
+        )
+        self.assertTrue(command.endswith("| head -c 1234"))
 
 
 class GitGrepZParserTestCase(unittest.TestCase):
@@ -173,6 +181,11 @@ class CollectSearchPayloadTestCase(unittest.TestCase):
         raw = [(f"f{index}.txt", 1, b"hello") for index in range(10)]
         payload = self._collect(raw, limits=self._limits(max_matches=4))
         self.assertEqual(payload["total_matches"], 4)
+        self.assertEqual(
+            [entry["path"] for entry in payload["files"]],
+            ["f0.txt", "f1.txt", "f2.txt", "f3.txt"],
+        )
+        self.assertTrue(all(entry["match_count"] > 0 for entry in payload["files"]))
         self.assertTrue(payload["truncated"]["matches"])
 
     def test_file_cap(self):
@@ -195,6 +208,15 @@ class CollectSearchPayloadTestCase(unittest.TestCase):
 
         payload = self._collect(raw())
         self.assertTrue(payload["truncated"]["deadline"])
+        self.assertEqual(payload["total_matches"], 1)
+
+    def test_engine_output_exception_sets_flag(self):
+        def raw():
+            yield ("a.txt", 1, b"hello")
+            raise explorer_search.SearchOutputTruncated()
+
+        payload = self._collect(raw())
+        self.assertTrue(payload["truncated"]["output"])
         self.assertEqual(payload["total_matches"], 1)
 
     def test_include_filter(self):
@@ -358,6 +380,31 @@ class LocalGitSearchTestCase(unittest.TestCase):
         self.assertEqual(payload["engine"], "git-grep")
         paths = sorted(entry["path"] for entry in payload["files"])
         self.assertEqual(paths, ["sessions/manager.py", "web/api.py"])
+
+    def test_local_git_grep_stdout_is_bounded(self):
+        with open(os.path.join(self.root, "many.txt"), "w", encoding="utf-8") as handle:
+            handle.write("hello bounded output\n" * 500)
+        backend = self._backend(self.root)
+        result = backend.run_git(
+            explorer_search.build_git_grep_args(_options(), "."),
+            cwd=self.root,
+            timeout=2.0,
+            max_output_bytes=128,
+        )
+
+        self.assertLessEqual(len(result.stdout), 128)
+        self.assertTrue(result.stdout_truncated)
+
+    def test_git_grep_output_cap_is_reported_in_payload(self):
+        with open(os.path.join(self.root, "many.txt"), "w", encoding="utf-8") as handle:
+            handle.write("hello bounded output\n" * 500)
+        with patch.object(explorer_search, "SEARCH_GIT_MAX_OUTPUT_BYTES", 128):
+            payload = explorer_search.run_explorer_search(
+                self._backend(self.root),
+                {"q": "hello"},
+            )
+
+        self.assertTrue(payload["truncated"]["output"])
 
     def test_scope_below_repo_root_is_confined(self):
         """An explorer root under the repo root must not see sibling hits."""

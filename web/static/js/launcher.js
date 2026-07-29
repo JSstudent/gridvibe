@@ -109,6 +109,8 @@
         explorer_md_preset: '',
         explorer_md_font: '',
         explorer_theme: 'dark',
+        browser_tabs: [],
+        browser_active_tab: 0,
         distribution: '',
         use_wsl: false,
         use_powershell: false
@@ -627,7 +629,7 @@
     /* Explorer file tabs are not editable in the launcher form; they are
        carried invisibly through the terminal row dataset so resaving a preset
        preserves them (ISSUE-2026-015). */
-    function parseExplorerOpenTabsDataset(value) {
+    function parseStringArrayDataset(value) {
         if (!value) {
             return [];
         }
@@ -659,10 +661,27 @@
 
         const drafts = rows.map((row, index) => {
             const commandMode = getTerminalCommandMode(row);
+            const initialCommand = buildTerminalInitialCommand(row);
+            /* Browser rows only expose the active URL as an input; the rest of
+               the tab strip rides along in the dataset so importing a saved
+               multi-tab pane and re-saving it keeps every tab. The visible
+               input is authoritative for the active slot — otherwise editing
+               the URL here would be overwritten by the stale stored tab. */
+            const browserActiveTab = Number(row.dataset.browserActiveTab) || 0;
+            const browserTabs = commandMode === 'browser'
+                ? parseStringArrayDataset(row.dataset.browserTabs)
+                : [];
+            if (commandMode === 'browser' && initialCommand) {
+                if (browserActiveTab < browserTabs.length) {
+                    browserTabs[browserActiveTab] = initialCommand;
+                } else {
+                    browserTabs.push(initialCommand);
+                }
+            }
             return {
                 title: row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`,
                 directory: row.querySelector('.t-dir').value.trim(),
-                initial_command: buildTerminalInitialCommand(row),
+                initial_command: initialCommand,
                 initial_command_mode: commandMode === 'agent'
                     ? 'agent'
                     : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'command'),
@@ -681,12 +700,19 @@
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
                 explorer_search_open: commandMode === 'explorer' && row.dataset.explorerSearchOpen === 'true',
-                explorer_open_tabs: commandMode === 'explorer' ? parseExplorerOpenTabsDataset(row.dataset.explorerOpenTabs) : [],
+                explorer_open_tabs: commandMode === 'explorer' ? parseStringArrayDataset(row.dataset.explorerOpenTabs) : [],
                 explorer_active_tab: commandMode === 'explorer' ? (row.dataset.explorerActiveTab || '') : '',
                 explorer_tab_views: commandMode === 'explorer' ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews) : {},
                 explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
                 explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
                 explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : '',
+                /* Browser rows only expose the active URL as an input; the rest
+                   of the tab strip rides along in the dataset so importing a
+                   saved multi-tab pane and re-saving it keeps every tab. */
+                browser_tabs: browserTabs,
+                browser_active_tab: commandMode === 'browser'
+                    ? Math.max(0, Math.min(browserTabs.length - 1, browserActiveTab))
+                    : 0,
                 distribution: LOCAL_WINDOWS_SHELLS_AVAILABLE ? (row.querySelector('.t-distribution')?.value.trim() || '') : '',
                 use_wsl: LOCAL_WINDOWS_SHELLS_AVAILABLE && commandMode !== 'explorer' && commandMode !== 'browser'
                     ? Boolean(row.querySelector('.t-use-wsl')?.checked)
@@ -1514,6 +1540,8 @@
                     data-explorer-md-preset="${escHtml(terminal.explorer_md_preset || '')}"
                     data-explorer-md-font="${escHtml(terminal.explorer_md_font || '')}"
                     data-explorer-theme="${escHtml(terminal.explorer_theme || 'dark')}"
+                    data-browser-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.browser_tabs) ? terminal.browser_tabs : []))}"
+                    data-browser-active-tab="${escHtml(String(Number(terminal.browser_active_tab) || 0))}"
                 >
                     <div class="t-row-head">
                         <span class="t-badge">T${index + 1}</span>
@@ -2151,10 +2179,11 @@
            workspace is empty (nothing live to save), which is not an error —
            the restart still proceeds. */
         try {
+            const nativeZoomFactor = await getNativeSessionZoomFactor();
             const response = await fetch('/api/runtime-state/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({})
+                body: JSON.stringify({ native_zoom_factor: nativeZoomFactor })
             });
             if (response.ok || response.status === 409) {
                 return true;
@@ -2225,13 +2254,18 @@
         console.info(`[GridVibe Launcher] ${action}`, details);
     }
 
-    async function viewActiveTerminals(event) {
+    async function viewActiveTerminals(event, preferredGroupId = '', nativeZoomFactor = null) {
         event.preventDefault();
+        const normalizedZoomFactor = normalizeNativeZoomFactor(nativeZoomFactor);
         logLauncherWindowAction('View Active Terminals clicked', {
             pywebview: Boolean(window.pywebview?.api)
         });
 
-        if (window.pywebview?.api?.focus_session_window) {
+        /* A plain focus deliberately leaves the session window's URL alone, so
+           it cannot honour a requested group — a restore goes straight to
+           open_session_window, which retargets an existing window. A zoomed
+           restore also needs that path so the native window receives its zoom. */
+        if (!preferredGroupId && normalizedZoomFactor === null && window.pywebview?.api?.focus_session_window) {
             try {
                 const result = await window.pywebview.api.focus_session_window();
                 logLauncherWindowAction('focus_session_window result', result || {});
@@ -2243,11 +2277,11 @@
             }
         }
 
-        await openTerminalsIfActive();
+        await openTerminalsIfActive(preferredGroupId, normalizedZoomFactor);
         return false;
     }
 
-    async function openTerminalsIfActive() {
+    async function openTerminalsIfActive(preferredGroupId = '', nativeZoomFactor = null) {
         try {
             const resp = await fetch('/api/sessions');
             const data = await resp.json();
@@ -2262,12 +2296,22 @@
                 return;
             }
 
-            const firstGroupId = data.sessions.find(session => session.group_id)?.group_id || '';
+            /* A workspace restore names the group that was in front when the
+               workspace was saved; otherwise fall back to the first live one. */
+            const liveGroupIds = new Set(
+                data.sessions.map(session => session.group_id).filter(Boolean)
+            );
+            const targetGroupId = liveGroupIds.has(preferredGroupId)
+                ? preferredGroupId
+                : (data.sessions.find(session => session.group_id)?.group_id || '');
             if (window.pywebview?.api?.open_session_window) {
                 try {
-                    const result = await window.pywebview.api.open_session_window(firstGroupId);
+                    const result = await window.pywebview.api.open_session_window(
+                        targetGroupId,
+                        normalizeNativeZoomFactor(nativeZoomFactor)
+                    );
                     logLauncherWindowAction('open_session_window result', {
-                        requested_group_id: firstGroupId || 'all',
+                        requested_group_id: targetGroupId || 'all',
                         ...(result || {})
                     });
                     if (result?.ok) {
@@ -2278,9 +2322,12 @@
                 }
             }
 
-            window.open('/terminals', 'gridvibe-sessions');
+            window.open(
+                targetGroupId ? `/terminals?group=${encodeURIComponent(targetGroupId)}` : '/terminals',
+                'gridvibe-sessions'
+            );
             logLauncherWindowAction('Opened browser terminals window fallback', {
-                requested_group_id: firstGroupId || 'all'
+                requested_group_id: targetGroupId || 'all'
             });
         } catch {
             showMessage('Could not check active sessions.', 'error');
@@ -2295,6 +2342,11 @@
        Passwords are never persisted — restored SSH panes use key auth or fail
        into the error placeholder (which has a Retry button). */
     let restorableWorkspaceGroups = [];
+    /* Snapshot id of the group that was in front when the workspace was saved.
+       Restored groups are minted with fresh ids, so it is resolved to the newly
+       created group by position during the replay below. */
+    let restorableActiveGroupId = '';
+    let restorableNativeZoomFactor = null;
 
     function formatWorkspaceSavedAgo(savedAt) {
         const savedSeconds = Number(savedAt);
@@ -2326,6 +2378,8 @@
             return;
         }
         restorableWorkspaceGroups = data.groups;
+        restorableActiveGroupId = String(data.active_group_id || '');
+        restorableNativeZoomFactor = normalizeNativeZoomFactor(data.native_zoom_factor);
         const groupCount = data.groups.length;
         const paneCount = data.groups.reduce(
             (total, group) => total + (Array.isArray(group.sessions) ? group.sessions.length : 0),
@@ -2391,6 +2445,8 @@
         const banner = document.getElementById('restoreWorkspaceBanner');
         if (banner) banner.hidden = true;
         restorableWorkspaceGroups = [];
+        restorableActiveGroupId = '';
+        restorableNativeZoomFactor = null;
     }
 
     async function restorePreviousWorkspace() {
@@ -2401,6 +2457,11 @@
             button.textContent = 'Restoring…';
         }
         let restored = 0;
+        /* Live id of the group that was in front when the workspace was saved,
+           resolved as the replay creates it — the restore opens the workspace
+           on this group instead of on whichever one ends up newest. */
+        let activeGroupId = '';
+        const nativeZoomFactor = restorableNativeZoomFactor;
         try {
             for (const group of restorableWorkspaceGroups) {
                 const response = await fetch('/api/sessions', {
@@ -2408,13 +2469,24 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(await buildRestoreGroupBody(group))
                 });
-                if (response.ok) restored += 1;
+                if (!response.ok) continue;
+                restored += 1;
+                if (restorableActiveGroupId && group.group_id === restorableActiveGroupId) {
+                    const created = await response.json().catch(() => ({}));
+                    activeGroupId = String(created.group_id || '');
+                }
             }
             document.getElementById('restoreWorkspaceBanner')?.setAttribute('hidden', '');
             restorableWorkspaceGroups = [];
+            restorableActiveGroupId = '';
+            restorableNativeZoomFactor = null;
             if (restored > 0) {
                 showMessage(`Restored ${restored} session${restored === 1 ? '' : 's'} from the previous workspace.`, 'success');
-                await viewActiveTerminals({ preventDefault: () => {} });
+                await viewActiveTerminals(
+                    { preventDefault: () => {} },
+                    activeGroupId,
+                    nativeZoomFactor
+                );
             } else {
                 showMessage('Could not restore the previous workspace.', 'error');
             }
@@ -2438,6 +2510,12 @@
         const launchDefaultDir = configuredDefaultDir || (config.connection_mode === 'ssh' ? '/' : '');
 
         (Array.isArray(config.terminals) ? config.terminals : []).slice(0, count).forEach((terminal, index) => {
+            const startupMode = resolvePaneStartupMode(terminal);
+            const {
+                use_wsl: resolvedUseWsl,
+                use_powershell: resolvedUsePowershell,
+                ...paneLaunchFields
+            } = buildPaneLaunchFields(terminal, startupMode);
             const resolvedDirectory = buildLaunchDirectory(
                 configuredDefaultDir,
                 terminal.directory,
@@ -2447,48 +2525,7 @@
             const common = {
                 title: terminal.title || `Terminal ${index + 1}`,
                 directory: resolvedDirectory,
-                initial_command: terminal.startup_mode === 'explorer' ? null : (terminal.initial_command || null),
-                initial_command_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
-                    ? terminal.startup_mode
-                    : (terminal.initial_command_mode === 'agent' ? 'agent' : 'command'),
-                agent_selection: terminal.initial_command_mode === 'agent'
-                    ? (terminal.agent_selection || '')
-                    : '',
-                custom_agent: terminal.initial_command_mode === 'agent'
-                    ? (terminal.custom_agent || '')
-                    : '',
-                agent_auto_mode: terminal.initial_command_mode === 'agent'
-                    && Boolean(terminal.agent_auto_mode),
-                explorer_tree_open: terminal.startup_mode === 'explorer'
-                    ? Boolean(terminal.explorer_tree_open)
-                    : false,
-                explorer_git_open: terminal.startup_mode === 'explorer'
-                    ? Boolean(terminal.explorer_git_open)
-                    : false,
-                explorer_search_open: terminal.startup_mode === 'explorer'
-                    ? Boolean(terminal.explorer_search_open)
-                    : false,
-                explorer_open_tabs: terminal.startup_mode === 'explorer' && Array.isArray(terminal.explorer_open_tabs)
-                    ? terminal.explorer_open_tabs
-                    : [],
-                explorer_active_tab: terminal.startup_mode === 'explorer'
-                    ? (terminal.explorer_active_tab || '')
-                    : '',
-                explorer_tab_views: terminal.startup_mode === 'explorer' && terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object'
-                    ? terminal.explorer_tab_views
-                    : {},
-                explorer_md_preset: terminal.startup_mode === 'explorer'
-                    ? (terminal.explorer_md_preset || '')
-                    : '',
-                explorer_md_font: terminal.startup_mode === 'explorer'
-                    ? (terminal.explorer_md_font || '')
-                    : '',
-                explorer_theme: terminal.startup_mode === 'explorer'
-                    ? (terminal.explorer_theme || 'dark')
-                    : '',
-                startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
-                    ? terminal.startup_mode
-                    : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
+                ...paneLaunchFields
             };
 
             if (config.connection_mode === 'ssh') {
@@ -2506,8 +2543,8 @@
                 ...common,
                 distribution: terminal.distribution || config.wsl.distribution || '',
                 username: config.wsl.username || '',
-                use_wsl: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_wsl),
-                use_powershell: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_powershell)
+                use_wsl: resolvedUseWsl,
+                use_powershell: resolvedUsePowershell
             });
         });
 

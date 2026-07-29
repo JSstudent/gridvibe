@@ -98,6 +98,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _explorer_editor_language,
     _explorer_image_mimetype,
     _explorer_root_directory,
+    _fs_root_revision,
     _get_git_context,
     _get_git_diff,
     _get_git_repo_summary,
@@ -129,6 +130,10 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     read_explorer_file_preview,
     save_explorer_file_payload,
 )
+from web.explorer_fs import (
+    delete_explorer_entry_payload,
+    paste_explorer_entry_payload,
+)
 from web.explorer_search import (  # noqa: F401 - re-exported for backwards compatibility
     run_explorer_search,
 )
@@ -144,6 +149,7 @@ from web.runtime_state import (  # noqa: F401 - re-exported for backwards compat
     load_restorable_workspace,
 )
 from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compatibility
+    BROWSER_MAX_TABS,
     DEFAULT_BROWSER_URL,
     DEFAULT_SAVED_SESSION_ID,
     DEFAULT_SAVED_SESSION_NAME,
@@ -156,6 +162,8 @@ from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compa
     _generate_saved_session_id,
     _load_saved_sessions_payload,
     _merge_workspace_session_config,
+    _normalize_browser_active_tab,
+    _normalize_browser_tabs,
     _normalize_browser_url,
     _normalize_connection_mode,
     _normalize_launch_session_id,
@@ -746,11 +754,135 @@ def get_explorer_entries(session_id: str):
         entries.sort(key=lambda item: (item["type"] != "directory", item["name"].lower()))
         return {
             "root": root_path,
+            "root_revision": _fs_root_revision(root_path),
             "path": backend.rel_explorer_path(root_path, current_path),
             "parent_path": backend.parent_explorer_path(root_path, current_path),
             "git": git_context,
             "entries": entries,
         }
+
+    return _explorer_route_response(session, handler)
+
+
+def _explorer_mutation_json(
+    allowed_fields: set,
+) -> Any:
+    """Return a mutation JSON object or one shared invalid-request response."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, (
+            jsonify(
+                {
+                    "error": "Request body must be a JSON object",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+    unexpected = sorted(set(data) - allowed_fields)
+    if unexpected:
+        return None, (
+            jsonify(
+                {
+                    "error": f"Unsupported request field: {unexpected[0]}",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+    return data, None
+
+
+@app.route('/api/explorer/<session_id>/paste', methods=['POST'])
+def paste_explorer_entry(session_id: str):
+    """Copy one entry inside the same live explorer root without overwrite."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if not _is_explorer_session(session):
+        return jsonify({"error": "Session is not a file explorer pane"}), 400
+    data, error_response = _explorer_mutation_json(
+        {
+            "root_revision",
+            "source_path",
+            "source_revision",
+            "destination_directory",
+        }
+    )
+    if error_response is not None:
+        return error_response
+    required_strings = ("root_revision", "source_path", "source_revision")
+    if any(
+        not isinstance(data.get(field), str) or not data.get(field)
+        for field in required_strings
+    ) or not isinstance(data.get("destination_directory"), str):
+        return (
+            jsonify(
+                {
+                    "error": "Paste requires root/source revisions, a source path, and a destination directory",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return paste_explorer_entry_payload(
+            backend,
+            root_revision=data["root_revision"],
+            source_path=data["source_path"],
+            source_revision=data["source_revision"],
+            destination_directory=data["destination_directory"],
+            session_id=session_id,
+        )
+
+    return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/delete', methods=['POST'])
+def delete_explorer_entry(session_id: str):
+    """Permanently delete one entry, requiring an explicit recursive flag."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if not _is_explorer_session(session):
+        return jsonify({"error": "Session is not a file explorer pane"}), 400
+    data, error_response = _explorer_mutation_json(
+        {"root_revision", "path", "base_revision", "recursive"}
+    )
+    if error_response is not None:
+        return error_response
+    required_strings = ("root_revision", "path", "base_revision")
+    if (
+        any(
+            not isinstance(data.get(field), str) or not data.get(field)
+            for field in required_strings
+        )
+        or not isinstance(data.get("recursive"), bool)
+    ):
+        return (
+            jsonify(
+                {
+                    "error": "Delete requires root/entry revisions, a path, and a recursive boolean",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return delete_explorer_entry_payload(
+            backend,
+            root_revision=data["root_revision"],
+            path=data["path"],
+            base_revision=data["base_revision"],
+            recursive=data["recursive"],
+            session_id=session_id,
+        )
 
     return _explorer_route_response(session, handler)
 
@@ -1141,6 +1273,20 @@ def reorder_session_groups():
     return jsonify({"groups": groups, "count": len(groups)})
 
 
+@app.route('/api/session-groups/active', methods=['POST'])
+def set_active_session_group():
+    """Record which group the session window has in front.
+
+    A workspace-shape hint, not session state: nothing about the group changes,
+    so there is no broadcast. It exists because the autosave *timer* has no
+    window to ask — without it, only an explicit Save Workspace could know which
+    group to reopen on. An unknown id leaves the previous hint standing.
+    """
+    data = request.get_json(silent=True) or {}
+    active_group_id = session_manager.set_active_group(data.get("group_id"))
+    return jsonify({"active_group_id": active_group_id})
+
+
 @app.route('/api/runtime-state', methods=['GET'])
 def get_runtime_state():
     """Return the restorable previous-workspace slot, if any (10.5).
@@ -1159,18 +1305,32 @@ def get_runtime_state():
         "origin": slot.get("origin") if slot else None,
         "saved_at": slot.get("saved_at") if slot else None,
         "groups": slot.get("groups", []) if slot else [],
+        # The group the restore should reopen on; "" means no preference.
+        "active_group_id": slot.get("active_group_id", "") if slot else "",
+        # Optional desktop session-window zoom; null means no preference.
+        "native_zoom_factor": slot.get("native_zoom_factor") if slot else None,
         "active_group_count": len(active_groups),
     })
 
 
 @app.route('/api/runtime-state/save', methods=['POST'])
 def save_runtime_state():
-    """Capture the workspace now (Workspace ▸ Save Workspace), origin manual."""
+    """Capture the workspace now (Workspace ▸ Save Workspace), origin manual.
+
+    The saving window names its own front group in ``active_group_id``; it is
+    also recorded as the live hint so the next autosave agrees with this save.
+    """
     data = request.get_json(silent=True) or {}
     workspace_id = str(data.get("workspace_id") or "default").strip() or "default"
     label = str(data.get("label") or "").strip() or None
+    active_group_id = session_manager.set_active_group(data.get("active_group_id"))
     slot = capture_workspace(
-        session_manager, workspace_id=workspace_id, origin="manual", label=label
+        session_manager,
+        workspace_id=workspace_id,
+        origin="manual",
+        label=label,
+        active_group_id=active_group_id,
+        native_zoom_factor=data.get("native_zoom_factor"),
     )
     if slot is None:
         # An empty workspace is never captured, so it never overwrites (or
@@ -1182,6 +1342,8 @@ def save_runtime_state():
         "label": slot["label"],
         "origin": slot["origin"],
         "saved_at": slot["saved_at"],
+        "active_group_id": slot["active_group_id"],
+        "native_zoom_factor": slot.get("native_zoom_factor"),
         "groups": slot["groups"],
     })
 
@@ -1481,9 +1643,24 @@ def create_sessions():
                 if startup_mode == "browser":
                     use_powershell = False
                     use_wsl = False
-                    prepared["initial_command"] = _normalize_browser_url(
-                        prepared.get("initial_command")
+                    browser_tabs = _normalize_browser_tabs(
+                        prepared.get("browser_tabs"),
+                        prepared.get("initial_command") or DEFAULT_BROWSER_URL,
                     )
+                    if not browser_tabs:
+                        # Every entry was rejected. Re-validate the seed so the
+                        # 400 carries the precise reason (bad scheme, too long,
+                        # ...) rather than a generic "needs a URL".
+                        _normalize_browser_url(
+                            prepared.get("initial_command") or DEFAULT_BROWSER_URL
+                        )
+                        raise ValueError("Browser panes require an HTTP or HTTPS URL")
+                    browser_active_tab = _normalize_browser_active_tab(
+                        prepared.get("browser_active_tab"), browser_tabs
+                    )
+                    prepared["browser_tabs"] = browser_tabs
+                    prepared["browser_active_tab"] = browser_active_tab
+                    prepared["initial_command"] = browser_tabs[browser_active_tab]
                     prepared["initial_command_mode"] = "browser"
                     prepared["explorer_root_directory"] = None
                     prepared["distribution"] = ""
@@ -1741,30 +1918,52 @@ def change_session_mode(session_id: str):
     if target_mode == "browser":
         if session.mode != "wsl":
             return jsonify({"error": "Browser mode is only available for Local Repo sessions"}), 400
+        # One endpoint serves three client actions — switching a terminal into
+        # browser mode, navigating the active tab, and opening/closing tabs — so
+        # the tab strip never needs a second route. `tabs` wins when present;
+        # otherwise the pane's existing strip is kept and only the active tab's
+        # URL moves, which keeps the plain single-URL navigate call working.
         try:
-            browser_url = _normalize_browser_url(
-                data.get("url")
-                or data.get("initial_command")
-                or session.initial_command
-                or DEFAULT_BROWSER_URL
-            )
+            if "tabs" in data:
+                browser_tabs = _normalize_browser_tabs(data.get("tabs"))
+                if not browser_tabs:
+                    raise ValueError("Browser panes require at least one HTTP or HTTPS tab")
+                browser_active_tab = _normalize_browser_active_tab(
+                    data.get("active_tab"), browser_tabs
+                )
+                browser_url = browser_tabs[browser_active_tab]
+                browser_snapshot = session_manager.update_browser_tab_strip(
+                    session_id,
+                    browser_tabs=browser_tabs,
+                    browser_active_tab=browser_active_tab,
+                    initial_command=browser_url,
+                )
+                if browser_snapshot is None:
+                    return jsonify({"error": "Browser tab update is stale"}), 409
+                _broadcast_session_status(session_id)
+                return jsonify(browser_snapshot)
+            else:
+                requested_browser_url = data.get("url") or data.get("initial_command")
+                browser_url = (
+                    _normalize_browser_url(requested_browser_url)
+                    if requested_browser_url
+                    else None
+                )
+                browser_snapshot = session_manager.merge_browser_tabs(
+                    session_id,
+                    browser_url=browser_url,
+                    browser_active_tab=data.get("active_tab"),
+                    default_browser_url=DEFAULT_BROWSER_URL,
+                )
+                if browser_snapshot is None:
+                    return jsonify({"error": "Session not found"}), 404
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
-        session_manager.update_session_metadata(
-            session_id,
-            host="Browser",
-            username="",
-            port=22,
-            password=None,
-            initial_command=browser_url,
-            initial_command_mode="browser",
-            startup_mode="browser",
-        )
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         _close_ssh_connection(session_id, clear_buffer=True)
         _broadcast_session_status(session_id)
-        return jsonify(session_manager.get_session(session_id).to_dict())
+        return jsonify(browser_snapshot)
 
     if target_mode == "explorer":
         requested_directory = data.get("directory")
@@ -1836,6 +2035,8 @@ def change_session_mode(session_id: str):
                 password=None,
                 initial_command="",
                 startup_mode="explorer",
+                browser_tabs=[],
+                browser_active_tab=0,
             )
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         _close_ssh_connection(session_id, clear_buffer=True)
@@ -1884,6 +2085,10 @@ def change_session_mode(session_id: str):
         "initial_command": "",
         "initial_command_mode": "command",
         "startup_mode": "terminal",
+        # A pane leaving browser mode drops its tab strip; a stale strip would
+        # otherwise be re-persisted and reopen browser tabs on a shell pane.
+        "browser_tabs": [],
+        "browser_active_tab": 0,
     }
     if session.mode == "wsl":
         updates["host"] = _local_shell_display_name(

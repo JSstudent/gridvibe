@@ -29,6 +29,7 @@ from web.api import (
     run_server,
     session_manager,
 )
+from web.runtime_state import normalize_native_zoom_factor
 
 try:
     import webview
@@ -424,6 +425,87 @@ def _should_exit_after_window_close(kind: str, open_windows: set[str]) -> bool:
     return kind == "launcher" or not open_windows
 
 
+def _native_zoom_control(window):
+    """Return the backend webview control that owns the page zoom."""
+    return getattr(getattr(window, "native", None), "webview", None)
+
+
+def _invoke_native_window_action(window, action) -> bool:
+    """Run a native-control mutation on the window's UI thread when required."""
+    invoke = getattr(getattr(window, "native", None), "Invoke", None)
+    if not callable(invoke):
+        action()
+        return True
+    try:
+        from System import Action  # type: ignore
+    except Exception:
+        delegate = action
+    else:
+        delegate = Action(action)
+    invoke(delegate)
+    return True
+
+
+def _read_native_window_zoom(window):
+    """Read the current native zoom factor, or ``None`` when unavailable."""
+    control = _native_zoom_control(window)
+    if control is None:
+        return None
+    result = {}
+
+    def _read():
+        try:
+            if hasattr(control, "ZoomFactor"):
+                value = control.ZoomFactor
+            else:
+                getter = getattr(control, "zoomFactor", None)
+                value = getter() if callable(getter) else None
+            result["factor"] = normalize_native_zoom_factor(value)
+        except Exception as exc:
+            result["error"] = exc
+
+    try:
+        _invoke_native_window_action(window, _read)
+    except Exception as exc:
+        logger.warning("Could not read native window zoom: %s", exc)
+        return None
+    if result.get("error") is not None:
+        logger.warning("Could not read native window zoom: %s", result["error"])
+    return result.get("factor")
+
+
+def _set_native_window_zoom(window, zoom_factor):
+    """Apply a validated native zoom factor, returning the applied factor."""
+    factor = normalize_native_zoom_factor(zoom_factor)
+    control = _native_zoom_control(window)
+    if factor is None or control is None:
+        return None
+    result = {"applied": False, "error": None}
+
+    def _apply():
+        try:
+            if hasattr(control, "ZoomFactor"):
+                control.ZoomFactor = factor
+            else:
+                setter = getattr(control, "setZoomFactor", None)
+                if not callable(setter):
+                    return
+                setter(factor)
+            result["applied"] = True
+        except Exception as exc:
+            result["error"] = exc
+
+    try:
+        _invoke_native_window_action(window, _apply)
+    except Exception as exc:
+        logger.warning("Could not apply native window zoom %.3f: %s", factor, exc)
+        return None
+    if result["error"] is not None:
+        logger.warning("Could not apply native window zoom %.3f: %s", factor, result["error"])
+        return None
+    return factor if result["applied"] else None
+
+
 class GridVibeApi:
     """Expose native window actions to the pywebview frontend."""
 
@@ -439,6 +521,7 @@ class GridVibeApi:
         self._session_window_minimized = False
         self._restarting = False
         self._native_theme = "dark"
+        self._pending_session_native_zoom_factor = None
 
     def _attach_window(self, window):
         """Attach the created pywebview window instance."""
@@ -539,6 +622,22 @@ class GridVibeApi:
     def get_session_fullscreen_state(self):
         """Return the tracked native fullscreen state for the session window."""
         return {"ok": True, "is_fullscreen": self._session_is_fullscreen}
+
+    def get_session_native_zoom(self):
+        """Return the session window's current native zoom for workspace save."""
+        factor = _read_native_window_zoom(self._session_window)
+        if factor is None:
+            return {"ok": False, "error": "Session window zoom is not ready"}
+        return {"ok": True, "zoom_factor": factor}
+
+    def _apply_pending_session_native_zoom(self):
+        """Apply a restore-time zoom once the new WebView has finished loading."""
+        factor = self._pending_session_native_zoom_factor
+        self._pending_session_native_zoom_factor = None
+        if factor is None:
+            return
+        if _set_native_window_zoom(self._session_window, factor) is None:
+            logger.warning("Session window zoom %.3f could not be applied after load", factor)
 
     def _apply_native_frame_theme(self, window, window_name: str = "window") -> bool:
         """Apply the current native frame theme to a native window frame."""
@@ -699,9 +798,10 @@ class GridVibeApi:
         logger.info("Focused existing session window")
         return {"ok": True}
 
-    def open_session_window(self, group_id: str):
-        """Open or focus the dedicated session window."""
+    def open_session_window(self, group_id: str, native_zoom_factor=None):
+        """Open or focus the dedicated session window, optionally restoring zoom."""
         resolved_group_id = str(group_id or "").strip()
+        requested_zoom = normalize_native_zoom_factor(native_zoom_factor)
         url = f"{self._base_url}/terminals"
         if resolved_group_id:
             url = f"{url}?group={resolved_group_id}"
@@ -720,6 +820,13 @@ class GridVibeApi:
                 if should_retarget:
                     logger.info(
                         "Keeping existing session window open; frontend will switch groups via polling"
+                    )
+                if requested_zoom is not None and _set_native_window_zoom(
+                    self._session_window, requested_zoom
+                ) is None:
+                    logger.warning(
+                        "Could not apply restored session window zoom %.3f",
+                        requested_zoom,
                     )
                 if not self._bring_to_front(self._session_window, "session"):
                     return {"ok": False, "error": "Failed to focus session window"}
@@ -746,12 +853,18 @@ class GridVibeApi:
                 easy_drag=False,
                 background_color="#0d0d0d",
                 text_select=True,
+                zoomable=True,
                 js_api=self,
             )
             if window is None:
                 logger.error("pywebview.create_window returned None for the session window")
                 return {"ok": False, "error": "Failed to create session window"}
 
+            self._pending_session_native_zoom_factor = requested_zoom
+            if requested_zoom is not None:
+                loaded_event = getattr(getattr(window, "events", None), "loaded", None)
+                if loaded_event is not None:
+                    loaded_event += lambda *_args: self._apply_pending_session_native_zoom()
             self._attach_session_window(window, resolved_group_id)
             if self._register_window is not None:
                 self._register_window(window, "session")
@@ -1103,6 +1216,7 @@ def main():
         easy_drag=False,
         background_color="#070b18",
         text_select=True,
+        zoomable=True,
         js_api=api_bridge,
     )
     if window is None:

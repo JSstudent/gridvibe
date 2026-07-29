@@ -121,6 +121,20 @@ def _normalize_explorer_tab_font_size(value: Any) -> int:
     return max(EXPLORER_EDITOR_FONT_MIN, min(EXPLORER_EDITOR_FONT_MAX, font_size))
 
 
+def _normalize_explorer_line_wrap(raw_view: Dict[str, Any]) -> Dict[str, bool]:
+    """Return the per-tab source/preview/diff line-wrap opt-outs.
+
+    Wrapping is on by default, so only an explicit off flag persists — an absent
+    key restores wrapped, which is also what tabs saved before wrapping existed
+    (and every never-touched tab) get.
+    """
+    return {
+        key: False
+        for key in ("wrap_source", "wrap_preview", "wrap_diff")
+        if key in raw_view and not raw_view[key]
+    }
+
+
 def _normalize_explorer_markdown_folds(value: Any) -> List[int]:
     """Return bounded, unique Markdown heading line numbers in document order."""
     if not isinstance(value, list):
@@ -183,14 +197,15 @@ def _normalize_explorer_view_snapshot(raw_view: Dict[str, Any]) -> Dict[str, Any
 
 
 def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str, Any]:
-    """Validate the per-tab view map: mode + scroll fraction + identity + zoom.
+    """Validate the per-tab view map: mode + scroll + identity + zoom + wrapping.
 
     Only entries for persisted open tabs survive (plus the reserved Preview
-    key, which keeps zoom, Markdown folds, and the tab's own separated path —
-    shown file and/or browsed directory); the mode must be a known file view,
-    the scroll is clamped to a [0, 1] fraction (OD-4), content identities are
-    short opaque tokens, and the font size and fold lines are bounded — anything
-    else is dropped rather than restored.
+    key, which keeps zoom, line wrapping, Markdown folds, and the tab's own
+    separated path — shown file and/or browsed directory); the mode must be a
+    known file view, the scroll is clamped to a [0, 1] fraction (OD-4), content
+    identities are short opaque tokens, line-wrap flags are booleans, and the
+    font size and fold lines are bounded — anything else is dropped rather than
+    restored.
     """
     if not isinstance(value, dict):
         return {}
@@ -203,6 +218,7 @@ def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str,
             font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
             if font_size:
                 record["font_size"] = font_size
+            record.update(_normalize_explorer_line_wrap(raw_view))
             preview_path = _normalize_explorer_tab_path(raw_view.get("path"))
             if preview_path:
                 record["path"] = preview_path
@@ -224,6 +240,7 @@ def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str,
         font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
         if font_size:
             record["font_size"] = font_size
+        record.update(_normalize_explorer_line_wrap(raw_view))
         folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
         fold_identity = _normalize_explorer_view_identity(raw_view.get("fold_identity"))
         if folds and fold_identity:
@@ -255,6 +272,8 @@ def _default_terminal_entries():
             "explorer_md_preset": "",
             "explorer_md_font": "",
             "explorer_theme": "dark",
+            "browser_tabs": [],
+            "browser_active_tab": 0,
             "distribution": "",
             "use_wsl": False,
             "use_powershell": False,
@@ -296,6 +315,8 @@ def _normalize_browser_url(value: Any) -> str:
     raw_value = str(value or DEFAULT_BROWSER_URL).strip()
     if not raw_value:
         raise ValueError("Browser panes require an HTTP or HTTPS URL")
+    if len(raw_value) > BROWSER_MAX_URL_LENGTH:
+        raise ValueError("Browser pane URL is too long")
 
     candidate = raw_value
     if "://" not in candidate:
@@ -309,6 +330,52 @@ def _normalize_browser_url(value: Any) -> str:
 
 
 DEFAULT_BROWSER_URL = "http://127.0.0.1:3000"
+
+# Browser-pane tab persistence bounds. Mirrored by BROWSER_MAX_TABS in
+# web/static/js/browser-pane.js — a pane is a preview surface, not a full
+# browser, so the strip stays short enough to read at pane width.
+BROWSER_MAX_TABS = 8
+BROWSER_MAX_URL_LENGTH = 2048
+
+
+def _normalize_browser_tabs(value: Any, active_url: str = "") -> List[str]:
+    """Bound one browser pane's persisted tab URLs, dropping unusable entries.
+
+    Unlike explorer tabs, duplicates are kept: the same URL open twice is a
+    legitimate side-by-side comparison. ``active_url`` seeds a single-tab list
+    for panes saved before tabs existed, so an upgrade never loses the URL.
+    """
+    tabs: List[str] = []
+    for item in value if isinstance(value, list) else []:
+        # `_normalize_browser_url` treats an empty value as "use the default",
+        # which is right for the single-URL entry point but wrong here: a blank
+        # tab is a broken entry and must be dropped, not become the default.
+        if not str(item or "").strip():
+            continue
+        try:
+            tabs.append(_normalize_browser_url(item))
+        except ValueError:
+            continue
+        if len(tabs) >= BROWSER_MAX_TABS:
+            break
+
+    if not tabs and active_url:
+        try:
+            tabs.append(_normalize_browser_url(active_url))
+        except ValueError:
+            return []
+    return tabs
+
+
+def _normalize_browser_active_tab(value: Any, tabs: List[str]) -> int:
+    """Clamp the active tab index into the persisted tab list ("" -> 0)."""
+    if not tabs:
+        return 0
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(len(tabs) - 1, index))
 
 
 def _normalize_workspace_layout(data: Any, terminal_count: int) -> Optional[Dict[str, Any]]:
@@ -429,11 +496,25 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
             raw_startup_mode = "agent" if entry.get("initial_command_mode") == "agent" else "terminal"
         startup_mode = _normalize_startup_mode(raw_startup_mode, connection_mode)
         open_tabs = _normalize_explorer_open_tabs(entry.get("explorer_open_tabs"))
+        initial_command = str(entry.get("initial_command") or "")
+        # Browser tabs only exist for browser panes; the active tab's URL is
+        # mirrored into `initial_command` so the single-URL readers (pane
+        # launch, `_normalize_browser_url`, the session model) stay authoritative.
+        browser_tabs = (
+            _normalize_browser_tabs(entry.get("browser_tabs"), initial_command)
+            if startup_mode == "browser"
+            else []
+        )
+        browser_active_tab = _normalize_browser_active_tab(
+            entry.get("browser_active_tab"), browser_tabs
+        )
+        if browser_tabs:
+            initial_command = browser_tabs[browser_active_tab]
         normalized.append(
             {
                 "title": str(entry.get("title") or f"Terminal {index + 1}"),
                 "directory": str(entry.get("directory") or ""),
-                "initial_command": str(entry.get("initial_command") or ""),
+                "initial_command": initial_command,
                 "initial_command_mode": startup_mode if startup_mode in {"agent", "explorer", "browser"} else "command",
                 "startup_mode": startup_mode,
                 "agent_selection": str(entry.get("agent_selection") or ""),
@@ -448,6 +529,8 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
                 "explorer_md_preset": _normalize_explorer_md_choice(entry.get("explorer_md_preset"), EXPLORER_MD_PRESETS),
                 "explorer_md_font": _normalize_explorer_md_choice(entry.get("explorer_md_font"), EXPLORER_MD_FONTS),
                 "explorer_theme": _normalize_explorer_theme(entry.get("explorer_theme")),
+                "browser_tabs": browser_tabs,
+                "browser_active_tab": browser_active_tab,
                 "distribution": str(entry.get("distribution") or ""),
                 "use_wsl": bool(entry.get("use_wsl")) and not use_powershell,
                 "use_powershell": use_powershell,
@@ -576,11 +659,30 @@ def _merge_workspace_session_config(
             workspace_terminal["explorer_theme"] if startup_mode == "explorer" else "dark"
         )
 
-        # Browser panes need a valid URL, but navigation performed in the live
-        # browser pane is transient. Keep an existing configured browser URL or
-        # use the product default when a pane is newly switched to browser mode.
-        if startup_mode == "browser" and base["terminals"][index]["startup_mode"] != "browser":
-            saved_terminal["initial_command"] = DEFAULT_BROWSER_URL
+        # Browser panes persist their full live tab strip: Save Workspace on a
+        # pane with three tabs open must relaunch with those same three tabs and
+        # the same one selected. `_normalize_terminal_entries` already mirrored
+        # the active tab's URL into `initial_command`, so the single-URL readers
+        # follow the tab list rather than a stale configured value.
+        if startup_mode == "browser":
+            browser_tabs = workspace_terminal["browser_tabs"]
+            if not browser_tabs:
+                browser_tabs = _normalize_browser_tabs(
+                    [],
+                    base["terminals"][index]["initial_command"]
+                    if base["terminals"][index]["startup_mode"] == "browser"
+                    else DEFAULT_BROWSER_URL,
+                )
+            saved_terminal["browser_tabs"] = browser_tabs
+            saved_terminal["browser_active_tab"] = _normalize_browser_active_tab(
+                workspace_terminal["browser_active_tab"], browser_tabs
+            )
+            saved_terminal["initial_command"] = browser_tabs[
+                saved_terminal["browser_active_tab"]
+            ]
+        else:
+            saved_terminal["browser_tabs"] = []
+            saved_terminal["browser_active_tab"] = 0
 
     return _normalize_session_config(merged)
 

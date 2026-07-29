@@ -1615,15 +1615,127 @@
             display: none;
         }
 
+        /* Tab strip, URL bar, then the stacked frames (one per tab; only the
+           active one is visible, the rest stay loaded and hidden). */
         .browser-surface {
             height: 100%;
             display: grid;
-            grid-template-rows: auto minmax(0, 1fr);
+            grid-template-rows: auto auto minmax(0, 1fr);
             color: var(--explorer-text);
             background: var(--explorer-bg);
             border: 1px solid var(--explorer-border);
             border-radius: 6px;
             overflow: hidden;
+        }
+
+        .browser-tabstrip {
+            display: flex;
+            align-items: stretch;
+            gap: 2px;
+            min-height: 0;
+            padding: 4px 6px 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            border-bottom: 1px solid var(--explorer-row-border);
+            background: var(--explorer-bar-bg);
+            scrollbar-width: thin;
+        }
+
+        .browser-tab {
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            max-width: 200px;
+            padding: 6px 4px 6px 8px;
+            border: 1px solid transparent;
+            border-bottom: none;
+            border-radius: 6px 6px 0 0;
+            background: transparent;
+            color: var(--explorer-muted);
+            cursor: pointer;
+            font-size: .72rem;
+        }
+
+        .browser-tab.active {
+            border-color: var(--explorer-row-border);
+            background: var(--explorer-bg);
+            color: var(--explorer-text);
+        }
+
+        .browser-tab:hover:not(.active) {
+            color: var(--explorer-text);
+        }
+
+        .browser-tab-label {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* Drag-reorder feedback, matching the explorer tab strip: the dragged
+           tab dims, the hovered drop target shows an accent edge on the side
+           the tab will land. */
+        .browser-tab.dragging {
+            opacity: .55;
+        }
+
+        .browser-tab.drag-before {
+            box-shadow: inset 2px 0 0 var(--t-accent);
+        }
+
+        .browser-tab.drag-after {
+            box-shadow: inset -2px 0 0 var(--t-accent);
+        }
+
+        .browser-tab.active .browser-tab-label {
+            font-weight: 600;
+        }
+
+        .browser-tab-close,
+        .browser-tab-new {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            flex: none;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: var(--explorer-muted);
+            cursor: pointer;
+            font-size: .95rem;
+            line-height: 1;
+        }
+
+        .browser-tab-close svg,
+        .browser-tab-new svg {
+            display: block;
+            width: 12px;
+            height: 12px;
+            pointer-events: none;
+        }
+
+        .browser-tab-new {
+            align-self: center;
+            margin-left: 2px;
+        }
+
+        .browser-tab-close:hover,
+        .browser-tab-new:hover:not(:disabled) {
+            background: var(--explorer-row-hover);
+            color: var(--explorer-text);
+        }
+
+        .browser-tab-new:disabled {
+            cursor: default;
+            opacity: .4;
+        }
+
+        .browser-frames {
+            position: relative;
+            min-height: 0;
+            height: 100%;
         }
 
         .browser-bar {
@@ -1689,6 +1801,36 @@
             height: 100%;
             border: 0;
             background: #fff;
+        }
+
+        .browser-frame[hidden] {
+            display: none;
+        }
+
+        /* Stand-in for a frame that would re-embed GridVibe inside itself. */
+        .browser-frame-blocked {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            width: 100%;
+            height: 100%;
+            padding: 16px;
+            text-align: center;
+            color: var(--explorer-muted);
+            background: var(--explorer-bg);
+            font-size: .78rem;
+        }
+
+        .browser-frame-blocked[hidden] {
+            display: none;
+        }
+
+        .browser-frame-blocked-hint {
+            max-width: 42ch;
+            line-height: 1.5;
+            overflow-wrap: anywhere;
         }
 
         .explorer-surface {
@@ -1985,8 +2127,18 @@
         }
 
         .explorer-search-panel .explorer-search-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             width: 26px;
             height: 26px;
+        }
+
+        .explorer-search-panel .explorer-search-btn svg {
+            display: block;
+            width: 14px;
+            height: 14px;
+            pointer-events: none;
         }
 
         .explorer-search-panel .explorer-search-btn[aria-pressed="true"] {
@@ -2054,9 +2206,17 @@
         }
 
         .explorer-search-group-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             color: var(--explorer-muted);
-            font-size: .66rem;
             text-align: center;
+        }
+
+        .explorer-search-group-toggle svg {
+            display: block;
+            width: 12px;
+            height: 12px;
         }
 
         .explorer-search-group-name {
@@ -2168,7 +2328,7 @@
 
         .explorer-tree-row {
             display: grid;
-            grid-template-columns: minmax(0, 1fr) auto auto;
+            grid-template-columns: auto minmax(0, 1fr) auto auto;
             align-items: center;
             gap: 4px;
             min-width: 0;
@@ -2187,11 +2347,11 @@
 
         .explorer-tree-main {
             display: grid;
-            grid-template-columns: 14px 20px minmax(0, 1fr);
+            grid-template-columns: 20px minmax(0, 1fr);
             align-items: center;
             gap: 4px;
             min-width: 0;
-            padding: 3px 4px 3px 7px;
+            padding: 3px 4px 3px 0;
             border: 0;
             background: transparent;
             color: inherit;
@@ -2201,15 +2361,39 @@
             text-align: left;
         }
 
-        .explorer-tree-main:focus-visible {
+        .explorer-tree-main:focus-visible,
+        .explorer-tree-chevron-btn:focus-visible {
             outline: 2px solid var(--t-accent);
             outline-offset: -2px;
         }
 
-        .explorer-tree-chevron {
+        /* The fold arrow is a standalone control (expand/collapse only), so the
+           file/folder name button stays the single thing that opens a target. */
+        .explorer-tree-chevron,
+        .explorer-tree-chevron-btn {
+            box-sizing: content-box;
+            width: 14px;
             color: var(--explorer-muted);
             font-size: .68rem;
             text-align: center;
+        }
+
+        .explorer-tree-chevron-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            align-self: stretch;
+            padding: 3px 0;
+            border: 0;
+            background: transparent;
+            cursor: pointer;
+            font: inherit;
+            font-size: .68rem;
+            line-height: 1;
+        }
+
+        .explorer-tree-chevron-btn:hover {
+            color: var(--t-accent);
         }
 
         .explorer-tree-name {
@@ -2308,6 +2492,15 @@
         .explorer-tab-main .explorer-icon svg {
             width: 14px;
             height: 14px;
+        }
+
+        .explorer-tab-main > .explorer-git-badge {
+            flex: none;
+            min-width: 16px;
+            width: 16px;
+            height: 16px;
+            border: 0;
+            background: transparent;
         }
 
         .explorer-tab-name {
@@ -2755,7 +2948,8 @@
         }
 
         .explorer-download-btn,
-        .explorer-md-appearance-btn {
+        .explorer-md-appearance-btn,
+        .explorer-line-wrap-btn {
             width: 28px;
             height: 28px;
             display: inline-flex;
@@ -2771,8 +2965,14 @@
 
         .explorer-download-btn:hover,
         .explorer-md-appearance-btn:hover,
-        .explorer-md-appearance-btn[aria-expanded="true"] {
+        .explorer-md-appearance-btn[aria-expanded="true"],
+        .explorer-line-wrap-btn:hover,
+        .explorer-line-wrap-btn[aria-pressed="true"] {
             color: var(--t-accent);
+        }
+
+        .explorer-line-wrap-btn[hidden] {
+            display: none;
         }
 
         .terminal-toast {
@@ -2810,7 +3010,8 @@
         }
 
         .explorer-download-btn svg,
-        .explorer-md-appearance-btn svg {
+        .explorer-md-appearance-btn svg,
+        .explorer-line-wrap-btn svg {
             width: 14px;
             height: 14px;
         }
@@ -2870,8 +3071,9 @@
             cursor: default;
         }
 
-        /* The full-height edit surface: no soft wrap, scrolls both directions,
-           inherits the per-tab editor font-size variable. */
+        /* The full-height edit surface: follows the Source view's per-tab line
+           wrap flag (unwrapped it scrolls both directions), inherits the per-tab
+           editor font-size variable. */
         .explorer-source-editor {
             display: block;
             width: 100%;
@@ -2892,11 +3094,19 @@
             tab-size: 4;
         }
 
+        .explorer-source-view.wrap-lines .explorer-source-editor {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
         .explorer-source-editor:focus {
             outline: 2px solid var(--t-accent);
             outline-offset: -2px;
         }
 
+        /* Line wrapping stays live while editing (like zoom, it only restyles the
+           surface), so its button is not dimmed with the disabled chrome. */
         .explorer-editor.is-editing .explorer-editor-tab,
         .explorer-editor.is-editing .explorer-download-btn,
         .explorer-editor.is-editing .explorer-md-appearance-btn {
@@ -3103,8 +3313,16 @@
             tab-size: 4;
         }
 
+        /* Unwrapped source keeps every line on one row and scrolls sideways, so
+           the lines block grows to the widest line. Wrapped source (the default,
+           per-tab like the preview/diff toggles) drops that floor so the code
+           column can reflow inside the pane instead. */
         .explorer-source-lines {
             min-width: max-content;
+        }
+
+        .explorer-source-view.wrap-lines .explorer-source-lines {
+            min-width: 0;
         }
 
         .explorer-source-line {
@@ -3156,6 +3374,12 @@
         .explorer-source-line-code {
             min-width: 0;
             padding: 0 14px;
+            white-space: pre;
+        }
+
+        /* Wrapped rows grow downward; the number gutter is a stretched grid cell
+           in the same row, so it stays aligned with the line it belongs to. */
+        .explorer-source-view.wrap-lines .explorer-source-line-code {
             white-space: pre-wrap;
             overflow-wrap: anywhere;
             word-break: break-word;
@@ -3457,6 +3681,7 @@
         }
 
         .explorer-diff-line-number {
+            position: relative;
             padding: 2px 8px;
             color: var(--explorer-muted);
             text-align: right;
@@ -3500,6 +3725,105 @@
             background: var(--explorer-bar-bg);
             border-right: 0;
             font-weight: 700;
+        }
+
+        .explorer-diff-undo-line {
+            position: absolute;
+            inset-inline-start: 2px;
+            top: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            padding: 0;
+            transform: translateY(-50%);
+            border: 1px solid var(--explorer-btn-border);
+            border-radius: var(--gv-radius-s);
+            background: var(--explorer-btn-bg);
+            color: var(--t-accent);
+            cursor: pointer;
+            opacity: .72;
+            transition: opacity .12s ease, background-color .12s ease;
+        }
+
+        .explorer-diff-undo-line .explorer-btn-icon {
+            width: 13px;
+            height: 13px;
+        }
+
+        :is(.explorer-diff-line-number, .d2h-code-side-linenumber):hover
+        > .explorer-diff-undo-line,
+        .explorer-diff-undo-line:focus-visible,
+        .explorer-diff-undo-line.is-busy {
+            opacity: 1;
+        }
+
+        .explorer-diff-undo-line:hover:not(:disabled),
+        .explorer-diff-undo-line:focus-visible {
+            background: var(--explorer-btn-hover-bg);
+            outline: none;
+        }
+
+        .explorer-diff-undo-line:disabled {
+            cursor: wait;
+        }
+
+        /* Block undo: one pill on the first row of a multi-line change, sitting
+           just right of the (sticky) line-number gutter so it stays reachable
+           while the code column scrolls. Revealed by JS on block hover. */
+        .explorer-diff-undo-block {
+            position: absolute;
+            left: calc(100% + 4px);
+            top: 50%;
+            direction: ltr;
+            z-index: 3;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 1px 7px 1px 5px;
+            transform: translateY(-50%);
+            border: 1px solid var(--explorer-btn-border);
+            border-radius: var(--gv-radius-s);
+            background: var(--explorer-btn-bg);
+            color: var(--t-accent);
+            cursor: pointer;
+            opacity: 0;
+            pointer-events: none;
+            font: inherit;
+            font-size: .68rem;
+            line-height: 1.6;
+            white-space: nowrap;
+            transition: opacity .12s ease, background-color .12s ease;
+        }
+
+        .explorer-diff-undo-block .explorer-btn-icon {
+            width: 12px;
+            height: 12px;
+        }
+
+        .explorer-diff-undo-block.is-visible,
+        .explorer-diff-undo-block.is-busy,
+        .explorer-diff-undo-block:focus-visible {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .explorer-diff-undo-block:hover:not(:disabled),
+        .explorer-diff-undo-block:focus-visible {
+            background: var(--explorer-btn-hover-bg);
+            outline: none;
+        }
+
+        .explorer-diff-undo-block:disabled {
+            cursor: wait;
+        }
+
+        /* Diff2Html clips its line-number cells (ellipsis for long numbers);
+           the one cell that hosts a block pill has to let it through. */
+        .explorer-diff-line-number.has-block-undo,
+        .explorer-diff2html .d2h-code-side-linenumber.has-block-undo {
+            overflow: visible;
         }
 
         .explorer-diff-empty {
@@ -3806,6 +4130,48 @@
             max-width: 4em;
         }
 
+        /* Wrapped mode keeps Diff2Html's syntax + intraline markup. The existing
+           4em number cell reserves the gutter; JS equalises each pair of row
+           heights after wrapping so the two sides cannot drift vertically. */
+        .explorer-diff-content.wrap-lines .explorer-diff2html .d2h-file-side-diff {
+            overflow-x: hidden;
+        }
+
+        .explorer-diff-content.wrap-lines .explorer-diff2html .d2h-code-side-line {
+            display: block;
+            /* Do not preserve the template's formatting whitespace between the
+               prefix/code spans; only the actual code span wraps below. */
+            white-space: nowrap;
+        }
+
+        .explorer-diff-content.wrap-lines .explorer-diff2html .d2h-code-line-ctn {
+            display: inline;
+            width: auto;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            vertical-align: top;
+        }
+
+        .explorer-diff-content.wrap-lines .explorer-diff2html .d2h-code-line-prefix {
+            white-space: pre;
+        }
+
+        .explorer-diff-content.wrap-lines
+        .explorer-diff2html
+        :is(.d2h-code-side-line ins, .d2h-code-side-line del) {
+            display: inline;
+            white-space: inherit;
+        }
+
+        .explorer-diff-content.wrap-lines .explorer-diff2html .d2h-code-side-linenumber {
+            vertical-align: top;
+        }
+
+        .explorer-diff-content.wrap-lines .explorer-diff-horizontal-scrollbars {
+            display: none;
+        }
+
         .explorer-diff2html .d2h-file-header {
             display: none;
         }
@@ -3945,6 +4311,40 @@
 
         .explorer-markdown-preview > * {
             max-width: var(--md-preview-measure);
+        }
+
+        /* Opt-in full-pane wrapping keeps the existing reading measure as the
+           default, while allowing long prose/URLs to use the whole viewer. */
+        .explorer-markdown-preview.wrap-lines > * {
+            box-sizing: border-box;
+            max-width: 100%;
+        }
+
+        .explorer-markdown-preview p,
+        .explorer-markdown-preview li {
+            text-align: justify;
+            text-justify: inter-word;
+        }
+
+        .explorer-markdown-preview.wrap-lines :is(p, li, blockquote, dd, th, td) {
+            overflow-wrap: anywhere;
+        }
+
+        .explorer-markdown-preview.wrap-lines table {
+            width: 100%;
+            table-layout: fixed;
+        }
+
+        .explorer-markdown-preview pre,
+        .explorer-markdown-preview table,
+        .explorer-markdown-preview .explorer-mermaid,
+        .explorer-markdown-preview h1,
+        .explorer-markdown-preview h2,
+        .explorer-markdown-preview h3,
+        .explorer-markdown-preview h4,
+        .explorer-markdown-preview h5,
+        .explorer-markdown-preview h6 {
+            text-align: left;
         }
 
         /* Reading-surface presets (ISSUE-2026-030). */
@@ -4374,6 +4774,83 @@
         #explorer-ctx-menu button:hover,
         #explorer-ctx-menu button:focus-visible {
             background: var(--t-ctx-hover);
+            outline: none;
+        }
+        #explorer-ctx-menu .explorer-ctx-separator {
+            height: 1px;
+            margin: 4px 0;
+            background: var(--t-ctx-border);
+        }
+        #explorer-ctx-menu button:disabled {
+            color: var(--t-text-muted);
+            cursor: default;
+            opacity: .65;
+        }
+        #explorer-ctx-menu button:disabled:hover {
+            background: none;
+        }
+        #explorer-ctx-menu button.danger {
+            color: var(--gv-danger);
+        }
+        .explorer-context-target {
+            outline: 1px solid var(--t-accent);
+            outline-offset: -1px;
+        }
+        .explorer-fs-highlight {
+            background: var(--explorer-row-active);
+            outline: 1px solid var(--t-accent);
+            outline-offset: -1px;
+        }
+        .terminal-container.explorer-fs-busy {
+            cursor: progress;
+        }
+        .explorer-fs-busy-label {
+            position: absolute;
+            z-index: 8;
+            right: 12px;
+            bottom: 12px;
+            max-width: calc(100% - 24px);
+            padding: 6px 10px;
+            border: 1px solid var(--explorer-btn-border);
+            border-radius: 6px;
+            background: var(--t-ctx-bg);
+            color: var(--t-text);
+            box-shadow: 0 4px 12px color-mix(in srgb, var(--t-bg) 60%, transparent);
+            font-size: .75rem;
+            pointer-events: none;
+        }
+        .explorer-fs-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            padding: 7px 12px;
+            border-bottom: 1px solid var(--explorer-row-border);
+            background: var(--explorer-row-active);
+            color: var(--gv-danger);
+            font-size: .74rem;
+        }
+        .explorer-fs-bar-message {
+            flex: 1 1 200px;
+            min-width: 0;
+        }
+        .explorer-fs-bar-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .explorer-fs-bar-action {
+            padding: 4px 8px;
+            border: 1px solid var(--explorer-btn-border);
+            border-radius: 5px;
+            background: var(--explorer-btn-bg);
+            color: var(--explorer-btn-text);
+            cursor: pointer;
+            font: inherit;
+        }
+        .explorer-fs-bar-action:hover,
+        .explorer-fs-bar-action:focus-visible {
+            border-color: var(--t-accent);
             outline: none;
         }
 

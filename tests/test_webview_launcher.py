@@ -68,6 +68,7 @@ class _FakeWindow:
             restored=_FakeEvent(),
             before_show=_FakeEvent(),
             shown=_FakeEvent(),
+            loaded=_FakeEvent(),
             closed=_FakeEvent(),
         )
 
@@ -83,6 +84,16 @@ class _FakeHandle:
 class _FakeNative:
     def __init__(self, hwnd=1234):
         self.Handle = _FakeHandle(hwnd)
+
+
+class _FakeZoomWebview:
+    def __init__(self):
+        self.ZoomFactor = 1.0
+
+
+class _FakeZoomNative:
+    def __init__(self):
+        self.webview = _FakeZoomWebview()
 
 
 class WebviewLauncherTestCase(unittest.TestCase):
@@ -308,6 +319,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertTrue(fake_webview.create_window.call_args.kwargs["resizable"])
         self.assertFalse(fake_webview.create_window.call_args.kwargs["frameless"])
         self.assertFalse(fake_webview.create_window.call_args.kwargs["easy_drag"])
+        self.assertTrue(fake_webview.create_window.call_args.kwargs["zoomable"])
         self.assertEqual(
             fake_webview.create_window.call_args.kwargs["background_color"],
             "#070b18",
@@ -329,10 +341,58 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertTrue(fake_webview.create_window.call_args.kwargs["resizable"])
         self.assertFalse(fake_webview.create_window.call_args.kwargs["frameless"])
         self.assertFalse(fake_webview.create_window.call_args.kwargs["easy_drag"])
+        self.assertTrue(fake_webview.create_window.call_args.kwargs["zoomable"])
         self.assertEqual(
             fake_webview.create_window.call_args.kwargs["background_color"],
             "#0d0d0d",
         )
+
+    def test_session_native_zoom_round_trip_uses_native_control(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _ExplodingWindow()
+        window.native = _FakeZoomNative()
+        window.native.webview.ZoomFactor = 1.5
+        api_bridge._attach_session_window(window)
+
+        self.assertEqual(
+            api_bridge.get_session_native_zoom(),
+            {"ok": True, "zoom_factor": 1.5},
+        )
+        self.assertEqual(
+            webview_launcher._set_native_window_zoom(window, "1.25"),
+            1.25,
+        )
+        self.assertEqual(window.native.webview.ZoomFactor, 1.25)
+        self.assertIsNone(webview_launcher._set_native_window_zoom(window, 99))
+
+    def test_open_existing_session_window_applies_restored_zoom(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _ExplodingWindow()
+        window.native = _FakeZoomNative()
+        api_bridge._attach_session_window(window, "group-1")
+
+        result = api_bridge.open_session_window("group-1", 1.75)
+
+        self.assertEqual(result, {"ok": True, "reused": True})
+        self.assertEqual(window.native.webview.ZoomFactor, 1.75)
+        self.assertEqual(window.show_calls, 1)
+
+    def test_new_session_window_applies_restored_zoom_after_load(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _FakeWindow()
+        window.native = _FakeZoomNative()
+        fake_webview = Mock()
+        fake_webview.create_window.return_value = window
+
+        with patch.object(webview_launcher, "webview", fake_webview):
+            result = api_bridge.open_session_window("group-1", 1.4)
+
+        self.assertEqual(result, {"ok": True, "reused": False})
+        self.assertEqual(api_bridge._pending_session_native_zoom_factor, 1.4)
+        self.assertEqual(len(window.events.loaded.handlers), 1)
+        window.events.loaded.handlers[0]()
+        self.assertEqual(window.native.webview.ZoomFactor, 1.4)
+        self.assertIsNone(api_bridge._pending_session_native_zoom_factor)
 
     def test_hex_to_colorref_converts_rgb_to_windows_colorref(self):
         self.assertEqual(webview_launcher._hex_to_colorref("#112233"), 0x332211)

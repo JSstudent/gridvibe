@@ -23,12 +23,13 @@
     }
 
     /* Drop a pane's edit without a prompt. Callers that reach here have already
-       confirmed (or the buffer was clean). Never touches the DOM — the caller
-       re-renders. */
+       confirmed (or the buffer was clean). Sync the tab marker immediately:
+       some exits refresh the file in place and do not rebuild the tab strip. */
     function clearExplorerEditState(index) {
         const pane = terminals[index];
         if (pane) {
             pane._explorerEdit = null;
+            updateExplorerEditTabDirty(index);
         }
     }
 
@@ -218,7 +219,10 @@
         if (!pane || !code || !state) {
             return;
         }
-        code.innerHTML = `<textarea id="explorer-edit-textarea-${index}" class="explorer-source-editor" spellcheck="false" wrap="off" aria-label="Edit ${escHtml(pane._explorerFileName || 'file')}"></textarea>`;
+        // The editor honours the tab's Source line-wrap flag; `soft` never
+        // rewrites the value, so the saved bytes are the same either way.
+        const wrap = explorerLineWrapPreference(index, 'source') ? 'soft' : 'off';
+        code.innerHTML = `<textarea id="explorer-edit-textarea-${index}" class="explorer-source-editor" spellcheck="false" wrap="${wrap}" aria-label="Edit ${escHtml(pane._explorerFileName || 'file')}"></textarea>`;
         const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
         if (!textarea) {
             return;
@@ -291,7 +295,7 @@
         }
         const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
         const editViewport = captureScrollMetrics(textarea);
-        pane._explorerEdit = null;
+        clearExplorerEditState(index);
         clearExplorerEditBar(index);
         renderExplorerSource(index);
         restoreExplorerEditViewport(
@@ -369,7 +373,7 @@
         if (!pane) {
             return;
         }
-        pane._explorerEdit = null;
+        clearExplorerEditState(index);
         const scrollState = captureExplorerFileScroll(index);
         // Prefer the in-place refresh; fall back to a full render when the
         // available panels changed (a clean file commonly gains a Diff panel
@@ -496,7 +500,7 @@
             return;
         }
         const path = state.path;
-        pane._explorerEdit = null;
+        clearExplorerEditState(index);
         clearExplorerEditBar(index);
         setExplorerEditChromeDisabled(index, false);
         await openExplorerFile(index, path, { showLoading: false, tab: pane._explorerActiveTabId });

@@ -58,6 +58,11 @@ class TerminalSession:
     explorer_md_preset: str = ""
     explorer_md_font: str = ""
     explorer_theme: str = "dark"
+    # Browser panes are tabbed: `browser_tabs` holds one HTTP(S) URL per open
+    # tab and `browser_active_tab` indexes into it. `initial_command` stays the
+    # active tab's URL so every existing browser-pane reader keeps working.
+    browser_tabs: List[str] = field(default_factory=list)
+    browser_active_tab: int = 0
     status: SessionStatus = SessionStatus.PENDING
     created_at: float = field(default_factory=time.time)
     connected_at: Optional[float] = None
@@ -93,6 +98,8 @@ class TerminalSession:
             "explorer_md_preset": self.explorer_md_preset,
             "explorer_md_font": self.explorer_md_font,
             "explorer_theme": self.explorer_theme,
+            "browser_tabs": list(self.browser_tabs),
+            "browser_active_tab": self.browser_active_tab,
             "status": self.status.value,
             "created_at": self.created_at,
             "connected_at": self.connected_at,
@@ -138,6 +145,10 @@ class SessionManager:
         """Initialize the session manager."""
         self.sessions: Dict[str, TerminalSession] = {}
         self.groups: Dict[str, SessionGroup] = {}
+        # Which group the session window last had in front. A workspace-shape
+        # hint only — never session state — captured with the workspace so a
+        # restore reopens on the group the user was actually working in.
+        self._active_group_id: str = ""
         # Lock ordering: web/api.py's connection_lock may be held while taking
         # this lock; code holding this lock must never take connection_lock.
         self.lock = threading.RLock()
@@ -179,8 +190,30 @@ class SessionManager:
                 workspace_layout=workspace_layout,
             )
             self.groups[resolved_group_id] = group
+            # The session window switches to a newly launched group, so mirror
+            # that here: the hint is then right even before a window reports.
+            self._active_group_id = resolved_group_id
 
         return group
+
+    def set_active_group(self, group_id: str) -> str:
+        """Record which group the session window has in front; return the hint.
+
+        Unknown ids are ignored rather than stored, so a stale tab can never
+        point a workspace restore at a group that no longer exists.
+        """
+        candidate = str(group_id or "").strip()
+        with self.lock:
+            if candidate and candidate in self.groups:
+                self._active_group_id = candidate
+            return self.get_active_group_id()
+
+    def get_active_group_id(self) -> str:
+        """Return the active-group hint, or "" once that group is gone."""
+        with self.lock:
+            if self._active_group_id not in self.groups:
+                self._active_group_id = ""
+            return self._active_group_id
 
     def _generate_session_id(self) -> str:
         """Return a short session id that is not already in use.
@@ -284,6 +317,8 @@ class SessionManager:
                     explorer_md_preset=str(config.get("explorer_md_preset") or ""),
                     explorer_md_font=str(config.get("explorer_md_font") or ""),
                     explorer_theme="light" if config.get("explorer_theme") == "light" else "dark",
+                    browser_tabs=list(config.get("browser_tabs") or []),
+                    browser_active_tab=int(config.get("browser_active_tab") or 0),
                 )
                 created.append(session)
             except Exception as e:
@@ -325,6 +360,8 @@ class SessionManager:
             "explorer_md_preset",
             "explorer_md_font",
             "explorer_theme",
+            "browser_tabs",
+            "browser_active_tab",
         }
         with self.lock:
             session = self.sessions.get(session_id)
@@ -336,6 +373,77 @@ class SessionManager:
                     setattr(session, field_name, value)
 
             return session
+
+    def update_browser_tab_strip(
+        self,
+        session_id: str,
+        *,
+        browser_tabs: List[str],
+        browser_active_tab: int,
+        initial_command: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically update tabs only while the session is still a browser pane."""
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None or session.startup_mode != "browser":
+                return None
+            session.browser_tabs = browser_tabs
+            session.browser_active_tab = browser_active_tab
+            session.initial_command = initial_command
+            return session.to_dict()
+
+    def merge_browser_tabs(
+        self,
+        session_id: str,
+        *,
+        browser_url: Optional[str],
+        browser_active_tab: Any,
+        default_browser_url: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically merge a single-URL browser request into the live tab strip.
+
+        ``browser_url`` and ``default_browser_url`` are normalized by the web
+        boundary. Existing tabs belong to an already-normalized browser
+        session, so the read/merge/write transaction can stay inside one lock
+        hold without making the session layer depend on web normalization.
+        """
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                return None
+
+            was_browser = session.startup_mode == "browser"
+            resolved_url = (
+                browser_url
+                or (session.initial_command if was_browser else "")
+                or default_browser_url
+            )
+            browser_tabs = list(session.browser_tabs) if was_browser else []
+            if not browser_tabs:
+                browser_tabs = [resolved_url]
+
+            requested_active_tab = (
+                session.browser_active_tab
+                if browser_active_tab is None
+                else browser_active_tab
+            )
+            try:
+                active_tab = int(requested_active_tab)
+            except (TypeError, ValueError):
+                active_tab = 0
+            active_tab = max(0, min(len(browser_tabs) - 1, active_tab))
+            browser_tabs[active_tab] = resolved_url
+
+            session.host = "Browser"
+            session.username = ""
+            session.port = 22
+            session.password = None
+            session.initial_command = resolved_url
+            session.initial_command_mode = "browser"
+            session.startup_mode = "browser"
+            session.browser_tabs = browser_tabs
+            session.browser_active_tab = active_tab
+            return session.to_dict()
 
     def get_all_sessions(self) -> List[TerminalSession]:
         """Get all sessions."""

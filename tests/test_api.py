@@ -195,6 +195,8 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/explorer-viewer.js",
             "js/explorer-editor.js",
             "js/explorer-search.js",
+            "js/explorer-fs.js",
+            "js/browser-pane.js",
             "js/terminals.js",
         ):
             marker = f"/static/{asset}"
@@ -604,18 +606,18 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("workspace_layout: workspaceLayout", html)
         self.assertIn("activeWorkspaceLayout = normalized.workspace_layout || null;", html)
         self.assertIn("workspace_layout: config.workspace_layout", html)
-        self.assertIn("initial_command_mode: terminal.startup_mode === 'explorer'", html)
-        self.assertIn("agent_selection: terminal.initial_command_mode === 'agent'", html)
+        self.assertIn("initial_command_mode: resolvedStartupMode === 'explorer'", html)
+        self.assertIn("agent_selection: resolvedStartupMode === 'agent'", html)
         self.assertIn("data-explorer-tree-open=", html)
         self.assertIn("data-explorer-git-open=", html)
         self.assertIn("data-explorer-search-open=", html)
-        self.assertIn("explorer_tree_open: terminal.startup_mode === 'explorer'", html)
-        self.assertIn("explorer_git_open: terminal.startup_mode === 'explorer'", html)
-        self.assertIn("explorer_search_open: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_tree_open: resolvedStartupMode === 'explorer'", html)
+        self.assertIn("explorer_git_open: resolvedStartupMode === 'explorer'", html)
+        self.assertIn("explorer_search_open: resolvedStartupMode === 'explorer'", html)
         self.assertIn('<option value="browser"', html)
         self.assertIn('class="field t-browser-field', html)
         self.assertIn("function normalizeBrowserPaneUrl(value)", html)
-        self.assertIn("terminal.startup_mode === 'browser'", html)
+        self.assertIn("browser_tabs: resolvedStartupMode === 'browser'", html)
         layout_change_start = html.index("container.querySelectorAll('.layout-btn').forEach")
         layout_change_end = html.index("function renderModeFields", layout_change_start)
         layout_change_html = html[layout_change_start:layout_change_end]
@@ -949,15 +951,180 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function getBrowserSessionUrl(session)", html)
         self.assertIn("function normalizeBrowserUrlInput(value)", html)
         self.assertIn("class=\"browser-surface\"", html)
-        self.assertIn("class=\"browser-frame\"", html)
+        self.assertIn("class=\"browser-frame${isActive ? ' active' : ''}\"", html)
         self.assertIn("class=\"browser-url-input\"", html)
-        self.assertIn("data-browser-open=\"${i}\"", html)
+        self.assertIn("data-browser-open=\"${index}\"", html)
         self.assertIn("data-session-browser-toggle=\"${i}\"", html)
         self.assertIn("function reloadBrowserPane(index)", html)
         self.assertIn("function openBrowserPaneExternally(index)", html)
         self.assertIn("async function switchSessionBrowserMode(index)", html)
         self.assertIn("async function navigateBrowserPane(index, value)", html)
-        self.assertIn("sandbox=\"allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts\"", html)
+        self.assertIn(
+            "'allow-downloads allow-forms allow-modals allow-popups '",
+            html,
+        )
+        self.assertIn("'allow-popups-to-escape-sandbox allow-same-origin allow-scripts'", html)
+
+    def test_terminals_page_exposes_browser_pane_tab_strip(self):
+        """Browser panes are tabbed: one frame per tab, persisted as a strip."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("const BROWSER_MAX_TABS = 8;", html)
+        self.assertIn("class=\"browser-tabstrip\"", html)
+        self.assertIn("data-browser-tab-new=\"${index}\"", html)
+        self.assertIn("data-browser-tab-close=\"${index}\"", html)
+        self.assertIn("function browserOpenTab(index, url", html)
+        self.assertIn("function browserCloseTab(index, tabIndex)", html)
+        self.assertIn("function browserSelectTab(index, tabIndex)", html)
+        self.assertIn("function browserSerializeTabs(pane, session = null)", html)
+        # Same-origin popups become pane tabs instead of escaping to the OS
+        # browser; cross-origin access throws and is swallowed.
+        self.assertIn("function browserHookFrameWindow(index, frame)", html)
+        self.assertIn("win.__gridvibeBrowserPaneHooked", html)
+        self.assertIn("a[target=\"_blank\"], a[target=\"_new\"]", html)
+        # Save Workspace and the saved-session launch payload carry the strip.
+        self.assertIn("browser_tabs: browserTabs.tabs", html)
+        self.assertIn("browser_active_tab: browserTabs.active_tab", html)
+
+    def test_compact_action_controls_use_shared_svg_icons(self):
+        """F8 — action buttons use currentColor SVGs; search mnemonics stay text."""
+        icons = self._static("js/terminal-icons.js")
+        search = self._static("js/explorer-search.js")
+        browser = self._static("js/browser-pane.js")
+
+        for icon in (
+            "UI_CHEVRON_RIGHT_ICON",
+            "UI_CHEVRON_DOWN_ICON",
+            "UI_PLUS_ICON",
+            "UI_MINUS_ICON",
+            "UI_CLOSE_ICON",
+        ):
+            marker = f"const {icon} = '"
+            self.assertIn(marker, icons)
+            svg = icons[icons.index(marker) + len(marker):]
+            svg = svg[:svg.index("';")]
+            self.assertIn('stroke="currentColor"', svg)
+            self.assertNotIn('fill="#', svg)
+
+        self.assertIn(
+            "collapsed ? UI_CHEVRON_RIGHT_ICON : UI_CHEVRON_DOWN_ICON",
+            search,
+        )
+        self.assertIn('aria-label="Expand all">${UI_PLUS_ICON}</button>', search)
+        self.assertIn('aria-label="Collapse all">${UI_MINUS_ICON}</button>', search)
+        self.assertNotIn("▸", search)
+        self.assertNotIn("▾", search)
+        self.assertNotIn('aria-label="Expand all">+</button>', search)
+        self.assertNotIn('aria-label="Collapse all">−</button>', search)
+
+        self.assertIn(">${UI_CLOSE_ICON}</button>", browser)
+        self.assertIn(">${UI_PLUS_ICON}</button>", browser)
+        self.assertNotIn(">×</button>", browser)
+        self.assertNotIn(">+</button>", browser)
+
+        # These are search-language labels, not stand-ins for graphical actions.
+        self.assertIn('title="Match case">Aa</button>', search)
+        self.assertIn('title="Match whole word">ab</button>', search)
+        self.assertIn('title="Use regular expression">.*</button>', search)
+
+    def test_browser_tab_persist_is_cancelled_and_revalidated_before_post(self):
+        """F1 — a stale debounce must not switch a terminal back to browser mode."""
+        browser_response = self.client.get("/static/js/browser-pane.js")
+        terminals_response = self.client.get("/static/js/terminals.js")
+        browser_js = browser_response.get_data(as_text=True)
+        terminals_js = terminals_response.get_data(as_text=True)
+        browser_response.close()
+        terminals_response.close()
+
+        self.assertIn("function browserCancelPendingPersist(sessionId)", browser_js)
+        persist_start = browser_js.index("const push = async () => {")
+        persist_end = browser_js.index("const snapshot = browserSerializeTabs(pane);", persist_start)
+        persist_guard = browser_js[persist_start:persist_end]
+        self.assertIn("const currentIndex = sessionIds.indexOf(sessionId);", persist_guard)
+        self.assertIn("terminals[currentIndex] !== pane", persist_guard)
+        self.assertIn("!isBrowserSession(terminals[currentIndex]?._session)", persist_guard)
+        self.assertIn("isSessionModeSwitchPending(sessionId)", persist_guard)
+
+        switch_start = terminals_js.index("async function switchSessionBrowserMode(index)")
+        switch_end = terminals_js.index("function captureSurvivingPaneClientState", switch_start)
+        switch_body = terminals_js[switch_start:switch_end]
+        self.assertLess(
+            switch_body.index("browserCancelPendingPersist(sessionId);"),
+            switch_body.index("pendingModeSwitchSessionIds.add(sessionId);"),
+        )
+        close_start = terminals_js.index("async function closeTerminalPane(index)")
+        close_end = terminals_js.index("async function splitTerminalPane(index", close_start)
+        self.assertIn(
+            "browserCancelPendingPersist(plan.sessionId);",
+            terminals_js[close_start:close_end],
+        )
+        group_start = terminals_js.index("async function closeSessionGroup(")
+        group_end = terminals_js.index("async function closeCurrentSession()", group_start)
+        self.assertIn(
+            "closingSessionIds.forEach(browserCancelPendingPersist);",
+            terminals_js[group_start:group_end],
+        )
+
+    def test_browser_pane_new_tab_never_duplicates_the_active_tab(self):
+        """A '+' that copied the active URL made a pane showing GridVibe
+        re-embed its own workspace, one level deeper on every render."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        new_tab_start = html.index('[data-browser-tab-new="${index}"]`)')
+        new_tab_end = html.index("const tab = event.target.closest", new_tab_start)
+        handler = html[new_tab_start:new_tab_end]
+        self.assertIn("browserOpenTab(index, BROWSER_DEFAULT_URL)", handler)
+        # The old duplicating call must be gone from the handler entirely.
+        self.assertNotIn("current.url", handler)
+        self.assertNotIn("browserActiveTab(pane)", handler)
+
+    def test_browser_pane_blocks_nested_self_embedding(self):
+        """A GridVibe page inside a browser pane renders no browser frames."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function browserIsNestedPreview()", html)
+        self.assertIn("window.frameElement?.classList.contains('browser-frame')", html)
+        self.assertIn("if (browserIsNestedPreview()) {", html)
+        self.assertIn("browser-frame-blocked", html)
+        # The stand-in must not carry the class the guard looks for, or a page
+        # one level deeper would not detect that it is nested.
+        self.assertNotIn('class="browser-frame${isActive', html.split("browser-frame-blocked")[0][-400:])
+
+    def test_browser_pane_tabs_drag_reorder(self):
+        """Tabs drag-reorder like the session and explorer strips."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn('draggable="true"', html)
+        self.assertIn("function browserReorderTab(index, draggedId, targetId, before)", html)
+        self.assertIn("function browserClearTabDragMarkers(index)", html)
+        # Drag state is held as a tab id, not an index, so a re-render mid-drag
+        # cannot retarget the move.
+        self.assertIn("pane._browserDraggedTabId = tab.dataset.browserTabId", html)
+        self.assertIn("data-browser-tab-id=", html)
+        # The shown page must survive a reorder: the active tab is re-resolved
+        # by identity, never left pointing at whatever slid into its old index.
+        self.assertIn("pane._browserActiveTab = Math.max(0, tabs.indexOf(activeTab))", html)
+        self.assertIn(".browser-tab.drag-before", html)
+        self.assertIn(".browser-tab.drag-after", html)
+
+    def test_browser_pane_reuses_named_window_targets(self):
+        """window.open(url, 'name') reuses that tab instead of stacking tabs."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("tab.windowName === windowName", html)
+        # _self/_top/_parent navigate an existing window, so they stay native.
+        self.assertIn("['_self', '_top', '_parent'].includes(name)", html)
+        self.assertIn("['_blank', '_new', ''].includes(name) ? '' : name", html)
 
     def test_terminals_page_explorer_refresh_requires_initial_navigation_or_force(self):
         response = self.client.get("/terminals")
@@ -1316,7 +1483,8 @@ class ApiRoutesTestCase(unittest.TestCase):
             "new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs)",
             html,
         )
-        # Render path prefers Diff2Html, falling back to the handwritten renderer.
+        # Both wrapped and unwrapped paths prefer Diff2Html; only unavailable
+        # vendor assets use the handwritten renderer.
         self.assertIn("function renderExplorerDiffWithDiff2Html(index, code, diff, banner)", html)
         self.assertIn(
             "if (!renderExplorerDiffWithDiff2Html(index, code, diff, banner)) {",
@@ -1426,6 +1594,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function setExplorerSearchSidebarOpen(index, open)", html)
         self.assertIn("function renderExplorerSearchPanel(index)", html)
         self.assertIn("function runExplorerRepoSearch(index)", html)
+        self.assertIn("const EXPLORER_REPO_SEARCH_DEBOUNCE_MS = 350;", html)
+        self.assertIn(
+            "function scheduleExplorerRepoSearch(index, { delay = EXPLORER_REPO_SEARCH_DEBOUNCE_MS } = {})",
+            html,
+        )
         self.assertIn("function activateExplorerSearchHit(index, path, line,", html)
         self.assertIn("function focusExplorerRepoSearch(index, seedQuery = '')", html)
         self.assertIn("function findExplorerRepoSearchTargetIndex()", html)
@@ -1463,6 +1636,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         # `ignored` flag is wired end-to-end rather than dead (guardrail 5).
         self.assertIn("data-explorer-repo-search-ignored", html)
         self.assertIn("if (state.ignored) params.set('ignored', '1');", html)
+        self.assertIn("if (truncated.output)", html)
+        self.assertIn("stopped at the output limit", html)
 
     def test_terminals_page_explorer_uses_tabbed_file_viewer(self):
         """ISSUE-2026-014: main pane is a persistent tabbed read-only viewer."""
@@ -1527,8 +1702,13 @@ class ApiRoutesTestCase(unittest.TestCase):
             "function cancelExplorerEdit(index)",
         ):
             self.assertIn(hook, editor)
-        # Textarea attributes: spellcheck off, no soft wrap, accessible label.
-        self.assertIn('class="explorer-source-editor" spellcheck="false" wrap="off"', editor)
+        # Textarea attributes: spellcheck off, the tab's own Source wrap flag
+        # (never `hard`, which would rewrite the saved value), accessible label.
+        self.assertIn('class="explorer-source-editor" spellcheck="false" wrap="${wrap}"', editor)
+        self.assertIn(
+            "const wrap = explorerLineWrapPreference(index, 'source') ? 'soft' : 'off';",
+            editor,
+        )
         self.assertIn('aria-label="Edit ', editor)
         # Tab inserts a literal tab; Ctrl/Cmd+S saves; Escape cancels.
         self.assertIn("textarea.setRangeText('\\t', start, end, 'end');", editor)
@@ -1577,6 +1757,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("data-explorer-edit-overwrite=", editor)
         self.assertIn("save_in_progress", editor)
         self.assertIn("file_too_large", editor)
+
+    def test_terminals_page_explorer_editor_clears_dirty_tab_marker_immediately(self):
+        """Save/cancel/discard exits synchronise the transient tab dirty class."""
+        editor = self._static("js/explorer-editor.js")
+        clear_state = editor[
+            editor.index("function clearExplorerEditState(index)"):
+            editor.index("async function confirmDiscardExplorerEdit", editor.index("function clearExplorerEditState(index)"))
+        ]
+        self.assertIn("pane._explorerEdit = null;", clear_state)
+        self.assertIn("updateExplorerEditTabDirty(index);", clear_state)
+        # Confirmed discard, Cancel, Save success, and conflict reload all share
+        # the same immediate state-drop path.
+        self.assertGreaterEqual(editor.count("clearExplorerEditState(index);"), 4)
 
     def test_terminals_page_explorer_editor_guards_dirty_teardown(self):
         """§5.6: every deliberate teardown consults the discard guard."""
@@ -1632,6 +1825,113 @@ class ApiRoutesTestCase(unittest.TestCase):
         # No raw hex palette literals in the new editor rules.
         editor_css = css[css.index("/* ── In-app editor controls"):css.index(".explorer-tab.is-dirty .explorer-tab-name::after")]
         self.assertNotRegex(editor_css, r":\s*#[0-9a-fA-F]{3,6}\b")
+
+    def test_terminals_page_explorer_tabs_show_unstaged_git_status(self):
+        """Open tabs mirror only the worktree/unstaged status column."""
+        viewer = self._static("js/explorer-viewer.js")
+        css = self._static("css/terminals.css")
+        helper = viewer[
+            viewer.index("function explorerTabUnstagedGit(git)"):
+            viewer.index("function syncExplorerTabGitFromRepo", viewer.index("function explorerTabUnstagedGit(git)"))
+        ]
+        self.assertIn("const worktreeCode = git.worktree_status || ' ';", helper)
+        self.assertIn("if (explorerGitCodeUnmodified(worktreeCode)) {", helper)
+        self.assertIn("explorerGitStatusFromCode(worktreeCode)", helper)
+        self.assertIn("assignedTab.git = data.git || null;", viewer)
+        self.assertIn("renderedTab.git = data.git || null;", viewer)
+        self.assertIn("syncExplorerTabGitFromRepo(index, data);", viewer)
+        self.assertIn("${gitBadge}", viewer)
+        self.assertIn(".explorer-tab-main > .explorer-git-badge {", css)
+
+    def test_terminals_page_explorer_diff_line_undo_is_revision_guarded(self):
+        """Per-line discard stays inside the existing bounded editor save route."""
+        viewer = self._static("js/explorer-viewer.js")
+        css = self._static("css/terminals.css")
+        line_undo = viewer[
+            viewer.index("function explorerDiffShowsOnlyWorktreeChanges(pane)"):
+            viewer.index(
+                "/* Render the patch with the pinned Diff2Html build",
+                viewer.index("function explorerDiffShowsOnlyWorktreeChanges(pane)"),
+            )
+        ]
+        # It is offered only for complete editable unstaged worktree diffs.
+        for guard in (
+            "pane._explorerDiffMode === 'worktree'",
+            "explorerDiffShowsOnlyWorktreeChanges(pane)",
+            "!pane._explorerDiffCommit",
+            "pane._explorerFileEditable",
+            "!pane._explorerFileTruncated",
+            "!pane._explorerDiffTruncated",
+            "pane._explorerFileRevision",
+            "'\\\\ No newline at end of file'",
+        ):
+            self.assertIn(guard, line_undo)
+        # A directly opened tab uses HEAD mode. Permit it only when HEAD and the
+        # worktree diff are identical: an unchanged index plus an unstaged edit.
+        self.assertIn("const indexCode = git.index_status || ' ';", line_undo)
+        self.assertIn("const worktreeCode = git.worktree_status || ' ';", line_undo)
+        self.assertIn("explorerGitCodeUnmodified(indexCode)", line_undo)
+        self.assertIn("!explorerGitCodeUnmodified(worktreeCode)", line_undo)
+        self.assertIn("git.status === 'conflicted'", line_undo)
+        # The action confirms in-page and reuses the optimistic full-file save
+        # contract; it does not add a patch-accepting Git endpoint.
+        self.assertIn("await openGenericConfirmModal({", line_undo)
+        self.assertIn("/file`, {", line_undo)
+        self.assertIn("const baseRevision = pane._explorerFileRevision;", line_undo)
+        self.assertIn("pane._explorerFileRevision !== baseRevision", line_undo)
+        self.assertIn("base_revision: baseRevision", line_undo)
+        self.assertNotIn("/git/", line_undo)
+        self.assertIn("wireExplorerDiffUndoControls(index, host);", viewer)
+        self.assertIn("wireExplorerDiffUndoControls(index, code);", viewer)
+        self.assertIn(".explorer-diff-undo-line {", css)
+        undo_css = css[
+            css.index(".explorer-diff-undo-line {"):
+            css.index(".explorer-diff-empty {")
+        ]
+        self.assertIn("border-radius: var(--gv-radius-s);", undo_css)
+        self.assertNotRegex(undo_css, r":\s*#[0-9a-fA-F]{3,6}\b")
+
+    def test_terminals_page_explorer_diff_block_undo(self):
+        """A contiguous run of changed lines can be undone in one save, through
+        the same revision-guarded editor route the per-line undo uses."""
+        viewer = self._static("js/explorer-viewer.js")
+        css = self._static("css/terminals.css")
+        blocks = viewer[
+            viewer.index("function explorerDiffChangeBlocks(diff)"):
+            viewer.index("function explorerRenderedDiffLine(row, {")
+        ]
+        # A block is a maximal run of changed lines: a context line ends it.
+        self.assertIn("const flushRun = () => {", blocks)
+        self.assertIn("startRun().replacement.push(line.slice(1));", blocks)
+        self.assertIn("startRun().expected.push(line.slice(1));", blocks)
+        self.assertIn("if (line.startsWith(' ')) {", blocks)
+        # Applying a block is one splice, guarded by every worktree line the
+        # block expects still matching — a stale diff refuses instead of
+        # corrupting the file.
+        self.assertIn(
+            "const stale = expected.some((text, offset) => lines[lineIndex + offset] !== text);",
+            viewer,
+        )
+        self.assertIn("lines.splice(lineIndex, expected.length, ...replacement);", viewer)
+        # Single-line blocks keep the existing per-line button only.
+        self.assertIn("if (!pane || !block || block.rows < 2) {", viewer)
+        # Same bounded save contract as the per-line undo; no Git patch route.
+        undo = viewer[
+            viewer.index("async function undoExplorerDiffChange(index, actionId)"):
+            viewer.index("/* Render the patch with the pinned Diff2Html build")
+        ]
+        self.assertIn("base_revision: baseRevision", undo)
+        self.assertNotIn("/git/", undo)
+        # Hover reveal is wired once per rendered container (no listener leak).
+        self.assertIn("if (root._explorerDiffBlockHoverWired) {", viewer)
+        # Token-driven styling only (Regression Guardrail 7).
+        block_css = css[
+            css.index(".explorer-diff-undo-block {"):
+            css.index(".explorer-diff-empty {")
+        ]
+        self.assertIn("var(--explorer-btn-bg)", block_css)
+        self.assertIn("border-radius: var(--gv-radius-s);", block_css)
+        self.assertNotRegex(block_css, r":\s*#[0-9a-fA-F]{3,6}\b")
 
     def test_terminals_page_explorer_markdown_links_open_tabs(self):
         """ISSUE-2026-016: Markdown preview links resolve and open explorer tabs."""
@@ -1705,7 +2005,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("...explorerTabPersistedDiffTarget(previewTab)", html)
         # The saved-session relaunch payload carries the new fields through.
         self.assertIn(
-            "explorer_tab_views: startupMode === 'explorer' && terminal?.explorer_tab_views",
+            "explorer_tab_views: resolvedStartupMode === 'explorer' && terminal?.explorer_tab_views",
             html,
         )
         # Markdown appearance re-applies once per session id (ISSUE-2026-033) so
@@ -1858,19 +2158,36 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const preferredFileView = restoredMode || carriedMode;", html)
 
     def test_terminals_page_tree_directory_click_browses_in_preview(self):
-        """2.d: a Files-tree directory click also browses it in the Preview tab."""
+        """A Files-tree directory *name* click browses it in the Preview tab;
+        the fold arrow beside it is a separate expand/collapse-only control."""
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         toggle = html[
             html.index("async function toggleExplorerTreeDirectory(index, path)"):
+            html.index("async function openExplorerTreeDirectory(index, path)")
+        ]
+        # The fold arrow is its own button and never navigates the Preview tab,
+        # so browsing the tree cannot evict the file the pane is showing.
+        self.assertIn("data-explorer-tree-chevron", html)
+        self.assertIn(
+            "toggleExplorerTreeDirectory(index, button.dataset.explorerTreeChevron || '');",
+            html,
+        )
+        self.assertNotIn("loadExplorerPane(", toggle)
+        self.assertIn("pane._explorerTreeExpanded.delete(path);", toggle)
+        # The name button navigates and expands, but never collapses.
+        open_dir = html[
+            html.index("async function openExplorerTreeDirectory(index, path)"):
             html.index("async function revealExplorerTreePath(index)")
         ]
-        # Both the expand and the collapse click navigate the Preview tab —
-        # unless the Preview tab already shows that directory (pure toggle).
-        self.assertEqual(toggle.count("await loadExplorerPane(index, path);"), 2)
-        self.assertIn("const alreadyShown = pane._explorerMode === 'directory'", toggle)
+        self.assertEqual(open_dir.count("await loadExplorerPane(index, path);"), 1)
+        self.assertNotIn("pane._explorerTreeExpanded.delete(path);", open_dir)
+        self.assertIn(
+            "openExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');",
+            html,
+        )
         # Navigating still reveals the target row, but no longer force-expands
         # the directory itself (that would undo the collapse click).
         reveal = html[
@@ -1964,11 +2281,49 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        self.assertIn("function parseExplorerOpenTabsDataset(value)", html)
+        # Shared with the browser-pane tab strip, hence the neutral name.
+        self.assertIn("function parseStringArrayDataset(value)", html)
         self.assertIn("data-explorer-open-tabs=", html)
         self.assertIn("data-explorer-active-tab=", html)
         self.assertIn("explorer_open_tabs: commandMode === 'explorer'", html)
-        self.assertIn("explorer_open_tabs: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_open_tabs: resolvedStartupMode === 'explorer'", html)
+
+    def test_pages_carry_the_active_session_group_through_workspace_restore(self):
+        """Both save paths record the front group; the restore reopens on it."""
+        terminals_html = self._page_html(self.client.get("/terminals"))
+        # Every activeGroupId change reports the front group, so the autosave
+        # timer can capture it without a window to ask.
+        self.assertIn("function reportActiveSessionGroup(groupId)", terminals_html)
+        self.assertIn("fetch('/api/session-groups/active', {", terminals_html)
+        self.assertIn("reportActiveSessionGroup(groupId);", terminals_html)
+        # An explicit Save Workspace names the saving window's own group and,
+        # when desktop mode is active, carries the session window zoom.
+        self.assertIn(
+            "const nativeZoomFactor = await getNativeSessionZoomFactor();",
+            terminals_html,
+        )
+        self.assertIn("active_group_id: activeGroupId,", terminals_html)
+        self.assertIn("native_zoom_factor: nativeZoomFactor", terminals_html)
+
+        launcher_html = self._page_html(self.client.get("/"))
+        self.assertIn(
+            "restorableActiveGroupId = String(data.active_group_id || '');",
+            launcher_html,
+        )
+        # Restored groups get fresh ids, so the saved one is resolved to the
+        # group the replay actually created before opening the workspace on it.
+        self.assertIn(
+            "if (restorableActiveGroupId && group.group_id === restorableActiveGroupId) {",
+            launcher_html,
+        )
+        self.assertIn(
+            "restorableNativeZoomFactor = normalizeNativeZoomFactor(data.native_zoom_factor);",
+            launcher_html,
+        )
+        self.assertIn("activeGroupId,\n                    nativeZoomFactor", launcher_html)
+        self.assertIn(
+            "`/terminals?group=${encodeURIComponent(targetGroupId)}`", launcher_html
+        )
 
     def test_launcher_round_trips_explorer_tab_views_and_markdown_appearance(self):
         """2.f: launcher carries tab views + Markdown appearance without editing them."""
@@ -1982,10 +2337,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("data-explorer-md-font=", html)
         self.assertIn("data-explorer-theme=", html)
         self.assertIn("explorer_tab_views: commandMode === 'explorer'", html)
-        self.assertIn("explorer_tab_views: terminal.startup_mode === 'explorer'", html)
-        self.assertIn("explorer_md_preset: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_tab_views: resolvedStartupMode === 'explorer'", html)
+        self.assertIn("explorer_md_preset: resolvedStartupMode === 'explorer'", html)
         self.assertIn("explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : ''", html)
-        self.assertIn("explorer_theme: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_theme: resolvedStartupMode === 'explorer'", html)
 
     def test_terminals_page_explorer_sidebar_supports_tree_and_git_together(self):
         response = self.client.get("/terminals")
@@ -2033,6 +2388,72 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("renderExplorerDiff(index);", html)
         self.assertIn("if (activeExplorerFileView(index) === 'diff')", html)
         self.assertIn('data-explorer-file-panel="diff"', html)
+
+    def test_terminals_page_markdown_and_diff_line_wrap_preferences(self):
+        """Source, preview and diff expose per-tab, persisted, gutter-safe wrapping."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn('data-explorer-line-wrap="${index}"', html)
+        self.assertIn("applyExplorerLineWrapState(index, selectedMode);", html)
+        # Wrapping lives on the active explorer tab (like the editor zoom), not
+        # in one workspace-global preference, and saves with the session.
+        self.assertIn(
+            "const EXPLORER_LINE_WRAP_MODES = Object.freeze(['source', 'preview', 'diff']);",
+            html,
+        )
+        self.assertIn("function setExplorerLineWrapPreference(index, mode, enabled)", html)
+        self.assertIn(
+            "return ensureExplorerTabLineWrap(explorerActiveTab(pane))[mode];",
+            html,
+        )
+        self.assertIn(
+            "ensureExplorerTabLineWrap(explorerActiveTab(pane))[mode] = Boolean(enabled);",
+            html,
+        )
+        # Wrapping defaults ON, so the persisted flag is the opt-out: an absent
+        # key restores wrapped.
+        self.assertIn("source: current.source !== false,", html)
+        self.assertIn("preview: current.preview !== false,", html)
+        self.assertIn("diff: current.diff !== false,", html)
+        self.assertIn("record.wrap_source = false;", html)
+        self.assertIn("record.wrap_preview = false;", html)
+        self.assertIn("record.wrap_diff = false;", html)
+        self.assertIn("source: view.wrap_source !== false,", html)
+        self.assertIn("preview: view.wrap_preview !== false,", html)
+        # Unwrapped source keeps one row per line and scrolls sideways; the
+        # wrapped variant drops the max-content floor so the code column reflows,
+        # and the in-place editor follows the same per-tab flag.
+        self.assertIn(".explorer-source-view.wrap-lines .explorer-source-lines {", html)
+        self.assertIn(".explorer-source-view.wrap-lines .explorer-source-line-code {", html)
+        self.assertIn(".explorer-source-view.wrap-lines .explorer-source-editor {", html)
+        self.assertIn("textarea.wrap = wraps.source ? 'soft' : 'off';", html)
+        self.assertIn("function explorerPersistedTabLineWrap(raw)", html)
+        self.assertIn("record.lineWrap = explorerPersistedTabLineWrap(rawViews[key]);", html)
+        # Wrapped diffs retain Diff2Html's intraline markup; paired row heights
+        # are synchronized around the fixed middle number gutter.
+        self.assertIn(
+            "function synchroniseExplorerDiffWrappedRows(host)",
+            html,
+        )
+        self.assertIn("row.style.height = `${maxHeight}px`;", html)
+        self.assertIn(
+            ".explorer-diff-content.wrap-lines .explorer-diff2html .d2h-code-line-ctn {",
+            html,
+        )
+        self.assertIn("display: inline;", html)
+        self.assertIn("white-space: pre-wrap;", html)
+        self.assertIn(
+            ":is(.d2h-code-side-line ins, .d2h-code-side-line del) {",
+            html,
+        )
+        self.assertIn("max-width: 4em;", html)
+        self.assertIn(".explorer-markdown-preview.wrap-lines > * {", html)
+        self.assertIn(".explorer-markdown-preview p,", html)
+        self.assertIn("text-align: justify;", html)
+        self.assertIn("const EXPLORER_LINE_WRAP_ICON =", html)
+        self.assertIn('stroke="currentColor"', html)
 
     def test_terminals_page_explorer_markdown_source_sections_can_be_collapsed(self):
         response = self.client.get("/terminals")
@@ -3815,6 +4236,276 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("http:// and https://", response.get_json()["error"])
 
+    def test_create_sessions_browser_mode_keeps_every_tab(self):
+        """A saved multi-tab browser pane relaunches with its whole strip."""
+        sessions_payload = {
+            "connection_mode": "wsl",
+            "sessions": [
+                {
+                    "directory": self.temp_dir.name,
+                    "title": "Preview",
+                    "initial_command": "http://127.0.0.1:3000",
+                    "startup_mode": "browser",
+                    "browser_tabs": [
+                        "http://127.0.0.1:3000",
+                        "http://127.0.0.1:5050/",
+                        "localhost:8080",
+                    ],
+                    "browser_active_tab": 1,
+                }
+            ],
+        }
+
+        response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertEqual(session.startup_mode, "browser")
+        self.assertEqual(
+            session.browser_tabs,
+            ["http://127.0.0.1:3000", "http://127.0.0.1:5050/", "http://localhost:8080"],
+        )
+        self.assertEqual(session.browser_active_tab, 1)
+        # The active tab's URL stays mirrored into the single-URL contract.
+        self.assertEqual(session.initial_command, "http://127.0.0.1:5050/")
+
+    def test_create_sessions_browser_mode_drops_unusable_tabs(self):
+        """Bad entries are dropped, not launched, and cannot shift the active tab."""
+        sessions_payload = {
+            "connection_mode": "wsl",
+            "sessions": [
+                {
+                    "directory": self.temp_dir.name,
+                    "title": "Preview",
+                    "startup_mode": "browser",
+                    "browser_tabs": ["file:///tmp/a.html", "http://127.0.0.1:4000", ""],
+                    "browser_active_tab": 9,
+                }
+            ],
+        }
+
+        response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertEqual(session.browser_tabs, ["http://127.0.0.1:4000"])
+        self.assertEqual(session.browser_active_tab, 0)
+
+    def test_switch_browser_pane_replaces_whole_tab_strip(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:3000",
+            initial_command_mode="browser",
+            browser_tabs=["http://127.0.0.1:3000"],
+        )
+
+        with patch.object(api, "_close_ssh_connection"):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={
+                    "startup_mode": "browser",
+                    "tabs": ["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
+                    "active_tab": 1,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(
+            updated.browser_tabs,
+            ["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
+        )
+        self.assertEqual(updated.browser_active_tab, 1)
+        self.assertEqual(updated.initial_command, "http://127.0.0.1:5050/")
+
+    def test_switch_browser_pane_navigation_only_moves_active_tab(self):
+        """A plain single-URL navigate edits the active tab and leaves siblings."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:5050/",
+            initial_command_mode="browser",
+            browser_tabs=["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
+            browser_active_tab=1,
+        )
+
+        with patch.object(api, "_close_ssh_connection"):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "browser", "url": "localhost:5173"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(
+            updated.browser_tabs,
+            ["http://127.0.0.1:3000", "http://localhost:5173"],
+        )
+        self.assertEqual(updated.browser_active_tab, 1)
+
+    def test_switch_browser_navigation_merges_with_latest_tab_strip(self):
+        """F6 — a concurrent strip update cannot be lost by URL navigation."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:5050/",
+            initial_command_mode="browser",
+            browser_tabs=["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
+            browser_active_tab=1,
+        )
+        original_merge = api.session_manager.merge_browser_tabs
+
+        def merge_after_concurrent_strip_update(session_id, **kwargs):
+            api.session_manager.update_browser_tab_strip(
+                session_id,
+                browser_tabs=["http://127.0.0.1:6000", "http://127.0.0.1:7000"],
+                browser_active_tab=0,
+                initial_command="http://127.0.0.1:6000",
+            )
+            return original_merge(session_id, **kwargs)
+
+        with patch.object(
+            api.session_manager,
+            "merge_browser_tabs",
+            side_effect=merge_after_concurrent_strip_update,
+        ), patch.object(api, "_close_ssh_connection"):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={
+                    "startup_mode": "browser",
+                    "url": "localhost:5173",
+                    "active_tab": 1,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(
+            updated.browser_tabs,
+            ["http://127.0.0.1:6000", "http://localhost:5173"],
+        )
+        self.assertEqual(updated.browser_active_tab, 1)
+        self.assertEqual(updated.initial_command, "http://localhost:5173")
+
+    def test_switch_pane_away_from_browser_clears_tab_strip(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:5050/",
+            initial_command_mode="browser",
+            browser_tabs=["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
+            browser_active_tab=1,
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "terminal"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertEqual(updated.browser_tabs, [])
+        self.assertEqual(updated.browser_active_tab, 0)
+
+    def test_stale_browser_tab_post_cannot_reenter_browser_mode(self):
+        """F1 — only an explicit mode switch may move a terminal into browser mode."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:5050/",
+            initial_command_mode="browser",
+            browser_tabs=["http://127.0.0.1:5050/"],
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            terminal_response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "terminal"},
+            )
+        stale_response = self.client.post(
+            f"/api/sessions/{session.session_id}/mode",
+            json={
+                "startup_mode": "browser",
+                "tabs": ["http://127.0.0.1:3000"],
+                "active_tab": 0,
+            },
+        )
+
+        self.assertEqual(terminal_response.status_code, 200)
+        self.assertEqual(stale_response.status_code, 409)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertEqual(updated.browser_tabs, [])
+
+        with patch.object(api, "_close_ssh_connection"):
+            explicit_response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "browser", "url": "http://127.0.0.1:3000"},
+            )
+        self.assertEqual(explicit_response.status_code, 200)
+        self.assertEqual(
+            api.session_manager.get_session(session.session_id).startup_mode,
+            "browser",
+        )
+
     def test_normalize_startup_mode_allows_browser_only_for_local_repo(self):
         self.assertEqual(api._normalize_startup_mode("browser", "wsl"), "browser")
         self.assertEqual(api._normalize_startup_mode("browser", "ssh"), "terminal")
@@ -4533,7 +5224,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["total_files"], 1)
         self.assertEqual(payload["total_matches"], 2)
         self.assertEqual(
-            payload["truncated"], {"files": False, "matches": False, "deadline": False}
+            payload["truncated"],
+            {"files": False, "matches": False, "deadline": False, "output": False},
         )
         entry = payload["files"][0]
         self.assertEqual(entry["path"], "notes.txt")
@@ -6988,6 +7680,8 @@ class ApiRoutesTestCase(unittest.TestCase):
                         "scroll": 0.5,
                         "identity": "abc123",
                         "font_size": 18,
+                        "wrap_preview": True,
+                        "wrap_diff": False,
                         "folds": [9, 2, 9, 0, "4", True],
                         "fold_identity": "abc123",
                     },
@@ -6996,10 +7690,11 @@ class ApiRoutesTestCase(unittest.TestCase):
                         "scroll": 7,
                         "identity": "x" * 100,
                         "font_size": 99,
+                        "wrap_diff": 1,
                         "diff_mode": "staged",
                     },
                     "c.md": {"mode": "bogus", "scroll": 0.1, "identity": "ok"},
-                    "e.md": {"font_size": 12},
+                    "e.md": {"font_size": 12, "wrap_preview": 0, "wrap_source": False},
                     "../escape.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "not-open.md": {"mode": "source", "scroll": 0.2, "identity": "ok"},
                     "d.md": "not-a-dict",
@@ -7009,6 +7704,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                         "identity": "zz",
                         "diff_mode": "worktree",
                         "font_size": 16,
+                        "wrap_preview": False,
                         "path": "docs\\a.md",
                         "dir": "../escape",
                         "folds": [3],
@@ -7035,13 +7731,15 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "scroll": 0.5,
                 "identity": "abc123",
                 "font_size": 18,
+                "wrap_diff": False,
                 "folds": [2, 4, 9],
                 "fold_identity": "abc123",
             },
         )
         # Keys normalize like tab paths; out-of-range scroll fractions clamp to
         # [0, 1]; oversized identity tokens are dropped rather than restored;
-        # font sizes clamp to the editor zoom bounds.
+        # font sizes clamp to the editor zoom bounds. Line wrapping is on by
+        # default, so a truthy flag is the default and persists nothing.
         self.assertEqual(
             views["sub/b.md"],
             {
@@ -7053,9 +7751,13 @@ class ApiRoutesTestCase(unittest.TestCase):
             },
         )
         # A record may carry only a zoom (a zoomed tab whose view was never
-        # captured), and the reserved Preview key keeps its view, zoom, and own
-        # separated path — file and browsed directory.
-        self.assertEqual(views["e.md"], {"font_size": 12})
+        # captured), a falsy wrap flag normalizes to an explicit `False`
+        # opt-out, and the reserved Preview key keeps its view, zoom, wrapping,
+        # and own separated path — file and browsed directory.
+        self.assertEqual(
+            views["e.md"],
+            {"font_size": 12, "wrap_source": False, "wrap_preview": False},
+        )
         self.assertEqual(
             views["__preview__"],
             {
@@ -7064,6 +7766,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "identity": "zz",
                 "diff_mode": "worktree",
                 "font_size": 16,
+                "wrap_preview": False,
                 "path": "docs/a.md",
                 "folds": [3],
                 "fold_identity": "preview-hash",
@@ -10138,6 +10841,8 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/explorer-viewer.js",
         "js/explorer-editor.js",
         "js/explorer-search.js",
+        "js/explorer-fs.js",
+        "js/browser-pane.js",
     )
 
     def setUp(self):
@@ -10237,6 +10942,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertIn(f"/static/js/voice-input.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-viewer.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-editor.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/explorer-fs.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/terminals.js?v={__version__}", terminals_html)
         # shared.js must load before each page script so its globals exist first.
         self.assertLess(
@@ -10274,6 +10980,17 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         )
         self.assertLess(
             terminals_html.index("js/explorer-search.js"),
+            terminals_html.index("js/explorer-fs.js"),
+        )
+        # browser-pane.js (tabbed browser preview surface) loads after the
+        # explorer modules and before terminals.js.
+        self.assertIn(f"/static/js/browser-pane.js?v={__version__}", terminals_html)
+        self.assertLess(
+            terminals_html.index("js/explorer-fs.js"),
+            terminals_html.index("js/browser-pane.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/browser-pane.js"),
             terminals_html.index("js/terminals.js"),
         )
 
@@ -10290,6 +11007,8 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/explorer-viewer.js",
             "js/explorer-editor.js",
             "js/explorer-search.js",
+            "js/explorer-fs.js",
+            "js/browser-pane.js",
             "js/terminals.js",
         ):
             with self.subTest(filename=filename):
@@ -10322,6 +11041,8 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "resolveTheme",
             "buildLaunchDirectory",
             "resolveTerminalDirectory",
+            "resolvePaneStartupMode",
+            "buildPaneLaunchFields",
         )
         for name in shared_helpers:
             with self.subTest(helper=name):
@@ -10333,6 +11054,22 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         for page in (launcher, terminals):
             self.assertIn("function onThemeApplied(", page)
             self.assertIn("initTheme();", page)
+
+    def test_saved_session_launch_fields_use_shared_pane_helpers(self):
+        shared = self.client.get("/static/js/shared.js").get_data(as_text=True)
+        launcher = self.client.get("/static/js/launcher.js").get_data(as_text=True)
+        terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+
+        self.assertIn("function resolvePaneStartupMode(terminal)", shared)
+        self.assertIn("function buildPaneLaunchFields(terminal, startupMode =", shared)
+        for page_name, page in (("launcher", launcher), ("terminals", terminals)):
+            with self.subTest(page=page_name):
+                self.assertIn("const startupMode = resolvePaneStartupMode(terminal);", page)
+                self.assertIn(
+                    "} = buildPaneLaunchFields(terminal, startupMode);",
+                    page,
+                )
+                self.assertNotIn("savedStartupMode", page)
 
     def test_launcher_button_and_dead_display_fixes_locked_in(self):
         """Findings 4.3/4.6 — launch button restores its markup; dead node gone."""
@@ -10536,6 +11273,16 @@ class CrossOriginWriteGuardTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertIn("Cross-origin", response.get_json()["error"])
+
+    def test_cross_origin_explorer_mutations_are_rejected(self):
+        for action in ("paste", "delete"):
+            with self.subTest(action=action):
+                response = self.client.post(
+                    f"/api/explorer/missing/{action}",
+                    json={},
+                    headers={"Origin": "http://evil.example"},
+                )
+                self.assertEqual(response.status_code, 403)
 
     def test_cross_origin_delete_is_rejected(self):
         response = self.client.delete(
@@ -12642,6 +13389,34 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(len(payload["groups"]), 1)
         self.assertEqual(payload["active_group_count"], 1)
 
+    def test_manual_native_zoom_survives_later_autosave(self):
+        """Save Workspace records desktop zoom; the timer must not erase it."""
+        self._launch_explorer_group()
+        response = self.client.post(
+            "/api/runtime-state/save",
+            json={"native_zoom_factor": 1.25},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["native_zoom_factor"], 1.25)
+
+        api._run_workspace_autosave_tick()
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertEqual(slot["native_zoom_factor"], 1.25)
+        payload = self.client.get("/api/runtime-state").get_json()
+        self.assertEqual(payload["native_zoom_factor"], 1.25)
+
+    def test_invalid_stored_native_zoom_degrades_to_no_preference(self):
+        self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        data["workspaces"]["default"]["native_zoom_factor"] = 99
+        self.state_path.write_text(json.dumps(data), encoding="utf-8")
+
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertIsNone(slot["native_zoom_factor"])
+        payload = self.client.get("/api/runtime-state").get_json()
+        self.assertIsNone(payload["native_zoom_factor"])
+
     def test_save_endpoint_captures_a_manual_slot_immediately_restorable(self):
         self._launch_explorer_group()
         response = self.client.post("/api/runtime-state/save", json={})
@@ -12662,6 +13437,73 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         response = self.client.post("/api/runtime-state/save", json={})
         self.assertEqual(response.status_code, 409)
         self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
+
+    def test_autosave_captures_the_reported_front_group(self):
+        """The timer has no window to ask, so it uses the reported hint."""
+        first = self._launch_explorer_group("First")
+        self._launch_explorer_group("Second")
+        # Launching switches the workspace to the newest group; going back to
+        # the first one must be what a later timed save records.
+        response = self.client.post(
+            "/api/session-groups/active", json={"group_id": first}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["active_group_id"], first)
+
+        api._run_workspace_autosave_tick()
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertEqual(slot["active_group_id"], first)
+        payload = self.client.get("/api/runtime-state").get_json()
+        self.assertEqual(payload["active_group_id"], first)
+
+    def test_manual_save_records_the_saving_windows_front_group(self):
+        first = self._launch_explorer_group("First")
+        second = self._launch_explorer_group("Second")
+        response = self.client.post(
+            "/api/runtime-state/save", json={"active_group_id": first}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["active_group_id"], first)
+        self.assertEqual(
+            web_runtime_state.load_restorable_workspace()["active_group_id"], first
+        )
+        # The manual save also updates the live hint, so the next timed save
+        # agrees with it instead of reverting to the newest group.
+        api._run_workspace_autosave_tick()
+        self.assertEqual(
+            web_runtime_state.load_restorable_workspace()["active_group_id"], first
+        )
+        self.assertNotEqual(first, second)
+
+    def test_unknown_or_closed_front_group_degrades_to_no_preference(self):
+        first = self._launch_explorer_group("First")
+        self._launch_explorer_group("Second")
+        self.client.post("/api/session-groups/active", json={"group_id": first})
+        # An id naming no live group leaves the standing hint alone rather than
+        # blanking it (a stale tab must not lose the real answer).
+        response = self.client.post(
+            "/api/session-groups/active", json={"group_id": "does-not-exist"}
+        )
+        self.assertEqual(response.get_json()["active_group_id"], first)
+
+        # Once that group is closed the hint is gone, and a capture falls back
+        # to no preference rather than naming a group it did not store.
+        self.assertEqual(
+            self.client.delete(f"/api/sessions?group={first}").status_code, 200
+        )
+        slot = web_runtime_state.capture_workspace(api.session_manager)
+        self.assertEqual(slot["active_group_id"], "")
+
+    def test_stored_front_group_is_revalidated_against_the_slots_groups(self):
+        """A hand-edited id naming no stored group must not reach the restore."""
+        self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        data["workspaces"]["default"]["active_group_id"] = "ghost-group"
+        self.state_path.write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual(
+            web_runtime_state.load_restorable_workspace()["active_group_id"], ""
+        )
 
     def test_group_events_do_not_write_the_snapshot(self):
         group_id = self._launch_explorer_group()
@@ -12896,7 +13738,14 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertIn("function toggleWorkspaceMenu(event)", terminals_js)
         self.assertIn("async function saveWorkspace(", terminals_js)
         self.assertIn("/api/runtime-state/save", terminals_js)
+        self.assertIn("native_zoom_factor: nativeZoomFactor", terminals_js)
         self.assertIn("item.disabled = !sessionGroups.length;", terminals_js)
+        shared_js = self._static("js/shared.js")
+        self.assertIn("function normalizeNativeZoomFactor(value)", shared_js)
+        self.assertIn("async function getNativeSessionZoomFactor()", shared_js)
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("body: JSON.stringify({ native_zoom_factor: nativeZoomFactor })", launcher_js)
+        self.assertIn("open_session_window(\n                        targetGroupId,", launcher_js)
 
 
 class SettingsLauncherConfigTestCase(unittest.TestCase):
@@ -13413,6 +14262,87 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         merged = web_saved_sessions._merge_workspace_session_config(base, workspace)
         self.assertFalse(merged["terminals"][0]["agent_auto_mode"])
 
+    def test_workspace_merge_persists_live_browser_tabs(self):
+        """Save Workspace captures the pane's live strip, not its launch URL."""
+        base = {
+            "connection_mode": "wsl",
+            "terminal_count": 1,
+            "terminals": [
+                {
+                    "startup_mode": "browser",
+                    "initial_command": "http://127.0.0.1:3000",
+                    "browser_tabs": ["http://127.0.0.1:3000"],
+                }
+            ],
+        }
+        workspace = {
+            "terminal_count": 1,
+            "terminals": [
+                {
+                    "startup_mode": "browser",
+                    "initial_command": "http://127.0.0.1:5050/",
+                    "browser_tabs": [
+                        "http://127.0.0.1:5050/",
+                        "http://127.0.0.1:5050/terminals",
+                    ],
+                    "browser_active_tab": 1,
+                }
+            ],
+        }
+
+        merged = web_saved_sessions._merge_workspace_session_config(base, workspace)
+
+        terminal = merged["terminals"][0]
+        self.assertEqual(
+            terminal["browser_tabs"],
+            ["http://127.0.0.1:5050/", "http://127.0.0.1:5050/terminals"],
+        )
+        self.assertEqual(terminal["browser_active_tab"], 1)
+        self.assertEqual(terminal["initial_command"], "http://127.0.0.1:5050/terminals")
+
+    def test_workspace_merge_clears_browser_tabs_when_pane_leaves_browser_mode(self):
+        base = {
+            "connection_mode": "wsl",
+            "terminal_count": 1,
+            "terminals": [
+                {
+                    "startup_mode": "browser",
+                    "initial_command": "http://127.0.0.1:3000",
+                    "browser_tabs": ["http://127.0.0.1:3000"],
+                }
+            ],
+        }
+        workspace = {"terminal_count": 1, "terminals": [{"startup_mode": "terminal"}]}
+
+        merged = web_saved_sessions._merge_workspace_session_config(base, workspace)
+
+        self.assertEqual(merged["terminals"][0]["browser_tabs"], [])
+        self.assertEqual(merged["terminals"][0]["browser_active_tab"], 0)
+
+    def test_normalize_terminal_entries_upgrades_pre_tabs_browser_pane(self):
+        """A preset saved before tabs existed becomes a one-tab strip."""
+        normalized = web_saved_sessions._normalize_terminal_entries(
+            [{"startup_mode": "browser", "initial_command": "http://127.0.0.1:5050/"}],
+            connection_mode="wsl",
+        )
+        self.assertEqual(normalized[0]["browser_tabs"], ["http://127.0.0.1:5050/"])
+        self.assertEqual(normalized[0]["browser_active_tab"], 0)
+        self.assertEqual(normalized[0]["initial_command"], "http://127.0.0.1:5050/")
+
+    def test_normalize_terminal_entries_bounds_browser_tabs(self):
+        many = [f"http://127.0.0.1:{4000 + index}" for index in range(20)]
+        normalized = web_saved_sessions._normalize_terminal_entries(
+            [{"startup_mode": "browser", "browser_tabs": many, "browser_active_tab": 19}],
+            connection_mode="wsl",
+        )
+        self.assertEqual(
+            len(normalized[0]["browser_tabs"]), web_saved_sessions.BROWSER_MAX_TABS
+        )
+        self.assertEqual(
+            normalized[0]["browser_active_tab"],
+            web_saved_sessions.BROWSER_MAX_TABS - 1,
+        )
+
     def test_sessions_post_round_trips_agent_auto_mode(self):
         api.session_manager.reset_sessions()
         self.addCleanup(api.session_manager.reset_sessions)
@@ -13470,15 +14400,18 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         ]
         self.assertIn("agent_auto_mode:", collect)
 
-        # 7.b (OD-12 case a): the launch payload rebuilds each session
-        # field-by-field and must carry the toggle. This expansion now lives in
-        # buildSessionsFromConfig, shared by the launch button and workspace
-        # restore, so both build panes identically.
+        # 7.b (OD-12 case a): the shared pane-field builder carries the toggle
+        # into buildSessionsFromConfig, which serves both launch and restore.
         launch = launcher_js[
             launcher_js.index("function buildSessionsFromConfig(config, count)"):
             launcher_js.index("async function launchSessions()")
         ]
-        self.assertIn("agent_auto_mode: terminal.initial_command_mode === 'agent'", launch)
+        self.assertIn("buildPaneLaunchFields(terminal, startupMode)", launch)
+        shared_js = self._static("js/shared.js")
+        self.assertIn(
+            "agent_auto_mode: resolvedStartupMode === 'agent'",
+            shared_js,
+        )
 
         # The help line shows the composed command plus the registry description.
         sync = launcher_js[

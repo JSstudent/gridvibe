@@ -5,7 +5,9 @@
 <h1 align="center">GridVibe</h1>
 
 <p align="center">
-  Run many SSH terminals, local shells, agent CLIs, file explorers, and browser previews in one tabbed workspace — from your browser or a native desktop window.
+  <b>The vibe-coding cockpit.</b><br>
+  Spin up a grid of AI agent CLIs and SSH terminals in seconds, talk to them out loud,<br>
+  and keep your files, Git, and a live app preview in the same window.
 </p>
 
 <p align="center">
@@ -14,140 +16,189 @@
   <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+">
 </p>
 
+---
+
+## Why GridVibe
+
+| | |
+| --- | --- |
+| **A grid, not a tab pile** | Pick 1, 2, 3, 4, 6, or 8 panes, pick a target per pane, hit launch. SSH, WSL, PowerShell, cmd, or a local repo — side by side, resizable, splittable. |
+| **Agents are a dropdown, not a chore** | Six agent CLIs are first-class pane types, most with an **Auto mode** toggle. GridVibe detects them on the target machine before you launch, so you find out about a missing binary *before* the pane opens. |
+| **Talk to your agents** | Fully offline voice input (Vosk or faster-whisper) dictates straight into any pane. Push-to-talk keybind included. Off by default. |
+| **Set it up once** | Save a tab as a preset, save the whole workspace, restart, get it all back — right down to which group you were working in. |
+
+Everything else — the file explorer, the Git sidebar, the browser preview — exists so you never have to leave the grid mid-flow.
+
 ## Screenshots
 
-| Launcher | Terminal Workspace | App Settings |
-| --- | --- | --- |
-| ![GridVibe launcher with terminal count, layout, connection, and per-terminal setup controls](docs/images/screenshots/launcher.png) | ![GridVibe terminal workspace showing a four-pane SSH session group](docs/images/screenshots/workspace.png) | ![GridVibe app settings with theme, SSH host-key, and voice options](docs/images/screenshots/settings.PNG) |
-
-## Install
-
-GridVibe runs from source. **Python 3.10+ is the only prerequisite** — the launcher scripts (`GridVibe.bat` on Windows, `GridVibe.sh` on Linux/macOS) create and repair the virtual environment, install dependencies, and start the app for you.
-
-There are two ways to get it:
-
-| | How to get it | How to update |
-| --- | --- | --- |
-| **Clone** (recommended) | `git clone https://github.com/JSstudent/gridvibe.git` | The launcher's **Check for updates** button fast-forwards the checkout in place |
-| **Release ZIP** (no Git needed) | Download **Source code (zip)** from the [Releases page](https://github.com/JSstudent/gridvibe/releases) and extract it | Download the next release. In-app updates need a clone, and the app says so instead of failing with an error |
-
-A Windows installer that bundles Python is planned for **2.0.0**; until then, source is the only distribution channel.
-
-Then follow the Quick Start for your platform.
+| Launcher | Terminal Workspace | Browser | App Settings |
+| --- | --- | --- | --- |
+| ![GridVibe launcher with terminal count, layout, connection, and per-terminal setup controls](docs/images/screenshots/launcher.png) | ![GridVibe terminal workspace showing a four-pane SSH session group](docs/images/screenshots/workspace.png) | ![GridVibe app browser terminal mode with tabs](docs/images/screenshots/browser_view.png) | ![GridVibe app settings with theme, SSH host-key, and voice options](docs/images/screenshots/settings.PNG) |
 
 ## Quick Start
 
-### Windows (easiest)
+**Python 3.10+ is the only prerequisite.** The launcher scripts create and repair the virtual environment, install dependencies, and start the app.
 
 ```powershell
+# Windows
 .\START_HERE\Start GridVibe.bat
 ```
 
-or run `GridVibe.bat` from the project root directly. The launcher creates/repairs `.venv`, installs the core dependencies, then asks whether to start in **Desktop** (native window) or **Browser** mode. Optional voice packages are only offered once voice input is turned on — see [Voice Input](#voice-input).
-
-### Linux
-
 ```bash
+# Linux / macOS
 sudo apt install python3 python3-venv python3-pip   # Debian/Ubuntu
-chmod +x GridVibe.sh
-./GridVibe.sh
+chmod +x GridVibe.sh && ./GridVibe.sh
 ```
 
-The script sets up `.venv`, installs dependencies, then asks for **native** or **browser** mode. Browser mode opens `http://localhost:5050`.
-
-### Manual (any platform)
-
 ```bash
+# Manual, any platform
 python -m venv .venv
 source .venv/bin/activate        # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
 python -m pip install --upgrade -r requirements.txt
-python main.py
+python main.py                   # → http://localhost:5050
 ```
 
-Open `http://localhost:5050`. The core requirements already include `pywinpty` on Windows (needed for local cmd/PowerShell/WSL terminals, in browser mode too). For a native desktop window, also install `requirements-desktop.txt` and run `python webview_launcher.py`.
+Both launchers ask for **Desktop** (native window) or **Browser** mode. Core requirements already include `pywinpty` on Windows, so local cmd/PowerShell/WSL panes work in browser mode too. For a native window, also install `requirements-desktop.txt`.
 
-## Run Modes
+### Getting & updating it
+
+| | Get it | Update it |
+| --- | --- | --- |
+| **Clone** (recommended) | `git clone https://github.com/JSstudent/gridvibe.git` | The launcher's **Check for updates** button fast-forwards in place |
+| **Release ZIP** (no Git) | **Source code (zip)** from [Releases](https://github.com/JSstudent/gridvibe/releases) | Download the next release — in-app update needs a clone, and says so |
+
+A Windows installer that bundles Python is planned for **2.0.0**.
+
+### Run modes
 
 ```bash
-python main.py                  # browser mode on http://localhost:5050
-python main.py --host 0.0.0.0   # bind on all network interfaces (opt-in)
-python main.py --port 8080      # custom port
-python webview_launcher.py      # auto: native window, browser fallback
-python webview_launcher.py --mode browser
-python webview_launcher.py --mode native
+python main.py                     # browser mode on http://localhost:5050
+python main.py --host 0.0.0.0      # bind all interfaces (opt-in)
+python main.py --port 8080         # custom port
+python webview_launcher.py         # auto: native window, browser fallback
+python webview_launcher.py --mode browser|native
 ```
 
-## What You Can Do
+## Agent CLIs
 
-- Launch 1, 2, 3, 4, 6, or 8 panes per session group: SSH hosts, WSL distributions, PowerShell, cmd, or local repositories.
-- Start each pane as a shell, an agent CLI (Codex, Claude Code, OpenCode, Kilo, Kimi Code CLI, GitHub Copilot CLI — each with an optional Auto mode toggle), a file explorer, or a browser preview.
-- Group sessions into numbered, draggable, closable tabs (`Alt+1`–`Alt+9` to switch).
-- Save any tab as a reusable session preset (`Save Session` / `Save All Sessions`), import presets into a running workspace, and keep a restore-after-restart snapshot of the whole workspace: a background autosave (configurable 1–15 min) plus an explicit `Save Workspace` write `runtime_state.json` (never passwords — SSH passwords live encrypted in `saved_sessions.json`), and after a restart the launcher offers the saved workspace back by name. Preset-backed groups restore from the preset's current config, so edits to a saved session survive the round trip.
-- Broadcast typing to every pane in a group, search scrollback (`Ctrl+Shift+F`), click URLs in output, split panes, and drag-resize dividers.
-- Browse files over SFTP or locally — pinned file tabs, breadcrumb navigation, a lazily loaded file tree, Markdown preview with Mermaid diagrams, an inline image viewer, syntax coloring, safe in-place editing of text files (atomic, revision-checked), and a Git sidebar (status, diffs, commit graph, staging/commit/publish with bulk stage/discard).
-- Update GridVibe in place from the launcher (`Check for updates`, git fast-forward) or save the workspace and restart the app in one action.
-- Dictate into any terminal with optional offline voice input (Vosk or faster-whisper).
-- Theme the whole app (system/light/dark), collapse the top bar, or go max-surface/fullscreen.
+Pick an agent per pane in the launcher. GridVibe checks whether the binary is on `PATH` **in the target environment** (the remote host for SSH, the chosen distro for WSL, Windows for PowerShell/cmd) and shows install guidance when it isn't.
 
-## Using the Workspace
+| Agent | Binary | Auto mode |
+| --- | --- | --- |
+| Claude Code | `claude` | Yes |
+| OpenAI Codex CLI | `codex` | Yes |
+| GitHub Copilot CLI | `copilot` | Yes |
+| OpenCode CLI | `opencode` | — |
+| Kilo CLI | `kilo` | Yes |
+| Kimi Code CLI | `kimi` | Yes |
 
-**Top bar:** theme, refresh, max surface, broadcast typing, fullscreen, a `Workspace...` menu (`Save Workspace` for the restore snapshot), and a button back to the launcher.
-
-**Session tabs:** drag to reorder, `Alt+1`–`Alt+9` to switch, `Sessions...` to save/import session presets (`Save Session`, `Save All Sessions`, `Import Session`), close button per tab, and a chevron to hide the top bar.
-
-**Per pane** (stroke-style icon buttons in the pane header):
-
-- refresh (circular arrow) — reset the view and replay recent output (reloads explorers and browser panes)
-- folder / terminal prompt — switch between terminal and file explorer at the current directory
-- globe / terminal prompt — switch a Local Repo pane between terminal and browser preview
-- `⊞` — split the pane (clones the connection)
-- eraser — clear the display and replay buffer
-- microphone — start/stop voice input (when enabled)
-- moon / sun — toggle an explorer pane between its dark and light theme
-- Drag the dividers between panes to resize them.
-
-## File Explorer Panes
-
-Explorers are read-only views of a local repo folder or a remote SSH host (over SFTP), rooted at the folder you picked, with one bounded write exception (in-place file editing, below). The viewer is tabbed: a permanent Preview tab for browsing plus pinned file tabs (drag to reorder, middle-click to close) that each remember their Source/Preview/Diff mode, scroll position, and font zoom — across tab swaps, workspace saves, and restarts. Around it: a clickable breadcrumb path bar, directory search, a lazily loaded file tree sidebar, in-file find (`Ctrl+F`), and file download (100 MB cap). Text previews are capped at 10 MiB (plain text above ~2 MiB); images (`.png`, `.jpg`, `.gif`, `.webp`, `.svg`, and friends) open in an inline viewer (25 MB cap).
-
-Any complete, UTF-8, single-line-ending text file within the cap can be edited in place: choose **Edit** in Source view, change the full contents in a textarea (`Ctrl+S` saves, `Esc` cancels, `Tab` inserts a tab), and save. Saves are atomic and preserve the file's line-ending style, UTF-8 BOM, and permission bits, then refresh Source, Preview, Diff, and Git state. A file changed on disk since you opened it triggers a conflict prompt (Reload from disk / Overwrite), and any unsaved buffer is protected by an in-page confirmation before you switch tabs, navigate, refresh, close the pane/session, or reload the page. Truncated, mixed-line-ending, binary, and image files stay view-only. There is no autosave or draft recovery — an unsaved buffer is lost if the process is killed before you save.
-
-Markdown gets extra treatment: rendered preview (`Ctrl+Shift+V` toggle) with Mermaid diagrams, heading folds in Source view (Alt+click folds every heading of that level), and a Markdown-appearance menu with reading-surface presets and fonts. Local panes also get an "open in system file manager" button that reveals the current file or folder outside GridVibe.
-
-The Git sidebar shows branch/dirty status, per-file badges, a colour-coded commit graph, and historical diffs. The only mutating actions are staging/unstaging (per file or `Stage All`), commit, branch publishing (push), discarding unstaged changes of tracked files (per file or `Discard All`), and deleting one explicitly selected untracked file; discard/delete actions require an in-page confirmation, and `Discard All` always preserves untracked files. File moving, general deletion, upload, checkout, pull, and merge are intentionally not supported (the bounded in-place text editor above is the only filesystem-write exception). Every mutating Git action refreshes the tree and any open diff in place.
-
-A third sidebar panel — toggled open *and closed* by the magnifier button or `Ctrl+Shift+F` — searches a string across every file under the pane's root, with results grouped per file in foldable groups. The search runs on the backend (`git grep` inside a Git work tree, so `.gitignore` is honoured and binaries are skipped; a bounded walk/`grep -rIn` fallback covers other roots) and never fetches file contents into the browser. `git grep` searches tracked *and* new-but-unignored files, so only `.gitignore`d paths are left out — the `git`/`all` toggle switches to the walk/`grep` engine to include them too (that engine still skips `.git/`, `node_modules/`, `.venv/`, `venv/`, `__pycache__/` and the other VCS/vendor directories). Match case, whole word, and regex toggles, an optional include-glob filter, and a root-vs-current-folder scope switch are built in; clicking a result opens the file at that line with every other hit highlighted. Every search is bounded (file/match caps and a time limit, configurable under `explorer_search` in `config.json`) and says so in the panel footer when a cap stopped it. It is a read, like everything else in the explorer outside the bounded editor exception.
-
-## Browser Panes
-
-Local Repo panes can show an `http://`/`https://` URL in a sandboxed iframe, with an editable address bar and an `Open` fallback for sites that block embedding. GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP restrictions.
+GridVibe does not bundle the CLIs. If everything shows `Missing`, install it and put its folder on `PATH` — for npm-installed agents on Windows that is usually `%APPDATA%\npm` (check with `npm prefix -g`). Restart GridVibe after PATH changes.
 
 ## Voice Input
 
-Voice input is optional, fully offline, and **off by default**. Enable it in `App Settings` (the gear button on either the launcher or the session window), pick a backend — `Vosk` or `faster-whisper` — a language, and optionally a capture profile, microphone, and push-to-talk keybind. Browser mode is the most reliable for microphone permissions.
+Optional, fully offline, **off by default**. Turn it on in **App Settings** (the gear on either page), pick a backend (`Vosk` or `faster-whisper`), a language, and optionally a capture profile, microphone, and push-to-talk keybind. Then hit the 🎙️ button on any pane.
 
-If the packages for the selected backend are missing, `App Settings` says so and offers **Install voice dependencies**, which installs them into GridVibe's own environment and loads them without restarting. You can also install them yourself:
+If the packages are missing, App Settings says so and offers **Install voice dependencies** — installed into GridVibe's own environment and loaded without a restart. Or do it yourself:
 
 ```bash
 python -m pip install --upgrade -r requirements-voice.txt
 ```
 
-On Windows, `GridVibe.bat` offers the same install — but only when voice input is already enabled, and it never asks twice after a decline. Voice settings, including the push-to-talk keybind, apply to open workspace tabs as soon as they are saved. Details: `docs/voice_guideline.md`.
+Browser mode is the most reliable for microphone permissions. Settings apply live to open workspace tabs. Details: [`docs/voice_guideline.md`](docs/voice_guideline.md).
 
-## Agent CLI Detection
+## Sessions & Workspace
 
-GridVibe does not bundle agent CLIs; it checks whether each one is on `PATH` in the target environment (remote host for SSH, the chosen distro for WSL, Windows for PowerShell/cmd). If everything shows `Missing`, install the CLI and make sure its folder is on `PATH` — for npm-installed agents on Windows that is typically `%APPDATA%\npm` (check with `npm prefix -g`). Restart GridVibe after PATH changes.
+| | |
+| --- | --- |
+| **Session groups** | Numbered, draggable, closable tabs. `Alt+1`–`Alt+9` to switch, middle-click to close. |
+| **Presets** | `Save Session`, `Save Session as…`, `Save All Sessions`, `Import Session`. SSH passwords are Fernet-encrypted in `saved_sessions.json`. |
+| **Workspace snapshot** | Background autosave (1–15 min) plus explicit **Save Workspace** writes `runtime_state.json` — never passwords. After a restart the launcher offers the workspace back by name and reopens on the group you left. |
+| **Broadcast typing** | One keystroke, every pane in the group. |
+| **Self-update** | **Check for updates** does a git fast-forward, or save the workspace and restart in one action. |
+
+Preset-backed groups restore from the preset's *current* config, so edits to a saved session survive the round trip.
+
+## File Explorer
+
+Swap any pane between a terminal and a file explorer with one button — same directory, no re-navigation. Works on a local repo folder or a remote host over SFTP.
+
+| | |
+| --- | --- |
+| **Read** | Tabbed viewer with pinned file tabs (drag to reorder, middle-click to close), each remembering its view mode, scroll, zoom, and wrap. Breadcrumbs, lazy file tree, directory search, `Ctrl+F` in-file find, download (100 MB cap). |
+| **Preview** | Syntax coloring, Markdown render with Mermaid (`Ctrl+Shift+V`), heading folds, reading-surface presets, inline image viewer (25 MB cap). Text caps at 10 MiB. |
+| **Edit** | In-place editing of complete UTF-8 text files. `Ctrl+S` saves atomically, preserving line-ending style, BOM, and permission bits. Changed on disk since you opened it? You get a conflict prompt, not a silent overwrite. |
+| **Git** | Branch/dirty status, per-file badges, colour-coded commit graph, historical diffs. Stage · unstage · commit · publish · discard — plus per-line **and** per-block undo right in the diff view. |
+| **Search** | `Ctrl+Shift+F` toggles repo-wide search across the pane's root. Runs on the backend (`git grep`, with a bounded walk / `grep -rIn` fallback), results grouped per file. Case/word/regex toggles, include-glob, scope switch, `.gitignore` on/off. |
+| **Copy & delete** | Right-click a file or folder: copy, paste elsewhere in the same session (never overwrites — collisions get `-Copy` names), copy path, or confirmed permanent delete. |
+
+**Read-only by default.** Those three mutation families are the whole exception list — moving, creating, renaming, uploading, overwrite-on-paste, and `git checkout`/`pull`/`merge` are deliberately out of scope.
+
+## Browser Preview
+
+Flip a Local Repo pane to a browser preview (the 🌐 button) and watch the app you're building next to the terminal running it.
+
+- **Tabbed** — up to 8 tabs, per-tab close, drag to reorder, **+** opens a blank tab at `http://127.0.0.1:3000`. Each tab keeps its own live frame, so switching or reordering never reloads your app.
+- **URL bar** navigates the active tab (http/https only); **Open** kicks it out to a real OS browser tab.
+- **Same-origin popups get captured** into new pane tabs instead of escaping — which is what lets you drive GridVibe's own launcher → workspace flow inside a pane. Named window targets reuse their tab rather than stacking up. Cross-origin pages can't be instrumented by anyone, so their popups still open externally.
+- **Nested preview is capped one level deep** — a GridVibe page already inside a pane shows a *Nested preview disabled* notice instead of re-embedding itself forever.
+- The whole tab strip saves and restores with the workspace and with session presets.
+
+GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that block embedding need **Open**.
+
+## Icons & Shortcuts
+
+**Pane header:**
+
+| | Does |
+| :---: | --- |
+| 🔄 | Reset the view and replay recent output (reloads explorer and browser panes) |
+| 📁 ⇄ 💻 | Swap between terminal and file explorer at the current directory |
+| 🌐 ⇄ 💻 | Swap a Local Repo pane between terminal and browser preview |
+| 🪟 | Split side-by-side or stacked (clones the connection) |
+| 🧹 | Clear the display and purge the replay buffer |
+| 🎙️ | Start/stop voice input (when enabled) |
+| 🌙 ⇄ ☀️ | Toggle an explorer pane between dark and light |
+| ⋯ | Overflow menu, shown when the pane is too narrow for the full row |
+| ✖️ | Close the pane (confirms first — it's a live session) |
+
+**Explorer bar:**
+
+| | Does |
+| :---: | --- |
+| 🔄 | Refresh the explorer (`F5`) |
+| ⬆️ | Go to the parent directory (or mouse Back) |
+| 🗂️ | Files tree sidebar |
+| 🌿 | Git changes and history sidebar |
+| 🔍 | Repository search sidebar (`Ctrl+Shift+F`) |
+| 🖥️ | Reveal the current location in the system file manager (local panes only) |
+
+**Top bar:** theme · refresh all · max surface · broadcast typing · fullscreen · App Settings · back to launcher · chevron to hide the bar. Plus a `Workspace…` menu and a `Sessions…` menu.
+
+| Shortcut | Action |
+| --- | --- |
+| `Alt+1`–`Alt+9` | Switch session group |
+| `Ctrl+Shift+F` | Terminal scrollback search — or, on an explorer pane, toggle repository search |
+| `Ctrl+F` | Find in the open file |
+| `Ctrl+Shift+V` | Toggle Markdown rendered preview |
+| `Ctrl+S` / `Esc` | Save / cancel in the explorer editor |
+| `F5` | Refresh the focused explorer |
+
+Drag the dividers between panes to resize them.
 
 ## Configuration
 
-Runtime settings load from `config.json` (git-ignored), falling back to `default_config.json`. Everything is also editable in `App Settings` — the same dialog opens from the gear button on the launcher and on the session window, so settings never require a trip back to the launcher. It covers terminal font presets and size (applied to the active session or all sessions), max sessions, the workspace autosave interval, SSH host-key policy, and voice options. Example:
+Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, workspace autosave interval, SSH host-key policy, and all voice options.
+
+On disk, settings load from `config.json` (git-ignored) falling back to `default_config.json`:
 
 ```json
 {
   "server": { "host": "127.0.0.1", "port": 5050 },
-  "appearance": { "theme": "system" },
-  "ssh": { "host_key_policy": "auto-add" }
+  "appearance": { "theme": "dark" },
+  "terminal": { "max_sessions": 16, "font_size": 14 },
+  "workspace": { "surface_mode": "normal", "autosave_interval_minutes": 5 },
+  "ssh": { "host_key_policy": "auto-add" },
+  "explorer_search": { "max_files": 2000, "max_matches": 5000, "timeout_seconds": 20 }
 }
 ```
 
@@ -157,23 +208,26 @@ GridVibe generates a Flask session signing key at startup unless `GRIDVIBE_SECRE
 
 GridVibe is a local tool, not a public web service: it binds to `127.0.0.1` by default, has no built-in authentication, and should not be exposed to the internet.
 
-- Socket.IO CORS defaults to same-origin; state-changing cross-origin requests are rejected. Configure `security.cors_origins` only if you serve GridVibe from another origin.
-- SSH host keys are persisted to `.known_hosts`; `ssh.host_key_policy` can be `auto-add` (default), `known-hosts`, or `strict`.
-- Saved SSH passwords are encrypted with Fernet; the key lives in `.encryption_key`.
+- Socket.IO CORS defaults to same-origin; state-changing cross-origin requests are rejected. Set `security.cors_origins` only if you serve GridVibe from another origin.
+- SSH host keys persist to `.known_hosts`; `ssh.host_key_policy` can be `auto-add` (default), `known-hosts`, or `strict`.
+- Saved SSH passwords are Fernet-encrypted; the key lives in `.encryption_key`.
 
-See `SECURITY.md` for reporting and scope.
+See [`SECURITY.md`](SECURITY.md) for reporting and scope.
 
 ## Development
 
 ```bash
-make test lint fix check        # or, on Windows without make:
+make check                      # test + lint, run this before handing work back
+make test lint fix              # individually
+
+# Windows without make:
 python tests/run_tests.py
 python -m ruff check .
 ```
 
-Backend code lives in the modular `web/` package (`app.py`, `api.py`, `agents.py`, `terminal_io.py`, `explorer.py`, `voice.py`, …), session state in `sessions/manager.py`, the voice service in `services/`, and the two pages in `templates/` with assets in `web/static/`. Root-level `api.py`, `session_manager.py`, `cleanup.py`, and `webview_launcher.py` are compatibility shims — edit the canonical modules instead.
+Backend lives in the modular `web/` package (`app.py`, `api.py`, `agents.py`, `terminal_io.py`, `explorer.py`, `explorer_search.py`, `voice.py`, …), session state in `sessions/manager.py`, the voice service in `services/`, and the two pages in `templates/` with assets in `web/static/`. Root-level `api.py`, `session_manager.py`, `cleanup.py`, and `webview_launcher.py` are compatibility shims — edit the canonical modules.
 
-More docs: `docs/logging_guide.md`, `docs/voice_guideline.md`, `CONTRIBUTING.md`, `CHANGELOG.md`.
+More: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md) · [`docs/logging_guide.md`](docs/logging_guide.md) · [`docs/voice_guideline.md`](docs/voice_guideline.md)
 
 ## Local Files
 
@@ -190,4 +244,4 @@ Created at runtime, never committed:
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [`LICENSE`](LICENSE).

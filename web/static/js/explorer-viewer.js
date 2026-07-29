@@ -1107,10 +1107,20 @@
         return `${trimmedBase}${separator}${nativeRel}`;
     }
 
+    let _explorerContextMenuInvoker = null;
+
     function dismissExplorerContextMenu() {
+        const { restoreFocus = true } = arguments[0] || {};
         document.getElementById('explorer-ctx-menu')?.remove();
         document.removeEventListener('keydown', _explorerContextMenuKeydown, true);
         document.removeEventListener('mousedown', _explorerContextMenuOutside, true);
+        document.querySelectorAll('.explorer-context-target')
+            .forEach(node => node.classList.remove('explorer-context-target'));
+        const invoker = _explorerContextMenuInvoker;
+        _explorerContextMenuInvoker = null;
+        if (restoreFocus && invoker?.isConnected) {
+            invoker.focus({ preventScroll: true });
+        }
     }
 
     function _explorerContextMenuOutside(event) {
@@ -1125,7 +1135,7 @@
         if (!menu) {
             return;
         }
-        const items = Array.from(menu.querySelectorAll('button'));
+        const items = Array.from(menu.querySelectorAll('button:not(:disabled)'));
         if (!items.length) {
             return;
         }
@@ -1149,15 +1159,41 @@
         const menu = document.createElement('div');
         menu.id = 'explorer-ctx-menu';
         menu.setAttribute('role', 'menu');
-        items.forEach(({ label, action }) => {
+        items.forEach(({
+            label,
+            action,
+            disabled = false,
+            danger = false,
+            separatorBefore = false,
+            title = ''
+        }) => {
+            if (separatorBefore) {
+                const separator = document.createElement('div');
+                separator.className = 'explorer-ctx-separator';
+                separator.setAttribute('role', 'separator');
+                menu.appendChild(separator);
+            }
             const button = document.createElement('button');
             button.type = 'button';
             button.setAttribute('role', 'menuitem');
             button.textContent = label;
-            button.addEventListener('click', () => {
-                action();
-                dismissExplorerContextMenu();
-            });
+            button.disabled = Boolean(disabled);
+            button.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+            if (danger) {
+                button.classList.add('danger');
+            }
+            if (title) {
+                button.title = title;
+            }
+            if (!disabled && typeof action === 'function') {
+                button.addEventListener('click', () => {
+                    const result = action();
+                    dismissExplorerContextMenu();
+                    Promise.resolve(result).catch(error => {
+                        console.error('[GridVibe Sessions] Explorer menu action failed:', error);
+                    });
+                });
+            }
             menu.appendChild(button);
         });
         menu.style.visibility = 'hidden';
@@ -1169,7 +1205,9 @@
         menu.style.left = `${Math.max(8, Math.min(x, vw - rect.width - 8))}px`;
         menu.style.top = `${Math.max(8, Math.min(y, vh - rect.height - 8))}px`;
         menu.style.visibility = 'visible';
-        menu.querySelector('button')?.focus();
+        const initialItem = Array.from(menu.querySelectorAll('button:not(:disabled)'))
+            .find(button => !button.classList.contains('danger'));
+        initialItem?.focus();
 
         // Defer the outside-dismiss listener so the opening interaction does not
         // immediately close the menu.
@@ -1179,29 +1217,68 @@
         document.addEventListener('keydown', _explorerContextMenuKeydown, true);
     }
 
-    function handleExplorerCopyPathMenu(event, index) {
+    function handleExplorerContextMenu(event, index) {
         const row = event.target.closest('[data-explorer-copy-path]');
         if (!row) {
             return;
         }
         event.preventDefault();
+        document.querySelectorAll('.explorer-context-target')
+            .forEach(node => node.classList.remove('explorer-context-target'));
+        row.classList.add('explorer-context-target');
+        _explorerContextMenuInvoker = row.matches('button') ? row : (row.querySelector('button') || row);
         const relativePath = row.dataset.explorerCopyPath || '';
         const absolutePath = explorerJoinRootPath(explorerRootDirectory(index), relativePath);
-        const items = [
+        const filesystemItems = row.dataset.explorerContextKind
+            && typeof explorerFilesystemMenuItems === 'function'
+            ? explorerFilesystemMenuItems(index, {
+                path: row.dataset.explorerContextPath || relativePath,
+                kind: row.dataset.explorerContextKind || '',
+                revision: row.dataset.explorerContextRevision || '',
+                surface: row.dataset.explorerContextSurface || ''
+            })
+            : [];
+        const beforePath = filesystemItems.filter(item => item.placement !== 'after-path');
+        const afterPath = filesystemItems.filter(item => item.placement === 'after-path');
+        const pathItems = [
             { label: 'Copy path', action: () => _copyText(absolutePath || relativePath) },
         ];
         if (relativePath) {
-            items.push({ label: 'Copy relative path', action: () => _copyText(relativePath) });
+            pathItems.push({ label: 'Copy relative path', action: () => _copyText(relativePath) });
         }
-        showExplorerContextMenu(event.clientX, event.clientY, items);
+        if (beforePath.length) {
+            pathItems[0].separatorBefore = true;
+        }
+        if (afterPath.length) {
+            afterPath[0].separatorBefore = true;
+        }
+        const items = [...beforePath, ...pathItems, ...afterPath];
+        let x = event.clientX;
+        let y = event.clientY;
+        if (x <= 0 && y <= 0) {
+            const rect = row.getBoundingClientRect();
+            x = rect.left + Math.min(24, rect.width);
+            y = rect.top + Math.min(rect.height, 24);
+        }
+        showExplorerContextMenu(x, y, items);
+    }
+
+    function wireExplorerContextMenu(panel, index) {
+        if (!panel || panel.dataset.contextMenuWired === 'true') {
+            return;
+        }
+        panel.dataset.contextMenuWired = 'true';
+        panel.addEventListener('contextmenu', event => handleExplorerContextMenu(event, index));
+    }
+
+    /* Backwards-compatible name retained for extracted-page contract tests and
+       callers outside this module; all behavior lives in the generalized menu. */
+    function handleExplorerCopyPathMenu(event, index) {
+        handleExplorerContextMenu(event, index);
     }
 
     function wireExplorerCopyPathMenu(panel, index) {
-        if (!panel || panel.dataset.copyPathMenuWired === 'true') {
-            return;
-        }
-        panel.dataset.copyPathMenuWired = 'true';
-        panel.addEventListener('contextmenu', event => handleExplorerCopyPathMenu(event, index));
+        wireExplorerContextMenu(panel, index);
     }
 
     function renderExplorerGitPanel(index) {
@@ -1754,6 +1831,7 @@
             if (!response.ok) {
                 throw new Error(data.error || 'Failed to load directory');
             }
+            updateExplorerFilesystemRootRevision(index, data.root_revision || '');
             const entries = (Array.isArray(data.entries) ? data.entries : []).filter(entry => !entry.deleted);
             pane._explorerTreeChildren.set(key, entries);
             return entries;
@@ -1781,9 +1859,23 @@
         const expanded = isDirectory && pane._explorerTreeExpanded.has(path);
         const active = explorerTreeRowIsActive(pane, entry);
         const action = isDirectory
-            ? `data-explorer-tree-dir="${escHtml(path)}" aria-expanded="${expanded ? 'true' : 'false'}"`
+            ? `data-explorer-tree-dir="${escHtml(path)}"`
             : `data-explorer-tree-file="${escHtml(path)}"`;
-        const chevron = isDirectory ? (expanded ? '▾' : '▸') : '';
+        /* The fold arrow is its own control: it expands/collapses in place and
+           never navigates, so browsing the tree can't evict whatever the
+           Preview tab is showing. Only the name button opens the target. */
+        const indent = `style="padding-left:${7 + depth * EXPLORER_TREE_INDENT_PX}px"`;
+        const chevron = isDirectory
+            ? `<button
+                type="button"
+                class="explorer-tree-chevron-btn"
+                data-explorer-tree-chevron="${escHtml(path)}"
+                aria-expanded="${expanded ? 'true' : 'false'}"
+                title="${expanded ? 'Collapse folder' : 'Expand folder'}"
+                aria-label="${expanded ? 'Collapse' : 'Expand'} ${escHtml(entry.name || path)}"
+                ${indent}
+            >${expanded ? '▾' : '▸'}</button>`
+            : `<span class="explorer-tree-chevron" aria-hidden="true" ${indent}></span>`;
         const badge = explorerGitStatusLabel(entry.git) ? explorerGitBadgeHtml(entry.git) : '';
         const openFolder = isDirectory
             ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">↪</button>`
@@ -1793,9 +1885,16 @@
             : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">↗</button>`;
 
         return `
-            <div class="explorer-tree-row${active ? ' active' : ''}" data-explorer-copy-path="${escHtml(path)}">
-                <button type="button" class="explorer-tree-main" ${action} style="padding-left:${7 + depth * EXPLORER_TREE_INDENT_PX}px" title="${escHtml(path)}">
-                    <span class="explorer-tree-chevron" aria-hidden="true">${chevron}</span>
+            <div
+                class="explorer-tree-row${active ? ' active' : ''}"
+                data-explorer-copy-path="${escHtml(path)}"
+                data-explorer-context-path="${escHtml(path)}"
+                data-explorer-context-kind="${escHtml(entry.entry_kind || '')}"
+                data-explorer-context-revision="${escHtml(entry.revision || '')}"
+                data-explorer-context-surface="tree"
+            >
+                ${chevron}
+                <button type="button" class="explorer-tree-main" ${action} title="${escHtml(path)}">
                     ${isDirectory ? EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(entry.name || path)}
                     <span class="explorer-tree-name">${escHtml(entry.name || path)}</span>
                 </button>
@@ -1849,9 +1948,15 @@
                 <div class="explorer-tree-children">${renderExplorerTreeNodes(pane, '', 0)}</div>
             </div>
         `;
+        panel.querySelectorAll('[data-explorer-tree-chevron]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                toggleExplorerTreeDirectory(index, button.dataset.explorerTreeChevron || '');
+            });
+        });
         panel.querySelectorAll('[data-explorer-tree-dir]').forEach(button => {
             button.addEventListener('click', () => {
-                toggleExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');
+                openExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');
             });
         });
         panel.querySelectorAll('[data-explorer-tree-file]').forEach(button => {
@@ -1873,6 +1978,8 @@
         });
     }
 
+    /* Fold arrow only: expand or collapse in place. It never touches the
+       Preview tab, so the tree can be browsed without losing the open file. */
     async function toggleExplorerTreeDirectory(index, path) {
         const pane = terminals[index];
         if (!pane || !path) {
@@ -1880,28 +1987,36 @@
         }
 
         ensureExplorerTreeState(pane);
-        /* 2.d: a directory click keeps its expand/collapse toggle AND browses
-           the directory in the Preview tab so the user can drill in from the
-           main pane. Clicking the directory the Preview tab already shows
-           only toggles its expansion. */
-        const alreadyShown = pane._explorerMode === 'directory'
-            && (pane._explorerPath || '') === path;
         if (pane._explorerTreeExpanded.has(path)) {
             pane._explorerTreeExpanded.delete(path);
             renderExplorerTreePanel(index);
-            if (!alreadyShown) {
-                await loadExplorerPane(index, path);
-            }
             return;
         }
 
         pane._explorerTreeExpanded.add(path);
         pane._explorerTreeErrors.delete(path);
         renderExplorerTreePanel(index);
-        const childrenLoading = loadExplorerTreeChildren(index, path);
-        if (!alreadyShown) {
-            await loadExplorerPane(index, path);
+        await loadExplorerTreeChildren(index, path);
+    }
+
+    /* Directory name click: browse it in the Preview tab, and expand it so the
+       tree matches what the pane now shows. Never collapses — collapsing is
+       the fold arrow's job, so an open directory can be re-opened safely. */
+    async function openExplorerTreeDirectory(index, path) {
+        const pane = terminals[index];
+        if (!pane || !path) {
+            return;
         }
+
+        ensureExplorerTreeState(pane);
+        let childrenLoading = Promise.resolve();
+        if (!pane._explorerTreeExpanded.has(path)) {
+            pane._explorerTreeExpanded.add(path);
+            pane._explorerTreeErrors.delete(path);
+            renderExplorerTreePanel(index);
+            childrenLoading = loadExplorerTreeChildren(index, path);
+        }
+        await loadExplorerPane(index, path);
         await childrenLoading;
     }
 
@@ -1989,6 +2104,7 @@
             }
             pane._explorerGitRepoLoaded = true;
             pane._explorerGitRepo = data;
+            syncExplorerTabGitFromRepo(index, data);
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer Git repository failed:', error);
             pane._explorerGitRepoError = error.message || 'Failed to load Git repository.';
@@ -2020,6 +2136,7 @@
             }
             pane._explorerGitRepo = data;
             pane._explorerGitRepoLoaded = true;
+            syncExplorerTabGitFromRepo(index, data);
             succeeded = true;
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer Git action failed:', error);
@@ -2214,6 +2331,34 @@
         });
     }
 
+    function synchroniseExplorerDiffWrappedRows(host) {
+        const sides = host?._explorerDiffSides || [];
+        const rowsBySide = sides.map(side => [
+            ...side.querySelectorAll('.d2h-diff-tbody > tr')
+        ]);
+        rowsBySide.flat().forEach(row => {
+            row.style.height = '';
+        });
+        if (sides.length !== 2
+            || !host.closest('.explorer-diff-content')?.classList.contains('wrap-lines')) {
+            return;
+        }
+
+        const rowCount = Math.max(...rowsBySide.map(rows => rows.length), 0);
+        for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+            const pairedRows = rowsBySide
+                .map(rows => rows[rowIndex])
+                .filter(Boolean);
+            const heights = pairedRows.map(row => row.getBoundingClientRect().height);
+            const maxHeight = Math.max(...heights, 0);
+            pairedRows.forEach((row, sideIndex) => {
+                if (maxHeight - heights[sideIndex] > 0.5) {
+                    row.style.height = `${maxHeight}px`;
+                }
+            });
+        }
+    }
+
     function scheduleExplorerDiffScrollbarSync(host) {
         if (!host || host._explorerDiffScrollbarFrame) {
             return;
@@ -2221,6 +2366,7 @@
         const sync = () => {
             host._explorerDiffScrollbarFrame = null;
             if (host.isConnected) {
+                synchroniseExplorerDiffWrappedRows(host);
                 synchroniseExplorerDiffScrollbars(host);
             }
         };
@@ -2275,10 +2421,14 @@
 
         if (typeof window.ResizeObserver === 'function') {
             const observer = new window.ResizeObserver(entries => {
-                if (entries.length) {
+                const width = entries[0]?.contentRect?.width;
+                if (Number.isFinite(width)
+                    && Math.abs(width - (host._explorerDiffObservedWidth || 0)) > 0.5) {
+                    host._explorerDiffObservedWidth = width;
                     scheduleExplorerDiffScrollbarSync(host);
                 }
             });
+            host._explorerDiffObservedWidth = filesDiff.getBoundingClientRect().width;
             observer.observe(filesDiff);
             host._explorerDiffResizeObserver = observer;
         }
@@ -2288,6 +2438,542 @@
         host?._explorerDiffResizeObserver?.disconnect();
         if (host?._explorerDiffScrollbarFrame && typeof window.cancelAnimationFrame === 'function') {
             window.cancelAnimationFrame(host._explorerDiffScrollbarFrame);
+        }
+    }
+
+    /* A file opened from the Changes sidebar carries an explicit worktree mode.
+       A file opened directly uses the legacy HEAD diff; that view is equally
+    safe for line undo only when the index is clean, because HEAD→worktree
+       then contains exactly the unstaged worktree changes. */
+    function explorerDiffShowsOnlyWorktreeChanges(pane) {
+        if (pane && pane._explorerDiffMode === 'worktree') {
+            return true;
+        }
+        if (!pane || (pane._explorerDiffMode && pane._explorerDiffMode !== 'head')) {
+            return false;
+        }
+        const git = pane._explorerGit;
+        if (!git || git.status === 'conflicted') {
+            return false;
+        }
+        const indexCode = git.index_status || ' ';
+        const worktreeCode = git.worktree_status || ' ';
+        return explorerGitCodeUnmodified(indexCode)
+            && !explorerGitCodeUnmodified(worktreeCode);
+    }
+
+    function explorerCanUndoDiffLine(pane) {
+        return Boolean(
+            pane
+            && pane._explorerMode === 'file'
+            && explorerDiffShowsOnlyWorktreeChanges(pane)
+            && !pane._explorerDiffCommit
+            && pane._explorerFileEditable
+            && !pane._explorerFileTruncated
+            && !pane._explorerDiffTruncated
+            && !pane._explorerDiffUndoBusy
+            && !pane._explorerEdit
+            && pane._explorerFileRevision
+            && !String(pane._explorerDiffContent || '').includes('\\ No newline at end of file')
+        );
+    }
+
+    /* Record the current worktree insertion point for every deleted line. A
+       deleted line has no new-side line number of its own, so this small map is
+       what lets a one-line restore put it back at the exact hunk position. */
+    function explorerDiffDeletionInsertions(diff) {
+        const insertions = new Map();
+        let oldLine = 0;
+        let newLine = 0;
+        String(diff || '').split(/\r?\n/).forEach(line => {
+            const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+            if (hunk) {
+                oldLine = Number(hunk[1]);
+                newLine = Number(hunk[2]);
+                return;
+            }
+            if (!oldLine && !newLine) {
+                return;
+            }
+            if (line.startsWith('-') && !line.startsWith('---')) {
+                insertions.set(oldLine, newLine);
+                oldLine += 1;
+            } else if (line.startsWith('+') && !line.startsWith('+++')) {
+                newLine += 1;
+            } else if (line.startsWith(' ')) {
+                oldLine += 1;
+                newLine += 1;
+            }
+        });
+        return insertions;
+    }
+
+    /* Group the patch into change blocks: a maximal run of consecutive changed
+       lines with no context line between them — the "paragraph" a reader sees
+       as one edit. Undoing a block swaps its worktree lines (`expected`) back
+       to the HEAD lines it replaced (`replacement`) in a single save, so a
+       20-line rewrite is one click instead of twenty. `line` is the 1-based
+       worktree line the run starts at (for a pure deletion, where the removed
+       lines go back in); `oldLine` is the matching HEAD line. */
+    function explorerDiffChangeBlocks(diff) {
+        const blocks = [];
+        let oldLine = 0;
+        let newLine = 0;
+        let run = null;
+        const startRun = () => {
+            if (!run) {
+                run = { kind: 'block', line: newLine, oldLine, expected: [], replacement: [] };
+            }
+            return run;
+        };
+        const flushRun = () => {
+            if (run && (run.expected.length || run.replacement.length)) {
+                blocks.push(run);
+            }
+            run = null;
+        };
+        String(diff || '').split(/\r?\n/).forEach(line => {
+            const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+            if (hunk) {
+                flushRun();
+                oldLine = Number(hunk[1]);
+                newLine = Number(hunk[2]);
+                return;
+            }
+            if (!oldLine && !newLine) {
+                return;
+            }
+            if (line.startsWith('-') && !line.startsWith('---')) {
+                startRun().replacement.push(line.slice(1));
+                oldLine += 1;
+                return;
+            }
+            if (line.startsWith('+') && !line.startsWith('+++')) {
+                startRun().expected.push(line.slice(1));
+                newLine += 1;
+                return;
+            }
+            flushRun();
+            if (line.startsWith(' ')) {
+                oldLine += 1;
+                newLine += 1;
+            }
+        });
+        flushRun();
+        return blocks;
+    }
+
+    /* Index every changed line of every block by its rendered line number so a
+       diff row can be mapped back to the block it belongs to. */
+    function explorerDiffBlockLineIndex(blocks) {
+        const byNewLine = new Map();
+        const byOldLine = new Map();
+        blocks.forEach((block, position) => {
+            block.id = String(position + 1);
+            block.rows = Math.max(block.expected.length, block.replacement.length);
+            block.expected.forEach((_, offset) => byNewLine.set(block.line + offset, block));
+            block.replacement.forEach((_, offset) => byOldLine.set(block.oldLine + offset, block));
+        });
+        return { byNewLine, byOldLine };
+    }
+
+    function explorerDiffRowBlock(blockIndex, oldLine, newLine) {
+        if (newLine?.type === 'add') {
+            const block = blockIndex.byNewLine.get(newLine.number);
+            if (block) {
+                return block;
+            }
+        }
+        if (oldLine?.type === 'delete') {
+            return blockIndex.byOldLine.get(oldLine.number) || null;
+        }
+        return null;
+    }
+
+    function explorerRenderedDiffLine(row, {
+        cellSelector,
+        numberSelector,
+        codeSelector,
+        addClass,
+        deleteClass
+    }) {
+        const cell = row?.querySelector(cellSelector);
+        const numberCell = cell?.matches(numberSelector)
+            ? cell
+            : cell?.querySelector(numberSelector);
+        const number = Number.parseInt(numberCell?.textContent || '', 10);
+        if (!cell || !numberCell || !Number.isFinite(number)) {
+            return null;
+        }
+        const typeHost = cell.matches(numberSelector) ? row : cell;
+        const type = typeHost.querySelector(`.${addClass}`)
+            || typeHost.classList.contains(addClass)
+            ? 'add'
+            : (
+                typeHost.querySelector(`.${deleteClass}`)
+                || typeHost.classList.contains(deleteClass)
+                    ? 'delete'
+                    : 'context'
+            );
+        return {
+            type,
+            number,
+            text: (cell.querySelector(codeSelector) || row.querySelector(codeSelector))?.textContent || '',
+            numberCell
+        };
+    }
+
+    function explorerDiffUndoAction(oldLine, newLine, deletionInsertions) {
+        const deleted = oldLine?.type === 'delete';
+        const added = newLine?.type === 'add';
+        if (deleted && added) {
+            return {
+                kind: 'replace',
+                line: newLine.number,
+                expected: newLine.text,
+                replacement: oldLine.text
+            };
+        }
+        if (added) {
+            return {
+                kind: 'remove',
+                line: newLine.number,
+                expected: newLine.text,
+                replacement: ''
+            };
+        }
+        if (deleted) {
+            const insertLine = deletionInsertions.get(oldLine.number);
+            if (Number.isFinite(insertLine) && insertLine > 0) {
+                return {
+                    kind: 'insert',
+                    line: insertLine,
+                    expected: '',
+                    replacement: oldLine.text
+                };
+            }
+        }
+        return null;
+    }
+
+    function registerExplorerDiffUndoAction(pane, actionId, action) {
+        if (!(pane._explorerDiffUndoActions instanceof Map)) {
+            pane._explorerDiffUndoActions = new Map();
+        }
+        pane._explorerDiffUndoActions.set(actionId, action);
+        return actionId;
+    }
+
+    function attachExplorerDiffUndoButton(index, numberCell, action) {
+        const pane = terminals[index];
+        if (!pane || !numberCell || !action) {
+            return;
+        }
+        if (!(pane._explorerDiffUndoActions instanceof Map)) {
+            pane._explorerDiffUndoActions = new Map();
+        }
+        const actionId = registerExplorerDiffUndoAction(
+            pane,
+            String(pane._explorerDiffUndoActions.size + 1),
+            action
+        );
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'explorer-diff-undo-line';
+        button.dataset.explorerDiffUndoLine = actionId;
+        button.title = 'Undo this unstaged line change';
+        button.setAttribute('aria-label', 'Undo this unstaged line change');
+        button.innerHTML = EXPLORER_GIT_REVERT_ICON;
+        button.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            undoExplorerDiffChange(index, actionId);
+        });
+        numberCell.appendChild(button);
+    }
+
+    /* Tag every rendered row of a multi-line block, and hang one "Undo block"
+       pill off the block's first row. Single-line blocks are left to the
+       per-line button — a pill there would say the same thing twice. */
+    function attachExplorerDiffUndoBlockButton(index, block, rows, numberCell) {
+        const pane = terminals[index];
+        if (!pane || !block || block.rows < 2) {
+            return;
+        }
+        rows.filter(Boolean).forEach(row => {
+            row.dataset.explorerDiffBlock = block.id;
+        });
+        const actionId = `block-${block.id}`;
+        if (!numberCell || pane._explorerDiffUndoActions?.has(actionId)) {
+            return;
+        }
+        registerExplorerDiffUndoAction(pane, actionId, block);
+        const label = `Undo this block of ${block.rows} unstaged line changes`;
+        const pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'explorer-diff-undo-block';
+        pill.dataset.explorerDiffUndoBlock = block.id;
+        pill.dataset.explorerDiffUndoAction = actionId;
+        pill.title = label;
+        pill.setAttribute('aria-label', label);
+        pill.innerHTML = `${EXPLORER_GIT_REVERT_ICON}<span>Undo block (${block.rows})</span>`;
+        pill.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            undoExplorerDiffChange(index, actionId);
+        });
+        numberCell.classList.add('has-block-undo');
+        numberCell.appendChild(pill);
+    }
+
+    /* Hovering anywhere inside a block reveals that block's pill, which lives
+       on a different row (and, side by side, a different table) — so this is a
+       pair of delegated listeners on the diff root rather than CSS. */
+    function setExplorerDiffHoveredBlock(root, blockId) {
+        if (root._explorerDiffHoveredBlock === blockId) {
+            return;
+        }
+        root._explorerDiffHoveredBlock = blockId;
+        root.querySelectorAll('[data-explorer-diff-undo-block]').forEach(pill => {
+            pill.classList.toggle(
+                'is-visible',
+                Boolean(blockId) && pill.dataset.explorerDiffUndoBlock === blockId
+            );
+        });
+    }
+
+    function wireExplorerDiffBlockHover(root) {
+        /* The fallback renderer re-wires the same persistent container on every
+           render, so the listeners are attached once per element. */
+        if (root._explorerDiffBlockHoverWired) {
+            root._explorerDiffHoveredBlock = '';
+            return;
+        }
+        root._explorerDiffBlockHoverWired = true;
+        root.addEventListener('mouseover', event => {
+            const row = event.target?.closest?.('[data-explorer-diff-block]');
+            setExplorerDiffHoveredBlock(root, row?.dataset.explorerDiffBlock || '');
+        });
+        root.addEventListener('mouseleave', () => {
+            setExplorerDiffHoveredBlock(root, '');
+        });
+    }
+
+    function wireExplorerDiffUndoControls(index, root) {
+        const pane = terminals[index];
+        if (pane) {
+            pane._explorerDiffUndoActions = new Map();
+        }
+        if (!root || !explorerCanUndoDiffLine(pane)) {
+            return;
+        }
+        const deletionInsertions = explorerDiffDeletionInsertions(pane._explorerDiffContent);
+        const blockIndex = explorerDiffBlockLineIndex(
+            explorerDiffChangeBlocks(pane._explorerDiffContent)
+        );
+        wireExplorerDiffBlockHover(root);
+        const diff2HtmlSides = root._explorerDiffSides || [];
+        if (diff2HtmlSides.length === 2) {
+            const rowsBySide = diff2HtmlSides.map(side => [
+                ...side.querySelectorAll('.d2h-diff-tbody > tr')
+            ]);
+            const rowCount = Math.max(rowsBySide[0].length, rowsBySide[1].length);
+            for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+                const oldLine = explorerRenderedDiffLine(rowsBySide[0][rowIndex], {
+                    cellSelector: '.d2h-code-side-linenumber',
+                    numberSelector: '.d2h-code-side-linenumber',
+                    codeSelector: '.d2h-code-line-ctn',
+                    addClass: 'd2h-ins',
+                    deleteClass: 'd2h-del'
+                });
+                const newLine = explorerRenderedDiffLine(rowsBySide[1][rowIndex], {
+                    cellSelector: '.d2h-code-side-linenumber',
+                    numberSelector: '.d2h-code-side-linenumber',
+                    codeSelector: '.d2h-code-line-ctn',
+                    addClass: 'd2h-ins',
+                    deleteClass: 'd2h-del'
+                });
+                const action = explorerDiffUndoAction(oldLine, newLine, deletionInsertions);
+                attachExplorerDiffUndoButton(index, (newLine || oldLine)?.numberCell, action);
+                attachExplorerDiffUndoBlockButton(
+                    index,
+                    explorerDiffRowBlock(blockIndex, oldLine, newLine),
+                    [rowsBySide[0][rowIndex], rowsBySide[1][rowIndex]],
+                    (newLine || oldLine)?.numberCell
+                );
+            }
+            return;
+        }
+
+        root.querySelectorAll('.explorer-diff-row').forEach(row => {
+            const options = {
+                numberSelector: '.explorer-diff-line-number',
+                codeSelector: '.explorer-diff-line-code',
+                addClass: 'add',
+                deleteClass: 'delete'
+            };
+            const oldLine = explorerRenderedDiffLine(row, {
+                ...options,
+                cellSelector: '.explorer-diff-cell.old'
+            });
+            const newLine = explorerRenderedDiffLine(row, {
+                ...options,
+                cellSelector: '.explorer-diff-cell.new'
+            });
+            const action = explorerDiffUndoAction(oldLine, newLine, deletionInsertions);
+            attachExplorerDiffUndoButton(index, (newLine || oldLine)?.numberCell, action);
+            attachExplorerDiffUndoBlockButton(
+                index,
+                explorerDiffRowBlock(blockIndex, oldLine, newLine),
+                [row],
+                (newLine || oldLine)?.numberCell
+            );
+        });
+    }
+
+    function explorerDiffUndoContent(content, action) {
+        const lines = String(content == null ? '' : content)
+            .replace(/\r\n/g, '\n')
+            .replace(/\r/g, '\n')
+            .split('\n');
+        const lineIndex = Number(action?.line) - 1;
+        if (!Number.isInteger(lineIndex) || lineIndex < 0) {
+            return null;
+        }
+        if (action.kind === 'block') {
+            const expected = Array.isArray(action.expected) ? action.expected : [];
+            const replacement = Array.isArray(action.replacement) ? action.replacement : [];
+            if (lineIndex + expected.length > lines.length) {
+                return null;
+            }
+            const stale = expected.some((text, offset) => lines[lineIndex + offset] !== text);
+            if (stale) {
+                return null;
+            }
+            lines.splice(lineIndex, expected.length, ...replacement);
+            return lines.join('\n');
+        }
+        if (action.kind === 'insert') {
+            if (lineIndex > lines.length) {
+                return null;
+            }
+            lines.splice(lineIndex, 0, action.replacement);
+            return lines.join('\n');
+        }
+        if (lineIndex >= lines.length || lines[lineIndex] !== action.expected) {
+            return null;
+        }
+        if (action.kind === 'replace') {
+            lines[lineIndex] = action.replacement;
+        } else if (action.kind === 'remove') {
+            lines.splice(lineIndex, 1);
+        } else {
+            return null;
+        }
+        return lines.join('\n');
+    }
+
+    function setExplorerDiffUndoBusy(index, busy) {
+        const pane = terminals[index];
+        if (pane) {
+            pane._explorerDiffUndoBusy = Boolean(busy);
+        }
+        document.querySelectorAll(
+            `#explorer-diff-code-${index} :is([data-explorer-diff-undo-line], [data-explorer-diff-undo-block])`
+        ).forEach(button => {
+            button.disabled = Boolean(busy);
+            button.classList.toggle('is-busy', Boolean(busy));
+        });
+    }
+
+    function explorerDiffUndoCopy(action) {
+        if (action.kind === 'block') {
+            return {
+                title: 'Undo block of changes?',
+                copy: `Undo these ${action.rows} unstaged line changes starting at line ${action.line}?`,
+                confirmLabel: 'Undo block',
+                toast: `Undid ${action.rows} line changes`
+            };
+        }
+        return {
+            title: 'Undo line change?',
+            copy: `Undo this unstaged change on line ${action.line}?`,
+            confirmLabel: 'Undo line',
+            toast: 'Undid line change'
+        };
+    }
+
+    async function undoExplorerDiffChange(index, actionId) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        const action = pane?._explorerDiffUndoActions?.get(String(actionId));
+        if (!pane || !sessionId || !action || !explorerCanUndoDiffLine(pane)) {
+            return;
+        }
+        const content = explorerDiffUndoContent(pane._explorerFileContent, action);
+        if (content === null) {
+            showTerminalToast('This diff is stale. Refresh the file and try again.', 'error');
+            return;
+        }
+        const copy = explorerDiffUndoCopy(action);
+        const filePath = pane._explorerFilePath;
+        const baseRevision = pane._explorerFileRevision;
+        const confirmed = await openGenericConfirmModal({
+            title: copy.title,
+            copy: copy.copy,
+            note: 'The file is saved immediately. Staged changes are preserved.',
+            confirmLabel: copy.confirmLabel,
+            danger: true
+        });
+        if (
+            !confirmed
+            || !explorerCanUndoDiffLine(pane)
+            || pane._explorerFilePath !== filePath
+            || pane._explorerFileRevision !== baseRevision
+        ) {
+            return;
+        }
+
+        const scrollState = captureExplorerFileScroll(index);
+        const activeTabId = pane._explorerActiveTabId;
+        setExplorerDiffUndoBusy(index, true);
+        try {
+            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/file`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    path: filePath,
+                    content,
+                    base_revision: baseRevision
+                })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || 'Could not undo this change.');
+            }
+            setExplorerDiffUndoBusy(index, false);
+            const hasRemainingDiff = explorerHasGitDiff(data.git);
+            const applied = updateExplorerFileInPlace(index, data, scrollState);
+            if (!applied) {
+                renderExplorerFile(index, data, {
+                    scrollState,
+                    openDiff: hasRemainingDiff,
+                    diffMode: 'worktree',
+                    tab: activeTabId
+                });
+            }
+            if (pane._explorerGitSidebarOpen) {
+                invalidateExplorerGitRepo(index);
+                loadExplorerGitRepo(index);
+            }
+            if (pane._explorerTreeSidebarOpen) {
+                reloadExplorerTree(index);
+            }
+            showTerminalToast(`${copy.toast} in ${data.name || pane._explorerFileName || 'file'}`, 'success');
+        } catch (error) {
+            console.error('[GridVibe Sessions] Explorer diff undo failed:', error);
+            setExplorerDiffUndoBusy(index, false);
+            showTerminalToast(error.message || 'Could not undo this change.', 'error');
         }
     }
 
@@ -2312,6 +2998,7 @@
             code.innerHTML = banner;
             code.appendChild(host);
             observeExplorerDiffLayout(host);
+            wireExplorerDiffUndoControls(index, host);
             return true;
         } catch (error) {
             console.error('[GridVibe Sessions] Diff2Html render failed:', error);
@@ -2326,6 +3013,8 @@
             return;
         }
         disconnectExplorerDiffLayout(code.querySelector('.explorer-diff2html'));
+        const wrapLines = explorerLineWrapPreference(index, 'diff');
+        code.classList.toggle('wrap-lines', wrapLines);
         const diff = pane._explorerDiffContent || '';
         if (!diff) {
             code.innerHTML = '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
@@ -2334,6 +3023,7 @@
         const banner = explorerDiffTruncationBannerHtml(pane);
         if (!renderExplorerDiffWithDiff2Html(index, code, diff, banner)) {
             code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);
+            wireExplorerDiffUndoControls(index, code);
         }
     }
 
@@ -2556,6 +3246,7 @@
         list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
             panel.hidden = panel.dataset.explorerFilePanel !== selectedMode;
         });
+        applyExplorerLineWrapState(index, selectedMode);
         if (isDiffMode) {
             loadExplorerDiff(index);
             const state = pane ? ensureExplorerSearchState(pane, 'file') : null;
@@ -2696,6 +3387,14 @@
     const EXPLORER_MD_FONT_DEFAULT = 'system';
     const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';
     const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';
+    /* Line wrapping is per explorer tab, like the editor zoom above: each tab
+       record carries its own source/preview/diff flags instead of one
+       workspace-global preference, so every tab keeps the wrapping it was left
+       at and the flags ride along in the saved session's per-tab views. All
+       three default to ON — a wrapped view never hides content off to the
+       right — so it is the *opt-out* that is tracked and persisted, and an
+       absent flag means wrapped. */
+    const EXPLORER_LINE_WRAP_MODES = Object.freeze(['source', 'preview', 'diff']);
     const EXPLORER_MD_PRESET_LABELS = {
         default: 'Default',
         paper: 'Paper',
@@ -2710,6 +3409,121 @@
         'jetbrains-mono': 'JetBrains Mono',
         'courier-new': 'Courier New',
     };
+
+    function ensureExplorerTabLineWrap(tab) {
+        if (!tab) {
+            return { source: true, preview: true, diff: true };
+        }
+        const current = tab.lineWrap && typeof tab.lineWrap === 'object' ? tab.lineWrap : {};
+        tab.lineWrap = {
+            source: current.source !== false,
+            preview: current.preview !== false,
+            diff: current.diff !== false,
+        };
+        return tab.lineWrap;
+    }
+
+    function explorerLineWrapPreference(index, mode) {
+        const pane = terminals[index];
+        if (!pane || !EXPLORER_LINE_WRAP_MODES.includes(mode)) {
+            return false;
+        }
+        return ensureExplorerTabLineWrap(explorerActiveTab(pane))[mode];
+    }
+
+    function explorerLineWrapControlText(mode, enabled) {
+        const viewLabel = mode === 'preview'
+            ? 'Markdown preview'
+            : (mode === 'source' ? 'source view' : 'diff');
+        return `${enabled ? 'Disable' : 'Enable'} line wrapping in ${viewLabel}`;
+    }
+
+    function explorerLineWrapControlHtml(index, initialMode = '') {
+        const mode = EXPLORER_LINE_WRAP_MODES.includes(initialMode) ? initialMode : '';
+        const enabled = mode ? explorerLineWrapPreference(index, mode) : false;
+        const label = mode ? explorerLineWrapControlText(mode, enabled) : 'Wrap lines';
+        return `
+            <button
+                type="button"
+                class="explorer-line-wrap-btn"
+                data-explorer-line-wrap="${index}"
+                data-explorer-wrap-mode="${mode}"
+                title="${label}"
+                aria-label="${label}"
+                aria-pressed="${enabled ? 'true' : 'false'}"
+                ${mode ? '' : 'hidden'}
+            >${EXPLORER_LINE_WRAP_ICON}</button>
+        `;
+    }
+
+    function applyExplorerLineWrapState(index, selectedMode = activeExplorerFileView(index)) {
+        const panels = {
+            source: document.getElementById(`explorer-code-${index}`),
+            preview: document.getElementById(`explorer-preview-${index}`),
+            diff: document.getElementById(`explorer-diff-code-${index}`),
+        };
+        const wraps = {};
+        EXPLORER_LINE_WRAP_MODES.forEach(mode => {
+            wraps[mode] = explorerLineWrapPreference(index, mode);
+            panels[mode]?.classList.toggle('wrap-lines', wraps[mode]);
+        });
+        /* The in-place editor replaces the Source panel's contents, so the same
+           per-tab flag drives the textarea: the CSS class above styles it and
+           the `wrap` attribute keeps the control's own soft wrapping in step
+           (never `hard`, which would inject newlines into the saved value). */
+        const textarea = panels.source?.querySelector('.explorer-source-editor');
+        if (textarea) {
+            textarea.wrap = wraps.source ? 'soft' : 'off';
+        }
+
+        const button = document.querySelector(`[data-explorer-line-wrap="${index}"]`);
+        if (!button) {
+            return;
+        }
+        const modeAvailable = EXPLORER_LINE_WRAP_MODES.includes(selectedMode)
+            && Boolean(panels[selectedMode]);
+        button.hidden = !modeAvailable;
+        if (!modeAvailable) {
+            button.dataset.explorerWrapMode = '';
+            button.setAttribute('aria-pressed', 'false');
+            return;
+        }
+        const enabled = wraps[selectedMode];
+        const label = explorerLineWrapControlText(selectedMode, enabled);
+        button.dataset.explorerWrapMode = selectedMode;
+        button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+        button.setAttribute('title', label);
+        button.setAttribute('aria-label', label);
+    }
+
+    function setExplorerLineWrapPreference(index, mode, enabled) {
+        const pane = terminals[index];
+        if (!pane || !EXPLORER_LINE_WRAP_MODES.includes(mode)) {
+            return;
+        }
+        ensureExplorerTabLineWrap(explorerActiveTab(pane))[mode] = Boolean(enabled);
+        applyExplorerLineWrapState(index);
+        if (mode === 'diff' && pane._explorerDiffLoaded) {
+            applyExplorerSearch(index);
+        }
+        persistExplorerTabsToSession(index);
+    }
+
+    function wireExplorerLineWrapControl(index) {
+        const button = document.querySelector(`[data-explorer-line-wrap="${index}"]`);
+        if (!button || button.dataset.bound) {
+            applyExplorerLineWrapState(index);
+            return;
+        }
+        button.dataset.bound = 'true';
+        button.addEventListener('click', () => {
+            const mode = button.dataset.explorerWrapMode;
+            if (mode === 'preview' || mode === 'diff') {
+                setExplorerLineWrapPreference(index, mode, !explorerLineWrapPreference(index, mode));
+            }
+        });
+        applyExplorerLineWrapState(index);
+    }
 
     function readExplorerMarkdownPref(key, allowed, fallback) {
         let stored = '';
@@ -3465,12 +4279,19 @@
             end: matchIndex + String(query).length,
             active
         }];
+        const contextAttributes = isDeleted ? '' : `
+                data-explorer-copy-path="${escHtml(entry.path || '')}"
+                data-explorer-context-path="${escHtml(entry.path || '')}"
+                data-explorer-context-kind="${escHtml(entry.entry_kind || '')}"
+                data-explorer-context-revision="${escHtml(entry.revision || '')}"
+                data-explorer-context-surface="preview"`;
 
         return `
             <button
                 type="button"
                 class="explorer-row ${isDirectory ? 'directory' : 'file'}${isDeleted ? ' deleted' : ''}"
                 data-explorer-path="${escHtml(entry.path || '')}"
+                ${contextAttributes}
                 ${isDeleted ? 'disabled' : ''}
             >
                 ${isDirectory ? EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(name || entry.path)}
@@ -4245,6 +5066,43 @@
         return tab.name || explorerBaseName(tab.path) || 'File';
     }
 
+    function explorerTabUnstagedGit(git) {
+        if (!git || typeof git !== 'object') {
+            return null;
+        }
+        const indexCode = git.index_status || ' ';
+        const worktreeCode = git.worktree_status || ' ';
+        if (git.status === 'untracked' || indexCode === '?' || worktreeCode === '?') {
+            return { ...git, status: 'untracked' };
+        }
+        if (git.status === 'conflicted' || indexCode === 'U' || worktreeCode === 'U') {
+            return { ...git, status: 'conflicted' };
+        }
+        if (explorerGitCodeUnmodified(worktreeCode)) {
+            return null;
+        }
+        const status = explorerGitStatusFromCode(worktreeCode);
+        return status === 'clean' ? null : { ...git, status };
+    }
+
+    function syncExplorerTabGitFromRepo(index, repo) {
+        const pane = terminals[index];
+        if (!pane || !repo || !Array.isArray(repo.changes)) {
+            return;
+        }
+        const changesByPath = new Map(repo.changes.map(change => [
+            explorerNormalizeTabPath(change.path),
+            change.git || null
+        ]));
+        ensureExplorerTabState(pane).forEach(tab => {
+            const path = explorerNormalizeTabPath(tab.path);
+            if (path) {
+                tab.git = changesByPath.get(path) || null;
+            }
+        });
+        renderExplorerTabStrip(index);
+    }
+
     /* Choose (and if needed create) the tab a file should load into. A `+`
        action or Markdown link pins a deduplicated tab; an explicit `tab`
        re-renders that tab; every other plain click (Files tree, Git sidebar)
@@ -4297,6 +5155,7 @@
         if (!list) {
             return null;
         }
+        wireExplorerContextMenu(list, index);
         let viewer = document.getElementById(`explorer-viewer-${index}`);
         if (!viewer) {
             list.innerHTML =
@@ -4366,15 +5225,23 @@
             const isPreview = tab.id === EXPLORER_PREVIEW_TAB_ID;
             const dirty = Boolean(dirtyEdit && dirtyEdit.tabId === tab.id);
             const label = explorerTabLabel(tab);
+            const unstagedGit = explorerTabUnstagedGit(tab.git);
+            const gitLabel = explorerGitStatusLabel(unstagedGit);
+            const tabStates = [
+                dirty ? 'unsaved changes' : '',
+                unstagedGit ? `${unstagedGit.status} unstaged` : ''
+            ].filter(Boolean);
             const icon = (!isPreview || tab.path) ? explorerFileTypeIconHtml(tab.path || label) : '';
+            const gitBadge = unstagedGit ? explorerGitBadgeHtml(unstagedGit) : '';
             const closeButton = isPreview
                 ? ''
                 : `<button type="button" class="explorer-tab-close" data-explorer-tab-close="${escHtml(tab.id)}" title="Close tab" aria-label="Close ${escHtml(label)}">×</button>`;
             return `
-                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}${dirty ? ' is-dirty' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}"${dirty ? ' aria-label="' + escHtml(label) + ' (unsaved changes)"' : ''} data-explorer-tab="${escHtml(tab.id)}"${isPreview ? '' : ' draggable="true"'} title="${escHtml((dirty ? '● ' : '') + (tab.path || label))}">
+                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}${dirty ? ' is-dirty' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}"${tabStates.length ? ' aria-label="' + escHtml(`${label} (${tabStates.join(', ')})`) + '"' : ''} data-explorer-tab="${escHtml(tab.id)}"${isPreview ? '' : ' draggable="true"'} title="${escHtml(`${dirty ? '● ' : ''}${gitLabel ? `${gitLabel} ` : ''}${tab.path || label}`)}">
                     <button type="button" class="explorer-tab-main" data-explorer-tab-open="${escHtml(tab.id)}">
                         ${icon}
                         <span class="explorer-tab-name">${escHtml(label)}</span>
+                        ${gitBadge}
                     </button>
                     ${closeButton}
                 </div>
@@ -4532,6 +5399,9 @@
         }
         if (preview.fontSize) {
             pinnedTab.fontSize = preview.fontSize;
+        }
+        if (preview.lineWrap) {
+            pinnedTab.lineWrap = { ...preview.lineWrap };
         }
         if (preview.preferredMode) {
             pinnedTab.preferredMode = preview.preferredMode;
@@ -4845,8 +5715,10 @@
     /* Reduce a tab's live view snapshot to the persisted shape (OD-5, amended
        per user feedback to include zoom): view mode, the primary panel's
        scroll as a fraction of scroll height (OD-4), the content-identity hash
-       the restore-side skip rule compares, and the tab's editor font size
-       (omitted at the default so unzoomed tabs persist nothing). */
+       the restore-side skip rule compares, the tab's editor font size
+       (omitted at the default so unzoomed tabs persist nothing), and its
+       source/preview/diff line-wrap opt-outs (wrapping defaults on, so only an
+       explicit off persists — same reason). */
     function explorerPersistableTabView(tab) {
         if (!tab) {
             return null;
@@ -4874,6 +5746,15 @@
         if (fontSize && fontSize !== EXPLORER_EDITOR_FONT_DEFAULT) {
             record.font_size = fontSize;
         }
+        if (tab.lineWrap && tab.lineWrap.source === false) {
+            record.wrap_source = false;
+        }
+        if (tab.lineWrap && tab.lineWrap.preview === false) {
+            record.wrap_preview = false;
+        }
+        if (tab.lineWrap && tab.lineWrap.diff === false) {
+            record.wrap_diff = false;
+        }
         if (tab.collapsedLines instanceof Set && tab.collapsedLines.size) {
             record.folds = Array.from(tab.collapsedLines)
                 .filter(line => Number.isInteger(line) && line > 0)
@@ -4893,6 +5774,18 @@
             return 0;
         }
         return clampExplorerEditorFontSize(fontSize);
+    }
+
+    /* Per-tab line-wrap flags from one persisted tab view record. Wrapping is
+       on by default, so only an explicit `false` turns it off — which also
+       means tabs saved before wrapping existed restore wrapped. */
+    function explorerPersistedTabLineWrap(raw) {
+        const view = raw && typeof raw === 'object' ? raw : {};
+        return {
+            source: view.wrap_source !== false,
+            preview: view.wrap_preview !== false,
+            diff: view.wrap_diff !== false,
+        };
     }
 
     function explorerPersistedMarkdownFolds(raw) {
@@ -5036,6 +5929,7 @@
         if (previewFont) {
             previewTab.fontSize = previewFont;
         }
+        previewTab.lineWrap = explorerPersistedTabLineWrap(rawPreviewView);
         previewTab.collapsedLines = explorerPersistedMarkdownFolds(rawPreviewView);
         previewTab.collapsedIdentity = explorerPersistedMarkdownFoldIdentity(rawPreviewView);
         const savedPreviewPath = explorerNormalizeTabPath(
@@ -5094,6 +5988,7 @@
             if (fontSize) {
                 record.fontSize = fontSize;
             }
+            record.lineWrap = explorerPersistedTabLineWrap(rawViews[key]);
             record.collapsedLines = explorerPersistedMarkdownFolds(rawViews[key]);
             record.collapsedIdentity = explorerPersistedMarkdownFoldIdentity(rawViews[key]);
             pane._explorerTabs.push(record);
@@ -5228,6 +6123,7 @@
             return false;
         }
         const assignedTab = explorerAssignOpenTab(pane, data.path || '', { pinned, tab });
+        assignedTab.git = data.git || null;
         pane._explorerRenderedTabId = assignedTab.id;
 
         const path = data.path || '';
@@ -5361,6 +6257,7 @@
                         <span class="explorer-zoom-value" data-explorer-zoom-value="${index}"></span>
                         <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">+</button>
                     </div>
+                    ${explorerLineWrapControlHtml(index, initialFileView)}
                     ${hasPreview ? `<button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Markdown appearance" aria-label="Markdown preview appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>` : ''}
                     ${explorerEditorControlsHtml(index)}
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
@@ -5412,6 +6309,7 @@
                 }
             });
         }
+        wireExplorerLineWrapControl(index);
 
         const downloadButton = list.querySelector(`[data-explorer-download="${index}"]`);
         if (downloadButton) {
@@ -5487,6 +6385,13 @@
         pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
         pane._explorerGit = data.git || null;
         pane._explorerGitContext = data.git_context || null;
+        const renderedTab = explorerFindTab(
+            pane,
+            pane._explorerRenderedTabId || pane._explorerActiveTabId
+        );
+        if (renderedTab) {
+            renderedTab.git = data.git || null;
+        }
         pane._explorerDiffLoaded = false;
         pane._explorerDiffCacheKey = '';
         pane._explorerDiffContent = '';
@@ -5531,6 +6436,7 @@
         refreshExplorerEditControls(index);
         applyExplorerSearch(index);
         restoreExplorerFileScroll(index, scrollState);
+        renderExplorerTabStrip(index);
         return true;
     }
 
@@ -5583,6 +6489,7 @@
                     <div class="explorer-editor-tabs" role="tablist" aria-label="File view">
                         <button type="button" class="explorer-editor-tab" data-explorer-file-view="diff" data-explorer-diff-toggle="${index}" role="tab" aria-selected="true" aria-pressed="true">Diff</button>
                     </div>
+                    ${explorerLineWrapControlHtml(index, 'diff')}
                     <div class="explorer-editor-search" data-explorer-search="${index}">
                         <input
                             type="search"
@@ -5612,6 +6519,7 @@
                 }
             });
         });
+        wireExplorerLineWrapControl(index);
         wireExplorerSearchControls(index);
         applyExplorerEditorFontSize(index);
         loadExplorerDiff(index);
@@ -5749,6 +6657,7 @@
                 throw new Error(data.error || 'Failed to load directory');
             }
 
+            updateExplorerFilesystemRootRevision(index, data.root_revision || '');
             pane._attached = true;
             pane._explorerMode = 'directory';
             pane._explorerFilePath = '';

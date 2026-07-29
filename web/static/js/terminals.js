@@ -527,7 +527,13 @@
     let saveSessionAsResolver = null;
     let closeSessionConfirmResolver = null;
     let genericConfirmResolver = null;
+    let genericConfirmOwner = null;
     const MAX_SPLIT_TERMINALS = Math.min(16, Number(MAX_SESSIONS || 16));
+
+    function isSessionModeSwitchPending(sessionId) {
+        return pendingModeSwitchSessionIds.has(sessionId);
+    }
+
     const MIN_SPLIT_COLS = 8;
     /* A stacked (horizontal) split must leave each half with at least this many
        rows *after* its own header is subtracted, so this floor — not the column
@@ -565,26 +571,10 @@
         return terminal?._paneType === 'browser';
     }
 
-    function getBrowserSessionUrl(session) {
-        const rawUrl = String(session?.initial_command || '').trim();
-        if (!rawUrl) {
-            return 'http://127.0.0.1:3000';
-        }
-        return rawUrl.includes('://') ? rawUrl : `http://${rawUrl}`;
-    }
-
-    function normalizeBrowserUrlInput(value) {
-        const rawValue = String(value || '').trim();
-        if (!rawValue) {
-            throw new Error('Enter a browser URL.');
-        }
-        const candidate = rawValue.includes('://') ? rawValue : `http://${rawValue}`;
-        const parsed = new URL(candidate);
-        if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.host) {
-            throw new Error('Browser panes only support http:// and https:// URLs.');
-        }
-        return parsed.href;
-    }
+    /* Browser-pane URL/tab helpers live in browser-pane.js (loaded first):
+       getBrowserSessionUrl, normalizeBrowserUrlInput, renderBrowserSurface,
+       browserSurfaceHtml, wireBrowserOnlyControls, navigateBrowserPane,
+       reloadBrowserPane, openBrowserPaneExternally, browserSerializeTabs. */
 
     function getSessionApiPath(groupId = activeGroupId) {
         return groupId
@@ -1002,6 +992,7 @@
             return;
         }
 
+        (cached.sessionIds || []).forEach(cancelExplorerFilesystemUiForSession);
         clearFitTimers(cached.terminals || []);
         disconnectObservers(cached.resizeObservers || []);
         if (socket) {
@@ -1020,6 +1011,28 @@
         cachedGroupViews.delete(groupId);
     }
 
+    /* Tell the backend which group this window has in front, so the workspace
+       *autosave timer* can capture it — the timer has no window to ask, and
+       without it only an explicit Save Workspace could record where to reopen.
+       Fire-and-forget and change-only: a group switch is a user action, never a
+       poll. A failure just leaves the restore with no group preference. */
+    let reportedActiveGroupId = '';
+
+    function reportActiveSessionGroup(groupId) {
+        const normalized = String(groupId || '');
+        if (!normalized || normalized === reportedActiveGroupId) {
+            return;
+        }
+        reportedActiveGroupId = normalized;
+        fetch('/api/session-groups/active', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ group_id: normalized })
+        }).catch(() => {
+            reportedActiveGroupId = '';
+        });
+    }
+
     function syncLocationToGroup(groupId) {
         const url = new URL(window.location.href);
         if (groupId) {
@@ -1028,6 +1041,7 @@
             url.searchParams.delete('group');
         }
         window.history.replaceState({}, '', url);
+        reportActiveSessionGroup(groupId);
     }
 
     const TAB_COLOUR_PALETTE = [
@@ -1328,18 +1342,28 @@
         if (genericConfirmResolver) {
             const resolver = genericConfirmResolver;
             genericConfirmResolver = null;
+            genericConfirmOwner = null;
             resolver(result);
         }
     }
 
+    function closeGenericConfirmModalForOwner(owner, result = false) {
+        if (!owner || genericConfirmOwner !== owner) {
+            return false;
+        }
+        closeGenericConfirmModal(result);
+        return true;
+    }
+
     /* Reusable in-page confirm shell for irreversible actions (WebView2 blocks
        window.confirm). Resolves true on accept, false on cancel/dismiss. */
-    function openGenericConfirmModal({ title = 'Are you sure?', copy = '', note = '', confirmLabel = 'Confirm', danger = false } = {}) {
+    function openGenericConfirmModal({ title = 'Are you sure?', copy = '', note = '', confirmLabel = 'Confirm', danger = false, owner = null } = {}) {
         const modal = document.getElementById('genericConfirmModal');
         if (!modal) {
             return Promise.resolve(false);
         }
         closeGenericConfirmModal(false);
+        genericConfirmOwner = owner;
         document.getElementById('genericConfirmTitle').textContent = title;
         document.getElementById('genericConfirmCopy').textContent = copy;
         const noteEl = document.getElementById('genericConfirmNote');
@@ -1409,9 +1433,12 @@
         }
 
         Array.from({ length: terminalCount }, (_, index) => terminalConfigs[index] || {}).forEach((terminal, index) => {
-            const startupMode = terminal?.startup_mode === 'explorer'
-                ? 'explorer'
-                : (terminal?.initial_command_mode === 'agent' || terminal?.startup_mode === 'agent' ? 'agent' : 'terminal');
+            const startupMode = resolvePaneStartupMode(terminal);
+            const {
+                use_wsl: resolvedUseWsl,
+                use_powershell: resolvedUsePowershell,
+                ...paneLaunchFields
+            } = buildPaneLaunchFields(terminal, startupMode);
             const resolvedDirectory = buildLaunchDirectory(
                 configuredDefaultDir,
                 terminal?.directory,
@@ -1420,25 +1447,7 @@
             const common = {
                 title: terminal?.title || `Terminal ${index + 1}`,
                 directory: resolvedDirectory,
-                initial_command: startupMode === 'explorer' ? null : (terminal?.initial_command || null),
-                initial_command_mode: startupMode === 'explorer'
-                    ? 'explorer'
-                    : (startupMode === 'agent' ? 'agent' : 'command'),
-                agent_selection: startupMode === 'agent' ? (terminal?.agent_selection || '') : '',
-                custom_agent: startupMode === 'agent' ? (terminal?.custom_agent || '') : '',
-                agent_auto_mode: startupMode === 'agent' && Boolean(terminal?.agent_auto_mode),
-                explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_tree_open) : false,
-                explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_git_open) : false,
-                explorer_search_open: startupMode === 'explorer' ? Boolean(terminal?.explorer_search_open) : false,
-                explorer_open_tabs: startupMode === 'explorer' && Array.isArray(terminal?.explorer_open_tabs) ? terminal.explorer_open_tabs : [],
-                explorer_active_tab: startupMode === 'explorer' ? (terminal?.explorer_active_tab || '') : '',
-                explorer_tab_views: startupMode === 'explorer' && terminal?.explorer_tab_views && typeof terminal.explorer_tab_views === 'object'
-                    ? terminal.explorer_tab_views
-                    : {},
-                explorer_md_preset: startupMode === 'explorer' ? (terminal?.explorer_md_preset || '') : '',
-                explorer_md_font: startupMode === 'explorer' ? (terminal?.explorer_md_font || '') : '',
-                explorer_theme: startupMode === 'explorer' ? (terminal?.explorer_theme || 'dark') : '',
-                startup_mode: startupMode
+                ...paneLaunchFields
             };
 
             if (connectionMode === 'ssh') {
@@ -1456,8 +1465,8 @@
                 ...common,
                 distribution: terminal?.distribution || wslConfig.distribution || '',
                 username: wslConfig.username || '',
-                use_wsl: startupMode === 'explorer' ? false : Boolean(terminal?.use_wsl),
-                use_powershell: startupMode === 'explorer' ? false : Boolean(terminal?.use_powershell)
+                use_wsl: resolvedUseWsl,
+                use_powershell: resolvedUsePowershell
             });
         });
 
@@ -1753,6 +1762,9 @@
             ? explorerSerializeTabs(terminal)
             : { open_tabs: [], active_tab: '', tab_views: {} };
         const mdAppearance = startupMode === 'explorer' ? explorerMarkdownAppearance() : null;
+        const browserTabs = startupMode === 'browser'
+            ? browserSerializeTabs(terminal, session)
+            : { tabs: [], active_tab: 0 };
         /* Persist the pane's live light/dark explorer theme so a saved session
            relaunches with the same appearance (its localStorage override is
            keyed by session_id and won't survive new session ids). */
@@ -1784,6 +1796,11 @@
             explorer_md_preset: mdAppearance ? mdAppearance.preset : '',
             explorer_md_font: mdAppearance ? mdAppearance.font : '',
             explorer_theme: explorerTheme,
+            /* Save Workspace captures the pane's whole live tab strip, not just
+               the URL it launched with, so a saved browser pane reopens every
+               tab that was on screen with the same one selected. */
+            browser_tabs: browserTabs.tabs,
+            browser_active_tab: browserTabs.active_tab,
             distribution: connectionMode === 'wsl' ? (session.distribution || '') : '',
             use_wsl: connectionMode === 'wsl' ? Boolean(session.use_wsl) : false,
             use_powershell: connectionMode === 'wsl' ? Boolean(session.use_powershell) : false
@@ -1997,10 +2014,16 @@
         }
 
         try {
+            const nativeZoomFactor = await getNativeSessionZoomFactor();
             const response = await fetch('/api/runtime-state/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({})
+                // Name the group this window is on, so the restore reopens here;
+                // desktop mode also carries the session window's current zoom.
+                body: JSON.stringify({
+                    active_group_id: activeGroupId,
+                    native_zoom_factor: nativeZoomFactor
+                })
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
@@ -3885,24 +3908,6 @@
         return false;
     }
 
-    function reloadBrowserPane(index) {
-        const frame = document.getElementById(`browser-frame-${index}`);
-        if (!frame) {
-            return false;
-        }
-        frame.src = getBrowserSessionUrl(terminals[index]?._session);
-        return true;
-    }
-
-    function openBrowserPaneExternally(index) {
-        const url = getBrowserSessionUrl(terminals[index]?._session);
-        if (!url || url === 'about:blank') {
-            return false;
-        }
-        window.open(url, '_blank', 'noopener');
-        return true;
-    }
-
     async function clearTerminalDisplay(index) {
         const terminal = terminals[index];
         const sessionId = sessionIds[index];
@@ -4067,6 +4072,8 @@
     ───────────────────────────────────────────── */
     function teardownCurrentGrid() {
         _stopAllVoice();
+        resetFocusedTerminal();
+        sessionIds.forEach(cancelExplorerFilesystemUiForSession);
         // Leave all active SocketIO rooms so the backend clears
         // client_joined_sessions — buffer will replay on re-join.
         if (socket) {
@@ -4089,7 +4096,6 @@
         terminals  = [];
         sessionIds = [];
         gridBuilt  = false;
-        resetFocusedTerminal();
         visibleGroupId = '';
     }
 
@@ -4108,7 +4114,10 @@
             };
         }
         if (isBrowserSession(session)) {
-            return { _session: session, _paneType: 'browser', _attached: false };
+            return browserEnsureTabState(
+                { _session: session, _paneType: 'browser', _attached: false },
+                session
+            );
         }
         return makeTerminal();
     }
@@ -4412,21 +4421,7 @@
                 </div>
                 <div class="terminal-wrapper" id="tw-${i}">
                     <div class="terminal-surface">
-                        ${isBrowser ? `
-                            <div class="browser-surface" id="browser-${i}">
-                                <div class="browser-bar">
-                                    <input class="browser-url-input" id="browser-url-${i}" data-browser-url="${i}" type="url" value="${escHtml(getBrowserSessionUrl(session))}" title="${escHtml(getBrowserSessionUrl(session))}" aria-label="Browser URL">
-                                    <button type="button" class="browser-open-btn" id="browser-open-${i}" data-browser-open="${i}" title="Open this URL in an external browser tab">Open</button>
-                                </div>
-                                <iframe
-                                    class="browser-frame"
-                                    id="browser-frame-${i}"
-                                    title="${escHtml(session.title || `Browser ${i + 1}`)}"
-                                    src="${escHtml(getBrowserSessionUrl(session))}"
-                                    sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
-                                ></iframe>
-                            </div>
-                        ` : (isExplorer ? `
+                        ${isBrowser ? browserSurfaceHtml(i, session) : (isExplorer ? `
                             <div class="explorer-surface" id="explorer-${i}">
                                 <div class="explorer-bar">
                                      <button type="button" class="explorer-refresh" id="explorer-refresh-${i}" data-explorer-refresh="${i}" title="Refresh explorer (F5)" aria-label="Refresh explorer">${TERMINAL_REFRESH_ICON}</button>
@@ -4469,27 +4464,9 @@
     function wirePaneControls(card, i) {
         wireCardDragAndDrop(card, card.querySelector('.terminal-header'));
         wireCardButton(card, `[data-terminal-refresh="${i}"]`, () => refreshTerminalDisplay(i));
-        wireCardButton(card, `[data-browser-open="${i}"]`, () => openBrowserPaneExternally(i));
-        const browserUrlInput = card.querySelector(`[data-browser-url="${i}"]`);
-        if (browserUrlInput) {
-            browserUrlInput.addEventListener('keydown', event => {
-                if (event.key !== 'Enter') {
-                    return;
-                }
-                event.preventDefault();
-                event.stopPropagation();
-                navigateBrowserPane(i, browserUrlInput.value);
-            });
-            browserUrlInput.addEventListener('blur', () => {
-                navigateBrowserPane(i, browserUrlInput.value);
-            });
-        }
-        const browserFrame = card.querySelector(`#browser-frame-${i}`);
-        if (browserFrame) {
-            browserFrame.addEventListener('load', () => {
-                document.getElementById(`ph-${i}`)?.remove();
-            });
-        }
+        /* Browser panes (URL bar, external-open, tab strip, frame hooks) are
+           wired as one surface by browser-pane.js; a no-op on other panes. */
+        wireBrowserOnlyControls(card, i);
         wireCardButton(card, `[data-session-browser-toggle="${i}"]`, () => switchSessionBrowserMode(i));
         wireCardButton(card, `[data-session-mode-toggle="${i}"]`, () => switchSessionPaneMode(i));
         wireSplitButtons(card, i);
@@ -5016,68 +4993,6 @@
         return button;
     }
 
-    function renderBrowserSurface(index, session) {
-        const url = getBrowserSessionUrl(session);
-        return `
-            <div class="terminal-surface">
-                <div class="browser-surface" id="browser-${index}">
-                    <div class="browser-bar">
-                        <input class="browser-url-input" id="browser-url-${index}" data-browser-url="${index}" type="url" value="${escHtml(url)}" title="${escHtml(url)}" aria-label="Browser URL">
-                        <button type="button" class="browser-open-btn" id="browser-open-${index}" data-browser-open="${index}" title="Open this URL in an external browser tab">Open</button>
-                    </div>
-                    <iframe
-                        class="browser-frame"
-                        id="browser-frame-${index}"
-                        title="${escHtml(session.title || `Browser ${index + 1}`)}"
-                        src="${escHtml(url)}"
-                        sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
-                    ></iframe>
-                </div>
-            </div>
-            <div class="placeholder" id="ph-${index}">
-                <div class="spinner"></div>
-                <span style="font-size:.78rem">Loading browser...</span>
-            </div>
-        `;
-    }
-
-    function wireBrowserOnlyControls(card, index) {
-        const browserOpenButton = card.querySelector(`[data-browser-open="${index}"]`);
-        if (browserOpenButton && !browserOpenButton.dataset.bound) {
-            browserOpenButton.dataset.bound = 'true';
-            stopHeaderButtonDrag(browserOpenButton);
-            browserOpenButton.addEventListener('click', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                openBrowserPaneExternally(index);
-            });
-        }
-
-        const browserUrlInput = card.querySelector(`[data-browser-url="${index}"]`);
-        if (browserUrlInput && !browserUrlInput.dataset.bound) {
-            browserUrlInput.dataset.bound = 'true';
-            browserUrlInput.addEventListener('keydown', event => {
-                if (event.key !== 'Enter') {
-                    return;
-                }
-                event.preventDefault();
-                event.stopPropagation();
-                navigateBrowserPane(index, browserUrlInput.value);
-            });
-            browserUrlInput.addEventListener('blur', () => {
-                navigateBrowserPane(index, browserUrlInput.value);
-            });
-        }
-
-        const browserFrame = card.querySelector(`#browser-frame-${index}`);
-        if (browserFrame && !browserFrame.dataset.bound) {
-            browserFrame.dataset.bound = 'true';
-            browserFrame.addEventListener('load', () => {
-                document.getElementById(`ph-${index}`)?.remove();
-            });
-        }
-    }
-
     function wireExplorerOnlyControls(card, index) {
         const explorerThemeButton = card.querySelector(`[data-explorer-theme-toggle="${index}"]`);
         if (explorerThemeButton && !explorerThemeButton.dataset.bound) {
@@ -5376,7 +5291,10 @@
             socket.emit('leave_session', { session_id: sessionIds[index] });
         }
 
-        terminals[index] = { _session: session, _paneType: 'browser', _attached: false };
+        terminals[index] = browserEnsureTabState(
+            { _session: session, _paneType: 'browser', _attached: false },
+            session
+        );
         sessionIds[index] = session.session_id;
         setSessionRoute(session.session_id, activeGroupId, index);
 
@@ -5533,6 +5451,7 @@
         if (!sessionId || !terminal?._session) {
             return;
         }
+        browserCancelPendingPersist(sessionId);
 
         const switchingToTerminal = isBrowserSession(terminal._session);
         const targetMode = switchingToTerminal ? 'terminal' : 'browser';
@@ -5567,71 +5486,6 @@
             updateBrowserModeToggleButton(button, switchingToTerminal);
         } finally {
             pendingModeSwitchSessionIds.delete(sessionId);
-        }
-    }
-
-    async function navigateBrowserPane(index, value) {
-        const terminal = terminals[index];
-        const sessionId = sessionIds[index];
-        const input = document.getElementById(`browser-url-${index}`);
-        const frame = document.getElementById(`browser-frame-${index}`);
-        if (!terminal?._session || !sessionId || !isBrowserSession(terminal._session)) {
-            return false;
-        }
-
-        let nextUrl;
-        try {
-            nextUrl = normalizeBrowserUrlInput(value);
-        } catch (error) {
-            if (input) {
-                input.value = getBrowserSessionUrl(terminal._session);
-            }
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Browser URL rejected: ${error.message}`;
-            }
-            return false;
-        }
-
-        if (nextUrl === getBrowserSessionUrl(terminal._session)) {
-            if (input) {
-                input.value = nextUrl;
-                input.title = nextUrl;
-            }
-            return true;
-        }
-
-        try {
-            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/mode`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ startup_mode: 'browser', url: nextUrl })
-            });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) {
-                throw new Error(data.error || `Browser navigation failed with status ${response.status}`);
-            }
-            terminal._session = data;
-            if (input) {
-                input.value = getBrowserSessionUrl(data);
-                input.title = getBrowserSessionUrl(data);
-            }
-            if (frame) {
-                frame.src = getBrowserSessionUrl(data);
-            }
-            setStatus(index, data.status);
-            return true;
-        } catch (error) {
-            console.error('[GridVibe Sessions] navigateBrowserPane failed:', error);
-            if (input) {
-                input.value = getBrowserSessionUrl(terminal._session);
-                input.title = getBrowserSessionUrl(terminal._session);
-            }
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Browser navigation failed: ${error.message}`;
-            }
-            return false;
         }
     }
 
@@ -5678,10 +5532,7 @@
                     explorer_preview_view: previewActive ? (pane._explorerLastFileView || '') : '',
                 };
             } else if (isBrowserSession(pane._session)) {
-                stateBySessionId[sessionId] = {
-                    type: 'browser',
-                    browser_url: getBrowserSessionUrl(pane._session),
-                };
+                stateBySessionId[sessionId] = browserCaptureCloseSnapshot(pane);
             }
         });
         return stateBySessionId;
@@ -5729,6 +5580,12 @@
     }
 
     async function closeTerminalPane(index) {
+        const explorerSessionId = sessionIds[index];
+        if (hasActiveExplorerFilesystemOperation(index)) {
+            showTerminalToast('A copy or delete is finishing. Try closing this pane again shortly.', 'error');
+            return;
+        }
+        cancelExplorerFilesystemUiForSession(explorerSessionId);
         // Closing a pane tears down its explorer viewer — confirm any dirty edit.
         if (!(await confirmDiscardExplorerEdit(index, 'Closing this pane'))) {
             return;
@@ -5747,6 +5604,7 @@
             }
             return;
         }
+        browserCancelPendingPersist(plan.sessionId);
 
         const button = document.getElementById(`tclose-${index}`);
         if (button) {
@@ -6425,6 +6283,8 @@
                         entry.explorer_tab_views = snapshot.explorer_tab_views;
                     } else if (snapshot.type === 'browser') {
                         entry.initial_command = snapshot.browser_url;
+                        entry.browser_tabs = snapshot.browser_tabs;
+                        entry.browser_active_tab = snapshot.browser_active_tab;
                     }
                 });
             }
@@ -6857,6 +6717,11 @@
         if (!groupId || groupId === activeGroupId) {
             return;
         }
+        if (hasActiveExplorerFilesystemOperationForSessions(sessionIds)) {
+            showTerminalToast('A copy or delete is finishing. Try switching sessions again shortly.', 'error');
+            return;
+        }
+        sessionIds.forEach(cancelExplorerFilesystemUiForSession);
         // Switching sessions rebuilds the grid and discards the visible panes'
         // explorer editors — confirm any unsaved changes first.
         if (!(await confirmDiscardAllExplorerEdits('Switching sessions'))) {
@@ -6950,6 +6815,13 @@
         if (!groupId) {
             return;
         }
+        const cachedClosingIds = cachedGroupViews.get(groupId)?.sessionIds || [];
+        const closingSessionIds = groupId === visibleGroupId ? sessionIds : cachedClosingIds;
+        if (hasActiveExplorerFilesystemOperationForSessions(closingSessionIds)) {
+            showTerminalToast('A copy or delete is finishing. Try closing this session again shortly.', 'error');
+            return;
+        }
+        closingSessionIds.forEach(cancelExplorerFilesystemUiForSession);
 
         // Closing the visible group tears down its explorer editors; confirm
         // unsaved changes before the live-terminal close prompt.
@@ -6960,6 +6832,7 @@
         if (!(await confirmCloseSessionGroup(groupId))) {
             return;
         }
+        closingSessionIds.forEach(browserCancelPendingPersist);
 
         try {
             const closingGroupId = groupId;
