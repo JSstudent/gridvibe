@@ -988,6 +988,44 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("browser_tabs: browserTabs.tabs", html)
         self.assertIn("browser_active_tab: browserTabs.active_tab", html)
 
+    def test_browser_tab_persist_is_cancelled_and_revalidated_before_post(self):
+        """F1 — a stale debounce must not switch a terminal back to browser mode."""
+        browser_response = self.client.get("/static/js/browser-pane.js")
+        terminals_response = self.client.get("/static/js/terminals.js")
+        browser_js = browser_response.get_data(as_text=True)
+        terminals_js = terminals_response.get_data(as_text=True)
+        browser_response.close()
+        terminals_response.close()
+
+        self.assertIn("function browserCancelPendingPersist(sessionId)", browser_js)
+        persist_start = browser_js.index("const push = async () => {")
+        persist_end = browser_js.index("const snapshot = browserSerializeTabs(pane);", persist_start)
+        persist_guard = browser_js[persist_start:persist_end]
+        self.assertIn("const currentIndex = sessionIds.indexOf(sessionId);", persist_guard)
+        self.assertIn("terminals[currentIndex] !== pane", persist_guard)
+        self.assertIn("!isBrowserSession(terminals[currentIndex]?._session)", persist_guard)
+        self.assertIn("isSessionModeSwitchPending(sessionId)", persist_guard)
+
+        switch_start = terminals_js.index("async function switchSessionBrowserMode(index)")
+        switch_end = terminals_js.index("function captureSurvivingPaneClientState", switch_start)
+        switch_body = terminals_js[switch_start:switch_end]
+        self.assertLess(
+            switch_body.index("browserCancelPendingPersist(sessionId);"),
+            switch_body.index("pendingModeSwitchSessionIds.add(sessionId);"),
+        )
+        close_start = terminals_js.index("async function closeTerminalPane(index)")
+        close_end = terminals_js.index("async function splitTerminalPane(index", close_start)
+        self.assertIn(
+            "browserCancelPendingPersist(plan.sessionId);",
+            terminals_js[close_start:close_end],
+        )
+        group_start = terminals_js.index("async function closeSessionGroup(")
+        group_end = terminals_js.index("async function closeCurrentSession()", group_start)
+        self.assertIn(
+            "closingSessionIds.forEach(browserCancelPendingPersist);",
+            terminals_js[group_start:group_end],
+        )
+
     def test_browser_pane_new_tab_never_duplicates_the_active_tab(self):
         """A '+' that copied the active URL made a pane showing GridVibe
         re-embed its own workspace, one level deeper on every render."""
@@ -1552,6 +1590,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         # `ignored` flag is wired end-to-end rather than dead (guardrail 5).
         self.assertIn("data-explorer-repo-search-ignored", html)
         self.assertIn("if (state.ignored) params.set('ignored', '1');", html)
+        self.assertIn("if (truncated.output)", html)
+        self.assertIn("stopped at the output limit", html)
 
     def test_terminals_page_explorer_uses_tabbed_file_viewer(self):
         """ISSUE-2026-014: main pane is a persistent tabbed read-only viewer."""
@@ -4254,6 +4294,58 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(updated.browser_tabs, [])
         self.assertEqual(updated.browser_active_tab, 0)
 
+    def test_stale_browser_tab_post_cannot_reenter_browser_mode(self):
+        """F1 — only an explicit mode switch may move a terminal into browser mode."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:5050/",
+            initial_command_mode="browser",
+            browser_tabs=["http://127.0.0.1:5050/"],
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            terminal_response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "terminal"},
+            )
+        stale_response = self.client.post(
+            f"/api/sessions/{session.session_id}/mode",
+            json={
+                "startup_mode": "browser",
+                "tabs": ["http://127.0.0.1:3000"],
+                "active_tab": 0,
+            },
+        )
+
+        self.assertEqual(terminal_response.status_code, 200)
+        self.assertEqual(stale_response.status_code, 409)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertEqual(updated.browser_tabs, [])
+
+        with patch.object(api, "_close_ssh_connection"):
+            explicit_response = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={"startup_mode": "browser", "url": "http://127.0.0.1:3000"},
+            )
+        self.assertEqual(explicit_response.status_code, 200)
+        self.assertEqual(
+            api.session_manager.get_session(session.session_id).startup_mode,
+            "browser",
+        )
+
     def test_normalize_startup_mode_allows_browser_only_for_local_repo(self):
         self.assertEqual(api._normalize_startup_mode("browser", "wsl"), "browser")
         self.assertEqual(api._normalize_startup_mode("browser", "ssh"), "terminal")
@@ -4972,7 +5064,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["total_files"], 1)
         self.assertEqual(payload["total_matches"], 2)
         self.assertEqual(
-            payload["truncated"], {"files": False, "matches": False, "deadline": False}
+            payload["truncated"],
+            {"files": False, "matches": False, "deadline": False, "output": False},
         )
         entry = payload["files"][0]
         self.assertEqual(entry["path"], "notes.txt")

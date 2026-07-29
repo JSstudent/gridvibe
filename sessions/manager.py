@@ -374,6 +374,24 @@ class SessionManager:
 
             return session
 
+    def update_browser_tab_strip(
+        self,
+        session_id: str,
+        *,
+        browser_tabs: List[str],
+        browser_active_tab: int,
+        initial_command: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically update tabs only while the session is still a browser pane."""
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None or session.startup_mode != "browser":
+                return None
+            session.browser_tabs = browser_tabs
+            session.browser_active_tab = browser_active_tab
+            session.initial_command = initial_command
+            return session.to_dict()
+
     def get_all_sessions(self) -> List[TerminalSession]:
         """Get all sessions."""
         with self.lock:

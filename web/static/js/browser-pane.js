@@ -156,6 +156,15 @@
        The whole strip is pushed to the session so a restart-restore, a
        sibling-pane close rebuild, and Save Workspace all read the same state.
        Debounced because rapid navigation inside a frame fires repeatedly. */
+    function browserCancelPendingPersist(sessionId) {
+        if (!sessionId || !browserPersistTimers.has(sessionId)) {
+            return false;
+        }
+        clearTimeout(browserPersistTimers.get(sessionId));
+        browserPersistTimers.delete(sessionId);
+        return true;
+    }
+
     function browserPersistTabs(index, { immediate = false } = {}) {
         const pane = browserPaneAt(index);
         const sessionId = sessionIds[index];
@@ -171,6 +180,15 @@
 
         const push = async () => {
             browserPersistTimers.delete(sessionId);
+            const currentIndex = sessionIds.indexOf(sessionId);
+            if (
+                currentIndex === -1
+                || terminals[currentIndex] !== pane
+                || !isBrowserSession(terminals[currentIndex]?._session)
+                || isSessionModeSwitchPending(sessionId)
+            ) {
+                return;
+            }
             const snapshot = browserSerializeTabs(pane);
             /* Keep the local session object in step even if the POST fails, so
                a Save Workspace issued right after still sees the live strip. */

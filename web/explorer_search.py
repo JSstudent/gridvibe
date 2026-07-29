@@ -30,6 +30,8 @@ from web.explorer import (
 
 SEARCH_QUERY_MAX_CHARS = 512
 SEARCH_LINE_WINDOW_CHARS = 400
+# Cap primary `git grep` stdout before it reaches either backend's memory.
+SEARCH_GIT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 # Cap on a remote `grep -r` stdout so one command can never stream an
 # unbounded result set back over SSH.
 SEARCH_REMOTE_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -49,6 +51,10 @@ SEARCH_EXCLUDE_DIRS = (
 
 class SearchDeadlineExceeded(Exception):
     """Internal signal: an engine stopped because the search deadline passed."""
+
+
+class SearchOutputTruncated(Exception):
+    """Internal signal: an engine reached its stdout byte cap."""
 
 
 @dataclass(frozen=True)
@@ -229,7 +235,12 @@ def git_grep_matches(
 
     def generate() -> Iterator[RawMatch]:
         try:
-            result = backend.run_git(args, cwd=repo_root, timeout=timeout)
+            result = backend.run_git(
+                args,
+                cwd=repo_root,
+                timeout=timeout,
+                max_output_bytes=SEARCH_GIT_MAX_OUTPUT_BYTES,
+            )
         except (subprocess.TimeoutExpired, TimeoutError) as exc:
             raise SearchDeadlineExceeded() from exc
         if result.returncode not in (0, 1):
@@ -237,11 +248,18 @@ def git_grep_matches(
             raise ExplorerRouteError(
                 _decode_git_output(result.stderr) or "Repository search failed"
             )
-        for repo_path, line_number, line_bytes in parse_git_grep_z(result.stdout):
+        output_truncated = bool(getattr(result, "stdout_truncated", False))
+        stream = result.stdout
+        if output_truncated and stream and not stream.endswith(b"\n"):
+            complete, separator, _partial = stream.rpartition(b"\n")
+            stream = complete + separator
+        for repo_path, line_number, line_bytes in parse_git_grep_z(stream):
             abs_path = backend.repo_abs_path(repo_root, repo_path)
             if not backend.path_inside_root(root_path, abs_path):
                 continue
             yield backend.rel_explorer_path(root_path, abs_path), line_number, line_bytes
+        if output_truncated:
+            raise SearchOutputTruncated()
 
     return generate()
 
@@ -398,7 +416,7 @@ def collect_search_payload(
     files: List[Dict[str, Any]] = []
     index_by_path: Dict[str, Dict[str, Any]] = {}
     total_matches = 0
-    truncated = {"files": False, "matches": False, "deadline": False}
+    truncated = {"files": False, "matches": False, "deadline": False, "output": False}
 
     iterator = iter(raw_matches)
     while True:
@@ -408,6 +426,9 @@ def collect_search_payload(
             break
         except SearchDeadlineExceeded:
             truncated["deadline"] = True
+            break
+        except SearchOutputTruncated:
+            truncated["output"] = True
             break
         if time.monotonic() > deadline:
             truncated["deadline"] = True

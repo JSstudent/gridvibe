@@ -287,6 +287,9 @@
             if (truncated.deadline) {
                 footerParts.push('stopped at the time limit');
             }
+            if (truncated.output) {
+                footerParts.push('stopped at the output limit');
+            }
             footer.textContent = footerParts.join(' · ');
         }
 

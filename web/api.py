@@ -1932,6 +1932,16 @@ def change_session_mode(session_id: str):
                     data.get("active_tab"), browser_tabs
                 )
                 browser_url = browser_tabs[browser_active_tab]
+                browser_snapshot = session_manager.update_browser_tab_strip(
+                    session_id,
+                    browser_tabs=browser_tabs,
+                    browser_active_tab=browser_active_tab,
+                    initial_command=browser_url,
+                )
+                if browser_snapshot is None:
+                    return jsonify({"error": "Browser tab update is stale"}), 409
+                _broadcast_session_status(session_id)
+                return jsonify(browser_snapshot)
             else:
                 browser_url = _normalize_browser_url(
                     data.get("url")

@@ -959,6 +959,7 @@ def _run_git_command(
     cwd: str,
     timeout: Optional[float] = None,
     write: bool = False,
+    max_output_bytes: Optional[int] = None,
 ) -> subprocess.CompletedProcess:
     """Run an explorer Git command with predictable process settings.
 
@@ -972,15 +973,95 @@ def _run_git_command(
         env["GIT_TERMINAL_PROMPT"] = "0"
     else:
         env["GIT_OPTIONAL_LOCKS"] = "0"
-    return subprocess.run(
-        ["git", *args],
+    command = ["git", *args]
+    if max_output_bytes is None:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+
+    output_limit = max(1, int(max_output_bytes))
+    process = subprocess.Popen(
+        command,
         cwd=cwd,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
     )
+    stdout_chunks: List[bytes] = []
+    stderr_chunks: List[bytes] = []
+    stdout_size = 0
+    stdout_truncated = threading.Event()
+
+    def read_stdout() -> None:
+        nonlocal stdout_size
+        assert process.stdout is not None
+        while True:
+            chunk = process.stdout.read(64 * 1024)
+            if not chunk:
+                break
+            remaining = output_limit - stdout_size
+            if remaining > 0:
+                kept = chunk[:remaining]
+                stdout_chunks.append(kept)
+                stdout_size += len(kept)
+            if len(chunk) > max(0, remaining):
+                stdout_truncated.set()
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+
+    def read_stderr() -> None:
+        assert process.stderr is not None
+        while True:
+            chunk = process.stderr.read(64 * 1024)
+            if not chunk:
+                break
+            stderr_chunks.append(chunk)
+
+    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+
+    def close_process_streams() -> None:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        close_process_streams()
+        raise subprocess.TimeoutExpired(
+            command,
+            exc.timeout,
+            output=b"".join(stdout_chunks),
+            stderr=b"".join(stderr_chunks),
+        ) from exc
+
+    stdout_thread.join()
+    stderr_thread.join()
+    close_process_streams()
+    result = subprocess.CompletedProcess(
+        args=command,
+        returncode=0 if stdout_truncated.is_set() else process.returncode,
+        stdout=b"".join(stdout_chunks),
+        stderr=b"".join(stderr_chunks),
+    )
+    result.stdout_truncated = stdout_truncated.is_set()
+    return result
 
 
 def _decode_git_output(raw_output: bytes) -> str:
@@ -1189,7 +1270,13 @@ REMOTE_GIT_READ_TIMEOUT = 2.0
 REMOTE_GIT_WRITE_TIMEOUT = 30.0
 
 
-def _remote_git_shell_command(args: List[str], cwd: str, *, write: bool = False) -> str:
+def _remote_git_shell_command(
+    args: List[str],
+    cwd: str,
+    *,
+    write: bool = False,
+    max_output_bytes: Optional[int] = None,
+) -> str:
     """Build a Git command for a remote POSIX-compatible SSH shell.
 
     Reads run with GIT_OPTIONAL_LOCKS=0; writes run with GIT_TERMINAL_PROMPT=0
@@ -1197,7 +1284,10 @@ def _remote_git_shell_command(args: List[str], cwd: str, *, write: bool = False)
     """
     quoted_args = " ".join(shlex.quote(part) for part in args)
     env_prefix = "GIT_TERMINAL_PROMPT=0" if write else "GIT_OPTIONAL_LOCKS=0"
-    return f"{env_prefix} git -C {shlex.quote(cwd)} {quoted_args}"
+    command = f"{env_prefix} git -C {shlex.quote(cwd)} {quoted_args}"
+    if max_output_bytes is not None:
+        command += f" | head -c {max(1, int(max_output_bytes))}"
+    return command
 
 
 def _run_remote_git_command(
@@ -1207,11 +1297,17 @@ def _run_remote_git_command(
     cwd: str,
     timeout: Optional[float] = None,
     write: bool = False,
+    max_output_bytes: Optional[int] = None,
 ) -> Any:
     """Run a Git command over SSH and return a subprocess-like result."""
     if timeout is None:
         timeout = REMOTE_GIT_WRITE_TIMEOUT if write else REMOTE_GIT_READ_TIMEOUT
-    command = _remote_git_shell_command(args, cwd, write=write)
+    command = _remote_git_shell_command(
+        args,
+        cwd,
+        write=write,
+        max_output_bytes=max_output_bytes,
+    )
     _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
     stdout_data = stdout.read()
     stderr_data = stderr.read()
@@ -1219,12 +1315,16 @@ def _run_remote_git_command(
         stdout_data = stdout_data.encode("utf-8", errors="replace")
     if isinstance(stderr_data, str):
         stderr_data = stderr_data.encode("utf-8", errors="replace")
-    return subprocess.CompletedProcess(
+    result = subprocess.CompletedProcess(
         args=command,
         returncode=stdout.channel.recv_exit_status(),
         stdout=stdout_data,
         stderr=stderr_data,
     )
+    result.stdout_truncated = (
+        max_output_bytes is not None and len(stdout_data) >= max(1, int(max_output_bytes))
+    )
+    return result
 
 
 class _LocalExplorerBackend:
@@ -1249,8 +1349,15 @@ class _LocalExplorerBackend:
         cwd: str,
         timeout: Optional[float] = None,
         write: bool = False,
+        max_output_bytes: Optional[int] = None,
     ) -> subprocess.CompletedProcess:
-        return _run_git_command(args, cwd=cwd, timeout=timeout, write=write)
+        return _run_git_command(
+            args,
+            cwd=cwd,
+            timeout=timeout,
+            write=write,
+            max_output_bytes=max_output_bytes,
+        )
 
     def request_error_types(self) -> Tuple[type, ...]:
         return (OSError,)
@@ -1499,8 +1606,16 @@ class _SftpExplorerBackend:
         cwd: str,
         timeout: Optional[float] = None,
         write: bool = False,
+        max_output_bytes: Optional[int] = None,
     ) -> Any:
-        return _run_remote_git_command(self.client, args, cwd=cwd, timeout=timeout, write=write)
+        return _run_remote_git_command(
+            self.client,
+            args,
+            cwd=cwd,
+            timeout=timeout,
+            write=write,
+            max_output_bytes=max_output_bytes,
+        )
 
     def request_error_types(self) -> Tuple[type, ...]:
         return _sftp_request_error_types()

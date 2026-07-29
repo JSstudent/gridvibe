@@ -529,6 +529,11 @@
     let genericConfirmResolver = null;
     let genericConfirmOwner = null;
     const MAX_SPLIT_TERMINALS = Math.min(16, Number(MAX_SESSIONS || 16));
+
+    function isSessionModeSwitchPending(sessionId) {
+        return pendingModeSwitchSessionIds.has(sessionId);
+    }
+
     const MIN_SPLIT_COLS = 8;
     /* A stacked (horizontal) split must leave each half with at least this many
        rows *after* its own header is subtracted, so this floor — not the column
@@ -5473,6 +5478,7 @@
         if (!sessionId || !terminal?._session) {
             return;
         }
+        browserCancelPendingPersist(sessionId);
 
         const switchingToTerminal = isBrowserSession(terminal._session);
         const targetMode = switchingToTerminal ? 'terminal' : 'browser';
@@ -5625,6 +5631,7 @@
             }
             return;
         }
+        browserCancelPendingPersist(plan.sessionId);
 
         const button = document.getElementById(`tclose-${index}`);
         if (button) {
@@ -6852,6 +6859,7 @@
         if (!(await confirmCloseSessionGroup(groupId))) {
             return;
         }
+        closingSessionIds.forEach(browserCancelPendingPersist);
 
         try {
             const closingGroupId = groupId;
