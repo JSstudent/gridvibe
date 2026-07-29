@@ -606,18 +606,18 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("workspace_layout: workspaceLayout", html)
         self.assertIn("activeWorkspaceLayout = normalized.workspace_layout || null;", html)
         self.assertIn("workspace_layout: config.workspace_layout", html)
-        self.assertIn("initial_command_mode: terminal.startup_mode === 'explorer'", html)
-        self.assertIn("agent_selection: terminal.initial_command_mode === 'agent'", html)
+        self.assertIn("initial_command_mode: resolvedStartupMode === 'explorer'", html)
+        self.assertIn("agent_selection: resolvedStartupMode === 'agent'", html)
         self.assertIn("data-explorer-tree-open=", html)
         self.assertIn("data-explorer-git-open=", html)
         self.assertIn("data-explorer-search-open=", html)
-        self.assertIn("explorer_tree_open: terminal.startup_mode === 'explorer'", html)
-        self.assertIn("explorer_git_open: terminal.startup_mode === 'explorer'", html)
-        self.assertIn("explorer_search_open: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_tree_open: resolvedStartupMode === 'explorer'", html)
+        self.assertIn("explorer_git_open: resolvedStartupMode === 'explorer'", html)
+        self.assertIn("explorer_search_open: resolvedStartupMode === 'explorer'", html)
         self.assertIn('<option value="browser"', html)
         self.assertIn('class="field t-browser-field', html)
         self.assertIn("function normalizeBrowserPaneUrl(value)", html)
-        self.assertIn("terminal.startup_mode === 'browser'", html)
+        self.assertIn("browser_tabs: resolvedStartupMode === 'browser'", html)
         layout_change_start = html.index("container.querySelectorAll('.layout-btn').forEach")
         layout_change_end = html.index("function renderModeFields", layout_change_start)
         layout_change_html = html[layout_change_start:layout_change_end]
@@ -1553,6 +1553,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function setExplorerSearchSidebarOpen(index, open)", html)
         self.assertIn("function renderExplorerSearchPanel(index)", html)
         self.assertIn("function runExplorerRepoSearch(index)", html)
+        self.assertIn("const EXPLORER_REPO_SEARCH_DEBOUNCE_MS = 350;", html)
+        self.assertIn(
+            "function scheduleExplorerRepoSearch(index, { delay = EXPLORER_REPO_SEARCH_DEBOUNCE_MS } = {})",
+            html,
+        )
         self.assertIn("function activateExplorerSearchHit(index, path, line,", html)
         self.assertIn("function focusExplorerRepoSearch(index, seedQuery = '')", html)
         self.assertIn("function findExplorerRepoSearchTargetIndex()", html)
@@ -1917,7 +1922,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("...explorerTabPersistedDiffTarget(previewTab)", html)
         # The saved-session relaunch payload carries the new fields through.
         self.assertIn(
-            "explorer_tab_views: startupMode === 'explorer' && terminal?.explorer_tab_views",
+            "explorer_tab_views: resolvedStartupMode === 'explorer' && terminal?.explorer_tab_views",
             html,
         )
         # Markdown appearance re-applies once per session id (ISSUE-2026-033) so
@@ -2181,7 +2186,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("data-explorer-open-tabs=", html)
         self.assertIn("data-explorer-active-tab=", html)
         self.assertIn("explorer_open_tabs: commandMode === 'explorer'", html)
-        self.assertIn("explorer_open_tabs: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_open_tabs: resolvedStartupMode === 'explorer'", html)
 
     def test_pages_carry_the_active_session_group_through_workspace_restore(self):
         """Both save paths record the front group; the restore reopens on it."""
@@ -2232,10 +2237,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("data-explorer-md-font=", html)
         self.assertIn("data-explorer-theme=", html)
         self.assertIn("explorer_tab_views: commandMode === 'explorer'", html)
-        self.assertIn("explorer_tab_views: terminal.startup_mode === 'explorer'", html)
-        self.assertIn("explorer_md_preset: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_tab_views: resolvedStartupMode === 'explorer'", html)
+        self.assertIn("explorer_md_preset: resolvedStartupMode === 'explorer'", html)
         self.assertIn("explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : ''", html)
-        self.assertIn("explorer_theme: terminal.startup_mode === 'explorer'", html)
+        self.assertIn("explorer_theme: resolvedStartupMode === 'explorer'", html)
 
     def test_terminals_page_explorer_sidebar_supports_tree_and_git_together(self):
         response = self.client.get("/terminals")
@@ -10881,6 +10886,8 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "resolveTheme",
             "buildLaunchDirectory",
             "resolveTerminalDirectory",
+            "resolvePaneStartupMode",
+            "buildPaneLaunchFields",
         )
         for name in shared_helpers:
             with self.subTest(helper=name):
@@ -10892,6 +10899,22 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         for page in (launcher, terminals):
             self.assertIn("function onThemeApplied(", page)
             self.assertIn("initTheme();", page)
+
+    def test_saved_session_launch_fields_use_shared_pane_helpers(self):
+        shared = self.client.get("/static/js/shared.js").get_data(as_text=True)
+        launcher = self.client.get("/static/js/launcher.js").get_data(as_text=True)
+        terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+
+        self.assertIn("function resolvePaneStartupMode(terminal)", shared)
+        self.assertIn("function buildPaneLaunchFields(terminal, startupMode =", shared)
+        for page_name, page in (("launcher", launcher), ("terminals", terminals)):
+            with self.subTest(page=page_name):
+                self.assertIn("const startupMode = resolvePaneStartupMode(terminal);", page)
+                self.assertIn(
+                    "} = buildPaneLaunchFields(terminal, startupMode);",
+                    page,
+                )
+                self.assertNotIn("savedStartupMode", page)
 
     def test_launcher_button_and_dead_display_fixes_locked_in(self):
         """Findings 4.3/4.6 — launch button restores its markup; dead node gone."""
@@ -14222,15 +14245,18 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         ]
         self.assertIn("agent_auto_mode:", collect)
 
-        # 7.b (OD-12 case a): the launch payload rebuilds each session
-        # field-by-field and must carry the toggle. This expansion now lives in
-        # buildSessionsFromConfig, shared by the launch button and workspace
-        # restore, so both build panes identically.
+        # 7.b (OD-12 case a): the shared pane-field builder carries the toggle
+        # into buildSessionsFromConfig, which serves both launch and restore.
         launch = launcher_js[
             launcher_js.index("function buildSessionsFromConfig(config, count)"):
             launcher_js.index("async function launchSessions()")
         ]
-        self.assertIn("agent_auto_mode: terminal.initial_command_mode === 'agent'", launch)
+        self.assertIn("buildPaneLaunchFields(terminal, startupMode)", launch)
+        shared_js = self._static("js/shared.js")
+        self.assertIn(
+            "agent_auto_mode: resolvedStartupMode === 'agent'",
+            shared_js,
+        )
 
         # The help line shows the composed command plus the registry description.
         sync = launcher_js[

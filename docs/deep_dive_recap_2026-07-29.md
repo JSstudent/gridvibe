@@ -1,7 +1,7 @@
 # Deep dive recap — guardrail check-up, 2026-07-29
 
 Date: 2026-07-29
-Status: Review complete — F1 and F2 validated and fixed; F3–F8 remain proposed
+Status: Review complete — F1–F5 validated and fixed; F6–F8 remain proposed
 Scope: every change since the `1.2.0` release tag (`5823ea0`), i.e. the `1.3.0`
 release and the current Unreleased block, audited against the ten Regression
 Guardrails in `CLAUDE.md`. This recap is also the pre-flight check for
@@ -26,6 +26,11 @@ Post-fix verification for F1/F2: `.venv\Scripts\python.exe tests\run_tests.py`
 — **800 tests, 0 failures, 6 skipped**; `.venv\Scripts\python.exe -m ruff
 check .` — clean; `git diff --check` — clean.
 
+Post-fix verification for F3/F4/F5:
+`.venv\Scripts\python.exe tests\run_tests.py` — **802 tests, 0 failures, 6
+skipped**; `.venv\Scripts\python.exe -m ruff check .` — clean; `node --check`
+— clean for all four changed JavaScript files; `git diff --check` — clean.
+
 ---
 
 ## 1. Guardrail scorecard
@@ -34,10 +39,10 @@ check .` — clean; `git diff --check` — clean.
 |---|---|---|
 | 1 | Security (same-origin defaults, host keys, secrets) | **Pass.** Paste/delete/save are POSTs/PUTs under the app-level cross-origin write guard; search/download stay GETs. No new origin, host-key, or secret handling was touched. Pre-existing ISSUE-2026-037 (restore credential exposure, High) remains open — see §4. |
 | 2 | Concurrency (no emit under locks, single-hold check-then-act, lock ordering) | **Pass with one remaining note.** The new claim set (`web/explorer.py:560`) holds its mutex only around set membership and releases before any I/O. No new `socketio.emit` under any shared lock. F1 is fixed; the low-severity check-then-act note in F6 remains. |
-| 3 | Performance (no per-request handshakes, polling, unbounded buffers) | **Mostly pass.** SSH pooling reused everywhere; copies stream in 1 MiB chunks; the only `setInterval` is the pre-existing 15 s socket-down fallback. F2's `git grep` stdout is now bounded; the copy byte-cap gap in F3 remains. |
+| 3 | Performance (no per-request handshakes, polling, unbounded buffers) | **Pass.** SSH pooling reused everywhere; copies stream in 1 MiB chunks and now enforce each file's scanned byte budget while streaming (F3); the only `setInterval` is the pre-existing 15 s socket-down fallback. F2's `git grep` stdout is bounded, and repository search now has its own 350 ms debounce (F5). |
 | 4 | Correctness (target-shell quoting, no `window.confirm`/`alert`, CLI flags beat config) | **Pass.** `build_remote_grep_command` and `_remote_git_shell_command` quote with `shlex.quote` for POSIX; no shell is involved in copy/delete. Zero `window.confirm/prompt/alert` anywhere in `web/static/js`; all new confirmations (delete, line-undo, discard) go through `openGenericConfirmModal`. |
 | 5 | Dead code (everything wired end-to-end) | **Pass.** All five `explorer_search.*` config keys go through `RuntimeConfig` (`web/config.py:210,273`) and are read by `search_limits_from_config()`. The previously dead `ignored=1` parameter got its UI toggle. `DELETE /api/runtime-state` and `clear_workspace` are explicitly labeled multi-workspace skeleton — deliberate, documented, and consumed by tests. |
-| 6 | Architecture / DRY (backend abstraction, own JS modules, pane-kind resolution) | **Pass with one standing debt.** New backend logic landed in the right modules (`explorer_fs.py`, `explorer_search.py`); new frontend surfaces got their own files (`browser-pane.js`, `explorer-fs.js`, `explorer-search.js`); local/SFTP share one policy through the backend `fs_*` primitives. The pane-kind corollary was fixed in *both* saved-session payload builders — but the builders themselves are still two hand-maintained copies (F4). |
+| 6 | Architecture / DRY (backend abstraction, own JS modules, pane-kind resolution) | **Pass.** New backend logic landed in the right modules (`explorer_fs.py`, `explorer_search.py`); new frontend surfaces got their own files (`browser-pane.js`, `explorer-fs.js`, `explorer-search.js`); local/SFTP share one policy through the backend `fs_*` primitives. Pane startup-mode resolution and mode-gated launch fields now live once in `shared.js`, with both saved-session launch paths calling the shared helpers (F4). |
 | 7 | Styling (tokens, stroke-style SVG icons) | **Pass with a cosmetic note.** No hardcoded palette literals were added to `terminals.css` since 1.2.0 (verified by diff). New icons (search magnifier, revert/undo) are stroke-style `currentColor` SVG. A few new controls use text glyphs (F8). |
 | 8 | Interaction (in-page confirm, retry affordance, busy via CSS classes) | **Pass.** Delete and line-undo confirm in-page with danger styling; the filesystem error bar distinguishes **Retry** (only when `mutated: false`) from **Refresh**; busy states toggle `explorer-fs-busy` / `is-busy` classes; search errors have a Retry button. |
 | 9 | Logging (teardown at DEBUG, no ANSI, no high-frequency polling) | **Pass.** `explorer_fs.py` logs quarantine-unavailable at DEBUG and genuine cleanup failures at WARNING; the autosave daemon logs once at startup and only exceptions per tick. |
@@ -47,7 +52,7 @@ check .` — clean; `git diff --check` — clean.
 
 ## 2. New findings
 
-Ordered by severity. F1 and F2 were validated and fixed on 2026-07-29; F3–F8
+Ordered by severity. F1–F5 were validated and fixed on 2026-07-29; F6–F8
 remain proposals.
 
 ### F1 — Stale debounced browser-tab persist can flip a pane back to browser mode — Fixed
@@ -129,7 +134,7 @@ The optional two-character HTTP minimum was not added: the byte cap now protects
 the API independently of client validation, while retaining legitimate
 single-character repository searches.
 
-### F3 — Copy byte-cap is enforced at scan time, not during streaming
+### F3 — Copy byte-cap is enforced at scan time, not during streaming — Fixed
 
 **Severity: Low (cap bypass on a moving file).**
 `paste_explorer_entry_payload` pre-scans the tree and enforces
@@ -141,43 +146,62 @@ log; on Windows even the revision's mtime/size check passes for the *top-level*
 entry only) streams past the cap; a file that grows continuously during the copy
 streams for as long as it grows.
 
-**Proposed solution.** Pass a byte budget into `_copy_file_to_handle`: count
-bytes written; on exceeding `min(scanned_size + slack, EXPLORER_COPY_MAX_BYTES
-remaining)` raise `ExplorerFsEntryChangedError` ("changed during copy") so the
-existing cleanup path removes the reserved destination. One counter and one
-comparison per chunk — no extra I/O. Add a unit test in
-`tests/test_explorer_fs.py` with a fake backend whose `fs_read_chunks` yields
-more than the scanned size.
+**Validation:** valid. The pre-scan bounded only the recorded sizes; the copy
+loop neither counted streamed bytes nor compared the completed byte count with
+the scan.
 
-### F4 — The two saved-session payload builders are still parallel hand-copies
+**Implemented solution:**
+
+1. `_copy_file_to_handle` now treats the scanned file size as a hard streaming
+   budget, counts each chunk before writing it, and raises
+   `ExplorerFsEntryChangedError` if the next chunk would exceed that budget.
+   Because the tree scan already caps the sum of those sizes, the same check
+   preserves the global `EXPLORER_COPY_MAX_BYTES` limit without another I/O
+   pass.
+2. The completed byte count must also equal the scanned size, so a file that
+   shrinks during the copy is rejected instead of producing a partial snapshot.
+3. The existing `ExplorerRouteError` cleanup path removes the exclusively
+   reserved destination and reports `mutated: false`.
+4. Added a regression test in `tests/test_explorer_fs.py` whose patched
+   `fs_read_chunks` yields more than the scanned size; it verifies the
+   `entry_changed` failure and destination cleanup.
+
+### F4 — The two saved-session payload builders are still parallel hand-copies — Fixed
 
 **Severity: Medium as process debt (this exact duplication caused the shipped
 browser-URL-as-command bug).**
-The Unreleased fix taught *both* builders to resolve `browser` — but they remain
-two structurally identical ~60-line field-by-field blocks:
+At validation time, the Unreleased fix had taught *both* builders to resolve
+`browser` — but they remained two structurally identical ~60-line
+field-by-field blocks:
 `buildSavedSessionLaunchPayload()` in `terminals.js:1430` and the launcher's
 builder at `launcher.js:2520`. Every new pane kind or per-pane field must now be
 added in two places (three counting the restore path's shared
 `buildSessionsFromConfig()` helper on the launcher side), and guardrail 6's own
 corollary notes a missed branch degrades silently.
 
-**Proposed solution.** Extract one shared helper into `shared.js` (both pages
-already load it):
+**Validation:** valid. Both blocks independently resolved pane kind and gated
+the same browser, agent, explorer, and local-shell fields. Workspace restore
+reused the launcher block, so divergence there would also affect restored
+presets.
 
-1. `resolvePaneStartupMode(terminal)` — the `startup_mode` /
-   `initial_command_mode` resolution ternary, written once.
-2. `buildPaneLaunchFields(terminal, startupMode)` — the mode-gated common block
-   (initial_command nulling, `browser_tabs`, `agent_*`, `explorer_*`,
-   `use_wsl`/`use_powershell` clearing).
-   Callers keep their genuinely different parts (SSH credentials vs. WSL
-   config, defaults).
-3. Lock it in with an `ExtractedFrontendAssetsTestCase`-style test asserting
-   both call sites use the shared helper (no local `savedStartupMode`
-   re-implementation).
-   This is also a prerequisite-quality cleanup for multi-workspace, whose
-   launcher work touches these builders again.
+**Implemented solution:**
 
-### F5 — Repo-search shares the 160 ms in-file debounce; aborted requests keep running server-side
+1. Added `resolvePaneStartupMode(terminal)` to `shared.js`; it resolves
+   `startup_mode` and `initial_command_mode` once for explorer, browser, agent,
+   and terminal panes.
+2. Added `buildPaneLaunchFields(terminal, startupMode)` to `shared.js`; it owns
+   initial-command mode/nulling, `browser_*`, `agent_*`, `explorer_*`,
+   `startup_mode`, and the mode-gated local shell flags.
+3. Both `buildSavedSessionLaunchPayload()` and `buildSessionsFromConfig()` now
+   call the shared helpers. Their genuine connection-specific differences —
+   SSH credentials, WSL distribution/user, directory defaults, and session
+   count handling — remain local.
+4. Extended `ExtractedFrontendAssetsTestCase` to require the helpers exactly
+   once in `shared.js`, forbid page-local definitions, require both call sites,
+   and reject the old `savedStartupMode` implementation. Existing payload
+   source-contract tests now follow the shared fields.
+
+### F5 — Repo-search shares the 160 ms in-file debounce; aborted requests keep running server-side — Fixed
 
 **Severity: Low (wasted bounded work).**
 `scheduleExplorerRepoSearch` defaults to `EXPLORER_SEARCH_DEBOUNCE_MS = 160`
@@ -187,12 +211,19 @@ repository-wide search costs a subprocess or an SSH round trip; typing a
 aborted client-side but whose `git grep`/walk still runs to completion on the
 backend, each remote one holding an SSH pool connection for up to the deadline.
 
-**Proposed solution.** Give the repo search its own constant (300–400 ms) in
-`explorer-search.js`; keep 160 ms for the in-file find. Optionally have the
-route short-circuit stale requests per session (a monotonically increasing
-`seq` query param remembered per session id; a superseded request returns
-early) — but the debounce alone removes most of the waste and is a two-line
-change.
+**Validation:** valid. The repository scheduler's default referenced
+`EXPLORER_SEARCH_DEBOUNCE_MS` from `explorer-viewer.js`, while aborting the
+browser-side fetch did not cancel repository work already running inside the
+Flask request.
+
+**Implemented solution:** added
+`EXPLORER_REPO_SEARCH_DEBOUNCE_MS = 350` in `explorer-search.js` and made it the
+default for `scheduleExplorerRepoSearch`. The in-file find remains at 160 ms;
+explicit option/scope toggles and seeded shortcut searches retain their
+intentional `delay: 0`. The terminals-page repository-search contract test
+locks in the dedicated constant and scheduler default. No server-side sequence
+state was added: the longer debounce removes the common typing burst without
+introducing new per-session concurrency state.
 
 ### F6 — `/mode` browser branch reads session state outside the manager lock
 
@@ -311,12 +342,10 @@ the plan needs three additions before implementation starts:
    the server-side restore contract with credential redaction should land
    first or together with it.
 
-Also worth doing *before* the multi-workspace branch, because that work touches
-the same files: **F1** (now completed in this pass), **F4** (single shared
-payload builder — the launcher destination control edits exactly this code),
-and the schema-side confirmation that `runtime_state.json` v2 needs no version
-bump for per-workspace `active_group_id`/zoom (it does not — both are already
-slot-scoped).
+The overlapping code prerequisites **F1** and **F4** are now complete before
+the multi-workspace branch. The schema-side confirmation that
+`runtime_state.json` v2 needs no version bump for per-workspace
+`active_group_id`/zoom also still holds — both are already slot-scoped.
 
 ---
 
@@ -326,11 +355,10 @@ slot-scoped).
 |---|---|---|
 | Done | F1 — cancel/guard the debounced browser-tab persist | Completed (frontend guard + atomic backend stale-update rejection + tests) |
 | Done | F2 — cap `git grep` output (remote `head -c`, local incremental read) | Completed (backend cap + truncation UI + tests) |
-| 1 | F4 — extract the shared payload builder into `shared.js` | Medium (move-only + lock-in test) |
-| 2 | F3 — enforce the copy byte budget during streaming | Small |
-| 3 | F5 — dedicated repo-search debounce constant | Trivial |
-| 4 | F6/F7/F8 — opportunistic; fold into the next touch of each file | Trivial each |
-| 5 | Multi-workspace plan deltas from §4 folded into the plan doc | Doc-only |
+| Done | F3 — enforce the copy byte budget during streaming | Completed (scanned-size streaming budget + cleanup regression test) |
+| Done | F4 — extract shared pane launch fields into `shared.js` | Completed (two shared helpers + both callers + lock-in tests) |
+| Done | F5 — dedicated repo-search debounce constant | Completed (350 ms repo default; 160 ms in-file default retained) |
+| 1 | F6/F7/F8 — opportunistic; fold into the next touch of each file | Trivial each |
+| 2 | Multi-workspace plan deltas from §4 folded into the plan doc | Doc-only |
 
-The remaining findings are independent of the multi-workspace branch. F4 is
-the next user-visible/process-debt item recommended before that work.
+The remaining F6/F7/F8 findings are independent of the multi-workspace branch.

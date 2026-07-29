@@ -273,6 +273,32 @@ class ExplorerFilesystemPolicyTestCase(unittest.TestCase):
             )
         self.assertIn("source/linked.txt", str(caught.exception))
 
+    def test_copy_aborts_and_cleans_up_when_file_outgrows_scanned_size(self):
+        source = self.root / "growing.log"
+        source.write_bytes(b"before")
+        source_stat = self.backend.fs_lstat(str(source))
+
+        def growing_chunks(_path, _chunk_size):
+            yield b"before"
+            yield b"-after-scan"
+
+        with patch.object(
+            self.backend, "fs_read_chunks", side_effect=growing_chunks
+        ):
+            with self.assertRaises(explorer_fs.ExplorerFsEntryChangedError) as caught:
+                explorer_fs.paste_explorer_entry_payload(
+                    self.backend,
+                    root_revision=explorer_fs._fs_root_revision(str(self.root)),
+                    source_path=source.name,
+                    source_revision=explorer_fs._fs_revision(source_stat),
+                    destination_directory="",
+                    session_id="growing-copy",
+                )
+
+        self.assertFalse(caught.exception.details["mutated"])
+        self.assertEqual(caught.exception.details["path"], source.name)
+        self.assertFalse((self.root / "growing-Copy.log").exists())
+
     def test_sftp_final_destination_uses_exclusive_create_only(self):
         sftp = MagicMock()
         handle = io.BytesIO()

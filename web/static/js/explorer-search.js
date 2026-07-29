@@ -15,6 +15,7 @@
     `;
 
     const EXPLORER_REPO_SEARCH_MIN_CHARS = 2;
+    const EXPLORER_REPO_SEARCH_DEBOUNCE_MS = 350;
     const EXPLORER_REPO_SEARCH_EXPAND_MAX_FILES = 10;
 
     const EXPLORER_SEARCH_ENGINE_LABELS = Object.freeze({
@@ -162,7 +163,7 @@
         }
     }
 
-    function scheduleExplorerRepoSearch(index, { delay = EXPLORER_SEARCH_DEBOUNCE_MS } = {}) {
+    function scheduleExplorerRepoSearch(index, { delay = EXPLORER_REPO_SEARCH_DEBOUNCE_MS } = {}) {
         const pane = terminals[index];
         if (!pane) {
             return;

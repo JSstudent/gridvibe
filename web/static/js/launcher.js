@@ -2510,6 +2510,12 @@
         const launchDefaultDir = configuredDefaultDir || (config.connection_mode === 'ssh' ? '/' : '');
 
         (Array.isArray(config.terminals) ? config.terminals : []).slice(0, count).forEach((terminal, index) => {
+            const startupMode = resolvePaneStartupMode(terminal);
+            const {
+                use_wsl: resolvedUseWsl,
+                use_powershell: resolvedUsePowershell,
+                ...paneLaunchFields
+            } = buildPaneLaunchFields(terminal, startupMode);
             const resolvedDirectory = buildLaunchDirectory(
                 configuredDefaultDir,
                 terminal.directory,
@@ -2519,54 +2525,7 @@
             const common = {
                 title: terminal.title || `Terminal ${index + 1}`,
                 directory: resolvedDirectory,
-                initial_command: terminal.startup_mode === 'explorer' ? null : (terminal.initial_command || null),
-                initial_command_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
-                    ? terminal.startup_mode
-                    : (terminal.initial_command_mode === 'agent' ? 'agent' : 'command'),
-                agent_selection: terminal.initial_command_mode === 'agent'
-                    ? (terminal.agent_selection || '')
-                    : '',
-                custom_agent: terminal.initial_command_mode === 'agent'
-                    ? (terminal.custom_agent || '')
-                    : '',
-                agent_auto_mode: terminal.initial_command_mode === 'agent'
-                    && Boolean(terminal.agent_auto_mode),
-                explorer_tree_open: terminal.startup_mode === 'explorer'
-                    ? Boolean(terminal.explorer_tree_open)
-                    : false,
-                explorer_git_open: terminal.startup_mode === 'explorer'
-                    ? Boolean(terminal.explorer_git_open)
-                    : false,
-                explorer_search_open: terminal.startup_mode === 'explorer'
-                    ? Boolean(terminal.explorer_search_open)
-                    : false,
-                explorer_open_tabs: terminal.startup_mode === 'explorer' && Array.isArray(terminal.explorer_open_tabs)
-                    ? terminal.explorer_open_tabs
-                    : [],
-                explorer_active_tab: terminal.startup_mode === 'explorer'
-                    ? (terminal.explorer_active_tab || '')
-                    : '',
-                explorer_tab_views: terminal.startup_mode === 'explorer' && terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object'
-                    ? terminal.explorer_tab_views
-                    : {},
-                explorer_md_preset: terminal.startup_mode === 'explorer'
-                    ? (terminal.explorer_md_preset || '')
-                    : '',
-                explorer_md_font: terminal.startup_mode === 'explorer'
-                    ? (terminal.explorer_md_font || '')
-                    : '',
-                explorer_theme: terminal.startup_mode === 'explorer'
-                    ? (terminal.explorer_theme || 'dark')
-                    : '',
-                browser_tabs: terminal.startup_mode === 'browser' && Array.isArray(terminal.browser_tabs)
-                    ? terminal.browser_tabs
-                    : [],
-                browser_active_tab: terminal.startup_mode === 'browser'
-                    ? (Number(terminal.browser_active_tab) || 0)
-                    : 0,
-                startup_mode: terminal.startup_mode === 'explorer' || terminal.startup_mode === 'browser'
-                    ? terminal.startup_mode
-                    : (terminal.initial_command_mode === 'agent' ? 'agent' : 'terminal')
+                ...paneLaunchFields
             };
 
             if (config.connection_mode === 'ssh') {
@@ -2584,8 +2543,8 @@
                 ...common,
                 distribution: terminal.distribution || config.wsl.distribution || '',
                 username: config.wsl.username || '',
-                use_wsl: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_wsl),
-                use_powershell: ['explorer', 'browser'].includes(common.startup_mode) ? false : Boolean(terminal.use_powershell)
+                use_wsl: resolvedUseWsl,
+                use_powershell: resolvedUsePowershell
             });
         });
 

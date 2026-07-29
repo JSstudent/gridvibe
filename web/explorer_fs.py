@@ -359,6 +359,8 @@ def _copy_file_to_handle(
     destination_handle: Any,
     display_path: str,
 ) -> None:
+    expected_size = max(0, int(source.stat_info.get("size") or 0))
+    written_bytes = 0
     try:
         current_stat = backend.fs_lstat(source.path)
         if current_stat is None:
@@ -369,7 +371,19 @@ def _copy_file_to_handle(
                 path=display_path,
             )
         for chunk in backend.fs_read_chunks(source.path, EXPLORER_COPY_CHUNK_BYTES):
+            next_written_bytes = written_bytes + len(chunk)
+            if next_written_bytes > expected_size:
+                raise ExplorerFsEntryChangedError(
+                    f"{display_path} changed during copy",
+                    path=display_path,
+                )
             destination_handle.write(chunk)
+            written_bytes = next_written_bytes
+        if written_bytes != expected_size:
+            raise ExplorerFsEntryChangedError(
+                f"{display_path} changed during copy",
+                path=display_path,
+            )
         flush = getattr(destination_handle, "flush", None)
         if callable(flush):
             flush()
