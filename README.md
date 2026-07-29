@@ -133,6 +133,10 @@ Swap any pane between a terminal and a file explorer with one button — same di
 
 **Read-only by default.** Those three mutation families are the whole exception list — moving, creating, renaming, uploading, overwrite-on-paste, and `git checkout`/`pull`/`merge` are deliberately out of scope.
 
+## Switching a Local Repo Pane's Shell
+
+Launched a pane in cmd and wanted PowerShell — or WSL? Click the pane's 🔄 button: on a Local Repo terminal it's a dropdown with **Reset view** on top and a **Shell** section listing **Command Prompt**, **PowerShell**, **WSL** (default distro) and every detected distro. Picking one restarts that pane's shell in place — same slot, same title, same startup command — starting in the directory the old shell was sitting in. Windows hosts only; SSH, explorer, and browser panes keep the plain one-click reset.
+
 ## Browser Preview
 
 Flip a Local Repo pane to a browser preview (the 🌐 button) and watch the app you're building next to the terminal running it.
@@ -151,7 +155,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 
 | | Does |
 | :---: | --- |
-| 🔄 | Reset the view and replay recent output (reloads explorer and browser panes) |
+| 🔄 | Reset the view and replay recent output (reloads explorer and browser panes). On a Local Repo terminal it opens a dropdown: **Reset view** plus a **Shell** section that restarts the pane in cmd, PowerShell, or a WSL distro |
 | 📁 ⇄ 💻 | Swap between terminal and file explorer at the current directory |
 | 🌐 ⇄ 💻 | Swap a Local Repo pane between terminal and browser preview |
 | 🪟 | Split side-by-side or stacked (clones the connection) |

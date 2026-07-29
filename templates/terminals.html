@@ -293,6 +293,9 @@
 <script>
     const DEFAULT_SURFACE_MODE = {{ app_surface_mode|tojson }};
     const MAX_SESSIONS = {{ max_sessions | tojson }};
+    /* cmd / PowerShell / WSL panes only exist on Windows hosts, so the header
+       shell picker is offered there only. */
+    const LOCAL_SHELL_MODES_AVAILABLE = {{ local_windows_shells_available|tojson }};
 </script>
 <script src="{{ url_for('static', filename='js/shared.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/app-settings.js') }}?v={{ version }}"></script>
@@ -303,6 +306,7 @@
 <script src="{{ url_for('static', filename='js/explorer-search.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/explorer-fs.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/browser-pane.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/terminal-shell.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminals.js') }}?v={{ version }}"></script>
 </body>
 </html>

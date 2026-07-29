@@ -196,6 +196,7 @@ from web.selfupdate import (  # noqa: F401 - perform_self_update re-exported for
 from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatibility
     _MAX_TRACKED_SOCKET_CLIENTS,
     _MAX_TRACKED_TERMINAL_COMMAND_LENGTH,
+    LOCAL_SHELL_KINDS,
     SSH_STREAM_RECV_TIMEOUT,
     TERMINAL_OUTPUT_BUFFER_MAX_CHARS,
     WINDOWS_DEVICE_ATTRIBUTES_RESPONSE,
@@ -216,8 +217,10 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _finalize_stream,
     _get_buffered_terminal_output,
     _local_shell_display_name,
+    _local_shell_kind,
     _mark_runtime_agent_exited,
     _normalize_local_directory,
+    _normalize_local_shell_kind,
     _normalize_probed_local_cwd,
     _replace_group_sessions,
     _resize_connection,
@@ -582,6 +585,7 @@ def terminals_page():
     logger.info("GET /terminals")
     return render_template('terminals.html', max_sessions=runtime_config.max_sessions,
                            app_surface_mode=runtime_config.app_surface_mode,
+                           local_windows_shells_available=os.name == "nt",
                            voice_enabled=runtime_config.voice_enabled,
                            voice_engine=runtime_config.voice_engine,
                            voice_model=_active_voice_model_name(),
@@ -1892,6 +1896,81 @@ def reconnect_session(session_id: str):
         ), 409
 
     logger.info("Reconnect requested session_id=%s previous_status=%s", session_id, session.status.value)
+    _close_ssh_connection(session_id, clear_buffer=True)
+    session_manager.update_session_status(session_id, SessionStatus.PENDING)
+    _broadcast_session_status(session_id)
+    socketio.start_background_task(_connect_session, session_id)
+
+    return jsonify(session_manager.get_session(session_id).to_dict())
+
+
+@app.route('/api/sessions/<session_id>/shell', methods=['POST'])
+def change_session_shell(session_id: str):
+    """Restart one Local Repo terminal pane under a different local shell.
+
+    Only the shell family (cmd / PowerShell / WSL distro) changes: the pane
+    keeps its slot, title, startup command and startup mode, so the pane's
+    startup sequence simply replays under the newly chosen shell. The live
+    working directory is carried over when the old shell still answers a cwd
+    probe (that probe already returns Windows-form paths for WSL panes).
+    """
+    session = session_manager.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    if session.mode != "wsl":
+        return jsonify({"error": "Shell switching is only available for Local Repo sessions"}), 400
+
+    if os.name != "nt":
+        return jsonify(
+            {"error": "cmd, PowerShell and WSL shells are only available on Windows hosts"}
+        ), 400
+
+    if _is_explorer_session(session) or _is_browser_session(session):
+        return jsonify(
+            {"error": "Switch this pane back to terminal mode before changing its shell"}
+        ), 400
+
+    data = request.get_json(silent=True) or {}
+    shell_kind = _normalize_local_shell_kind(data.get("shell"))
+    if shell_kind not in LOCAL_SHELL_KINDS:
+        return jsonify({"error": "shell must be 'cmd', 'powershell', or 'wsl'"}), 400
+
+    use_wsl = shell_kind == "wsl"
+    use_powershell = shell_kind == "powershell"
+    distribution = str(data.get("distribution") or "").strip() if use_wsl else ""
+
+    # Re-selecting the shell a pane already runs is a no-op rather than a
+    # restart, so clicking the active menu entry never kills a live shell.
+    if shell_kind == _local_shell_kind(session) and (
+        not use_wsl or distribution == str(session.distribution or "").strip()
+    ):
+        return jsonify(session.to_dict())
+
+    next_directory = session.directory
+    probed_directory = _resolve_live_terminal_cwd(session_id, session)
+    if probed_directory and os.path.isdir(probed_directory):
+        next_directory = probed_directory
+
+    session_manager.update_session_metadata(
+        session_id,
+        directory=next_directory,
+        distribution=distribution,
+        use_wsl=use_wsl,
+        use_powershell=use_powershell,
+        host=_local_shell_display_name(
+            use_wsl=use_wsl,
+            use_powershell=use_powershell,
+            distribution=distribution,
+        ),
+    )
+    logger.info(
+        "Shell switch session_id=%s shell=%s distribution=%s directory=%s",
+        session_id,
+        shell_kind,
+        distribution or "-",
+        next_directory,
+    )
     _close_ssh_connection(session_id, clear_buffer=True)
     session_manager.update_session_status(session_id, SessionStatus.PENDING)
     _broadcast_session_status(session_id)

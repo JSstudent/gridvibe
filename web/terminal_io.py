@@ -667,6 +667,38 @@ def _resolve_local_launch_cwd(directory: Any, shell_kind: str) -> Optional[str]:
     return resolved if os.path.isdir(resolved) else None
 
 
+"""Local shell families a Local Repo pane can run under (Windows hosts only)."""
+LOCAL_SHELL_KINDS = ("cmd", "powershell", "wsl")
+
+_LOCAL_SHELL_KIND_ALIASES = {
+    "cmd": "cmd",
+    "cmd.exe": "cmd",
+    "command": "cmd",
+    "powershell": "powershell",
+    "powershell.exe": "powershell",
+    "pwsh": "powershell",
+    "wsl": "wsl",
+}
+
+
+def _local_shell_kind(session: Any) -> str:
+    """Return the shell family one local pane starts under.
+
+    Mirrors the precedence ``_build_local_command`` applies: WSL wins over
+    PowerShell, and non-Windows hosts always land on their POSIX login shell.
+    """
+    if getattr(session, "use_wsl", False):
+        return "wsl"
+    if os.name == "nt":
+        return "powershell" if getattr(session, "use_powershell", False) else "cmd"
+    return "posix"
+
+
+def _normalize_local_shell_kind(value: Any) -> str:
+    """Normalize a requested local shell family, or "" when unrecognized."""
+    return _LOCAL_SHELL_KIND_ALIASES.get(str(value or "").strip().lower(), "")
+
+
 def _local_shell_display_name(
     use_wsl: bool,
     use_powershell: bool,
@@ -960,16 +992,7 @@ def _connect_local_session(session_id: str, session: Any):
     process = None
     try:
         resolved_distribution = _resolve_wsl_distribution(session)
-        use_wsl = getattr(session, "use_wsl", False)
-        shell_kind = (
-            "wsl"
-            if use_wsl
-            else (
-                "powershell"
-                if os.name == "nt" and getattr(session, "use_powershell", False)
-                else ("cmd" if os.name == "nt" else "posix")
-            )
-        )
+        shell_kind = _local_shell_kind(session)
         wsl_startup_directory = ""
         if shell_kind == "wsl" and session.directory:
             wsl_startup_directory = _normalize_local_directory(session.directory, shell_kind)
