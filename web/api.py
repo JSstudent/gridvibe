@@ -1307,6 +1307,8 @@ def get_runtime_state():
         "groups": slot.get("groups", []) if slot else [],
         # The group the restore should reopen on; "" means no preference.
         "active_group_id": slot.get("active_group_id", "") if slot else "",
+        # Optional desktop session-window zoom; null means no preference.
+        "native_zoom_factor": slot.get("native_zoom_factor") if slot else None,
         "active_group_count": len(active_groups),
     })
 
@@ -1328,6 +1330,7 @@ def save_runtime_state():
         origin="manual",
         label=label,
         active_group_id=active_group_id,
+        native_zoom_factor=data.get("native_zoom_factor"),
     )
     if slot is None:
         # An empty workspace is never captured, so it never overwrites (or
@@ -1340,6 +1343,7 @@ def save_runtime_state():
         "origin": slot["origin"],
         "saved_at": slot["saved_at"],
         "active_group_id": slot["active_group_id"],
+        "native_zoom_factor": slot.get("native_zoom_factor"),
         "groups": slot["groups"],
     })
 

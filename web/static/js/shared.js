@@ -152,6 +152,27 @@
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;');
     }
+    const NATIVE_ZOOM_FACTOR_MIN = 0.25;
+    const NATIVE_ZOOM_FACTOR_MAX = 5;
+    function normalizeNativeZoomFactor(value) {
+        const factor = Number(value);
+        if (!Number.isFinite(factor) || factor < NATIVE_ZOOM_FACTOR_MIN || factor > NATIVE_ZOOM_FACTOR_MAX) {
+            return null;
+        }
+        return Math.round(factor * 1000) / 1000;
+    }
+    async function getNativeSessionZoomFactor() {
+        try {
+            const bridge = window.pywebview?.api;
+            if (!bridge?.get_session_native_zoom) {
+                return null;
+            }
+            const result = await bridge.get_session_native_zoom();
+            return result?.ok ? normalizeNativeZoomFactor(result.zoom_factor) : null;
+        } catch (_) {
+            return null;
+        }
+    }
     function syncNativeTheme() {
         try {
             const bridge = window.pywebview?.api;

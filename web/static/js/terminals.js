@@ -2036,11 +2036,16 @@
         }
 
         try {
+            const nativeZoomFactor = await getNativeSessionZoomFactor();
             const response = await fetch('/api/runtime-state/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                // Name the group this window is on, so the restore reopens here.
-                body: JSON.stringify({ active_group_id: activeGroupId })
+                // Name the group this window is on, so the restore reopens here;
+                // desktop mode also carries the session window's current zoom.
+                body: JSON.stringify({
+                    active_group_id: activeGroupId,
+                    native_zoom_factor: nativeZoomFactor
+                })
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {

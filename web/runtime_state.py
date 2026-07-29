@@ -15,6 +15,7 @@ is local state and gitignored.
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -30,6 +31,24 @@ _runtime_state_lock = threading.Lock()
 SCHEMA_VERSION = 2
 DEFAULT_WORKSPACE_ID = "default"
 RESTORABLE_ORIGINS = ("auto", "manual")
+NATIVE_ZOOM_FACTOR_MIN = 0.25
+NATIVE_ZOOM_FACTOR_MAX = 5.0
+
+
+def normalize_native_zoom_factor(value: Any) -> Optional[float]:
+    """Normalize the optional desktop session-window zoom stored with a slot."""
+    if value is None or value == "":
+        return None
+    try:
+        factor = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(factor) or not (
+        NATIVE_ZOOM_FACTOR_MIN <= factor <= NATIVE_ZOOM_FACTOR_MAX
+    ):
+        return None
+    return round(factor, 3)
+
 
 # TerminalSession launch fields worth replaying through POST /api/sessions.
 # `password` is deliberately absent; ids/status/timestamps are per-run state.
@@ -166,6 +185,7 @@ def capture_workspace(
     origin: str = "auto",
     label: Optional[str] = None,
     active_group_id: Optional[str] = None,
+    native_zoom_factor: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """Capture one workspace's shape from the live manager and persist its slot.
 
@@ -178,6 +198,10 @@ def capture_workspace(
     (the autosave timer's case) asks the manager for its live hint. Either way
     it only survives if it names a group this capture actually stored, so a
     restore never targets a group that was skipped for having no sessions.
+
+    ``native_zoom_factor`` is optional desktop-window state. An explicit manual
+    save supplies it; captures without one (notably the autosave timer) preserve
+    the value already stored in this workspace's slot.
     """
     workspace_id = str(workspace_id or DEFAULT_WORKSPACE_ID).strip() or DEFAULT_WORKSPACE_ID
     groups = []
@@ -206,17 +230,26 @@ def capture_workspace(
         active_group_id = getter() if callable(getter) else ""
     active_group_id = str(active_group_id or "").strip()
     captured_group_ids = {group["group_id"] for group in groups}
+    normalized_zoom = normalize_native_zoom_factor(native_zoom_factor)
 
-    slot = {
-        "workspace_id": workspace_id,
-        "label": str(label or "").strip() or _derive_workspace_label(groups),
-        "origin": "manual" if origin == "manual" else "auto",
-        "saved_at": time.time(),
-        "active_group_id": active_group_id if active_group_id in captured_group_ids else "",
-        "groups": groups,
-    }
     with _runtime_state_lock:
         state = _read_state_locked()
+        if normalized_zoom is None:
+            previous_slot = state.get("workspaces", {}).get(workspace_id)
+            if isinstance(previous_slot, dict):
+                normalized_zoom = normalize_native_zoom_factor(
+                    previous_slot.get("native_zoom_factor")
+                )
+        slot = {
+            "workspace_id": workspace_id,
+            "label": str(label or "").strip() or _derive_workspace_label(groups),
+            "origin": "manual" if origin == "manual" else "auto",
+            "saved_at": time.time(),
+            "active_group_id": active_group_id if active_group_id in captured_group_ids else "",
+            "groups": groups,
+        }
+        if normalized_zoom is not None:
+            slot["native_zoom_factor"] = normalized_zoom
         state.setdefault("workspaces", {})[workspace_id] = slot
         _write_state_locked(state)
     return slot
@@ -248,6 +281,10 @@ def load_restorable_workspace(workspace_id: str = DEFAULT_WORKSPACE_ID) -> Optio
         if isinstance(group, dict)
     }
     slot["active_group_id"] = active_group_id if active_group_id in stored_group_ids else ""
+    # Hand-edited or older local state degrades to "no zoom preference".
+    slot["native_zoom_factor"] = normalize_native_zoom_factor(
+        slot.get("native_zoom_factor")
+    )
     return slot
 
 

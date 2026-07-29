@@ -2179,10 +2179,11 @@
            workspace is empty (nothing live to save), which is not an error —
            the restart still proceeds. */
         try {
+            const nativeZoomFactor = await getNativeSessionZoomFactor();
             const response = await fetch('/api/runtime-state/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({})
+                body: JSON.stringify({ native_zoom_factor: nativeZoomFactor })
             });
             if (response.ok || response.status === 409) {
                 return true;
@@ -2253,16 +2254,18 @@
         console.info(`[GridVibe Launcher] ${action}`, details);
     }
 
-    async function viewActiveTerminals(event, preferredGroupId = '') {
+    async function viewActiveTerminals(event, preferredGroupId = '', nativeZoomFactor = null) {
         event.preventDefault();
+        const normalizedZoomFactor = normalizeNativeZoomFactor(nativeZoomFactor);
         logLauncherWindowAction('View Active Terminals clicked', {
             pywebview: Boolean(window.pywebview?.api)
         });
 
         /* A plain focus deliberately leaves the session window's URL alone, so
            it cannot honour a requested group — a restore goes straight to
-           open_session_window, which retargets an existing window. */
-        if (!preferredGroupId && window.pywebview?.api?.focus_session_window) {
+           open_session_window, which retargets an existing window. A zoomed
+           restore also needs that path so the native window receives its zoom. */
+        if (!preferredGroupId && normalizedZoomFactor === null && window.pywebview?.api?.focus_session_window) {
             try {
                 const result = await window.pywebview.api.focus_session_window();
                 logLauncherWindowAction('focus_session_window result', result || {});
@@ -2274,11 +2277,11 @@
             }
         }
 
-        await openTerminalsIfActive(preferredGroupId);
+        await openTerminalsIfActive(preferredGroupId, normalizedZoomFactor);
         return false;
     }
 
-    async function openTerminalsIfActive(preferredGroupId = '') {
+    async function openTerminalsIfActive(preferredGroupId = '', nativeZoomFactor = null) {
         try {
             const resp = await fetch('/api/sessions');
             const data = await resp.json();
@@ -2303,7 +2306,10 @@
                 : (data.sessions.find(session => session.group_id)?.group_id || '');
             if (window.pywebview?.api?.open_session_window) {
                 try {
-                    const result = await window.pywebview.api.open_session_window(targetGroupId);
+                    const result = await window.pywebview.api.open_session_window(
+                        targetGroupId,
+                        normalizeNativeZoomFactor(nativeZoomFactor)
+                    );
                     logLauncherWindowAction('open_session_window result', {
                         requested_group_id: targetGroupId || 'all',
                         ...(result || {})
@@ -2340,6 +2346,7 @@
        Restored groups are minted with fresh ids, so it is resolved to the newly
        created group by position during the replay below. */
     let restorableActiveGroupId = '';
+    let restorableNativeZoomFactor = null;
 
     function formatWorkspaceSavedAgo(savedAt) {
         const savedSeconds = Number(savedAt);
@@ -2372,6 +2379,7 @@
         }
         restorableWorkspaceGroups = data.groups;
         restorableActiveGroupId = String(data.active_group_id || '');
+        restorableNativeZoomFactor = normalizeNativeZoomFactor(data.native_zoom_factor);
         const groupCount = data.groups.length;
         const paneCount = data.groups.reduce(
             (total, group) => total + (Array.isArray(group.sessions) ? group.sessions.length : 0),
@@ -2438,6 +2446,7 @@
         if (banner) banner.hidden = true;
         restorableWorkspaceGroups = [];
         restorableActiveGroupId = '';
+        restorableNativeZoomFactor = null;
     }
 
     async function restorePreviousWorkspace() {
@@ -2452,6 +2461,7 @@
            resolved as the replay creates it — the restore opens the workspace
            on this group instead of on whichever one ends up newest. */
         let activeGroupId = '';
+        const nativeZoomFactor = restorableNativeZoomFactor;
         try {
             for (const group of restorableWorkspaceGroups) {
                 const response = await fetch('/api/sessions', {
@@ -2469,9 +2479,14 @@
             document.getElementById('restoreWorkspaceBanner')?.setAttribute('hidden', '');
             restorableWorkspaceGroups = [];
             restorableActiveGroupId = '';
+            restorableNativeZoomFactor = null;
             if (restored > 0) {
                 showMessage(`Restored ${restored} session${restored === 1 ? '' : 's'} from the previous workspace.`, 'success');
-                await viewActiveTerminals({ preventDefault: () => {} }, activeGroupId);
+                await viewActiveTerminals(
+                    { preventDefault: () => {} },
+                    activeGroupId,
+                    nativeZoomFactor
+                );
             } else {
                 showMessage('Could not restore the previous workspace.', 'error');
             }

@@ -2068,10 +2068,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function reportActiveSessionGroup(groupId)", terminals_html)
         self.assertIn("fetch('/api/session-groups/active', {", terminals_html)
         self.assertIn("reportActiveSessionGroup(groupId);", terminals_html)
-        # An explicit Save Workspace names the saving window's own group.
+        # An explicit Save Workspace names the saving window's own group and,
+        # when desktop mode is active, carries the session window zoom.
         self.assertIn(
-            "body: JSON.stringify({ active_group_id: activeGroupId })", terminals_html
+            "const nativeZoomFactor = await getNativeSessionZoomFactor();",
+            terminals_html,
         )
+        self.assertIn("active_group_id: activeGroupId,", terminals_html)
+        self.assertIn("native_zoom_factor: nativeZoomFactor", terminals_html)
 
         launcher_html = self._page_html(self.client.get("/"))
         self.assertIn(
@@ -2085,9 +2089,10 @@ class ApiRoutesTestCase(unittest.TestCase):
             launcher_html,
         )
         self.assertIn(
-            "await viewActiveTerminals({ preventDefault: () => {} }, activeGroupId);",
+            "restorableNativeZoomFactor = normalizeNativeZoomFactor(data.native_zoom_factor);",
             launcher_html,
         )
+        self.assertIn("activeGroupId,\n                    nativeZoomFactor", launcher_html)
         self.assertIn(
             "`/terminals?group=${encodeURIComponent(targetGroupId)}`", launcher_html
         )
@@ -13017,6 +13022,34 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(len(payload["groups"]), 1)
         self.assertEqual(payload["active_group_count"], 1)
 
+    def test_manual_native_zoom_survives_later_autosave(self):
+        """Save Workspace records desktop zoom; the timer must not erase it."""
+        self._launch_explorer_group()
+        response = self.client.post(
+            "/api/runtime-state/save",
+            json={"native_zoom_factor": 1.25},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["native_zoom_factor"], 1.25)
+
+        api._run_workspace_autosave_tick()
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertEqual(slot["native_zoom_factor"], 1.25)
+        payload = self.client.get("/api/runtime-state").get_json()
+        self.assertEqual(payload["native_zoom_factor"], 1.25)
+
+    def test_invalid_stored_native_zoom_degrades_to_no_preference(self):
+        self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        data["workspaces"]["default"]["native_zoom_factor"] = 99
+        self.state_path.write_text(json.dumps(data), encoding="utf-8")
+
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertIsNone(slot["native_zoom_factor"])
+        payload = self.client.get("/api/runtime-state").get_json()
+        self.assertIsNone(payload["native_zoom_factor"])
+
     def test_save_endpoint_captures_a_manual_slot_immediately_restorable(self):
         self._launch_explorer_group()
         response = self.client.post("/api/runtime-state/save", json={})
@@ -13338,7 +13371,14 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertIn("function toggleWorkspaceMenu(event)", terminals_js)
         self.assertIn("async function saveWorkspace(", terminals_js)
         self.assertIn("/api/runtime-state/save", terminals_js)
+        self.assertIn("native_zoom_factor: nativeZoomFactor", terminals_js)
         self.assertIn("item.disabled = !sessionGroups.length;", terminals_js)
+        shared_js = self._static("js/shared.js")
+        self.assertIn("function normalizeNativeZoomFactor(value)", shared_js)
+        self.assertIn("async function getNativeSessionZoomFactor()", shared_js)
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("body: JSON.stringify({ native_zoom_factor: nativeZoomFactor })", launcher_js)
+        self.assertIn("open_session_window(\n                        targetGroupId,", launcher_js)
 
 
 class SettingsLauncherConfigTestCase(unittest.TestCase):
