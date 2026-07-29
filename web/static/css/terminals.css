@@ -2302,7 +2302,7 @@
 
         .explorer-tree-row {
             display: grid;
-            grid-template-columns: minmax(0, 1fr) auto auto;
+            grid-template-columns: auto minmax(0, 1fr) auto auto;
             align-items: center;
             gap: 4px;
             min-width: 0;
@@ -2321,11 +2321,11 @@
 
         .explorer-tree-main {
             display: grid;
-            grid-template-columns: 14px 20px minmax(0, 1fr);
+            grid-template-columns: 20px minmax(0, 1fr);
             align-items: center;
             gap: 4px;
             min-width: 0;
-            padding: 3px 4px 3px 7px;
+            padding: 3px 4px 3px 0;
             border: 0;
             background: transparent;
             color: inherit;
@@ -2335,15 +2335,39 @@
             text-align: left;
         }
 
-        .explorer-tree-main:focus-visible {
+        .explorer-tree-main:focus-visible,
+        .explorer-tree-chevron-btn:focus-visible {
             outline: 2px solid var(--t-accent);
             outline-offset: -2px;
         }
 
-        .explorer-tree-chevron {
+        /* The fold arrow is a standalone control (expand/collapse only), so the
+           file/folder name button stays the single thing that opens a target. */
+        .explorer-tree-chevron,
+        .explorer-tree-chevron-btn {
+            box-sizing: content-box;
+            width: 14px;
             color: var(--explorer-muted);
             font-size: .68rem;
             text-align: center;
+        }
+
+        .explorer-tree-chevron-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            align-self: stretch;
+            padding: 3px 0;
+            border: 0;
+            background: transparent;
+            cursor: pointer;
+            font: inherit;
+            font-size: .68rem;
+            line-height: 1;
+        }
+
+        .explorer-tree-chevron-btn:hover {
+            color: var(--t-accent);
         }
 
         .explorer-tree-name {
@@ -3717,6 +3741,63 @@
 
         .explorer-diff-undo-line:disabled {
             cursor: wait;
+        }
+
+        /* Block undo: one pill on the first row of a multi-line change, sitting
+           just right of the (sticky) line-number gutter so it stays reachable
+           while the code column scrolls. Revealed by JS on block hover. */
+        .explorer-diff-undo-block {
+            position: absolute;
+            left: calc(100% + 4px);
+            top: 50%;
+            direction: ltr;
+            z-index: 3;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 1px 7px 1px 5px;
+            transform: translateY(-50%);
+            border: 1px solid var(--explorer-btn-border);
+            border-radius: var(--gv-radius-s);
+            background: var(--explorer-btn-bg);
+            color: var(--t-accent);
+            cursor: pointer;
+            opacity: 0;
+            pointer-events: none;
+            font: inherit;
+            font-size: .68rem;
+            line-height: 1.6;
+            white-space: nowrap;
+            transition: opacity .12s ease, background-color .12s ease;
+        }
+
+        .explorer-diff-undo-block .explorer-btn-icon {
+            width: 12px;
+            height: 12px;
+        }
+
+        .explorer-diff-undo-block.is-visible,
+        .explorer-diff-undo-block.is-busy,
+        .explorer-diff-undo-block:focus-visible {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .explorer-diff-undo-block:hover:not(:disabled),
+        .explorer-diff-undo-block:focus-visible {
+            background: var(--explorer-btn-hover-bg);
+            outline: none;
+        }
+
+        .explorer-diff-undo-block:disabled {
+            cursor: wait;
+        }
+
+        /* Diff2Html clips its line-number cells (ellipsis for long numbers);
+           the one cell that hosts a block pill has to let it through. */
+        .explorer-diff-line-number.has-block-undo,
+        .explorer-diff2html .d2h-code-side-linenumber.has-block-undo {
+            overflow: visible;
         }
 
         .explorer-diff-empty {

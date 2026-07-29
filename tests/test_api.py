@@ -1850,6 +1850,48 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("border-radius: var(--gv-radius-s);", undo_css)
         self.assertNotRegex(undo_css, r":\s*#[0-9a-fA-F]{3,6}\b")
 
+    def test_terminals_page_explorer_diff_block_undo(self):
+        """A contiguous run of changed lines can be undone in one save, through
+        the same revision-guarded editor route the per-line undo uses."""
+        viewer = self._static("js/explorer-viewer.js")
+        css = self._static("css/terminals.css")
+        blocks = viewer[
+            viewer.index("function explorerDiffChangeBlocks(diff)"):
+            viewer.index("function explorerRenderedDiffLine(row, {")
+        ]
+        # A block is a maximal run of changed lines: a context line ends it.
+        self.assertIn("const flushRun = () => {", blocks)
+        self.assertIn("startRun().replacement.push(line.slice(1));", blocks)
+        self.assertIn("startRun().expected.push(line.slice(1));", blocks)
+        self.assertIn("if (line.startsWith(' ')) {", blocks)
+        # Applying a block is one splice, guarded by every worktree line the
+        # block expects still matching — a stale diff refuses instead of
+        # corrupting the file.
+        self.assertIn(
+            "const stale = expected.some((text, offset) => lines[lineIndex + offset] !== text);",
+            viewer,
+        )
+        self.assertIn("lines.splice(lineIndex, expected.length, ...replacement);", viewer)
+        # Single-line blocks keep the existing per-line button only.
+        self.assertIn("if (!pane || !block || block.rows < 2) {", viewer)
+        # Same bounded save contract as the per-line undo; no Git patch route.
+        undo = viewer[
+            viewer.index("async function undoExplorerDiffChange(index, actionId)"):
+            viewer.index("/* Render the patch with the pinned Diff2Html build")
+        ]
+        self.assertIn("base_revision: baseRevision", undo)
+        self.assertNotIn("/git/", undo)
+        # Hover reveal is wired once per rendered container (no listener leak).
+        self.assertIn("if (root._explorerDiffBlockHoverWired) {", viewer)
+        # Token-driven styling only (Regression Guardrail 7).
+        block_css = css[
+            css.index(".explorer-diff-undo-block {"):
+            css.index(".explorer-diff-empty {")
+        ]
+        self.assertIn("var(--explorer-btn-bg)", block_css)
+        self.assertIn("border-radius: var(--gv-radius-s);", block_css)
+        self.assertNotRegex(block_css, r":\s*#[0-9a-fA-F]{3,6}\b")
+
     def test_terminals_page_explorer_markdown_links_open_tabs(self):
         """ISSUE-2026-016: Markdown preview links resolve and open explorer tabs."""
         response = self.client.get("/terminals")
@@ -2075,19 +2117,36 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const preferredFileView = restoredMode || carriedMode;", html)
 
     def test_terminals_page_tree_directory_click_browses_in_preview(self):
-        """2.d: a Files-tree directory click also browses it in the Preview tab."""
+        """A Files-tree directory *name* click browses it in the Preview tab;
+        the fold arrow beside it is a separate expand/collapse-only control."""
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         toggle = html[
             html.index("async function toggleExplorerTreeDirectory(index, path)"):
+            html.index("async function openExplorerTreeDirectory(index, path)")
+        ]
+        # The fold arrow is its own button and never navigates the Preview tab,
+        # so browsing the tree cannot evict the file the pane is showing.
+        self.assertIn("data-explorer-tree-chevron", html)
+        self.assertIn(
+            "toggleExplorerTreeDirectory(index, button.dataset.explorerTreeChevron || '');",
+            html,
+        )
+        self.assertNotIn("loadExplorerPane(", toggle)
+        self.assertIn("pane._explorerTreeExpanded.delete(path);", toggle)
+        # The name button navigates and expands, but never collapses.
+        open_dir = html[
+            html.index("async function openExplorerTreeDirectory(index, path)"):
             html.index("async function revealExplorerTreePath(index)")
         ]
-        # Both the expand and the collapse click navigate the Preview tab —
-        # unless the Preview tab already shows that directory (pure toggle).
-        self.assertEqual(toggle.count("await loadExplorerPane(index, path);"), 2)
-        self.assertIn("const alreadyShown = pane._explorerMode === 'directory'", toggle)
+        self.assertEqual(open_dir.count("await loadExplorerPane(index, path);"), 1)
+        self.assertNotIn("pane._explorerTreeExpanded.delete(path);", open_dir)
+        self.assertIn(
+            "openExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');",
+            html,
+        )
         # Navigating still reveals the target row, but no longer force-expands
         # the directory itself (that would undo the collapse click).
         reveal = html[

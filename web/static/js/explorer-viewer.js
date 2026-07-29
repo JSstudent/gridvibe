@@ -1859,9 +1859,23 @@
         const expanded = isDirectory && pane._explorerTreeExpanded.has(path);
         const active = explorerTreeRowIsActive(pane, entry);
         const action = isDirectory
-            ? `data-explorer-tree-dir="${escHtml(path)}" aria-expanded="${expanded ? 'true' : 'false'}"`
+            ? `data-explorer-tree-dir="${escHtml(path)}"`
             : `data-explorer-tree-file="${escHtml(path)}"`;
-        const chevron = isDirectory ? (expanded ? '▾' : '▸') : '';
+        /* The fold arrow is its own control: it expands/collapses in place and
+           never navigates, so browsing the tree can't evict whatever the
+           Preview tab is showing. Only the name button opens the target. */
+        const indent = `style="padding-left:${7 + depth * EXPLORER_TREE_INDENT_PX}px"`;
+        const chevron = isDirectory
+            ? `<button
+                type="button"
+                class="explorer-tree-chevron-btn"
+                data-explorer-tree-chevron="${escHtml(path)}"
+                aria-expanded="${expanded ? 'true' : 'false'}"
+                title="${expanded ? 'Collapse folder' : 'Expand folder'}"
+                aria-label="${expanded ? 'Collapse' : 'Expand'} ${escHtml(entry.name || path)}"
+                ${indent}
+            >${expanded ? '▾' : '▸'}</button>`
+            : `<span class="explorer-tree-chevron" aria-hidden="true" ${indent}></span>`;
         const badge = explorerGitStatusLabel(entry.git) ? explorerGitBadgeHtml(entry.git) : '';
         const openFolder = isDirectory
             ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">↪</button>`
@@ -1879,8 +1893,8 @@
                 data-explorer-context-revision="${escHtml(entry.revision || '')}"
                 data-explorer-context-surface="tree"
             >
-                <button type="button" class="explorer-tree-main" ${action} style="padding-left:${7 + depth * EXPLORER_TREE_INDENT_PX}px" title="${escHtml(path)}">
-                    <span class="explorer-tree-chevron" aria-hidden="true">${chevron}</span>
+                ${chevron}
+                <button type="button" class="explorer-tree-main" ${action} title="${escHtml(path)}">
                     ${isDirectory ? EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(entry.name || path)}
                     <span class="explorer-tree-name">${escHtml(entry.name || path)}</span>
                 </button>
@@ -1934,9 +1948,15 @@
                 <div class="explorer-tree-children">${renderExplorerTreeNodes(pane, '', 0)}</div>
             </div>
         `;
+        panel.querySelectorAll('[data-explorer-tree-chevron]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                toggleExplorerTreeDirectory(index, button.dataset.explorerTreeChevron || '');
+            });
+        });
         panel.querySelectorAll('[data-explorer-tree-dir]').forEach(button => {
             button.addEventListener('click', () => {
-                toggleExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');
+                openExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');
             });
         });
         panel.querySelectorAll('[data-explorer-tree-file]').forEach(button => {
@@ -1958,6 +1978,8 @@
         });
     }
 
+    /* Fold arrow only: expand or collapse in place. It never touches the
+       Preview tab, so the tree can be browsed without losing the open file. */
     async function toggleExplorerTreeDirectory(index, path) {
         const pane = terminals[index];
         if (!pane || !path) {
@@ -1965,28 +1987,36 @@
         }
 
         ensureExplorerTreeState(pane);
-        /* 2.d: a directory click keeps its expand/collapse toggle AND browses
-           the directory in the Preview tab so the user can drill in from the
-           main pane. Clicking the directory the Preview tab already shows
-           only toggles its expansion. */
-        const alreadyShown = pane._explorerMode === 'directory'
-            && (pane._explorerPath || '') === path;
         if (pane._explorerTreeExpanded.has(path)) {
             pane._explorerTreeExpanded.delete(path);
             renderExplorerTreePanel(index);
-            if (!alreadyShown) {
-                await loadExplorerPane(index, path);
-            }
             return;
         }
 
         pane._explorerTreeExpanded.add(path);
         pane._explorerTreeErrors.delete(path);
         renderExplorerTreePanel(index);
-        const childrenLoading = loadExplorerTreeChildren(index, path);
-        if (!alreadyShown) {
-            await loadExplorerPane(index, path);
+        await loadExplorerTreeChildren(index, path);
+    }
+
+    /* Directory name click: browse it in the Preview tab, and expand it so the
+       tree matches what the pane now shows. Never collapses — collapsing is
+       the fold arrow's job, so an open directory can be re-opened safely. */
+    async function openExplorerTreeDirectory(index, path) {
+        const pane = terminals[index];
+        if (!pane || !path) {
+            return;
         }
+
+        ensureExplorerTreeState(pane);
+        let childrenLoading = Promise.resolve();
+        if (!pane._explorerTreeExpanded.has(path)) {
+            pane._explorerTreeExpanded.add(path);
+            pane._explorerTreeErrors.delete(path);
+            renderExplorerTreePanel(index);
+            childrenLoading = loadExplorerTreeChildren(index, path);
+        }
+        await loadExplorerPane(index, path);
         await childrenLoading;
     }
 
@@ -2478,6 +2508,88 @@
         return insertions;
     }
 
+    /* Group the patch into change blocks: a maximal run of consecutive changed
+       lines with no context line between them — the "paragraph" a reader sees
+       as one edit. Undoing a block swaps its worktree lines (`expected`) back
+       to the HEAD lines it replaced (`replacement`) in a single save, so a
+       20-line rewrite is one click instead of twenty. `line` is the 1-based
+       worktree line the run starts at (for a pure deletion, where the removed
+       lines go back in); `oldLine` is the matching HEAD line. */
+    function explorerDiffChangeBlocks(diff) {
+        const blocks = [];
+        let oldLine = 0;
+        let newLine = 0;
+        let run = null;
+        const startRun = () => {
+            if (!run) {
+                run = { kind: 'block', line: newLine, oldLine, expected: [], replacement: [] };
+            }
+            return run;
+        };
+        const flushRun = () => {
+            if (run && (run.expected.length || run.replacement.length)) {
+                blocks.push(run);
+            }
+            run = null;
+        };
+        String(diff || '').split(/\r?\n/).forEach(line => {
+            const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+            if (hunk) {
+                flushRun();
+                oldLine = Number(hunk[1]);
+                newLine = Number(hunk[2]);
+                return;
+            }
+            if (!oldLine && !newLine) {
+                return;
+            }
+            if (line.startsWith('-') && !line.startsWith('---')) {
+                startRun().replacement.push(line.slice(1));
+                oldLine += 1;
+                return;
+            }
+            if (line.startsWith('+') && !line.startsWith('+++')) {
+                startRun().expected.push(line.slice(1));
+                newLine += 1;
+                return;
+            }
+            flushRun();
+            if (line.startsWith(' ')) {
+                oldLine += 1;
+                newLine += 1;
+            }
+        });
+        flushRun();
+        return blocks;
+    }
+
+    /* Index every changed line of every block by its rendered line number so a
+       diff row can be mapped back to the block it belongs to. */
+    function explorerDiffBlockLineIndex(blocks) {
+        const byNewLine = new Map();
+        const byOldLine = new Map();
+        blocks.forEach((block, position) => {
+            block.id = String(position + 1);
+            block.rows = Math.max(block.expected.length, block.replacement.length);
+            block.expected.forEach((_, offset) => byNewLine.set(block.line + offset, block));
+            block.replacement.forEach((_, offset) => byOldLine.set(block.oldLine + offset, block));
+        });
+        return { byNewLine, byOldLine };
+    }
+
+    function explorerDiffRowBlock(blockIndex, oldLine, newLine) {
+        if (newLine?.type === 'add') {
+            const block = blockIndex.byNewLine.get(newLine.number);
+            if (block) {
+                return block;
+            }
+        }
+        if (oldLine?.type === 'delete') {
+            return blockIndex.byOldLine.get(oldLine.number) || null;
+        }
+        return null;
+    }
+
     function explorerRenderedDiffLine(row, {
         cellSelector,
         numberSelector,
@@ -2544,6 +2656,14 @@
         return null;
     }
 
+    function registerExplorerDiffUndoAction(pane, actionId, action) {
+        if (!(pane._explorerDiffUndoActions instanceof Map)) {
+            pane._explorerDiffUndoActions = new Map();
+        }
+        pane._explorerDiffUndoActions.set(actionId, action);
+        return actionId;
+    }
+
     function attachExplorerDiffUndoButton(index, numberCell, action) {
         const pane = terminals[index];
         if (!pane || !numberCell || !action) {
@@ -2552,8 +2672,11 @@
         if (!(pane._explorerDiffUndoActions instanceof Map)) {
             pane._explorerDiffUndoActions = new Map();
         }
-        const actionId = String(pane._explorerDiffUndoActions.size + 1);
-        pane._explorerDiffUndoActions.set(actionId, action);
+        const actionId = registerExplorerDiffUndoAction(
+            pane,
+            String(pane._explorerDiffUndoActions.size + 1),
+            action
+        );
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'explorer-diff-undo-line';
@@ -2564,9 +2687,76 @@
         button.addEventListener('click', event => {
             event.preventDefault();
             event.stopPropagation();
-            undoExplorerDiffLine(index, actionId);
+            undoExplorerDiffChange(index, actionId);
         });
         numberCell.appendChild(button);
+    }
+
+    /* Tag every rendered row of a multi-line block, and hang one "Undo block"
+       pill off the block's first row. Single-line blocks are left to the
+       per-line button — a pill there would say the same thing twice. */
+    function attachExplorerDiffUndoBlockButton(index, block, rows, numberCell) {
+        const pane = terminals[index];
+        if (!pane || !block || block.rows < 2) {
+            return;
+        }
+        rows.filter(Boolean).forEach(row => {
+            row.dataset.explorerDiffBlock = block.id;
+        });
+        const actionId = `block-${block.id}`;
+        if (!numberCell || pane._explorerDiffUndoActions?.has(actionId)) {
+            return;
+        }
+        registerExplorerDiffUndoAction(pane, actionId, block);
+        const label = `Undo this block of ${block.rows} unstaged line changes`;
+        const pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'explorer-diff-undo-block';
+        pill.dataset.explorerDiffUndoBlock = block.id;
+        pill.dataset.explorerDiffUndoAction = actionId;
+        pill.title = label;
+        pill.setAttribute('aria-label', label);
+        pill.innerHTML = `${EXPLORER_GIT_REVERT_ICON}<span>Undo block (${block.rows})</span>`;
+        pill.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            undoExplorerDiffChange(index, actionId);
+        });
+        numberCell.classList.add('has-block-undo');
+        numberCell.appendChild(pill);
+    }
+
+    /* Hovering anywhere inside a block reveals that block's pill, which lives
+       on a different row (and, side by side, a different table) — so this is a
+       pair of delegated listeners on the diff root rather than CSS. */
+    function setExplorerDiffHoveredBlock(root, blockId) {
+        if (root._explorerDiffHoveredBlock === blockId) {
+            return;
+        }
+        root._explorerDiffHoveredBlock = blockId;
+        root.querySelectorAll('[data-explorer-diff-undo-block]').forEach(pill => {
+            pill.classList.toggle(
+                'is-visible',
+                Boolean(blockId) && pill.dataset.explorerDiffUndoBlock === blockId
+            );
+        });
+    }
+
+    function wireExplorerDiffBlockHover(root) {
+        /* The fallback renderer re-wires the same persistent container on every
+           render, so the listeners are attached once per element. */
+        if (root._explorerDiffBlockHoverWired) {
+            root._explorerDiffHoveredBlock = '';
+            return;
+        }
+        root._explorerDiffBlockHoverWired = true;
+        root.addEventListener('mouseover', event => {
+            const row = event.target?.closest?.('[data-explorer-diff-block]');
+            setExplorerDiffHoveredBlock(root, row?.dataset.explorerDiffBlock || '');
+        });
+        root.addEventListener('mouseleave', () => {
+            setExplorerDiffHoveredBlock(root, '');
+        });
     }
 
     function wireExplorerDiffUndoControls(index, root) {
@@ -2578,6 +2768,10 @@
             return;
         }
         const deletionInsertions = explorerDiffDeletionInsertions(pane._explorerDiffContent);
+        const blockIndex = explorerDiffBlockLineIndex(
+            explorerDiffChangeBlocks(pane._explorerDiffContent)
+        );
+        wireExplorerDiffBlockHover(root);
         const diff2HtmlSides = root._explorerDiffSides || [];
         if (diff2HtmlSides.length === 2) {
             const rowsBySide = diff2HtmlSides.map(side => [
@@ -2601,6 +2795,12 @@
                 });
                 const action = explorerDiffUndoAction(oldLine, newLine, deletionInsertions);
                 attachExplorerDiffUndoButton(index, (newLine || oldLine)?.numberCell, action);
+                attachExplorerDiffUndoBlockButton(
+                    index,
+                    explorerDiffRowBlock(blockIndex, oldLine, newLine),
+                    [rowsBySide[0][rowIndex], rowsBySide[1][rowIndex]],
+                    (newLine || oldLine)?.numberCell
+                );
             }
             return;
         }
@@ -2622,6 +2822,12 @@
             });
             const action = explorerDiffUndoAction(oldLine, newLine, deletionInsertions);
             attachExplorerDiffUndoButton(index, (newLine || oldLine)?.numberCell, action);
+            attachExplorerDiffUndoBlockButton(
+                index,
+                explorerDiffRowBlock(blockIndex, oldLine, newLine),
+                [row],
+                (newLine || oldLine)?.numberCell
+            );
         });
     }
 
@@ -2633,6 +2839,19 @@
         const lineIndex = Number(action?.line) - 1;
         if (!Number.isInteger(lineIndex) || lineIndex < 0) {
             return null;
+        }
+        if (action.kind === 'block') {
+            const expected = Array.isArray(action.expected) ? action.expected : [];
+            const replacement = Array.isArray(action.replacement) ? action.replacement : [];
+            if (lineIndex + expected.length > lines.length) {
+                return null;
+            }
+            const stale = expected.some((text, offset) => lines[lineIndex + offset] !== text);
+            if (stale) {
+                return null;
+            }
+            lines.splice(lineIndex, expected.length, ...replacement);
+            return lines.join('\n');
         }
         if (action.kind === 'insert') {
             if (lineIndex > lines.length) {
@@ -2660,14 +2879,31 @@
             pane._explorerDiffUndoBusy = Boolean(busy);
         }
         document.querySelectorAll(
-            `#explorer-diff-code-${index} [data-explorer-diff-undo-line]`
+            `#explorer-diff-code-${index} :is([data-explorer-diff-undo-line], [data-explorer-diff-undo-block])`
         ).forEach(button => {
             button.disabled = Boolean(busy);
             button.classList.toggle('is-busy', Boolean(busy));
         });
     }
 
-    async function undoExplorerDiffLine(index, actionId) {
+    function explorerDiffUndoCopy(action) {
+        if (action.kind === 'block') {
+            return {
+                title: 'Undo block of changes?',
+                copy: `Undo these ${action.rows} unstaged line changes starting at line ${action.line}?`,
+                confirmLabel: 'Undo block',
+                toast: `Undid ${action.rows} line changes`
+            };
+        }
+        return {
+            title: 'Undo line change?',
+            copy: `Undo this unstaged change on line ${action.line}?`,
+            confirmLabel: 'Undo line',
+            toast: 'Undid line change'
+        };
+    }
+
+    async function undoExplorerDiffChange(index, actionId) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         const action = pane?._explorerDiffUndoActions?.get(String(actionId));
@@ -2679,13 +2915,14 @@
             showTerminalToast('This diff is stale. Refresh the file and try again.', 'error');
             return;
         }
+        const copy = explorerDiffUndoCopy(action);
         const filePath = pane._explorerFilePath;
         const baseRevision = pane._explorerFileRevision;
         const confirmed = await openGenericConfirmModal({
-            title: 'Undo line change?',
-            copy: `Undo this unstaged change on line ${action.line}?`,
+            title: copy.title,
+            copy: copy.copy,
             note: 'The file is saved immediately. Staged changes are preserved.',
-            confirmLabel: 'Undo line',
+            confirmLabel: copy.confirmLabel,
             danger: true
         });
         if (
@@ -2712,7 +2949,7 @@
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
-                throw new Error(data.error || 'Could not undo this line change.');
+                throw new Error(data.error || 'Could not undo this change.');
             }
             setExplorerDiffUndoBusy(index, false);
             const hasRemainingDiff = explorerHasGitDiff(data.git);
@@ -2732,11 +2969,11 @@
             if (pane._explorerTreeSidebarOpen) {
                 reloadExplorerTree(index);
             }
-            showTerminalToast(`Undid line change in ${data.name || pane._explorerFileName || 'file'}`, 'success');
+            showTerminalToast(`${copy.toast} in ${data.name || pane._explorerFileName || 'file'}`, 'success');
         } catch (error) {
-            console.error('[GridVibe Sessions] Explorer line undo failed:', error);
+            console.error('[GridVibe Sessions] Explorer diff undo failed:', error);
             setExplorerDiffUndoBusy(index, false);
-            showTerminalToast(error.message || 'Could not undo this line change.', 'error');
+            showTerminalToast(error.message || 'Could not undo this change.', 'error');
         }
     }
 
