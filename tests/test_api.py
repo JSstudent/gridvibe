@@ -10946,6 +10946,85 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("function setExplorerFileWatchBaseline(pane, revision)", viewer)
         self.assertIn("setExplorerFileWatchBaseline(pane, data.state_revision || '')", viewer)
 
+    # ── Filesystem-surface change listener (plan §15) ───────────────────────
+
+    def test_fs_surface_watch_shares_the_single_git_state_poll(self):
+        watch = self._static("js/explorer-git-watch.js")
+        # One request, two baselines: the listing/tree consumer rides the same
+        # /git/state poll the sidebar uses rather than adding an endpoint.
+        self.assertEqual(watch.count("/git/state?known="), 1)
+        self.assertIn("function explorerFsWatchConsumer(pane)", watch)
+        self.assertIn("_explorerFsWatchRevision", watch)
+        self.assertIn("refreshExplorerFilesystemSurfacesQuiet(index)", watch)
+        # Only panes inside a Git worktree have this consumer — the revision is
+        # the change signal, so a non-repository root never polls for it.
+        self.assertIn("_explorerGitContext?.available", watch)
+        self.assertIn("_explorerTreeSidebarOpen", watch)
+        self.assertIn("_explorerMode === 'directory'", watch)
+        # Failures back off silently and never advance the baseline.
+        self.assertIn("function explorerFsWatchOnFailure(pane)", watch)
+        self.assertIn("_explorerFsWatchSuspended", watch)
+
+    def test_fs_surface_watch_defers_apply_during_interaction(self):
+        watch = self._static("js/explorer-git-watch.js")
+        for gate in (
+            "function explorerFsWatchDeferralActive(",
+            "explorerWatchInteractionActive()",
+            "_explorerFsWatchPending",
+            "_explorerFsWatchRefreshing",
+            "explorer-tree-panel-",
+            ":hover",
+        ):
+            with self.subTest(gate=gate):
+                self.assertIn(gate, watch)
+
+    def test_fs_surface_quiet_refresh_helper_contract(self):
+        viewer = self._static("js/explorer-viewer.js")
+        for helper in (
+            "function explorerEntriesSignature(entries)",
+            "async function refreshExplorerDirectoryQuiet(index)",
+            "async function refreshExplorerTreeQuiet(index)",
+            "async function refreshExplorerFilesystemSurfacesQuiet(index)",
+        ):
+            with self.subTest(helper=helper):
+                self.assertIn(helper, viewer)
+        quiet_fn = viewer[
+            viewer.index("function explorerEntriesSignature(entries)"):
+            viewer.index("async function performExplorerGitAction")
+        ]
+        self.assertIn("cache: 'no-store'", quiet_fn)
+        # Quiet: no loading placeholder, no tab/scroll/search reset, and never
+        # through the user-initiated load paths.
+        for banned in (
+            "renderExplorerMessage",
+            "loadExplorerPane(",
+            "reloadExplorerTree(",
+            "openExplorerFile(",
+            "explorerCaptureActiveTabView(",
+        ):
+            with self.subTest(banned=banned):
+                self.assertNotIn(banned, quiet_fn)
+        # An unchanged listing performs zero DOM writes, and the tree refresh
+        # is bounded because every node costs one /entries.
+        self.assertIn("explorerEntriesSignature(pane._explorerEntries)", quiet_fn)
+        self.assertIn("EXPLORER_FS_WATCH_MAX_TREE_NODES", quiet_fn)
+        self.assertIn("captureScrollMetrics(", quiet_fn)
+
+    def test_fs_watch_baseline_is_reset_by_user_initiated_loads(self):
+        viewer = self._static("js/explorer-viewer.js")
+        self.assertIn("function resetExplorerFsWatchBaseline(pane)", viewer)
+        # Every listing/tree load leaves the surfaces current, so the next poll
+        # re-bootstraps silently instead of repainting what was just fetched.
+        self.assertEqual(viewer.count("resetExplorerFsWatchBaseline(pane);"), 2)
+
+    def test_promoted_preview_tab_keeps_its_git_badge(self):
+        viewer = self._static("js/explorer-viewer.js")
+        promote_fn = viewer[
+            viewer.index("function promoteExplorerPreviewTab(index)"):
+            viewer.index("function renderExplorerViewerEmpty(index)")
+        ]
+        self.assertIn("pinnedTab.git = preview.git || null;", promote_fn)
+
     def test_empty_diff_falls_back_to_the_file_content_view(self):
         viewer = self._static("js/explorer-viewer.js")
         self.assertIn("function explorerFallbackFromEmptyDiff(index)", viewer)

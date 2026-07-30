@@ -2118,6 +2118,7 @@
         for (const path of expanded) {
             await loadExplorerTreeChildren(index, path);
         }
+        resetExplorerFsWatchBaseline(pane);
         renderExplorerTreePanel(index);
     }
 
@@ -2211,6 +2212,21 @@
         }
     }
 
+    /* Baseline for the filesystem-surface listener (explorer-git-watch.js).
+       Cleared by every user-initiated listing/tree load, because the surfaces
+       are then current by construction: the next poll re-bootstraps silently
+       instead of repainting what was just fetched. Also re-arms a watch that
+       suspended itself after repeated `/entries` failures. */
+    function resetExplorerFsWatchBaseline(pane) {
+        if (!pane) {
+            return;
+        }
+        pane._explorerFsWatchRevision = '';
+        pane._explorerFsWatchPending = null;
+        pane._explorerFsWatchFailures = 0;
+        pane._explorerFsWatchSuspended = false;
+    }
+
     /* Background re-read of the file the viewer is showing, for the open-file
        change listener. Identity-checked at every await, never runs against an
        open editor buffer (the editor owns the file and has its own
@@ -2300,6 +2316,181 @@
             }
         }
         return true;
+    }
+
+    /* ── Quiet filesystem-surface refresh (change-listener plan §15) ────────
+       The directory listing and the Files tree carry the same Git badges the
+       sidebar does, so a file created or edited outside GridVibe has to land
+       there too — that is what the plan's D7 asymmetry deferred and what these
+       helpers close. They are driven by the *same* `/git/state` poll the
+       sidebar uses (explorer-git-watch.js): no new endpoint, no second signal.
+
+       Quiet means: no `Loading directory...` placeholder, no tab switch, no
+       scroll reset, no search reset, and — when the re-fetched entries are
+       byte-for-byte the same listing — no DOM write at all. They never touch
+       the file viewer, the editor buffer, or the tab strip; a pane showing a
+       file only refreshes its tree sidebar. */
+
+    const EXPLORER_FS_WATCH_MAX_TREE_NODES = 16;
+
+    /* Everything the listing and tree rows actually render, hashed. A poll
+       that fires for a change outside the browsed directory (or outside the
+       expanded tree) therefore costs one fetch and zero repaints. */
+    function explorerEntriesSignature(entries) {
+        if (!Array.isArray(entries)) {
+            return '';
+        }
+        return explorerHashText(entries.map(entry => [
+            entry.path || '',
+            entry.name || '',
+            entry.type || '',
+            entry.entry_kind || '',
+            entry.deleted ? '1' : '',
+            entry.size == null ? '' : String(entry.size),
+            entry.modified == null ? '' : String(entry.modified),
+            entry.revision || '',
+            entry.git?.status || '',
+            entry.git?.index_status || '',
+            entry.git?.worktree_status || ''
+        ].join('')).join(''));
+    }
+
+    async function explorerFetchEntriesQuiet(index, path) {
+        const sessionId = sessionIds[index];
+        if (!sessionId) {
+            return null;
+        }
+        try {
+            const response = await fetch(
+                `/api/explorer/${encodeURIComponent(sessionId)}/entries?path=${encodeURIComponent(path || '')}`,
+                { cache: 'no-store' }
+            );
+            const data = await response.json();
+            return response.ok ? data : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    /* Re-list the browsed directory in place. Only `_explorerEntries` and the
+       rows change; the Preview tab, its Find query, and the list scroll offset
+       are all preserved, so a new file simply appears where it belongs. */
+    async function refreshExplorerDirectoryQuiet(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId || pane._explorerMode !== 'directory') {
+            return true; // Nothing to re-list is not a failure.
+        }
+        const path = pane._explorerPath || '';
+        const data = await explorerFetchEntriesQuiet(index, path);
+        if (!data) {
+            return false;
+        }
+        if (
+            terminals[index] !== pane
+            || sessionIds[index] !== sessionId
+            || pane._explorerMode !== 'directory'
+            || (pane._explorerPath || '') !== path
+        ) {
+            return false;
+        }
+        const entries = Array.isArray(data.entries) ? data.entries : [];
+        if (explorerEntriesSignature(entries) === explorerEntriesSignature(pane._explorerEntries)) {
+            return true;
+        }
+        const list = document.getElementById(`explorer-list-${index}`);
+        const scrollTop = list ? list.scrollTop : 0;
+        const scrollLeft = list ? list.scrollLeft : 0;
+        updateExplorerFilesystemRootRevision(index, data.root_revision || '');
+        pane._explorerEntries = entries;
+        pane._explorerParentPath = data.parent_path || '';
+        pane._explorerGitContext = data.git || null;
+        updateExplorerGitSummary(index, data.git || null);
+        renderExplorerDirectoryRows(index);
+        if (list) {
+            list.scrollTop = Math.min(scrollTop, Math.max(0, list.scrollHeight - list.clientHeight));
+            list.scrollLeft = scrollLeft;
+        }
+        return true;
+    }
+
+    /* The tree nodes a re-render would actually paint: the root plus every
+       expanded directory whose children are cached, shallowest first. Bounded
+       because each node costs one `/entries` (one `git status` on a subtree) —
+       a deeply expanded tree refreshes its visible top and leaves the rest to
+       the manual Refresh, which is strictly better than today's fully stale
+       tree. */
+    function explorerTreeQuietRefreshKeys(pane) {
+        const keys = [''];
+        [...pane._explorerTreeExpanded]
+            .filter(path => path && pane._explorerTreeChildren.has(path))
+            .sort((left, right) => left.split('/').length - right.split('/').length)
+            .forEach(path => keys.push(path));
+        return keys.slice(0, EXPLORER_FS_WATCH_MAX_TREE_NODES);
+    }
+
+    /* Refetch the visible tree nodes into a scratch map, then swap them in one
+       render — unlike reloadExplorerTree, the panel never empties, never shows
+       `Loading...`, and keeps its scroll offset and expansion state. */
+    async function refreshExplorerTreeQuiet(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId || !pane._explorerTreeSidebarOpen) {
+            return true;
+        }
+        ensureExplorerTreeState(pane);
+        if (!pane._explorerTreeChildren.size) {
+            return true; // Never loaded: the watcher does not bootstrap it.
+        }
+        const fetched = new Map();
+        let changed = false;
+        for (const key of explorerTreeQuietRefreshKeys(pane)) {
+            const data = await explorerFetchEntriesQuiet(index, key);
+            if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
+                return false;
+            }
+            if (!data) {
+                return false;
+            }
+            const entries = (Array.isArray(data.entries) ? data.entries : [])
+                .filter(entry => !entry.deleted);
+            fetched.set(key, entries);
+            if (explorerEntriesSignature(entries)
+                !== explorerEntriesSignature(pane._explorerTreeChildren.get(key))) {
+                changed = true;
+            }
+        }
+        if (!changed) {
+            return true;
+        }
+        const metrics = captureScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`));
+        fetched.forEach((entries, key) => {
+            pane._explorerTreeChildren.set(key, entries);
+            pane._explorerTreeErrors.delete(key);
+        });
+        renderExplorerTreePanel(index);
+        applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), metrics);
+        return true;
+    }
+
+    /* One entry point for the change listener. Returns false on any failure or
+       staleness so the watcher can back off without advancing its baseline —
+       the surfaces keep their last good contents either way. */
+    async function refreshExplorerFilesystemSurfacesQuiet(index) {
+        const pane = terminals[index];
+        if (!pane || pane._explorerFsWatchRefreshing) {
+            return false;
+        }
+        pane._explorerFsWatchRefreshing = true;
+        try {
+            const listing = await refreshExplorerDirectoryQuiet(index);
+            const tree = await refreshExplorerTreeQuiet(index);
+            return listing && tree;
+        } catch (error) {
+            return false;
+        } finally {
+            pane._explorerFsWatchRefreshing = false;
+        }
     }
 
     async function performExplorerGitAction(index, endpoint, body) {
@@ -5671,6 +5862,11 @@
         // full per-tab state onto the new pinned tab.
         explorerCaptureActiveTabView(index);
         const pinnedTab = explorerAssignOpenTab(pane, path, { pinned: true });
+        /* The promoted tab shows the file the Preview tab was already showing,
+           so it inherits that file's Git badge. Without this the new tab
+           renders unbadged (no `?` on a brand-new file, no `M` on a modified
+           one) until something else re-opens the file or the sidebar syncs. */
+        pinnedTab.git = preview.git || null;
         if (preview.view) {
             pinnedTab.view = { ...preview.view };
         }
@@ -6319,7 +6515,11 @@
         pane._explorerFilePlain = false;
         pane._explorerPreviewHtml = '';
         pane._explorerGit = null;
-        pane._explorerGitContext = null;
+        /* `_explorerGitContext` describes the repository the *pane* is rooted
+           in, not the shown file, so the image viewer leaves it alone — the
+           image payload simply carries none, and clearing it would silently
+           stop the filesystem-surface listener for a pane whose Files tree is
+           still on screen. */
         // Images render through the separate byte route; nothing here for the
         // open-file change listener to refresh in place.
         setExplorerFileWatchBaseline(pane, '');
@@ -6957,6 +7157,7 @@
             pane._explorerMode = 'directory';
             pane._explorerFilePath = '';
             setExplorerFileWatchBaseline(pane, '');
+            resetExplorerFsWatchBaseline(pane);
             pane._explorerFileContent = '';
             pane._explorerFileLanguage = '';
             pane._explorerPreviewHtml = '';

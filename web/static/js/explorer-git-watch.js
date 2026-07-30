@@ -5,37 +5,49 @@
        "no file-changed notice for an open file" non-goal for the *viewer*
        only — the editor buffer stays untouchable).
 
-       One page-level scheduler runs two independent per-pane checks while the
-       page is visible:
+       One page-level scheduler runs two independent per-pane requests while
+       the page is visible, feeding three surfaces:
 
-       1. Git sidebar — while it is open, poll the cheap
-          GET /api/explorer/<id>/git/state semantic-revision endpoint. An
-          unchanged revision costs one `git status` on the server and causes
-          zero DOM writes, zero refetches, zero log lines. A changed revision
-          quietly refetches the full /git/repo summary and swaps the sidebar in
-          place.
+       1. Repository state — poll the cheap GET /api/explorer/<id>/git/state
+          semantic-revision endpoint. An unchanged revision costs one
+          `git status` on the server and causes zero DOM writes, zero
+          refetches, zero log lines. One poll serves two consumers, each with
+          its own baseline, so a pane with both surfaces open still makes one
+          request:
+            a. the Git sidebar, while it is open — a changed revision quietly
+               refetches the full /git/repo summary and swaps the sidebar in
+               place;
+            b. the directory listing and the Files tree (§15) — a changed
+               revision quietly re-lists what is on screen through
+               refreshExplorerFilesystemSurfacesQuiet, so a file created or
+               modified outside GridVibe appears there with its `?`/`M` badge
+               instead of waiting for a manual refresh. Only panes inside a
+               Git worktree have this consumer: the revision *is* the signal,
+               so an ignored or non-repository file is picked up exactly when
+               Git itself would report it.
        2. Open file — while the viewer is showing a file, poll the cheaper
           GET /api/explorer/<id>/file/state (one `stat`, no read). A changed
           token re-reads the file and updates the viewer in place, so a file
           edited outside GridVibe stops going stale in the tab the user is
           actually looking at.
 
-       Both applies are deferred while the user is interacting (commit message
+       Every apply is deferred while the user is interacting (commit message
        focused, IME composition, context menu or modal open, pointer down,
-       reading a scrolled sidebar, an active text selection in the viewer).
+       reading a scrolled sidebar/tree, an active text selection).
 
-       Invariants: read-only; no directory-listing or Files-tree reload from
-       here (no loadExplorerPane / reloadExplorerTree / openExplorerFile calls
-       by design — the open-file refresh goes through the single narrow
-       refreshExplorerOpenFileQuiet door); the editor buffer is never touched,
-       because a pane with an open editor is ineligible and the editor keeps
-       its own save-conflict flow; no work when invisible; one in-flight
-       request per pane per check; recursive setTimeout only; stale responses
-       dropped by pane/session (and, for files, path) identity.
+       Invariants: read-only; the editor buffer is never touched, because a
+       pane with an open editor is ineligible and the editor keeps its own
+       save-conflict flow; every apply goes through one narrow quiet door
+       (refreshExplorerGitRepoQuiet / refreshExplorerOpenFileQuiet /
+       refreshExplorerFilesystemSurfacesQuiet) and never through
+       loadExplorerPane, reloadExplorerTree or openExplorerFile, which reset
+       scroll, tabs and search; no work when invisible; one in-flight request
+       per pane per check; recursive setTimeout only; stale responses dropped
+       by pane/session (and, for files, path) identity.
        Loaded before terminals.js; `terminals`, `sessionIds`,
        `isExplorerPaneInstance`, `refreshExplorerGitRepoQuiet`,
-       `applyExplorerGitRepoQuiet` and `refreshExplorerOpenFileQuiet` all
-       resolve at call time.
+       `applyExplorerGitRepoQuiet`, `refreshExplorerOpenFileQuiet` and
+       `refreshExplorerFilesystemSurfacesQuiet` all resolve at call time.
     ───────────────────────────────────────────── */
     const EXPLORER_GIT_WATCH_BASE_MS = 5000;          // local pane
     const EXPLORER_GIT_WATCH_REMOTE_BASE_MS = 10000;  // ssh pane
@@ -122,28 +134,50 @@
         }, delayMs);
     }
 
+    /* Sidebar consumer of the shared /git/state poll. The watcher never
+       bootstraps a sidebar load; it only detects drift from a baseline the
+       user's own actions established. */
+    function explorerGitWatchSidebarConsumer(pane) {
+        if (!pane._explorerGitSidebarOpen || !pane._explorerGitRepoLoaded) {
+            return false;
+        }
+        if (typeof pane._explorerGitRevision !== 'string' || !pane._explorerGitRevision) {
+            return false;
+        }
+        return !pane._explorerGitRepoLoading && !pane._explorerGitRepoRefreshing;
+    }
+
+    /* Filesystem-surface consumer (§15): a directory listing or an open Files
+       tree, inside a Git worktree. `_explorerGitContext` is set by every
+       listing and file load, so a non-repository root simply never has this
+       consumer and never polls — matching the rule that the Git revision is
+       the change signal. Unlike the sidebar this one *is* bootstrapped by the
+       watcher (the surfaces carry no revision of their own), silently: the
+       first poll records the baseline without repainting anything. */
+    function explorerFsWatchConsumer(pane) {
+        if (!pane._explorerGitContext?.available) {
+            return false;
+        }
+        if (pane._explorerFsWatchSuspended) {
+            return false;
+        }
+        return pane._explorerMode === 'directory' || Boolean(pane._explorerTreeSidebarOpen);
+    }
+
     /* Eligibility gates (plan §5.3) — no request is made unless all hold.
-       Closing the sidebar, switching session-group tabs (the pane leaves
-       `terminals`), or a non-Git root (no baseline revision) therefore stops
-       all polling with no server-side unsubscribe. */
+       Closing every consumer surface, switching session-group tabs (the pane
+       leaves `terminals`), or a non-Git root therefore stops all polling with
+       no server-side unsubscribe. */
     function explorerGitWatchEligible(index) {
         const pane = terminals[index];
         if (!pane || !isExplorerPaneInstance(pane) || !sessionIds[index]) {
             return false;
         }
-        if (!pane._explorerGitSidebarOpen || !pane._explorerGitRepoLoaded) {
-            return false;
-        }
-        // The watcher never bootstraps a load; it only detects drift from a
-        // baseline the user's own actions established.
-        if (typeof pane._explorerGitRevision !== 'string' || !pane._explorerGitRevision) {
-            return false;
-        }
-        if (pane._explorerGitRepoLoading || pane._explorerGitRepoRefreshing) {
+        if (!explorerGitWatchSidebarConsumer(pane) && !explorerFsWatchConsumer(pane)) {
             return false;
         }
         // A GridVibe Git action is authoritative, and a filesystem
-        // mutation/save triggers its own sidebar refresh.
+        // mutation/save triggers its own sidebar and surface refresh.
         if (pane._explorerGitActionBusy || pane._explorerFsBusy || pane._explorerEdit?.saving) {
             return false;
         }
@@ -273,6 +307,79 @@
         );
     }
 
+    /* Filesystem-surface deferral gates. A listing re-render replaces the rows
+       and a tree re-render replaces the panel, so the same rule as the sidebar
+       applies: never while a menu/modal is open, a pointer is down, focus sits
+       in one of those surfaces, or the user is reading them scrolled away from
+       the top. Scroll offset, Find query and expansion state all survive the
+       apply, so nothing else needs guarding. */
+    function explorerFsWatchDeferralActive(index) {
+        if (explorerWatchInteractionActive()) {
+            return true;
+        }
+        const active = document.activeElement;
+        const surfaces = [
+            document.getElementById(`explorer-tree-panel-${index}`),
+            document.getElementById(`explorer-list-${index}`)
+        ];
+        return surfaces.some(surface => {
+            if (!surface) {
+                return false;
+            }
+            if (active && surface.contains(active)) {
+                return true;
+            }
+            return surface.matches(':hover') && surface.scrollTop > 0;
+        });
+    }
+
+    function explorerFsWatchOnFailure(pane) {
+        pane._explorerFsWatchFailures = (pane._explorerFsWatchFailures || 0) + 1;
+        if (pane._explorerFsWatchFailures >= EXPLORER_GIT_WATCH_MAX_FAILURES) {
+            // Silent, like the open-file watch: the listing and tree have no
+            // "live" affordance to contradict, and they keep their last good
+            // contents. Any manual refresh or navigation re-arms it through
+            // resetExplorerFsWatchBaseline().
+            pane._explorerFsWatchSuspended = true;
+            pane._explorerFsWatchPending = null;
+        }
+    }
+
+    /* The re-list is the expensive half here, so a deferred change holds only
+       its revision and re-lists once the gate clears. The baseline advances
+       only on a successful apply, so a failed pass simply retries. */
+    async function explorerFsWatchFlushPending(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        const revision = pane?._explorerFsWatchPending || '';
+        if (!pane || !sessionId || !revision) {
+            return;
+        }
+        if (!explorerFsWatchConsumer(pane) || revision === pane._explorerFsWatchRevision) {
+            pane._explorerFsWatchPending = null;
+            return;
+        }
+        // Hold the payload (never drop it) while a GridVibe action owns these
+        // surfaces or an earlier quiet re-list is still running.
+        if (pane._explorerGitActionBusy || pane._explorerFsBusy || pane._explorerFsWatchRefreshing) {
+            return;
+        }
+        if (explorerFsWatchDeferralActive(index)) {
+            return;
+        }
+        pane._explorerFsWatchPending = null;
+        const applied = await refreshExplorerFilesystemSurfacesQuiet(index);
+        if (!explorerWatchPaneCurrent(index, pane, sessionId)) {
+            return;
+        }
+        if (applied) {
+            pane._explorerFsWatchRevision = revision;
+            pane._explorerFsWatchFailures = 0;
+        } else {
+            explorerFsWatchOnFailure(pane);
+        }
+    }
+
     function explorerGitWatchFlushPending(index) {
         const pane = terminals[index];
         if (!pane || !pane._explorerGitWatchPending) {
@@ -400,6 +507,7 @@
         for (let index = 0; index < terminals.length; index += 1) {
             explorerGitWatchFlushPending(index);
             explorerFileWatchFlushPending(index);
+            explorerFsWatchFlushPending(index);
         }
     }
 
@@ -432,8 +540,16 @@
         pane._explorerGitWatchInFlight = true;
         const started = performance.now();
         let delay = explorerGitWatchNextDelay(pane);
+        const sidebarConsumer = explorerGitWatchSidebarConsumer(pane);
+        const fsConsumer = explorerFsWatchConsumer(pane);
         try {
-            const known = encodeURIComponent(pane._explorerGitRevision || '');
+            /* `known` is informational only now that one poll serves two
+               baselines — the response's `revision` is compared against each
+               consumer's own. It is still sent so the server contract and the
+               log filter stay exactly as specified. */
+            const known = encodeURIComponent(
+                (sidebarConsumer ? pane._explorerGitRevision : pane._explorerFsWatchRevision) || ''
+            );
             const response = await fetch(
                 `/api/explorer/${encodeURIComponent(sessionId)}/git/state?known=${known}`,
                 { cache: 'no-store' }
@@ -453,14 +569,35 @@
                 return;
             }
             pane._explorerGitWatchFailures = 0;
-            if (!data || data.changed === false || data.revision === pane._explorerGitRevision) {
-                // Unchanged (or a GridVibe Git action already applied it):
-                // zero DOM writes, and any deferred payload is now stale.
+            const revision = typeof data?.revision === 'string' ? data.revision : '';
+            const sidebarStale = Boolean(
+                revision && sidebarConsumer && revision !== pane._explorerGitRevision
+            );
+            let fsStale = Boolean(
+                revision && fsConsumer && revision !== pane._explorerFsWatchRevision
+            );
+            if (fsStale && !pane._explorerFsWatchRevision) {
+                // Silent bootstrap: the surfaces were loaded from the same
+                // filesystem this revision describes, so there is no drift to
+                // repaint — only a baseline to record.
+                pane._explorerFsWatchRevision = revision;
+                fsStale = false;
+            }
+            if (!sidebarStale && !fsStale) {
+                // Unchanged (or a GridVibe action already applied it): zero DOM
+                // writes, and any deferred payload is now stale.
                 pane._explorerGitWatchChanges = 0;
                 pane._explorerGitWatchPending = null;
+                pane._explorerFsWatchPending = null;
             } else {
                 pane._explorerGitWatchChanges = (pane._explorerGitWatchChanges || 0) + 1;
-                await explorerGitWatchApplyRefresh(index, pane, sessionId);
+                if (sidebarStale) {
+                    await explorerGitWatchApplyRefresh(index, pane, sessionId);
+                }
+                if (fsStale && explorerWatchPaneCurrent(index, pane, sessionId)) {
+                    pane._explorerFsWatchPending = revision;
+                    await explorerFsWatchFlushPending(index);
+                }
             }
             if (terminals[index] === pane && sessionIds[index] === sessionId) {
                 delay = pane._explorerGitWatchFailures > 0
@@ -506,6 +643,7 @@
             for (let index = 0; index < terminals.length; index += 1) {
                 explorerGitWatchFlushPending(index);
                 await explorerFileWatchFlushPending(index);
+                await explorerFsWatchFlushPending(index);
                 const pane = terminals[index];
                 if (!pane) {
                     continue;
