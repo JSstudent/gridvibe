@@ -8359,6 +8359,125 @@ class ApiRoutesTestCase(unittest.TestCase):
             self.assertEqual(terminal["custom_agent"], "")
             self.assertEqual(terminal["initial_command"], "")
 
+    def test_workspace_save_follows_a_live_local_shell_switch(self):
+        """A pane restarted under another shell saves with the shell it runs now."""
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "local shells",
+                "config": {
+                    "connection_mode": "wsl",
+                    "terminal_count": 3,
+                    "layout": "split",
+                    "wsl": {"distribution": "Ubuntu", "username": "", "default_dir": "C:/repo"},
+                    "terminals": [
+                        {
+                            "title": "Agent",
+                            "startup_mode": "agent",
+                            "initial_command_mode": "agent",
+                            "agent_selection": "codex",
+                            "initial_command": "codex",
+                            "use_wsl": True,
+                            "distribution": "Ubuntu",
+                        },
+                        {"title": "Shell", "startup_mode": "terminal"},
+                        {
+                            "title": "Files",
+                            "startup_mode": "explorer",
+                            "use_wsl": True,
+                            "distribution": "Ubuntu",
+                        },
+                    ],
+                },
+            },
+        ).get_json()
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "wsl",
+                    "terminal_count": 3,
+                    "layout": "split",
+                    "terminals": [
+                        # WSL agent pane restarted under PowerShell.
+                        {
+                            "startup_mode": "agent",
+                            "initial_command_mode": "agent",
+                            "agent_selection": "codex",
+                            "initial_command": "codex",
+                            "use_wsl": False,
+                            "use_powershell": True,
+                            "distribution": "",
+                        },
+                        # cmd terminal pane restarted under a named WSL distro.
+                        {
+                            "startup_mode": "terminal",
+                            "use_wsl": True,
+                            "use_powershell": False,
+                            "distribution": "Debian",
+                        },
+                        # Explorer panes have no shell; configured flags stand.
+                        {"startup_mode": "explorer", "use_wsl": False, "distribution": ""},
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        terminals = response.get_json()["config"]["terminals"]
+        self.assertFalse(terminals[0]["use_wsl"])
+        self.assertTrue(terminals[0]["use_powershell"])
+        self.assertEqual(terminals[0]["distribution"], "")
+        self.assertEqual(terminals[0]["initial_command"], "codex")
+        self.assertTrue(terminals[1]["use_wsl"])
+        self.assertFalse(terminals[1]["use_powershell"])
+        self.assertEqual(terminals[1]["distribution"], "Debian")
+        self.assertTrue(terminals[2]["use_wsl"])
+        self.assertEqual(terminals[2]["distribution"], "Ubuntu")
+
+    def test_workspace_save_keeps_ssh_panes_free_of_local_shell_flags(self):
+        """An SSH preset never picks up local shell flags from a workspace save."""
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "remote",
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 1,
+                    "layout": "single",
+                    "ssh": {"host": "example.com", "username": "ubuntu", "port": 22, "default_dir": "/repo"},
+                    "terminals": [{"title": "Shell", "startup_mode": "terminal"}],
+                },
+            },
+        ).get_json()
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 1,
+                    "layout": "single",
+                    "terminals": [
+                        {"startup_mode": "terminal", "use_wsl": True, "distribution": "Ubuntu"}
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        terminal = response.get_json()["config"]["terminals"][0]
+        self.assertFalse(terminal["use_wsl"])
+        self.assertFalse(terminal["use_powershell"])
+        self.assertEqual(terminal["distribution"], "")
+
     def test_save_as_updates_only_the_requesting_session_group_target(self):
         original_group = api.session_manager.create_group(
             name="GridVibe",
