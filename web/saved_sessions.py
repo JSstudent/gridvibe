@@ -684,6 +684,17 @@ def _merge_workspace_session_config(
             saved_terminal["browser_tabs"] = []
             saved_terminal["browser_active_tab"] = 0
 
+        # The pane header's shell dropdown restarts a live Local Repo pane under
+        # another shell family, so a workspace save has to follow the shell the
+        # pane runs *now*. Without this the launcher-configured shell always won
+        # and re-saving a launched session silently reverted a cmd/PowerShell/WSL
+        # switch. Explorer and browser panes have no shell, so their flags stay
+        # as configured (`buildPaneLaunchFields` zeroes them at launch anyway).
+        if base["connection_mode"] == "wsl" and startup_mode in {"terminal", "agent"}:
+            saved_terminal["use_wsl"] = workspace_terminal["use_wsl"]
+            saved_terminal["use_powershell"] = workspace_terminal["use_powershell"]
+            saved_terminal["distribution"] = workspace_terminal["distribution"]
+
     return _normalize_session_config(merged)
 
 

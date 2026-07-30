@@ -1189,6 +1189,113 @@
            (the coloured status dot still shows). */
         .terminal-container.actions-collapsed .terminal-status span { display: none; }
 
+        /* Panes whose reset button opens the shell picker get a caret hint. Drawn
+           in CSS rather than as markup so the busy-state innerHTML swap in
+           setTerminalActionState cannot wipe it. */
+        .terminal-action-btn.has-shell-menu {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .terminal-action-btn.has-shell-menu::after {
+            content: '';
+            width: 0;
+            height: 0;
+            border-left: 3.5px solid transparent;
+            border-right: 3.5px solid transparent;
+            border-top: 4px solid currentColor;
+            opacity: .75;
+        }
+
+        /* Reset/shell dropdown for Local Repo panes. Anchored to .terminal-meta
+           (already position: relative) so it lands under the header actions in
+           both the inline and the collapsed/folded header layouts. */
+        .pane-shell-menu {
+            position: absolute;
+            top: calc(100% + 6px);
+            right: 0;
+            z-index: 60;
+            min-width: 186px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            padding: 6px;
+            background: var(--t-card-header);
+            border: 1px solid var(--t-border);
+            border-radius: 8px;
+            box-shadow: 0 10px 26px rgba(0, 0, 0, .35);
+        }
+
+        .pane-shell-menu[hidden] { display: none; }
+
+        .pane-shell-menu.is-busy { pointer-events: none; opacity: .6; }
+
+        .pane-shell-menu-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+            padding: 6px 8px;
+            border: 1px solid transparent;
+            border-radius: 5px;
+            background: transparent;
+            color: var(--t-btn-text);
+            font-size: .74rem;
+            font-weight: 600;
+            text-align: left;
+            cursor: pointer;
+            transition: background .18s, border-color .18s, color .18s;
+        }
+
+        .pane-shell-menu-item:hover {
+            background: var(--t-btn-hover-bg);
+            border-color: var(--session-color, var(--t-accent));
+            color: var(--t-text);
+        }
+
+        .pane-shell-menu-item.is-active { color: var(--t-accent); }
+
+        .pane-shell-menu-mark {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 14px;
+            width: 14px;
+            height: 14px;
+        }
+
+        .pane-shell-menu-mark svg { width: 14px; height: 14px; }
+
+        .pane-shell-menu-label { flex: 1 1 auto; }
+
+        .pane-shell-menu-hint {
+            color: var(--t-text-muted);
+            font-size: .68rem;
+            font-weight: 500;
+        }
+
+        .pane-shell-menu-title {
+            padding: 4px 8px 2px;
+            color: var(--t-text-muted);
+            font-size: .66rem;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+
+        .pane-shell-menu-note {
+            padding: 4px 8px;
+            color: var(--t-text-muted);
+            font-size: .7rem;
+        }
+
+        .pane-shell-menu-sep {
+            height: 1px;
+            margin: 3px 4px;
+            background: var(--t-border);
+        }
+
         .terminal-action-btn {
             border: 1px solid var(--session-color-dim, var(--t-border-tab));
             background: var(--t-btn-bg);
@@ -4801,6 +4908,9 @@
             outline: 1px solid var(--t-accent);
             outline-offset: -1px;
         }
+        .explorer-fs-cut-source {
+            opacity: .55;
+        }
         .terminal-container.explorer-fs-busy {
             cursor: progress;
         }
@@ -4852,6 +4962,20 @@
         .explorer-fs-bar-action:focus-visible {
             border-color: var(--t-accent);
             outline: none;
+        }
+        .explorer-name-card {
+            width: min(520px, 100%);
+        }
+        .explorer-name-error {
+            color: var(--gv-danger);
+            font-size: .78rem;
+            line-height: 1.4;
+        }
+        #explorerNameModal.is-busy .explorer-name-card {
+            cursor: progress;
+        }
+        #explorerNameModal.is-busy .modal-form {
+            opacity: .72;
         }
 
         /* placeholder states */

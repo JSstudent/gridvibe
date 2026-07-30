@@ -1333,7 +1333,7 @@ class _LocalExplorerBackend:
     The backend abstraction exists so every explorer helper and route body is
     written once: backends supply how Git runs (subprocess vs SSH) and how
     paths/files are resolved and read (os vs SFTP); the helpers supply the
-    logic. All filesystem access stays read-only.
+    logic. Filesystem mutations stay limited to the guarded policy modules.
     """
 
     remote = False
@@ -1475,6 +1475,52 @@ class _LocalExplorerBackend:
         os.rmdir(path)
 
     def fs_rename(self, source: str, destination: str) -> None:
+        os.rename(source, destination)
+
+    def fs_rename_noreplace(self, source: str, destination: str) -> None:
+        """Move one entry without replacing an existing destination."""
+        if os.name == "nt":
+            # MoveFile, which backs os.rename on Windows, refuses replacement.
+            os.rename(source, destination)
+            return
+
+        if self.fs_lstat(destination) is not None:
+            raise FileExistsError(errno.EEXIST, "Destination exists", destination)
+
+        source_stat = self.fs_lstat(source)
+        if source_stat is not None and source_stat.get("kind") == "file":
+            try:
+                # link(2) reserves the exact destination atomically. Link leaves
+                # are rejected by policy, so this never follows a symlink source.
+                os.link(source, destination, follow_symlinks=False)
+            except OSError as exc:
+                if exc.errno not in {
+                    errno.EPERM,
+                    errno.EMLINK,
+                    errno.EXDEV,
+                    errno.ENOSYS,
+                }:
+                    raise
+            else:
+                try:
+                    os.unlink(source)
+                except OSError as exc:
+                    try:
+                        os.unlink(destination)
+                    except OSError as cleanup_exc:
+                        uncertain = OSError(
+                            "Move failed after reserving the destination"
+                        )
+                        uncertain.gridvibe_mutated = True
+                        raise uncertain from cleanup_exc
+                    raise exc
+                return
+
+        # Directories cannot be hard-linked. The policy claim excludes every
+        # GridVibe-internal race; this final existence check narrows the residual
+        # race with an external writer before rename(2).
+        if self.fs_lstat(destination) is not None:
+            raise FileExistsError(errno.EEXIST, "Destination exists", destination)
         os.rename(source, destination)
 
     def fs_chmod(self, path: str, mode: int) -> None:
@@ -1720,6 +1766,11 @@ class _SftpExplorerBackend:
         self.sftp.rmdir(path)
 
     def fs_rename(self, source: str, destination: str) -> None:
+        self.sftp.rename(source, destination)
+
+    def fs_rename_noreplace(self, source: str, destination: str) -> None:
+        # SSH_FXP_RENAME is no-replace. Do not use the overwriting
+        # posix_rename extension used by replace_file().
         self.sftp.rename(source, destination)
 
     def fs_chmod(self, path: str, mode: int) -> None:

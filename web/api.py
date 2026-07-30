@@ -131,8 +131,11 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     save_explorer_file_payload,
 )
 from web.explorer_fs import (
+    create_explorer_entry_payload,
     delete_explorer_entry_payload,
+    move_explorer_entry_payload,
     paste_explorer_entry_payload,
+    rename_explorer_entry_payload,
 )
 from web.explorer_search import (  # noqa: F401 - re-exported for backwards compatibility
     run_explorer_search,
@@ -196,6 +199,7 @@ from web.selfupdate import (  # noqa: F401 - perform_self_update re-exported for
 from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatibility
     _MAX_TRACKED_SOCKET_CLIENTS,
     _MAX_TRACKED_TERMINAL_COMMAND_LENGTH,
+    LOCAL_SHELL_KINDS,
     SSH_STREAM_RECV_TIMEOUT,
     TERMINAL_OUTPUT_BUFFER_MAX_CHARS,
     WINDOWS_DEVICE_ATTRIBUTES_RESPONSE,
@@ -216,8 +220,10 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _finalize_stream,
     _get_buffered_terminal_output,
     _local_shell_display_name,
+    _local_shell_kind,
     _mark_runtime_agent_exited,
     _normalize_local_directory,
+    _normalize_local_shell_kind,
     _normalize_probed_local_cwd,
     _replace_group_sessions,
     _resize_connection,
@@ -582,6 +588,7 @@ def terminals_page():
     logger.info("GET /terminals")
     return render_template('terminals.html', max_sessions=runtime_config.max_sessions,
                            app_surface_mode=runtime_config.app_surface_mode,
+                           local_windows_shells_available=os.name == "nt",
                            voice_enabled=runtime_config.voice_enabled,
                            voice_engine=runtime_config.voice_engine,
                            voice_model=_active_voice_model_name(),
@@ -795,6 +802,55 @@ def _explorer_mutation_json(
     return data, None
 
 
+@app.route('/api/explorer/<session_id>/create', methods=['POST'])
+def create_explorer_entry(session_id: str):
+    """Create one exact empty file or folder without overwrite."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if not _is_explorer_session(session):
+        return jsonify({"error": "Session is not a file explorer pane"}), 400
+    data, error_response = _explorer_mutation_json(
+        {
+            "root_revision",
+            "destination_directory",
+            "name",
+            "entry_kind",
+        }
+    )
+    if error_response is not None:
+        return error_response
+    if (
+        not isinstance(data.get("root_revision"), str)
+        or not data.get("root_revision")
+        or not isinstance(data.get("destination_directory"), str)
+        or not isinstance(data.get("name"), str)
+        or not isinstance(data.get("entry_kind"), str)
+    ):
+        return (
+            jsonify(
+                {
+                    "error": "Create requires a root revision, destination directory, name, and entry kind",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return create_explorer_entry_payload(
+            backend,
+            root_revision=data["root_revision"],
+            destination_directory=data["destination_directory"],
+            name=data["name"],
+            entry_kind=data["entry_kind"],
+            session_id=session_id,
+        )
+
+    return _explorer_route_response(session, handler)
+
+
 @app.route('/api/explorer/<session_id>/paste', methods=['POST'])
 def paste_explorer_entry(session_id: str):
     """Copy one entry inside the same live explorer root without overwrite."""
@@ -836,6 +892,100 @@ def paste_explorer_entry(session_id: str):
             source_path=data["source_path"],
             source_revision=data["source_revision"],
             destination_directory=data["destination_directory"],
+            session_id=session_id,
+        )
+
+    return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/move', methods=['POST'])
+def move_explorer_entry(session_id: str):
+    """Move one entry inside the same live explorer root without overwrite."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if not _is_explorer_session(session):
+        return jsonify({"error": "Session is not a file explorer pane"}), 400
+    data, error_response = _explorer_mutation_json(
+        {
+            "root_revision",
+            "source_path",
+            "source_revision",
+            "destination_directory",
+        }
+    )
+    if error_response is not None:
+        return error_response
+    required_strings = ("root_revision", "source_path", "source_revision")
+    if any(
+        not isinstance(data.get(field), str) or not data.get(field)
+        for field in required_strings
+    ) or not isinstance(data.get("destination_directory"), str):
+        return (
+            jsonify(
+                {
+                    "error": "Move requires root/source revisions, a source path, and a destination directory",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return move_explorer_entry_payload(
+            backend,
+            root_revision=data["root_revision"],
+            source_path=data["source_path"],
+            source_revision=data["source_revision"],
+            destination_directory=data["destination_directory"],
+            session_id=session_id,
+        )
+
+    return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/rename', methods=['POST'])
+def rename_explorer_entry(session_id: str):
+    """Rename one entry inside its own folder without overwrite."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if not _is_explorer_session(session):
+        return jsonify({"error": "Session is not a file explorer pane"}), 400
+    data, error_response = _explorer_mutation_json(
+        {
+            "root_revision",
+            "source_path",
+            "source_revision",
+            "name",
+        }
+    )
+    if error_response is not None:
+        return error_response
+    required_strings = ("root_revision", "source_path", "source_revision")
+    if any(
+        not isinstance(data.get(field), str) or not data.get(field)
+        for field in required_strings
+    ) or not isinstance(data.get("name"), str):
+        return (
+            jsonify(
+                {
+                    "error": "Rename requires root/source revisions, a source path, and a new name",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return rename_explorer_entry_payload(
+            backend,
+            root_revision=data["root_revision"],
+            source_path=data["source_path"],
+            source_revision=data["source_revision"],
+            name=data["name"],
             session_id=session_id,
         )
 
@@ -1892,6 +2042,81 @@ def reconnect_session(session_id: str):
         ), 409
 
     logger.info("Reconnect requested session_id=%s previous_status=%s", session_id, session.status.value)
+    _close_ssh_connection(session_id, clear_buffer=True)
+    session_manager.update_session_status(session_id, SessionStatus.PENDING)
+    _broadcast_session_status(session_id)
+    socketio.start_background_task(_connect_session, session_id)
+
+    return jsonify(session_manager.get_session(session_id).to_dict())
+
+
+@app.route('/api/sessions/<session_id>/shell', methods=['POST'])
+def change_session_shell(session_id: str):
+    """Restart one Local Repo terminal pane under a different local shell.
+
+    Only the shell family (cmd / PowerShell / WSL distro) changes: the pane
+    keeps its slot, title, startup command and startup mode, so the pane's
+    startup sequence simply replays under the newly chosen shell. The live
+    working directory is carried over when the old shell still answers a cwd
+    probe (that probe already returns Windows-form paths for WSL panes).
+    """
+    session = session_manager.get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    if session.mode != "wsl":
+        return jsonify({"error": "Shell switching is only available for Local Repo sessions"}), 400
+
+    if os.name != "nt":
+        return jsonify(
+            {"error": "cmd, PowerShell and WSL shells are only available on Windows hosts"}
+        ), 400
+
+    if _is_explorer_session(session) or _is_browser_session(session):
+        return jsonify(
+            {"error": "Switch this pane back to terminal mode before changing its shell"}
+        ), 400
+
+    data = request.get_json(silent=True) or {}
+    shell_kind = _normalize_local_shell_kind(data.get("shell"))
+    if shell_kind not in LOCAL_SHELL_KINDS:
+        return jsonify({"error": "shell must be 'cmd', 'powershell', or 'wsl'"}), 400
+
+    use_wsl = shell_kind == "wsl"
+    use_powershell = shell_kind == "powershell"
+    distribution = str(data.get("distribution") or "").strip() if use_wsl else ""
+
+    # Re-selecting the shell a pane already runs is a no-op rather than a
+    # restart, so clicking the active menu entry never kills a live shell.
+    if shell_kind == _local_shell_kind(session) and (
+        not use_wsl or distribution == str(session.distribution or "").strip()
+    ):
+        return jsonify(session.to_dict())
+
+    next_directory = session.directory
+    probed_directory = _resolve_live_terminal_cwd(session_id, session)
+    if probed_directory and os.path.isdir(probed_directory):
+        next_directory = probed_directory
+
+    session_manager.update_session_metadata(
+        session_id,
+        directory=next_directory,
+        distribution=distribution,
+        use_wsl=use_wsl,
+        use_powershell=use_powershell,
+        host=_local_shell_display_name(
+            use_wsl=use_wsl,
+            use_powershell=use_powershell,
+            distribution=distribution,
+        ),
+    )
+    logger.info(
+        "Shell switch session_id=%s shell=%s distribution=%s directory=%s",
+        session_id,
+        shell_kind,
+        distribution or "-",
+        next_directory,
+    )
     _close_ssh_connection(session_id, clear_buffer=True)
     session_manager.update_session_status(session_id, SessionStatus.PENDING)
     _broadcast_session_status(session_id)

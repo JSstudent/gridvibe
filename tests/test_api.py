@@ -197,6 +197,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/explorer-search.js",
             "js/explorer-fs.js",
             "js/browser-pane.js",
+            "js/terminal-shell.js",
             "js/terminals.js",
         ):
             marker = f"/static/{asset}"
@@ -722,7 +723,10 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        self.assertIn('data-terminal-refresh="${i}"', html)
+        # The button itself is rendered by terminal-shell.js (it doubles as the
+        # local shell picker), still wired per pane slot by terminals.js.
+        self.assertIn('data-terminal-refresh="${index}"', html)
+        self.assertIn('wireCardButton(card, `[data-terminal-refresh="${i}"]`', html)
         self.assertIn("function setTerminalRefreshState(index, refreshing)", html)
         self.assertIn("async function refreshTerminalDisplay(index)", html)
 
@@ -940,6 +944,35 @@ class ApiRoutesTestCase(unittest.TestCase):
             "function captureSurvivingPaneClientState(closingSessionId)", switch_start
         )
         self.assertNotIn("teardownCurrentGrid();", html[switch_start:switch_end])
+
+    def test_terminals_page_exposes_pane_shell_picker(self):
+        """The header reset control doubles as the Local Repo shell picker."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # The reset button and its menu are rendered by terminal-shell.js and
+        # only the local terminal panes get the dropdown behaviour.
+        self.assertIn("${paneResetButtonHtml(i, session)}", html)
+        self.assertIn("${paneShellMenuHtml(i)}", html)
+        self.assertIn("handlePaneResetButton(i)", html)
+        self.assertIn("function paneSupportsShellSwitch(session)", html)
+        self.assertIn("&& session.mode === 'wsl'", html)
+        self.assertIn("!isExplorerSession(session)", html)
+        self.assertIn("!isBrowserSession(session)", html)
+        self.assertIn("async function switchSessionShell(index, shellKind, distribution = '')", html)
+        self.assertIn("`/api/sessions/${encodeURIComponent(sessionId)}/shell`", html)
+        self.assertIn("body: JSON.stringify({ shell: shellKind, distribution })", html)
+        self.assertIn("data-pane-shell-kind=\"wsl\" data-pane-shell-distro=\"\"", html)
+        self.assertIn("fetch('/api/wsl-distros')", html)
+        # Non-switchable panes keep the plain one-click reset.
+        reset_start = html.index("function handlePaneResetButton(index)")
+        reset_body = html[reset_start:html.index("function syncPaneShellControls(index, session)")]
+        self.assertIn("togglePaneShellMenu(index);", reset_body)
+        self.assertIn("refreshTerminalDisplay(index);", reset_body)
+        # WebView2-safe dismissal + retry affordance for failed distro lookups.
+        self.assertIn("closeAllPaneShellMenus();", html)
+        self.assertIn("data-pane-shell-distro-retry=\"1\"", html)
 
     def test_terminals_page_exposes_browser_pane_rendering_hooks(self):
         response = self.client.get("/terminals")
@@ -2217,9 +2250,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('data-explorer-crumb=', html)
         self.assertIn("loadExplorerPane(index, button.dataset.explorerCrumb || '');", html)
         self.assertIn('class="explorer-crumb current"', html)
-        # One definition + all five render paths (directory listing, file,
-        # image viewer, in-place refresh, commit diff) route through it.
-        self.assertEqual(html.count("renderExplorerPathBreadcrumb("), 6)
+        # One definition + all six render paths (directory listing, file,
+        # image viewer, in-place refresh, commit diff, move retarget) use it.
+        self.assertEqual(html.count("renderExplorerPathBreadcrumb("), 7)
         # Token-driven styling only (Regression Guardrail 7).
         crumb_css = html[html.index(".explorer-crumb {"):html.index(".explorer-crumb-sep {")]
         self.assertIn("var(--explorer-muted)", crumb_css)
@@ -4564,6 +4597,240 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(Path(session.explorer_root_directory), repo_dir.resolve())
         self.assertEqual(session.status, api.SessionStatus.PENDING)
         self.assertEqual(response.get_json()["startup_mode"], "terminal")
+
+    def _create_local_terminal_session(self, directory: Path, **overrides):
+        """One connected Local Repo terminal pane running cmd by default."""
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        fields = {
+            "host": "cmd",
+            "directory": str(directory),
+            "mode": "wsl",
+            "startup_mode": "terminal",
+        }
+        fields.update(overrides)
+        session = api.session_manager.create_session(group_id=group.group_id, **fields)
+        api.session_manager.update_session_status(session.session_id, api.SessionStatus.CONNECTED)
+        return session
+
+    def test_switch_pane_shell_restarts_local_terminal_under_powershell(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session = self._create_local_terminal_session(repo_dir, initial_command="claude")
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api, "_resolve_live_terminal_cwd", return_value=None
+        ), patch.object(api, "_close_ssh_connection") as close_connection, patch.object(
+            api.socketio, "start_background_task"
+        ) as start_task:
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/shell",
+                json={"shell": "powershell"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        close_connection.assert_called_once_with(session.session_id, clear_buffer=True)
+        start_task.assert_called_once_with(api._connect_session, session.session_id)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertTrue(updated.use_powershell)
+        self.assertFalse(updated.use_wsl)
+        self.assertEqual(updated.host, "PowerShell")
+        self.assertEqual(updated.status, api.SessionStatus.PENDING)
+        # The pane keeps its identity: same slot, startup command and mode, so
+        # only the shell process is replaced.
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertEqual(updated.initial_command, "claude")
+        self.assertEqual(response.get_json()["use_powershell"], True)
+
+    def test_switch_pane_shell_selects_named_wsl_distribution(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session = self._create_local_terminal_session(repo_dir, use_powershell=True, host="PowerShell")
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api, "_resolve_live_terminal_cwd", return_value=None
+        ), patch.object(api, "_close_ssh_connection"), patch.object(
+            api.socketio, "start_background_task"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/shell",
+                json={"shell": "wsl", "distribution": "Ubuntu"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertTrue(updated.use_wsl)
+        self.assertFalse(updated.use_powershell)
+        self.assertEqual(updated.distribution, "Ubuntu")
+        self.assertEqual(updated.host, "WSL (Ubuntu)")
+
+    def test_switch_pane_shell_clears_distribution_for_windows_shells(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session = self._create_local_terminal_session(
+            repo_dir, use_wsl=True, distribution="Ubuntu", host="WSL (Ubuntu)"
+        )
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api, "_resolve_live_terminal_cwd", return_value=None
+        ), patch.object(api, "_close_ssh_connection"), patch.object(
+            api.socketio, "start_background_task"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/shell",
+                json={"shell": "cmd", "distribution": "Ubuntu"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertFalse(updated.use_wsl)
+        self.assertFalse(updated.use_powershell)
+        self.assertEqual(updated.distribution, "")
+        self.assertEqual(updated.host, "cmd")
+
+    def test_switch_pane_shell_carries_live_working_directory(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        nested_dir = repo_dir / "src"
+        nested_dir.mkdir(parents=True)
+        session = self._create_local_terminal_session(repo_dir)
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api, "_resolve_live_terminal_cwd", return_value=str(nested_dir)
+        ), patch.object(api, "_close_ssh_connection"), patch.object(
+            api.socketio, "start_background_task"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/shell",
+                json={"shell": "wsl"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(Path(updated.directory), nested_dir)
+
+    def test_switch_pane_shell_keeps_directory_when_probe_fails(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session = self._create_local_terminal_session(repo_dir)
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api, "_resolve_live_terminal_cwd", return_value="/home/dev/project"
+        ), patch.object(api, "_close_ssh_connection"), patch.object(
+            api.socketio, "start_background_task"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/shell",
+                json={"shell": "powershell"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(Path(updated.directory), repo_dir)
+
+    def test_switch_pane_shell_reselecting_active_shell_does_not_restart(self):
+        """Clicking the shell a pane already runs must not kill a live shell."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session = self._create_local_terminal_session(
+            repo_dir, use_wsl=True, distribution="Ubuntu", host="WSL (Ubuntu)"
+        )
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api, "_close_ssh_connection"
+        ) as close_connection, patch.object(
+            api.socketio, "start_background_task"
+        ) as start_task:
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/shell",
+                json={"shell": "wsl", "distribution": "Ubuntu"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.status, api.SessionStatus.CONNECTED)
+
+    def test_switch_pane_shell_rejects_unknown_shell(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session = self._create_local_terminal_session(repo_dir)
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            api.socketio, "start_background_task"
+        ) as start_task:
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/shell",
+                json={"shell": "fish"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        start_task.assert_not_called()
+        self.assertIn("shell must be", response.get_json()["error"])
+
+    def test_switch_pane_shell_rejects_ssh_session(self):
+        group = api.session_manager.create_group(
+            name="Remote",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            mode="ssh",
+            startup_mode="terminal",
+        )
+
+        with patch.object(api.os, "name", "nt"):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/shell",
+                json={"shell": "powershell"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Local Repo", response.get_json()["error"])
+
+    def test_switch_pane_shell_rejects_explorer_pane(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session_id = self._create_explorer_session(repo_dir)
+
+        with patch.object(api.os, "name", "nt"):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/shell",
+                json={"shell": "powershell"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("terminal mode", response.get_json()["error"])
+
+    def test_switch_pane_shell_rejects_non_windows_hosts(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session = self._create_local_terminal_session(repo_dir, host="Shell")
+
+        with patch.object(api.os, "name", "posix"):
+            response = self.client.post(
+                f"/api/sessions/{session.session_id}/shell",
+                json={"shell": "powershell"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Windows", response.get_json()["error"])
+
+    def test_switch_pane_shell_missing_session_returns_404(self):
+        response = self.client.post(
+            "/api/sessions/does-not-exist/shell",
+            json={"shell": "powershell"},
+        )
+
+        self.assertEqual(response.status_code, 404)
 
     def test_switch_terminal_pane_to_explorer_closes_connection_and_preserves_shell_choice(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -8092,6 +8359,125 @@ class ApiRoutesTestCase(unittest.TestCase):
             self.assertEqual(terminal["custom_agent"], "")
             self.assertEqual(terminal["initial_command"], "")
 
+    def test_workspace_save_follows_a_live_local_shell_switch(self):
+        """A pane restarted under another shell saves with the shell it runs now."""
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "local shells",
+                "config": {
+                    "connection_mode": "wsl",
+                    "terminal_count": 3,
+                    "layout": "split",
+                    "wsl": {"distribution": "Ubuntu", "username": "", "default_dir": "C:/repo"},
+                    "terminals": [
+                        {
+                            "title": "Agent",
+                            "startup_mode": "agent",
+                            "initial_command_mode": "agent",
+                            "agent_selection": "codex",
+                            "initial_command": "codex",
+                            "use_wsl": True,
+                            "distribution": "Ubuntu",
+                        },
+                        {"title": "Shell", "startup_mode": "terminal"},
+                        {
+                            "title": "Files",
+                            "startup_mode": "explorer",
+                            "use_wsl": True,
+                            "distribution": "Ubuntu",
+                        },
+                    ],
+                },
+            },
+        ).get_json()
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "wsl",
+                    "terminal_count": 3,
+                    "layout": "split",
+                    "terminals": [
+                        # WSL agent pane restarted under PowerShell.
+                        {
+                            "startup_mode": "agent",
+                            "initial_command_mode": "agent",
+                            "agent_selection": "codex",
+                            "initial_command": "codex",
+                            "use_wsl": False,
+                            "use_powershell": True,
+                            "distribution": "",
+                        },
+                        # cmd terminal pane restarted under a named WSL distro.
+                        {
+                            "startup_mode": "terminal",
+                            "use_wsl": True,
+                            "use_powershell": False,
+                            "distribution": "Debian",
+                        },
+                        # Explorer panes have no shell; configured flags stand.
+                        {"startup_mode": "explorer", "use_wsl": False, "distribution": ""},
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        terminals = response.get_json()["config"]["terminals"]
+        self.assertFalse(terminals[0]["use_wsl"])
+        self.assertTrue(terminals[0]["use_powershell"])
+        self.assertEqual(terminals[0]["distribution"], "")
+        self.assertEqual(terminals[0]["initial_command"], "codex")
+        self.assertTrue(terminals[1]["use_wsl"])
+        self.assertFalse(terminals[1]["use_powershell"])
+        self.assertEqual(terminals[1]["distribution"], "Debian")
+        self.assertTrue(terminals[2]["use_wsl"])
+        self.assertEqual(terminals[2]["distribution"], "Ubuntu")
+
+    def test_workspace_save_keeps_ssh_panes_free_of_local_shell_flags(self):
+        """An SSH preset never picks up local shell flags from a workspace save."""
+        original = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "remote",
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 1,
+                    "layout": "single",
+                    "ssh": {"host": "example.com", "username": "ubuntu", "port": 22, "default_dir": "/repo"},
+                    "terminals": [{"title": "Shell", "startup_mode": "terminal"}],
+                },
+            },
+        ).get_json()
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "id": original["id"],
+                "name": original["name"],
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "ssh",
+                    "terminal_count": 1,
+                    "layout": "single",
+                    "terminals": [
+                        {"startup_mode": "terminal", "use_wsl": True, "distribution": "Ubuntu"}
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        terminal = response.get_json()["config"]["terminals"][0]
+        self.assertFalse(terminal["use_wsl"])
+        self.assertFalse(terminal["use_powershell"])
+        self.assertEqual(terminal["distribution"], "")
+
     def test_save_as_updates_only_the_requesting_session_group_target(self):
         original_group = api.session_manager.create_group(
             name="GridVibe",
@@ -10843,6 +11229,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/explorer-search.js",
         "js/explorer-fs.js",
         "js/browser-pane.js",
+        "js/terminal-shell.js",
     )
 
     def setUp(self):
@@ -10989,8 +11376,15 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             terminals_html.index("js/explorer-fs.js"),
             terminals_html.index("js/browser-pane.js"),
         )
+        # terminal-shell.js (pane shell picker) is the last module before
+        # terminals.js, which calls into it while building pane headers.
+        self.assertIn(f"/static/js/terminal-shell.js?v={__version__}", terminals_html)
         self.assertLess(
             terminals_html.index("js/browser-pane.js"),
+            terminals_html.index("js/terminal-shell.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/terminal-shell.js"),
             terminals_html.index("js/terminals.js"),
         )
 
@@ -11009,6 +11403,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/explorer-search.js",
             "js/explorer-fs.js",
             "js/browser-pane.js",
+            "js/terminal-shell.js",
             "js/terminals.js",
         ):
             with self.subTest(filename=filename):

@@ -1,9 +1,9 @@
-"""Root-confined copy and delete policy shared by local and SFTP explorers.
+"""Root-confined filesystem mutation policy shared by local and SFTP explorers.
 
 Backends in :mod:`web.explorer` provide small filesystem mechanics; this module
 owns every validation, limit, naming, concurrency, cleanup, and response rule.
-No path is passed to a shell, copies stream in bounded chunks, and link leaves
-are always handled with lstat/remove semantics rather than followed.
+No path is passed to a shell. Parent directories are resolved before literal
+leaves are joined, so mutation targets are never followed through a link leaf.
 """
 
 import errno
@@ -30,6 +30,7 @@ EXPLORER_FS_MAX_DEPTH = 32
 EXPLORER_COPY_MAX_BYTES = 512 * 1024 * 1024
 EXPLORER_COPY_CHUNK_BYTES = 1024 * 1024
 EXPLORER_COPY_NAME_ATTEMPTS = 100
+EXPLORER_CREATE_NAME_MAX_CHARS = 255
 
 _WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:")
 _FILESYSTEM_ERRORS = (OSError, RuntimeError, ValueError)
@@ -85,6 +86,11 @@ class ExplorerFsOperationInProgressError(ExplorerFsError):
     code = "operation_in_progress"
 
 
+class ExplorerFsCrossDeviceError(ExplorerFsError):
+    status_code = 409
+    code = "cross_device_move"
+
+
 class ExplorerFsCopyLimitError(ExplorerFsError):
     status_code = 413
     code = "copy_limit_exceeded"
@@ -123,6 +129,29 @@ def _normalize_destination(requested_path: Any) -> str:
     return _normalize_rel(requested_path)
 
 
+def _normalize_entry_name(name: Any) -> str:
+    """Validate one exact, literal leaf name for exclusive creation."""
+    if not isinstance(name, str) or not name:
+        raise ExplorerFsError("A non-empty entry name is required")
+    if "\x00" in name:
+        raise ExplorerFsError("Entry names cannot contain NUL")
+    if "/" in name or "\\" in name:
+        raise ExplorerFsError("Entry names must be one path segment")
+    if name in {".", ".."}:
+        raise ExplorerFsError("Entry names cannot be dot or parent segments")
+    if _WINDOWS_ABSOLUTE_RE.match(name) or os.path.isabs(name):
+        raise ExplorerFsError("Entry names cannot be absolute or drive-qualified")
+    if len(name) > EXPLORER_CREATE_NAME_MAX_CHARS:
+        raise ExplorerFsError(
+            f"Entry names cannot exceed {EXPLORER_CREATE_NAME_MAX_CHARS} characters"
+        )
+    if name.lower() == ".git":
+        raise ExplorerFsProtectedPathError(
+            "GridVibe will not create .git entries through the file explorer"
+        )
+    return name
+
+
 def _copy_name_for_attempt(name: str, attempt: int) -> str:
     """Return the original name, then extension-aware ``-Copy`` variants."""
     if attempt <= 0:
@@ -138,6 +167,18 @@ def _is_missing_error(exc: BaseException) -> bool:
 
 def _is_exists_error(exc: BaseException) -> bool:
     return isinstance(exc, FileExistsError) or getattr(exc, "errno", None) == errno.EEXIST
+
+
+def _is_destination_collision_error(exc: BaseException) -> bool:
+    return _is_exists_error(exc) or getattr(exc, "errno", None) in {
+        errno.ENOTEMPTY,
+        errno.ENOTDIR,
+        errno.EISDIR,
+    }
+
+
+def _is_cross_device_error(exc: BaseException) -> bool:
+    return getattr(exc, "errno", None) == errno.EXDEV
 
 
 def _is_permission_error(exc: BaseException) -> bool:
@@ -476,6 +517,95 @@ def _reserve_copy_destination(
     )
 
 
+def _relative_path_contains_git(path: str) -> bool:
+    return any(part.lower() == ".git" for part in path.replace("\\", "/").split("/"))
+
+
+def create_explorer_entry_payload(
+    backend: Any,
+    *,
+    root_revision: Any,
+    destination_directory: Any,
+    name: Any,
+    entry_kind: Any,
+    session_id: str,
+) -> Dict[str, Any]:
+    """Create one exact empty file or directory without overwrite."""
+    if entry_kind not in {"file", "directory"}:
+        raise ExplorerFsError("Entry kind must be file or directory")
+    literal_name = _normalize_entry_name(name)
+    current_root, _revision = _current_root(backend, root_revision)
+    destination_root, destination_absolute, destination_relative = (
+        _resolve_destination(backend, destination_directory)
+    )
+    if destination_root != current_root:
+        raise ExplorerFsRootChangedError(
+            "The explorer root changed; refresh before trying again"
+        )
+
+    resolved_destination_relative = backend.rel_explorer_path(
+        current_root, destination_absolute
+    )
+    if _relative_path_contains_git(
+        resolved_destination_relative or destination_relative
+    ):
+        raise ExplorerFsProtectedPathError(
+            "GridVibe will not create entries inside .git"
+        )
+
+    target_path = backend.fs_join(destination_absolute, literal_name)
+    with _explorer_path_claims(
+        (backend.fs_claim_key(target_path),),
+        error_type=ExplorerFsOperationInProgressError,
+    ):
+        try:
+            existing = backend.fs_lstat(target_path)
+        except _FILESYSTEM_ERRORS as exc:
+            _raise_io_error(
+                "Could not inspect the create destination", exc, mutated=False
+            )
+        if existing is not None:
+            raise ExplorerFsDestinationExistsError(
+                "An entry with that name already exists"
+            )
+        if entry_kind == "directory":
+            try:
+                backend.fs_mkdir_exclusive(target_path)
+            except _FILESYSTEM_ERRORS as exc:
+                if _is_destination_collision_error(exc):
+                    raise ExplorerFsDestinationExistsError(
+                        "An entry with that name already exists"
+                    ) from exc
+                _raise_io_error(
+                    "Could not create the folder", exc, mutated=False
+                )
+        else:
+            try:
+                handle = backend.fs_create_exclusive(target_path)
+            except _FILESYSTEM_ERRORS as exc:
+                if _is_destination_collision_error(exc):
+                    raise ExplorerFsDestinationExistsError(
+                        "An entry with that name already exists"
+                    ) from exc
+                _raise_io_error("Could not create the file", exc, mutated=False)
+            try:
+                handle.close()
+            except Exception as exc:
+                _raise_io_error(
+                    "The file may have been created, but its final status is unknown",
+                    exc,
+                    mutated=True,
+                )
+
+    destination_path = backend.rel_explorer_path(current_root, target_path)
+    return {
+        "ok": True,
+        "destination_path": destination_path,
+        "type": entry_kind,
+        "entry_kind": entry_kind,
+    }
+
+
 def paste_explorer_entry_payload(
     backend: Any,
     *,
@@ -615,6 +745,195 @@ def paste_explorer_entry_payload(
         "destination_path": destination_relative,
         "type": "directory" if source_kind == "directory" else "file",
         "entry_kind": source_kind,
+    }
+
+
+def move_explorer_entry_payload(
+    backend: Any,
+    *,
+    root_revision: Any,
+    source_path: Any,
+    source_revision: Any,
+    destination_directory: Any,
+    session_id: str,
+) -> Dict[str, Any]:
+    """Move one file/tree inside a single live root without replacement."""
+    current_root, _revision = _current_root(backend, root_revision)
+    (
+        source_root,
+        source_parent,
+        source_leaf,
+        source_absolute,
+        source_relative,
+    ) = resolve_mutation_target(backend, source_path)
+    destination_root, destination_absolute, _destination_relative = (
+        _resolve_destination(backend, destination_directory)
+    )
+    if source_root != current_root or destination_root != current_root:
+        raise ExplorerFsRootChangedError(
+            "The explorer root changed; refresh before trying again"
+        )
+
+    source_stat = _check_revision(
+        backend, source_absolute, source_revision, source_relative
+    )
+    source_kind = source_stat.get("kind")
+    if source_kind not in {"file", "directory"}:
+        raise ExplorerFsUnsupportedEntryError(
+            f"Cannot move unsupported entry type at {source_relative}",
+            path=source_relative,
+        )
+    if source_kind == "directory" and source_leaf.lower() == ".git":
+        raise ExplorerFsProtectedPathError(
+            "GridVibe will not move a .git directory because it contains repository history"
+        )
+    if backend.fs_path_is_same_or_descendant(
+        source_absolute, destination_absolute
+    ):
+        raise ExplorerFsInvalidDestinationError(
+            "A folder cannot be moved into itself or one of its descendants"
+        )
+    if backend.fs_claim_key(source_parent) == backend.fs_claim_key(
+        destination_absolute
+    ):
+        raise ExplorerFsInvalidDestinationError(
+            f"{source_relative} is already in that folder"
+        )
+
+    claim_keys = (
+        backend.fs_claim_key(source_absolute),
+        backend.fs_claim_key(destination_absolute),
+    )
+    with _explorer_path_claims(
+        claim_keys,
+        error_type=ExplorerFsOperationInProgressError,
+    ):
+        _check_revision(
+            backend, source_absolute, source_revision, source_relative
+        )
+        destination_target = backend.fs_join(
+            destination_absolute, source_leaf
+        )
+        try:
+            backend.fs_rename_noreplace(source_absolute, destination_target)
+        except _FILESYSTEM_ERRORS as exc:
+            if _is_destination_collision_error(exc):
+                raise ExplorerFsDestinationExistsError(
+                    "An entry with that name already exists in the destination"
+                ) from exc
+            if _is_missing_error(exc):
+                raise ExplorerFsSourceMissingError(
+                    f"{source_relative} no longer exists"
+                ) from exc
+            if _is_cross_device_error(exc):
+                raise ExplorerFsCrossDeviceError(
+                    "This move crosses filesystem devices; use Copy, Paste, then Delete instead"
+                ) from exc
+            _raise_io_error(
+                f"Could not move {source_relative}",
+                exc,
+                mutated=bool(getattr(exc, "gridvibe_mutated", False)),
+            )
+
+    destination_relative = backend.rel_explorer_path(
+        current_root, destination_target
+    )
+    return {
+        "ok": True,
+        "source_path": source_relative,
+        "destination_path": destination_relative,
+        "type": "directory" if source_kind == "directory" else "file",
+        "entry_kind": source_kind,
+        "moved": True,
+    }
+
+
+def rename_explorer_entry_payload(
+    backend: Any,
+    *,
+    root_revision: Any,
+    source_path: Any,
+    source_revision: Any,
+    name: Any,
+    session_id: str,
+) -> Dict[str, Any]:
+    """Rename one entry in place, keeping its parent and never replacing.
+
+    A rename is the same ``rename(2)`` a move performs, with the leaf changing
+    instead of the parent, so it inherits every move guarantee: atomic, no
+    pre-scan, no byte limit, and provably ``mutated: false`` on every failure.
+    """
+    literal_name = _normalize_entry_name(name)
+    current_root, _revision = _current_root(backend, root_revision)
+    (
+        source_root,
+        source_parent,
+        source_leaf,
+        source_absolute,
+        source_relative,
+    ) = resolve_mutation_target(backend, source_path)
+    if source_root != current_root:
+        raise ExplorerFsRootChangedError(
+            "The explorer root changed; refresh before trying again"
+        )
+
+    source_stat = _check_revision(
+        backend, source_absolute, source_revision, source_relative
+    )
+    source_kind = source_stat.get("kind")
+    if source_kind not in {"file", "directory"}:
+        raise ExplorerFsUnsupportedEntryError(
+            f"Cannot rename unsupported entry type at {source_relative}",
+            path=source_relative,
+        )
+    resolved_source_relative = backend.rel_explorer_path(
+        current_root, source_absolute
+    )
+    if _relative_path_contains_git(source_relative) or _relative_path_contains_git(
+        resolved_source_relative
+    ):
+        raise ExplorerFsProtectedPathError(
+            "GridVibe will not rename .git entries because they hold repository metadata"
+        )
+    if literal_name == source_leaf:
+        raise ExplorerFsInvalidDestinationError(
+            f"{source_relative} is already named {literal_name}"
+        )
+
+    target_path = backend.fs_join(source_parent, literal_name)
+    claim_keys = (
+        backend.fs_claim_key(source_absolute),
+        backend.fs_claim_key(target_path),
+    )
+    with _explorer_path_claims(
+        claim_keys,
+        error_type=ExplorerFsOperationInProgressError,
+    ):
+        _check_revision(backend, source_absolute, source_revision, source_relative)
+        try:
+            backend.fs_rename_noreplace(source_absolute, target_path)
+        except _FILESYSTEM_ERRORS as exc:
+            if _is_destination_collision_error(exc):
+                raise ExplorerFsDestinationExistsError(
+                    "An entry with that name already exists"
+                ) from exc
+            if _is_missing_error(exc):
+                raise ExplorerFsSourceMissingError(
+                    f"{source_relative} no longer exists"
+                ) from exc
+            _raise_io_error(
+                f"Could not rename {source_relative}",
+                exc,
+                mutated=bool(getattr(exc, "gridvibe_mutated", False)),
+            )
+
+    return {
+        "ok": True,
+        "source_path": source_relative,
+        "destination_path": backend.rel_explorer_path(current_root, target_path),
+        "type": "directory" if source_kind == "directory" else "file",
+        "entry_kind": source_kind,
+        "moved": True,
     }
 
 
@@ -781,9 +1100,11 @@ __all__ = [
     "EXPLORER_COPY_CHUNK_BYTES",
     "EXPLORER_COPY_MAX_BYTES",
     "EXPLORER_COPY_NAME_ATTEMPTS",
+    "EXPLORER_CREATE_NAME_MAX_CHARS",
     "EXPLORER_FS_MAX_DEPTH",
     "EXPLORER_FS_MAX_ENTRIES",
     "ExplorerFsCopyLimitError",
+    "ExplorerFsCrossDeviceError",
     "ExplorerFsError",
     "ExplorerFsInvalidDestinationError",
     "ExplorerFsIoError",
@@ -794,9 +1115,13 @@ __all__ = [
     "_explorer_claim_keys_conflict",
     "_fs_revision",
     "_fs_root_revision",
+    "_normalize_entry_name",
     "_normalize_rel",
     "_scan_tree",
+    "create_explorer_entry_payload",
     "delete_explorer_entry_payload",
+    "move_explorer_entry_payload",
     "paste_explorer_entry_payload",
+    "rename_explorer_entry_payload",
     "resolve_mutation_target",
 ]

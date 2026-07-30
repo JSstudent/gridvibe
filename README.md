@@ -129,9 +129,13 @@ Swap any pane between a terminal and a file explorer with one button — same di
 | **Edit** | In-place editing of complete UTF-8 text files. `Ctrl+S` saves atomically, preserving line-ending style, BOM, and permission bits. Changed on disk since you opened it? You get a conflict prompt, not a silent overwrite. |
 | **Git** | Branch/dirty status, per-file badges, colour-coded commit graph, historical diffs. Stage · unstage · commit · publish · discard — plus per-line **and** per-block undo right in the diff view. |
 | **Search** | `Ctrl+Shift+F` toggles repo-wide search across the pane's root. Runs on the backend (`git grep`, with a bounded walk / `grep -rIn` fallback), results grouped per file. Case/word/regex toggles, include-glob, scope switch, `.gitignore` on/off. |
-| **Copy & delete** | Right-click a file or folder: copy, paste elsewhere in the same session (never overwrites — collisions get `-Copy` names), copy path, or confirmed permanent delete. |
+| **Create, copy, move, rename & delete** | Right-click an entry or blank directory space to create an exact-name empty file/folder. Copy/paste allocates collision-safe `-Copy` names; Cut/paste moves inside the same root and refuses collisions; **Rename…** changes an entry's name in place through the same dialog and the same no-overwrite rule; permanent delete stays confirmed. |
 
-**Read-only by default.** Those three mutation families are the whole exception list — moving, creating, renaming, uploading, overwrite-on-paste, and `git checkout`/`pull`/`merge` are deliberately out of scope.
+**Read-only by default.** The six guarded mutation families above are the whole exception list. Uploading, overwriting on paste/move/rename, cross-session/root transfer, and `git checkout`/`pull`/`merge` remain deliberately out of scope.
+
+## Switching a Local Repo Pane's Shell
+
+Launched a pane in cmd and wanted PowerShell — or WSL? Click the pane's 🔄 button: on a Local Repo terminal it's a dropdown with **Reset view** on top and a **Shell** section listing **Command Prompt**, **PowerShell**, **WSL** (default distro) and every detected distro. Picking one restarts that pane's shell in place — same slot, same title, same startup command — starting in the directory the old shell was sitting in. Windows hosts only; SSH, explorer, and browser panes keep the plain one-click reset.
 
 ## Browser Preview
 
@@ -151,7 +155,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 
 | | Does |
 | :---: | --- |
-| 🔄 | Reset the view and replay recent output (reloads explorer and browser panes) |
+| 🔄 | Reset the view and replay recent output (reloads explorer and browser panes). On a Local Repo terminal it opens a dropdown: **Reset view** plus a **Shell** section that restarts the pane in cmd, PowerShell, or a WSL distro |
 | 📁 ⇄ 💻 | Swap between terminal and file explorer at the current directory |
 | 🌐 ⇄ 💻 | Swap a Local Repo pane between terminal and browser preview |
 | 🪟 | Split side-by-side or stacked (clones the connection) |

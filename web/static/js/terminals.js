@@ -4338,15 +4338,7 @@
                             <span id="tlabel-${i}">Pending</span>
                         </div>
                         <div class="terminal-actions" id="tactions-${i}">
-                            <button
-                                type="button"
-                                class="terminal-action-btn"
-                                id="trefresh-${i}"
-                                data-terminal-refresh="${i}"
-                                title="${isBrowser ? 'Reload browser pane' : 'Reset this terminal view and replay recent output'}"
-                            >
-                                ${TERMINAL_REFRESH_ICON}
-                            </button>
+                            ${paneResetButtonHtml(i, session)}
                             ${!isBrowser ? `
                             <button
                                 type="button"
@@ -4417,6 +4409,7 @@
                         >
                             ×
                         </button>
+                        ${paneShellMenuHtml(i)}
                     </div>
                 </div>
                 <div class="terminal-wrapper" id="tw-${i}">
@@ -4463,7 +4456,10 @@
        shared drag/focus-guard behaviour). */
     function wirePaneControls(card, i) {
         wireCardDragAndDrop(card, card.querySelector('.terminal-header'));
-        wireCardButton(card, `[data-terminal-refresh="${i}"]`, () => refreshTerminalDisplay(i));
+        /* Local Repo terminals open the shell picker here; every other pane kind
+           keeps the plain one-click reset (terminal-shell.js owns the split). */
+        wireCardButton(card, `[data-terminal-refresh="${i}"]`, () => handlePaneResetButton(i));
+        wirePaneShellMenu(card, i);
         /* Browser panes (URL bar, external-open, tab strip, frame hooks) are
            wired as one surface by browser-pane.js; a no-op on other panes. */
         wireBrowserOnlyControls(card, i);
@@ -4786,9 +4782,10 @@
             refreshButton.addEventListener('click', event => {
                 event.preventDefault();
                 event.stopPropagation();
-                refreshTerminalDisplay(index);
+                handlePaneResetButton(index);
             });
         }
+        wirePaneShellMenu(card, index);
 
         const modeToggleButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
         if (modeToggleButton) {
@@ -5233,6 +5230,7 @@
             hostLabel.textContent = session.host || '';
         }
         updateModeToggleButton(card.querySelector(`[data-session-mode-toggle="${index}"]`), true);
+        syncPaneShellControls(index, session);
         wrapper.innerHTML = `
             <div class="terminal-surface">
                 <div class="explorer-surface" id="explorer-${index}">
@@ -5322,6 +5320,7 @@
         if (hostLabel) {
             hostLabel.textContent = session.host || '';
         }
+        syncPaneShellControls(index, session);
         wrapper.innerHTML = renderBrowserSurface(index, session);
         wireBrowserOnlyControls(card, index);
         setStatus(index, session.status);
@@ -5367,6 +5366,7 @@
             hostLabel.textContent = session.host || '';
         }
         updateModeToggleButton(card.querySelector(`[data-session-mode-toggle="${index}"]`), false);
+        syncPaneShellControls(index, session);
         wrapper.innerHTML = `
             <div class="terminal-surface">
                 <div class="terminal-canvas" id="tcanvas-${index}"></div>
@@ -5671,6 +5671,7 @@
             ? sourceCard.querySelectorAll(`[data-terminal-split-v="${index}"], [data-terminal-split-h="${index}"]`)
             : [];
         closeAllPaneActionMenus();
+        closeAllPaneShellMenus();
         if (!sourceSessionId || !sourceTerminal || !sourceCard || !grid || isExplorerSession(sourceTerminal._session)) {
             return;
         }
@@ -6892,9 +6893,13 @@
         renderResizeHandles();
     });
 
-    /* Dismiss any open header overflow menu on an outside click or Escape. */
+    /* Dismiss any open header overflow menu or shell picker on an outside click
+       or Escape. */
     document.addEventListener('pointerdown', event => {
         _activeExplorerIndex = explorerPaneIndexFromTarget(event.target);
+        if (!event.target.closest('.pane-shell-menu') && !event.target.closest('[data-terminal-refresh]')) {
+            closeAllPaneShellMenus();
+        }
         if (event.target.closest('.terminal-actions-more-btn') || event.target.closest('.terminal-container.actions-open .terminal-actions')) {
             return;
         }
@@ -6903,6 +6908,7 @@
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             closeAllPaneActionMenus();
+            closeAllPaneShellMenus();
         }
     });
     window.addEventListener('pointermove', updateGridResize);
