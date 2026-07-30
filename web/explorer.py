@@ -14,6 +14,7 @@ guarded Git mutations are unchanged.
 import codecs
 import errno
 import hashlib
+import json
 import logging
 import os
 import posixpath
@@ -58,6 +59,7 @@ EXPLORER_FILE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024
 EXPLORER_GIT_DIFF_MAX_BYTES = 256 * 1024
 EXPLORER_GIT_DIFF_MAX_LINES = 4000
 EXPLORER_GIT_LOG_MAX_COMMITS = 60
+EXPLORER_GIT_REVISION_LENGTH = 16
 
 
 def _is_explorer_session(session: Any) -> bool:
@@ -391,6 +393,24 @@ def read_explorer_file_preview(
 def _explorer_file_revision(raw_content: bytes) -> str:
     """Return a ``sha256:`` optimistic-concurrency token for exact file bytes."""
     return "sha256:" + hashlib.sha256(raw_content).hexdigest()
+
+
+def _explorer_file_state_revision(size: Optional[int], modified: Optional[float]) -> str:
+    """Return a cheap change token for one file: byte size + modification time.
+
+    Deliberately derived from the single ``stat`` the read payload already
+    performs. The open-file change listener polls it every few seconds, so it
+    must never re-read (let alone re-hash) file contents — the ``sha256:``
+    token from ``_explorer_file_revision`` stays the authority for save
+    conflict detection; this one only answers "re-fetch or not".
+
+    Known limitation: SFTP reports whole-second mtimes, so a same-second edit
+    that leaves the size unchanged is not detected until the next change.
+    Manual Refresh covers that case.
+    """
+    size_part = "-" if size is None else str(int(size))
+    mtime_part = "-" if modified is None else f"{float(modified):.6f}"
+    return f"{size_part}:{mtime_part}"
 
 
 def _explorer_line_ending(raw_content: bytes) -> str:
@@ -2266,19 +2286,62 @@ def _explorer_git_changed_files(
     return changes
 
 
-def _get_git_repo_summary(backend: Any, root_path: str) -> Dict[str, Any]:
-    """Return changed files and a bounded commit graph for an explorer root."""
+def _git_repo_revision(git_context: Dict[str, Any], changes: List[Dict[str, Any]]) -> str:
+    """Return a stable token for the Git state an explorer sidebar can show.
+
+    Covers exactly what the sidebar renders: branch/HEAD/ahead/behind plus each
+    visible changed path with its index and worktree columns. Deliberately
+    excludes error text and absolute paths so local and SSH explorers on the
+    same semantic state produce the same token.
+    """
+    rows = sorted(
+        [
+            change.get("path") or "",
+            (change.get("git") or {}).get("status") or "",
+            (change.get("git") or {}).get("index_status") or " ",
+            (change.get("git") or {}).get("worktree_status") or " ",
+            (change.get("git") or {}).get("original_path") or "",
+        ]
+        for change in changes
+    )
+    canonical = json.dumps(
+        {
+            "branch": git_context.get("branch"),
+            "head": git_context.get("head"),
+            "ahead": git_context.get("ahead"),
+            "behind": git_context.get("behind"),
+            "changes": rows,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:EXPLORER_GIT_REVISION_LENGTH]
+
+
+def _get_git_repo_state(backend: Any, root_path: str) -> Dict[str, Any]:
+    """Return the sidebar's semantic Git state without the commit graph."""
     git_context, statuses = _get_git_context(backend, root_path, root_path)
     if not git_context.get("available"):
         raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
-
     repo_root = str(git_context["repo_root"])
+    changes = _explorer_git_changed_files(backend, root_path, repo_root, statuses)
+    return {
+        "git": git_context,
+        "changes": changes,
+        "revision": _git_repo_revision(git_context, changes),
+    }
+
+
+def _get_git_repo_summary(backend: Any, root_path: str) -> Dict[str, Any]:
+    """Return changed files and a bounded commit graph for an explorer root."""
+    state = _get_git_repo_state(backend, root_path)
+    repo_root = str(state["git"]["repo_root"])
     root_pathspec = backend.pathspec(repo_root, root_path)
     commits = _bounded_git_graph_log(backend, repo_root, root_pathspec)
     commit_files = _git_commit_files_log(backend, repo_root, root_pathspec)
     return {
-        "git": git_context,
-        "changes": _explorer_git_changed_files(backend, root_path, repo_root, statuses),
+        **state,
         "commits": _attach_commit_files(
             commits,
             commit_files,
@@ -2925,6 +2988,7 @@ def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, An
             "editable": False,
             "edit_block_reason": "unsupported_format",
             "revision": None,
+            "state_revision": _explorer_file_state_revision(size, modified),
             "line_ending": None,
             "utf8_bom": False,
             "git": _clean_git_entry_status(),
@@ -2972,10 +3036,30 @@ def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, An
         "editable": edit_metadata["editable"],
         "edit_block_reason": edit_metadata["edit_block_reason"],
         "revision": edit_metadata["revision"],
+        # Baseline for the open-file change listener; every load and every save
+        # carries it, so the client never needs a priming round trip and can
+        # never mistake its own write for an external one.
+        "state_revision": _explorer_file_state_revision(size, modified),
         "line_ending": edit_metadata["line_ending"],
         "utf8_bom": edit_metadata["utf8_bom"],
         "git": file_git,
         "git_context": git_context,
+    }
+
+
+def get_explorer_file_state_payload(backend: Any, requested_path: Any) -> Dict[str, Any]:
+    """Return only the cheap change token for one explorer file.
+
+    Polled by the open-file change listener (explorer-git-watch.js). One
+    ``resolve_file`` plus one ``stat`` — deliberately no read, no Markdown
+    render, no Git status — so watching an open file costs a fraction of the
+    Git sidebar poll that runs beside it.
+    """
+    root_path, file_path = backend.resolve_file(requested_path)
+    size, modified = backend.stat_file(file_path)
+    return {
+        "path": backend.rel_explorer_path(root_path, file_path),
+        "revision": _explorer_file_state_revision(size, modified),
     }
 
 

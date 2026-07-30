@@ -1335,6 +1335,12 @@
         const errorBanner = pane._explorerGitRepoError
             ? `<div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>`
             : '';
+        /* The change listener (explorer-git-watch.js) suspends itself after
+           repeated failures; it must never make the sidebar look broken, so
+           this is one muted line above the last good state — Refresh re-arms. */
+        const watchPausedBanner = pane._explorerGitWatchSuspended
+            ? '<div class="explorer-diff-sidebar-empty explorer-git-watch-paused">Live updates paused — use Refresh</div>'
+            : '';
         const changes = Array.isArray(repo.changes) ? repo.changes : [];
         const { staged, unstaged } = splitExplorerGitChanges(changes);
         /* Discard All remains tracked-only even though a confirmed per-row
@@ -1364,6 +1370,7 @@
 
         panel.innerHTML = `
             ${errorBanner}
+            ${watchPausedBanner}
             <div class="explorer-diff-sidebar-section explorer-git-repo-bar">
                 <span class="explorer-git-repo-branch" title="${escHtml(git.repo_root || branchText)}">${escHtml(branchText)}</span>
                 <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
@@ -2140,6 +2147,9 @@
             }
             pane._explorerGitRepoLoaded = true;
             pane._explorerGitRepo = data;
+            pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
+            // A user-initiated load re-arms a suspended change-listener watch.
+            pane._explorerGitWatchSuspended = false;
             syncExplorerTabGitFromRepo(index, data);
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer Git repository failed:', error);
@@ -2148,6 +2158,148 @@
             pane._explorerGitRepoLoading = false;
             renderExplorerGitPanels(index);
         }
+    }
+
+    async function refreshExplorerGitRepoQuiet(index) {
+        /* Background variant of loadExplorerGitRepo for the Git change
+           listener (explorer-git-watch.js): forced (no _explorerGitRepoLoaded
+           early return, no invalidate — the last good panel stays on screen),
+           quiet (only a git-refreshing class on the panel, never the Loading
+           placeholder), and identity-checked (a stale pane/session id yields
+           null). Returns the fresh payload, or null on failure/staleness —
+           the pane keeps its last good _explorerGitRepo either way. */
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId || pane._explorerGitRepoLoading || pane._explorerGitRepoRefreshing) {
+            return null;
+        }
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        pane._explorerGitRepoRefreshing = true;
+        panel?.classList.add('git-refreshing');
+        try {
+            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/git/repo`, { cache: 'no-store' });
+            const data = await response.json();
+            if (!response.ok) {
+                return null;
+            }
+            if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
+                return null;
+            }
+            return data;
+        } catch (error) {
+            return null;
+        } finally {
+            pane._explorerGitRepoRefreshing = false;
+            panel?.classList.remove('git-refreshing');
+        }
+    }
+
+    /* Baseline for the open-file change listener (explorer-git-watch.js), set
+       from every file load and save. A non-empty value is what arms the watch,
+       so clearing it (directory listing, image viewer, commit diff, empty
+       viewer) is also how those views opt out. Any fresh baseline re-arms a
+       watch that suspended itself after repeated failures. */
+    function setExplorerFileWatchBaseline(pane, revision) {
+        if (!pane) {
+            return;
+        }
+        pane._explorerFileStateRevision = typeof revision === 'string' ? revision : '';
+        pane._explorerFileWatchPending = null;
+        if (pane._explorerFileStateRevision) {
+            pane._explorerFileWatchFailures = 0;
+            pane._explorerFileWatchSuspended = false;
+        }
+    }
+
+    /* Background re-read of the file the viewer is showing, for the open-file
+       change listener. Identity-checked at every await, never runs against an
+       open editor buffer (the editor owns the file and has its own
+       save-conflict flow), and prefers the in-place update so scroll, view
+       mode, search query and the tab strip survive. Returns false — leaving
+       the last good view exactly as it was — on any failure or staleness. */
+    async function refreshExplorerOpenFileQuiet(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        const path = pane?._explorerFilePath || '';
+        if (!pane || !sessionId || !path || pane._explorerFileWatchRefreshing) {
+            return false;
+        }
+        if (explorerEditState(pane) || pane._explorerMode !== 'file') {
+            return false;
+        }
+        pane._explorerFileWatchRefreshing = true;
+        try {
+            const response = await fetch(
+                `/api/explorer/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(path)}`,
+                { cache: 'no-store' }
+            );
+            const data = await response.json();
+            if (!response.ok) {
+                return false;
+            }
+            if (
+                terminals[index] !== pane
+                || sessionIds[index] !== sessionId
+                || pane._explorerMode !== 'file'
+                || pane._explorerFilePath !== path
+                || explorerEditState(pane)
+            ) {
+                return false;
+            }
+            const diffMode = pane._explorerDiffMode || '';
+            const scrollState = captureExplorerFileScroll(index);
+            if (!updateExplorerFileInPlace(index, data, scrollState)) {
+                // The available panels changed (a file that lost or gained its
+                // Diff panel); a full rebuild is the only way to reflect that.
+                renderExplorerFile(index, data, {
+                    scrollState,
+                    openDiff: scrollState?.activeView === 'diff' && explorerHasGitDiff(data.git),
+                    diffMode,
+                    tab: pane._explorerActiveTabId
+                });
+            }
+            return true;
+        } catch (error) {
+            return false;
+        } finally {
+            pane._explorerFileWatchRefreshing = false;
+        }
+    }
+
+    function applyExplorerGitRepoQuiet(index, data) {
+        /* Swap a quietly fetched Git payload into the sidebar in place: one
+           panel render, scroll/focus preserved, tab badges re-rendered only
+           when the badge map actually changed (syncExplorerTabGitFromRepo
+           guards that itself). The commit draft, expanded commits, sidebar
+           sizing and open state all live in pane state and survive the render. */
+        const pane = terminals[index];
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        if (!pane || !panel || !data) {
+            return false;
+        }
+        const scrollTop = panel.scrollTop;
+        const active = document.activeElement;
+        const focusState = active && panel.contains(active) && typeof active.selectionStart === 'number'
+            ? { id: active.id, start: active.selectionStart, end: active.selectionEnd }
+            : null;
+        pane._explorerGitRepo = data;
+        pane._explorerGitRepoLoaded = true;
+        pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
+        syncExplorerTabGitFromRepo(index, data);
+        renderExplorerGitPanel(index);
+        panel.scrollTop = Math.min(scrollTop, panel.scrollHeight);
+        if (focusState && focusState.id) {
+            const target = panel.querySelector(`#${CSS.escape(focusState.id)}`);
+            if (target) {
+                target.focus();
+                try {
+                    target.setSelectionRange(focusState.start, focusState.end);
+                } catch (error) {
+                    /* The replacement node is not selectable; focus is enough. */
+                }
+            }
+        }
+        return true;
     }
 
     async function performExplorerGitAction(index, endpoint, body) {
@@ -2172,6 +2324,10 @@
             }
             pane._explorerGitRepo = data;
             pane._explorerGitRepoLoaded = true;
+            pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
+            // A successful GridVibe Git action is authoritative: it re-arms a
+            // suspended change-listener watch and resets its baseline.
+            pane._explorerGitWatchSuspended = false;
             syncExplorerTabGitFromRepo(index, data);
             succeeded = true;
         } catch (error) {
@@ -3173,6 +3329,52 @@
         return `<div class="explorer-side-by-side-diff">${rows.join('')}</div>`;
     }
 
+    /* Undoing the last hunk (or discarding the file's changes from the Git
+       sidebar) can leave the Diff view with nothing in it. When the file's Git
+       status stays non-clean — a partially staged file whose *staged* version
+       survives the discard — the in-place refresh keeps the Diff panel mounted
+       and the user is stranded on "No Git diff for selected file". Bounce back
+       to the file's own content view instead, honouring the sticky
+       source/preview preference, and hide the now-pointless Diff toggle until a
+       later load finds a patch again. Commit diffs are historical and never
+       empty out this way, so they are left alone. */
+    function explorerFallbackFromEmptyDiff(index) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!pane || !list || pane._explorerDiffCommit) {
+            return false;
+        }
+        if (String(pane._explorerDiffContent || '').trim()) {
+            return false;
+        }
+        if (activeExplorerFileView(index) !== 'diff') {
+            return false;
+        }
+        const hasSource = Boolean(document.getElementById(`explorer-code-${index}`));
+        const hasPreview = Boolean(document.getElementById(`explorer-preview-${index}`));
+        const preferred = pane._explorerLastFileView === 'preview' && hasPreview
+            ? 'preview'
+            : (hasSource ? 'source' : (hasPreview ? 'preview' : ''));
+        if (!preferred) {
+            return false;
+        }
+        // The diff panel is not being shown, so its stashed scroll would only
+        // be restored later against unrelated content.
+        pane._explorerPendingDiffScroll = null;
+        setExplorerDiffToggleHidden(index, true);
+        setExplorerFileView(index, preferred);
+        return true;
+    }
+
+    function setExplorerDiffToggleHidden(index, hidden) {
+        const list = document.getElementById(`explorer-list-${index}`);
+        // `hidden` (not `disabled`): setExplorerEditChromeDisabled owns the
+        // disabled flag on every file-view button while the editor is open.
+        list?.querySelectorAll('[data-explorer-file-view="diff"]').forEach(button => {
+            button.hidden = Boolean(hidden);
+        });
+    }
+
     function setExplorerDiffSplit(index, open) {
         const pane = terminals[index];
         if (!pane) {
@@ -3203,6 +3405,9 @@
         }
         if (pane._explorerDiffLoaded && pane._explorerDiffCacheKey === cacheKey) {
             renderExplorerDiff(index);
+            if (explorerFallbackFromEmptyDiff(index)) {
+                return;
+            }
             applyExplorerPendingDiffScroll(index);
             return;
         }
@@ -3231,6 +3436,12 @@
             // the flag so the rendered patch is never mistaken for the whole change.
             pane._explorerDiffTruncated = Boolean(data.truncated);
             renderExplorerDiff(index);
+            // A patch is back (or was there all along): re-expose the toggle a
+            // previous empty-diff fallback may have hidden.
+            setExplorerDiffToggleHidden(index, false);
+            if (explorerFallbackFromEmptyDiff(index)) {
+                return;
+            }
             applyExplorerPendingDiffScroll(index);
             if (activeExplorerFileView(index) === 'diff') {
                 applyExplorerSearch(index);
@@ -3239,6 +3450,22 @@
             console.error('[GridVibe Sessions] Explorer Git diff failed:', error);
             code.innerHTML = `<span class="explorer-diff-empty">${escHtml(error.message || 'Failed to load Git diff.')}</span>`;
         }
+    }
+
+    /* Resolve a requested view onto a panel that actually exists. A stored or
+       restored 'diff' mode routinely outlives its panel — discarding a file's
+       changes rebuilds the viewer without one, and the captured scroll state
+       still asks for 'diff' — and selecting a missing panel hides *every*
+       panel, leaving an empty viewer with no way back (ISSUE: empty file view
+       after undoing all changes). Fall back to the sticky source/preview
+       preference, then to whatever panel is left. */
+    function explorerResolveFileView(index, mode) {
+        const pane = terminals[index];
+        const exists = view => Boolean(
+            document.querySelector(`#explorer-list-${index} [data-explorer-file-panel="${view}"]`)
+        );
+        const candidates = [mode, pane?._explorerLastFileView, 'source', 'preview'];
+        return candidates.find(view => view && exists(view)) || mode;
     }
 
     function setExplorerFileView(index, mode) {
@@ -3254,7 +3481,7 @@
 
         const body = list.querySelector('.explorer-editor-body');
         const diffPanel = document.getElementById(`explorer-diff-panel-${index}`);
-        const selectedMode = normalizedMode === 'diff' && diffPanel ? 'diff' : normalizedMode;
+        const selectedMode = explorerResolveFileView(index, normalizedMode);
         const isDiffMode = selectedMode === 'diff';
         if (pane) {
             pane._explorerDiffSplit = isDiffMode;
@@ -5133,13 +5360,24 @@
             explorerNormalizeTabPath(change.path),
             change.git || null
         ]));
+        let badgesChanged = false;
         ensureExplorerTabState(pane).forEach(tab => {
             const path = explorerNormalizeTabPath(tab.path);
-            if (path) {
-                tab.git = changesByPath.get(path) || null;
+            // A tab showing no file (the Preview tab back on a directory
+            // listing) has no Git status to report — it must not keep the
+            // badge of the file it happened to show last.
+            const nextGit = path ? (changesByPath.get(path) || null) : null;
+            /* The tab strip is a second DOM rebuild the user did not ask
+               for; skip it when the badge map is unchanged (a quiet
+               background refresh must not repaint what did not change). */
+            if (JSON.stringify(nextGit) !== JSON.stringify(tab.git || null)) {
+                tab.git = nextGit;
+                badgesChanged = true;
             }
         });
-        renderExplorerTabStrip(index);
+        if (badgesChanged) {
+            renderExplorerTabStrip(index);
+        }
     }
 
     /* Choose (and if needed create) the tab a file should load into. A `+`
@@ -5462,11 +5700,13 @@
         const preview = explorerPreviewTab(pane);
         preview.path = '';
         preview.name = '';
+        preview.git = null;
         preview.dirPath = '';
         pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
         pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;
         pane._explorerMode = 'viewer';
         pane._explorerFilePath = '';
+        setExplorerFileWatchBaseline(pane, '');
         viewer.innerHTML = '<div class="explorer-empty-viewer"><span>Select a file to view</span></div>';
         renderExplorerTabStrip(index);
     }
@@ -6080,6 +6320,9 @@
         pane._explorerPreviewHtml = '';
         pane._explorerGit = null;
         pane._explorerGitContext = null;
+        // Images render through the separate byte route; nothing here for the
+        // open-file change listener to refresh in place.
+        setExplorerFileWatchBaseline(pane, '');
         pane._explorerDiffLoaded = false;
         pane._explorerDiffCacheKey = '';
         pane._explorerDiffContent = '';
@@ -6244,6 +6487,7 @@
         pane._explorerFileEditable = Boolean(data.editable);
         pane._explorerFileEditBlockReason = data.edit_block_reason || '';
         pane._explorerFileRevision = data.revision || '';
+        setExplorerFileWatchBaseline(pane, data.state_revision || '');
         pane._explorerFileLineEnding = data.line_ending || '';
         pane._explorerFileUtf8Bom = Boolean(data.utf8_bom);
         pane._explorerFileTruncated = Boolean(data.truncated);
@@ -6416,6 +6660,7 @@
         pane._explorerFileEditable = Boolean(data.editable);
         pane._explorerFileEditBlockReason = data.edit_block_reason || '';
         pane._explorerFileRevision = data.revision || '';
+        setExplorerFileWatchBaseline(pane, data.state_revision || '');
         pane._explorerFileLineEnding = data.line_ending || '';
         pane._explorerFileUtf8Bom = Boolean(data.utf8_bom);
         pane._explorerFileTruncated = Boolean(data.truncated);
@@ -6445,6 +6690,10 @@
             renderExplorerMermaid(preview);
         }
         if (diffPanel && hasGitDiff) {
+            // The header survives an in-place refresh, so a Diff toggle hidden
+            // by an earlier empty-diff fallback has to be re-exposed here once
+            // the file is reported as changed again.
+            setExplorerDiffToggleHidden(index, false);
             renderExplorerDiff(index);
             if (pane._explorerDiffSplit) {
                 loadExplorerDiff(index);
@@ -6492,7 +6741,12 @@
         clearExplorerDirectorySearchControls(index);
         cancelExplorerSearch(index);
         explorerCaptureActiveTabView(index);
-        pane._explorerRenderedTabId = explorerAssignOpenTab(pane, path, {}).id;
+        const commitTab = explorerAssignOpenTab(pane, path, {});
+        // The worktree status of this path is not part of a commit-diff
+        // payload; drop the outgoing file's badge rather than mislabel it, and
+        // let the next Git sidebar sync fill it back in.
+        commitTab.git = null;
+        pane._explorerRenderedTabId = commitTab.id;
 
         pane._attached = true;
         pane._explorerMode = 'file';
@@ -6501,6 +6755,8 @@
         pane._explorerFileLanguage = codeLanguage;
         pane._explorerPreviewHtml = '';
         pane._explorerGit = null;
+        // A commit diff is history: nothing on disk can change what it shows.
+        setExplorerFileWatchBaseline(pane, '');
         pane._explorerDiffLoaded = false;
         pane._explorerDiffCacheKey = '';
         pane._explorerDiffContent = '';
@@ -6700,6 +6956,7 @@
             pane._attached = true;
             pane._explorerMode = 'directory';
             pane._explorerFilePath = '';
+            setExplorerFileWatchBaseline(pane, '');
             pane._explorerFileContent = '';
             pane._explorerFileLanguage = '';
             pane._explorerPreviewHtml = '';
@@ -6726,6 +6983,9 @@
             const previewTab = explorerPreviewTab(pane);
             previewTab.path = '';
             previewTab.name = '';
+            // Back on a directory listing the tab shows no file, so the Git
+            // badge of the file it last showed must go with it.
+            previewTab.git = null;
             previewTab.dirPath = pane._explorerPath;
             document.getElementById(`ph-${index}`)?.remove();
             updateExplorerGitSummary(index, data.git || null);

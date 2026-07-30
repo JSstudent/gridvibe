@@ -101,6 +101,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _fs_root_revision,
     _get_git_context,
     _get_git_diff,
+    _get_git_repo_state,
     _get_git_repo_summary,
     _git_commit,
     _git_discard_all_paths,
@@ -126,6 +127,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _resolve_remote_explorer_candidate_path,
     _sftp_request_error_types,
     get_explorer_file_payload,
+    get_explorer_file_state_payload,
     open_path_in_os_file_manager,
     read_explorer_file_preview,
     save_explorer_file_payload,
@@ -1087,6 +1089,27 @@ def save_explorer_file(session_id: str):
     return _explorer_route_response(session, handler)
 
 
+@app.route('/api/explorer/<session_id>/file/state', methods=['GET'])
+def get_explorer_file_state(session_id: str):
+    """Return a cheap change token for one open explorer file.
+
+    Polled by the open-file change listener (explorer-git-watch.js) so a file
+    edited outside GridVibe refreshes in the viewer. A read, like `download`
+    and `search`: one `stat`, no content, ~80-byte body.
+    """
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    requested_path = request.args.get("path", "")
+    known = request.args.get("known", "")
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        state = get_explorer_file_state_payload(backend, requested_path)
+        return {**state, "changed": state["revision"] != known}
+
+    return _with_no_store(_explorer_route_response(session, handler))
+
+
 # Downloading is a read, so it stays inside the explorer's read-only contract
 # (which covers filesystem *mutations*); the cap keeps one request from
 # buffering an arbitrarily large remote file in memory.
@@ -1248,6 +1271,16 @@ def get_explorer_git_diff(session_id: str):
     return _explorer_route_response(session, handler)
 
 
+def _with_no_store(result: Any):
+    """Set Cache-Control: no-store on a `_explorer_route_response` result."""
+    if isinstance(result, tuple):
+        response, *rest = result
+        response.headers["Cache-Control"] = "no-store"
+        return (response, *rest)
+    result.headers["Cache-Control"] = "no-store"
+    return result
+
+
 @app.route('/api/explorer/<session_id>/git/repo', methods=['GET'])
 def get_explorer_git_repo(session_id: str):
     """Return bounded read-only Git repository metadata for the diff sidebar."""
@@ -1261,6 +1294,28 @@ def get_explorer_git_repo(session_id: str):
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/git/state', methods=['GET'])
+def get_explorer_git_state(session_id: str):
+    """Return a cheap semantic revision of the explorer Git sidebar state.
+
+    Polled by the Git change listener (explorer-git-watch.js). Deliberately
+    skips the commit graph and commit-file log: it exists so an unchanged
+    repository costs one `git status` and nothing else.
+    """
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    known = request.args.get("known", "")
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path = backend.root_directory()
+        state = _get_git_repo_state(backend, root_path)
+        revision = state["revision"]
+        return {"revision": revision, "changed": revision != known}
+
+    return _with_no_store(_explorer_route_response(session, handler))
 
 
 @app.route('/api/explorer/<session_id>/git/stage', methods=['POST'])

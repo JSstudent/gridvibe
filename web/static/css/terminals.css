@@ -3563,6 +3563,16 @@
             color: #fbbf24;
         }
 
+        /* Quiet background refresh (explorer-git-watch.js): a class toggle on
+           the existing panel, never a markup swap (guardrail 8). */
+        .explorer-git-panel.git-refreshing .explorer-git-repo-branch {
+            opacity: .55;
+        }
+
+        .explorer-git-watch-paused {
+            font-style: italic;
+        }
+
         .explorer-diff-file,
         .explorer-diff-commit,
         .explorer-diff-commit-file {

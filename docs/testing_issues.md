@@ -1,7 +1,37 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-24
+Last updated: 2026-07-30
 
 ## Open Issues
+
+### Issue ID: ISSUE-2026-038
+- Title: A crashed TUI leaves mouse tracking on and types escape sequences at the prompt
+- Priority: Medium
+- Status: Open
+- Area: `web/static/js/terminals.js`, `web/api.py`
+- Assignee: Unassigned
+- Tags: `terminal`, `session`, `socketio`, `ui`, `tests`
+- Reported: 2026-07-30
+
+Description:
+When a TUI running in a GridVibe pane exits without restoring terminal state — a crash, a `SIGKILL`, or a dropped SSH connection — the DECSET mouse-tracking modes it enabled stay set in the pane's xterm.js instance. The shell that regains the prompt is a plain line editor with no interest in mouse reports, so every pointer movement or click over the pane is encoded and sent as input, filling the command line with sequences such as `35;43;24M35;43;19M35;39;18M…`. The pane is unusable for typing until the user notices, clears the line, and finds a way to turn the mode back off, and the user can easily submit the accumulated garbage by pressing Enter. Observed on an Ubuntu host after `opencode` died with `Illegal instruction (core dumped)` (`docs/r&d/ubuntu_problems.PNG`).
+
+The pane header offers two recovery controls and only one of them works, for a non-obvious reason. **Clear** is a real cure; **Reset view** is not, and can re-arm the mode it was expected to clear.
+
+Steps to reproduce:
+1. Open a local or SSH terminal pane on a POSIX host.
+2. Arm mouse tracking the way a TUI does, without a TUI: `printf '\033[?1003h\033[?1006h'` (equivalently, start `opencode`/`vim` and kill it from another pane with `kill -9`, which is the real-world path).
+3. Move the pointer across the pane and observe SGR mouse reports being typed at the shell prompt.
+4. Click the pane's **Reset view** button and repeat step 3, noting whether the reports return once the replayed buffer lands (see the investigation target below).
+5. Click the pane's **Clear** button and repeat step 3 — the reports stop.
+
+Expected behavior:
+A pane whose foreground program has exited should not keep sending mouse reports to the shell that inherits the prompt, and recovering from a crashed TUI should not depend on the user knowing which of two adjacent header buttons happens to clear terminal modes. At minimum, **Reset view** — the control named for resetting the pane — should reliably return the pane to a sane input state.
+
+Actual behavior / logs:
+Confirmed by code inspection. Nothing in GridVibe enables or disables mouse tracking; the mode is owned by whatever runs in the pane, so a program that dies before emitting its `\033[?1003l` teardown leaves it set, and the connector keeps the same shell and the same xterm.js instance alive across that death. `clearTerminalDisplay()` (`web/static/js/terminals.js:3911`) calls `terminal.term.reset()` — a full reset, which drops the active mouse protocol — and then emits `clear_terminal_buffer`, so the server's rolling replay buffer is purged too and nothing can re-send the enabling sequence; this is why Clear works. `refreshTerminalDisplay()` (`web/static/js/terminals.js:3867`) calls the same `term.reset()`, but then emits `leave_session` + `join_session` (lines 3902-3904), and `handle_join_session()` (`web/api.py:2483-2492`) replays the buffered output on a first join. The replayed bytes are the raw stream the pane already received, so as long as the dead program's `\033[?1003h` is still inside the rolling window it is re-delivered and the mode is re-enabled immediately after the reset that cleared it — *investigation target*: confirm against the actual buffer size and eviction behavior, since a long-running pane may have evicted the enabling sequence and would then appear to recover. Separately, until the `getTerminalClearCommand()` host fix landed (Unreleased, same date), Clear on a Linux host also typed `cls` at the prompt, so the one working recovery path ended in `Command 'cls' not found` and looked broken.
+
+### Proposed solution:
+Make the recovery explicit instead of incidental. In `web/static/js/terminals.js`, have both `clearTerminalDisplay()` and `refreshTerminalDisplay()` write an explicit mouse-tracking teardown into the pane after `term.reset()` — `\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l` through `term.write()`, which changes only the client's mode state and sends nothing to the shell, so it stays inside the pane's existing behavior and touches no route. For `refreshTerminalDisplay()` the write must happen *after* the replayed buffer is applied, not before the `join_session` round trip, or the replay will overwrite it again; sequencing it against the async replay is the main implementation question. Consider whether the replay itself should be sanitized instead — filtering mode-setting sequences out of `_get_buffered_terminal_output()` is more invasive, risks corrupting a legitimately running TUI's state on rejoin, and should not be done without deciding what a rejoin to a *live* TUI is supposed to look like. A visible affordance is worth considering separately: a pane that is receiving mouse reports at a shell prompt could surface a one-click "Reset terminal modes" action rather than requiring the user to guess. Regression tests belong in `tests/test_api.py` alongside `test_terminals_page_clear_sends_shell_command_and_purges_replay_buffer`, asserting that both handlers emit the teardown sequence and that the refresh path emits it after the rejoin.
 
 ### Issue ID: ISSUE-2026-037
 - Title: SSH workspace restore still mishandles unavailable credentials and reports relaunch as connection success

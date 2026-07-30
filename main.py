@@ -30,10 +30,15 @@ MAX_LOG_SIZE = 2 * 1024 * 1024  # 2 MB per file
 MAX_LOG_BACKUPS = 10
 
 # Matches reconciliation GETs from the terminals page (push-triggered status
-# refreshes plus its slow fallback poll) and the voice-status checks fired on
-# window focus that would otherwise clutter the log
+# refreshes plus its slow fallback poll), the voice-status checks fired on
+# window focus, and the explorer change listener's Git-sidebar and open-file
+# state polls — the 2xx lines from these would otherwise clutter the log
+# (failures stay visible)
 _POLL_RE = re.compile(
-    r'"GET /api/(sessions|session-groups|voice-status)(\?[^ ]*)? HTTP/[\d.]+" 2\d\d'
+    r'"GET /api/(?:'
+    r'(?:sessions|session-groups|voice-status)'
+    r'|explorer/[^/ ?"]+/(?:git|file)/state'
+    r')(?:\?[^ ]*)? HTTP/[\d.]+" 2\d\d'
 )
 
 
