@@ -1,5 +1,5 @@
     /* ─────────────────────────────────────────────
-       Explorer create / copy / cut / paste / move / delete controller.
+       Explorer create / copy / cut / paste / move / rename / delete controller.
 
        Clipboard, confirmations, requests, busy state, and refreshes are bound
        to an immutable session id + pane reference + root revision. Nothing is
@@ -11,7 +11,7 @@
     const explorerFilesystemInFlightSessions = new Set();
     let explorerFilesystemTokenCounter = 0;
     let explorerFilesystemMenuSessionId = '';
-    let explorerCreateDialogState = null;
+    let explorerNameDialogState = null;
 
     function explorerFilesystemToken(sessionId) {
         explorerFilesystemTokenCounter += 1;
@@ -66,6 +66,13 @@
         }
     }
 
+    function clearExplorerFilesystemClipboardForPath(sessionId, path) {
+        const clipboard = explorerFilesystemClipboards.get(String(sessionId || ''));
+        if (clipboard && path && explorerFilesystemPathContains(path, clipboard.path)) {
+            clearExplorerFilesystemClipboard(sessionId);
+        }
+    }
+
     function updateExplorerFilesystemRootRevision(index, revision) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
@@ -86,8 +93,8 @@
         if (!pane || !sessionId || !pane._explorerRootRevision) {
             return null;
         }
-        if (explorerCreateDialogState && !explorerCreateDialogState.requestStarted) {
-            closeExplorerCreateModal();
+        if (explorerNameDialogState && !explorerNameDialogState.requestStarted) {
+            closeExplorerNameDialog();
         }
         const token = explorerFilesystemToken(sessionId);
         explorerFilesystemActionTokens.set(sessionId, token);
@@ -207,11 +214,19 @@
         const items = [
             {
                 label: 'New file…',
-                action: () => openExplorerCreateModal(context, 'file', destination)
+                action: () => openExplorerNameDialog(context, {
+                    mode: 'create',
+                    entryKind: 'file',
+                    destination
+                })
             },
             {
                 label: 'New folder…',
-                action: () => openExplorerCreateModal(context, 'directory', destination)
+                action: () => openExplorerNameDialog(context, {
+                    mode: 'create',
+                    entryKind: 'directory',
+                    destination
+                })
             }
         ];
         if (copyable) {
@@ -238,6 +253,18 @@
                 )
                 : null
         });
+        if (copyable) {
+            items.push({
+                label: 'Rename…',
+                title: `Rename ${context.path} in its own folder`,
+                placement: 'after-path',
+                action: () => openExplorerNameDialog(context, {
+                    mode: 'rename',
+                    entryKind: context.kind,
+                    currentName: explorerFilesystemBaseName(context.path)
+                })
+            });
+        }
         if (entryActionable) {
             items.push({
                 label: 'Delete…',
@@ -402,8 +429,8 @@
         }
     }
 
-    function setExplorerCreateModalBusy(busy) {
-        const modal = document.getElementById('explorerCreateModal');
+    function setExplorerNameDialogBusy(busy) {
+        const modal = document.getElementById('explorerNameModal');
         const controls = modal?.querySelectorAll('input, button') || [];
         modal?.classList.toggle('is-busy', Boolean(busy));
         controls.forEach(control => {
@@ -411,15 +438,15 @@
         });
     }
 
-    function setExplorerCreateModalError(message) {
-        const error = document.getElementById('explorerCreateError');
+    function setExplorerNameDialogError(message) {
+        const error = document.getElementById('explorerNameError');
         if (error) {
             error.textContent = String(message || '');
             error.hidden = !message;
         }
     }
 
-    function explorerCreateNameError(name) {
+    function explorerEntryNameError(name) {
         if (!name) {
             return 'Enter a name.';
         }
@@ -439,56 +466,80 @@
             return 'Names cannot exceed 255 characters.';
         }
         if (name.toLowerCase() === '.git') {
-            return 'Creating .git entries is not allowed.';
+            return 'Naming an entry .git is not allowed.';
         }
         return '';
     }
 
-    function closeExplorerCreateModal(force = false) {
-        const state = explorerCreateDialogState;
+    function closeExplorerNameDialog(force = false) {
+        const state = explorerNameDialogState;
         if (state?.requestStarted && !force) {
             return false;
         }
-        const modal = document.getElementById('explorerCreateModal');
+        const modal = document.getElementById('explorerNameModal');
         modal?.classList.remove('visible', 'is-busy');
         modal?.setAttribute('aria-hidden', 'true');
-        setExplorerCreateModalBusy(false);
-        setExplorerCreateModalError('');
-        explorerCreateDialogState = null;
+        setExplorerNameDialogBusy(false);
+        setExplorerNameDialogError('');
+        explorerNameDialogState = null;
         return true;
     }
 
-    function openExplorerCreateModal(context, entryKind, destination) {
+    function explorerNameDialogCopy(options) {
+        const isDirectory = options.entryKind === 'directory';
+        if (options.mode === 'rename') {
+            return {
+                title: isDirectory ? 'Rename folder' : 'Rename file',
+                context: `Rename ${options.sourcePath} in its own folder`,
+                acceptLabel: 'Rename',
+                inputLabel: isDirectory ? 'New folder name' : 'New file name'
+            };
+        }
+        return {
+            title: isDirectory ? 'New folder' : 'New file',
+            context: `Create in ${options.destination || 'the explorer root'}`,
+            acceptLabel: 'Create',
+            inputLabel: isDirectory ? 'New folder name' : 'New file name'
+        };
+    }
+
+    function openExplorerNameDialog(context, options) {
         if (!isExplorerFsActionContextCurrent(context)) {
             return;
         }
-        closeExplorerCreateModal(true);
-        explorerCreateDialogState = {
-            context,
-            entryKind,
-            destination,
-            requestStarted: false
-        };
-        const modal = document.getElementById('explorerCreateModal');
-        const title = document.getElementById('explorerCreateTitle');
-        const copy = document.getElementById('explorerCreateDestination');
-        const input = document.getElementById('explorerCreateName');
-        const accept = document.getElementById('explorerCreateAccept');
-        if (!modal || !title || !copy || !input || !accept) {
-            explorerCreateDialogState = null;
+        closeExplorerNameDialog(true);
+        const isRename = options.mode === 'rename';
+        if (isRename && (!context.path || !context.revision)) {
             return;
         }
-        const isDirectory = entryKind === 'directory';
-        title.textContent = isDirectory ? 'New folder' : 'New file';
-        copy.textContent = `Create in ${destination || 'the explorer root'}`;
-        accept.textContent = 'Create';
-        input.value = '';
-        input.setAttribute(
-            'aria-label',
-            isDirectory ? 'New folder name' : 'New file name'
-        );
-        setExplorerCreateModalError('');
-        setExplorerCreateModalBusy(false);
+        const state = {
+            context,
+            mode: isRename ? 'rename' : 'create',
+            entryKind: options.entryKind === 'directory' ? 'directory' : 'file',
+            destination: String(options.destination || ''),
+            sourcePath: context.path,
+            sourceRevision: context.revision,
+            currentName: String(options.currentName || ''),
+            requestStarted: false
+        };
+        const copy = explorerNameDialogCopy(state);
+        state.acceptLabel = copy.acceptLabel;
+        const modal = document.getElementById('explorerNameModal');
+        const title = document.getElementById('explorerNameTitle');
+        const contextCopy = document.getElementById('explorerNameContext');
+        const input = document.getElementById('explorerNameInput');
+        const accept = document.getElementById('explorerNameAccept');
+        if (!modal || !title || !contextCopy || !input || !accept) {
+            return;
+        }
+        explorerNameDialogState = state;
+        title.textContent = copy.title;
+        contextCopy.textContent = copy.context;
+        accept.textContent = copy.acceptLabel;
+        input.value = isRename ? state.currentName : '';
+        input.setAttribute('aria-label', copy.inputLabel);
+        setExplorerNameDialogError('');
+        setExplorerNameDialogBusy(false);
         modal.classList.add('visible');
         modal.setAttribute('aria-hidden', 'false');
         window.setTimeout(() => {
@@ -497,9 +548,37 @@
         }, 0);
     }
 
-    async function submitExplorerCreateModal() {
-        const state = explorerCreateDialogState;
-        const input = document.getElementById('explorerCreateName');
+    function explorerNameDialogValidationError(state, name) {
+        const nameError = explorerEntryNameError(name);
+        if (nameError) {
+            return nameError;
+        }
+        if (state.mode === 'rename' && name === state.currentName) {
+            return 'Enter a different name.';
+        }
+        return '';
+    }
+
+    function explorerNameDialogRequest(state, name) {
+        if (state.mode === 'rename') {
+            return explorerFilesystemRequest(state.context, 'rename', {
+                root_revision: state.context.rootRevision,
+                source_path: state.sourcePath,
+                source_revision: state.sourceRevision,
+                name
+            });
+        }
+        return explorerFilesystemRequest(state.context, 'create', {
+            root_revision: state.context.rootRevision,
+            destination_directory: state.destination,
+            name,
+            entry_kind: state.entryKind
+        });
+    }
+
+    async function submitExplorerNameDialog() {
+        const state = explorerNameDialogState;
+        const input = document.getElementById('explorerNameInput');
         if (
             !state
             || !input
@@ -509,31 +588,28 @@
             return;
         }
         const name = input.value;
-        const validationError = explorerCreateNameError(name);
+        const validationError = explorerNameDialogValidationError(state, name);
         if (validationError) {
-            setExplorerCreateModalError(validationError);
+            setExplorerNameDialogError(validationError);
             input.focus();
             input.select();
             return;
         }
         const context = state.context;
-        const label = state.entryKind === 'directory'
-            ? 'Creating folder…'
-            : 'Creating file…';
+        const isRename = state.mode === 'rename';
+        const isDirectory = state.entryKind === 'directory';
+        const label = isRename
+            ? (isDirectory ? 'Renaming folder…' : 'Renaming file…')
+            : (isDirectory ? 'Creating folder…' : 'Creating file…');
         if (!setExplorerFilesystemBusy(context, label)) {
             return;
         }
         state.requestStarted = true;
-        setExplorerCreateModalBusy(true);
-        setExplorerCreateModalError('');
+        setExplorerNameDialogBusy(true);
+        setExplorerNameDialogError('');
         clearExplorerFilesystemError(context.index);
         try {
-            const result = await explorerFilesystemRequest(context, 'create', {
-                root_revision: context.rootRevision,
-                destination_directory: state.destination,
-                name,
-                entry_kind: state.entryKind
-            });
+            const result = await explorerNameDialogRequest(state, name);
             if (!result || !isExplorerFsActionContextCurrent(context)) {
                 return;
             }
@@ -543,41 +619,62 @@
                     result.data?.mutated !== false
                     || result.response?.status === 404
                     || code === 'root_changed'
+                    || code === 'entry_changed'
                 );
                 if (closeForRefresh) {
-                    closeExplorerCreateModal(true);
+                    closeExplorerNameDialog(true);
+                    if (isRename) {
+                        clearExplorerFilesystemClipboardForPath(
+                            context.sessionId, state.sourcePath
+                        );
+                    }
                     showExplorerFilesystemError(context, result.data);
                 } else {
                     state.requestStarted = false;
-                    setExplorerCreateModalBusy(false);
-                    setExplorerCreateModalError(
-                        result.data?.error || 'The entry could not be created.'
+                    setExplorerNameDialogBusy(false);
+                    setExplorerNameDialogError(
+                        result.data?.error
+                        || (isRename
+                            ? 'The entry could not be renamed.'
+                            : 'The entry could not be created.')
                     );
-                    const accept = document.getElementById('explorerCreateAccept');
+                    const accept = document.getElementById('explorerNameAccept');
                     if (accept) {
                         accept.textContent = (
                             code === 'invalid_request'
+                            || code === 'invalid_destination'
                             || code === 'protected_path'
                             || code === 'destination_exists'
-                        ) ? 'Create' : 'Retry';
+                            || code === 'unsupported_entry_type'
+                        ) ? state.acceptLabel : 'Retry';
                     }
                     input.focus();
                     input.select();
                 }
                 return;
             }
-            closeExplorerCreateModal(true);
+            closeExplorerNameDialog(true);
+            if (isRename) {
+                clearExplorerFilesystemClipboardForPath(
+                    context.sessionId, result.data.source_path
+                );
+            }
             await refreshExplorerAfterFilesystemMutation(context, result.data);
             if (isExplorerFsActionContextCurrent(context)) {
+                const resultName = explorerFilesystemBaseName(
+                    result.data.destination_path
+                );
                 showTerminalToast(
-                    `Created ${explorerFilesystemBaseName(result.data.destination_path)}`,
+                    isRename
+                        ? `Renamed ${state.currentName} to ${resultName}`
+                        : `Created ${resultName}`,
                     'success'
                 );
             }
         } finally {
-            if (explorerCreateDialogState === state) {
+            if (explorerNameDialogState === state) {
                 state.requestStarted = false;
-                setExplorerCreateModalBusy(false);
+                setExplorerNameDialogBusy(false);
             }
             clearExplorerFilesystemBusy(context);
         }
@@ -629,6 +726,7 @@
         const createdPath = result.destination_path || '';
         if (moved) {
             const previousDirectoryPath = pane._explorerPath || '';
+            const previousFilePath = pane._explorerFilePath || '';
             const sourceParent = explorerFilesystemParentPath(removedPath);
             const destinationParent = explorerFilesystemParentPath(createdPath);
             ensureExplorerTabState(pane);
@@ -651,6 +749,12 @@
             pane._explorerFilePath = explorerFilesystemRetargetPath(
                 pane._explorerFilePath, removedPath, createdPath
             );
+            if (pane._explorerFilePath && pane._explorerFilePath !== previousFilePath) {
+                // A rename changes the leaf, so the open file's display name moves with it.
+                pane._explorerFileName = explorerFilesystemBaseName(
+                    pane._explorerFilePath
+                );
+            }
             if (pane._explorerTreeExpanded instanceof Set) {
                 pane._explorerTreeExpanded = new Set(
                     [...pane._explorerTreeExpanded].map(path => (
@@ -723,10 +827,7 @@
             }
             pane._explorerTreeChildren?.clear();
             pane._explorerTreeErrors?.clear();
-            const clipboard = explorerFilesystemClipboards.get(context.sessionId);
-            if (clipboard && explorerFilesystemPathContains(removedPath, clipboard.path)) {
-                clearExplorerFilesystemClipboard(context.sessionId);
-            }
+            clearExplorerFilesystemClipboardForPath(context.sessionId, removedPath);
             if (
                 pane._explorerMode === 'directory'
                 && explorerFilesystemPathContains(removedPath, pane._explorerPath || '')
@@ -948,8 +1049,8 @@
         if (!key || explorerFilesystemInFlightSessions.has(key)) {
             return false;
         }
-        if (explorerCreateDialogState?.context?.sessionId === key) {
-            closeExplorerCreateModal();
+        if (explorerNameDialogState?.context?.sessionId === key) {
+            closeExplorerNameDialog();
         }
         clearExplorerFilesystemClipboard(key);
         explorerFilesystemActionTokens.delete(key);
@@ -981,28 +1082,28 @@
         return true;
     }
 
-    document.getElementById('explorerCreateForm')?.addEventListener('submit', event => {
+    document.getElementById('explorerNameForm')?.addEventListener('submit', event => {
         event.preventDefault();
-        submitExplorerCreateModal();
+        submitExplorerNameDialog();
     });
-    document.getElementById('explorerCreateCancel')?.addEventListener('click', () => {
-        closeExplorerCreateModal();
+    document.getElementById('explorerNameCancel')?.addEventListener('click', () => {
+        closeExplorerNameDialog();
     });
-    document.getElementById('explorerCreateName')?.addEventListener('input', () => {
-        setExplorerCreateModalError('');
-        const accept = document.getElementById('explorerCreateAccept');
+    document.getElementById('explorerNameInput')?.addEventListener('input', () => {
+        setExplorerNameDialogError('');
+        const accept = document.getElementById('explorerNameAccept');
         if (accept) {
-            accept.textContent = 'Create';
+            accept.textContent = explorerNameDialogState?.acceptLabel || 'Create';
         }
     });
-    document.getElementById('explorerCreateModal')?.addEventListener('click', event => {
-        if (event.target.id === 'explorerCreateModal') {
-            closeExplorerCreateModal();
+    document.getElementById('explorerNameModal')?.addEventListener('click', event => {
+        if (event.target.id === 'explorerNameModal') {
+            closeExplorerNameDialog();
         }
     });
-    document.getElementById('explorerCreateModal')?.addEventListener('keydown', event => {
+    document.getElementById('explorerNameModal')?.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             event.preventDefault();
-            closeExplorerCreateModal();
+            closeExplorerNameDialog();
         }
     });

@@ -135,6 +135,7 @@ from web.explorer_fs import (
     delete_explorer_entry_payload,
     move_explorer_entry_payload,
     paste_explorer_entry_payload,
+    rename_explorer_entry_payload,
 )
 from web.explorer_search import (  # noqa: F401 - re-exported for backwards compatibility
     run_explorer_search,
@@ -938,6 +939,53 @@ def move_explorer_entry(session_id: str):
             source_path=data["source_path"],
             source_revision=data["source_revision"],
             destination_directory=data["destination_directory"],
+            session_id=session_id,
+        )
+
+    return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/rename', methods=['POST'])
+def rename_explorer_entry(session_id: str):
+    """Rename one entry inside its own folder without overwrite."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if not _is_explorer_session(session):
+        return jsonify({"error": "Session is not a file explorer pane"}), 400
+    data, error_response = _explorer_mutation_json(
+        {
+            "root_revision",
+            "source_path",
+            "source_revision",
+            "name",
+        }
+    )
+    if error_response is not None:
+        return error_response
+    required_strings = ("root_revision", "source_path", "source_revision")
+    if any(
+        not isinstance(data.get(field), str) or not data.get(field)
+        for field in required_strings
+    ) or not isinstance(data.get("name"), str):
+        return (
+            jsonify(
+                {
+                    "error": "Rename requires root/source revisions, a source path, and a new name",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return rename_explorer_entry_payload(
+            backend,
+            root_revision=data["root_revision"],
+            source_path=data["source_path"],
+            source_revision=data["source_revision"],
+            name=data["name"],
             session_id=session_id,
         )
 

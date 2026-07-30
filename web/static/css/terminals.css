@@ -4963,18 +4963,18 @@
             border-color: var(--t-accent);
             outline: none;
         }
-        .explorer-create-card {
+        .explorer-name-card {
             width: min(520px, 100%);
         }
-        .explorer-create-error {
+        .explorer-name-error {
             color: var(--gv-danger);
             font-size: .78rem;
             line-height: 1.4;
         }
-        #explorerCreateModal.is-busy .explorer-create-card {
+        #explorerNameModal.is-busy .explorer-name-card {
             cursor: progress;
         }
-        #explorerCreateModal.is-busy .modal-form {
+        #explorerNameModal.is-busy .modal-form {
             opacity: .72;
         }
 

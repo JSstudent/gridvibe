@@ -848,6 +848,95 @@ def move_explorer_entry_payload(
     }
 
 
+def rename_explorer_entry_payload(
+    backend: Any,
+    *,
+    root_revision: Any,
+    source_path: Any,
+    source_revision: Any,
+    name: Any,
+    session_id: str,
+) -> Dict[str, Any]:
+    """Rename one entry in place, keeping its parent and never replacing.
+
+    A rename is the same ``rename(2)`` a move performs, with the leaf changing
+    instead of the parent, so it inherits every move guarantee: atomic, no
+    pre-scan, no byte limit, and provably ``mutated: false`` on every failure.
+    """
+    literal_name = _normalize_entry_name(name)
+    current_root, _revision = _current_root(backend, root_revision)
+    (
+        source_root,
+        source_parent,
+        source_leaf,
+        source_absolute,
+        source_relative,
+    ) = resolve_mutation_target(backend, source_path)
+    if source_root != current_root:
+        raise ExplorerFsRootChangedError(
+            "The explorer root changed; refresh before trying again"
+        )
+
+    source_stat = _check_revision(
+        backend, source_absolute, source_revision, source_relative
+    )
+    source_kind = source_stat.get("kind")
+    if source_kind not in {"file", "directory"}:
+        raise ExplorerFsUnsupportedEntryError(
+            f"Cannot rename unsupported entry type at {source_relative}",
+            path=source_relative,
+        )
+    resolved_source_relative = backend.rel_explorer_path(
+        current_root, source_absolute
+    )
+    if _relative_path_contains_git(source_relative) or _relative_path_contains_git(
+        resolved_source_relative
+    ):
+        raise ExplorerFsProtectedPathError(
+            "GridVibe will not rename .git entries because they hold repository metadata"
+        )
+    if literal_name == source_leaf:
+        raise ExplorerFsInvalidDestinationError(
+            f"{source_relative} is already named {literal_name}"
+        )
+
+    target_path = backend.fs_join(source_parent, literal_name)
+    claim_keys = (
+        backend.fs_claim_key(source_absolute),
+        backend.fs_claim_key(target_path),
+    )
+    with _explorer_path_claims(
+        claim_keys,
+        error_type=ExplorerFsOperationInProgressError,
+    ):
+        _check_revision(backend, source_absolute, source_revision, source_relative)
+        try:
+            backend.fs_rename_noreplace(source_absolute, target_path)
+        except _FILESYSTEM_ERRORS as exc:
+            if _is_destination_collision_error(exc):
+                raise ExplorerFsDestinationExistsError(
+                    "An entry with that name already exists"
+                ) from exc
+            if _is_missing_error(exc):
+                raise ExplorerFsSourceMissingError(
+                    f"{source_relative} no longer exists"
+                ) from exc
+            _raise_io_error(
+                f"Could not rename {source_relative}",
+                exc,
+                mutated=bool(getattr(exc, "gridvibe_mutated", False)),
+            )
+
+    return {
+        "ok": True,
+        "source_path": source_relative,
+        "destination_path": backend.rel_explorer_path(current_root, target_path),
+        "type": "directory" if source_kind == "directory" else "file",
+        "entry_kind": source_kind,
+        "moved": True,
+    }
+
+
 def _contains_protected_git_directory(
     backend: Any, scanned: Iterable[_ScannedEntry]
 ) -> Optional[str]:
@@ -1033,5 +1122,6 @@ __all__ = [
     "delete_explorer_entry_payload",
     "move_explorer_entry_payload",
     "paste_explorer_entry_payload",
+    "rename_explorer_entry_payload",
     "resolve_mutation_target",
 ]

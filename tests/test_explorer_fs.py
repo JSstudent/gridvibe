@@ -569,7 +569,73 @@ class ExplorerFilesystemPolicyTestCase(unittest.TestCase):
             "/srv/app/destination/unsupported.txt", "x+b"
         )
 
-    def test_sftp_move_rejects_link_before_rename(self):
+    def test_sftp_rename_uses_one_no_replace_rename_without_scanning(self):
+        sftp = _MemorySftp(
+            {
+                "/srv/app": {"kind": "directory"},
+                "/srv/app/source": {"kind": "directory"},
+                "/srv/app/source/data.txt": {"kind": "file", "content": b"data"},
+                "/srv/app/taken": {"kind": "directory"},
+            }
+        )
+        session = SimpleNamespace(
+            session_id="remote-rename",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+            directory="/srv/app",
+            host="example.com",
+            port=22,
+            username="user",
+        )
+        backend = web_explorer._SftpExplorerBackend(session, MagicMock(), sftp)
+        root_revision = explorer_fs._fs_root_revision("/srv/app")
+        source_revision = explorer_fs._fs_revision(
+            backend.fs_lstat("/srv/app/source")
+        )
+
+        with patch.object(
+            backend,
+            "fs_listdir",
+            side_effect=AssertionError("rename must not pre-scan"),
+        ):
+            renamed = explorer_fs.rename_explorer_entry_payload(
+                backend,
+                root_revision=root_revision,
+                source_path="source",
+                source_revision=source_revision,
+                name="renamed",
+                session_id=session.session_id,
+            )
+
+        self.assertEqual(renamed["source_path"], "source")
+        self.assertEqual(renamed["destination_path"], "renamed")
+        self.assertTrue(renamed["moved"])
+        self.assertEqual(
+            sftp.entries["/srv/app/renamed/data.txt"]["content"], b"data"
+        )
+        self.assertNotIn("/srv/app/source", sftp.entries)
+        self.assertEqual(
+            sftp.operations,
+            [("rename", "/srv/app/source", "/srv/app/renamed")],
+        )
+        self.assertFalse(sftp.open_modes)
+
+        with self.assertRaises(explorer_fs.ExplorerFsDestinationExistsError):
+            explorer_fs.rename_explorer_entry_payload(
+                backend,
+                root_revision=root_revision,
+                source_path="renamed",
+                source_revision=explorer_fs._fs_revision(
+                    backend.fs_lstat("/srv/app/renamed")
+                ),
+                name="taken",
+                session_id=session.session_id,
+            )
+        self.assertTrue(sftp.entries["/srv/app/taken"]["kind"] == "directory")
+        self.assertIn("/srv/app/renamed/data.txt", sftp.entries)
+
+    def test_sftp_move_and_rename_reject_links_before_rename(self):
         sftp = _MemorySftp(
             {
                 "/srv/app": {"kind": "directory"},
@@ -599,6 +665,17 @@ class ExplorerFilesystemPolicyTestCase(unittest.TestCase):
                     backend.fs_lstat("/srv/app/link")
                 ),
                 destination_directory="destination",
+                session_id=session.session_id,
+            )
+        with self.assertRaises(explorer_fs.ExplorerFsUnsupportedEntryError):
+            explorer_fs.rename_explorer_entry_payload(
+                backend,
+                root_revision=explorer_fs._fs_root_revision("/srv/app"),
+                source_path="link",
+                source_revision=explorer_fs._fs_revision(
+                    backend.fs_lstat("/srv/app/link")
+                ),
+                name="renamed-link",
                 session_id=session.session_id,
             )
         self.assertFalse(sftp.operations)
@@ -726,6 +803,18 @@ class ExplorerFilesystemRoutesTestCase(unittest.TestCase):
         }
         return self.client.post(
             f"/api/explorer/{self.session_id}/move", json=body
+        )
+
+    def _rename(self, source: str, name: str, **overrides):
+        body = {
+            "root_revision": self._entries()["root_revision"],
+            "source_path": source,
+            "source_revision": self._entry(source)["revision"],
+            "name": name,
+            **overrides,
+        }
+        return self.client.post(
+            f"/api/explorer/{self.session_id}/rename", json=body
         )
 
     def test_entries_expose_kind_revision_and_root_revision(self):
@@ -944,6 +1033,171 @@ class ExplorerFilesystemRoutesTestCase(unittest.TestCase):
         self.assertEqual(blocked.status_code, 409)
         self.assertEqual(blocked.get_json()["code"], "operation_in_progress")
         self.assertTrue(source.exists())
+
+    def test_rename_keeps_the_parent_and_preserves_contents(self):
+        nested = self.root / "src"
+        nested.mkdir()
+        source_file = nested / "old.txt"
+        source_file.write_text("payload", encoding="utf-8")
+        os.chmod(source_file, 0o640)
+        original_mode = stat.S_IMODE(source_file.stat().st_mode)
+
+        response = self._rename("src/old.txt", "new.txt")
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        payload = response.get_json()
+        self.assertEqual(payload["source_path"], "src/old.txt")
+        self.assertEqual(payload["destination_path"], "src/new.txt")
+        self.assertEqual(payload["entry_kind"], "file")
+        self.assertTrue(payload["moved"])
+        self.assertFalse(source_file.exists())
+        renamed = nested / "new.txt"
+        self.assertEqual(renamed.read_text(encoding="utf-8"), "payload")
+        self.assertEqual(stat.S_IMODE(renamed.stat().st_mode), original_mode)
+
+        tree = self.root / "tree"
+        (tree / "child").mkdir(parents=True)
+        (tree / "child" / "data.bin").write_bytes(b"data")
+        directory_response = self._rename("tree", "renamed-tree")
+
+        self.assertEqual(
+            directory_response.status_code,
+            200,
+            directory_response.get_data(as_text=True),
+        )
+        self.assertEqual(
+            directory_response.get_json()["destination_path"], "renamed-tree"
+        )
+        self.assertFalse(tree.exists())
+        self.assertEqual(
+            (self.root / "renamed-tree" / "child" / "data.bin").read_bytes(), b"data"
+        )
+        self.assertEqual(
+            {entry["name"] for entry in self._entries()["entries"]},
+            {"src", "renamed-tree"},
+        )
+
+    def test_rename_refuses_collision_unchanged_name_and_git(self):
+        source = self.root / "keep.txt"
+        source.write_text("keep", encoding="utf-8")
+        blocker = self.root / "taken.txt"
+        blocker.write_text("blocker", encoding="utf-8")
+
+        collision = self._rename("keep.txt", "taken.txt")
+        self.assertEqual(collision.status_code, 409)
+        self.assertEqual(collision.get_json()["code"], "destination_exists")
+        self.assertFalse(collision.get_json()["mutated"])
+        self.assertEqual(source.read_text(encoding="utf-8"), "keep")
+        self.assertEqual(blocker.read_text(encoding="utf-8"), "blocker")
+
+        unchanged = self._rename("keep.txt", "keep.txt")
+        self.assertEqual(unchanged.status_code, 400)
+        self.assertEqual(unchanged.get_json()["code"], "invalid_destination")
+        self.assertTrue(source.exists())
+
+        for name in ("", ".", "..", "a/b", r"a\b", ".git", "x" * 256):
+            with self.subTest(name=name):
+                response = self._rename("keep.txt", name)
+                self.assertIn(response.status_code, {400, 403})
+                self.assertFalse(response.get_json()["mutated"])
+                self.assertTrue(source.exists())
+
+        directory_blocker = self.root / "folder"
+        directory_blocker.mkdir()
+        directory_collision = self._rename("keep.txt", "folder")
+        self.assertEqual(directory_collision.status_code, 409)
+        self.assertEqual(
+            directory_collision.get_json()["code"], "destination_exists"
+        )
+        self.assertTrue(directory_blocker.is_dir())
+
+        git_directory = self.root / ".git"
+        git_directory.mkdir()
+        (git_directory / "HEAD").write_text("ref", encoding="utf-8")
+        protected = self._rename(".git", "git-backup")
+        self.assertEqual(protected.status_code, 403)
+        self.assertEqual(protected.get_json()["code"], "protected_path")
+        self.assertTrue(git_directory.is_dir())
+        protected_child = self._rename(".git/HEAD", "HEAD.bak")
+        self.assertEqual(protected_child.status_code, 403)
+        self.assertEqual(protected_child.get_json()["code"], "protected_path")
+        self.assertTrue((git_directory / "HEAD").exists())
+
+    def test_rename_rejects_stale_revision_and_overlapping_claim(self):
+        directory = self.root / "src"
+        directory.mkdir()
+        child = directory / "app.py"
+        child.write_text("v1", encoding="utf-8")
+
+        stale = self.client.post(
+            f"/api/explorer/{self.session_id}/rename",
+            json={
+                "root_revision": self._entries()["root_revision"],
+                "source_path": "src",
+                "source_revision": "stale-entry",
+                "name": "lib",
+            },
+        )
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.get_json()["code"], "entry_changed")
+        self.assertFalse(stale.get_json()["mutated"])
+        self.assertTrue(directory.exists())
+
+        stale_root = self.client.post(
+            f"/api/explorer/{self.session_id}/rename",
+            json={
+                "root_revision": "stale-root",
+                "source_path": "src",
+                "source_revision": self._entry("src")["revision"],
+                "name": "lib",
+            },
+        )
+        self.assertEqual(stale_root.status_code, 409)
+        self.assertEqual(stale_root.get_json()["code"], "root_changed")
+
+        backend = web_explorer._LocalExplorerBackend(self.session)
+        with web_explorer._explorer_path_claims(
+            (backend.fs_claim_key(str(child)),)
+        ):
+            blocked = self._rename("src", "lib")
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.get_json()["code"], "operation_in_progress")
+        self.assertTrue(directory.exists())
+        self.assertFalse((self.root / "lib").exists())
+
+    def test_rename_rejects_out_of_root_paths_and_symlink_sources(self):
+        target = self.root / "target.txt"
+        target.write_text("keep", encoding="utf-8")
+
+        for source_path in (str(target), "../escape.txt", "./target.txt"):
+            with self.subTest(source_path=source_path):
+                response = self.client.post(
+                    f"/api/explorer/{self.session_id}/rename",
+                    json={
+                        "root_revision": self._entries()["root_revision"],
+                        "source_path": source_path,
+                        "source_revision": self._entry("target.txt")["revision"],
+                        "name": "moved.txt",
+                    },
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertFalse(response.get_json()["mutated"])
+        self.assertTrue(target.exists())
+        self.assertFalse((self.root / "moved.txt").exists())
+
+        link = self.root / "link.txt"
+        try:
+            link.symlink_to(target)
+        except OSError as exc:
+            self.skipTest(f"Symlink creation is unavailable: {exc}")
+
+        symlink_response = self._rename("link.txt", "renamed-link.txt")
+        self.assertEqual(symlink_response.status_code, 400)
+        self.assertEqual(
+            symlink_response.get_json()["code"], "unsupported_entry_type"
+        )
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(target.read_text(encoding="utf-8"), "keep")
 
     def test_stale_root_is_rejected_before_path_resolution(self):
         (self.root / "app.py").write_text("x", encoding="utf-8")
@@ -1167,8 +1421,8 @@ class ExplorerFilesystemRoutesTestCase(unittest.TestCase):
         )
         self.assertEqual(move_absolute.status_code, 400)
 
-    def test_create_and_move_routes_reject_invalid_json_shapes(self):
-        for route in ("create", "move"):
+    def test_create_move_and_rename_routes_reject_invalid_json_shapes(self):
+        for route in ("create", "move", "rename"):
             with self.subTest(route=route, shape="list"):
                 response = self.client.post(
                     f"/api/explorer/{self.session_id}/{route}",
@@ -1192,13 +1446,32 @@ class ExplorerFilesystemRoutesTestCase(unittest.TestCase):
         self.assertEqual(invalid_kind.status_code, 400)
         self.assertEqual(invalid_kind.get_json()["code"], "invalid_request")
 
-    def test_create_and_move_routes_use_cross_origin_write_guard(self):
+        (self.root / "app.py").write_text("x", encoding="utf-8")
+        wrong_rename = self.client.post(
+            f"/api/explorer/{self.session_id}/rename",
+            json={
+                "root_revision": self._entries()["root_revision"],
+                "source_path": "app.py",
+                "source_revision": self._entry("app.py")["revision"],
+                "name": 7,
+            },
+        )
+        self.assertEqual(wrong_rename.status_code, 400)
+        self.assertEqual(wrong_rename.get_json()["code"], "invalid_request")
+        unknown_rename = self._rename(
+            "app.py", "renamed.py", destination_directory=""
+        )
+        self.assertEqual(unknown_rename.status_code, 400)
+        self.assertEqual(unknown_rename.get_json()["code"], "invalid_request")
+        self.assertTrue((self.root / "app.py").exists())
+
+    def test_create_move_and_rename_routes_use_cross_origin_write_guard(self):
         with patch.object(
             web_app,
             "_allowed_write_origin_netlocs",
             return_value={"localhost:5050"},
         ):
-            for route in ("create", "move"):
+            for route in ("create", "move", "rename"):
                 with self.subTest(route=route):
                     response = self.client.post(
                         f"/api/explorer/{self.session_id}/{route}",
@@ -1229,7 +1502,7 @@ class ExplorerFilesystemRoutesTestCase(unittest.TestCase):
                 api.session_manager.sessions.pop(terminal_id, None)
         self.assertEqual(response.status_code, 400)
 
-        for route in ("create", "move"):
+        for route in ("create", "move", "rename"):
             with self.subTest(route=route):
                 missing = self.client.post(
                     f"/api/explorer/missing/{route}", json={}
@@ -1294,7 +1567,7 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
             section = self.terminals[self.terminals.index(f"function {caller}") :]
             self.assertIn("cancelExplorerFilesystemUiForSession", section[:3000])
 
-    def test_create_and_move_menu_contracts_are_wired(self):
+    def test_create_move_and_rename_menu_contracts_are_wired(self):
         menu = self.controller[
             self.controller.index("function explorerFilesystemMenuItems") :
             self.controller.index("function setExplorerFilesystemBusy")
@@ -1304,6 +1577,8 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
             "label: 'New folder…'",
             "label: 'Copy'",
             "label: 'Cut'",
+            "label: 'Rename…'",
+            "label: 'Delete…'",
         )
         positions = [menu.index(label) for label in labels]
         self.assertEqual(positions, sorted(positions))
@@ -1312,27 +1587,38 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
         self.assertIn('`${pasteVerb} "${clipboard.name}"', menu)
         self.assertIn("moveWithinSameFolder", menu)
         self.assertIn("moveIntoItself", menu)
-        self.assertIn("explorerFilesystemRequest(context, 'create'", self.controller)
+        # Rename and Delete share the after-path group, so Rename never sits
+        # among the copy-path items.
+        self.assertEqual(menu.count("placement: 'after-path'"), 2)
+        self.assertIn("mode: 'rename'", menu)
+        self.assertIn("explorerFilesystemRequest(state.context, 'create'", self.controller)
         self.assertIn("explorerFilesystemRequest(context, 'move'", self.controller)
+        self.assertIn("explorerFilesystemRequest(state.context, 'rename'", self.controller)
         self.assertIn("clearExplorerFilesystemClipboard(context.sessionId)", self.controller)
 
-    def test_create_modal_and_blank_area_destinations_are_accessible(self):
+    def test_name_dialog_is_shared_by_create_and_rename(self):
         for modal_id in (
-            'id="explorerCreateModal"',
-            'id="explorerCreateForm"',
-            'id="explorerCreateName"',
-            'for="explorerCreateName"',
-            'id="explorerCreateError"',
+            'id="explorerNameModal"',
+            'id="explorerNameForm"',
+            'id="explorerNameInput"',
+            'for="explorerNameInput"',
+            'id="explorerNameError"',
             'role="alert"',
             'maxlength="255"',
         ):
             self.assertIn(modal_id, self.template)
+        self.assertEqual(self.template.count('id="explorerNameModal"'), 1)
         self.assertIn("event.key === 'Escape'", self.controller)
         self.assertIn("input.focus();", self.controller)
         self.assertIn("input.select();", self.controller)
         self.assertIn("result.data?.mutated !== false", self.controller)
-        self.assertIn("setExplorerCreateModalError(", self.controller)
-        self.assertIn("? 'Create' : 'Retry'", self.controller)
+        self.assertIn("setExplorerNameDialogError(", self.controller)
+        self.assertIn("? state.acceptLabel : 'Retry'", self.controller)
+        self.assertIn("acceptLabel: 'Rename'", self.controller)
+        self.assertIn("'Enter a different name.'", self.controller)
+        self.assertIn("input.value = isRename ? state.currentName : ''", self.controller)
+        self.assertIn("clearExplorerFilesystemClipboardForPath(", self.controller)
+        self.assertIn("pane._explorerFileName = explorerFilesystemBaseName(", self.controller)
 
         self.assertIn("surface: 'tree-blank'", self.viewer)
         self.assertIn("surface: 'preview-blank'", self.viewer)
@@ -1373,7 +1659,7 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
         self.assertIn("var(--gv-danger)", style)
         self.assertIn("var(--t-accent)", style)
         self.assertIn(".explorer-fs-cut-source", style)
-        self.assertIn(".explorer-create-error", style)
+        self.assertIn(".explorer-name-error", style)
         self.assertNotRegex(style, r":\s*#[0-9a-fA-F]{3,8}\b")
         for call in ("window.confirm(", "window.alert(", "window.prompt("):
             self.assertNotIn(call, self.controller)

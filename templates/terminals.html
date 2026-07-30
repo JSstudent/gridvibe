@@ -280,34 +280,35 @@
     </div>
 </div>
 
-<div id="explorerCreateModal" class="modal-shell" aria-hidden="true">
-    <div class="modal-card explorer-create-card" role="dialog" aria-modal="true" aria-labelledby="explorerCreateTitle">
+<!-- One name dialog serves New file, New folder, and Rename (explorer-fs.js). -->
+<div id="explorerNameModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card explorer-name-card" role="dialog" aria-modal="true" aria-labelledby="explorerNameTitle">
         <div class="modal-head">
             <div>
-                <div id="explorerCreateTitle" class="modal-title">New file</div>
-                <div id="explorerCreateDestination" class="modal-copy"></div>
+                <div id="explorerNameTitle" class="modal-title">New file</div>
+                <div id="explorerNameContext" class="modal-copy"></div>
             </div>
         </div>
-        <form id="explorerCreateForm" class="modal-form">
+        <form id="explorerNameForm" class="modal-form">
             <div class="modal-field">
-                <label for="explorerCreateName">Name</label>
+                <label for="explorerNameInput">Name</label>
                 <input
-                    id="explorerCreateName"
+                    id="explorerNameInput"
                     class="modal-input"
                     type="text"
                     maxlength="255"
                     autocomplete="off"
                     spellcheck="false"
-                    aria-describedby="explorerCreateError"
+                    aria-describedby="explorerNameError"
                 >
-                <div id="explorerCreateError" class="explorer-create-error" role="alert" hidden></div>
+                <div id="explorerNameError" class="explorer-name-error" role="alert" hidden></div>
             </div>
         </form>
         <div class="modal-actions">
             <div class="modal-copy">The exact name is used; existing entries are never overwritten.</div>
             <div class="modal-actions-buttons">
-                <button id="explorerCreateCancel" class="btn btn-neutral" type="button">Cancel</button>
-                <button id="explorerCreateAccept" class="btn btn-primary" type="submit" form="explorerCreateForm">Create</button>
+                <button id="explorerNameCancel" class="btn btn-neutral" type="button">Cancel</button>
+                <button id="explorerNameAccept" class="btn btn-primary" type="submit" form="explorerNameForm">Create</button>
             </div>
         </div>
     </div>
