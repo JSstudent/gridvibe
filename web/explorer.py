@@ -395,6 +395,24 @@ def _explorer_file_revision(raw_content: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw_content).hexdigest()
 
 
+def _explorer_file_state_revision(size: Optional[int], modified: Optional[float]) -> str:
+    """Return a cheap change token for one file: byte size + modification time.
+
+    Deliberately derived from the single ``stat`` the read payload already
+    performs. The open-file change listener polls it every few seconds, so it
+    must never re-read (let alone re-hash) file contents — the ``sha256:``
+    token from ``_explorer_file_revision`` stays the authority for save
+    conflict detection; this one only answers "re-fetch or not".
+
+    Known limitation: SFTP reports whole-second mtimes, so a same-second edit
+    that leaves the size unchanged is not detected until the next change.
+    Manual Refresh covers that case.
+    """
+    size_part = "-" if size is None else str(int(size))
+    mtime_part = "-" if modified is None else f"{float(modified):.6f}"
+    return f"{size_part}:{mtime_part}"
+
+
 def _explorer_line_ending(raw_content: bytes) -> str:
     """Classify a file's newline style as lf/crlf/cr/none/mixed."""
     crlf = raw_content.count(b"\r\n")
@@ -2970,6 +2988,7 @@ def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, An
             "editable": False,
             "edit_block_reason": "unsupported_format",
             "revision": None,
+            "state_revision": _explorer_file_state_revision(size, modified),
             "line_ending": None,
             "utf8_bom": False,
             "git": _clean_git_entry_status(),
@@ -3017,10 +3036,30 @@ def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, An
         "editable": edit_metadata["editable"],
         "edit_block_reason": edit_metadata["edit_block_reason"],
         "revision": edit_metadata["revision"],
+        # Baseline for the open-file change listener; every load and every save
+        # carries it, so the client never needs a priming round trip and can
+        # never mistake its own write for an external one.
+        "state_revision": _explorer_file_state_revision(size, modified),
         "line_ending": edit_metadata["line_ending"],
         "utf8_bom": edit_metadata["utf8_bom"],
         "git": file_git,
         "git_context": git_context,
+    }
+
+
+def get_explorer_file_state_payload(backend: Any, requested_path: Any) -> Dict[str, Any]:
+    """Return only the cheap change token for one explorer file.
+
+    Polled by the open-file change listener (explorer-git-watch.js). One
+    ``resolve_file`` plus one ``stat`` — deliberately no read, no Markdown
+    render, no Git status — so watching an open file costs a fraction of the
+    Git sidebar poll that runs beside it.
+    """
+    root_path, file_path = backend.resolve_file(requested_path)
+    size, modified = backend.stat_file(file_path)
+    return {
+        "path": backend.rel_explorer_path(root_path, file_path),
+        "revision": _explorer_file_state_revision(size, modified),
     }
 
 

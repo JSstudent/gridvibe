@@ -46,8 +46,9 @@ The `werkzeug` logger emits an `INFO` line for every HTTP request. A few familie
 - `GET /api/session-groups`
 - `GET /api/voice-status`
 - `GET /api/explorer/<id>/git/state` (the explorer Git change listener; `?known=…` variants)
+- `GET /api/explorer/<id>/file/state` (the explorer open-file change listener; `?path=…&known=…` variants)
 
-The `_SuppressPollLogs` filter (attached to `logging.getLogger("werkzeug")` inside `setup_logging`) drops these lines when the response status is `2xx`. All other werkzeug output — errors, non-polling routes — is logged normally, so a failing Git state poll still shows up.
+The `_SuppressPollLogs` filter (attached to `logging.getLogger("werkzeug")` inside `setup_logging`) drops these lines when the response status is `2xx`. All other werkzeug output — errors, non-polling routes — is logged normally, so a failing state poll still shows up. Note that only the `/state` polls are suppressed: the full `GET /api/explorer/<id>/file` read the listener issues after a change is a real request and stays in the log.
 
 The filter regex:
 
@@ -55,7 +56,7 @@ The filter regex:
 _POLL_RE = re.compile(
     r'"GET /api/(?:'
     r'(?:sessions|session-groups|voice-status)'
-    r'|explorer/[^/ ?"]+/git/state'
+    r'|explorer/[^/ ?"]+/(?:git|file)/state'
     r')(?:\?[^ ]*)? HTTP/[\d.]+" 2\d\d'
 )
 ```

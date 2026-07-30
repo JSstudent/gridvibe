@@ -31,12 +31,13 @@ MAX_LOG_BACKUPS = 10
 
 # Matches reconciliation GETs from the terminals page (push-triggered status
 # refreshes plus its slow fallback poll), the voice-status checks fired on
-# window focus, and the explorer Git change listener's state polls — the
-# 2xx lines from these would otherwise clutter the log (failures stay visible)
+# window focus, and the explorer change listener's Git-sidebar and open-file
+# state polls — the 2xx lines from these would otherwise clutter the log
+# (failures stay visible)
 _POLL_RE = re.compile(
     r'"GET /api/(?:'
     r'(?:sessions|session-groups|voice-status)'
-    r'|explorer/[^/ ?"]+/git/state'
+    r'|explorer/[^/ ?"]+/(?:git|file)/state'
     r')(?:\?[^ ]*)? HTTP/[\d.]+" 2\d\d'
 )
 

@@ -127,6 +127,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _resolve_remote_explorer_candidate_path,
     _sftp_request_error_types,
     get_explorer_file_payload,
+    get_explorer_file_state_payload,
     open_path_in_os_file_manager,
     read_explorer_file_preview,
     save_explorer_file_payload,
@@ -1086,6 +1087,27 @@ def save_explorer_file(session_id: str):
         )
 
     return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/file/state', methods=['GET'])
+def get_explorer_file_state(session_id: str):
+    """Return a cheap change token for one open explorer file.
+
+    Polled by the open-file change listener (explorer-git-watch.js) so a file
+    edited outside GridVibe refreshes in the viewer. A read, like `download`
+    and `search`: one `stat`, no content, ~80-byte body.
+    """
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    requested_path = request.args.get("path", "")
+    known = request.args.get("known", "")
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        state = get_explorer_file_state_payload(backend, requested_path)
+        return {**state, "changed": state["revision"] != known}
+
+    return _with_no_store(_explorer_route_response(session, handler))
 
 
 # Downloading is a read, so it stays inside the explorer's read-only contract

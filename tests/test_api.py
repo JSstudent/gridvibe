@@ -2153,11 +2153,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("active.pinned", assign)
         self.assertIn("const preview = explorerPreviewTab(pane);", assign)
         self.assertIn("pinned tabs are never hijacked", html)
-        # Same-tab refreshes (git actions, pane refresh) pass the active tab
-        # explicitly so they are not rerouted into the Preview tab. The two
-        # additional uses come from the in-app editor's save-success re-render
-        # and conflict "Reload from disk" (explorer-editor.js).
-        self.assertEqual(html.count("tab: pane._explorerActiveTabId"), 4)
+        # Same-tab refreshes (git actions, pane refresh, the open-file change
+        # listener's quiet re-read) pass the active tab explicitly so they are
+        # not rerouted into the Preview tab. The two additional uses come from
+        # the in-app editor's save-success re-render and conflict "Reload from
+        # disk" (explorer-editor.js).
+        self.assertEqual(html.count("tab: pane._explorerActiveTabId"), 5)
 
     def test_terminals_page_explorer_capture_tracks_rendered_tab(self):
         """2.e: a same-path Preview render never overwrites a pinned tab's snapshot."""
@@ -2170,7 +2171,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("pane._explorerRenderedTabId !== pane._explorerActiveTabId", html)
         # Every render entry point stamps the tab it rendered for.
         self.assertIn("pane._explorerRenderedTabId = assignedTab.id;", html)
-        self.assertIn("pane._explorerRenderedTabId = explorerAssignOpenTab(pane, path, {}).id;", html)
+        self.assertIn("const commitTab = explorerAssignOpenTab(pane, path, {});", html)
+        self.assertIn("pane._explorerRenderedTabId = commitTab.id;", html)
         self.assertEqual(html.count("pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;"), 4)
         # The loading placeholder disowns the DOM until the next render.
         self.assertIn("pane._explorerRenderedTabId = '';", html)
@@ -10622,6 +10624,141 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         self.assertEqual(commit_revision, self._git_state(session_id).get_json()["revision"])
 
 
+class ExplorerFileStateTestCase(unittest.TestCase):
+    """Explorer open-file change listener: the cheap stat token helper and the
+    GET /api/explorer/<id>/file/state route it polls."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name) / "root"
+        self.root.mkdir()
+
+    def _create_explorer_session(self, root: Path) -> str:
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(root),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        return response.get_json()["sessions"][0]["session_id"]
+
+    def _file_state(self, session_id: str, path: str, known: str = ""):
+        return self.client.get(
+            f"/api/explorer/{session_id}/file/state",
+            query_string={"path": path, "known": known},
+        )
+
+    def test_state_revision_tracks_size_and_mtime_only(self):
+        self.assertEqual(web_explorer._explorer_file_state_revision(12, 1.5), "12:1.500000")
+        # A missing stat field never collapses two different files onto one token.
+        self.assertEqual(web_explorer._explorer_file_state_revision(None, None), "-:-")
+        self.assertNotEqual(
+            web_explorer._explorer_file_state_revision(12, 1.5),
+            web_explorer._explorer_file_state_revision(13, 1.5),
+        )
+        self.assertNotEqual(
+            web_explorer._explorer_file_state_revision(12, 1.5),
+            web_explorer._explorer_file_state_revision(12, 1.75),
+        )
+
+    def test_file_payload_carries_the_watch_baseline(self):
+        target = self.root / "notes.txt"
+        target.write_text("one\n", encoding="utf-8")
+        session_id = self._create_explorer_session(self.root)
+
+        payload = self.client.get(
+            f"/api/explorer/{session_id}/file", query_string={"path": "notes.txt"}
+        ).get_json()
+
+        # Every load carries the baseline, so the client never needs a priming
+        # round trip and can never mistake its own write for an external one.
+        self.assertEqual(
+            payload["state_revision"],
+            self._file_state(session_id, "notes.txt").get_json()["revision"],
+        )
+
+    def test_file_state_reports_changed_against_a_known_token(self):
+        target = self.root / "notes.txt"
+        target.write_text("one\n", encoding="utf-8")
+        session_id = self._create_explorer_session(self.root)
+
+        first = self._file_state(session_id, "notes.txt")
+        self.assertEqual(first.status_code, 200)
+        revision = first.get_json()["revision"]
+        self.assertTrue(first.get_json()["changed"])
+        self.assertEqual(first.get_json()["path"], "notes.txt")
+
+        unchanged = self._file_state(session_id, "notes.txt", known=revision).get_json()
+        self.assertFalse(unchanged["changed"])
+        self.assertEqual(unchanged["revision"], revision)
+
+        target.write_text("one\ntwo\n", encoding="utf-8")
+        changed = self._file_state(session_id, "notes.txt", known=revision).get_json()
+        self.assertTrue(changed["changed"])
+        self.assertNotEqual(changed["revision"], revision)
+
+    def test_file_state_never_reads_file_contents(self):
+        target = self.root / "notes.txt"
+        target.write_text("one\n", encoding="utf-8")
+        session_id = self._create_explorer_session(self.root)
+
+        # The whole cost argument: watching an open file must not re-read (nor
+        # re-render, nor re-hash) it on every poll.
+        with patch.object(
+            web_explorer, "read_explorer_file_preview", side_effect=AssertionError("read")
+        ) as preview, patch.object(
+            web_explorer, "_get_git_context", side_effect=AssertionError("git")
+        ) as git_context:
+            response = self._file_state(session_id, "notes.txt")
+
+        self.assertEqual(response.status_code, 200)
+        preview.assert_not_called()
+        git_context.assert_not_called()
+
+    def test_file_state_sends_no_store_header(self):
+        (self.root / "notes.txt").write_text("one\n", encoding="utf-8")
+        session_id = self._create_explorer_session(self.root)
+
+        response = self._file_state(session_id, "notes.txt")
+
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+
+    def test_file_state_missing_session_returns_404(self):
+        response = self.client.get(
+            "/api/explorer/missing/file/state", query_string={"path": "notes.txt"}
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_file_state_missing_file_returns_400(self):
+        session_id = self._create_explorer_session(self.root)
+
+        response = self._file_state(session_id, "gone.txt")
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_file_state_refuses_paths_outside_the_root(self):
+        (Path(self.temp_dir.name) / "outside.txt").write_text("secret\n", encoding="utf-8")
+        session_id = self._create_explorer_session(self.root)
+
+        response = self._file_state(session_id, "../outside.txt")
+
+        self.assertEqual(response.status_code, 400)
+
+
 class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
     """Explorer Git change listener frontend contract
     (explorer_git_change_listener_plan_2026-07-30 §9)."""
@@ -10738,6 +10875,108 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("_explorerGitWatchSuspended", viewer)
         css = self._static("css/terminals.css")
         self.assertIn(".explorer-git-watch-paused", css)
+
+    # ── Open-file change listener ───────────────────────────────────────────
+
+    def test_open_file_watch_polls_the_cheap_state_route(self):
+        watch = self._static("js/explorer-git-watch.js")
+        self.assertIn("/file/state", watch)
+        self.assertIn("async function explorerFileWatchCheckOne(index)", watch)
+        # Same scheduler, same recursive setTimeout, same identity discipline.
+        self.assertNotIn("setInterval", watch)
+        self.assertIn("explorerWatchPaneCurrent(index, pane, sessionId)", watch)
+
+    def test_open_file_watch_eligibility_gates_are_wired(self):
+        watch = self._static("js/explorer-git-watch.js")
+        for gate in (
+            "function explorerFileWatchEligible(",
+            "_explorerFileStateRevision",
+            "_explorerMode !== 'file'",
+            "pane._explorerEdit",
+            "_explorerDiffUndoBusy",
+            "_explorerFileWatchInFlight",
+            "_explorerFileWatchSuspended",
+            "_explorerFileWatchRefreshing",
+        ):
+            with self.subTest(gate=gate):
+                self.assertIn(gate, watch)
+
+    def test_open_file_watch_defers_apply_during_interaction(self):
+        watch = self._static("js/explorer-git-watch.js")
+        for gate in (
+            "function explorerFileWatchDeferralActive(",
+            "explorerWatchInteractionActive()",
+            "_explorerFileWatchPending",
+            "getSelection",
+            "isCollapsed",
+        ):
+            with self.subTest(gate=gate):
+                self.assertIn(gate, watch)
+
+    def test_open_file_watch_applies_through_the_quiet_viewer_helper(self):
+        viewer = self._static("js/explorer-viewer.js")
+        self.assertIn("async function refreshExplorerOpenFileQuiet(index)", viewer)
+        quiet_fn = viewer[
+            viewer.index("async function refreshExplorerOpenFileQuiet"):
+            viewer.index("function applyExplorerGitRepoQuiet")
+        ]
+        # Quiet: no loading placeholder, no tree/pane reload, and never against
+        # an open editor buffer.
+        self.assertIn("cache: 'no-store'", quiet_fn)
+        self.assertIn("explorerEditState(pane)", quiet_fn)
+        self.assertIn("updateExplorerFileInPlace(index, data, scrollState)", quiet_fn)
+        self.assertNotIn("renderExplorerMessage", quiet_fn)
+        self.assertNotIn("reloadExplorerTree", quiet_fn)
+        # The baseline is set from every load/save, so a GridVibe write is never
+        # mistaken for an external change.
+        self.assertIn("function setExplorerFileWatchBaseline(pane, revision)", viewer)
+        self.assertIn("setExplorerFileWatchBaseline(pane, data.state_revision || '')", viewer)
+
+    def test_empty_diff_falls_back_to_the_file_content_view(self):
+        viewer = self._static("js/explorer-viewer.js")
+        self.assertIn("function explorerFallbackFromEmptyDiff(index)", viewer)
+        fallback = viewer[
+            viewer.index("function explorerFallbackFromEmptyDiff(index)"):
+            viewer.index("function setExplorerDiffSplit(index, open)")
+        ]
+        # Commit diffs are history and never bounce; the live diff falls back to
+        # the sticky source/preview preference, and only to a panel that exists.
+        self.assertIn("pane._explorerDiffCommit", fallback)
+        self.assertIn("_explorerLastFileView === 'preview'", fallback)
+        self.assertIn("setExplorerFileView(index, preferred)", fallback)
+        self.assertIn("setExplorerDiffToggleHidden(index, true)", fallback)
+        # Applied on both the cached and the freshly-fetched diff paths.
+        self.assertEqual(viewer.count("if (explorerFallbackFromEmptyDiff(index)) {"), 2)
+
+    def test_missing_view_panel_never_hides_every_panel(self):
+        viewer = self._static("js/explorer-viewer.js")
+        # Selecting a panel that does not exist used to hide all of them and
+        # leave an empty viewer — a restored 'diff' scroll state routinely
+        # outlives its panel once the file's changes are discarded.
+        self.assertIn("function explorerResolveFileView(index, mode)", viewer)
+        self.assertIn(
+            "const selectedMode = explorerResolveFileView(index, normalizedMode);", viewer
+        )
+        resolve = viewer[
+            viewer.index("function explorerResolveFileView(index, mode)"):
+            viewer.index("function setExplorerFileView(index, mode)")
+        ]
+        self.assertIn("data-explorer-file-panel=", resolve)
+        self.assertIn("_explorerLastFileView", resolve)
+        self.assertIn("'source', 'preview'", resolve)
+
+    def test_pathless_tab_never_keeps_a_git_badge(self):
+        viewer = self._static("js/explorer-viewer.js")
+        sync = viewer[
+            viewer.index("function syncExplorerTabGitFromRepo(index, repo)"):
+            viewer.index("function explorerAssignOpenTab(pane, path")
+        ]
+        # A Preview tab back on a directory listing shows no file, so it must
+        # not keep the badge of the file it happened to show last.
+        self.assertIn("const nextGit = path ? (changesByPath.get(path) || null) : null;", sync)
+        # Cleared eagerly too, so it does not wait for a Git sidebar sync.
+        self.assertIn("previewTab.git = null;", viewer)
+        self.assertIn("preview.git = null;", viewer)
 
 
 # ---------------------------------------------------------------------------
