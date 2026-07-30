@@ -3651,15 +3651,25 @@
 
     }
 
+    /* The clear button also types a real clear command so the shell's own
+       scrollback goes with the pane's. Only cmd.exe and PowerShell understand
+       `cls`; every POSIX shell wants `clear`. A local ("wsl" mode) pane with
+       neither shell flag set is the host's default shell, which is cmd.exe on a
+       Windows host but bash/zsh on a Linux or macOS one — hence the host check,
+       without which a Linux host answered the clear button with
+       "Command 'cls' not found". */
     function getTerminalClearCommand(index) {
         const session = terminals[index]?._session;
-        if (session?.mode === 'wsl' && session?.use_powershell) {
+        if (session?.mode !== 'wsl') {
+            return 'clear\r';
+        }
+        if (session?.use_powershell) {
             return 'cls\r';
         }
-        if (session?.mode === 'wsl' && !session?.use_wsl) {
-            return 'cls\r';
+        if (session?.use_wsl) {
+            return 'clear\r';
         }
-        return 'clear\r';
+        return localShellModesAvailable() ? 'cls\r' : 'clear\r';
     }
 
     function flushPendingOutput(index) {

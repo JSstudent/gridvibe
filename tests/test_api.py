@@ -3001,6 +3001,20 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("socket.emit('clear_terminal_buffer', { session_id: sessionId });", html[clear_start:])
         self.assertIn("socket.emit('terminal_input', { session_id: sessionId, data: clearCommand });", html[clear_start:])
 
+    def test_terminals_page_clear_command_matches_shell_family_and_host(self):
+        """`cls` is a cmd/PowerShell command; POSIX hosts and WSL panes get `clear`."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        start = html.index("function getTerminalClearCommand(index)")
+        end = html.index("function flushPendingOutput(index)", start)
+        body = html[start:end]
+        self.assertIn("if (session?.mode !== 'wsl') {\n            return 'clear\\r';", body)
+        self.assertIn("if (session?.use_powershell) {\n            return 'cls\\r';", body)
+        self.assertIn("if (session?.use_wsl) {\n            return 'clear\\r';", body)
+        self.assertIn("return localShellModesAvailable() ? 'cls\\r' : 'clear\\r';", body)
+
     def test_terminals_page_redraws_attached_terminals_after_group_switch_rejoin(self):
         response = self.client.get("/terminals")
 
