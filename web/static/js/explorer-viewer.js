@@ -1335,6 +1335,12 @@
         const errorBanner = pane._explorerGitRepoError
             ? `<div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>`
             : '';
+        /* The change listener (explorer-git-watch.js) suspends itself after
+           repeated failures; it must never make the sidebar look broken, so
+           this is one muted line above the last good state — Refresh re-arms. */
+        const watchPausedBanner = pane._explorerGitWatchSuspended
+            ? '<div class="explorer-diff-sidebar-empty explorer-git-watch-paused">Live updates paused — use Refresh</div>'
+            : '';
         const changes = Array.isArray(repo.changes) ? repo.changes : [];
         const { staged, unstaged } = splitExplorerGitChanges(changes);
         /* Discard All remains tracked-only even though a confirmed per-row
@@ -1364,6 +1370,7 @@
 
         panel.innerHTML = `
             ${errorBanner}
+            ${watchPausedBanner}
             <div class="explorer-diff-sidebar-section explorer-git-repo-bar">
                 <span class="explorer-git-repo-branch" title="${escHtml(git.repo_root || branchText)}">${escHtml(branchText)}</span>
                 <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
@@ -2140,6 +2147,9 @@
             }
             pane._explorerGitRepoLoaded = true;
             pane._explorerGitRepo = data;
+            pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
+            // A user-initiated load re-arms a suspended change-listener watch.
+            pane._explorerGitWatchSuspended = false;
             syncExplorerTabGitFromRepo(index, data);
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer Git repository failed:', error);
@@ -2148,6 +2158,76 @@
             pane._explorerGitRepoLoading = false;
             renderExplorerGitPanels(index);
         }
+    }
+
+    async function refreshExplorerGitRepoQuiet(index) {
+        /* Background variant of loadExplorerGitRepo for the Git change
+           listener (explorer-git-watch.js): forced (no _explorerGitRepoLoaded
+           early return, no invalidate — the last good panel stays on screen),
+           quiet (only a git-refreshing class on the panel, never the Loading
+           placeholder), and identity-checked (a stale pane/session id yields
+           null). Returns the fresh payload, or null on failure/staleness —
+           the pane keeps its last good _explorerGitRepo either way. */
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId || pane._explorerGitRepoLoading || pane._explorerGitRepoRefreshing) {
+            return null;
+        }
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        pane._explorerGitRepoRefreshing = true;
+        panel?.classList.add('git-refreshing');
+        try {
+            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/git/repo`, { cache: 'no-store' });
+            const data = await response.json();
+            if (!response.ok) {
+                return null;
+            }
+            if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
+                return null;
+            }
+            return data;
+        } catch (error) {
+            return null;
+        } finally {
+            pane._explorerGitRepoRefreshing = false;
+            panel?.classList.remove('git-refreshing');
+        }
+    }
+
+    function applyExplorerGitRepoQuiet(index, data) {
+        /* Swap a quietly fetched Git payload into the sidebar in place: one
+           panel render, scroll/focus preserved, tab badges re-rendered only
+           when the badge map actually changed (syncExplorerTabGitFromRepo
+           guards that itself). The commit draft, expanded commits, sidebar
+           sizing and open state all live in pane state and survive the render. */
+        const pane = terminals[index];
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        if (!pane || !panel || !data) {
+            return false;
+        }
+        const scrollTop = panel.scrollTop;
+        const active = document.activeElement;
+        const focusState = active && panel.contains(active) && typeof active.selectionStart === 'number'
+            ? { id: active.id, start: active.selectionStart, end: active.selectionEnd }
+            : null;
+        pane._explorerGitRepo = data;
+        pane._explorerGitRepoLoaded = true;
+        pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
+        syncExplorerTabGitFromRepo(index, data);
+        renderExplorerGitPanel(index);
+        panel.scrollTop = Math.min(scrollTop, panel.scrollHeight);
+        if (focusState && focusState.id) {
+            const target = panel.querySelector(`#${CSS.escape(focusState.id)}`);
+            if (target) {
+                target.focus();
+                try {
+                    target.setSelectionRange(focusState.start, focusState.end);
+                } catch (error) {
+                    /* The replacement node is not selectable; focus is enough. */
+                }
+            }
+        }
+        return true;
     }
 
     async function performExplorerGitAction(index, endpoint, body) {
@@ -2172,6 +2252,10 @@
             }
             pane._explorerGitRepo = data;
             pane._explorerGitRepoLoaded = true;
+            pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
+            // A successful GridVibe Git action is authoritative: it re-arms a
+            // suspended change-listener watch and resets its baseline.
+            pane._explorerGitWatchSuspended = false;
             syncExplorerTabGitFromRepo(index, data);
             succeeded = true;
         } catch (error) {
@@ -5133,13 +5217,23 @@
             explorerNormalizeTabPath(change.path),
             change.git || null
         ]));
+        let badgesChanged = false;
         ensureExplorerTabState(pane).forEach(tab => {
             const path = explorerNormalizeTabPath(tab.path);
             if (path) {
-                tab.git = changesByPath.get(path) || null;
+                const nextGit = changesByPath.get(path) || null;
+                /* The tab strip is a second DOM rebuild the user did not ask
+                   for; skip it when the badge map is unchanged (a quiet
+                   background refresh must not repaint what did not change). */
+                if (JSON.stringify(nextGit) !== JSON.stringify(tab.git || null)) {
+                    tab.git = nextGit;
+                    badgesChanged = true;
+                }
             }
         });
-        renderExplorerTabStrip(index);
+        if (badgesChanged) {
+            renderExplorerTabStrip(index);
+        }
     }
 
     /* Choose (and if needed create) the tab a file should load into. A `+`

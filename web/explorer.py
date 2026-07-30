@@ -14,6 +14,7 @@ guarded Git mutations are unchanged.
 import codecs
 import errno
 import hashlib
+import json
 import logging
 import os
 import posixpath
@@ -58,6 +59,7 @@ EXPLORER_FILE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024
 EXPLORER_GIT_DIFF_MAX_BYTES = 256 * 1024
 EXPLORER_GIT_DIFF_MAX_LINES = 4000
 EXPLORER_GIT_LOG_MAX_COMMITS = 60
+EXPLORER_GIT_REVISION_LENGTH = 16
 
 
 def _is_explorer_session(session: Any) -> bool:
@@ -2266,19 +2268,62 @@ def _explorer_git_changed_files(
     return changes
 
 
-def _get_git_repo_summary(backend: Any, root_path: str) -> Dict[str, Any]:
-    """Return changed files and a bounded commit graph for an explorer root."""
+def _git_repo_revision(git_context: Dict[str, Any], changes: List[Dict[str, Any]]) -> str:
+    """Return a stable token for the Git state an explorer sidebar can show.
+
+    Covers exactly what the sidebar renders: branch/HEAD/ahead/behind plus each
+    visible changed path with its index and worktree columns. Deliberately
+    excludes error text and absolute paths so local and SSH explorers on the
+    same semantic state produce the same token.
+    """
+    rows = sorted(
+        [
+            change.get("path") or "",
+            (change.get("git") or {}).get("status") or "",
+            (change.get("git") or {}).get("index_status") or " ",
+            (change.get("git") or {}).get("worktree_status") or " ",
+            (change.get("git") or {}).get("original_path") or "",
+        ]
+        for change in changes
+    )
+    canonical = json.dumps(
+        {
+            "branch": git_context.get("branch"),
+            "head": git_context.get("head"),
+            "ahead": git_context.get("ahead"),
+            "behind": git_context.get("behind"),
+            "changes": rows,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:EXPLORER_GIT_REVISION_LENGTH]
+
+
+def _get_git_repo_state(backend: Any, root_path: str) -> Dict[str, Any]:
+    """Return the sidebar's semantic Git state without the commit graph."""
     git_context, statuses = _get_git_context(backend, root_path, root_path)
     if not git_context.get("available"):
         raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
-
     repo_root = str(git_context["repo_root"])
+    changes = _explorer_git_changed_files(backend, root_path, repo_root, statuses)
+    return {
+        "git": git_context,
+        "changes": changes,
+        "revision": _git_repo_revision(git_context, changes),
+    }
+
+
+def _get_git_repo_summary(backend: Any, root_path: str) -> Dict[str, Any]:
+    """Return changed files and a bounded commit graph for an explorer root."""
+    state = _get_git_repo_state(backend, root_path)
+    repo_root = str(state["git"]["repo_root"])
     root_pathspec = backend.pathspec(repo_root, root_path)
     commits = _bounded_git_graph_log(backend, repo_root, root_pathspec)
     commit_files = _git_commit_files_log(backend, repo_root, root_pathspec)
     return {
-        "git": git_context,
-        "changes": _explorer_git_changed_files(backend, root_path, repo_root, statuses),
+        **state,
         "commits": _attach_commit_files(
             commits,
             commit_files,

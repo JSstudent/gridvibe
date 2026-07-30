@@ -40,20 +40,27 @@ When `gridvibe.log` reaches 2 MB it is renamed to `.1`, the previous `.1` become
 
 ## Noise Suppression
 
-The `werkzeug` logger emits an `INFO` line for every HTTP request. Two families of endpoints are polled by the frontend every few seconds and would flood the log with identical entries:
+The `werkzeug` logger emits an `INFO` line for every HTTP request. A few families of endpoints are polled by the frontend every few seconds and would flood the log with identical entries:
 
 - `GET /api/sessions` (and `?group=…` variants)
 - `GET /api/session-groups`
+- `GET /api/voice-status`
+- `GET /api/explorer/<id>/git/state` (the explorer Git change listener; `?known=…` variants)
 
-The `_SuppressPollLogs` filter (attached to `logging.getLogger("werkzeug")` inside `setup_logging`) drops these lines when the response status is `2xx`. All other werkzeug output — errors, non-polling routes — is logged normally.
+The `_SuppressPollLogs` filter (attached to `logging.getLogger("werkzeug")` inside `setup_logging`) drops these lines when the response status is `2xx`. All other werkzeug output — errors, non-polling routes — is logged normally, so a failing Git state poll still shows up.
 
 The filter regex:
 
 ```python
-_POLL_RE = re.compile(r'"GET /api/(sessions|session-groups)(\?[^ ]*)? HTTP/[\d.]+" 2\d\d')
+_POLL_RE = re.compile(
+    r'"GET /api/(?:'
+    r'(?:sessions|session-groups|voice-status)'
+    r'|explorer/[^/ ?"]+/git/state'
+    r')(?:\?[^ ]*)? HTTP/[\d.]+" 2\d\d'
+)
 ```
 
-To stop suppressing a route, remove it from the alternation group in `_POLL_RE`.
+To stop suppressing a route, remove it from the alternation in `_POLL_RE`.
 
 ---
 

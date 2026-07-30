@@ -108,6 +108,25 @@ class LogPolishTestCase(unittest.TestCase):
         )
         self.assertTrue(log_filter.filter(kept))
 
+    def test_poll_filter_suppresses_git_state_checks(self):
+        log_filter = main._SuppressPollLogs()
+        for line in (
+            '127.0.0.1 - - [30/Jul/2026 12:00:00] "GET /api/explorer/abc123/git/state HTTP/1.1" 200 -',
+            '127.0.0.1 - - [30/Jul/2026 12:00:00] "GET /api/explorer/abc123/git/state?known=0123456789abcdef HTTP/1.1" 204 -',
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(log_filter.filter(_log_record(line)))
+
+    def test_poll_filter_keeps_failed_git_state_checks(self):
+        log_filter = main._SuppressPollLogs()
+        for line in (
+            '127.0.0.1 - - [30/Jul/2026 12:00:00] "GET /api/explorer/abc123/git/state HTTP/1.1" 400 -',
+            '127.0.0.1 - - [30/Jul/2026 12:00:00] "GET /api/explorer/abc123/git/state?known=x HTTP/1.1" 500 -',
+            '127.0.0.1 - - [30/Jul/2026 12:00:00] "GET /api/explorer/abc123/git/repo HTTP/1.1" 200 -',
+        ):
+            with self.subTest(line=line):
+                self.assertTrue(log_filter.filter(_log_record(line)))
+
     def test_strip_ansi_filter_cleans_werkzeug_style_records(self):
         log_filter = main._StripAnsiFilter()
         # werkzeug passes the coloured request line through record args.

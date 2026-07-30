@@ -196,6 +196,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/explorer-editor.js",
             "js/explorer-search.js",
             "js/explorer-fs.js",
+            "js/explorer-git-watch.js",
             "js/browser-pane.js",
             "js/terminal-shell.js",
             "js/terminals.js",
@@ -10326,6 +10327,419 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("splitRowWeights = cached.className === 'layout-split-local'", html)
 
 
+class ExplorerGitRevisionTestCase(unittest.TestCase):
+    """Explorer Git change listener (explorer_git_change_listener_plan_2026-07-30):
+    the semantic revision helper and the GET /api/explorer/<id>/git/state route."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+
+    def _run_git(self, repo_dir: Path, *args: str) -> subprocess.CompletedProcess:
+        if shutil.which("git") is None:
+            self.skipTest("git executable is not available")
+        env = dict(os.environ)
+        # Fixed author/committer dates make commit hashes deterministic, so two
+        # repos built the same way share a HEAD (and therefore a revision).
+        env.update(
+            {
+                "GIT_AUTHOR_DATE": "2026-07-30T00:00:00Z",
+                "GIT_COMMITTER_DATE": "2026-07-30T00:00:00Z",
+            }
+        )
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo_dir,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+
+    def _init_committed_repo(self, name: str = "repo") -> Path:
+        repo_dir = Path(self.temp_dir.name) / name
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        return repo_dir
+
+    def _create_explorer_session(self, root: Path) -> str:
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(root),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        return response.get_json()["sessions"][0]["session_id"]
+
+    def _git_state(self, session_id: str, known: str = ""):
+        query = f"?known={known}" if known else ""
+        return self.client.get(f"/api/explorer/{session_id}/git/state{query}")
+
+    # ── Revision helper ─────────────────────────────────────────────────────
+
+    def _base_context(self) -> dict:
+        return {
+            "branch": "main",
+            "head": "abcdef123456",
+            "ahead": 0,
+            "behind": 0,
+        }
+
+    def _change(self, path, status, index_status=" ", worktree_status=" ", original_path=None):
+        git = {
+            "status": status,
+            "index_status": index_status,
+            "worktree_status": worktree_status,
+        }
+        if original_path:
+            git["original_path"] = original_path
+        return {"path": path, "git": git}
+
+    def test_revision_is_stable_for_identical_semantic_state(self):
+        context = self._base_context()
+        changes = [
+            self._change("b.py", "modified", ".", "M"),
+            self._change("a.py", "untracked", "?", "?"),
+        ]
+        first = web_explorer._git_repo_revision(context, changes)
+        second = web_explorer._git_repo_revision(context, list(reversed(changes)))
+        self.assertEqual(first, second)
+        self.assertRegex(first, r"^[0-9a-f]{16}$")
+
+    def test_revision_changes_with_each_visible_state_delta(self):
+        context = self._base_context()
+        clean = web_explorer._git_repo_revision(context, [])
+        variants = {
+            "unstaged edit": (context, [self._change("a.py", "modified", ".", "M")]),
+            "staged edit": (context, [self._change("a.py", "modified", "M", ".")]),
+            "partially staged": (context, [self._change("a.py", "modified", "M", "M")]),
+            "untracked file": (context, [self._change("new.py", "untracked", "?", "?")]),
+            "deletion": (context, [self._change("a.py", "deleted", ".", "D")]),
+            "rename": (
+                context,
+                [self._change("b.py", "renamed", "R", ".", original_path="a.py")],
+            ),
+            "conflict": (context, [self._change("a.py", "conflicted", "U", "U")]),
+            "commit (HEAD)": ({**context, "head": "123456abcdef"}, []),
+            "branch switch": ({**context, "branch": "feature"}, []),
+            "ahead change": ({**context, "ahead": 2}, []),
+            "behind change": ({**context, "behind": 1}, []),
+        }
+        seen = {clean}
+        for label, (variant_context, variant_changes) in variants.items():
+            with self.subTest(variant=label):
+                revision = web_explorer._git_repo_revision(variant_context, variant_changes)
+                self.assertNotIn(revision, seen)
+                seen.add(revision)
+
+    def test_revision_excludes_error_text_and_absolute_paths(self):
+        context = {**self._base_context(), "repo_root": "/srv/app", "error": None}
+        other = {
+            **self._base_context(),
+            "repo_root": "C:\\Users\\dev\\app",
+            "error": "transient detail",
+        }
+        changes = [self._change("a.py", "modified", ".", "M")]
+        self.assertEqual(
+            web_explorer._git_repo_revision(context, changes),
+            web_explorer._git_repo_revision(other, changes),
+        )
+
+    def test_equal_semantic_state_in_two_roots_shares_revision(self):
+        first_repo = self._init_committed_repo("repo-a")
+        second_repo = self._init_committed_repo("repo-b")
+        for repo_dir in (first_repo, second_repo):
+            (repo_dir / "README.md").write_text("# Project\n\nchanged\n", encoding="utf-8")
+        first_session = self._create_explorer_session(first_repo)
+        second_session = self._create_explorer_session(second_repo)
+
+        first = self._git_state(first_session).get_json()
+        second = self._git_state(second_session).get_json()
+
+        self.assertEqual(first["revision"], second["revision"])
+
+    def test_change_outside_subtree_root_does_not_change_revision(self):
+        repo_dir = self._init_committed_repo()
+        sub_dir = repo_dir / "sub"
+        sub_dir.mkdir()
+        (sub_dir / "inside.txt").write_text("inside\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "add sub")
+        session_id = self._create_explorer_session(sub_dir)
+
+        baseline = self._git_state(session_id).get_json()["revision"]
+        (repo_dir / "README.md").write_text("# Project\n\noutside change\n", encoding="utf-8")
+        after_outside = self._git_state(session_id).get_json()["revision"]
+        self.assertEqual(baseline, after_outside)
+
+        (sub_dir / "inside.txt").write_text("inside\n\nchanged\n", encoding="utf-8")
+        after_inside = self._git_state(session_id).get_json()["revision"]
+        self.assertNotEqual(baseline, after_inside)
+
+    # ── Route ───────────────────────────────────────────────────────────────
+
+    def test_git_state_first_poll_reports_changed(self):
+        repo_dir = self._init_committed_repo()
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._git_state(session_id)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertRegex(payload["revision"], r"^[0-9a-f]{16}$")
+        self.assertTrue(payload["changed"])
+        self.assertNotIn("git", payload)
+        self.assertNotIn("changes", payload)
+        self.assertNotIn("commits", payload)
+
+    def test_git_state_known_revision_reports_unchanged(self):
+        repo_dir = self._init_committed_repo()
+        session_id = self._create_explorer_session(repo_dir)
+        revision = self._git_state(session_id).get_json()["revision"]
+
+        response = self._git_state(session_id, known=revision)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload["changed"])
+        self.assertEqual(payload["revision"], revision)
+
+    def test_git_state_detects_stage_and_commit(self):
+        repo_dir = self._init_committed_repo()
+        session_id = self._create_explorer_session(repo_dir)
+        revision = self._git_state(session_id).get_json()["revision"]
+
+        (repo_dir / "README.md").write_text("# Project\n\nchanged\n", encoding="utf-8")
+        unstaged = self._git_state(session_id, known=revision).get_json()
+        self.assertTrue(unstaged["changed"])
+        self.assertNotEqual(unstaged["revision"], revision)
+
+        self._run_git(repo_dir, "add", "README.md")
+        staged = self._git_state(session_id, known=unstaged["revision"]).get_json()
+        self.assertTrue(staged["changed"])
+        self.assertNotEqual(staged["revision"], unstaged["revision"])
+
+        self._run_git(repo_dir, "commit", "-m", "second")
+        committed = self._git_state(session_id, known=staged["revision"]).get_json()
+        self.assertTrue(committed["changed"])
+        self.assertNotIn(committed["revision"], {revision, unstaged["revision"], staged["revision"]})
+
+    def test_git_state_sends_no_store_header(self):
+        repo_dir = self._init_committed_repo()
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._git_state(session_id)
+
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+
+    def test_git_state_never_builds_commit_graph(self):
+        repo_dir = self._init_committed_repo()
+        session_id = self._create_explorer_session(repo_dir)
+        with patch.object(
+            web_explorer, "_bounded_git_graph_log", side_effect=AssertionError("graph log")
+        ) as graph_log, patch.object(
+            web_explorer, "_git_commit_files_log", side_effect=AssertionError("files log")
+        ) as files_log:
+            response = self._git_state(session_id)
+
+        self.assertEqual(response.status_code, 200)
+        graph_log.assert_not_called()
+        files_log.assert_not_called()
+
+    def test_git_state_missing_session_returns_404(self):
+        response = self.client.get("/api/explorer/missing/git/state")
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_git_state_non_git_root_returns_400(self):
+        plain_dir = Path(self.temp_dir.name) / "plain"
+        plain_dir.mkdir()
+        session_id = self._create_explorer_session(plain_dir)
+
+        response = self._git_state(session_id)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+
+    def test_git_state_backend_error_returns_500(self):
+        repo_dir = self._init_committed_repo()
+        session_id = self._create_explorer_session(repo_dir)
+        with patch.object(api, "_get_git_repo_state", side_effect=OSError("disk gone")):
+            response = self._git_state(session_id)
+
+        self.assertEqual(response.status_code, 500)
+
+    def test_git_repo_and_mutating_routes_carry_matching_revision(self):
+        repo_dir = self._init_committed_repo()
+        (repo_dir / "README.md").write_text("# Project\n\nchanged\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        repo_response = self.client.get(f"/api/explorer/{session_id}/git/repo")
+        self.assertEqual(repo_response.status_code, 200)
+        repo_revision = repo_response.get_json()["revision"]
+        self.assertRegex(repo_revision, r"^[0-9a-f]{16}$")
+        self.assertEqual(repo_revision, self._git_state(session_id).get_json()["revision"])
+
+        stage_response = self.client.post(
+            f"/api/explorer/{session_id}/git/stage",
+            json={"path": "README.md"},
+        )
+        self.assertEqual(stage_response.status_code, 200)
+        stage_revision = stage_response.get_json()["revision"]
+        self.assertRegex(stage_revision, r"^[0-9a-f]{16}$")
+        self.assertNotEqual(stage_revision, repo_revision)
+        self.assertEqual(stage_revision, self._git_state(session_id).get_json()["revision"])
+
+        stage_all_response = self.client.post(f"/api/explorer/{session_id}/git/stage-all")
+        self.assertEqual(stage_all_response.status_code, 200)
+        self.assertEqual(stage_all_response.get_json()["revision"], stage_revision)
+
+        commit_response = self.client.post(
+            f"/api/explorer/{session_id}/git/commit",
+            json={"message": "second"},
+        )
+        self.assertEqual(commit_response.status_code, 200)
+        commit_revision = commit_response.get_json()["revision"]
+        self.assertRegex(commit_revision, r"^[0-9a-f]{16}$")
+        self.assertNotIn(commit_revision, {repo_revision, stage_revision})
+        self.assertEqual(commit_revision, self._git_state(session_id).get_json()["revision"])
+
+
+class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
+    """Explorer Git change listener frontend contract
+    (explorer_git_change_listener_plan_2026-07-30 §9)."""
+
+    BANNED_VIEWER_CALLS = (
+        "openExplorerFile(",
+        "refreshExplorerAfterGitAction(",
+        "loadExplorerPane(",
+        "reloadExplorerTree(",
+    )
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path: str) -> str:
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_git_watch_file_is_served_and_loads_before_terminals_js(self):
+        watch = self._static("js/explorer-git-watch.js")
+        self.assertIn("explorerGitWatchTick", watch)
+        html = self.client.get("/terminals").get_data(as_text=True)
+        self.assertIn(f"/static/js/explorer-git-watch.js?v={__version__}", html)
+        self.assertLess(
+            html.index("js/explorer-fs.js"), html.index("js/explorer-git-watch.js")
+        )
+        self.assertLess(
+            html.index("js/explorer-git-watch.js"), html.index("js/terminals.js")
+        )
+
+    def test_git_watch_never_reaches_the_viewer_or_tree(self):
+        # Invariant 2: the listener has no code path into the file viewer, the
+        # editor buffer, or the directory listing.
+        watch = self._static("js/explorer-git-watch.js")
+        for call in self.BANNED_VIEWER_CALLS:
+            with self.subTest(call=call):
+                self.assertNotIn(call, watch)
+
+    def test_git_watch_uses_recursive_settimeout_only(self):
+        watch = self._static("js/explorer-git-watch.js")
+        self.assertIn("setTimeout", watch)
+        self.assertNotIn("setInterval", watch)
+
+    def test_git_watch_eligibility_gates_are_wired(self):
+        watch = self._static("js/explorer-git-watch.js")
+        for gate in (
+            "visibilityState",
+            "isExplorerPaneInstance",
+            "_explorerGitSidebarOpen",
+            "_explorerGitRepoLoaded",
+            "_explorerGitRevision",
+            "_explorerGitRepoLoading",
+            "_explorerGitActionBusy",
+            "_explorerFsBusy",
+            "_explorerEdit",
+            "_explorerGitWatchInFlight",
+            "_explorerGitWatchSuspended",
+        ):
+            with self.subTest(gate=gate):
+                self.assertIn(gate, watch)
+
+    def test_git_watch_defers_apply_during_interaction(self):
+        watch = self._static("js/explorer-git-watch.js")
+        for gate in (
+            "function explorerGitWatchDeferralActive(",
+            "_explorerGitWatchPending",
+            "genericConfirmModal",
+            "explorerNameModal",
+            "explorer-ctx-menu",
+            "_explorerGitComposing",
+            "pointerdown",
+            ":hover",
+        ):
+            with self.subTest(gate=gate):
+                self.assertIn(gate, watch)
+
+    def test_git_watch_adaptive_interval_backoff_and_suspension(self):
+        watch = self._static("js/explorer-git-watch.js")
+        self.assertIn("EXPLORER_GIT_WATCH_BASE_MS = 5000", watch)
+        self.assertIn("EXPLORER_GIT_WATCH_REMOTE_BASE_MS = 10000", watch)
+        self.assertIn("EXPLORER_GIT_WATCH_DURATION_FACTOR = 6", watch)
+        self.assertIn("EXPLORER_GIT_WATCH_MAX_MS = 60000", watch)
+        self.assertIn("EXPLORER_GIT_WATCH_MAX_FAILURES = 5", watch)
+        self.assertIn("EXPLORER_GIT_WATCH_CHURN_LIMIT = 3", watch)
+        self.assertIn("performance.now()", watch)
+
+    def test_quiet_refresh_helper_contract(self):
+        viewer = self._static("js/explorer-viewer.js")
+        self.assertIn("async function refreshExplorerGitRepoQuiet(index)", viewer)
+        quiet_fn = viewer[
+            viewer.index("async function refreshExplorerGitRepoQuiet"):
+            viewer.index("function applyExplorerGitRepoQuiet")
+        ]
+        # Forced + quiet: no invalidate (which would flash the Loading
+        # placeholder), only a CSS class toggle on the existing panel.
+        self.assertNotIn("invalidateExplorerGitRepo", quiet_fn)
+        self.assertIn("git-refreshing", quiet_fn)
+        self.assertNotIn("_explorerGitRepoLoading = true", quiet_fn)
+        self.assertIn("cache: 'no-store'", quiet_fn)
+        self.assertIn("function applyExplorerGitRepoQuiet(index, data)", viewer)
+        self.assertIn("_explorerGitRevision", viewer)
+        # Tab badges re-render only when the badge map actually changed.
+        self.assertIn("badgesChanged", viewer)
+        css = self._static("css/terminals.css")
+        self.assertIn(".explorer-git-panel.git-refreshing", css)
+
+    def test_suspended_watch_renders_muted_pause_line(self):
+        viewer = self._static("js/explorer-viewer.js")
+        self.assertIn("Live updates paused", viewer)
+        self.assertIn("_explorerGitWatchSuspended", viewer)
+        css = self._static("css/terminals.css")
+        self.assertIn(".explorer-git-watch-paused", css)
+
+
 # ---------------------------------------------------------------------------
 #  Phase 1-3 regression tests (code_review_2026_03_31.md)
 # ---------------------------------------------------------------------------
@@ -11228,6 +11642,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/explorer-editor.js",
         "js/explorer-search.js",
         "js/explorer-fs.js",
+        "js/explorer-git-watch.js",
         "js/browser-pane.js",
         "js/terminal-shell.js",
     )
@@ -11369,6 +11784,17 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             terminals_html.index("js/explorer-search.js"),
             terminals_html.index("js/explorer-fs.js"),
         )
+        # explorer-git-watch.js (Git change listener) loads after the explorer
+        # modules and before terminals.js, which owns the shared state it reads.
+        self.assertIn(f"/static/js/explorer-git-watch.js?v={__version__}", terminals_html)
+        self.assertLess(
+            terminals_html.index("js/explorer-fs.js"),
+            terminals_html.index("js/explorer-git-watch.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-git-watch.js"),
+            terminals_html.index("js/terminals.js"),
+        )
         # browser-pane.js (tabbed browser preview surface) loads after the
         # explorer modules and before terminals.js.
         self.assertIn(f"/static/js/browser-pane.js?v={__version__}", terminals_html)
@@ -11402,6 +11828,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/explorer-editor.js",
             "js/explorer-search.js",
             "js/explorer-fs.js",
+            "js/explorer-git-watch.js",
             "js/browser-pane.js",
             "js/terminal-shell.js",
             "js/terminals.js",
