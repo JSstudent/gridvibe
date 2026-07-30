@@ -1,3 +1,4 @@
+import errno
 import io
 import os
 import posixpath
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import api
+from web import app as web_app
 from web import explorer as web_explorer
 from web import explorer_fs
 
@@ -212,6 +214,27 @@ class ExplorerFilesystemPolicyTestCase(unittest.TestCase):
                     explorer_fs._normalize_rel(value)
         self.assertEqual(explorer_fs._normalize_rel(r"src\app.py"), "src/app.py")
 
+    def test_create_name_validation_is_literal_bounded_and_allows_dotfiles(self):
+        invalid = (
+            "",
+            ".",
+            "..",
+            "a/b",
+            r"a\b",
+            "/tmp",
+            r"C:drive",
+            "a\x00b",
+            ".git",
+            ".GIT",
+            "x" * (explorer_fs.EXPLORER_CREATE_NAME_MAX_CHARS + 1),
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(explorer_fs.ExplorerFsError):
+                    explorer_fs._normalize_entry_name(value)
+        self.assertEqual(explorer_fs._normalize_entry_name(".env"), ".env")
+        self.assertEqual(explorer_fs._normalize_entry_name(" exact "), " exact ")
+
     def test_fs_revision_is_stable_and_uses_every_field(self):
         base = {
             "kind": "file",
@@ -333,6 +356,62 @@ class ExplorerFilesystemPolicyTestCase(unittest.TestCase):
             )
         sftp.open.assert_called_once_with("/repo/copy.txt", "x+b")
 
+    def test_local_rename_noreplace_refuses_collision(self):
+        source = self.root / "source.txt"
+        destination = self.root / "destination.txt"
+        source.write_text("source", encoding="utf-8")
+        destination.write_text("keep", encoding="utf-8")
+
+        with self.assertRaises(FileExistsError):
+            self.backend.fs_rename_noreplace(str(source), str(destination))
+
+        self.assertEqual(source.read_text(encoding="utf-8"), "source")
+        self.assertEqual(destination.read_text(encoding="utf-8"), "keep")
+
+    def test_create_close_failure_reports_uncertain_mutation(self):
+        handle = MagicMock()
+        handle.close.side_effect = OSError("transport lost")
+        with patch.object(
+            self.backend, "fs_create_exclusive", return_value=handle
+        ):
+            with self.assertRaises(explorer_fs.ExplorerFsIoError) as caught:
+                explorer_fs.create_explorer_entry_payload(
+                    self.backend,
+                    root_revision=explorer_fs._fs_root_revision(str(self.root)),
+                    destination_directory="",
+                    name="uncertain.txt",
+                    entry_kind="file",
+                    session_id="uncertain-create",
+                )
+        self.assertTrue(caught.exception.details["mutated"])
+
+    def test_move_cross_device_is_stable_and_retry_safe(self):
+        source = self.root / "source.txt"
+        destination = self.root / "destination"
+        source.write_text("source", encoding="utf-8")
+        destination.mkdir()
+        source_revision = explorer_fs._fs_revision(
+            self.backend.fs_lstat(str(source))
+        )
+        with patch.object(
+            self.backend,
+            "fs_rename_noreplace",
+            side_effect=OSError(errno.EXDEV, "cross-device"),
+        ):
+            with self.assertRaises(
+                explorer_fs.ExplorerFsCrossDeviceError
+            ) as caught:
+                explorer_fs.move_explorer_entry_payload(
+                    self.backend,
+                    root_revision=explorer_fs._fs_root_revision(str(self.root)),
+                    source_path="source.txt",
+                    source_revision=source_revision,
+                    destination_directory="destination",
+                    session_id="cross-device-move",
+                )
+        self.assertFalse(caught.exception.details["mutated"])
+        self.assertTrue(source.exists())
+
     def test_sftp_copy_streams_and_recursive_delete_uses_one_backend(self):
         content = b"x" * (explorer_fs.EXPLORER_COPY_CHUNK_BYTES * 2 + 17)
         sftp = _MemorySftp(
@@ -394,6 +473,135 @@ class ExplorerFilesystemPolicyTestCase(unittest.TestCase):
         self.assertLess(
             operation_names.index("remove"), operation_names.index("rmdir")
         )
+
+    def test_sftp_create_and_move_use_exclusive_primitives(self):
+        sftp = _MemorySftp(
+            {
+                "/srv/app": {"kind": "directory"},
+                "/srv/app/source": {"kind": "directory"},
+                "/srv/app/source/data.txt": {
+                    "kind": "file",
+                    "content": b"data",
+                },
+                "/srv/app/destination": {"kind": "directory"},
+            }
+        )
+        session = SimpleNamespace(
+            session_id="remote-create-move",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+            directory="/srv/app",
+            host="example.com",
+            port=22,
+            username="user",
+        )
+        backend = web_explorer._SftpExplorerBackend(session, MagicMock(), sftp)
+        root_revision = explorer_fs._fs_root_revision("/srv/app")
+
+        created_file = explorer_fs.create_explorer_entry_payload(
+            backend,
+            root_revision=root_revision,
+            destination_directory="destination",
+            name="empty.txt",
+            entry_kind="file",
+            session_id=session.session_id,
+        )
+        created_directory = explorer_fs.create_explorer_entry_payload(
+            backend,
+            root_revision=root_revision,
+            destination_directory="destination",
+            name="folder",
+            entry_kind="directory",
+            session_id=session.session_id,
+        )
+        source_revision = explorer_fs._fs_revision(
+            backend.fs_lstat("/srv/app/source")
+        )
+        with patch.object(
+            backend,
+            "fs_listdir",
+            side_effect=AssertionError("move must not pre-scan"),
+        ):
+            moved = explorer_fs.move_explorer_entry_payload(
+                backend,
+                root_revision=root_revision,
+                source_path="source",
+                source_revision=source_revision,
+                destination_directory="destination",
+                session_id=session.session_id,
+            )
+
+        self.assertEqual(created_file["destination_path"], "destination/empty.txt")
+        self.assertEqual(created_directory["entry_kind"], "directory")
+        self.assertEqual(sftp.entries["/srv/app/destination/empty.txt"]["content"], b"")
+        self.assertEqual(sftp.open_modes, [("/srv/app/destination/empty.txt", "x+b")])
+        self.assertEqual(moved["destination_path"], "destination/source")
+        self.assertTrue(moved["moved"])
+        self.assertNotIn("/srv/app/source", sftp.entries)
+        self.assertEqual(
+            sftp.operations[-1],
+            ("rename", "/srv/app/source", "/srv/app/destination/source"),
+        )
+        with self.assertRaises(FileExistsError):
+            backend.fs_rename_noreplace(
+                "/srv/app/destination/source",
+                "/srv/app/destination/folder",
+            )
+        self.assertIn("/srv/app/destination/folder", sftp.entries)
+
+        with patch.object(
+            sftp,
+            "open",
+            side_effect=ValueError("exclusive create unsupported"),
+        ) as open_mock:
+            with self.assertRaises(explorer_fs.ExplorerFsIoError) as caught:
+                explorer_fs.create_explorer_entry_payload(
+                    backend,
+                    root_revision=root_revision,
+                    destination_directory="destination",
+                    name="unsupported.txt",
+                    entry_kind="file",
+                    session_id=session.session_id,
+                )
+        self.assertFalse(caught.exception.details["mutated"])
+        open_mock.assert_called_once_with(
+            "/srv/app/destination/unsupported.txt", "x+b"
+        )
+
+    def test_sftp_move_rejects_link_before_rename(self):
+        sftp = _MemorySftp(
+            {
+                "/srv/app": {"kind": "directory"},
+                "/srv/app/link": {"kind": "link"},
+                "/srv/app/destination": {"kind": "directory"},
+            }
+        )
+        session = SimpleNamespace(
+            session_id="remote-link-move",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+            directory="/srv/app",
+            host="example.com",
+            port=22,
+            username="user",
+        )
+        backend = web_explorer._SftpExplorerBackend(session, MagicMock(), sftp)
+        with self.assertRaises(
+            explorer_fs.ExplorerFsUnsupportedEntryError
+        ):
+            explorer_fs.move_explorer_entry_payload(
+                backend,
+                root_revision=explorer_fs._fs_root_revision("/srv/app"),
+                source_path="link",
+                source_revision=explorer_fs._fs_revision(
+                    backend.fs_lstat("/srv/app/link")
+                ),
+                destination_directory="destination",
+                session_id=session.session_id,
+            )
+        self.assertFalse(sftp.operations)
 
     def test_sftp_delete_unlinks_link_without_touching_target(self):
         sftp = _MemorySftp(
@@ -490,6 +698,36 @@ class ExplorerFilesystemRoutesTestCase(unittest.TestCase):
             f"/api/explorer/{self.session_id}/delete", json=body
         )
 
+    def _create(
+        self,
+        name: str,
+        destination: str = "",
+        entry_kind: str = "file",
+        **overrides,
+    ):
+        body = {
+            "root_revision": self._entries()["root_revision"],
+            "destination_directory": destination,
+            "name": name,
+            "entry_kind": entry_kind,
+            **overrides,
+        }
+        return self.client.post(
+            f"/api/explorer/{self.session_id}/create", json=body
+        )
+
+    def _move(self, source: str, destination: str, **overrides):
+        body = {
+            "root_revision": self._entries()["root_revision"],
+            "source_path": source,
+            "source_revision": self._entry(source)["revision"],
+            "destination_directory": destination,
+            **overrides,
+        }
+        return self.client.post(
+            f"/api/explorer/{self.session_id}/move", json=body
+        )
+
     def test_entries_expose_kind_revision_and_root_revision(self):
         (self.root / "app.py").write_text("print(1)\n", encoding="utf-8")
 
@@ -532,6 +770,180 @@ class ExplorerFilesystemRoutesTestCase(unittest.TestCase):
             ),
             "hello",
         )
+
+    def test_create_empty_file_and_folder_without_overwrite(self):
+        file_response = self._create(".env")
+        folder_response = self._create("src", entry_kind="directory")
+
+        self.assertEqual(
+            file_response.status_code, 200, file_response.get_data(as_text=True)
+        )
+        self.assertEqual(
+            folder_response.status_code,
+            200,
+            folder_response.get_data(as_text=True),
+        )
+        self.assertEqual(file_response.get_json()["destination_path"], ".env")
+        self.assertEqual(folder_response.get_json()["entry_kind"], "directory")
+        self.assertEqual((self.root / ".env").read_bytes(), b"")
+        self.assertTrue((self.root / "src").is_dir())
+
+        (self.root / "keep.txt").write_text("keep", encoding="utf-8")
+        collision = self._create("keep.txt")
+        self.assertEqual(collision.status_code, 409)
+        self.assertEqual(collision.get_json()["code"], "destination_exists")
+        self.assertFalse(collision.get_json()["mutated"])
+        self.assertEqual(
+            (self.root / "keep.txt").read_text(encoding="utf-8"), "keep"
+        )
+        self.assertFalse((self.root / "keep-Copy.txt").exists())
+
+        existing_directory = self.root / "existing"
+        existing_directory.mkdir()
+        collision_cases = (
+            ("keep.txt", "directory"),
+            ("existing", "file"),
+            ("existing", "directory"),
+        )
+        for name, entry_kind in collision_cases:
+            with self.subTest(name=name, entry_kind=entry_kind):
+                response = self._create(name, entry_kind=entry_kind)
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(
+                    response.get_json()["code"], "destination_exists"
+                )
+        self.assertEqual(
+            (self.root / "keep.txt").read_text(encoding="utf-8"), "keep"
+        )
+        self.assertTrue(existing_directory.is_dir())
+
+    def test_create_rejects_unsafe_and_protected_names_and_destinations(self):
+        for name in ("", ".", "..", "a/b", r"a\b", ".git", "x" * 256):
+            with self.subTest(name=name):
+                response = self._create(name)
+                self.assertIn(response.status_code, {400, 403})
+                self.assertFalse(response.get_json()["mutated"])
+
+        git_directory = self.root / ".git"
+        git_directory.mkdir()
+        response = self._create("config", destination=".git")
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()["code"], "protected_path")
+        self.assertFalse((git_directory / "config").exists())
+
+    def test_create_stale_root_precedes_destination_resolution(self):
+        with patch(
+            "web.explorer_fs._resolve_destination",
+            side_effect=AssertionError("destination resolution must not run"),
+        ):
+            response = self.client.post(
+                f"/api/explorer/{self.session_id}/create",
+                json={
+                    "root_revision": "stale-root",
+                    "destination_directory": "",
+                    "name": "new.txt",
+                    "entry_kind": "file",
+                },
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["code"], "root_changed")
+
+    def test_file_and_directory_move_preserve_contents_and_metadata(self):
+        destination = self.root / "destination"
+        destination.mkdir()
+        source_file = self.root / "report.txt"
+        source_file.write_text("report", encoding="utf-8")
+        os.chmod(source_file, 0o640)
+        original_stat = source_file.stat()
+
+        file_response = self._move("report.txt", "destination")
+        self.assertEqual(
+            file_response.status_code,
+            200,
+            file_response.get_data(as_text=True),
+        )
+        moved_file = destination / "report.txt"
+        self.assertFalse(source_file.exists())
+        self.assertEqual(moved_file.read_text(encoding="utf-8"), "report")
+        self.assertEqual(
+            stat.S_IMODE(moved_file.stat().st_mode),
+            stat.S_IMODE(original_stat.st_mode),
+        )
+        self.assertEqual(
+            file_response.get_json()["destination_path"],
+            "destination/report.txt",
+        )
+
+        source_tree = self.root / "tree"
+        (source_tree / "nested" / ".git").mkdir(parents=True)
+        (source_tree / "nested" / "data.bin").write_bytes(b"data")
+        directory_response = self._move("tree", "destination")
+        self.assertEqual(
+            directory_response.status_code,
+            200,
+            directory_response.get_data(as_text=True),
+        )
+        self.assertFalse(source_tree.exists())
+        self.assertEqual(
+            (destination / "tree" / "nested" / "data.bin").read_bytes(), b"data"
+        )
+
+    def test_move_refuses_collision_same_parent_descendant_and_git(self):
+        destination = self.root / "destination"
+        destination.mkdir()
+        source = self.root / "source"
+        source.mkdir()
+        (source / "child").mkdir()
+        (destination / "source").mkdir()
+
+        collision = self._move("source", "destination")
+        self.assertEqual(collision.status_code, 409)
+        self.assertEqual(collision.get_json()["code"], "destination_exists")
+        self.assertTrue(source.exists())
+        self.assertTrue((destination / "source").exists())
+
+        same_parent = self._move("source", "")
+        self.assertEqual(same_parent.status_code, 400)
+        self.assertEqual(same_parent.get_json()["code"], "invalid_destination")
+        descendant = self._move("source", "source/child")
+        self.assertEqual(descendant.status_code, 400)
+        self.assertEqual(descendant.get_json()["code"], "invalid_destination")
+
+        protected = self.root / ".git"
+        protected.mkdir()
+        protected_response = self._move(".git", "destination")
+        self.assertEqual(protected_response.status_code, 403)
+        self.assertEqual(protected_response.get_json()["code"], "protected_path")
+        self.assertTrue(protected.exists())
+
+    def test_move_rejects_stale_revision_and_overlapping_claim(self):
+        destination = self.root / "destination"
+        destination.mkdir()
+        source = self.root / "source"
+        source.mkdir()
+        child = source / "child.txt"
+        child.write_text("v1", encoding="utf-8")
+        stale = self.client.post(
+            f"/api/explorer/{self.session_id}/move",
+            json={
+                "root_revision": self._entries()["root_revision"],
+                "source_path": "source",
+                "source_revision": "stale-entry",
+                "destination_directory": "destination",
+            },
+        )
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.get_json()["code"], "entry_changed")
+        self.assertTrue(source.exists())
+
+        backend = web_explorer._LocalExplorerBackend(self.session)
+        with web_explorer._explorer_path_claims(
+            (backend.fs_claim_key(str(child)),)
+        ):
+            blocked = self._move("source", "destination")
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.get_json()["code"], "operation_in_progress")
+        self.assertTrue(source.exists())
 
     def test_stale_root_is_rejected_before_path_resolution(self):
         (self.root / "app.py").write_text("x", encoding="utf-8")
@@ -633,6 +1045,27 @@ class ExplorerFilesystemRoutesTestCase(unittest.TestCase):
             self.skipTest(f"Directory symlink creation is unavailable: {exc}")
 
         root_revision = self._entries()["root_revision"]
+        create_response = self.client.post(
+            f"/api/explorer/{self.session_id}/create",
+            json={
+                "root_revision": root_revision,
+                "destination_directory": "outside-link",
+                "name": "created.txt",
+                "entry_kind": "file",
+            },
+        )
+        self.assertEqual(create_response.status_code, 400)
+        self.assertFalse((outside / "created.txt").exists())
+        move_response = self.client.post(
+            f"/api/explorer/{self.session_id}/move",
+            json={
+                "root_revision": root_revision,
+                "source_path": "outside-link/secret.txt",
+                "source_revision": "irrelevant",
+                "destination_directory": "",
+            },
+        )
+        self.assertEqual(move_response.status_code, 400)
         response = self.client.post(
             f"/api/explorer/{self.session_id}/delete",
             json={
@@ -721,6 +1154,59 @@ class ExplorerFilesystemRoutesTestCase(unittest.TestCase):
         self.assertEqual(absolute.status_code, 400)
         self.assertTrue((self.root / "app.py").exists())
 
+        create_unknown = self._create("new.txt", unexpected=True)
+        self.assertEqual(create_unknown.status_code, 400)
+        move_absolute = self.client.post(
+            f"/api/explorer/{self.session_id}/move",
+            json={
+                "root_revision": root_revision,
+                "source_path": str(self.root / "app.py"),
+                "source_revision": entry["revision"],
+                "destination_directory": "",
+            },
+        )
+        self.assertEqual(move_absolute.status_code, 400)
+
+    def test_create_and_move_routes_reject_invalid_json_shapes(self):
+        for route in ("create", "move"):
+            with self.subTest(route=route, shape="list"):
+                response = self.client.post(
+                    f"/api/explorer/{self.session_id}/{route}",
+                    json=[],
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()["code"], "invalid_request")
+                self.assertFalse(response.get_json()["mutated"])
+
+        wrong_create = self.client.post(
+            f"/api/explorer/{self.session_id}/create",
+            json={
+                "root_revision": self._entries()["root_revision"],
+                "destination_directory": "",
+                "name": 7,
+                "entry_kind": "file",
+            },
+        )
+        self.assertEqual(wrong_create.status_code, 400)
+        invalid_kind = self._create("entry", entry_kind="link")
+        self.assertEqual(invalid_kind.status_code, 400)
+        self.assertEqual(invalid_kind.get_json()["code"], "invalid_request")
+
+    def test_create_and_move_routes_use_cross_origin_write_guard(self):
+        with patch.object(
+            web_app,
+            "_allowed_write_origin_netlocs",
+            return_value={"localhost:5050"},
+        ):
+            for route in ("create", "move"):
+                with self.subTest(route=route):
+                    response = self.client.post(
+                        f"/api/explorer/{self.session_id}/{route}",
+                        json={},
+                        headers={"Origin": "http://evil.example"},
+                    )
+                    self.assertEqual(response.status_code, 403)
+
     def test_mutation_routes_reject_missing_and_non_explorer_sessions(self):
         missing = self.client.post("/api/explorer/missing/paste", json={})
         self.assertEqual(missing.status_code, 404)
@@ -742,6 +1228,13 @@ class ExplorerFilesystemRoutesTestCase(unittest.TestCase):
             with api.session_manager.lock:
                 api.session_manager.sessions.pop(terminal_id, None)
         self.assertEqual(response.status_code, 400)
+
+        for route in ("create", "move"):
+            with self.subTest(route=route):
+                missing = self.client.post(
+                    f"/api/explorer/missing/{route}", json={}
+                )
+                self.assertEqual(missing.status_code, 404)
 
 
 class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
@@ -789,7 +1282,7 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
     def test_controller_is_session_scoped_confirmed_and_lifecycle_bound(self):
         self.assertIn("const explorerFilesystemClipboards = new Map();", self.controller)
         self.assertIn("'Paste — nothing copied'", self.controller)
-        self.assertIn("disabled: !clipboard", self.controller)
+        self.assertIn("disabled: pasteDisabled", self.controller)
         self.assertIn("danger: true", self.controller)
         self.assertIn("owner", self.controller)
         self.assertIn("confirmDiscardExplorerEdit", self.controller)
@@ -800,6 +1293,69 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
         for caller in ("closeTerminalPane", "closeSessionGroup", "switchGroup"):
             section = self.terminals[self.terminals.index(f"function {caller}") :]
             self.assertIn("cancelExplorerFilesystemUiForSession", section[:3000])
+
+    def test_create_and_move_menu_contracts_are_wired(self):
+        menu = self.controller[
+            self.controller.index("function explorerFilesystemMenuItems") :
+            self.controller.index("function setExplorerFilesystemBusy")
+        ]
+        labels = (
+            "label: 'New file…'",
+            "label: 'New folder…'",
+            "label: 'Copy'",
+            "label: 'Cut'",
+        )
+        positions = [menu.index(label) for label in labels]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("separatorBefore: true", menu)
+        self.assertIn("clipboardMode === 'cut'", menu)
+        self.assertIn('`${pasteVerb} "${clipboard.name}"', menu)
+        self.assertIn("moveWithinSameFolder", menu)
+        self.assertIn("moveIntoItself", menu)
+        self.assertIn("explorerFilesystemRequest(context, 'create'", self.controller)
+        self.assertIn("explorerFilesystemRequest(context, 'move'", self.controller)
+        self.assertIn("clearExplorerFilesystemClipboard(context.sessionId)", self.controller)
+
+    def test_create_modal_and_blank_area_destinations_are_accessible(self):
+        for modal_id in (
+            'id="explorerCreateModal"',
+            'id="explorerCreateForm"',
+            'id="explorerCreateName"',
+            'for="explorerCreateName"',
+            'id="explorerCreateError"',
+            'role="alert"',
+            'maxlength="255"',
+        ):
+            self.assertIn(modal_id, self.template)
+        self.assertIn("event.key === 'Escape'", self.controller)
+        self.assertIn("input.focus();", self.controller)
+        self.assertIn("input.select();", self.controller)
+        self.assertIn("result.data?.mutated !== false", self.controller)
+        self.assertIn("setExplorerCreateModalError(", self.controller)
+        self.assertIn("? 'Create' : 'Retry'", self.controller)
+
+        self.assertIn("surface: 'tree-blank'", self.viewer)
+        self.assertIn("surface: 'preview-blank'", self.viewer)
+        self.assertIn("path: pane._explorerPath || ''", self.viewer)
+        self.assertIn("pane?._explorerMode === 'directory'", self.viewer)
+        self.assertIn("explorerFilesystemMenuItems(index, blankContext)", self.viewer)
+
+    def test_move_retargets_open_explorer_state(self):
+        self.assertIn(
+            "function explorerFilesystemRetargetPath", self.controller
+        )
+        for state_path in (
+            "tab.path",
+            "tab.dirPath",
+            "pane._explorerPath",
+            "pane._explorerFilePath",
+            "pane._explorerTreeExpanded",
+            "edit.path",
+        ):
+            self.assertIn(state_path, self.controller)
+        self.assertIn("persistExplorerTabsToSession(context.index)", self.controller)
+        self.assertIn("result.moved && result.source_path", self.controller)
+        self.assertIn("highlightExplorerFilesystemPath(context.index, createdPath)", self.controller)
 
     def test_new_asset_loads_in_domain_order_and_uses_token_styles(self):
         self.assertLess(
@@ -816,6 +1372,8 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
         ]
         self.assertIn("var(--gv-danger)", style)
         self.assertIn("var(--t-accent)", style)
+        self.assertIn(".explorer-fs-cut-source", style)
+        self.assertIn(".explorer-create-error", style)
         self.assertNotRegex(style, r":\s*#[0-9a-fA-F]{3,8}\b")
         for call in ("window.confirm(", "window.alert(", "window.prompt("):
             self.assertNotIn(call, self.controller)

@@ -280,6 +280,39 @@
     </div>
 </div>
 
+<div id="explorerCreateModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card explorer-create-card" role="dialog" aria-modal="true" aria-labelledby="explorerCreateTitle">
+        <div class="modal-head">
+            <div>
+                <div id="explorerCreateTitle" class="modal-title">New file</div>
+                <div id="explorerCreateDestination" class="modal-copy"></div>
+            </div>
+        </div>
+        <form id="explorerCreateForm" class="modal-form">
+            <div class="modal-field">
+                <label for="explorerCreateName">Name</label>
+                <input
+                    id="explorerCreateName"
+                    class="modal-input"
+                    type="text"
+                    maxlength="255"
+                    autocomplete="off"
+                    spellcheck="false"
+                    aria-describedby="explorerCreateError"
+                >
+                <div id="explorerCreateError" class="explorer-create-error" role="alert" hidden></div>
+            </div>
+        </form>
+        <div class="modal-actions">
+            <div class="modal-copy">The exact name is used; existing entries are never overwritten.</div>
+            <div class="modal-actions-buttons">
+                <button id="explorerCreateCancel" class="btn btn-neutral" type="button">Cancel</button>
+                <button id="explorerCreateAccept" class="btn btn-primary" type="submit" form="explorerCreateForm">Create</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 {% include 'partials/app_settings_modal.html' %}
 
 <script src="{{ url_for('static', filename='vendor/xterm.min.js') }}"></script>

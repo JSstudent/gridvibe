@@ -1219,25 +1219,58 @@
 
     function handleExplorerContextMenu(event, index) {
         const row = event.target.closest('[data-explorer-copy-path]');
+        const pane = terminals[index];
+        let blankContext = null;
+        let blankTarget = null;
         if (!row) {
+            const treePanel = event.target.closest(`#explorer-tree-panel-${index}`);
+            const viewer = event.target.closest(`#explorer-viewer-${index}`);
+            if (treePanel) {
+                blankTarget = treePanel;
+                blankContext = {
+                    path: '',
+                    kind: 'directory',
+                    revision: '',
+                    surface: 'tree-blank'
+                };
+            } else if (viewer && pane?._explorerMode === 'directory') {
+                blankTarget = viewer;
+                blankContext = {
+                    path: pane._explorerPath || '',
+                    kind: 'directory',
+                    revision: '',
+                    surface: 'preview-blank'
+                };
+            }
+        }
+        if (!row && !blankContext) {
             return;
         }
         event.preventDefault();
         document.querySelectorAll('.explorer-context-target')
             .forEach(node => node.classList.remove('explorer-context-target'));
-        row.classList.add('explorer-context-target');
-        _explorerContextMenuInvoker = row.matches('button') ? row : (row.querySelector('button') || row);
-        const relativePath = row.dataset.explorerCopyPath || '';
+        row?.classList.add('explorer-context-target');
+        const target = row || blankTarget;
+        _explorerContextMenuInvoker = row
+            ? (row.matches('button') ? row : (row.querySelector('button') || row))
+            : blankTarget;
+        const relativePath = row
+            ? (row.dataset.explorerCopyPath || '')
+            : blankContext.path;
         const absolutePath = explorerJoinRootPath(explorerRootDirectory(index), relativePath);
-        const filesystemItems = row.dataset.explorerContextKind
-            && typeof explorerFilesystemMenuItems === 'function'
-            ? explorerFilesystemMenuItems(index, {
-                path: row.dataset.explorerContextPath || relativePath,
-                kind: row.dataset.explorerContextKind || '',
-                revision: row.dataset.explorerContextRevision || '',
-                surface: row.dataset.explorerContextSurface || ''
-            })
-            : [];
+        let filesystemItems = [];
+        if (typeof explorerFilesystemMenuItems === 'function') {
+            if (row?.dataset.explorerContextKind) {
+                filesystemItems = explorerFilesystemMenuItems(index, {
+                    path: row.dataset.explorerContextPath || relativePath,
+                    kind: row.dataset.explorerContextKind || '',
+                    revision: row.dataset.explorerContextRevision || '',
+                    surface: row.dataset.explorerContextSurface || ''
+                });
+            } else if (blankContext) {
+                filesystemItems = explorerFilesystemMenuItems(index, blankContext);
+            }
+        }
         const beforePath = filesystemItems.filter(item => item.placement !== 'after-path');
         const afterPath = filesystemItems.filter(item => item.placement === 'after-path');
         const pathItems = [
@@ -1256,7 +1289,7 @@
         let x = event.clientX;
         let y = event.clientY;
         if (x <= 0 && y <= 0) {
-            const rect = row.getBoundingClientRect();
+            const rect = target.getBoundingClientRect();
             x = rect.left + Math.min(24, rect.width);
             y = rect.top + Math.min(rect.height, 24);
         }
@@ -1976,6 +2009,9 @@
                 openExplorerFile(index, button.dataset.explorerTreeOpenTab || '', { pinned: true });
             });
         });
+        if (typeof refreshExplorerFilesystemCutSource === 'function') {
+            refreshExplorerFilesystemCutSource(index);
+        }
     }
 
     /* Fold arrow only: expand or collapse in place. It never touches the
@@ -4355,6 +4391,9 @@
         updateExplorerSearchControls(index, query, state.activeIndex || 0, matchCount);
         if (normalizedQuery && matchCount) {
             scrollExplorerSearchMatch(index);
+        }
+        if (typeof refreshExplorerFilesystemCutSource === 'function') {
+            refreshExplorerFilesystemCutSource(index);
         }
     }
 

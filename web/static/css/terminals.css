@@ -4908,6 +4908,9 @@
             outline: 1px solid var(--t-accent);
             outline-offset: -1px;
         }
+        .explorer-fs-cut-source {
+            opacity: .55;
+        }
         .terminal-container.explorer-fs-busy {
             cursor: progress;
         }
@@ -4959,6 +4962,20 @@
         .explorer-fs-bar-action:focus-visible {
             border-color: var(--t-accent);
             outline: none;
+        }
+        .explorer-create-card {
+            width: min(520px, 100%);
+        }
+        .explorer-create-error {
+            color: var(--gv-danger);
+            font-size: .78rem;
+            line-height: 1.4;
+        }
+        #explorerCreateModal.is-busy .explorer-create-card {
+            cursor: progress;
+        }
+        #explorerCreateModal.is-busy .modal-form {
+            opacity: .72;
         }
 
         /* placeholder states */

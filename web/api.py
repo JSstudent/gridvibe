@@ -131,7 +131,9 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     save_explorer_file_payload,
 )
 from web.explorer_fs import (
+    create_explorer_entry_payload,
     delete_explorer_entry_payload,
+    move_explorer_entry_payload,
     paste_explorer_entry_payload,
 )
 from web.explorer_search import (  # noqa: F401 - re-exported for backwards compatibility
@@ -799,6 +801,55 @@ def _explorer_mutation_json(
     return data, None
 
 
+@app.route('/api/explorer/<session_id>/create', methods=['POST'])
+def create_explorer_entry(session_id: str):
+    """Create one exact empty file or folder without overwrite."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if not _is_explorer_session(session):
+        return jsonify({"error": "Session is not a file explorer pane"}), 400
+    data, error_response = _explorer_mutation_json(
+        {
+            "root_revision",
+            "destination_directory",
+            "name",
+            "entry_kind",
+        }
+    )
+    if error_response is not None:
+        return error_response
+    if (
+        not isinstance(data.get("root_revision"), str)
+        or not data.get("root_revision")
+        or not isinstance(data.get("destination_directory"), str)
+        or not isinstance(data.get("name"), str)
+        or not isinstance(data.get("entry_kind"), str)
+    ):
+        return (
+            jsonify(
+                {
+                    "error": "Create requires a root revision, destination directory, name, and entry kind",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return create_explorer_entry_payload(
+            backend,
+            root_revision=data["root_revision"],
+            destination_directory=data["destination_directory"],
+            name=data["name"],
+            entry_kind=data["entry_kind"],
+            session_id=session_id,
+        )
+
+    return _explorer_route_response(session, handler)
+
+
 @app.route('/api/explorer/<session_id>/paste', methods=['POST'])
 def paste_explorer_entry(session_id: str):
     """Copy one entry inside the same live explorer root without overwrite."""
@@ -835,6 +886,53 @@ def paste_explorer_entry(session_id: str):
 
     def handler(backend: Any) -> Dict[str, Any]:
         return paste_explorer_entry_payload(
+            backend,
+            root_revision=data["root_revision"],
+            source_path=data["source_path"],
+            source_revision=data["source_revision"],
+            destination_directory=data["destination_directory"],
+            session_id=session_id,
+        )
+
+    return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/move', methods=['POST'])
+def move_explorer_entry(session_id: str):
+    """Move one entry inside the same live explorer root without overwrite."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if not _is_explorer_session(session):
+        return jsonify({"error": "Session is not a file explorer pane"}), 400
+    data, error_response = _explorer_mutation_json(
+        {
+            "root_revision",
+            "source_path",
+            "source_revision",
+            "destination_directory",
+        }
+    )
+    if error_response is not None:
+        return error_response
+    required_strings = ("root_revision", "source_path", "source_revision")
+    if any(
+        not isinstance(data.get(field), str) or not data.get(field)
+        for field in required_strings
+    ) or not isinstance(data.get("destination_directory"), str):
+        return (
+            jsonify(
+                {
+                    "error": "Move requires root/source revisions, a source path, and a destination directory",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return move_explorer_entry_payload(
             backend,
             root_revision=data["root_revision"],
             source_path=data["source_path"],

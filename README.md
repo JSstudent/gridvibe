@@ -129,9 +129,9 @@ Swap any pane between a terminal and a file explorer with one button — same di
 | **Edit** | In-place editing of complete UTF-8 text files. `Ctrl+S` saves atomically, preserving line-ending style, BOM, and permission bits. Changed on disk since you opened it? You get a conflict prompt, not a silent overwrite. |
 | **Git** | Branch/dirty status, per-file badges, colour-coded commit graph, historical diffs. Stage · unstage · commit · publish · discard — plus per-line **and** per-block undo right in the diff view. |
 | **Search** | `Ctrl+Shift+F` toggles repo-wide search across the pane's root. Runs on the backend (`git grep`, with a bounded walk / `grep -rIn` fallback), results grouped per file. Case/word/regex toggles, include-glob, scope switch, `.gitignore` on/off. |
-| **Copy & delete** | Right-click a file or folder: copy, paste elsewhere in the same session (never overwrites — collisions get `-Copy` names), copy path, or confirmed permanent delete. |
+| **Create, copy, move & delete** | Right-click an entry or blank directory space to create an exact-name empty file/folder. Copy/paste allocates collision-safe `-Copy` names; Cut/paste moves inside the same root and refuses collisions; permanent delete stays confirmed. |
 
-**Read-only by default.** Those three mutation families are the whole exception list — moving, creating, renaming, uploading, overwrite-on-paste, and `git checkout`/`pull`/`merge` are deliberately out of scope.
+**Read-only by default.** The five guarded mutation families above are the whole exception list. Arbitrary renaming, uploading, overwriting on paste/move, cross-session/root transfer, and `git checkout`/`pull`/`merge` remain deliberately out of scope.
 
 ## Switching a Local Repo Pane's Shell
 

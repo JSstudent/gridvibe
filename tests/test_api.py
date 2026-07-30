@@ -2250,9 +2250,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('data-explorer-crumb=', html)
         self.assertIn("loadExplorerPane(index, button.dataset.explorerCrumb || '');", html)
         self.assertIn('class="explorer-crumb current"', html)
-        # One definition + all five render paths (directory listing, file,
-        # image viewer, in-place refresh, commit diff) route through it.
-        self.assertEqual(html.count("renderExplorerPathBreadcrumb("), 6)
+        # One definition + all six render paths (directory listing, file,
+        # image viewer, in-place refresh, commit diff, move retarget) use it.
+        self.assertEqual(html.count("renderExplorerPathBreadcrumb("), 7)
         # Token-driven styling only (Regression Guardrail 7).
         crumb_css = html[html.index(".explorer-crumb {"):html.index(".explorer-crumb-sep {")]
         self.assertIn("var(--explorer-muted)", crumb_css)
