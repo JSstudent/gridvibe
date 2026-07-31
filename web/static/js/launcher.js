@@ -2254,25 +2254,12 @@
         console.info(`[GridVibe Launcher] ${action}`, details);
     }
 
-    /* With multiple workspaces live, "the" active terminals is ambiguous, and
-       always opening "default" showed the wrong window. Follow the Launch
-       button's destination — the workspace this launcher is currently pointed
-       at — and fall back to the only live one, then to "default". */
-    function viewActiveTerminalsWorkspaceId() {
-        if (!isMultiWorkspaceEnabled()) {
-            return WORKSPACE_DEFAULT_ID;
-        }
-        const destination = resolveWorkspaceDestination();
-        if (destination !== WORKSPACE_NEW_DESTINATION && findLiveWorkspace(destination)) {
-            return destination;
-        }
-        const populated = liveWorkspaceCache
-            .filter(workspace => (Number(workspace.group_count) || 0) > 0);
-        return populated.length === 1
-            ? populated[0].workspace_id
-            : WORKSPACE_DEFAULT_ID;
-    }
-
+    /* "The" active terminals only means something while there is one window to
+       open. With the flag on, the Workspaces card lists every live workspace
+       with its own Open button, so this button is hidden there rather than
+       renamed after one of them — see syncLaunchDestinationControl(). It stays
+       the single-workspace entry point, and the flag-off restore banner passes
+       its own workspace id. */
     async function viewActiveTerminals(
         event,
         preferredGroupId = '',
@@ -2282,7 +2269,7 @@
         event.preventDefault();
         const normalizedZoomFactor = normalizeNativeZoomFactor(nativeZoomFactor);
         const resolvedWorkspaceId = String(
-            workspaceId || viewActiveTerminalsWorkspaceId() || 'default'
+            workspaceId || WORKSPACE_DEFAULT_ID
         );
         logLauncherWindowAction('View Active Terminals clicked', {
             pywebview: Boolean(window.pywebview?.api)
@@ -2565,7 +2552,7 @@
     function syncLaunchDestinationControl() {
         const caret = document.getElementById('launchDestinationBtn');
         const destinationLabel = document.getElementById('launchDestinationLabel');
-        const viewLabel = document.getElementById('viewActiveTerminalsLabel');
+        const viewButton = document.getElementById('viewActiveTerminalsBtn');
         const enabled = isMultiWorkspaceEnabled();
         if (caret) {
             caret.hidden = !enabled;
@@ -2576,15 +2563,12 @@
             destinationLabel.hidden = !enabled;
             destinationLabel.textContent = enabled ? `into ${workspaceDestinationName()}` : '';
         }
-        if (viewLabel) {
-            /* Only name a workspace that actually has tabs to show — otherwise
-               the button promises a window it would refuse to open. */
-            const target = resolveWorkspaceDestination();
-            const found = target === WORKSPACE_NEW_DESTINATION ? null : findLiveWorkspace(target);
-            const hasSessions = (Number(found?.workspace?.group_count) || 0) > 0;
-            viewLabel.textContent = enabled && hasSessions
-                ? `View ${workspaceDestinationName(target)}`
-                : 'View Active Terminals';
+        if (viewButton) {
+            /* With the flag on this button could only ever name *one* of the
+               live workspaces, right next to the Workspaces card that lists all
+               of them with their own Open buttons — a second, worse copy of the
+               same control. Hide it; card 04 is the entry point there. */
+            viewButton.hidden = enabled;
         }
     }
 

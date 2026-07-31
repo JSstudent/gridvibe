@@ -289,6 +289,7 @@ from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     _redacted_launch_summary,
     close_extra_workspaces,
+    forget_pruned_workspaces,
     launch_session_group,
     list_live_workspaces,
     list_restorable_workspace_summaries,
@@ -2497,6 +2498,7 @@ def close_session(session_id: str):
         return jsonify({"error": "Session not found"}), 404
 
     _close_ssh_connection(session_id, clear_buffer=True)
+    forget_pruned_workspaces(pruned_workspace_ids)
     _broadcast_session_groups_updated(
         "session_closed",
         group_id=group_id,
@@ -2556,6 +2558,10 @@ def close_all_sessions():
             return jsonify({"error": close_error}), close_status
         for session_id in closed_session_ids:
             _close_ssh_connection(session_id, clear_buffer=True)
+        # Closing the last group removes the workspace globally: the live record
+        # is already gone, so its saved snapshot must go too or the restore
+        # chooser keeps offering a workspace the launcher no longer lists.
+        forget_pruned_workspaces(pruned_workspace_ids)
         _broadcast_session_groups_updated(
             "group_closed",
             group_id=group_id,

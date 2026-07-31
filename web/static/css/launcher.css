@@ -1707,6 +1707,13 @@
             transition: border-color 0.2s ease, background 0.2s ease;
         }
 
+        /* `display: inline-flex` above is an author rule, so it beats the user
+           agent's `[hidden] { display: none }` outright — hiding one of these
+           from JS needs this. */
+        .secondary-link[hidden] {
+            display: none;
+        }
+
         .secondary-link:hover {
             border-color: rgba(0, 217, 255, 0.4);
         }

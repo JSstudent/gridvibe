@@ -5,6 +5,24 @@
    Colours and radii come from tokens.css variables only — no palette literals
    (guardrail 7). Both pages already load tokens.css before this file. */
 
+/* ── Dialog layering ──
+   Both pages stack their own `.modal-shell` dialogs (20 on the launcher, 12000
+   on the workspace page) and the shared App Settings dialog (12000), so the top
+   of the stack was decided by document order. Multi-workspace broke that: the
+   confirm and name dialogs are answers to a question *another* dialog asked —
+   Forget from the restore chooser, "Turn off multiple workspaces?" from App
+   Settings — and both of those sit later in the document, so the question was
+   painted behind the dialog that asked it and could not be clicked.
+
+   These two are always the response to whatever is already open, so they lead
+   the stack outright rather than depending on where the markup happens to sit.
+   This file is loaded last by both pages, and an id beats a class, so one rule
+   covers both. */
+#genericConfirmModal,
+#workspaceNameModal {
+    z-index: 12100;
+}
+
 .workspace-icon {
     width: 15px;
     height: 15px;

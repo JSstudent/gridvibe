@@ -118,6 +118,48 @@ def workspace_label(workspace_id: Any) -> str:
     return str(getattr(workspace, "label", "") or "").strip()
 
 
+def forget_pruned_workspaces(workspace_ids: Any) -> List[str]:
+    """Drop the saved snapshot of every workspace pruned by losing its last group.
+
+    Emptying a non-default workspace removes the live record, so leaving its
+    snapshot behind made the launcher contradict itself: the workspace was gone
+    from the Workspaces card while *Reopen saved…* still offered it, and
+    reopening it resurrected a workspace the user had just emptied. For this
+    release, removing the last group removes the workspace globally.
+
+    Two deliberate exclusions:
+
+    * ``default`` is permanent and never reaches this path, so single-workspace
+      restore-after-restart keeps working exactly as before.
+    * Leaving multi-workspace mode (``close_extra_workspaces``) removes its
+      workspaces without pruning them here, so everything autosave or
+      Workspace ▸ Save Workspace already wrote stays restorable.
+
+    Returns the ids whose snapshot actually existed and was removed.
+    """
+    from web.runtime_state import clear_workspace
+
+    forgotten: List[str] = []
+    for workspace_id in workspace_ids or ():
+        try:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError:
+            continue
+        if resolved_workspace_id == DEFAULT_WORKSPACE_ID:
+            continue
+        try:
+            if clear_workspace(resolved_workspace_id):
+                forgotten.append(resolved_workspace_id)
+        except Exception:
+            logger.exception(
+                "Could not clear the saved snapshot for pruned workspace %s",
+                resolved_workspace_id,
+            )
+    if forgotten:
+        logger.debug("Forgot saved snapshots for pruned workspaces: %s", forgotten)
+    return forgotten
+
+
 # ==================== Destination resolution ====================
 
 
@@ -585,6 +627,11 @@ def move_group_to_workspace(group_id: str, data: Dict[str, Any]) -> Tuple[Dict[s
         and not source_groups
         and session_manager.remove_workspace(source_workspace_id)
     )
+    if pruned_source:
+        # The source workspace no longer exists; its saved snapshot goes with it
+        # so the restore chooser cannot offer a workspace the launcher no longer
+        # lists.
+        forget_pruned_workspaces([source_workspace_id])
 
     _broadcast_session_groups_updated(
         "moved",

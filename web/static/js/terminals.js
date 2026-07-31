@@ -902,6 +902,19 @@
             : 'GridVibe — Terminals';
     }
 
+    /* The session line has two shapes — the live grid's chrome and the empty
+       state. Both are written from here so a *deferred* rewrite (the save
+       confirmation handing the line back after its timer) can never disagree
+       with what is actually on screen. */
+    function renderSessionLine() {
+        if (!terminals.length) {
+            document.getElementById('sessionLabel').textContent =
+                sessionGroups.length ? 'No terminals in this session' : 'No sessions';
+            return;
+        }
+        updateSessionChrome(terminals.length);
+    }
+
     function cacheVisibleGroupView(groupId = visibleGroupId) {
         if (!groupId || !gridBuilt) {
             return;
@@ -1912,6 +1925,14 @@
         }
     });
 
+    /* The save confirmation borrows the session line, which is otherwise only
+       rewritten when the active tab changes. With a single tab nothing ever
+       rewrote it, so the confirmation stayed in the window chrome for the rest
+       of the session and read as part of the workspace name. It is a
+       confirmation, not a state: hand the line back on a timer. */
+    const WORKSPACE_SAVE_MESSAGE_MS = 6000;
+    let workspaceSaveMessageTimer = null;
+
     function setWorkspaceSaveMessage(message, type = '') {
         const label = document.getElementById('sessionLabel');
         if (!label || !message) {
@@ -1919,6 +1940,25 @@
         }
         label.textContent = message;
         label.dataset.workspaceSaveStatus = type;
+        if (workspaceSaveMessageTimer) {
+            clearTimeout(workspaceSaveMessageTimer);
+        }
+        workspaceSaveMessageTimer = setTimeout(
+            clearWorkspaceSaveMessage,
+            WORKSPACE_SAVE_MESSAGE_MS
+        );
+    }
+
+    function clearWorkspaceSaveMessage() {
+        if (workspaceSaveMessageTimer) {
+            clearTimeout(workspaceSaveMessageTimer);
+            workspaceSaveMessageTimer = null;
+        }
+        const label = document.getElementById('sessionLabel');
+        if (label) {
+            delete label.dataset.workspaceSaveStatus;
+        }
+        renderSessionLine();
     }
 
     function buildWorkspaceLayoutSnapshotFromState(count, className, rects, columnWeights, rowWeights, baseCount) {
@@ -7005,7 +7045,7 @@
         clearActiveGridResize();
         clearResizeHandles();
         document.getElementById('emptyState').classList.add('visible');
-        document.getElementById('sessionLabel').textContent = sessionGroups.length ? 'No terminals in this session' : 'No sessions';
+        renderSessionLine();
         document.title = 'GridVibe — Terminals';
     }
 
@@ -7197,6 +7237,11 @@
 
     async function _closeWindowAfterLastSession() {
         logSessionWindowAction('Last session closed — closing window');
+        /* Announce before closing: the room event that would normally relay
+           this change races the window teardown, and an emptied non-default
+           workspace is removed globally (record *and* saved snapshot), so a
+           launcher that missed it would keep listing a workspace that is gone. */
+        notifyWorkspacesChanged('workspace_emptied');
         if (isPywebviewAvailable()) {
             try {
                 const api = window.pywebview.api;

@@ -2,7 +2,8 @@
 
 Date: 2026-07-30
 Updated: 2026-07-31
-Status: Stages 1–4 implemented, post-test corrections applied (2026-07-31)
+Status: Stages 1–4 implemented, post-test corrections applied in two rounds
+(2026-07-31); §8 amended by round 2
 Scope: Multiple live workspaces, one terminal window per workspace, moving a
 session group between workspaces, and selective restore after restart.
 
@@ -301,6 +302,60 @@ and every listener skips its own.
 
 Coverage: `MultiWorkspaceModeToggleTestCase` in `tests/test_multi_workspace.py`.
 Suite: 982 tests, Ruff clean.
+
+### Post-test corrections, round 2 — 2026-07-31 (`docs/r&d/todos.txt`)
+
+A second pass with the flag on produced five findings. Four are chrome; one
+changes a §8 lifetime rule and is called out as an amendment below.
+
+1. **Two confirmations could not be clicked** (todos 1 and 3 — one root cause).
+   **Forget** from the restore chooser and *"Turn off multiple workspaces?"*
+   from App Settings both painted *behind* the dialog that asked for them. Each
+   page stacks its own `.modal-shell` dialogs (`z-index: 20` on the launcher,
+   `12000` on the workspace page) and both share the App Settings dialog
+   (`12000`), so the top of the stack was decided by document order — and
+   `genericConfirmModal` sits earlier in both templates than the chooser and the
+   App Settings include. `#genericConfirmModal` and `#workspaceNameModal` are
+   always the *response* to something already open, so they now lead the stack
+   outright (`12100`) rather than depending on markup order. One rule, in
+   `workspaces.css`, which both pages load last (an id beats a class).
+2. **View Active Terminals is hidden with the flag on.** Round 1 made it follow
+   the launch destination; that still left a button naming *one* live workspace
+   directly beside the Workspaces card that lists them all with their own
+   **Open** buttons — a second, worse copy of the same control. It stays exactly
+   as it was with the flag off. `viewActiveTerminalsWorkspaceId()` went with it
+   (guardrail 5), and the flag-off restore banner passes its own id.
+3. **The save confirmation never gave the session line back.** It is written
+   into `#sessionLabel`, which is otherwise only rewritten by
+   `updateSessionChrome()` on a tab switch — so with a single tab open the
+   confirmation stayed in the window chrome for the rest of the session, reading
+   as part of the workspace name. It now clears after 6s. The line has two
+   shapes (live chrome and the empty state) and a *deferred* rewrite can outlive
+   the grid it described, so both shapes moved behind one `renderSessionLine()`
+   that `resetSessionView()` also uses.
+4. **§8 amendment — emptying a non-default workspace removes it globally.**
+   §8 said the live record is pruned but "the saved slot is not erased — it
+   stays restorable". In use that made the launcher contradict itself: the
+   workspace vanished from the Workspaces card while **Reopen saved…** still
+   offered it, and accepting that offer resurrected a workspace the user had
+   just emptied. Closing the last group, or moving it out, now also clears the
+   saved slot through the new `forget_pruned_workspaces()` in `web/workspaces.py`,
+   fed by the `pruned_workspace_ids` both close routes and the move already
+   returned. Two exclusions are deliberate: `"default"` is permanent and never
+   reaches this path, so single-workspace restore-after-restart is unchanged;
+   and `close_extra_workspaces()` (leaving the mode) removes its workspaces
+   *without* pruning them here, so its promise that everything already captured
+   stays restorable still holds. A failed restore's rollback
+   (`restore_workspace`) also stays out — it removes the live record it just
+   created and must never delete the snapshot it failed to open.
+   The emptied window announces the change itself before closing
+   (`notifyWorkspacesChanged('workspace_emptied')`): the room event that would
+   normally relay it races the window teardown, and a launcher that missed it
+   would keep listing a workspace that no longer exists in either list.
+
+Coverage: `WorkspaceEmptiedRemovalTestCase` and
+`MultiWorkspaceDialogChromeTestCase` in `tests/test_multi_workspace.py`.
+Suite: 991 tests, Ruff clean.
 
 ---
 
@@ -692,8 +747,13 @@ items are hidden and the menu degrades to today's single **Save Workspace**.
   live and can be reopened from the launcher.
 - Closing the **last group** in a window closes that window and prunes the empty
   live workspace record (returning the id so the event can be emitted after the
-  lock). The workspace's **saved slot is not erased** — it stays restorable.
-- Moving the last group out has the same effect on the source window.
+  lock). **Amended after testing (round 2, §5):** the workspace's saved slot is
+  erased with it, so an emptied workspace is removed globally rather than
+  surviving in the restore chooser as an offer the live list no longer matches.
+  `"default"` keeps its slot (it is never pruned), and leaving multi-workspace
+  mode does not come through this path.
+- Moving the last group out has the same effect on the source window, including
+  the saved slot.
 - A deliberately created empty workspace is not auto-closed while its transient
   `retain_when_empty` flag is set. Adding or moving in the first group clears
   the flag; it is never persisted to a saved slot.
@@ -808,7 +868,7 @@ something the user did not save.**
 | R11 | User restores a subset, then restores another slot later | Allowed. Unselected slots survive save, clear, and restore untouched. |
 | R12 | Double-clicked restore / two restores in flight | Single-flight guard in the UI **and** server-side idempotency by workspace id: the second call sees the workspace live and returns `already_live`, not a duplicate. |
 | R13 | **Forget** a slot that was already removed (double-click, two launcher windows) | Idempotent `200` with `{"forgotten": false}`; the row disappears either way. Siblings are untouched. |
-| R14 | **Forget** a slot for a workspace that is live, or restore-then-forget in the same session | Refused in the UI (rule 2) and harmless if forced: the next autosave re-captures the live workspace. Forgetting *after* closing the workspace's last group is permanent, because an empty workspace is never captured (`capture_workspace` returns `None`, `runtime_state.py:225`). |
+| R14 | **Forget** a slot for a workspace that is live, or restore-then-forget in the same session | Refused in the UI (rule 2) and harmless if forced: the next autosave re-captures the live workspace. After round 2 there is nothing left to forget once the workspace's last group is closed — the slot goes with the pruned record (§8) — and it stays gone, because an empty workspace is never captured (`capture_workspace` returns `None`, `runtime_state.py:225`). |
 
 Also covered, outside restore: a group closed in window A while window B has a
 stale tab list (B reconciles on the room event, and a missing group id resolves

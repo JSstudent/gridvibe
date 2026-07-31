@@ -342,11 +342,12 @@ class MultiWorkspaceApiTestCase(WorkspaceSocketClientMixin, unittest.TestCase):
             workspaces_js,
         )
         self.assertIn("await openWorkspaceWindow(resolvedWorkspaceId, {", launcher_js)
-        # The launcher never hardcodes a window target: which workspace "View
-        # Active Terminals" opens follows the launch destination, and the window
-        # name is derived from that id in workspaces.js.
+        # The launcher never hardcodes a window *name*: it is derived from the
+        # workspace id in workspaces.js. "View Active Terminals" stays the
+        # single-workspace entry point and is hidden with the flag on, where the
+        # Workspaces card lists every live workspace with its own Open button.
         self.assertIn('id="viewActiveTerminalsBtn"', page)
-        self.assertIn("function viewActiveTerminalsWorkspaceId()", launcher_js)
+        self.assertIn("viewButton.hidden = enabled;", launcher_js)
         self.assertNotIn("gridvibe-workspace-default", page)
         self.assertNotIn("gridvibe-sessions", launcher_js)
         self.assertNotIn("gridvibe-sessions", workspaces_js)
@@ -1703,6 +1704,222 @@ class MultiWorkspaceModeToggleTestCase(unittest.TestCase):
         self.assertIn('const CURRENT_WORKSPACE_LABEL = "Reviews";', html)
         self.assertIn("`(${currentWorkspaceDisplayLabel()})`", terminals_js)
         self.assertIn("function setCurrentWorkspaceLabel(label)", terminals_js)
+
+
+class WorkspaceEmptiedRemovalTestCase(unittest.TestCase):
+    """Emptying a non-default workspace removes it globally, snapshot included.
+
+    Pruning the live record while the saved slot survived made the launcher
+    contradict itself: the workspace was gone from the Workspaces card and still
+    offered by *Reopen saved…*, and reopening it resurrected a workspace the user
+    had just emptied.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _launch(self, **overrides):
+        body = {
+            "connection_mode": "wsl",
+            "session_name": overrides.pop("session_name", "Files"),
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+        body.update(overrides)
+        response = self.client.post("/api/sessions", json=body)
+        self.assertEqual(response.status_code, 201)
+        return response.get_json()
+
+    def _saved_slot_ids(self):
+        return set(json.loads(self.state_path.read_text("utf-8"))["workspaces"])
+
+    def _capture(self, workspace_id):
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=workspace_id, origin="manual"
+        )
+
+    def test_closing_the_last_group_forgets_the_workspaces_snapshot(self):
+        launched = self._launch(new_workspace=True, workspace_label="Offscreen")
+        workspace_id = launched["workspace_id"]
+        self._capture(workspace_id)
+        self.assertIn(workspace_id, self._saved_slot_ids())
+
+        response = self.client.delete(
+            f"/api/sessions?group={launched['group_id']}"
+            f"&workspace_id={workspace_id}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        # Gone from both lists, not one: no live record, no restorable slot.
+        self.assertIsNone(api.session_manager.get_workspace(workspace_id))
+        self.assertNotIn(workspace_id, self._saved_slot_ids())
+        self.assertEqual(
+            [
+                summary["workspace_id"]
+                for summary in web_workspaces.list_restorable_workspace_summaries()
+            ],
+            [],
+        )
+
+    def test_closing_the_last_session_of_the_last_group_forgets_it_too(self):
+        launched = self._launch(new_workspace=True)
+        workspace_id = launched["workspace_id"]
+        self._capture(workspace_id)
+        session_id = launched["sessions"][0]["session_id"]
+        # The per-session close prunes on the grace period rather than forcing
+        # the group, so age it past the window the way real use does.
+        group = api.session_manager.get_group(launched["group_id"])
+        group.created_at -= EMPTY_GROUP_GRACE_SECONDS + 1
+        api.session_manager.get_workspace(workspace_id).created_at -= (
+            EMPTY_GROUP_GRACE_SECONDS + 1
+        )
+
+        response = self.client.delete(f"/api/sessions/{session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        # Both close paths prune through the same helper, so both forget.
+        self.assertIsNone(api.session_manager.get_workspace(workspace_id))
+        self.assertNotIn(workspace_id, self._saved_slot_ids())
+
+    def test_moving_the_last_group_out_forgets_the_source_snapshot(self):
+        self._launch(session_name="Main")
+        self._capture("default")
+        source = self._launch(new_workspace=True, workspace_label="Source")
+        source_workspace_id = source["workspace_id"]
+        self._capture(source_workspace_id)
+        self.assertEqual(
+            self._saved_slot_ids(), {"default", source_workspace_id}
+        )
+
+        response = self.client.post(
+            f"/api/session-groups/{source['group_id']}/move",
+            json={"target_workspace_id": "default"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["source_workspace_pruned"])
+        self.assertIsNone(api.session_manager.get_workspace(source_workspace_id))
+        # Only the emptied source is forgotten; the destination keeps its slot.
+        self.assertEqual(self._saved_slot_ids(), {"default"})
+
+    def test_the_permanent_default_workspace_keeps_its_snapshot(self):
+        launched = self._launch()
+        self.assertEqual(launched["workspace_id"], "default")
+        self._capture("default")
+
+        self.client.delete(f"/api/sessions?group={launched['group_id']}")
+
+        # "default" is never pruned, so single-workspace restore-after-restart
+        # keeps working exactly as it did before multi-workspace.
+        self.assertIsNotNone(api.session_manager.get_workspace("default"))
+        self.assertIn("default", self._saved_slot_ids())
+
+    def test_a_failed_restore_rollback_keeps_the_slot_restorable(self):
+        launched = self._launch(new_workspace=True)
+        workspace_id = launched["workspace_id"]
+        self._capture(workspace_id)
+        self.client.delete(
+            f"/api/sessions?group={launched['group_id']}"
+            f"&workspace_id={workspace_id}"
+        )
+        # The close above forgot it; write a slot back that cannot start.
+        state = json.loads(self.state_path.read_text("utf-8"))
+        state["workspaces"][workspace_id] = {
+            "label": "Broken",
+            "origin": "manual",
+            "saved_at": time.time(),
+            "groups": [{"group_id": "gone", "sessions": []}],
+            "active_group_id": "",
+        }
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        result = web_workspaces.restore_workspace(workspace_id)
+
+        # Rolling back a restore that started nothing removes the *live* record
+        # it just created — it must never forget the snapshot it failed to open.
+        self.assertFalse(result["restored"])
+        self.assertIsNone(api.session_manager.get_workspace(workspace_id))
+        self.assertIn(workspace_id, self._saved_slot_ids())
+
+    def test_the_window_announces_the_removal_before_it_closes(self):
+        response = self.client.get("/static/js/terminals.js")
+        terminals_js = response.get_data(as_text=True)
+        response.close()
+
+        # The room event that would normally relay this races the window
+        # teardown, so the emptied window announces the change itself first.
+        self.assertIn("notifyWorkspacesChanged('workspace_emptied');", terminals_js)
+
+
+class MultiWorkspaceDialogChromeTestCase(unittest.TestCase):
+    """Dialog layering and the launcher/window chrome corrections."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_confirm_and_name_dialogs_lead_the_dialog_stack(self):
+        workspaces_css = self._static("css/workspaces.css")
+
+        # Both are the answer to a question another dialog asked (Forget from
+        # the restore chooser, the mode toggle from App Settings), and both sit
+        # earlier in the document than the dialog asking it — so they were
+        # painted behind it and could not be clicked. One rule, loaded last by
+        # both pages, puts them above every other shell (App Settings is 12000).
+        self.assertIn("#genericConfirmModal,\n#workspaceNameModal {", workspaces_css)
+        self.assertIn("z-index: 12100;", workspaces_css)
+
+    def test_view_active_terminals_is_hidden_in_multi_workspace_mode(self):
+        launcher_js = self._static("js/launcher.js")
+
+        # It could only ever name one of the live workspaces, right beside the
+        # Workspaces card that lists them all with their own Open buttons.
+        self.assertIn("viewButton.hidden = enabled;", launcher_js)
+        self.assertNotIn("`View ${workspaceDestinationName(target)}`", launcher_js)
+        # `.secondary-link` sets `display: inline-flex`, an author rule that
+        # beats the user agent's `[hidden] { display: none }` — without this the
+        # button stays on screen with the attribute set.
+        self.assertIn(
+            ".secondary-link[hidden] {\n            display: none;\n        }",
+            self._static("css/launcher.css"),
+        )
+
+    def test_the_save_confirmation_hands_the_session_line_back(self):
+        terminals_js = self._static("js/terminals.js")
+
+        # The confirmation borrows the session line, which is otherwise only
+        # rewritten on a tab switch — with a single tab it never was, so the
+        # message stayed in the window chrome for the rest of the session.
+        self.assertIn("function clearWorkspaceSaveMessage()", terminals_js)
+        self.assertIn("clearWorkspaceSaveMessage,\n            WORKSPACE_SAVE_MESSAGE_MS", terminals_js)
+        # One function writes the line in both of its shapes, so the deferred
+        # restore can never disagree with the grid that is actually on screen.
+        self.assertIn("function renderSessionLine()", terminals_js)
 
 
 if __name__ == "__main__":
