@@ -2,7 +2,7 @@
 
 Date: 2026-07-30
 Updated: 2026-07-31
-Status: Stages 1–4 implemented (2026-07-31)
+Status: Stages 1–4 implemented, post-test corrections applied (2026-07-31)
 Scope: Multiple live workspaces, one terminal window per workspace, moving a
 session group between workspaces, and selective restore after restart.
 
@@ -245,6 +245,62 @@ tests, Ruff clean.
 (§5 Stage 3 step 9) was cut; it shares the same `moveGroupToWorkspace()` call,
 so adding it later changes no contract. Tab drag-and-drop still reorders within
 a window only.
+
+### Post-test corrections — 2026-07-31 (`docs/r&d/todos.txt`)
+
+Testing Stages 1–4 with the flag on produced six findings. All are fixed; none
+changed a contract in §10.
+
+1. **The flag had no control.** §10.5 wired `multi_workspace_enabled` end to end
+   but stopped at the page, so it could only be changed by editing
+   `config.json` and restarting — a guardrail-5 half-wire in practice. It is now
+   an App Settings checkbox below the auto-save interval. Changing it applies
+   immediately: both pages render the mode from server-side markup, so the
+   saving window reloads itself and every other window follows the existing
+   app-config broadcast. Switching it **off** confirms in page and then calls
+   the new `POST /api/workspaces/close-extra` → `close_extra_workspaces()`,
+   which closes every workspace but `"default"` (sessions, groups, record) —
+   with the flag off no window can reach them, so leaving them running would
+   strand live shells. That teardown deliberately writes **no** snapshot: a
+   capture taken during a teardown races the state it is recording, so
+   restorability is exactly what autosave or Save Workspace already wrote.
+   `retain_when_empty` is a promise for the lifetime of the mode, not past it.
+2. **The launcher grid collapsed with the chooser open** (`docs/images/launcher_display_broken.png`).
+   Root cause: `.card { min-height: 0 }` removes each grid item's automatic
+   minimum, so the right column's `1fr` row could be squeezed to nothing and
+   **Terminal Setup** rendered as a clipped header strip. Three fixes:
+   `.column-right` declares its third row (the Workspaces card), both content
+   cards have a height floor so the column scrolls instead of collapsing, and
+   the chooser became a dialog so its height never reflows the grid at all.
+3. **The destination was not visibly connected to Launch.** The `<select>` in
+   card 04 is gone; the CTA is a split button that names its destination, with a
+   caret opening an in-page picker (live workspaces + **New workspace…**, which
+   uses the shared `workspaceNameModal`). Card 04 keeps only what already
+   exists — the live workspaces and the entry back into the chooser. The
+   launcher also stopped going stale: it has no Socket.IO connection, so a
+   workspace window relays its room events (plus rename, which emits none) over
+   a `gridvibe.workspaces` broadcast, and the launcher re-reads both lists on
+   that and on window focus. No polling was added.
+4. **View Active Terminals always opened `"default"`.** It now follows the
+   launch destination, then the only populated workspace, then `"default"`.
+5. **"Saved workspaces (N)" read as a duplicate of the live list** it sat near.
+   Renamed **Reopen saved… (N)** and moved into the Workspaces card header,
+   beside the live list it is explicitly not.
+6. **A window did not say which workspace it was.** `CURRENT_WORKSPACE_LABEL` is
+   server-rendered and leads the session line and the window title; a rename
+   updates both without a reload.
+
+One real bug surfaced while testing (1): a window reacted to the broadcast it
+sent itself. A `BroadcastChannel` never delivers to the object that posted, but
+it does deliver to any *other* channel object in the same document, and every
+sender here opens a fresh channel per message. Harmless for the idempotent
+app-config updates that existed before; not harmless for one that reloads the
+window, which cut off the teardown the sender was still running and left the
+workspaces alive. Payloads now carry `source: GRIDVIBE_WINDOW_ID` (shared.js)
+and every listener skips its own.
+
+Coverage: `MultiWorkspaceModeToggleTestCase` in `tests/test_multi_workspace.py`.
+Suite: 982 tests, Ruff clean.
 
 ---
 
@@ -796,6 +852,8 @@ New:
 
 - `GET /api/workspaces` — live summaries + group counts.
 - `POST /api/workspaces` — create (label optional).
+- `POST /api/workspaces/close-extra` — close every workspace but `"default"`
+  (leaving the mode; confirmed by the caller, writes no snapshot).
 - `PATCH /api/workspaces/<id>` — rename (label only).
 - `POST /api/session-groups/<group_id>/move` — `target_workspace_id`, or
   `new_workspace` + `label`.

@@ -287,6 +287,14 @@
     padding: 9px 12px;
 }
 
+/* The 41px floor above matches a single-line check-field to the height of the
+   selects beside it. On a check-field with wrapping description copy that is
+   also a direct grid item, that floor becomes the auto row's size and the copy
+   spills over the next field, so a multi-line one opts out of it. */
+#appSettingsModal .multiline-check {
+    min-height: auto;
+}
+
 #appSettingsModal .check-copy {
     display: grid;
     gap: 3px;

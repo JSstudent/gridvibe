@@ -50,23 +50,6 @@
     </div>
 </div>
 
-<!-- Restore chooser: one row per saved workspace snapshot. Restore and Forget
-     are per row; Dismiss is panel-level ("not now") and loses nothing. -->
-<div id="workspaceRestorePanel" class="workspace-restore-panel" hidden>
-    <div class="workspace-restore-head">
-        <div class="workspace-restore-title">Saved workspaces</div>
-        <div class="workspace-restore-copy">
-            Pick the workspaces to reopen. Live shells do not survive a restart —
-            each selected workspace relaunches with the same layout.
-        </div>
-    </div>
-    <div class="workspace-restore-list" id="workspaceRestoreList"></div>
-    <div class="workspace-restore-actions">
-        <button class="ghost-btn" type="button" id="workspaceRestoreSelectedBtn" onclick="restoreSelectedWorkspaces()">Restore selected</button>
-        <button class="ghost-btn" type="button" id="workspaceRestoreDismissBtn" onclick="dismissWorkspaceRestorePanel()">Dismiss</button>
-    </div>
-</div>
-
 <div class="shell" data-max-sessions="{{ max_sessions }}">
     <section class="column column-left">
         <div class="card terminal-layout-card">
@@ -143,59 +126,79 @@
         </div>
 
         {% if multi_workspace_enabled %}
+        <!-- 04 lists what already exists: the live workspace windows, and the
+             saved snapshots that can be reopened. Where a launch *goes* is not
+             here — it is on the Launch button itself, so the destination and the
+             action that uses it are one control. -->
         <div class="card workspace-destination-card" id="workspaceDestinationCard">
             <div class="section-head">
                 <div class="section-title">
                     <span class="step-num">04</span>
-                    Workspace
+                    Workspaces
                 </div>
+                <!-- Re-entry point: "Not now" is a real dismiss, so the chooser
+                     must be reopenable mid-session for restore and housekeeping. -->
+                <button
+                    class="ghost-btn workspace-saved-entry"
+                    type="button"
+                    id="workspaceSavedEntry"
+                    onclick="openWorkspaceRestorePanel()"
+                    hidden
+                >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8"></path><path d="M3 8V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3"></path><path d="M10 12h4"></path></svg>
+                    <span id="workspaceSavedEntryLabel">Reopen saved…</span>
+                </button>
             </div>
             <div class="workspace-destination">
-                <div class="workspace-destination-row">
-                    <select id="workspaceDestinationSelect" aria-label="Launch into workspace"></select>
-                    <input
-                        id="workspaceDestinationLabel"
-                        type="text"
-                        maxlength="80"
-                        autocomplete="off"
-                        placeholder="New workspace name (optional)"
-                        aria-label="New workspace name"
-                        hidden
-                    >
-                </div>
                 <div class="workspace-destination-hint" id="workspaceDestinationHint">
-                    Each workspace opens in its own window with its own session tabs.
+                    Each workspace runs in its own window with its own session tabs.
                 </div>
                 <div class="workspace-live-list" id="workspaceLiveList"></div>
+                <div class="workspace-live-empty" id="workspaceLiveEmpty" hidden>
+                    No workspaces are open yet.
+                </div>
             </div>
         </div>
         {% endif %}
 
         <div class="action-bar">
             <div class="action-bar-left action-stack">
-                <a href="/terminals?workspace=default" class="secondary-link" target="gridvibe-workspace-default" onclick="return viewActiveTerminals(event)">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                    View Active Terminals
-                </a>
-                <!-- Re-entry point: Dismiss is "not now", so the chooser must be
-                     reopenable mid-session for restore and housekeeping. -->
                 <button
-                    class="secondary-link workspace-saved-entry"
                     type="button"
-                    id="workspaceSavedEntry"
-                    onclick="openWorkspaceRestorePanel()"
-                    hidden
+                    class="secondary-link"
+                    id="viewActiveTerminalsBtn"
+                    onclick="viewActiveTerminals(event)"
                 >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8"></path><path d="M3 8V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3"></path><path d="M10 12h4"></path></svg>
-                    <span id="workspaceSavedEntryLabel">Saved workspaces</span>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                    <span id="viewActiveTerminalsLabel">View Active Terminals</span>
                 </button>
-                <button id="launchBtn" type="button" class="action-btn" onclick="launchSessions()">
-                    <span class="action-btn-label">Launch Workspace</span>
-                    <span class="arrow" aria-hidden="true">→</span>
-                    <svg class="action-btn-spinner" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
-                        <path d="M12 2a10 10 0 1 0 10 10"/>
-                    </svg>
-                </button>
+                <!-- Split CTA: the primary half launches and names its
+                     destination, the caret half picks a different one. -->
+                <div class="launch-split" id="launchSplit">
+                    <button id="launchBtn" type="button" class="action-btn" onclick="launchSessions()">
+                        <span class="action-btn-text">
+                            <span class="action-btn-label">Launch Workspace</span>
+                            <span class="action-btn-destination" id="launchDestinationLabel" hidden></span>
+                        </span>
+                        <span class="arrow" aria-hidden="true">→</span>
+                        <svg class="action-btn-spinner" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+                            <path d="M12 2a10 10 0 1 0 10 10"/>
+                        </svg>
+                    </button>
+                    <button
+                        id="launchDestinationBtn"
+                        type="button"
+                        class="action-btn launch-destination-btn"
+                        onclick="toggleLaunchDestinationMenu(event)"
+                        aria-haspopup="true"
+                        aria-expanded="false"
+                        aria-label="Choose the workspace to launch into"
+                        title="Choose the workspace to launch into"
+                        hidden
+                    >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"></path></svg>
+                    </button>
+                </div>
             </div>
             <div class="action-bar-right">
                 <div id="themeControl" class="quick-controls">
@@ -291,6 +294,38 @@
         </div>
     </div>
 </div>
+
+<!-- Restore chooser: one row per saved workspace snapshot. Restore and Forget
+     are per row; "Not now" is dialog-level and loses nothing. It is a dialog
+     rather than an inline panel so a long list can never reflow the launcher. -->
+<div id="workspaceRestoreModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card workspace-restore-card" role="dialog" aria-modal="true" aria-labelledby="workspaceRestoreTitle">
+        <div class="modal-head">
+            <div>
+                <div id="workspaceRestoreTitle" class="modal-title">Reopen a saved workspace</div>
+                <div class="modal-copy">
+                    Live shells do not survive a restart — each selected workspace
+                    relaunches with the same layout.
+                </div>
+            </div>
+            <button class="ghost-btn" type="button" onclick="dismissWorkspaceRestorePanel()">Close</button>
+        </div>
+        <div class="workspace-restore-list" id="workspaceRestoreList"></div>
+        <div class="modal-actions">
+            <div class="modal-copy">Unselected workspaces stay saved and are offered again.</div>
+            <div class="modal-actions-buttons">
+                <button class="ghost-btn" type="button" id="workspaceRestoreDismissBtn" onclick="dismissWorkspaceRestorePanel()">Not now</button>
+                <button class="ghost-btn" type="button" id="workspaceRestoreSelectedBtn" onclick="restoreSelectedWorkspaces()">Restore selected</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% include 'partials/workspace_name_modal.html' %}
+
+<!-- Shared in-page menu surface (workspaces.js): the launch destination picker
+     here, the session-tab move menu on the workspace page. -->
+<div id="workspaceContextMenu" class="workspace-context-menu" role="menu" hidden></div>
 
 {% include 'partials/app_settings_modal.html' %}
 

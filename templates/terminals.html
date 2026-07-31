@@ -317,35 +317,7 @@
 <!-- Workspace naming (New Workspace / Rename Workspace). In-page, never
      window.prompt — WebView2 blocks it and GuardrailAuditFixesTestCase
      enforces the rule. -->
-<div id="workspaceNameModal" class="modal-shell" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="workspaceNameTitle">
-        <div class="modal-head">
-            <div>
-                <div id="workspaceNameTitle" class="modal-title">New workspace</div>
-                <div id="workspaceNameCopy" class="modal-copy"></div>
-            </div>
-        </div>
-        <form id="workspaceNameForm" class="modal-form">
-            <div class="modal-field">
-                <label for="workspaceNameInput">Workspace name</label>
-                <input
-                    id="workspaceNameInput"
-                    class="modal-input"
-                    type="text"
-                    maxlength="80"
-                    autocomplete="off"
-                    spellcheck="false"
-                >
-            </div>
-        </form>
-        <div class="modal-actions">
-            <div class="modal-actions-buttons">
-                <button id="workspaceNameCancel" class="btn btn-neutral" type="button">Cancel</button>
-                <button id="workspaceNameAccept" class="btn btn-cyan" type="submit" form="workspaceNameForm">Save</button>
-            </div>
-        </div>
-    </div>
-</div>
+{% include 'partials/workspace_name_modal.html' %}
 
 <!-- Right-click a session tab: Move to Workspace ▸ / Move to New Workspace. -->
 <div id="workspaceContextMenu" class="workspace-context-menu" role="menu" hidden></div>
@@ -398,6 +370,7 @@
     const DEFAULT_SURFACE_MODE = {{ app_surface_mode|tojson }};
     const MAX_SESSIONS = {{ max_sessions | tojson }};
     const CURRENT_WORKSPACE_ID = {{ workspace_id | tojson }};
+    const CURRENT_WORKSPACE_LABEL = {{ workspace_label | tojson }};
     const MULTI_WORKSPACE_ENABLED = {{ multi_workspace_enabled | tojson }};
     /* cmd / PowerShell / WSL panes only exist on Windows hosts, so the header
        shell picker is offered there only. */

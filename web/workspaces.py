@@ -993,3 +993,79 @@ def list_restorable_workspace_summaries() -> List[Dict[str, Any]]:
         live_conflict = workspace_has_groups(summary["workspace_id"])
         summaries.append({**summary, "live_conflict": live_conflict})
     return summaries
+
+
+# ==================== Leaving multi-workspace mode ====================
+
+
+def close_extra_workspaces() -> Dict[str, Any]:
+    """Close every live workspace except ``default``: sessions, then the record.
+
+    This is what switching ``workspace.multi_workspace_enabled`` off does to the
+    workspaces the feature created — with the flag off there is no window that
+    could reach them, so leaving them running would strand live shells.
+
+    Nothing is captured here on purpose: a snapshot written *during* a teardown
+    would race the very state it is trying to record. Restorability comes from
+    whatever the autosave timer or an explicit Workspace ▸ Save Workspace has
+    already written, and those slots survive this untouched.
+    """
+    from web.terminal_io import (
+        _broadcast_session_groups_updated,
+        _close_ssh_connection,
+    )
+
+    session_manager = _manager()
+    closed: List[Dict[str, Any]] = []
+
+    for workspace in session_manager.get_all_workspaces():
+        workspace_id = workspace.workspace_id
+        if workspace_id == DEFAULT_WORKSPACE_ID:
+            continue
+
+        # Check-then-act in one hold; the slow work (SSH teardown) and the emit
+        # both happen after the lock is released (guardrail 2).
+        with session_manager.lock:
+            session_ids = [
+                session.session_id
+                for session in session_manager.get_workspace_sessions(workspace_id)
+            ]
+            group_ids = [
+                group.group_id
+                for group in session_manager.get_workspace_groups(workspace_id)
+            ]
+            for session_id in session_ids:
+                session_manager.close_session(session_id)
+            # Leaving the mode is explicit, so these groups must not survive on
+            # the empty-group grace period the way a transient empty one does.
+            session_manager.clear_disconnected_sessions(force_group_ids=set(group_ids))
+            # A workspace created deliberately empty is retained until its first
+            # group arrives; that promise ends with the mode itself.
+            workspace.retain_when_empty = False
+            removed = session_manager.remove_workspace(workspace_id)
+
+        for session_id in session_ids:
+            _close_ssh_connection(session_id, clear_buffer=True)
+        _broadcast_session_groups_updated(
+            "workspace_closed",
+            workspace_id=workspace_id,
+        )
+        logger.debug(
+            "Closed workspace %s leaving multi-workspace mode "
+            "(groups=%d sessions=%d removed=%s)",
+            workspace_id,
+            len(group_ids),
+            len(session_ids),
+            bool(removed),
+        )
+        closed.append({
+            "workspace_id": workspace_id,
+            "label": str(workspace.label or "").strip(),
+            "group_count": len(group_ids),
+            "session_count": len(session_ids),
+        })
+
+    return {
+        "closed": closed,
+        "closed_count": len(closed),
+    }

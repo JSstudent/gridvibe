@@ -75,6 +75,67 @@
         return ok && Array.isArray(data.workspaces) ? data.workspaces : [];
     }
 
+    /* ── Cross-window workspace invalidation ──
+       The launcher has no Socket.IO connection, so the workspace rooms cannot
+       reach it. Terminal windows announce every change that alters a workspace
+       list — a launched or closed tab, a move, a rename — on the same
+       BroadcastChannel/localStorage pair the app-config broadcast already uses,
+       and the launcher refreshes its destination menu and live list from it.
+       A sender never receives its own message, so a window that made the change
+       still refreshes itself directly. */
+    const WORKSPACES_BROADCAST_CHANNEL = 'gridvibe.workspaces';
+    const WORKSPACES_UPDATE_STORAGE_KEY = 'gridvibe.workspacesUpdated';
+
+    function notifyWorkspacesChanged(reason = '') {
+        const payload = {
+            reason: String(reason || ''),
+            timestamp: Date.now(),
+            nonce: Math.random().toString(36).slice(2),
+            source: GRIDVIBE_WINDOW_ID
+        };
+        try {
+            const channel = new BroadcastChannel(WORKSPACES_BROADCAST_CHANNEL);
+            channel.postMessage(payload);
+            channel.close();
+        } catch (_error) {}
+        try {
+            localStorage.setItem(WORKSPACES_UPDATE_STORAGE_KEY, JSON.stringify(payload));
+        } catch (_error) {}
+        return payload;
+    }
+
+    function onWorkspacesChanged(handler) {
+        if (typeof handler !== 'function') {
+            return;
+        }
+        try {
+            const channel = new BroadcastChannel(WORKSPACES_BROADCAST_CHANNEL);
+            channel.onmessage = event => {
+                if (!isOwnBroadcast(event.data)) {
+                    handler(event.data || {});
+                }
+            };
+        } catch (_error) {}
+        window.addEventListener('storage', event => {
+            if (event.key !== WORKSPACES_UPDATE_STORAGE_KEY || !event.newValue) {
+                return;
+            }
+            try {
+                handler(JSON.parse(event.newValue));
+            } catch (_error) {}
+        });
+        /* BroadcastChannel does not cross a native WebView2 window boundary in
+           every host, and a window can be closed while hidden. Refreshing when
+           the window is looked at again costs one request and closes that gap
+           without any polling (guardrail 3). */
+        window.addEventListener('focus', () => handler({ reason: 'focus' }));
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                handler({ reason: 'visible' });
+            }
+        });
+    }
+
     async function createWorkspaceRecord(label = '') {
         const { ok, data } = await workspaceApiRequest('/api/workspaces', {
             method: 'POST',
@@ -183,6 +244,74 @@
         }
         window.close();
         return false;
+    }
+
+    /* ── Turning the multi-workspace mode on and off ──
+       app-settings.js owns the dialog but not this policy; both pages call
+       these so the rule lives in one place (guardrail 6). */
+
+    async function closeExtraWorkspaces() {
+        const { ok, data } = await workspaceApiRequest('/api/workspaces/close-extra', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        });
+        if (!ok) {
+            throw new Error(data.error || 'Could not close the extra workspaces');
+        }
+        return data;
+    }
+
+    /* Switching the mode off ends live shells in every workspace but the main
+       one, so it is confirmed in page first (guardrail 8). Returns true when the
+       save may proceed with the flag off. */
+    async function confirmMultiWorkspaceDisable() {
+        const extras = (await fetchLiveWorkspaces())
+            .filter(workspace => workspace.workspace_id !== WORKSPACE_DEFAULT_ID
+                && (Number(workspace.group_count) || 0) > 0);
+        if (!extras.length) {
+            return true;
+        }
+        const sessionCount = extras.reduce(
+            (total, workspace) => total + (Number(workspace.group_count) || 0),
+            0
+        );
+        return openGenericConfirmModal({
+            title: 'Turn off multiple workspaces?',
+            copy: `${extras.length} workspace${extras.length === 1 ? '' : 's'}`
+                + ` (${sessionCount} session${sessionCount === 1 ? '' : 's'}) will be closed`
+                + ' so everything runs in the main workspace again.',
+            note: 'Only what auto-save or Workspace ▸ Save Workspace already captured'
+                + ' can be restored afterwards. Close them?',
+            confirmLabel: 'Turn off and close',
+            danger: true
+        });
+    }
+
+    /* Both pages render the mode from server-side markup, so a flag change is
+       applied by reloading. A window whose workspace was just closed has nothing
+       left to render and closes instead of reloading into a 400. */
+    async function reactToMultiWorkspaceFlagChange(enabled, { currentWorkspaceId = '' } = {}) {
+        const ownId = normalizeWorkspaceId(currentWorkspaceId);
+        if (!enabled && currentWorkspaceId && ownId !== WORKSPACE_DEFAULT_ID) {
+            await closeWorkspaceWindow(ownId);
+            return;
+        }
+        window.location.reload();
+    }
+
+    /* The window that saved the setting also performs the close, once. Every
+       other window only reacts (above), so the teardown never runs N times. */
+    async function applyMultiWorkspaceFlagChange(enabled, options = {}) {
+        if (!enabled) {
+            try {
+                await closeExtraWorkspaces();
+            } catch (error) {
+                console.error('[GridVibe Workspaces] closing extra workspaces failed:', error);
+            }
+            notifyWorkspacesChanged('multi_workspace_disabled');
+        }
+        await reactToMultiWorkspaceFlagChange(enabled, options);
     }
 
     /* ── Saved-workspace snapshots (restore chooser) ── */

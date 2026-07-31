@@ -19,7 +19,8 @@
         }),
         workspace: Object.freeze({
             surface_mode: 'normal',
-            autosave_interval_minutes: 5
+            autosave_interval_minutes: 5,
+            multi_workspace_enabled: false
         }),
         ssh: Object.freeze({
             host_key_policy: 'auto-add'
@@ -170,6 +171,10 @@
                     : DEFAULT_APP_SETTINGS.workspace.autosave_interval_minutes
             );
             syncAutosaveIntervalLabel();
+        }
+        const multiWorkspaceInput = document.getElementById('appMultiWorkspaceEnabled');
+        if (multiWorkspaceInput) {
+            multiWorkspaceInput.checked = Boolean(workspace.multi_workspace_enabled);
         }
         if (sshHostKeyPolicyInput) {
             sshHostKeyPolicyInput.value = ['auto-add', 'known-hosts', 'strict'].includes(ssh.host_key_policy)
@@ -538,7 +543,10 @@
                 autosave_interval_minutes: Math.min(15, Math.max(1,
                     Number(document.getElementById('appWorkspaceAutosaveInterval')?.value)
                         || DEFAULT_APP_SETTINGS.workspace.autosave_interval_minutes
-                ))
+                )),
+                multi_workspace_enabled: Boolean(
+                    document.getElementById('appMultiWorkspaceEnabled')?.checked
+                )
             },
             ssh: {
                 host_key_policy: document.getElementById('appSshHostKeyPolicy')?.value || DEFAULT_APP_SETTINGS.ssh.host_key_policy
@@ -571,7 +579,8 @@
                 theme: normalizeThemePreference(appSettings?.appearance?.theme)
             },
             workspace: {
-                surface_mode: appSettings?.workspace?.surface_mode === 'max' ? 'max' : 'normal'
+                surface_mode: appSettings?.workspace?.surface_mode === 'max' ? 'max' : 'normal',
+                multi_workspace_enabled: Boolean(appSettings?.workspace?.multi_workspace_enabled)
             },
             terminal: {
                 font_family: String(appSettings?.terminal?.font_family || DEFAULT_APP_SETTINGS.terminal.font_family),
@@ -579,7 +588,8 @@
                 apply_scope: applyScope === 'all' ? 'all' : 'session'
             },
             timestamp: Date.now(),
-            nonce: Math.random().toString(36).slice(2)
+            nonce: Math.random().toString(36).slice(2),
+            source: GRIDVIBE_WINDOW_ID
         };
 
         try {
@@ -637,6 +647,23 @@
 
         try {
             const settingsForm = collectAppSettingsForm();
+
+            /* The multi-workspace flag is the one setting whose change has a
+               side effect on live state, so the policy for it lives in
+               workspaces.js and is applied around this save, not inside it. */
+            const multiWorkspaceWas = Boolean(appSettings?.workspace?.multi_workspace_enabled);
+            let multiWorkspaceWill = Boolean(settingsForm.workspace.multi_workspace_enabled);
+            if (multiWorkspaceWas && !multiWorkspaceWill && !(await confirmMultiWorkspaceDisable())) {
+                /* Declining leaves the mode on and saves everything else, rather
+                   than throwing away the rest of the user's edits. */
+                multiWorkspaceWill = true;
+                settingsForm.workspace.multi_workspace_enabled = true;
+                const multiWorkspaceInput = document.getElementById('appMultiWorkspaceEnabled');
+                if (multiWorkspaceInput) {
+                    multiWorkspaceInput.checked = true;
+                }
+            }
+
             const [settingsResponse] = await Promise.all([
                 fetch('/api/app-config', {
                     method: 'POST',
@@ -656,6 +683,19 @@
                 onAppSettingsSaved(data, payload);
             }
             notifyAppSettings('App settings saved.', 'success');
+
+            /* Both pages render the mode from server-side markup, so this window
+               applies the change to itself here; other windows pick it up from
+               the broadcast above (a sender never receives its own message). */
+            if (multiWorkspaceWas !== multiWorkspaceWill) {
+                closeAppSettingsModal();
+                await applyMultiWorkspaceFlagChange(multiWorkspaceWill, {
+                    currentWorkspaceId: typeof CURRENT_WORKSPACE_ID !== 'undefined'
+                        ? CURRENT_WORKSPACE_ID
+                        : ''
+                });
+                return;
+            }
 
             /* Turning voice input on with no backend installed used to save
                happily and then do nothing (stage J issue 2). Offer the install

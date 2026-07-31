@@ -9,6 +9,7 @@ from sessions.manager import EMPTY_GROUP_GRACE_SECONDS
 from web import api
 from web import runtime_state as web_runtime_state
 from web import saved_sessions as web_saved_sessions
+from web import terminal_io as web_terminal_io
 from web import workspaces as web_workspaces
 from web.workspaces import normalize_workspace_id, workspace_room
 
@@ -341,7 +342,12 @@ class MultiWorkspaceApiTestCase(WorkspaceSocketClientMixin, unittest.TestCase):
             workspaces_js,
         )
         self.assertIn("await openWorkspaceWindow(resolvedWorkspaceId, {", launcher_js)
-        self.assertIn('target="gridvibe-workspace-default"', page)
+        # The launcher never hardcodes a window target: which workspace "View
+        # Active Terminals" opens follows the launch destination, and the window
+        # name is derived from that id in workspaces.js.
+        self.assertIn('id="viewActiveTerminalsBtn"', page)
+        self.assertIn("function viewActiveTerminalsWorkspaceId()", launcher_js)
+        self.assertNotIn("gridvibe-workspace-default", page)
         self.assertNotIn("gridvibe-sessions", launcher_js)
         self.assertNotIn("gridvibe-sessions", workspaces_js)
 
@@ -866,9 +872,18 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
         with patch.object(api.runtime_config, "multi_workspace_enabled", False):
             disabled = self.client.get("/").get_data(as_text=True)
 
-        self.assertIn('id="workspaceDestinationSelect"', enabled)
+        launcher_js = self._static("js/launcher.js")
+
+        # The destination lives on the Launch button itself (a split CTA), so
+        # there is no separate control to link to the launch action.
+        self.assertIn('id="launchDestinationBtn"', enabled)
+        self.assertIn('id="launchDestinationLabel"', enabled)
         self.assertIn('id="workspaceLiveList"', enabled)
-        self.assertNotIn('id="workspaceDestinationSelect"', disabled)
+        self.assertIn("function toggleLaunchDestinationMenu(event)", launcher_js)
+        # With the flag off the CTA degrades to today's single button: the caret
+        # and the destination line are both hidden by syncLaunchDestinationControl.
+        self.assertNotIn('id="workspaceLiveList"', disabled)
+        self.assertIn("caret.hidden = !enabled;", launcher_js)
 
     def test_move_and_conflict_flows_confirm_in_page_only(self):
         terminals_js = self._static("js/terminals.js")
@@ -1464,11 +1479,15 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
             html = self.client.get("/").get_data(as_text=True)
         launcher_js = self.client.get("/static/js/launcher.js").get_data(as_text=True)
 
-        self.assertIn('id="workspaceRestorePanel"', html)
+        # A dialog, not an inline panel: inline, its height reflowed the
+        # launcher grid and collapsed the Terminal Setup card.
+        self.assertIn('id="workspaceRestoreModal"', html)
+        self.assertIn('class="modal-card workspace-restore-card"', html)
+        self.assertNotIn('id="workspaceRestorePanel"', html)
         self.assertIn('id="workspaceRestoreSelectedBtn"', html)
         self.assertIn('id="workspaceSavedEntry"', html)
         self.assertIn("onclick=\"dismissWorkspaceRestorePanel()\"", html)
-        # Restore and Forget are per row; Dismiss is panel-level and loses
+        # Restore and Forget are per row; Dismiss is dialog-level and loses
         # nothing, so the chooser must be reopenable mid-session.
         self.assertIn("async function forgetWorkspaceRow(summary)", launcher_js)
         self.assertIn("function openWorkspaceRestorePanel()", launcher_js)
@@ -1477,6 +1496,213 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
             launcher_js,
         )
         self.assertIn("danger: true", launcher_js)
+
+
+class MultiWorkspaceModeToggleTestCase(unittest.TestCase):
+    """Turning the mode on and off from App Settings, and keeping windows in sync.
+
+    The flag was wired end-to-end but had no control: it could only be changed by
+    editing config.json and restarting. It is now an App Settings toggle that
+    applies immediately, and switching it off has to leave nothing running that
+    no window can reach.
+    """
+
+    WORKSPACE_A = "aaaaaaaaaaaa"
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _launch(self, **overrides):
+        body = {
+            "connection_mode": "wsl",
+            "session_name": overrides.pop("session_name", "Files"),
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+        body.update(overrides)
+        return self.client.post("/api/sessions", json=body)
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    # ── The App Settings control ──
+
+    def test_app_settings_ships_the_toggle_wired_end_to_end(self):
+        html = self.client.get("/").get_data(as_text=True)
+        app_settings_js = self._static("js/app-settings.js")
+
+        # Guardrail 5: a config key must be wired page-to-backend, not half-added.
+        self.assertIn('id="appMultiWorkspaceEnabled"', html)
+        self.assertIn("multi_workspace_enabled: Boolean(", app_settings_js)
+        self.assertIn(
+            "multiWorkspaceInput.checked = Boolean(workspace.multi_workspace_enabled);",
+            app_settings_js,
+        )
+        self.assertIn(
+            "multi_workspace_enabled",
+            self.client.get("/api/app-config").get_json()["workspace"],
+        )
+
+    def test_saving_the_toggle_persists_and_broadcasts_it(self):
+        with patch.object(api, "save_config") as save_config, \
+                patch.object(api, "_refresh_runtime_config"), \
+                patch.object(api, "socketio") as socketio:
+            response = self.client.post(
+                "/api/app-config", json={"workspace": {"multi_workspace_enabled": True}}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        saved = save_config.call_args[0][0]
+        self.assertTrue(saved["workspace"]["multi_workspace_enabled"])
+        # Open windows render the mode from server-side markup, so they only
+        # learn about a change if the broadcast carries the flag.
+        event, payload = socketio.emit.call_args[0][:2]
+        self.assertEqual(event, "app_config_updated")
+        self.assertIn("multi_workspace_enabled", payload["workspace"])
+
+    def test_a_non_boolean_toggle_value_keeps_the_current_setting(self):
+        with patch.object(api.runtime_config, "multi_workspace_enabled", True):
+            normalized = api._normalize_app_config_update(
+                {"workspace": {"multi_workspace_enabled": "yes"}}
+            )
+
+        self.assertTrue(normalized["workspace"]["multi_workspace_enabled"])
+
+    # ── Leaving the mode ──
+
+    def test_leaving_the_mode_closes_every_workspace_but_default(self):
+        kept = self._launch(session_name="Main")
+        extra = self._launch(session_name="Side", new_workspace=True, workspace_label="Side")
+        self.assertEqual(extra.status_code, 201)
+        extra_workspace_id = extra.get_json()["workspace_id"]
+        extra_session_ids = [
+            session["session_id"] for session in extra.get_json()["sessions"]
+        ]
+
+        response = self.client.post("/api/workspaces/close-extra")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["closed_count"], 1)
+        self.assertEqual(payload["closed"][0]["workspace_id"], extra_workspace_id)
+        self.assertEqual(payload["closed"][0]["label"], "Side")
+        # Gone entirely — record, group and sessions — so nothing is left
+        # running that no window can reach with the flag off.
+        self.assertIsNone(api.session_manager.get_workspace(extra_workspace_id))
+        for session_id in extra_session_ids:
+            self.assertIsNone(api.session_manager.get_session(session_id))
+        # The default workspace is permanent and keeps its tabs.
+        self.assertEqual(
+            [group.group_id for group in api.session_manager.get_workspace_groups("default")],
+            [kept.get_json()["group_id"]],
+        )
+
+    def test_leaving_the_mode_also_closes_a_deliberately_empty_workspace(self):
+        created = self.client.post("/api/workspaces", json={"label": "Empty"}).get_json()
+        self.assertTrue(created["retain_when_empty"])
+
+        self.client.post("/api/workspaces/close-extra")
+
+        # retain_when_empty is a promise for the lifetime of the mode, not past it.
+        self.assertIsNone(api.session_manager.get_workspace(created["workspace_id"]))
+
+    def test_leaving_the_mode_notifies_only_the_closed_workspaces_rooms(self):
+        extra = self._launch(new_workspace=True)
+        extra_workspace_id = extra.get_json()["workspace_id"]
+
+        with patch.object(web_terminal_io, "socketio") as socketio:
+            self.client.post("/api/workspaces/close-extra")
+
+        rooms = [
+            call.kwargs.get("room")
+            for call in socketio.emit.call_args_list
+            if call.args and call.args[0] == "session_groups_updated"
+        ]
+        self.assertEqual(rooms, [f"workspace:{extra_workspace_id}"])
+
+    def test_leaving_the_mode_is_idempotent_and_never_touches_saved_slots(self):
+        self._launch(new_workspace=True)
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id="default", origin="manual"
+        )
+        self._launch(session_name="Main")
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id="default", origin="manual"
+        )
+        before = self.state_path.read_bytes()
+
+        first = self.client.post("/api/workspaces/close-extra")
+        second = self.client.post("/api/workspaces/close-extra")
+
+        self.assertEqual(first.get_json()["closed_count"], 1)
+        self.assertEqual(second.get_json()["closed_count"], 0)
+        # A close writes no snapshot: restorability comes from what autosave or
+        # an explicit Save Workspace already captured, which stays byte-identical.
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    # ── Cross-window freshness ──
+
+    def test_the_launcher_refreshes_its_workspace_lists_without_polling(self):
+        workspaces_js = self._static("js/workspaces.js")
+        launcher_js = self._static("js/launcher.js")
+        terminals_js = self._static("js/terminals.js")
+
+        # The launcher has no socket, so terminal windows relay every change
+        # that alters a workspace list (guardrail 3: push, never poll).
+        self.assertIn("function notifyWorkspacesChanged(reason = '')", workspaces_js)
+        self.assertIn("function onWorkspacesChanged(handler)", workspaces_js)
+        self.assertIn("notifyWorkspacesChanged(message?.reason", terminals_js)
+        self.assertIn("notifyWorkspacesChanged('renamed')", terminals_js)
+        self.assertIn("onWorkspacesChanged(() => {", launcher_js)
+        self.assertNotIn("setInterval", workspaces_js)
+
+    def test_a_window_ignores_the_broadcast_it_sent_itself(self):
+        shared_js = self._static("js/shared.js")
+        launcher_js = self._static("js/launcher.js")
+        terminals_js = self._static("js/terminals.js")
+        workspaces_js = self._static("js/workspaces.js")
+
+        # A BroadcastChannel does deliver to other channel objects in the same
+        # document, so a sender sees its own message. Reacting to it reloaded
+        # the sending window mid-teardown and left workspaces running.
+        self.assertIn("function isOwnBroadcast(message)", shared_js)
+        self.assertIn("source: GRIDVIBE_WINDOW_ID", workspaces_js)
+        for source in (launcher_js, terminals_js, workspaces_js):
+            self.assertIn("isOwnBroadcast(event.data)", source)
+
+    def test_the_workspace_window_names_its_own_workspace(self):
+        api.session_manager.rename_workspace("default", "Reviews")
+
+        html = self.client.get("/terminals").get_data(as_text=True)
+        terminals_js = self._static("js/terminals.js")
+
+        # Nothing else on screen says which workspace a window is once two are
+        # open, so the label leads the session line and the window title.
+        self.assertIn('const CURRENT_WORKSPACE_LABEL = "Reviews";', html)
+        self.assertIn("`(${currentWorkspaceDisplayLabel()})`", terminals_js)
+        self.assertIn("function setCurrentWorkspaceLabel(label)", terminals_js)
 
 
 if __name__ == "__main__":

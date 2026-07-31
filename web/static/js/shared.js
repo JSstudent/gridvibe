@@ -20,6 +20,21 @@
     const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';
     const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';
     const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';
+
+    /* Identifies this document on every cross-window broadcast. A
+       BroadcastChannel never delivers a message back to the object that posted
+       it — but it does deliver to any *other* channel object in the same
+       document, and every sender here opens a fresh channel per message. So a
+       window that both sends and listens does see its own message unless the
+       payload is tagged and the listener skips it. Harmless for idempotent
+       updates; not harmless for one that reloads the window, which is how a
+       reload once raced the work the sender was still doing.
+       (`storage` events genuinely never fire in the sending document.) */
+    const GRIDVIBE_WINDOW_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
+    function isOwnBroadcast(message) {
+        return message?.source === GRIDVIBE_WINDOW_ID;
+    }
     function normalizeThemePreference(theme) {
         return ['system', 'light', 'dark'].includes(theme) ? theme : 'system';
     }

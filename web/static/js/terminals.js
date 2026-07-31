@@ -177,10 +177,22 @@
         applyAppConfigTheme(message);
         applyAppConfigSurfaceMode(message);
         applyAppConfigTerminalFont(message);
+        applyAppConfigMultiWorkspace(message);
         /* Voice enable/engine and the push-to-talk keybind are saved from the
            same App Settings dialog, so re-read both here instead of leaving
            open tabs on boot-time values until a restart (stage J issue 3). */
         _refreshVoiceRuntimeState();
+    }
+
+    /* The Workspace menu's multi-workspace items are server-rendered, so this
+       window re-renders itself when the mode changes elsewhere. A window whose
+       workspace was closed by that change closes instead (workspaces.js). */
+    function applyAppConfigMultiWorkspace(message) {
+        const enabled = message?.workspace?.multi_workspace_enabled;
+        if (typeof enabled !== 'boolean' || enabled === isMultiWorkspaceEnabled()) {
+            return;
+        }
+        reactToMultiWorkspaceFlagChange(enabled, { currentWorkspaceId }).catch(() => {});
     }
 
     /* Per-session font overrides (OD-14): keyed by session-group id — the
@@ -306,7 +318,12 @@
             try {
                 const channel = new BroadcastChannel(APP_CONFIG_BROADCAST_CHANNEL);
                 channel.onmessage = event => {
-                    applyAppConfigUpdate(event.data || {});
+                    /* A window that saved the settings has already applied them
+                       and may still be acting on the change; its own broadcast
+                       is not news (shared.js explains the same-document case). */
+                    if (!isOwnBroadcast(event.data)) {
+                        applyAppConfigUpdate(event.data || {});
+                    }
                 };
             } catch (_error) {}
         }
@@ -851,16 +868,37 @@
         });
     }
 
+    /* Which workspace this window is. Nothing else on screen says so once two
+       windows are open, so it leads the session line and the window title. */
+    let currentWorkspaceLabel = String(
+        typeof CURRENT_WORKSPACE_LABEL !== 'undefined' ? CURRENT_WORKSPACE_LABEL : ''
+    ).trim();
+
+    function currentWorkspaceDisplayLabel() {
+        return currentWorkspaceLabel
+            || workspaceDisplayLabel({ workspace_id: currentWorkspaceId });
+    }
+
+    function setCurrentWorkspaceLabel(label) {
+        currentWorkspaceLabel = String(label || '').trim();
+        updateSessionChrome(terminals.length);
+    }
+
     function updateSessionChrome(count, groupId = activeGroupId) {
         const activeGroup = getGroupById(groupId);
         const labelParts = [
+            isMultiWorkspaceEnabled() ? `(${currentWorkspaceDisplayLabel()})` : '',
             activeGroup?.name || 'Session',
             `${count} terminal${count !== 1 ? 's' : ''}`,
             activeGroup?.connection_mode === 'wsl' ? 'Local Repo' : 'SSH'
         ].filter(Boolean);
         document.getElementById('sessionLabel').textContent = labelParts.join(' • ');
-        document.title = activeGroup?.name
-            ? `GridVibe — ${activeGroup.name}`
+        const titleParts = [
+            isMultiWorkspaceEnabled() ? currentWorkspaceDisplayLabel() : '',
+            activeGroup?.name || ''
+        ].filter(Boolean);
+        document.title = titleParts.length
+            ? `GridVibe — ${titleParts.join(' — ')}`
             : 'GridVibe — Terminals';
     }
 
@@ -1281,6 +1319,11 @@
         }
         try {
             const updated = await renameWorkspaceRecord(currentWorkspaceId, label);
+            setCurrentWorkspaceLabel(workspaceDisplayLabel(updated));
+            /* A rename changes no group, so it produces no room event: tell the
+               launcher (and any other window) directly, or their pickers keep
+               offering the old name until the next reload. */
+            notifyWorkspacesChanged('renamed');
             setWorkspaceSaveMessage(`Workspace renamed to "${workspaceDisplayLabel(updated)}".`, 'success');
         } catch (error) {
             setWorkspaceSaveMessage(`Rename failed: ${error.message} — try again.`, 'error');
@@ -1298,6 +1341,7 @@
         }
         try {
             const workspace = await createWorkspaceRecord(label);
+            notifyWorkspacesChanged('created');
             await openWorkspaceWindow(workspace.workspace_id);
         } catch (error) {
             setWorkspaceSaveMessage(`Could not create the workspace: ${error.message}`, 'error');
@@ -7331,6 +7375,10 @@
             if (message?.workspace_id === currentWorkspaceId) {
                 scheduleStatusRefresh();
             }
+            /* The launcher is not in any workspace room (it has no socket), so
+               its workspace list would otherwise go stale for the whole run.
+               Relay the invalidation to it. */
+            notifyWorkspacesChanged(message?.reason || 'session_groups_updated');
         });
 
         /* Voice preferences and backend availability can change from the

@@ -2254,15 +2254,36 @@
         console.info(`[GridVibe Launcher] ${action}`, details);
     }
 
+    /* With multiple workspaces live, "the" active terminals is ambiguous, and
+       always opening "default" showed the wrong window. Follow the Launch
+       button's destination — the workspace this launcher is currently pointed
+       at — and fall back to the only live one, then to "default". */
+    function viewActiveTerminalsWorkspaceId() {
+        if (!isMultiWorkspaceEnabled()) {
+            return WORKSPACE_DEFAULT_ID;
+        }
+        const destination = resolveWorkspaceDestination();
+        if (destination !== WORKSPACE_NEW_DESTINATION && findLiveWorkspace(destination)) {
+            return destination;
+        }
+        const populated = liveWorkspaceCache
+            .filter(workspace => (Number(workspace.group_count) || 0) > 0);
+        return populated.length === 1
+            ? populated[0].workspace_id
+            : WORKSPACE_DEFAULT_ID;
+    }
+
     async function viewActiveTerminals(
         event,
         preferredGroupId = '',
         nativeZoomFactor = null,
-        workspaceId = 'default'
+        workspaceId = null
     ) {
         event.preventDefault();
         const normalizedZoomFactor = normalizeNativeZoomFactor(nativeZoomFactor);
-        const resolvedWorkspaceId = String(workspaceId || 'default');
+        const resolvedWorkspaceId = String(
+            workspaceId || viewActiveTerminalsWorkspaceId() || 'default'
+        );
         logLauncherWindowAction('View Active Terminals clicked', {
             pywebview: Boolean(window.pywebview?.api)
         });
@@ -2491,111 +2512,168 @@
        this file keeps only form collection and launch orchestration.
     ───────────────────────────────────────────── */
 
-    /* The last destination the user picked explicitly in this launcher session.
-       With two or more live workspaces there is no sensible automatic answer,
-       so the previous choice stands rather than silently retargeting. */
-    let lastWorkspaceDestinationChoice = '';
+    /* The destination is part of the Launch control itself (the split button),
+       not a separate field the user has to connect to it: `workspaceDestination`
+       is what the caret menu sets and what the CTA both names and launches into.
+       `WORKSPACE_NEW_DESTINATION` means "a workspace this launch creates". */
+    let workspaceDestination = '';
+    let workspaceDestinationLabelDraft = '';
     let liveWorkspaceCache = [];
     let restorableWorkspaceSummaries = [];
     let workspaceRestoreInFlight = false;
 
-    function workspaceDestinationElements() {
-        return {
-            select: document.getElementById('workspaceDestinationSelect'),
-            label: document.getElementById('workspaceDestinationLabel'),
-            list: document.getElementById('workspaceLiveList')
-        };
+    function findLiveWorkspace(workspaceId) {
+        const index = liveWorkspaceCache
+            .findIndex(workspace => workspace.workspace_id === workspaceId);
+        return index === -1
+            ? null
+            : { workspace: liveWorkspaceCache[index], index };
     }
 
-    function syncWorkspaceDestinationLabelVisibility() {
-        const { select, label } = workspaceDestinationElements();
-        if (!select || !label) {
-            return;
-        }
-        label.hidden = select.value !== WORKSPACE_NEW_DESTINATION;
-    }
-
-    function onWorkspaceDestinationChanged() {
-        const { select } = workspaceDestinationElements();
-        lastWorkspaceDestinationChoice = select?.value || '';
-        syncWorkspaceDestinationLabelVisibility();
-    }
-
-    /* Default: New workspace when none is live, the single live one when
-       exactly one exists, otherwise this session's last explicit choice. */
-    function defaultWorkspaceDestination(workspaces) {
-        const liveIds = workspaces.map(workspace => workspace.workspace_id);
-        if (lastWorkspaceDestinationChoice
-            && (lastWorkspaceDestinationChoice === WORKSPACE_NEW_DESTINATION
-                || liveIds.includes(lastWorkspaceDestinationChoice))) {
-            return lastWorkspaceDestinationChoice;
-        }
-        if (!workspaces.length) {
+    /* An explicit choice always wins — including "New workspace", which is a
+       real answer and not the absence of one (`workspaceDestination` is "" until
+       the user picks). Without a choice: the single live workspace when exactly
+       one exists, otherwise a new one. */
+    function resolveWorkspaceDestination() {
+        if (workspaceDestination === WORKSPACE_NEW_DESTINATION) {
             return WORKSPACE_NEW_DESTINATION;
         }
-        if (workspaces.length === 1) {
-            return workspaces[0].workspace_id;
+        if (workspaceDestination && findLiveWorkspace(workspaceDestination)) {
+            return workspaceDestination;
+        }
+        /* Only workspaces that actually have tabs count here: the permanent
+           empty "default" record must not make a single real workspace look
+           like two and push the default answer to "New workspace". */
+        const populated = liveWorkspaceCache
+            .filter(workspace => (Number(workspace.group_count) || 0) > 0);
+        if (populated.length === 1) {
+            return populated[0].workspace_id;
         }
         return WORKSPACE_NEW_DESTINATION;
+    }
+
+    function workspaceDestinationName(workspaceId = resolveWorkspaceDestination()) {
+        if (workspaceId === WORKSPACE_NEW_DESTINATION) {
+            return workspaceDestinationLabelDraft || 'New workspace';
+        }
+        const found = findLiveWorkspace(workspaceId);
+        return found ? workspaceDisplayLabel(found.workspace, found.index) : 'New workspace';
+    }
+
+    /* The CTA carries the destination so there is nothing to link it to. With
+       the flag off it stays exactly today's single-workspace button. */
+    function syncLaunchDestinationControl() {
+        const caret = document.getElementById('launchDestinationBtn');
+        const destinationLabel = document.getElementById('launchDestinationLabel');
+        const viewLabel = document.getElementById('viewActiveTerminalsLabel');
+        const enabled = isMultiWorkspaceEnabled();
+        if (caret) {
+            caret.hidden = !enabled;
+            /* The split seam only exists when the caret does. */
+            document.getElementById('launchSplit')?.classList.toggle('has-destination', enabled);
+        }
+        if (destinationLabel) {
+            destinationLabel.hidden = !enabled;
+            destinationLabel.textContent = enabled ? `into ${workspaceDestinationName()}` : '';
+        }
+        if (viewLabel) {
+            /* Only name a workspace that actually has tabs to show — otherwise
+               the button promises a window it would refuse to open. */
+            const target = resolveWorkspaceDestination();
+            const found = target === WORKSPACE_NEW_DESTINATION ? null : findLiveWorkspace(target);
+            const hasSessions = (Number(found?.workspace?.group_count) || 0) > 0;
+            viewLabel.textContent = enabled && hasSessions
+                ? `View ${workspaceDestinationName(target)}`
+                : 'View Active Terminals';
+        }
+    }
+
+    function setWorkspaceDestination(workspaceId, labelDraft = '') {
+        workspaceDestination = workspaceId;
+        workspaceDestinationLabelDraft = String(labelDraft || '').trim();
+        syncLaunchDestinationControl();
+    }
+
+    async function chooseNewWorkspaceDestination() {
+        const label = await openWorkspaceNameModal({
+            title: 'Launch into a new workspace',
+            copy: 'The name is shown in workspace pickers and on the saved snapshot. Leave it blank for an automatic name.',
+            value: workspaceDestinationLabelDraft,
+            confirmLabel: 'Use this name'
+        });
+        if (label === null) {
+            return;
+        }
+        setWorkspaceDestination(WORKSPACE_NEW_DESTINATION, label);
+    }
+
+    function toggleLaunchDestinationMenu(event) {
+        event.preventDefault();
+        const entries = liveWorkspaceCache.map((workspace, index) => {
+            const count = Number(workspace.group_count) || 0;
+            const isCurrent = workspace.workspace_id === resolveWorkspaceDestination();
+            return {
+                label: `${workspaceDisplayLabel(workspace, index)} — ${count} session${count === 1 ? '' : 's'}`,
+                current: isCurrent,
+                icon: isCurrent ? '' : WORKSPACE_ICONS.window,
+                onSelect: () => setWorkspaceDestination(workspace.workspace_id)
+            };
+        });
+        entries.push({
+            label: 'New workspace ...',
+            icon: WORKSPACE_ICONS.add,
+            current: resolveWorkspaceDestination() === WORKSPACE_NEW_DESTINATION
+                && liveWorkspaceCache.length > 0,
+            onSelect: () => chooseNewWorkspaceDestination()
+        });
+        openWorkspaceContextMenu(event, entries);
     }
 
     async function refreshWorkspaceDestinations() {
         if (!isMultiWorkspaceEnabled()) {
             return;
         }
-        const { select, list } = workspaceDestinationElements();
-        if (!select) {
-            return;
-        }
 
         /* A workspace is only "live" for launch purposes once it has tabs — a
            just-created empty one is still a valid destination, so both are
-           listed and only the picker's default differs. */
+           listed and only the default differs. */
         liveWorkspaceCache = await fetchLiveWorkspaces();
-        const selection = defaultWorkspaceDestination(liveWorkspaceCache);
-        select.innerHTML = '';
-        liveWorkspaceCache.forEach((workspace, index) => {
-            const option = document.createElement('option');
-            option.value = workspace.workspace_id;
-            const count = Number(workspace.group_count) || 0;
-            option.textContent = `${workspaceDisplayLabel(workspace, index)} (${count} session${count === 1 ? '' : 's'})`;
-            select.appendChild(option);
-        });
-        const newOption = document.createElement('option');
-        newOption.value = WORKSPACE_NEW_DESTINATION;
-        newOption.textContent = 'New workspace';
-        select.appendChild(newOption);
-        select.value = selection;
-        syncWorkspaceDestinationLabelVisibility();
+        syncLaunchDestinationControl();
 
+        const list = document.getElementById('workspaceLiveList');
+        const empty = document.getElementById('workspaceLiveEmpty');
         if (!list) {
             return;
         }
+        const openWorkspaces = liveWorkspaceCache
+            .filter(workspace => (Number(workspace.group_count) || 0) > 0);
+        if (empty) {
+            empty.hidden = openWorkspaces.length > 0;
+        }
         list.innerHTML = '';
-        liveWorkspaceCache
-            .filter(workspace => (Number(workspace.group_count) || 0) > 0)
-            .forEach((workspace, index) => {
-                const row = document.createElement('div');
-                row.className = 'workspace-live-row';
-                const count = Number(workspace.group_count) || 0;
-                const name = document.createElement('div');
-                name.className = 'workspace-live-name';
-                name.innerHTML = `${WORKSPACE_ICONS.window}<span>${escHtml(workspaceDisplayLabel(workspace, index))}</span>`;
-                const meta = document.createElement('span');
-                meta.className = 'workspace-live-meta';
-                meta.textContent = `${count} session${count === 1 ? '' : 's'}`;
-                const openButton = document.createElement('button');
-                openButton.type = 'button';
-                openButton.className = 'ghost-btn';
-                openButton.textContent = 'Open';
-                openButton.addEventListener('click', async () => {
-                    if (!(await focusWorkspaceWindow(workspace.workspace_id))) {
-                        await openWorkspaceWindow(workspace.workspace_id);
-                    }
-                });
-                row.append(name, meta, openButton);
-                list.appendChild(row);
+        openWorkspaces.forEach(workspace => {
+            const index = liveWorkspaceCache.indexOf(workspace);
+            const row = document.createElement('div');
+            row.className = 'workspace-live-row';
+            const count = Number(workspace.group_count) || 0;
+            const name = document.createElement('div');
+            name.className = 'workspace-live-name';
+            name.innerHTML = `${WORKSPACE_ICONS.window}<span>${escHtml(workspaceDisplayLabel(workspace, index))}</span>`;
+            const meta = document.createElement('span');
+            meta.className = 'workspace-live-meta';
+            meta.textContent = `${count} session${count === 1 ? '' : 's'}`;
+            const openButton = document.createElement('button');
+            openButton.type = 'button';
+            openButton.className = 'ghost-btn';
+            openButton.textContent = 'Open';
+            openButton.addEventListener('click', async () => {
+                if (!(await focusWorkspaceWindow(workspace.workspace_id))) {
+                    await openWorkspaceWindow(workspace.workspace_id);
+                }
             });
+            row.append(name, meta, openButton);
+            list.appendChild(row);
+        });
     }
 
     /* The destination fields POST /api/sessions expects, or {} with the flag
@@ -2604,12 +2682,11 @@
         if (!isMultiWorkspaceEnabled()) {
             return {};
         }
-        const { select, label } = workspaceDestinationElements();
-        const choice = select?.value || '';
-        if (!choice || choice === WORKSPACE_NEW_DESTINATION) {
+        const choice = resolveWorkspaceDestination();
+        if (choice === WORKSPACE_NEW_DESTINATION) {
             return {
                 new_workspace: true,
-                workspace_label: String(label?.value || '').trim()
+                workspace_label: workspaceDestinationLabelDraft
             };
         }
         return { workspace_id: choice };
@@ -2624,7 +2701,10 @@
             return;
         }
         entry.hidden = !isMultiWorkspaceEnabled() || restorableWorkspaceSummaries.length === 0;
-        label.textContent = `Saved workspaces (${restorableWorkspaceSummaries.length})`;
+        /* Named for what it does, not for what it lists: the panel above it is
+           the *live* workspaces, so "Saved workspaces" alone read as a duplicate
+           of that list rather than as the way back into the restore chooser. */
+        label.textContent = `Reopen saved… (${restorableWorkspaceSummaries.length})`;
     }
 
     function renderWorkspaceRestoreRows() {
@@ -2678,38 +2758,47 @@
         });
     }
 
+    /* A dialog, not an inline panel: the chooser is as tall as the number of
+       saved workspaces, and inline it reflowed (and squeezed) the whole
+       launcher grid behind it. */
+    function setWorkspaceRestoreModalVisible(visible) {
+        const modal = document.getElementById('workspaceRestoreModal');
+        if (!modal) {
+            return;
+        }
+        modal.classList.toggle('visible', visible);
+        modal.setAttribute('aria-hidden', visible ? 'false' : 'true');
+    }
+
+    function isWorkspaceRestoreModalVisible() {
+        return Boolean(document.getElementById('workspaceRestoreModal')?.classList.contains('visible'));
+    }
+
     async function loadWorkspaceRestoreChooser({ autoOpen = false } = {}) {
-        const panel = document.getElementById('workspaceRestorePanel');
-        if (!panel) {
+        if (!document.getElementById('workspaceRestoreModal')) {
             return;
         }
         restorableWorkspaceSummaries = await fetchRestorableWorkspaces();
         updateWorkspaceSavedEntry();
         renderWorkspaceRestoreRows();
         if (!restorableWorkspaceSummaries.length) {
-            panel.hidden = true;
+            setWorkspaceRestoreModalVisible(false);
             return;
         }
         if (autoOpen) {
-            panel.hidden = false;
+            setWorkspaceRestoreModalVisible(true);
         }
     }
 
     function openWorkspaceRestorePanel() {
-        const panel = document.getElementById('workspaceRestorePanel');
-        if (panel) {
-            panel.hidden = false;
-        }
+        setWorkspaceRestoreModalVisible(true);
         loadWorkspaceRestoreChooser().catch(() => {});
     }
 
-    /* Panel-level "not now": every slot survives on disk and the chooser
-       reopens from the Saved workspaces entry. */
+    /* Dialog-level "not now": every slot survives on disk and the chooser
+       reopens from the Reopen saved… entry in the Workspaces card. */
     function dismissWorkspaceRestorePanel() {
-        const panel = document.getElementById('workspaceRestorePanel');
-        if (panel) {
-            panel.hidden = true;
-        }
+        setWorkspaceRestoreModalVisible(false);
     }
 
     async function forgetWorkspaceRow(summary) {
@@ -2735,7 +2824,7 @@
     }
 
     async function restoreSelectedWorkspaces() {
-        const panel = document.getElementById('workspaceRestorePanel');
+        const panel = document.querySelector('#workspaceRestoreModal .workspace-restore-card');
         if (!panel || workspaceRestoreInFlight) {
             return;
         }
@@ -2751,9 +2840,11 @@
            id, so a double click can never duplicate a workspace's tabs. */
         workspaceRestoreInFlight = true;
         panel.classList.add('busy');
+        let restoreStarted = false;
         try {
             const result = await restoreSavedWorkspaces(workspaceIds);
             const restored = (result.workspaces || []).filter(entry => entry.restored);
+            restoreStarted = restored.length > 0;
             for (const entry of restored) {
                 // Only workspaces whose relaunch actually started get a window.
                 await openWorkspaceWindow(entry.workspace_id, {
@@ -2778,7 +2869,11 @@
             panel.classList.remove('busy');
             await loadWorkspaceRestoreChooser();
             await refreshWorkspaceDestinations();
-            if (!restorableWorkspaceSummaries.length) {
+            /* A restored row stays listed (now marked already open), so the
+               dialog would sit over the launcher after the windows opened.
+               Close it once anything started; leave it up if nothing did, so
+               the failure and its retry are still in front of the user. */
+            if (!restorableWorkspaceSummaries.length || restoreStarted) {
                 dismissWorkspaceRestorePanel();
             }
         }
@@ -2895,6 +2990,11 @@
             if (!response.ok) {
                 throw new Error(data.error || 'Failed to create sessions');
             }
+            /* Point the CTA at what was just launched, so a follow-up launch
+               defaults to the same window instead of silently making another. */
+            if (data.workspace_id) {
+                setWorkspaceDestination(String(data.workspace_id));
+            }
             await refreshWorkspaceDestinations();
 
             const launchWarnings = Array.isArray(data.warnings)
@@ -2932,8 +3032,54 @@
         }
     }
 
-    document.getElementById('workspaceDestinationSelect')
-        ?.addEventListener('change', onWorkspaceDestinationChanged);
+    /* The workspace lists are live state owned by the terminal windows, so they
+       must not go stale here while the app runs: opening or closing a tab,
+       moving one, or renaming a workspace all invalidate this launcher's view.
+       Terminal windows announce those changes (workspaces.js) and the launcher
+       re-reads both lists — no polling, and no reliance on a page reload. */
+    onWorkspacesChanged(() => {
+        if (!isMultiWorkspaceEnabled()) {
+            return;
+        }
+        refreshWorkspaceDestinations().catch(() => {});
+        loadWorkspaceRestoreChooser({
+            autoOpen: isWorkspaceRestoreModalVisible()
+        }).catch(() => {});
+    });
+
+    /* The launcher has no Socket.IO connection, so App Settings changes made in
+       a workspace window reach it through the same broadcast pair. Only the
+       multi-workspace mode changes this page's markup. */
+    function setupLauncherAppConfigListeners() {
+        const handle = message => {
+            const enabled = message?.workspace?.multi_workspace_enabled;
+            if (typeof enabled === 'boolean' && enabled !== isMultiWorkspaceEnabled()) {
+                reactToMultiWorkspaceFlagChange(enabled).catch(() => {});
+            }
+        };
+        try {
+            const channel = new BroadcastChannel(APP_CONFIG_BROADCAST_CHANNEL);
+            channel.onmessage = event => {
+                /* Never react to this window's own save: it is already applying
+                   the change itself, and reloading here would cut off the
+                   workspace teardown that has to finish first. */
+                if (!isOwnBroadcast(event.data)) {
+                    handle(event.data || {});
+                }
+            };
+        } catch (_error) {}
+        window.addEventListener('storage', event => {
+            if (event.key !== APP_CONFIG_UPDATE_STORAGE_KEY || !event.newValue) {
+                return;
+            }
+            try {
+                handle(JSON.parse(event.newValue));
+            } catch (_error) {}
+        });
+    }
+
+    setupLauncherAppConfigListeners();
+    syncLaunchDestinationControl();
 
     restoreActiveSavedSessionMeta();
     setupSavedSessionUpdateListeners();
@@ -3008,6 +3154,13 @@
         }
     });
 
+    document.getElementById('workspaceRestoreModal')?.addEventListener('click', event => {
+        /* Clicking the backdrop is "not now", never a restore or a forget. */
+        if (event.target.id === 'workspaceRestoreModal' && !workspaceRestoreInFlight) {
+            dismissWorkspaceRestorePanel();
+        }
+    });
+
     document.getElementById('genericConfirmCancel').addEventListener('click', () => {
         closeGenericConfirmModal(false);
     });
@@ -3025,5 +3178,8 @@
         }
         if (event.key === 'Escape' && document.getElementById('genericConfirmModal').classList.contains('visible')) {
             closeGenericConfirmModal(false);
+        }
+        if (event.key === 'Escape' && isWorkspaceRestoreModalVisible() && !workspaceRestoreInFlight) {
+            dismissWorkspaceRestorePanel();
         }
     });

@@ -154,40 +154,23 @@
     white-space: nowrap;
 }
 
-/* ── Restore chooser (launcher) ── */
-
-.workspace-restore-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    margin: 0 auto 12px;
-    padding: 12px 16px;
-    width: min(100%, 1180px);
-    border: 1px solid var(--gv-dialog-border);
-    border-radius: var(--gv-radius-m);
-    background: var(--gv-dialog-panel-soft);
+.workspace-live-empty {
+    padding: 10px 2px;
+    font-size: 12px;
+    color: var(--gv-dialog-muted);
 }
 
-.workspace-restore-panel[hidden] {
+.workspace-live-empty[hidden] {
     display: none;
 }
 
-.workspace-restore-head {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: baseline;
-    justify-content: space-between;
-}
+/* ── Restore chooser (launcher) ──
+   A dialog rather than an inline panel: its height follows the number of saved
+   workspaces, and inline it reflowed the launcher grid behind it (collapsing
+   the Terminal Setup card into a clipped header strip). */
 
-.workspace-restore-title {
-    font-weight: 600;
-    color: var(--gv-dialog-text);
-}
-
-.workspace-restore-copy {
-    font-size: 12px;
-    color: var(--gv-dialog-muted);
+.workspace-restore-card {
+    width: min(100%, 760px);
 }
 
 .workspace-restore-list {
@@ -249,21 +232,74 @@
     color: var(--gv-warning);
 }
 
-.workspace-restore-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    justify-content: flex-end;
-}
-
 /* Busy states toggle a class rather than rewriting button markup
    (guardrail 8). */
-.workspace-restore-panel.busy .workspace-restore-list,
-.workspace-restore-panel.busy .workspace-restore-actions button {
+.workspace-restore-card.busy .workspace-restore-list,
+.workspace-restore-card.busy .modal-actions button {
     pointer-events: none;
     opacity: 0.6;
 }
 
 .workspace-saved-entry[hidden] {
     display: none;
+}
+
+/* ── Workspace name dialog (shared partial) ──
+   Styled here, scoped to the dialog, so the partial does not depend on either
+   page's button/field classes (the App Settings dialog uses the same trick). */
+
+#workspaceNameModal .workspace-name-card {
+    width: min(100%, 460px);
+}
+
+#workspaceNameModal .workspace-modal-form {
+    margin: 4px 0 8px;
+}
+
+#workspaceNameModal .workspace-modal-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+#workspaceNameModal .workspace-modal-field label {
+    font-size: 12px;
+    color: var(--gv-dialog-muted);
+}
+
+#workspaceNameModal .workspace-modal-input {
+    width: 100%;
+    padding: 9px 11px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-s);
+    background: var(--gv-dialog-field-bg);
+    color: var(--gv-dialog-text);
+    font: inherit;
+}
+
+#workspaceNameModal .workspace-modal-input:focus {
+    outline: none;
+    border-color: var(--gv-accent);
+}
+
+#workspaceNameModal .workspace-modal-btn {
+    padding: 8px 16px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-s);
+    background: var(--gv-dialog-field-bg);
+    color: var(--gv-dialog-text);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+#workspaceNameModal .workspace-modal-btn:hover {
+    border-color: var(--gv-accent);
+}
+
+#workspaceNameModal .workspace-modal-btn.is-primary {
+    border-color: var(--gv-accent);
+    background: var(--gv-accent-soft);
+    color: var(--gv-accent);
+    font-weight: 600;
 }

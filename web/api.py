@@ -288,6 +288,7 @@ from web.voice import (  # noqa: F401 - re-exported for backwards compatibility
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     _redacted_launch_summary,
+    close_extra_workspaces,
     launch_session_group,
     list_live_workspaces,
     list_restorable_workspace_summaries,
@@ -297,6 +298,7 @@ from web.workspaces import (
     public_workspace_payload,
     restore_workspaces,
     workspace_has_groups,
+    workspace_label,
     workspace_room,
 )
 
@@ -645,6 +647,7 @@ def terminals_page():
     return render_template('terminals.html', max_sessions=runtime_config.max_sessions,
                            app_surface_mode=runtime_config.app_surface_mode,
                            workspace_id=workspace_id,
+                           workspace_label=workspace_label(workspace_id),
                            multi_workspace_enabled=runtime_config.multi_workspace_enabled,
                            local_windows_shells_available=os.name == "nt",
                            voice_enabled=runtime_config.voice_enabled,
@@ -1578,6 +1581,22 @@ def create_workspace():
     workspace = session_manager.create_workspace(label=label, retain_when_empty=True)
     logger.debug("Created workspace %s label=%r", workspace.workspace_id, workspace.label)
     return jsonify(public_workspace_payload(workspace, 0)), 201
+
+
+@app.route('/api/workspaces/close-extra', methods=['POST'])
+def close_extra_live_workspaces():
+    """Close every live workspace except ``default`` (leaving multi-workspace).
+
+    The caller confirms first — this ends live shells. Saved snapshots are not
+    written or touched here: what the autosave timer or an explicit Save
+    Workspace already captured stays on offer in the restore chooser.
+    """
+    result = close_extra_workspaces()
+    logger.info(
+        "Closed %d extra workspace(s) leaving multi-workspace mode",
+        result["closed_count"],
+    )
+    return jsonify(result)
 
 
 @app.route('/api/workspaces/<workspace_id>', methods=['PATCH'])
