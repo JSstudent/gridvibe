@@ -1869,6 +1869,110 @@ class WorkspaceEmptiedRemovalTestCase(unittest.TestCase):
         self.assertIn("notifyWorkspacesChanged('workspace_emptied');", terminals_js)
 
 
+class WorkspaceGoneWindowTestCase(unittest.TestCase):
+    """A window whose workspace disappeared closes instead of erroring.
+
+    Emptying a non-default workspace removes it globally, but the window that
+    emptied it stayed open on "Load error: Workspace not found" over a stale tab
+    list, with no way back (``docs/images/zombie_workspace_window.png``). Every
+    workspace-scoped read now marks that case machine-readably so the window can
+    tell "your workspace is gone" from any other failed request.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+
+    def _launch(self, **overrides):
+        body = {
+            "connection_mode": "wsl",
+            "session_name": "Files",
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+        body.update(overrides)
+        response = self.client.post("/api/sessions", json=body)
+        self.assertEqual(response.status_code, 201)
+        return response.get_json()
+
+    def _emptied_workspace_id(self):
+        launched = self._launch(new_workspace=True, workspace_label="Offscreen")
+        workspace_id = launched["workspace_id"]
+        self.assertEqual(
+            self.client.delete(
+                f"/api/sessions?group={launched['group_id']}"
+                f"&workspace_id={workspace_id}"
+            ).status_code,
+            200,
+        )
+        self.assertIsNone(api.session_manager.get_workspace(workspace_id))
+        return workspace_id, launched["group_id"]
+
+    def test_every_workspace_read_marks_a_removed_workspace(self):
+        workspace_id, group_id = self._emptied_workspace_id()
+
+        requests = [
+            self.client.get(f"/api/session-groups?workspace_id={workspace_id}"),
+            self.client.get(f"/api/sessions?workspace_id={workspace_id}"),
+            self.client.post(
+                "/api/session-groups/order",
+                json={"workspace_id": workspace_id, "group_ids": [group_id]},
+            ),
+            self.client.post(
+                "/api/runtime-state/save", json={"workspace_id": workspace_id}
+            ),
+        ]
+
+        for response in requests:
+            self.assertEqual(response.status_code, 400)
+            payload = response.get_json()
+            self.assertEqual(payload["error"], "Workspace not found")
+            self.assertTrue(payload["workspace_missing"])
+
+    def test_another_failure_is_not_reported_as_a_missing_workspace(self):
+        launched = self._launch(new_workspace=True)
+
+        # A stale group id from a sibling workspace is a recoverable mismatch —
+        # the window reloads its own tabs. Only a gone workspace closes it.
+        response = self.client.get(
+            f"/api/sessions?workspace_id=default&group={launched['group_id']}"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.get_json()
+        self.assertEqual(payload["error"], "Session group does not belong to workspace")
+        self.assertNotIn("workspace_missing", payload)
+
+    def test_the_window_closes_itself_when_its_workspace_is_gone(self):
+        response = self.client.get("/static/js/terminals.js")
+        terminals_js = response.get_data(as_text=True)
+        response.close()
+
+        # One detection point: every refresh path (close, room event, fallback
+        # poll, initialLoad) reaches the tab list before anything else.
+        self.assertIn("if (data?.workspace_missing) {", terminals_js)
+        self.assertIn("await handleWorkspaceGone();", terminals_js)
+        self.assertIn(
+            "await _closeWindowAfterLastSession('Workspace no longer exists');",
+            terminals_js,
+        )
+        # A window that cannot close itself (a hand-opened browser tab) must not
+        # keep re-reading a workspace that will never come back.
+        self.assertIn("if (statusRefreshTimer || workspaceGone) return;", terminals_js)
+        self.assertIn("if (workspaceGone) return;", terminals_js)
+
+
 class MultiWorkspaceDialogChromeTestCase(unittest.TestCase):
     """Dialog layering and the launcher/window chrome corrections."""
 
@@ -1920,6 +2024,18 @@ class MultiWorkspaceDialogChromeTestCase(unittest.TestCase):
         # One function writes the line in both of its shapes, so the deferred
         # restore can never disagree with the grid that is actually on screen.
         self.assertIn("function renderSessionLine()", terminals_js)
+
+    def test_an_unavailable_menu_item_does_not_look_busy_or_clickable(self):
+        terminals_css = self._static("css/terminals.css")
+
+        # The checked current workspace under Open Workspace is disabled for
+        # good — an hourglass cursor read as "wait, it is loading", and the
+        # hover highlight read as "click me".
+        self.assertIn(
+            ".app-menu-item:disabled {\n            cursor: default;",
+            terminals_css,
+        )
+        self.assertIn(".app-menu-item:hover:not(:disabled),", terminals_css)
 
 
 if __name__ == "__main__":

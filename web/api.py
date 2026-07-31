@@ -300,6 +300,7 @@ from web.workspaces import (
     restore_workspaces,
     workspace_has_groups,
     workspace_label,
+    workspace_missing_payload,
     workspace_room,
 )
 
@@ -782,10 +783,12 @@ def get_sessions():
         return jsonify({"error": str(exc)}), 400
     group_id = _resolve_group_id()
     error = ""
+    workspace_missing = False
     group_meta = None
     with session_manager.lock:
         if workspace_named and workspace_id not in session_manager.workspaces:
             error = "Workspace not found"
+            workspace_missing = True
         group = session_manager.groups.get(group_id) if group_id else None
         if not error and group_id and group is not None and group.workspace_id != workspace_id:
             error = "Session group does not belong to workspace"
@@ -809,7 +812,9 @@ def get_sessions():
                     allow_launch_fallback=not workspace_named,
                 )
     if error:
-        return jsonify({"error": error}), 400
+        return jsonify(
+            workspace_missing_payload() if workspace_missing else {"error": error}
+        ), 400
     logger.debug(
         f"GET /api/sessions workspace={workspace_id} "
         f"group={group_id or 'all'} count={len(sessions)} "
@@ -1644,7 +1649,7 @@ def get_session_groups():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     if not _workspace_exists(workspace_id):
-        return jsonify({"error": "Workspace not found"}), 400
+        return jsonify(workspace_missing_payload()), 400
     groups = [
         group.to_dict()
         for group in session_manager.get_workspace_groups(workspace_id)
@@ -1669,7 +1674,7 @@ def reorder_session_groups():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     if not _workspace_exists(workspace_id):
-        return jsonify({"error": "Workspace not found"}), 400
+        return jsonify(workspace_missing_payload()), 400
     try:
         groups = [
             group.to_dict()
@@ -1756,7 +1761,7 @@ def save_runtime_state():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     if not _workspace_exists(workspace_id):
-        return jsonify({"error": "Workspace not found"}), 400
+        return jsonify(workspace_missing_payload()), 400
     label = str(data.get("label") or "").strip() or None
     active_group_id = session_manager.set_active_group(
         workspace_id,

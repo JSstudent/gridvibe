@@ -2,8 +2,8 @@
 
 Date: 2026-07-30
 Updated: 2026-07-31
-Status: Stages 1–4 implemented, post-test corrections applied in two rounds
-(2026-07-31); §8 amended by round 2
+Status: Stages 1–4 implemented, post-test corrections applied in three rounds
+(2026-07-31); §8 amended by round 2, §8 window rule completed by round 3
 Scope: Multiple live workspaces, one terminal window per workspace, moving a
 session group between workspaces, and selective restore after restart.
 
@@ -356,6 +356,49 @@ changes a §8 lifetime rule and is called out as an amendment below.
 Coverage: `WorkspaceEmptiedRemovalTestCase` and
 `MultiWorkspaceDialogChromeTestCase` in `tests/test_multi_workspace.py`.
 Suite: 991 tests, Ruff clean.
+
+### Post-test corrections, round 3 — 2026-07-31 (`docs/r&d/todos.txt`)
+
+Two findings. The first is round 2's §8 amendment seen from the window side.
+
+1. **The emptied window stayed open** (`docs/images/zombie_workspace_window.png`).
+   Round 2 made closing the last group remove the workspace globally, and the
+   window that did it kept rendering: *Load error: Workspace not found* in the
+   session line, above a tab for the group just closed. The amendment created
+   the failure it exposed — removing the record makes the reload the window
+   needs return `400`, and `closeSessionGroup()`'s
+   `sessionGroups.length === 0` check (which closes the window) sits *after*
+   that reload, so it was never reached. Two further routes into the same dead
+   end: the last pane of the last group closed
+   (`DELETE /api/sessions/<id>` → grace-period prune → room event →
+   `refreshStatuses()`), and another window pulling the last group out with
+   *Move it here*, where the source window learns of it only through the room
+   event and so has no `source_groups` to act on.
+   Rather than fix three call sites, the rule is stated once: **a window whose
+   workspace no longer exists closes itself.** Every workspace-scoped route that
+   can answer for a vanished workspace now returns the shared
+   `workspace_missing_payload()` (`web/workspaces.py`) — the `workspace_missing`
+   marker is what separates "your workspace is gone" from a stale group id,
+   which is recoverable and must *not* close anything. `loadSessionGroups()` is
+   the one client-side detection point because every refresh path reaches the
+   tab list first; it hands off to `handleWorkspaceGone()`, which runs the same
+   teardown as the last-session close (announce, then close natively or via
+   `window.close()`) exactly once. Two consequences are deliberate: refreshes
+   stop, so a window that cannot close itself — a browser tab opened by hand,
+   where `window.close()` is a no-op — does not re-read a workspace that will
+   never return, and it clears the stale tab and says *This workspace was
+   closed.* instead of showing a load error it can never clear.
+2. **A disabled menu item wore a busy cursor.** `.app-menu-item:disabled` set
+   `cursor: wait`, so the checked current workspace under **Open Workspace**
+   read as loading rather than as "you are already here" — and the hover
+   highlight, which applies to disabled buttons too, read as clickable. Both are
+   `default` and no highlight now, matching `.workspace-context-menu`'s existing
+   rule. The `wait` cursor was never visible on a genuinely busy item: every
+   menu item closes the menu before its handler runs.
+
+Coverage: `WorkspaceGoneWindowTestCase` in `tests/test_multi_workspace.py`, plus
+a cursor assertion in `MultiWorkspaceDialogChromeTestCase`.
+Suite: 995 tests, Ruff clean.
 
 ---
 
@@ -754,6 +797,11 @@ items are hidden and the menu degrades to today's single **Save Workspace**.
   mode does not come through this path.
 - Moving the last group out has the same effect on the source window, including
   the saved slot.
+- **A window whose workspace no longer exists closes itself** (round 3), however
+  it lost it: it emptied the workspace, the last pane of its last group closed,
+  or another window moved that group away. The workspace-scoped routes mark this
+  one case with `workspace_missing` so the window can tell it from a stale group
+  id, which is recoverable and closes nothing.
 - A deliberately created empty workspace is not auto-closed while its transient
   `retain_when_empty` flag is set. Adding or moving in the first group clears
   the flag; it is never persisted to a saved slot.
@@ -935,7 +983,9 @@ Extended:
   returns `{"forgotten": bool}`; it stays idempotent and sibling-preserving.
 
 Validation: unknown or malformed workspace id → `400`; group not owned by the
-named workspace → `400`, never a sibling's data.
+named workspace → `400`, never a sibling's data. A `400` for a workspace that no
+longer exists carries `workspace_missing: true` (`workspace_missing_payload()`),
+which is the only failure that closes a window (§8, round 3).
 
 ### 10.3 Socket.IO
 

@@ -69,6 +69,18 @@ def public_workspace_payload(workspace: Any, group_count: int = 0) -> Dict[str, 
     }
 
 
+def workspace_missing_payload() -> Dict[str, Any]:
+    """Return the error body for a request whose workspace no longer exists.
+
+    ``workspace_missing`` is the machine-readable half of the message. A
+    workspace window outlives its workspace whenever the last group leaves it —
+    closed here, closed pane by pane, or moved out from another window — and
+    without this marker the window could only render "Load error: Workspace not
+    found" over a stale tab list it can never reload. It closes itself instead.
+    """
+    return {"error": "Workspace not found", "workspace_missing": True}
+
+
 # ==================== Live workspace inspection ====================
 
 

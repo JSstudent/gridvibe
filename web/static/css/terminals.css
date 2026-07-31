@@ -576,15 +576,20 @@
             white-space: nowrap;
         }
 
-        .app-menu-item:hover,
-        .app-menu-item:focus {
+        .app-menu-item:hover:not(:disabled),
+        .app-menu-item:focus:not(:disabled) {
             background: var(--t-ctx-hover);
             color: var(--t-text);
             outline: none;
         }
 
+        /* Disabled here means unavailable, not busy: the checked current
+           workspace under Open Workspace, and Save Workspace with no sessions.
+           An hourglass promised those items were about to become clickable, and
+           the hover highlight promised the same — both are the plain cursor and
+           no highlight now, matching .workspace-context-menu. */
         .app-menu-item:disabled {
-            cursor: wait;
+            cursor: default;
             opacity: 0.65;
         }
 

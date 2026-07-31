@@ -1368,6 +1368,22 @@
         await closeWorkspaceWindow(currentWorkspaceId);
     }
 
+    /* This window can outlive its workspace: the last tab closed here, that
+       tab's last pane closed, or the last tab pulled out by another window all
+       empty a non-default workspace, which is then removed globally (§8). The
+       window has nothing left to render and cannot reload — every workspace
+       read answers `workspace_missing` — so it closes itself instead of
+       lingering as a load error over a stale tab list. */
+    let workspaceGone = false;
+
+    async function handleWorkspaceGone() {
+        if (workspaceGone) {
+            return;
+        }
+        workspaceGone = true;
+        await _closeWindowAfterLastSession('Workspace no longer exists');
+    }
+
     async function moveSessionGroupToNewWorkspace(groupId) {
         const label = await openWorkspaceNameModal({
             title: 'Move to new workspace',
@@ -6784,6 +6800,19 @@
             if (loadToken !== activeLoadToken) {
                 return;
             }
+            if (workspaceGone) {
+                /* The close is already under way; a browser tab the user opened
+                   by hand cannot close itself, so leave an honest empty state
+                   rather than a load error over tabs that no longer exist. */
+                sessionGroups = [];
+                knownGroupIds = [];
+                activeGroupId = '';
+                renderSessionTabs();
+                label.textContent = 'This workspace was closed.';
+                grid.style.display = 'none';
+                document.getElementById('emptyState').classList.add('visible');
+                return;
+            }
             console.error('Initial load failed:', e);
             label.textContent = `Load error: ${e.message}`;
             grid.style.display = 'none';
@@ -6892,6 +6921,11 @@
         );
         const data = await response.json();
         if (!response.ok) {
+            /* Every refresh path leads here, so this is the one place that has
+               to notice the workspace itself is gone. */
+            if (data?.workspace_missing) {
+                await handleWorkspaceGone();
+            }
             throw new Error(data.error || 'Failed to load session tabs');
         }
 
@@ -7110,7 +7144,7 @@
     ───────────────────────────────────────────── */
     let statusRefreshTimer = null;
     function scheduleStatusRefresh() {
-        if (statusRefreshTimer) return;
+        if (statusRefreshTimer || workspaceGone) return;
         statusRefreshTimer = setTimeout(() => {
             statusRefreshTimer = null;
             refreshStatuses();
@@ -7118,6 +7152,9 @@
     }
 
     async function refreshStatuses() {
+        /* Nothing to reconcile against a workspace that no longer exists — the
+           window is closing, and every read would 400. */
+        if (workspaceGone) return;
         if (!gridBuilt) { initialLoad(); return; }
         try {
             const groupChanged = await loadSessionGroups();
@@ -7227,7 +7264,12 @@
                 await initialLoad();
             }
         } catch (e) {
-            console.error('Close session failed:', e);
+            /* Closing the last tab of a non-default workspace removes the
+               workspace with it, so the reload above legitimately fails —
+               loadSessionGroups() has already started closing this window. */
+            if (!workspaceGone) {
+                console.error('Close session failed:', e);
+            }
         }
     }
 
@@ -7235,8 +7277,8 @@
         await closeSessionGroup(activeGroupId);
     }
 
-    async function _closeWindowAfterLastSession() {
-        logSessionWindowAction('Last session closed — closing window');
+    async function _closeWindowAfterLastSession(reason = 'Last session closed') {
+        logSessionWindowAction(`${reason} — closing window`);
         /* Announce before closing: the room event that would normally relay
            this change races the window teardown, and an emptied non-default
            workspace is removed globally (record *and* saved snapshot), so a
