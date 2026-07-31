@@ -2547,6 +2547,57 @@
         return found ? workspaceDisplayLabel(found.workspace, found.index) : 'New workspace';
     }
 
+    /* ── The workspace mode switch (card 04) ──
+       Multiple workspaces changes what every launch does, so it is a switch on
+       the launch surface rather than a checkbox in App Settings. The behaviour
+       is unchanged: turning it off still confirms, closes every workspace but
+       the main one, and reloads — all of that stays in workspaces.js. */
+    const MULTI_WORKSPACE_STATE_COPY = Object.freeze({
+        on: 'On — launches can go to their own window',
+        off: 'Off — everything runs in one window'
+    });
+    let multiWorkspaceToggleInFlight = false;
+
+    function syncMultiWorkspaceToggle(enabled = isMultiWorkspaceEnabled()) {
+        const toggle = document.getElementById('multiWorkspaceToggle');
+        if (!toggle) {
+            return;
+        }
+        toggle.classList.toggle('is-on', Boolean(enabled));
+        toggle.setAttribute('aria-checked', enabled ? 'true' : 'false');
+        const state = document.getElementById('multiWorkspaceToggleState');
+        if (state) {
+            state.textContent = enabled ? MULTI_WORKSPACE_STATE_COPY.on : MULTI_WORKSPACE_STATE_COPY.off;
+        }
+    }
+
+    async function toggleMultiWorkspaceMode() {
+        const toggle = document.getElementById('multiWorkspaceToggle');
+        if (multiWorkspaceToggleInFlight) {
+            return;
+        }
+        const next = !isMultiWorkspaceEnabled();
+        multiWorkspaceToggleInFlight = true;
+        /* Busy state is a class, never rewritten markup (guardrail 8). The
+           switch moves straight away because a successful change reloads this
+           page; only a declined confirm or a failure puts it back. */
+        toggle?.classList.add('is-busy');
+        syncMultiWorkspaceToggle(next);
+        try {
+            const applied = await setMultiWorkspaceEnabled(next);
+            if (applied !== next) {
+                syncMultiWorkspaceToggle(applied);
+                showMessage('Multiple workspaces stays on.', '');
+            }
+        } catch (error) {
+            syncMultiWorkspaceToggle();
+            showMessage(`Could not change the workspace mode: ${error.message}`, 'error');
+        } finally {
+            multiWorkspaceToggleInFlight = false;
+            toggle?.classList.remove('is-busy');
+        }
+    }
+
     /* The CTA carries the destination so there is nothing to link it to. With
        the flag off it stays exactly today's single-workspace button. */
     function syncLaunchDestinationControl() {
@@ -3063,6 +3114,7 @@
     }
 
     setupLauncherAppConfigListeners();
+    syncMultiWorkspaceToggle();
     syncLaunchDestinationControl();
 
     restoreActiveSavedSessionMeta();

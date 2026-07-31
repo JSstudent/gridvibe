@@ -108,12 +108,108 @@
     cursor: default;
 }
 
+/* ── The workspace mode switch (launcher, card 04) ──
+   Sized to read as the card's headline control rather than a settings row: it
+   decides whether every launch below it can open its own window. */
+
+.workspace-mode-switch {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    padding: 14px 16px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-m);
+    background: var(--gv-dialog-panel-soft);
+    color: var(--gv-dialog-text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.workspace-mode-switch:hover:not(.is-busy),
+.workspace-mode-switch:focus-visible {
+    border-color: var(--gv-accent);
+}
+
+.workspace-mode-switch.is-on {
+    border-color: var(--gv-accent);
+    background: var(--gv-accent-soft);
+}
+
+.workspace-mode-switch.is-busy {
+    opacity: 0.6;
+    cursor: progress;
+}
+
+.workspace-mode-track {
+    position: relative;
+    flex: 0 0 auto;
+    width: 52px;
+    height: 30px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: 999px;
+    background: var(--gv-dialog-field-bg);
+    transition: background 0.18s ease, border-color 0.18s ease;
+}
+
+.workspace-mode-switch.is-on .workspace-mode-track {
+    border-color: var(--gv-accent);
+    background: var(--gv-accent);
+}
+
+.workspace-mode-thumb {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--gv-dialog-muted);
+    transition: transform 0.18s ease, background 0.18s ease;
+}
+
+.workspace-mode-switch.is-on .workspace-mode-thumb {
+    transform: translateX(22px);
+    background: var(--gv-dialog-field-bg);
+}
+
+.workspace-mode-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+
+.workspace-mode-copy strong {
+    font-size: 0.95rem;
+    letter-spacing: 0.2px;
+}
+
+.workspace-mode-state {
+    font-size: 12px;
+    color: var(--gv-dialog-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .workspace-mode-switch,
+    .workspace-mode-track,
+    .workspace-mode-thumb {
+        transition: none;
+    }
+}
+
 /* ── Launch destination (launcher, step 2) ── */
 
 .workspace-destination {
     display: flex;
     flex-direction: column;
     gap: 8px;
+}
+
+.workspace-mode-switch + .workspace-destination {
+    margin-top: 12px;
 }
 
 .workspace-destination-row {

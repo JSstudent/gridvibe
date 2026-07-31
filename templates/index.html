@@ -125,11 +125,10 @@
             <div id="terminalRows" class="rows-wrap"></div>
         </div>
 
-        {% if multi_workspace_enabled %}
-        <!-- 04 lists what already exists: the live workspace windows, and the
-             saved snapshots that can be reopened. Where a launch *goes* is not
-             here — it is on the Launch button itself, so the destination and the
-             action that uses it are one control. -->
+        <!-- 04 owns the mode and lists what already exists: the live workspace
+             windows, and the saved snapshots that can be reopened. Where a
+             launch *goes* is not here — it is on the Launch button itself, so
+             the destination and the action that uses it are one control. -->
         <div class="card workspace-destination-card" id="workspaceDestinationCard">
             <div class="section-head">
                 <div class="section-title">
@@ -149,6 +148,30 @@
                     <span id="workspaceSavedEntryLabel">Reopen saved…</span>
                 </button>
             </div>
+
+            <!-- The mode switch is the loudest control in the card on purpose:
+                 it changes what every launch does, and as a checkbox buried in
+                 App Settings nobody found it. The policy behind it (confirm,
+                 persist, tell the other windows, apply) stays in workspaces.js
+                 so this stays the only surface, not a second implementation. -->
+            <button
+                type="button"
+                class="workspace-mode-switch"
+                id="multiWorkspaceToggle"
+                role="switch"
+                aria-checked="false"
+                onclick="toggleMultiWorkspaceMode()"
+            >
+                <span class="workspace-mode-track" aria-hidden="true">
+                    <span class="workspace-mode-thumb"></span>
+                </span>
+                <span class="workspace-mode-copy">
+                    <strong>Multiple workspaces</strong>
+                    <span class="workspace-mode-state" id="multiWorkspaceToggleState"></span>
+                </span>
+            </button>
+
+            {% if multi_workspace_enabled %}
             <div class="workspace-destination">
                 <div class="workspace-destination-hint" id="workspaceDestinationHint">
                     Each workspace runs in its own window with its own session tabs.
@@ -158,8 +181,8 @@
                     No workspaces are open yet.
                 </div>
             </div>
+            {% endif %}
         </div>
-        {% endif %}
 
         <div class="action-bar">
             <div class="action-bar-left action-stack">

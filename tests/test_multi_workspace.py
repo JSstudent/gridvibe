@@ -1500,12 +1500,13 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
 
 
 class MultiWorkspaceModeToggleTestCase(unittest.TestCase):
-    """Turning the mode on and off from App Settings, and keeping windows in sync.
+    """Turning the mode on and off from the launcher, and keeping windows in sync.
 
     The flag was wired end-to-end but had no control: it could only be changed by
-    editing config.json and restarting. It is now an App Settings toggle that
-    applies immediately, and switching it off has to leave nothing running that
-    no window can reach.
+    editing config.json and restarting. It became an App Settings checkbox, which
+    hid a feature that changes what every launch does, so the control is now the
+    switch in the launcher's Workspaces card. It still applies immediately, and
+    switching it off has to leave nothing running that no window can reach.
     """
 
     WORKSPACE_A = "aaaaaaaaaaaa"
@@ -1548,23 +1549,88 @@ class MultiWorkspaceModeToggleTestCase(unittest.TestCase):
         response.close()
         return body
 
-    # ── The App Settings control ──
+    # ── The launcher control ──
 
-    def test_app_settings_ships_the_toggle_wired_end_to_end(self):
+    def test_the_launcher_ships_the_mode_switch_wired_end_to_end(self):
         html = self.client.get("/").get_data(as_text=True)
-        app_settings_js = self._static("js/app-settings.js")
+        launcher_js = self._static("js/launcher.js")
+        workspaces_js = self._static("js/workspaces.js")
 
         # Guardrail 5: a config key must be wired page-to-backend, not half-added.
-        self.assertIn('id="appMultiWorkspaceEnabled"', html)
-        self.assertIn("multi_workspace_enabled: Boolean(", app_settings_js)
+        self.assertIn('id="multiWorkspaceToggle"', html)
+        self.assertIn('onclick="toggleMultiWorkspaceMode()"', html)
+        self.assertIn('role="switch"', html)
+        self.assertIn("async function toggleMultiWorkspaceMode()", launcher_js)
+        self.assertIn("async function setMultiWorkspaceEnabled(enabled", workspaces_js)
         self.assertIn(
-            "multiWorkspaceInput.checked = Boolean(workspace.multi_workspace_enabled);",
-            app_settings_js,
+            "JSON.stringify({ workspace: { multi_workspace_enabled: next } })",
+            workspaces_js,
         )
         self.assertIn(
             "multi_workspace_enabled",
             self.client.get("/api/app-config").get_json()["workspace"],
         )
+
+    def test_the_switch_is_visible_before_the_mode_is_on(self):
+        with patch.object(api.runtime_config, "multi_workspace_enabled", False):
+            html = self.client.get("/").get_data(as_text=True)
+
+        # The point of moving it out of App Settings: the way in must be on
+        # screen while the mode is still off. The live-workspace list stays
+        # server-gated — there is nothing to list yet.
+        self.assertIn('id="multiWorkspaceToggle"', html)
+        self.assertIn('id="workspaceDestinationCard"', html)
+        self.assertNotIn('id="workspaceLiveList"', html)
+
+    def test_app_settings_no_longer_owns_the_flag(self):
+        html = self.client.get("/").get_data(as_text=True)
+        app_settings_js = self._static("js/app-settings.js")
+
+        # One surface only (guardrail 6). The dialog must also stop *sending*
+        # the key, so saving an unrelated setting cannot move the mode: the
+        # backend keeps whatever a payload omits.
+        self.assertNotIn('id="appMultiWorkspaceEnabled"', html)
+        self.assertNotIn("appMultiWorkspaceEnabled", app_settings_js)
+        self.assertNotIn("confirmMultiWorkspaceDisable()", app_settings_js)
+        collect = app_settings_js[
+            app_settings_js.index("function collectAppSettingsForm()"):
+            app_settings_js.index("function notifyAppConfigUpdated(appSettings")
+        ]
+        # No `multi_workspace_enabled:` key in the object this dialog POSTs.
+        self.assertNotIn("multi_workspace_enabled:", collect)
+        # The broadcast still carries the flag: that is how the other windows
+        # learn the mode changed at all.
+        self.assertIn(
+            "multi_workspace_enabled: Boolean(appSettings?.workspace?.multi_workspace_enabled)",
+            app_settings_js,
+        )
+
+    def test_saving_an_unrelated_setting_keeps_the_mode(self):
+        with patch.object(api, "save_config"), \
+                patch.object(api, "_refresh_runtime_config"), \
+                patch.object(api, "socketio"), \
+                patch.object(api.runtime_config, "multi_workspace_enabled", True):
+            response = self.client.post(
+                "/api/app-config", json={"workspace": {"surface_mode": "max"}}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["workspace"]["multi_workspace_enabled"])
+
+    def test_the_switch_confirms_before_it_closes_live_workspaces(self):
+        workspaces_js = self._static("js/workspaces.js")
+        launcher_js = self._static("js/launcher.js")
+
+        # Guardrail 8: an irreversible action confirms in page, and the busy
+        # state is a class rather than rewritten button markup.
+        setter = workspaces_js[
+            workspaces_js.index("async function setMultiWorkspaceEnabled(enabled"):
+            workspaces_js.index("/* ── Saved-workspace snapshots")
+        ]
+        self.assertIn("await confirmMultiWorkspaceDisable()", setter)
+        self.assertIn("notifyAppConfigUpdated(data)", setter)
+        self.assertIn("await applyMultiWorkspaceFlagChange(next", setter)
+        self.assertIn("toggle?.classList.add('is-busy')", launcher_js)
 
     def test_saving_the_toggle_persists_and_broadcasts_it(self):
         with patch.object(api, "save_config") as save_config, \

@@ -113,7 +113,7 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 | **Session groups** | Numbered, draggable, closable tabs. `Alt+1`–`Alt+9` to switch, middle-click to close. |
 | **Presets** | `Save Session`, `Save Session as…`, `Save All Sessions`, `Import Session`. SSH passwords are Fernet-encrypted in `saved_sessions.json`. |
 | **Workspace snapshot** | Background autosave (1–15 min) plus explicit **Save Workspace** writes `runtime_state.json` — never passwords. After a restart the launcher offers the workspace back by name and reopens on the group you left. |
-| **Multiple workspaces** | Opt-in (`workspace.multi_workspace_enabled`). Launch into a chosen workspace or a new one, each in its own window with its own tabs; move a tab between workspaces without restarting a single terminal; rename a workspace; restore any subset of saved workspaces after a restart. |
+| **Multiple workspaces** | Opt-in — the switch in the launcher's **Workspaces** card (step 04), stored as `workspace.multi_workspace_enabled`. Launch into a chosen workspace or a new one, each in its own window with its own tabs; move a tab between workspaces without restarting a single terminal; rename a workspace; restore any subset of saved workspaces after a restart. |
 | **Broadcast typing** | One keystroke, every pane in the group. |
 | **Self-update** | **Check for updates** does a git fast-forward, or save the workspace and restart in one action. |
 
@@ -194,7 +194,7 @@ Drag the dividers between panes to resize them.
 
 ## Configuration
 
-Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, workspace autosave interval, SSH host-key policy, and all voice options.
+Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, workspace autosave interval, SSH host-key policy, and all voice options. The one exception is **Multiple workspaces**: it changes what every launch does, so its switch sits in the launcher's Workspaces card instead of the dialog.
 
 On disk, settings load from `config.json` (git-ignored) falling back to `default_config.json`:
 

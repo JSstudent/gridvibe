@@ -247,8 +247,8 @@
     }
 
     /* ── Turning the multi-workspace mode on and off ──
-       app-settings.js owns the dialog but not this policy; both pages call
-       these so the rule lives in one place (guardrail 6). */
+       The launcher's Workspaces card owns the switch but not this policy; it
+       lives here so a second surface can only ever call it (guardrail 6). */
 
     async function closeExtraWorkspaces() {
         const { ok, data } = await workspaceApiRequest('/api/workspaces/close-extra', {
@@ -312,6 +312,36 @@
             notifyWorkspacesChanged('multi_workspace_disabled');
         }
         await reactToMultiWorkspaceFlagChange(enabled, options);
+    }
+
+    /* The single entry point for changing the mode: confirm what turning it off
+       costs, persist just this key, tell every other window, then apply it here.
+       Only `multi_workspace_enabled` is sent, so a switch flip can never carry
+       along a half-edited App Settings form — the backend keeps every key the
+       payload omits. Returns the flag that is in effect afterwards, which is the
+       old one when the user declines the confirm. */
+    async function setMultiWorkspaceEnabled(enabled, { currentWorkspaceId = '' } = {}) {
+        const next = Boolean(enabled);
+        if (next === isMultiWorkspaceEnabled()) {
+            return next;
+        }
+        if (!next && !(await confirmMultiWorkspaceDisable())) {
+            return true;
+        }
+        const { ok, data } = await workspaceApiRequest('/api/app-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspace: { multi_workspace_enabled: next } })
+        });
+        if (!ok) {
+            throw new Error(data.error || 'Could not change the workspace mode');
+        }
+        /* Every window renders the mode from server-side markup, so the others
+           only learn about the change from this broadcast (a sender never
+           receives its own message — this window applies it below). */
+        notifyAppConfigUpdated(data);
+        await applyMultiWorkspaceFlagChange(next, { currentWorkspaceId });
+        return next;
     }
 
     /* ── Saved-workspace snapshots (restore chooser) ── */
