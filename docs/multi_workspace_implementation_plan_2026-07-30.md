@@ -1,7 +1,8 @@
 # Multi-workspace implementation plan (staged)
 
 Date: 2026-07-30
-Status: Proposal — supersedes `docs/multi_workspace_initial_plan_2026-07-28.md`
+Updated: 2026-07-31
+Status: Stages 1–2 implemented; Stages 3–4 revised and pending
 Scope: Multiple live workspaces, one terminal window per workspace, moving a
 session group between workspaces, and selective restore after restart.
 
@@ -118,11 +119,50 @@ multiplying the client-side replay path across N workspaces.
 Each stage ends with `python tests/run_tests.py` + `python -m ruff check .`
 green, and is independently mergeable.
 
+### Implementation record — 2026-07-31
+
+Stages 1 and 2 are implemented behind
+`workspace.multi_workspace_enabled` (default `false`):
+
+- `SessionManager` owns a permanent default workspace plus independent
+  non-default workspace records, per-workspace active groups and compact display
+  orders. Moving a group preserves its live sessions and ids.
+- Runtime capture is partitioned and password-free. One autosave tick takes one
+  consistent manager snapshot and performs one sibling-preserving file write.
+  Restorable summaries expose counts and metadata only.
+- The read/order/active HTTP contracts are workspace-scoped, reject foreign
+  groups, and never use `active_launch_options` for an explicitly named
+  workspace. Legacy callers still resolve to `"default"`.
+- Workspace Socket.IO rooms isolate group-list invalidation events. Browser and
+  native windows have stable per-workspace identities; native fullscreen, zoom,
+  close, theme and download-dialog targeting are keyed by workspace id.
+- Focused coverage lives in `tests/test_multi_workspace.py`, with manager and
+  native-window coverage in `tests/test_session_manager.py` and
+  `tests/test_webview_launcher.py`. Existing API/config/markup assertions were
+  extended in `tests/test_api.py`.
+
+Implementation exposed four requirements for the remaining stages:
+
+1. A stable saved-group conflict must be resolved **before**
+   `_replace_group_sessions()` runs. Replacing first would destroy the source
+   workspace's live sessions and only then discover the ownership conflict.
+2. A UI-created empty workspace needs an explicit transient
+   `retain_when_empty` policy. Absence of groups alone cannot distinguish it from
+   a workspace emptied by close or move.
+3. A shared native `js_api` cannot infer which window invoked any method,
+   including `save_download`; every new bridge call must carry the workspace id.
+4. Restore must create the live workspace with the saved slot's exact id and
+   roll it back if no group starts. Autosave already preserves a slot's
+   `origin: "manual"` so the Stage 4 auto-slot cap can never demote or evict a
+   manual save.
+
 ---
 
 ## 5. The stages
 
 ### Stage 1 — Live ownership and persistence partitioning
+
+**Implementation status (2026-07-31): Complete.**
 
 **Goal.** The backend can own N workspaces correctly. Nothing in the UI changes.
 
@@ -168,9 +208,9 @@ green, and is independently mergeable.
      `pane_count`), no launch config, no credentials.
    - `clear_workspace()` is unchanged and finally has a caller.
 7. **Backend orchestration module** — new canonical `web/workspaces.py` holding
-   normalization, the public workspace payload, the destination-resolution
-   rules, and (Stage 4) the shared launch service. `web/api.py` gets thin routes
-   only (guardrail 6 — do not regrow the monolith).
+   normalization and the public workspace payload. Stage 3 adds destination
+   resolution and Stage 4 adds the shared launch service there. `web/api.py`
+   gets thin routes only (guardrail 6 — do not regrow the monolith).
 8. **Compatibility** — every route/manager entry point that omits a workspace id
    resolves to `"default"`. Existing tests must pass **unmodified** except where
    they assert a payload that gains a `workspace_id` key.
@@ -188,9 +228,16 @@ green, and is independently mergeable.
 **Explicitly not in Stage 1.** Any route surface change beyond optional
 `workspace_id` parameters; any frontend file; any window change.
 
+**Implemented notes.** Forced removal of a last group prunes an empty
+non-default workspace immediately; background cleanup uses the existing grace
+period. The default workspace is never pruned. Autosave preserves an existing
+manual slot's origin while refreshing its live contents.
+
 ---
 
 ### Stage 2 — Isolated workspace windows
+
+**Implementation status (2026-07-31): Complete.**
 
 **Goal.** Two windows exist, each showing only its own tabs, each updating
 independently. Still no new UI controls — reached by hand-typed URL and by the
@@ -203,10 +250,11 @@ flag in dev.
 1. **URL identity** — `/terminals?workspace=<id>&group=<id>`. Legacy
    `/terminals` and `/terminals?group=<id>` mean the default workspace. When
    both are supplied and the group is **not** owned by that workspace, the page
-   is served but the group is ignored and the window falls back to its own
-   first tab; `GET /api/session-groups?workspace_id=` never returns a foreign
-   group. (This is the post-move race: a stale URL must never render a sibling
-   workspace's data.)
+   is served but the group is ignored and the window uses its existing local
+   selection policy (currently the newest group by display order);
+   `GET /api/session-groups?workspace_id=` never returns a foreign group. (This
+   is the post-move race: a stale URL must never render a sibling workspace's
+   data.)
 2. **Filtered reads** — `GET /api/session-groups?workspace_id=`,
    `GET /api/sessions?workspace_id=`, `POST /api/session-groups/order` with
    `workspace_id` (rejects foreign group ids with `400`),
@@ -238,7 +286,9 @@ flag in dev.
    - `_should_exit_after_window_close` (`:423`) keeps its meaning: the launcher
      owns the app lifecycle; closing one workspace window closes only its own
      bridge state.
-   - Native frame theme, zoom, and close callbacks are applied per window.
+    - Native frame theme, zoom, and close callbacks are applied per window.
+    - Shared bridge operations such as `save_download` also take an explicit
+      workspace id; caller identity is never inferred from the shared `js_api`.
 6. **Last-group behavior** — `terminals.js:6882` closes only *this* workspace's
    window, and only when the user closed the last group **in that window**. A
    workspace created deliberately empty (Stage 3) is never auto-closed.
@@ -258,6 +308,12 @@ flag in dev.
 
 **Explicitly not in Stage 2.** Creating workspaces from the UI, moving groups,
 menu changes, restore changes.
+
+**Implemented notes.** `POST /api/sessions` remains a default-workspace launch
+until Stage 3, but already returns `workspace_id`. The Stage 2 client dispatch,
+identity, filtered loading and room-join logic is functional in the existing
+files; Stage 3 extracts shared pieces into `workspaces.js` instead of
+reimplementing them.
 
 ---
 
@@ -279,18 +335,24 @@ workspaces from inside a window, move a tab between workspaces.
    - A **Live workspaces** list with an Open/Focus button per workspace.
 2. **`POST /api/sessions` destination** — accepts `workspace_id`, **or**
    `new_workspace: true` + optional `workspace_label`; returns the resolved
-   `workspace_id`. Omitting both keeps targeting `"default"`.
+   `workspace_id` (the response field already exists from Stage 2). Omitting
+   both keeps targeting `"default"`.
    Workspace creation and group insertion are one manager operation; if
    validation or session creation fails, the new workspace record is rolled
    back so a dead destination can never appear in the picker
    (mirrors the existing `remove_group` rollback at `web/api.py:1960`).
 3. **Uniqueness guard** — see §6. `409` with a structured conflict body, and an
    in-page **Open it / Move it here** affordance (guardrail 8: failure states
-   need a retry affordance).
+   need a retry affordance). For stable `saved-session-<id>` groups,
+   `find_saved_session_group()` and destination ownership resolution run
+   **before** `_replace_group_sessions()`. Replace-in-place is allowed only
+   after the existing group is proven to belong to the resolved target.
 4. **Workspace menus in every window** — full spec in §7.
 5. **Move** — `POST /api/session-groups/<group_id>/move` with
    `{"target_workspace_id"}` or `{"new_workspace": true, "label": ""}`.
-   Backend sequence, atomic under `SessionManager.lock`:
+   The manager's Stage 1 `move_group()` performs the ownership and ordering
+   mutation atomically under `SessionManager.lock`; the thin route resolves a
+   destination, calls it, and emits after the lock. Sequence:
    1. validate source group + destination (or create destination);
    2. reassign `group.workspace_id`;
    3. compact the source workspace's order;
@@ -308,17 +370,26 @@ workspaces from inside a window, move a tab between workspaces.
    through `openGenericConfirmModal(...)`. **No `window.confirm` / `prompt` /
    `alert` anywhere** — WebView2 blocks them and
    `GuardrailAuditFixesTestCase` enforces it (guardrail 4).
-7. **Frontend structure** (guardrail 6)
+7. **Deliberately empty lifetime** — add transient
+   `Workspace.retain_when_empty: bool = false`. `POST /api/workspaces` sets it
+   for a UI-created empty workspace. Adding or moving in the first group clears
+   it, after which normal last-group close/move pruning applies. It is live
+   lifecycle state only and is not written to `runtime_state.json`.
+8. **Frontend structure** (guardrail 6)
    - New `web/static/js/workspaces.js`, loaded by both pages: workspace
-     identity, workspace API calls, destination lists, move actions,
-     browser/native window dispatch.
+      identity, workspace API calls, destination lists, move actions,
+      browser/native window dispatch.
    - New `web/static/css/workspaces.css`, `tokens.css` variables only, no
      palette literals (guardrail 7).
-   - `launcher.js` keeps only form collection and launch orchestration;
-     `terminals.js` keeps only page integration (current workspace id,
-     filtered loading, cache eviction, room joins).
+   - Extract the Stage 2 dispatch/API helpers already present in `launcher.js`
+     and `terminals.js`; do not introduce a parallel implementation.
+     `launcher.js` keeps only form collection and launch orchestration;
+     `terminals.js` keeps only page integration (current workspace id, filtered
+     loading, cache eviction, room joins).
+   - Every native bridge helper, including download dialogs, passes the current
+     workspace id explicitly.
    - Icons are stroke-style `currentColor` SVG.
-8. *(Optional, last)* **Drag destination tray** — a small in-window tray of
+9. *(Optional, last)* **Drag destination tray** — a small in-window tray of
    workspace targets; dropping a tab calls the same `moveGroupToWorkspace()`.
    Cross-OS-window HTML drag/drop is **not** attempted: it is inconsistent
    across browsers and embedded WebViews. If this step is cut, nothing else
@@ -347,8 +418,9 @@ each, without ever handing a credential to the browser.
 **Work.**
 
 1. **Summaries** — `GET /api/runtime-state/workspaces` returns
-   `list_restorable_workspaces()` plus a per-row `live_conflict` flag when that
-   workspace id is already active. No launch config, no credentials.
+   the Stage 1 `list_restorable_workspaces()` result plus a per-row
+   `live_conflict` flag when that workspace id is already active. This is a thin
+   route; no launch config or credentials are returned.
 2. **Chooser UI** — the launcher's single banner becomes a list with a checkbox,
    label, saved-age, group count, pane count, and a disabled state with the
    reason. Restore any subset; unselected slots stay saved. Per row: a
@@ -364,9 +436,11 @@ each, without ever handing a credential to the browser.
    launch in JavaScript.
 4. **`POST /api/runtime-state/restore`** with `{"workspace_ids": [...]}`.
    Per workspace, server-side: load the password-free slot → reject if already
-   live → resolve the referenced preset and its credential **on the server** →
+   live → create the live workspace record with the slot's **exact saved id** →
+   resolve the referenced preset and its credential **on the server** →
    relaunch each group through the shared service → return per-workspace and
-   per-group results.
+   per-group results. If no group starts, remove the just-created live workspace
+   so a failed restore does not become an `already_live` conflict on retry.
 5. **ISSUE-2026-037** — decrypted passwords never leave the process; the
    full-request-body log at `web/api.py:1811` is redacted (log a field
    summary, never `password`); the response says **relaunch started**, not
@@ -374,7 +448,11 @@ each, without ever handing a credential to the browser.
    existing room-scoped `session_status` events and the existing retry UI.
 6. **Windows** — the launcher opens a window only for workspaces whose relaunch
    actually started, and only after the response.
-7. **Edge cases** — §9, all twelve rows, each with a test.
+7. **Slot cap** — apply `MAX_AUTO_WORKSPACE_SLOTS` at the single
+   `capture_live_workspaces()` write point. Stage 1 already preserves an
+   existing manual slot's origin during autosave; eviction therefore considers
+   only slots whose origin is still `"auto"`.
+8. **Edge cases** — §9, all fourteen rows, each with a test.
 
 **Exit criteria.**
 
@@ -442,7 +520,7 @@ which today has exactly one item.
 |---|---|---|
 | Save Workspace | 2 | Existing (`terminals.js:2005`); now sends this window's `workspace_id` and its own `active_group_id`. |
 | Rename Workspace … | 3 | Label only, via the existing name-dialog pattern (`explorerNameModal`), never `window.prompt`. Updates the live record and the saved slot's label. |
-| New Workspace … | 3 | Creates an empty workspace and opens its window. The empty window is usable: it shows the existing empty state plus **Sessions ▸ Import Session …**. Because no group was ever closed in it, the last-group auto-close path (§Stage 2.6) does not fire. |
+| New Workspace … | 3 | Creates an empty workspace with transient `retain_when_empty=true` and opens its window. The empty window is usable: it shows the existing empty state plus **Sessions ▸ Import Session …**. Adding or moving in its first group clears the retention flag. |
 | Open Workspace ▸ | 3 | Submenu of live workspaces (current one marked, disabled); focuses or opens that window. |
 | Move Session to Workspace ▸ | 3 | Acts on the active tab; keyboard-accessible parity with the tab context menu. Same `moveGroupToWorkspace()` call. |
 | Close Workspace Window | 3 | Closes this window, keeps its sessions live and reopenable. Explicit, unlike the OS close button. |
@@ -466,7 +544,9 @@ items are hidden and the menu degrades to today's single **Save Workspace**.
   live workspace record (returning the id so the event can be emitted after the
   lock). The workspace's **saved slot is not erased** — it stays restorable.
 - Moving the last group out has the same effect on the source window.
-- A deliberately created empty workspace is not auto-closed.
+- A deliberately created empty workspace is not auto-closed while its transient
+  `retain_when_empty` flag is set. Adding or moving in the first group clears
+  the flag; it is never persisted to a saved slot.
 - App settings, theme, voice settings, and surface mode stay **global**. They
   are not copied into workspace records — a workspace must never pin a stale
   copy of a live global setting (the same reasoning already documented at
@@ -553,6 +633,10 @@ keeps its permanent-offer promise. Roughly ten lines, one place, no config key
 (guardrail 5 — no half-wired settings). If you would rather ship nothing here,
 Forget alone is sufficient and the cap can follow later; it changes no contract.
 
+Stage 1 already prevents autosave from changing an existing slot from
+`origin: "manual"` to `"auto"`. Stage 4 therefore adds only the bounded
+oldest-auto-first eviction at this write point.
+
 ### 9.3 Edge-case matrix
 
 Every row is a defined outcome and a test. The invariant: **a bad row degrades
@@ -578,7 +662,7 @@ something the user did not save.**
 
 Also covered, outside restore: a group closed in window A while window B has a
 stale tab list (B reconciles on the room event, and a missing group id resolves
-to "load this window's first tab"); a `max_sessions` cap exceeded mid-restore
+to this window's valid local selection); a `max_sessions` cap exceeded mid-restore
 (per-group `400`, surfaced as a failed group, never a 500).
 
 ---
@@ -594,6 +678,7 @@ class Workspace:
     label: str = ""
     created_at: float = field(default_factory=time.time)
     active_group_id: str = ""     # replaces SessionManager._active_group_id
+    retain_when_empty: bool = False  # Stage 3 live-only lifecycle hint
 
 @dataclass
 class SessionGroup:
@@ -690,6 +775,9 @@ last group yields an empty source; empty-workspace pruning spares `"default"`;
 one tick → one write for N workspaces; v1 migration and default-slot behavior
 unchanged; no password in any snapshot; lock-hold assertions.
 
+Implemented automated coverage: `MultiWorkspaceSessionManagerTestCase` plus the
+runtime-state cases in `tests/test_multi_workspace.py`.
+
 **Stage 2 — routes, rooms, windows**
 Filtered group/session/order/active responses; foreign-group rejection;
 mismatched `workspace`+`group` falls back safely; a named workspace never gets
@@ -699,6 +787,11 @@ workspace twice reuses one native window; two ids create two windows with
 distinct URLs; closing one window preserves the other and the launcher; closing
 the launcher still exits; fullscreen/minimize/zoom/theme target the right
 window.
+
+Implemented automated coverage: route/room/browser/runtime cases in
+`tests/test_multi_workspace.py`, native registry cases in
+`tests/test_webview_launcher.py`, and compatibility assertions in
+`tests/test_api.py`.
 
 **Stage 3 — launch, menus, move**
 New-workspace launch and rollback on failed session creation; the §6 conflict

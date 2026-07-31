@@ -5403,7 +5403,13 @@
            Save dialog + server-side fetch). In the browser the anchor works. */
         if (isPywebviewAvailable() && window.pywebview.api.save_download) {
             try {
-                const result = await window.pywebview.api.save_download(url, fileName);
+                const result = await window.pywebview.api.save_download(
+                    url,
+                    fileName,
+                    typeof CURRENT_WORKSPACE_ID === 'undefined'
+                        ? 'default'
+                        : CURRENT_WORKSPACE_ID
+                );
                 if (result?.ok) {
                     showTerminalToast(`Saved ${getDownloadBaseName(result.path) || fileName}`, 'success');
                 } else if (!result?.cancelled) {

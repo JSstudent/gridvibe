@@ -2335,7 +2335,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # An explicit Save Workspace names the saving window's own group and,
         # when desktop mode is active, carries the session window zoom.
         self.assertIn(
-            "const nativeZoomFactor = await getNativeSessionZoomFactor();",
+            "const nativeZoomFactor = await getCurrentWorkspaceNativeZoomFactor();",
             terminals_html,
         )
         self.assertIn("active_group_id: activeGroupId,", terminals_html)
@@ -2358,8 +2358,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertIn("activeGroupId,\n                    nativeZoomFactor", launcher_html)
         self.assertIn(
-            "`/terminals?group=${encodeURIComponent(targetGroupId)}`", launcher_html
+            "const params = new URLSearchParams({ workspace: resolvedWorkspaceId });",
+            launcher_html,
         )
+        self.assertIn("`gridvibe-workspace-${resolvedWorkspaceId}`", launcher_html)
 
     def test_launcher_round_trips_explorer_tab_views_and_markdown_appearance(self):
         """2.f: launcher carries tab views + Markdown appearance without editing them."""
@@ -3324,6 +3326,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                 },
                 "workspace": {
                     "surface_mode": "max",
+                    "multi_workspace_enabled": False,
                 },
                 "terminal": {
                     "font_family": api.runtime_config.terminal_font_family,
@@ -11411,6 +11414,8 @@ class SessionGroupsUpdatedBroadcastTestCase(unittest.TestCase):
         )
         self.addCleanup(socket_client.disconnect)
         socket_client.get_received()
+        socket_client.emit("join_workspace", {"workspace_id": "default"})
+        socket_client.get_received()
         return socket_client
 
     def _received_reasons(self, socket_client):
@@ -14492,25 +14497,44 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertIsNone(web_runtime_state.load_restorable_workspace())
         self.state_path.write_text("not json", encoding="utf-8")
         self.assertIsNone(web_runtime_state.load_restorable_workspace())
-        self.assertIsNone(web_runtime_state.load_restorable_workspace("nonexistent"))
+        self.assertIsNone(
+            web_runtime_state.load_restorable_workspace("cccccccccccc")
+        )
 
     def test_capture_and_clear_preserve_sibling_slots(self):
-        self._launch_explorer_group()
-        web_runtime_state.capture_workspace(api.session_manager, workspace_id="alpha")
-        web_runtime_state.capture_workspace(api.session_manager, workspace_id="beta")
-        # Overwriting slot A must leave slot B intact.
+        workspace_a = "aaaaaaaaaaaa"
+        workspace_b = "bbbbbbbbbbbb"
+        api.session_manager.create_workspace("A", workspace_a)
+        api.session_manager.create_workspace("B", workspace_b)
+        group_a = self._launch_explorer_group("A")
+        api.session_manager.move_group(group_a, workspace_a)
+        group_b = self._launch_explorer_group("B")
+        api.session_manager.move_group(group_b, workspace_b)
         web_runtime_state.capture_workspace(
-            api.session_manager, workspace_id="alpha", origin="manual"
+            api.session_manager,
+            workspace_id=workspace_a,
+        )
+        web_runtime_state.capture_workspace(
+            api.session_manager,
+            workspace_id=workspace_b,
+        )
+        # Overwriting slot A must leave slot B intact.
+        before = json.loads(self.state_path.read_text(encoding="utf-8"))
+        sibling_before = before["workspaces"][workspace_b]
+        web_runtime_state.capture_workspace(
+            api.session_manager,
+            workspace_id=workspace_a,
+            origin="manual",
         )
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(set(data["workspaces"]), {"alpha", "beta"})
-        self.assertEqual(data["workspaces"]["alpha"]["origin"], "manual")
-        self.assertEqual(data["workspaces"]["beta"]["origin"], "auto")
+        self.assertEqual(set(data["workspaces"]), {workspace_a, workspace_b})
+        self.assertEqual(data["workspaces"][workspace_a]["origin"], "manual")
+        self.assertEqual(data["workspaces"][workspace_b], sibling_before)
         # Clearing slot A must leave slot B intact, and the file stays v2.
-        web_runtime_state.clear_workspace("alpha")
+        web_runtime_state.clear_workspace(workspace_a)
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
         self.assertEqual(data["version"], 2)
-        self.assertEqual(set(data["workspaces"]), {"beta"})
+        self.assertEqual(set(data["workspaces"]), {workspace_b})
 
     def test_autosave_tick_captures_a_live_workspace(self):
         self._launch_explorer_group()
@@ -14899,7 +14923,7 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertIn("async function getNativeSessionZoomFactor()", shared_js)
         launcher_js = self._static("js/launcher.js")
         self.assertIn("body: JSON.stringify({ native_zoom_factor: nativeZoomFactor })", launcher_js)
-        self.assertIn("open_session_window(\n                        targetGroupId,", launcher_js)
+        self.assertIn("open_workspace_window(\n                            resolvedWorkspaceId,", launcher_js)
 
 
 class SettingsLauncherConfigTestCase(unittest.TestCase):
@@ -14966,6 +14990,27 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         )
         self.assertEqual(
             payload["terminal"]["max_sessions"], api.runtime_config.max_sessions
+        )
+
+    def test_multi_workspace_flag_is_wired_through_runtime_and_both_pages(self):
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"multi_workspace_enabled": True}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["workspace"]["multi_workspace_enabled"])
+        self.assertTrue(api.runtime_config.multi_workspace_enabled)
+        self.assertTrue(
+            api.load_config()["workspace"]["multi_workspace_enabled"]
+        )
+        self.assertIn(
+            "const MULTI_WORKSPACE_ENABLED = true;",
+            self.client.get("/").get_data(as_text=True),
+        )
+        self.assertIn(
+            "const MULTI_WORKSPACE_ENABLED = true;",
+            self.client.get("/terminals").get_data(as_text=True),
         )
 
     def test_app_config_persists_terminal_settings(self):

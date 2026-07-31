@@ -23,7 +23,8 @@
   },
   "workspace": {
     "surface_mode": "normal",
-    "autosave_interval_minutes": 5
+    "autosave_interval_minutes": 5,
+    "multi_workspace_enabled": false
   },
   "explorer_search": {
     "max_files": 2000,

@@ -19,6 +19,7 @@ import time
 import webbrowser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import urlopen
 
 from main import setup_logging
@@ -30,6 +31,7 @@ from web.api import (
     session_manager,
 )
 from web.runtime_state import normalize_native_zoom_factor
+from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id
 
 try:
     import webview
@@ -512,25 +514,86 @@ class GridVibeApi:
     def __init__(self, base_url: str):
         self._base_url = base_url
         self._window = None
-        self._session_window = None
-        self._session_window_group_id = ""
+        self._workspace_windows = {}
+        self._workspace_window_group_ids = {}
         self._is_fullscreen = False
-        self._session_is_fullscreen = False
+        self._workspace_fullscreen_states = {}
         self._register_window = None
         self._window_minimized = False
-        self._session_window_minimized = False
+        self._workspace_window_minimized = {}
         self._restarting = False
         self._native_theme = "dark"
-        self._pending_session_native_zoom_factor = None
+        self._pending_workspace_native_zoom_factors = {}
+
+    # Stage-2 compatibility aliases. The singular bridge methods target the
+    # permanent default workspace, while all real state is workspace-keyed.
+    @property
+    def _session_window(self):
+        return self._workspace_windows.get(DEFAULT_WORKSPACE_ID)
+
+    @_session_window.setter
+    def _session_window(self, window):
+        if window is None:
+            self._workspace_windows.pop(DEFAULT_WORKSPACE_ID, None)
+        else:
+            self._workspace_windows[DEFAULT_WORKSPACE_ID] = window
+
+    @property
+    def _session_window_group_id(self):
+        return self._workspace_window_group_ids.get(DEFAULT_WORKSPACE_ID, "")
+
+    @_session_window_group_id.setter
+    def _session_window_group_id(self, group_id):
+        resolved_group_id = str(group_id or "").strip()
+        if resolved_group_id:
+            self._workspace_window_group_ids[DEFAULT_WORKSPACE_ID] = resolved_group_id
+        else:
+            self._workspace_window_group_ids.pop(DEFAULT_WORKSPACE_ID, None)
+
+    @property
+    def _session_is_fullscreen(self):
+        return self._workspace_fullscreen_states.get(DEFAULT_WORKSPACE_ID, False)
+
+    @_session_is_fullscreen.setter
+    def _session_is_fullscreen(self, fullscreen):
+        self._workspace_fullscreen_states[DEFAULT_WORKSPACE_ID] = bool(fullscreen)
+
+    @property
+    def _session_window_minimized(self):
+        return self._workspace_window_minimized.get(DEFAULT_WORKSPACE_ID, False)
+
+    @_session_window_minimized.setter
+    def _session_window_minimized(self, minimized):
+        self._workspace_window_minimized[DEFAULT_WORKSPACE_ID] = bool(minimized)
+
+    @property
+    def _pending_session_native_zoom_factor(self):
+        return self._pending_workspace_native_zoom_factors.get(DEFAULT_WORKSPACE_ID)
+
+    @_pending_session_native_zoom_factor.setter
+    def _pending_session_native_zoom_factor(self, factor):
+        if factor is None:
+            self._pending_workspace_native_zoom_factors.pop(DEFAULT_WORKSPACE_ID, None)
+        else:
+            self._pending_workspace_native_zoom_factors[DEFAULT_WORKSPACE_ID] = factor
 
     def _attach_window(self, window):
         """Attach the created pywebview window instance."""
         self._window = window
 
     def _attach_session_window(self, window, group_id: str = ""):
-        """Attach the persistent session window instance."""
-        self._session_window = window
-        self._session_window_group_id = str(group_id or "").strip()
+        """Attach the default workspace window (legacy test/caller helper)."""
+        self._attach_workspace_window(DEFAULT_WORKSPACE_ID, window, group_id)
+
+    def _attach_workspace_window(self, workspace_id, window, group_id: str = ""):
+        """Attach one persistent workspace window instance."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        self._workspace_windows[resolved_workspace_id] = window
+        self._workspace_window_group_ids[resolved_workspace_id] = str(
+            group_id or ""
+        ).strip()
+        self._workspace_fullscreen_states.setdefault(resolved_workspace_id, False)
+        self._workspace_window_minimized.setdefault(resolved_workspace_id, False)
 
     def _set_register_window(self, callback):
         """Store the window registration callback shared by the launcher."""
@@ -541,14 +604,20 @@ class GridVibeApi:
         if window_name == "launcher":
             self._window_minimized = minimized
         elif window_name == "session":
-            self._session_window_minimized = minimized
+            self._workspace_window_minimized[DEFAULT_WORKSPACE_ID] = minimized
+        elif window_name.startswith("workspace:"):
+            workspace_id = normalize_workspace_id(window_name.split(":", 1)[1])
+            self._workspace_window_minimized[workspace_id] = minimized
 
     def _is_window_minimized(self, window_name: str) -> bool:
         """Return the tracked minimized state for the named window."""
         if window_name == "launcher":
             return self._window_minimized
         if window_name == "session":
-            return self._session_window_minimized
+            return self._workspace_window_minimized.get(DEFAULT_WORKSPACE_ID, False)
+        if window_name.startswith("workspace:"):
+            workspace_id = normalize_workspace_id(window_name.split(":", 1)[1])
+            return self._workspace_window_minimized.get(workspace_id, False)
         return False
 
     def _pulse_on_top(self, window, window_name: str) -> bool:
@@ -573,7 +642,10 @@ class GridVibeApi:
 
     def _should_skip_top_most_pulse(self, window_name: str) -> bool:
         """Avoid the focus workaround only where it is known to cause renderer issues."""
-        return sys.platform == "win32" and window_name in {"session", "launcher"}
+        return sys.platform == "win32" and (
+            window_name in {"session", "launcher"}
+            or window_name.startswith("workspace:")
+        )
 
     def toggle_fullscreen(self):
         """Toggle native fullscreen mode for the current window."""
@@ -600,44 +672,97 @@ class GridVibeApi:
         return {"ok": True, "is_fullscreen": self._is_fullscreen}
 
     def toggle_session_fullscreen(self):
-        """Toggle native fullscreen mode for the session window."""
-        if self._session_window is None:
-            return {"ok": False, "error": "Session window is not ready"}
-
-        self._session_window.toggle_fullscreen()
-        self._session_is_fullscreen = not self._session_is_fullscreen
-        return {"ok": True}
+        """Toggle fullscreen for the default workspace window."""
+        return self.toggle_workspace_fullscreen(DEFAULT_WORKSPACE_ID)
 
     def exit_session_fullscreen(self):
-        """Exit native fullscreen mode for the session window."""
-        if self._session_window is None:
-            return {"ok": False, "error": "Session window is not ready"}
-
-        if self._session_is_fullscreen:
-            self._session_window.toggle_fullscreen()
-            self._session_is_fullscreen = False
-
-        return {"ok": True}
+        """Exit fullscreen for the default workspace window."""
+        return self.exit_workspace_fullscreen(DEFAULT_WORKSPACE_ID)
 
     def get_session_fullscreen_state(self):
-        """Return the tracked native fullscreen state for the session window."""
-        return {"ok": True, "is_fullscreen": self._session_is_fullscreen}
+        """Return fullscreen state for the default workspace window."""
+        return self.get_workspace_fullscreen_state(DEFAULT_WORKSPACE_ID)
 
     def get_session_native_zoom(self):
-        """Return the session window's current native zoom for workspace save."""
-        factor = _read_native_window_zoom(self._session_window)
+        """Return native zoom for the default workspace window."""
+        return self.get_workspace_native_zoom(DEFAULT_WORKSPACE_ID)
+
+    def toggle_workspace_fullscreen(self, workspace_id):
+        """Toggle native fullscreen mode for one workspace window."""
+        try:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        window = self._workspace_windows.get(resolved_workspace_id)
+        if window is None:
+            return {"ok": False, "error": "Workspace window is not ready"}
+        window.toggle_fullscreen()
+        self._workspace_fullscreen_states[resolved_workspace_id] = not (
+            self._workspace_fullscreen_states.get(resolved_workspace_id, False)
+        )
+        return {"ok": True}
+
+    def exit_workspace_fullscreen(self, workspace_id):
+        """Exit native fullscreen mode for one workspace window."""
+        try:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        window = self._workspace_windows.get(resolved_workspace_id)
+        if window is None:
+            return {"ok": False, "error": "Workspace window is not ready"}
+        if self._workspace_fullscreen_states.get(resolved_workspace_id, False):
+            window.toggle_fullscreen()
+            self._workspace_fullscreen_states[resolved_workspace_id] = False
+        return {"ok": True}
+
+    def get_workspace_fullscreen_state(self, workspace_id):
+        """Return tracked native fullscreen state for one workspace window."""
+        try:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {
+            "ok": True,
+            "is_fullscreen": self._workspace_fullscreen_states.get(
+                resolved_workspace_id,
+                False,
+            ),
+        }
+
+    def get_workspace_native_zoom(self, workspace_id):
+        """Return one workspace window's current native zoom."""
+        try:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        factor = _read_native_window_zoom(
+            self._workspace_windows.get(resolved_workspace_id)
+        )
         if factor is None:
-            return {"ok": False, "error": "Session window zoom is not ready"}
+            return {"ok": False, "error": "Workspace window zoom is not ready"}
         return {"ok": True, "zoom_factor": factor}
 
     def _apply_pending_session_native_zoom(self):
-        """Apply a restore-time zoom once the new WebView has finished loading."""
-        factor = self._pending_session_native_zoom_factor
-        self._pending_session_native_zoom_factor = None
+        """Apply pending zoom for the default workspace (legacy helper)."""
+        self._apply_pending_workspace_native_zoom(DEFAULT_WORKSPACE_ID)
+
+    def _apply_pending_workspace_native_zoom(self, workspace_id):
+        """Apply restore-time zoom once one workspace WebView has loaded."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        factor = self._pending_workspace_native_zoom_factors.pop(
+            resolved_workspace_id,
+            None,
+        )
         if factor is None:
             return
-        if _set_native_window_zoom(self._session_window, factor) is None:
-            logger.warning("Session window zoom %.3f could not be applied after load", factor)
+        window = self._workspace_windows.get(resolved_workspace_id)
+        if _set_native_window_zoom(window, factor) is None:
+            logger.warning(
+                "Workspace %s zoom %.3f could not be applied after load",
+                resolved_workspace_id,
+                factor,
+            )
 
     def _apply_native_frame_theme(self, window, window_name: str = "window") -> bool:
         """Apply the current native frame theme to a native window frame."""
@@ -651,8 +776,11 @@ class GridVibeApi:
         applied = False
         if self._window is not None:
             applied = self._apply_native_frame_theme(self._window, "launcher") or applied
-        if self._session_window is not None:
-            applied = self._apply_native_frame_theme(self._session_window, "session") or applied
+        for workspace_id, window in list(self._workspace_windows.items()):
+            applied = self._apply_native_frame_theme(
+                window,
+                f"workspace:{workspace_id}",
+            ) or applied
         return applied
 
     def set_native_theme(self, _theme=None):
@@ -687,7 +815,12 @@ class GridVibeApi:
 
         return {"ok": True, "path": path}
 
-    def save_download(self, download_url, filename=""):
+    def save_download(
+        self,
+        download_url,
+        filename="",
+        workspace_id=DEFAULT_WORKSPACE_ID,
+    ):
         """Save an in-app file download to disk via a native Save dialog.
 
         WebView2 silently drops programmatic ``<a download>`` clicks (the same
@@ -696,7 +829,11 @@ class GridVibeApi:
         The bytes are fetched from the local server over its own HTTP endpoint,
         so the endpoint's root-confinement and size-cap checks still apply.
         """
-        window = self._session_window or self._window
+        try:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        window = self._workspace_windows.get(resolved_workspace_id) or self._window
         if window is None or webview is None:
             return {"ok": False, "error": "Window is not ready"}
 
@@ -783,67 +920,129 @@ class GridVibeApi:
             return False
 
     def focus_session_window(self):
-        """Focus the existing session window without changing its URL."""
-        if self._session_window is None:
-            logger.warning("Session window focus requested, but no session window is registered")
-            return {"ok": False, "error": "No session window open"}
-
-        logger.info(
-            "Focusing existing session window (group=%s)",
-            self._session_window_group_id or "unknown",
-        )
-        if not self._bring_to_front(self._session_window, "session"):
-            return {"ok": False, "error": "Failed to focus session window"}
-
-        logger.info("Focused existing session window")
-        return {"ok": True}
+        """Focus the default workspace window."""
+        return self.focus_workspace_window(DEFAULT_WORKSPACE_ID)
 
     def open_session_window(self, group_id: str, native_zoom_factor=None):
-        """Open or focus the dedicated session window, optionally restoring zoom."""
+        """Open or focus the default workspace window (legacy bridge wrapper)."""
+        return self._open_workspace_window(
+            DEFAULT_WORKSPACE_ID,
+            group_id,
+            native_zoom_factor,
+            legacy_default_url=True,
+        )
+
+    def focus_workspace_window(self, workspace_id):
+        """Focus one existing workspace window without changing its URL."""
+        try:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        window = self._workspace_windows.get(resolved_workspace_id)
+        if window is None:
+            logger.warning(
+                "Workspace %s focus requested, but no window is registered",
+                resolved_workspace_id,
+            )
+            return {"ok": False, "error": "No workspace window open"}
+        group_id = self._workspace_window_group_ids.get(
+            resolved_workspace_id,
+            "",
+        )
+        window_name = f"workspace:{resolved_workspace_id}"
+        logger.info(
+            "Focusing existing workspace window workspace=%s group=%s",
+            resolved_workspace_id,
+            group_id or "unknown",
+        )
+        if not self._bring_to_front(window, window_name):
+            return {"ok": False, "error": "Failed to focus workspace window"}
+        return {"ok": True}
+
+    def open_workspace_window(
+        self,
+        workspace_id,
+        group_id: str = "",
+        native_zoom_factor=None,
+    ):
+        """Open or focus one workspace window, optionally restoring zoom."""
+        return self._open_workspace_window(
+            workspace_id,
+            group_id,
+            native_zoom_factor,
+            legacy_default_url=False,
+        )
+
+    def _open_workspace_window(
+        self,
+        workspace_id,
+        group_id: str,
+        native_zoom_factor,
+        *,
+        legacy_default_url: bool,
+    ):
+        """Implementation shared by workspace-aware and legacy bridge calls."""
+        try:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         resolved_group_id = str(group_id or "").strip()
         requested_zoom = normalize_native_zoom_factor(native_zoom_factor)
         url = f"{self._base_url}/terminals"
+        query = {}
+        if not legacy_default_url or resolved_workspace_id != DEFAULT_WORKSPACE_ID:
+            query["workspace"] = resolved_workspace_id
         if resolved_group_id:
-            url = f"{url}?group={resolved_group_id}"
+            query["group"] = resolved_group_id
+        if query:
+            url = f"{url}?{urlencode(query)}"
 
         try:
-            if self._session_window is not None:
-                should_retarget = resolved_group_id != self._session_window_group_id
+            window = self._workspace_windows.get(resolved_workspace_id)
+            current_group_id = self._workspace_window_group_ids.get(
+                resolved_workspace_id,
+                "",
+            )
+            window_name = f"workspace:{resolved_workspace_id}"
+            if window is not None:
+                should_retarget = resolved_group_id != current_group_id
                 logger.info(
                     (
-                        "Reusing existing session window "
-                        "(requested_group=%s current_group=%s)"
+                        "Reusing existing workspace window "
+                        "(workspace=%s requested_group=%s current_group=%s)"
                     ),
+                    resolved_workspace_id,
                     resolved_group_id or "all",
-                    self._session_window_group_id or "unknown",
+                    current_group_id or "unknown",
                 )
                 if should_retarget:
                     logger.info(
-                        "Keeping existing session window open; frontend will switch groups via polling"
+                        "Keeping existing workspace window open; frontend will reconcile its groups"
                     )
                 if requested_zoom is not None and _set_native_window_zoom(
-                    self._session_window, requested_zoom
+                    window, requested_zoom
                 ) is None:
                     logger.warning(
-                        "Could not apply restored session window zoom %.3f",
+                        "Could not apply restored workspace window zoom %.3f",
                         requested_zoom,
                     )
-                if not self._bring_to_front(self._session_window, "session"):
-                    return {"ok": False, "error": "Failed to focus session window"}
+                if not self._bring_to_front(window, window_name):
+                    return {"ok": False, "error": "Failed to focus workspace window"}
                 return {"ok": True, "reused": True}
 
             if webview is None:
-                logger.warning("Session window requested without pywebview support")
+                logger.warning("Workspace window requested without pywebview support")
                 return {"ok": False, "error": "pywebview is unavailable"}
 
             logger.info(
-                "Creating session window for group=%s url=%s",
+                "Creating workspace window workspace=%s group=%s url=%s",
+                resolved_workspace_id,
                 resolved_group_id or "all",
                 url,
             )
             _patch_winforms_dark_title_bar()
             window = webview.create_window(
-                "GridVibe Sessions",
+                "GridVibe Workspace",
                 url,
                 width=1600,
                 height=980,
@@ -857,24 +1056,39 @@ class GridVibeApi:
                 js_api=self,
             )
             if window is None:
-                logger.error("pywebview.create_window returned None for the session window")
-                return {"ok": False, "error": "Failed to create session window"}
+                logger.error("pywebview.create_window returned None for a workspace window")
+                return {"ok": False, "error": "Failed to create workspace window"}
 
-            self._pending_session_native_zoom_factor = requested_zoom
+            if requested_zoom is not None:
+                self._pending_workspace_native_zoom_factors[
+                    resolved_workspace_id
+                ] = requested_zoom
             if requested_zoom is not None:
                 loaded_event = getattr(getattr(window, "events", None), "loaded", None)
                 if loaded_event is not None:
-                    loaded_event += lambda *_args: self._apply_pending_session_native_zoom()
-            self._attach_session_window(window, resolved_group_id)
+                    loaded_event += (
+                        lambda *_args, workspace_id=resolved_workspace_id:
+                        self._apply_pending_workspace_native_zoom(workspace_id)
+                    )
+            self._attach_workspace_window(
+                resolved_workspace_id,
+                window,
+                resolved_group_id,
+            )
             if self._register_window is not None:
-                self._register_window(window, "session")
+                self._register_window(window, window_name)
             logger.info(
-                "Session window created and registered (group=%s)",
+                "Workspace window created and registered (workspace=%s group=%s)",
+                resolved_workspace_id,
                 resolved_group_id or "all",
             )
             return {"ok": True, "reused": False}
         except Exception as exc:
-            logger.exception("Failed to open session window for group=%s", resolved_group_id or "all")
+            logger.exception(
+                "Failed to open workspace window workspace=%s group=%s",
+                resolved_workspace_id,
+                resolved_group_id or "all",
+            )
             return {"ok": False, "error": str(exc)}
 
     def open_launcher_window(self):
@@ -893,16 +1107,31 @@ class GridVibeApi:
             return {"ok": False, "error": str(exc)}
 
     def close_session_window(self):
-        """Close the native session window."""
-        if self._session_window is None:
-            logger.warning("close_session_window called but no session window is registered")
-            return {"ok": False, "error": "No session window open"}
+        """Close the default workspace window."""
+        return self.close_workspace_window(DEFAULT_WORKSPACE_ID)
+
+    def close_workspace_window(self, workspace_id):
+        """Close one native workspace window without touching its sessions."""
         try:
-            logger.info("Closing session window (last session removed)")
-            self._session_window.destroy()
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        window = self._workspace_windows.get(resolved_workspace_id)
+        if window is None:
+            logger.warning(
+                "close_workspace_window called but workspace %s is not registered",
+                resolved_workspace_id,
+            )
+            return {"ok": False, "error": "No workspace window open"}
+        try:
+            logger.info("Closing workspace window workspace=%s", resolved_workspace_id)
+            window.destroy()
             return {"ok": True}
         except Exception as exc:
-            logger.exception("Failed to close session window")
+            logger.exception(
+                "Failed to close workspace window workspace=%s",
+                resolved_workspace_id,
+            )
             return {"ok": False, "error": str(exc)}
 
     def restart_application(self):
@@ -1046,7 +1275,8 @@ def _exit_current_process_after_restart(
     except Exception:
         pass
     if api_bridge is not None:
-        for win in (api_bridge._session_window, api_bridge._window):
+        windows = [*api_bridge._workspace_windows.values(), api_bridge._window]
+        for win in windows:
             try:
                 if win is not None:
                     win.destroy()
@@ -1160,9 +1390,21 @@ def main():
             open_windows.discard(kind)
             api_bridge._set_window_minimized(kind, False)
             if kind == "session":
-                api_bridge._session_window = None
-                api_bridge._session_window_group_id = ""
-                api_bridge._session_is_fullscreen = False
+                workspace_id = DEFAULT_WORKSPACE_ID
+                api_bridge._workspace_windows.pop(workspace_id, None)
+                api_bridge._workspace_window_group_ids.pop(workspace_id, None)
+                api_bridge._workspace_fullscreen_states.pop(workspace_id, None)
+                api_bridge._workspace_window_minimized.pop(workspace_id, None)
+            elif kind.startswith("workspace:"):
+                workspace_id = normalize_workspace_id(kind.split(":", 1)[1])
+                api_bridge._workspace_windows.pop(workspace_id, None)
+                api_bridge._workspace_window_group_ids.pop(workspace_id, None)
+                api_bridge._workspace_fullscreen_states.pop(workspace_id, None)
+                api_bridge._workspace_window_minimized.pop(workspace_id, None)
+                api_bridge._pending_workspace_native_zoom_factors.pop(
+                    workspace_id,
+                    None,
+                )
             else:
                 api_bridge._window = None
                 api_bridge._is_fullscreen = False

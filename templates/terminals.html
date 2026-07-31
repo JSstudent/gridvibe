@@ -327,6 +327,8 @@
 <script>
     const DEFAULT_SURFACE_MODE = {{ app_surface_mode|tojson }};
     const MAX_SESSIONS = {{ max_sessions | tojson }};
+    const CURRENT_WORKSPACE_ID = {{ workspace_id | tojson }};
+    const MULTI_WORKSPACE_ENABLED = {{ multi_workspace_enabled | tojson }};
     /* cmd / PowerShell / WSL panes only exist on Windows hosts, so the header
        shell picker is offered there only. */
     const LOCAL_SHELL_MODES_AVAILABLE = {{ local_windows_shells_available|tojson }};

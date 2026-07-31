@@ -511,7 +511,10 @@
     let draggedSessionTabOriginOrder = [];
     let sessionTabDropHandled = false;
     let suppressSessionTabClickUntil = 0;
-    let activeGroupId = new URLSearchParams(window.location.search).get('group') || '';
+    const initialRouteParams = new URLSearchParams(window.location.search);
+    const currentWorkspaceId = String(CURRENT_WORKSPACE_ID || 'default');
+    const workspaceWasExplicit = initialRouteParams.has('workspace');
+    let activeGroupId = initialRouteParams.get('group') || '';
     let sessionGroups = [];
     let activeLoadToken = 0;
     let knownGroupIds = [];
@@ -577,9 +580,11 @@
        reloadBrowserPane, openBrowserPaneExternally, browserSerializeTabs. */
 
     function getSessionApiPath(groupId = activeGroupId) {
-        return groupId
-            ? `/api/sessions?group=${encodeURIComponent(groupId)}`
-            : '/api/sessions';
+        const params = new URLSearchParams({ workspace_id: currentWorkspaceId });
+        if (groupId) {
+            params.set('group', groupId);
+        }
+        return `/api/sessions?${params.toString()}`;
     }
 
     function getGroupById(groupId) {
@@ -1027,7 +1032,10 @@
         fetch('/api/session-groups/active', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ group_id: normalized })
+            body: JSON.stringify({
+                workspace_id: currentWorkspaceId,
+                group_id: normalized
+            })
         }).catch(() => {
             reportedActiveGroupId = '';
         });
@@ -1035,6 +1043,9 @@
 
     function syncLocationToGroup(groupId) {
         const url = new URL(window.location.href);
+        if (currentWorkspaceId !== 'default' || workspaceWasExplicit) {
+            url.searchParams.set('workspace', currentWorkspaceId);
+        }
         if (groupId) {
             url.searchParams.set('group', groupId);
         } else {
@@ -2002,6 +2013,19 @@
         }
     }
 
+    async function getCurrentWorkspaceNativeZoomFactor() {
+        const api = window.pywebview?.api;
+        if (api?.get_workspace_native_zoom) {
+            try {
+                const result = await api.get_workspace_native_zoom(currentWorkspaceId);
+                if (result?.ok) {
+                    return normalizeNativeZoomFactor(result.zoom_factor);
+                }
+            } catch (_) {}
+        }
+        return getNativeSessionZoomFactor();
+    }
+
     async function saveWorkspace(button = null) {
         if (!sessionGroups.length) {
             setWorkspaceSaveMessage('No sessions to save.', 'error');
@@ -2014,13 +2038,14 @@
         }
 
         try {
-            const nativeZoomFactor = await getNativeSessionZoomFactor();
+            const nativeZoomFactor = await getCurrentWorkspaceNativeZoomFactor();
             const response = await fetch('/api/runtime-state/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 // Name the group this window is on, so the restore reopens here;
                 // desktop mode also carries the session window's current zoom.
                 body: JSON.stringify({
+                    workspace_id: currentWorkspaceId,
                     active_group_id: activeGroupId,
                     native_zoom_factor: nativeZoomFactor
                 })
@@ -2194,7 +2219,10 @@
         const response = await fetch('/api/session-groups/order', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ group_ids: groupIds })
+            body: JSON.stringify({
+                workspace_id: currentWorkspaceId,
+                group_ids: groupIds
+            })
         });
         const data = await response.json();
         if (!response.ok) {
@@ -6552,7 +6580,9 @@
     }
 
     async function loadSessionGroups() {
-        const response = await fetch('/api/session-groups');
+        const response = await fetch(
+            `/api/session-groups?workspace_id=${encodeURIComponent(currentWorkspaceId)}`
+        );
         const data = await response.json();
         if (!response.ok) {
             throw new Error(data.error || 'Failed to load session tabs');
@@ -6606,14 +6636,21 @@
     }
 
     async function syncNativeFullscreenState() {
-        if (!isPywebviewAvailable() || !window.pywebview.api.get_session_fullscreen_state) {
+        if (!isPywebviewAvailable()) {
             nativeFullscreen = false;
             updateFullscreenButton();
             return;
         }
 
         try {
-            const result = await window.pywebview.api.get_session_fullscreen_state();
+            const api = window.pywebview.api;
+            const result = api.get_workspace_fullscreen_state
+                ? await api.get_workspace_fullscreen_state(currentWorkspaceId)
+                : (
+                    api.get_session_fullscreen_state
+                        ? await api.get_session_fullscreen_state()
+                        : null
+                );
             nativeFullscreen = Boolean(result && result.ok && result.is_fullscreen);
         } catch (error) {
             console.error('Fullscreen state sync failed:', error);
@@ -6625,8 +6662,15 @@
 
     async function resetFullscreenState() {
         try {
-            if (isPywebviewAvailable() && window.pywebview.api.exit_session_fullscreen) {
-                const result = await window.pywebview.api.exit_session_fullscreen();
+            if (isPywebviewAvailable()) {
+                const api = window.pywebview.api;
+                const result = api.exit_workspace_fullscreen
+                    ? await api.exit_workspace_fullscreen(currentWorkspaceId)
+                    : (
+                        api.exit_session_fullscreen
+                            ? await api.exit_session_fullscreen()
+                            : null
+                    );
                 if (result && result.ok) {
                     nativeFullscreen = false;
                 }
@@ -6647,9 +6691,14 @@
     async function toggleFullscreen() {
         try {
             if (isPywebviewAvailable()) {
-                const result = await window.pywebview.api.toggle_session_fullscreen
-                    ? await window.pywebview.api.toggle_session_fullscreen()
-                    : null;
+                const api = window.pywebview.api;
+                const result = api.toggle_workspace_fullscreen
+                    ? await api.toggle_workspace_fullscreen(currentWorkspaceId)
+                    : (
+                        api.toggle_session_fullscreen
+                            ? await api.toggle_session_fullscreen()
+                            : null
+                    );
                 if (result && result.ok) {
                     nativeFullscreen = !nativeFullscreen;
                     updateFullscreenButton();
@@ -6881,12 +6930,21 @@
 
     async function _closeWindowAfterLastSession() {
         logSessionWindowAction('Last session closed — closing window');
-        if (isPywebviewAvailable() && window.pywebview.api.close_session_window) {
+        if (isPywebviewAvailable()) {
             try {
-                await window.pywebview.api.close_session_window();
-                return;
+                const api = window.pywebview.api;
+                const result = api.close_workspace_window
+                    ? await api.close_workspace_window(currentWorkspaceId)
+                    : (
+                        api.close_session_window
+                            ? await api.close_session_window()
+                            : null
+                    );
+                if (result?.ok) {
+                    return;
+                }
             } catch (e) {
-                console.error('[GridVibe Sessions] close_session_window failed:', e);
+                console.error('[GridVibe Sessions] close workspace window failed:', e);
             }
         }
         window.close();
@@ -7046,8 +7104,10 @@
             applyAppConfigUpdate(message || {});
         });
 
-        socket.on('session_groups_updated', () => {
-            scheduleStatusRefresh();
+        socket.on('session_groups_updated', message => {
+            if (message?.workspace_id === currentWorkspaceId) {
+                scheduleStatusRefresh();
+            }
         });
 
         /* Voice preferences and backend availability can change from the
@@ -7064,6 +7124,7 @@
            Skipped on the first connect — initialLoad() covers boot. */
         let hadSocketConnection = false;
         socket.on('connect', () => {
+            socket.emit('join_workspace', { workspace_id: currentWorkspaceId });
             if (!hadSocketConnection) {
                 hadSocketConnection = true;
                 return;
@@ -7136,6 +7197,11 @@
     window.addEventListener('pageshow', () => {
         _refreshVoiceRuntimeState();
         reconcileAppConfig();
+    });
+    window.addEventListener('pagehide', () => {
+        if (socket?.connected) {
+            socket.emit('leave_workspace', { workspace_id: currentWorkspaceId });
+        }
     });
     document.addEventListener('fullscreenchange', updateFullscreenButton);
     /* ─────────────────────────────────────────────

@@ -22,6 +22,7 @@ import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from web.paths import BASE_DIR
+from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,6 @@ RUNTIME_STATE_PATH = os.path.join(BASE_DIR, "runtime_state.json")
 _runtime_state_lock = threading.Lock()
 
 SCHEMA_VERSION = 2
-DEFAULT_WORKSPACE_ID = "default"
 RESTORABLE_ORIGINS = ("auto", "manual")
 NATIVE_ZOOM_FACTOR_MIN = 0.25
 NATIVE_ZOOM_FACTOR_MAX = 5.0
@@ -84,8 +84,24 @@ _SESSION_SNAPSHOT_FIELDS = (
 
 def _snapshot_session(session: Any) -> Dict[str, Any]:
     """Return the replayable launch config for one live session."""
-    data = session.to_dict()
+    data = session if isinstance(session, dict) else session.to_dict()
     return {key: data.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+
+
+def _snapshot_group(group: Any, sessions: List[Any]) -> Dict[str, Any]:
+    """Return one password-free runtime-state group payload."""
+    data = group if isinstance(group, dict) else group.to_dict()
+    return {
+        "group_id": data.get("group_id"),
+        "name": data.get("name"),
+        "connection_mode": data.get("connection_mode"),
+        "layout": data.get("layout"),
+        "workspace_layout": data.get("workspace_layout"),
+        # No surface_mode: chrome density is a live global setting, so a
+        # restore must never replay the value a group launched with.
+        "saved_session_id": data.get("saved_session_id"),
+        "sessions": [_snapshot_session(session) for session in sessions],
+    }
 
 
 def _looks_like_timestamp_name(name: str) -> bool:
@@ -203,34 +219,24 @@ def capture_workspace(
     save supplies it; captures without one (notably the autosave timer) preserve
     the value already stored in this workspace's slot.
     """
-    workspace_id = str(workspace_id or DEFAULT_WORKSPACE_ID).strip() or DEFAULT_WORKSPACE_ID
-    groups = []
-    for group in session_manager.get_all_groups():
-        sessions = session_manager.get_group_sessions(group.group_id)
-        if not sessions:
-            continue
-        groups.append(
-            {
-                "group_id": group.group_id,
-                "name": group.name,
-                "connection_mode": group.connection_mode,
-                "layout": group.layout,
-                "workspace_layout": group.workspace_layout,
-                # No surface_mode: chrome density is a live global setting, so
-                # a restore must never replay the value a group launched with.
-                "saved_session_id": group.saved_session_id,
-                "sessions": [_snapshot_session(session) for session in sessions],
-            }
-        )
+    workspace_id = normalize_workspace_id(workspace_id)
+    live_snapshot = session_manager.snapshot_live_workspaces().get(workspace_id)
+    if not live_snapshot:
+        return None
+    groups = [
+        _snapshot_group(group, list(group.get("sessions") or []))
+        for group in live_snapshot.get("groups") or []
+        if isinstance(group, dict) and group.get("sessions")
+    ]
     if not groups:
         return None
 
     if active_group_id is None:
-        getter = getattr(session_manager, "get_active_group_id", None)
-        active_group_id = getter() if callable(getter) else ""
+        active_group_id = live_snapshot.get("active_group_id")
     active_group_id = str(active_group_id or "").strip()
     captured_group_ids = {group["group_id"] for group in groups}
     normalized_zoom = normalize_native_zoom_factor(native_zoom_factor)
+    workspace_label = str(live_snapshot.get("label") or "").strip()
 
     with _runtime_state_lock:
         state = _read_state_locked()
@@ -242,7 +248,11 @@ def capture_workspace(
                 )
         slot = {
             "workspace_id": workspace_id,
-            "label": str(label or "").strip() or _derive_workspace_label(groups),
+            "label": (
+                str(label or "").strip()
+                or workspace_label
+                or _derive_workspace_label(groups)
+            ),
             "origin": "manual" if origin == "manual" else "auto",
             "saved_at": time.time(),
             "active_group_id": active_group_id if active_group_id in captured_group_ids else "",
@@ -260,7 +270,7 @@ def load_restorable_workspace(workspace_id: str = DEFAULT_WORKSPACE_ID) -> Optio
 
     The offer is permanent — there is deliberately no maximum age.
     """
-    workspace_id = str(workspace_id or DEFAULT_WORKSPACE_ID).strip() or DEFAULT_WORKSPACE_ID
+    workspace_id = normalize_workspace_id(workspace_id)
     with _runtime_state_lock:
         state = _read_state_locked()
     slot = state.get("workspaces", {}).get(workspace_id)
@@ -294,7 +304,7 @@ def clear_workspace(workspace_id: str = DEFAULT_WORKSPACE_ID) -> None:
     Multi-workspace skeleton: not wired to the single-workspace UI. The file
     itself is kept (with version 2) even when the last slot is removed.
     """
-    workspace_id = str(workspace_id or DEFAULT_WORKSPACE_ID).strip() or DEFAULT_WORKSPACE_ID
+    workspace_id = normalize_workspace_id(workspace_id)
     with _runtime_state_lock:
         state = _read_state_locked()
         if workspace_id not in state.get("workspaces", {}):
@@ -306,15 +316,127 @@ def clear_workspace(workspace_id: str = DEFAULT_WORKSPACE_ID) -> None:
 def iter_live_workspaces(session_manager: Any) -> Iterator[Tuple[str, List[Any]]]:
     """Yield ``(workspace_id, groups)`` for each live workspace with sessions.
 
-    Single mapping point between live groups and workspace ids: today every
-    live group belongs to the one "default" workspace, so this yields at most
-    one entry (and nothing at all when no group has sessions). When windows
-    own their own group sets, only this helper changes.
+    The manager owns the authoritative group partition. The returned lists are
+    snapshots, so callers never hold ``SessionManager.lock`` while yielding.
     """
-    groups = [
-        group
-        for group in session_manager.get_all_groups()
-        if session_manager.get_group_sessions(group.group_id)
-    ]
-    if groups:
-        yield DEFAULT_WORKSPACE_ID, groups
+    with session_manager.lock:
+        snapshots = []
+        for workspace in session_manager.get_all_workspaces():
+            groups = [
+                group
+                for group in session_manager.get_workspace_groups(workspace.workspace_id)
+                if session_manager.get_group_sessions(group.group_id)
+            ]
+            if groups:
+                snapshots.append((workspace.workspace_id, groups))
+    yield from snapshots
+
+
+def capture_live_workspaces(
+    session_manager: Any,
+    origin: str = "auto",
+) -> Dict[str, Dict[str, Any]]:
+    """Capture every non-empty live workspace with one consistent file write.
+
+    The manager serializes live state during one lock hold and returns before
+    this function acquires the file lock, preserving the documented lock order.
+    Existing sibling slots for closed workspaces and saved native zoom values
+    are retained.
+    """
+    live_snapshots = session_manager.snapshot_live_workspaces()
+    if not live_snapshots:
+        return {}
+
+    saved_at = time.time()
+    with _runtime_state_lock:
+        state = _read_state_locked()
+        workspaces = state.setdefault("workspaces", {})
+        stored_slots: Dict[str, Dict[str, Any]] = {}
+        for workspace_id, snapshot in live_snapshots.items():
+            groups = [
+                _snapshot_group(group, list(group.get("sessions") or []))
+                for group in snapshot.get("groups") or []
+                if isinstance(group, dict) and group.get("sessions")
+            ]
+            if not groups:
+                continue
+            previous_slot = workspaces.get(workspace_id)
+            previous_slot = previous_slot if isinstance(previous_slot, dict) else {}
+            slot_origin = (
+                "manual"
+                if origin == "manual" or previous_slot.get("origin") == "manual"
+                else "auto"
+            )
+            slot = {
+                "workspace_id": workspace_id,
+                "label": (
+                    str(snapshot.get("label") or "").strip()
+                    or _derive_workspace_label(groups)
+                ),
+                # A manual save is pinned for the Stage-4 auto-slot cap. Later
+                # autosaves refresh its shape without silently demoting it.
+                "origin": slot_origin,
+                "saved_at": saved_at,
+                "active_group_id": str(snapshot.get("active_group_id") or "").strip(),
+                "groups": groups,
+            }
+            previous_zoom = normalize_native_zoom_factor(
+                previous_slot.get("native_zoom_factor")
+            )
+            if previous_zoom is not None:
+                slot["native_zoom_factor"] = previous_zoom
+            workspaces[workspace_id] = slot
+            stored_slots[workspace_id] = slot
+        if stored_slots:
+            _write_state_locked(state)
+    return stored_slots
+
+
+def list_restorable_workspaces() -> List[Dict[str, Any]]:
+    """Return credential-free summaries for all valid restorable slots."""
+    with _runtime_state_lock:
+        state = _read_state_locked()
+
+    summaries = []
+    for workspace_id, slot in state.get("workspaces", {}).items():
+        if not isinstance(slot, dict):
+            continue
+        try:
+            normalized_id = normalize_workspace_id(workspace_id)
+        except ValueError:
+            continue
+        groups = slot.get("groups")
+        if (
+            not isinstance(groups, list)
+            or not groups
+            or slot.get("origin") not in RESTORABLE_ORIGINS
+        ):
+            continue
+        valid_groups = [group for group in groups if isinstance(group, dict)]
+        if not valid_groups:
+            continue
+        pane_count = sum(
+            len(group.get("sessions") or [])
+            for group in valid_groups
+            if isinstance(group.get("sessions"), list)
+        )
+        summaries.append(
+            {
+                "workspace_id": normalized_id,
+                "label": (
+                    str(slot.get("label") or "").strip()
+                    or _derive_workspace_label(valid_groups)
+                ),
+                "origin": slot.get("origin"),
+                "saved_at": slot.get("saved_at"),
+                "group_count": len(valid_groups),
+                "pane_count": pane_count,
+            }
+        )
+    return sorted(
+        summaries,
+        key=lambda summary: (
+            -(summary["saved_at"] if isinstance(summary["saved_at"], (int, float)) else 0),
+            summary["workspace_id"],
+        ),
+    )

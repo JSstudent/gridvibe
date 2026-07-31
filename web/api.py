@@ -148,9 +148,11 @@ from web.hostkeys import (  # noqa: F401 - re-exported for backwards compatibili
 )
 from web.paths import BASE_DIR, install_kind
 from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
+    capture_live_workspaces,
     capture_workspace,
     clear_workspace,
     iter_live_workspaces,
+    list_restorable_workspaces,
     load_restorable_workspace,
 )
 from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compatibility
@@ -283,6 +285,11 @@ from web.voice import (  # noqa: F401 - re-exported for backwards compatibility
     _whisper_language_code,
     _whisper_model_lock,
 )
+from web.workspaces import (
+    DEFAULT_WORKSPACE_ID,
+    normalize_workspace_id,
+    workspace_room,
+)
 
 try:
     import tkinter as tk
@@ -333,6 +340,7 @@ def _public_app_config() -> Dict[str, Any]:
         "workspace": {
             "surface_mode": runtime_config.app_surface_mode,
             "autosave_interval_minutes": runtime_config.workspace_autosave_interval_minutes,
+            "multi_workspace_enabled": runtime_config.multi_workspace_enabled,
         },
         "ssh": {
             "host_key_policy": runtime_config.ssh_host_key_policy,
@@ -369,6 +377,7 @@ def _broadcast_app_config_update(apply_scope: str = "session"):
             },
             "workspace": {
                 "surface_mode": runtime_config.app_surface_mode,
+                "multi_workspace_enabled": runtime_config.multi_workspace_enabled,
             },
             "terminal": {
                 "font_family": runtime_config.terminal_font_family,
@@ -394,6 +403,12 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     if not isinstance(workspace, dict):
         workspace = {}
     surface_mode = _normalize_surface_mode(workspace.get("surface_mode"), runtime_config.app_surface_mode)
+    multi_workspace_enabled = workspace.get(
+        "multi_workspace_enabled",
+        runtime_config.multi_workspace_enabled,
+    )
+    if not isinstance(multi_workspace_enabled, bool):
+        multi_workspace_enabled = runtime_config.multi_workspace_enabled
     try:
         autosave_interval_minutes = int(
             workspace.get(
@@ -463,6 +478,7 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
         "workspace": {
             "surface_mode": surface_mode,
             "autosave_interval_minutes": autosave_interval_minutes,
+            "multi_workspace_enabled": multi_workspace_enabled,
         },
         "ssh": {
             "host_key_policy": host_key_policy,
@@ -501,7 +517,26 @@ def _resolve_group_id() -> str:
     return str(request.args.get("group") or "").strip()
 
 
-def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
+def _resolve_workspace_id(value: Any = None) -> str:
+    """Normalize a workspace id at the HTTP boundary."""
+    requested = (
+        request.args.get("workspace_id")
+        if value is None and "workspace_id" in request.args
+        else value
+    )
+    return normalize_workspace_id(requested)
+
+
+def _workspace_exists(workspace_id: str) -> bool:
+    """Return whether the normalized workspace is live."""
+    return session_manager.get_workspace(workspace_id) is not None
+
+
+def _get_group_response_meta(
+    group_id: str,
+    *,
+    allow_launch_fallback: bool = True,
+) -> Dict[str, Any]:
     """Return layout metadata for one session group.
 
     ``surface_mode`` is always the current global setting, never a per-group
@@ -511,7 +546,10 @@ def _get_group_response_meta(group_id: str) -> Dict[str, Any]:
     """
     group = session_manager.get_group(group_id)
     if not group:
-        launch_options = active_launch_options
+        launch_options = active_launch_options if allow_launch_fallback else {
+            "layout": None,
+            "connection_mode": None,
+        }
         return {
             "group": None,
             "layout": launch_options["layout"],
@@ -580,6 +618,7 @@ def index():
         local_windows_shells_available=os.name == "nt",
         browser_shutdown_enabled=bool(browser_shutdown_token),
         browser_shutdown_token=browser_shutdown_token,
+        multi_workspace_enabled=runtime_config.multi_workspace_enabled,
         version=__version__,
     )
 
@@ -588,8 +627,16 @@ def index():
 def terminals_page():
     """Page showing active terminal instances."""
     logger.info("GET /terminals")
+    try:
+        workspace_id = normalize_workspace_id(request.args.get("workspace"))
+    except ValueError as exc:
+        return str(exc), 400
+    if not _workspace_exists(workspace_id):
+        return "Workspace not found", 400
     return render_template('terminals.html', max_sessions=runtime_config.max_sessions,
                            app_surface_mode=runtime_config.app_surface_mode,
+                           workspace_id=workspace_id,
+                           multi_workspace_enabled=runtime_config.multi_workspace_enabled,
                            local_windows_shells_available=os.name == "nt",
                            voice_enabled=runtime_config.voice_enabled,
                            voice_engine=runtime_config.voice_engine,
@@ -715,22 +762,64 @@ def set_app_config():
 @app.route('/api/sessions', methods=['GET'])
 def get_sessions():
     """Get all sessions."""
+    workspace_named = "workspace_id" in request.args
+    try:
+        workspace_id = _resolve_workspace_id()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     group_id = _resolve_group_id()
-    sessions = (
-        session_manager.get_group_sessions(group_id)
-        if group_id
-        else session_manager.get_all_sessions()
-    )
+    error = ""
+    group_meta = None
+    with session_manager.lock:
+        if workspace_named and workspace_id not in session_manager.workspaces:
+            error = "Workspace not found"
+        group = session_manager.groups.get(group_id) if group_id else None
+        if not error and group_id and group is not None and group.workspace_id != workspace_id:
+            error = "Session group does not belong to workspace"
+        if not error and workspace_named and group_id and group is None:
+            error = "Session group does not belong to workspace"
+
+        if error:
+            sessions = []
+            session_payloads = []
+            statuses = []
+        else:
+            if group_id:
+                sessions = session_manager.get_group_sessions(group_id)
+            else:
+                sessions = session_manager.get_workspace_sessions(workspace_id)
+            session_payloads = [session.to_dict() for session in sessions]
+            statuses = [session.status.value for session in sessions]
+            if group_id:
+                group_meta = _get_group_response_meta(
+                    group_id,
+                    allow_launch_fallback=not workspace_named,
+                )
+    if error:
+        return jsonify({"error": error}), 400
     logger.debug(
-        f"GET /api/sessions  group={group_id or 'all'} count={len(sessions)} "
-        f"statuses={[s.status.value for s in sessions]}"
+        f"GET /api/sessions workspace={workspace_id} "
+        f"group={group_id or 'all'} count={len(sessions)} "
+        f"statuses={statuses}"
     )
     payload = {
-        "sessions": [s.to_dict() for s in sessions],
+        "sessions": session_payloads,
         "count": len(sessions),
     }
     if group_id:
-        payload.update(_get_group_response_meta(group_id))
+        payload.update(group_meta)
+    elif workspace_named:
+        payload.update(
+            {
+                "group": None,
+                "layout": None,
+                "connection_mode": None,
+                "terminal_count": len(sessions),
+                "workspace_layout": None,
+                "surface_mode": runtime_config.app_surface_mode,
+                "workspace_id": workspace_id,
+            }
+        )
     else:
         launch_options = active_launch_options
         payload.update(
@@ -1460,9 +1549,22 @@ def search_explorer(session_id: str):
 
 @app.route('/api/session-groups', methods=['GET'])
 def get_session_groups():
-    """Return all launched groups for the session tabs."""
-    groups = [group.to_dict() for group in session_manager.get_all_groups()]
-    return jsonify({"groups": groups, "count": len(groups)})
+    """Return launched groups for the requested workspace."""
+    try:
+        workspace_id = _resolve_workspace_id()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not _workspace_exists(workspace_id):
+        return jsonify({"error": "Workspace not found"}), 400
+    groups = [
+        group.to_dict()
+        for group in session_manager.get_workspace_groups(workspace_id)
+    ]
+    return jsonify({
+        "workspace_id": workspace_id,
+        "groups": groups,
+        "count": len(groups),
+    })
 
 
 @app.route('/api/session-groups/order', methods=['POST'])
@@ -1473,9 +1575,25 @@ def reorder_session_groups():
     if not isinstance(group_ids, list) or not group_ids:
         return jsonify({"error": "A non-empty 'group_ids' list is required"}), 400
 
-    groups = [group.to_dict() for group in session_manager.reorder_groups(group_ids)]
-    _broadcast_session_groups_updated("reordered")
-    return jsonify({"groups": groups, "count": len(groups)})
+    try:
+        workspace_id = _resolve_workspace_id(data.get("workspace_id"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not _workspace_exists(workspace_id):
+        return jsonify({"error": "Workspace not found"}), 400
+    try:
+        groups = [
+            group.to_dict()
+            for group in session_manager.reorder_groups(workspace_id, group_ids)
+        ]
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    _broadcast_session_groups_updated("reordered", workspace_id=workspace_id)
+    return jsonify({
+        "workspace_id": workspace_id,
+        "groups": groups,
+        "count": len(groups),
+    })
 
 
 @app.route('/api/session-groups/active', methods=['POST'])
@@ -1488,8 +1606,23 @@ def set_active_session_group():
     group to reopen on. An unknown id leaves the previous hint standing.
     """
     data = request.get_json(silent=True) or {}
-    active_group_id = session_manager.set_active_group(data.get("group_id"))
-    return jsonify({"active_group_id": active_group_id})
+    try:
+        workspace_id = _resolve_workspace_id(data.get("workspace_id"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    group_id = str(data.get("group_id") or "").strip()
+    try:
+        active_group_id = session_manager.set_active_group(
+            workspace_id,
+            group_id,
+            require_owned="workspace_id" in data,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({
+        "workspace_id": workspace_id,
+        "active_group_id": active_group_id,
+    })
 
 
 @app.route('/api/runtime-state', methods=['GET'])
@@ -1500,9 +1633,12 @@ def get_runtime_state():
     groups and a restorable origin — permanently, and regardless of whether
     groups are currently live (a window may restore into itself).
     """
-    workspace_id = str(request.args.get("workspace_id") or "default").strip() or "default"
+    try:
+        workspace_id = _resolve_workspace_id(request.args.get("workspace_id"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     slot = load_restorable_workspace(workspace_id)
-    active_groups = session_manager.get_all_groups()
+    active_groups = session_manager.get_workspace_groups(workspace_id)
     return jsonify({
         "restorable": bool(slot),
         "workspace_id": workspace_id,
@@ -1526,9 +1662,17 @@ def save_runtime_state():
     also recorded as the live hint so the next autosave agrees with this save.
     """
     data = request.get_json(silent=True) or {}
-    workspace_id = str(data.get("workspace_id") or "default").strip() or "default"
+    try:
+        workspace_id = _resolve_workspace_id(data.get("workspace_id"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not _workspace_exists(workspace_id):
+        return jsonify({"error": "Workspace not found"}), 400
     label = str(data.get("label") or "").strip() or None
-    active_group_id = session_manager.set_active_group(data.get("active_group_id"))
+    active_group_id = session_manager.set_active_group(
+        workspace_id,
+        data.get("active_group_id"),
+    )
     slot = capture_workspace(
         session_manager,
         workspace_id=workspace_id,
@@ -1556,11 +1700,13 @@ def save_runtime_state():
 @app.route('/api/runtime-state', methods=['DELETE'])
 def dismiss_runtime_state():
     """Clear one workspace slot (multi-workspace skeleton; not UI-wired yet)."""
-    workspace_id = str(
-        request.args.get("workspace_id")
-        or (request.get_json(silent=True) or {}).get("workspace_id")
-        or "default"
-    ).strip() or "default"
+    try:
+        workspace_id = _resolve_workspace_id(
+            request.args.get("workspace_id")
+            or (request.get_json(silent=True) or {}).get("workspace_id")
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     clear_workspace(workspace_id)
     return jsonify({"message": "Workspace snapshot cleared", "workspace_id": workspace_id})
 
@@ -1578,11 +1724,10 @@ def _run_workspace_autosave_tick() -> None:
     just-restarted process can never wipe the restorable slot — a slot is only
     ever overwritten by the next non-empty capture.
     """
-    for workspace_id, _groups in iter_live_workspaces(session_manager):
-        try:
-            capture_workspace(session_manager, workspace_id=workspace_id, origin="auto")
-        except Exception:
-            logger.exception("Workspace autosave failed for %s", workspace_id)
+    try:
+        capture_live_workspaces(session_manager, origin="auto")
+    except Exception:
+        logger.exception("Workspace autosave failed")
 
 
 def _workspace_autosave_loop(stop_event: threading.Event) -> None:
@@ -1939,6 +2084,7 @@ def create_sessions():
             group_id=stable_group_id,
             saved_session_id=saved_session_id,
             workspace_layout=workspace_layout,
+            workspace_id=DEFAULT_WORKSPACE_ID,
         )
         logger.info(
             "Created session group group_id=%s saved_session_id=%r name=%r mode=%s layout=%s terminal_count=%d",
@@ -1989,12 +2135,17 @@ def create_sessions():
             )
             socketio.start_background_task(_connect_session, session.session_id)
 
-        _broadcast_session_groups_updated("launched")
+        _broadcast_session_groups_updated(
+            "launched",
+            group_id=group.group_id,
+            workspace_id=group.workspace_id,
+        )
 
         return jsonify({
             "sessions": [s.to_dict() for s in created_sessions],
             "count": len(created_sessions),
             "group_id": group.group_id,
+            "workspace_id": group.workspace_id,
             "group": group.to_dict(),
             "layout": layout,
             "connection_mode": connection_mode,
@@ -2072,7 +2223,11 @@ def split_session(session_id: str):
         group.group_id,
     )
     socketio.start_background_task(_connect_session, new_session.session_id)
-    _broadcast_session_groups_updated("split")
+    _broadcast_session_groups_updated(
+        "split",
+        group_id=group.group_id,
+        workspace_id=group.workspace_id,
+    )
 
     return jsonify(
         {
@@ -2386,14 +2541,39 @@ def change_session_mode(session_id: str):
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 def close_session(session_id: str):
     """Close a specific session."""
-    success = session_manager.close_session(session_id)
-
+    with session_manager.lock:
+        existing_session = session_manager.sessions.get(session_id)
+        group = (
+            session_manager.groups.get(existing_session.group_id)
+            if existing_session is not None
+            else None
+        )
+        success = session_manager.close_session(session_id)
+        if success:
+            pruned_workspace_ids = session_manager.clear_disconnected_sessions()
+            group_id = existing_session.group_id
+            workspace_id = (
+                group.workspace_id if group else DEFAULT_WORKSPACE_ID
+            )
+        else:
+            pruned_workspace_ids = []
+            group_id = ""
+            workspace_id = DEFAULT_WORKSPACE_ID
     if not success:
         return jsonify({"error": "Session not found"}), 404
 
     _close_ssh_connection(session_id, clear_buffer=True)
-    session_manager.clear_disconnected_sessions()
-    _broadcast_session_groups_updated("session_closed")
+    _broadcast_session_groups_updated(
+        "session_closed",
+        group_id=group_id,
+        workspace_id=workspace_id,
+    )
+    for pruned_workspace_id in pruned_workspace_ids:
+        if pruned_workspace_id != workspace_id:
+            _broadcast_session_groups_updated(
+                "workspace_pruned",
+                workspace_id=pruned_workspace_id,
+            )
 
     return jsonify({"message": "Session closed successfully"})
 
@@ -2401,26 +2581,73 @@ def close_session(session_id: str):
 @app.route('/api/sessions', methods=['DELETE'])
 def close_all_sessions():
     """Close all sessions."""
+    workspace_named = "workspace_id" in request.args
+    try:
+        workspace_id = _resolve_workspace_id()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     group_id = _resolve_group_id()
     if group_id:
-        sessions = session_manager.get_group_sessions(group_id)
-        if not sessions and not session_manager.get_group(group_id):
-            return jsonify({"error": "Session group not found"}), 404
-
-        for session in sessions:
-            session_manager.close_session(session.session_id)
-            _close_ssh_connection(session.session_id, clear_buffer=True)
-
-        # The user explicitly closed this group, so it must not survive on the
-        # empty-group grace period.
-        session_manager.clear_disconnected_sessions(force_group_ids={group_id})
-        _broadcast_session_groups_updated("group_closed", group_id=group_id)
+        close_error = ""
+        close_status = 400
+        with session_manager.lock:
+            group = session_manager.groups.get(group_id)
+            if group is not None and group.workspace_id != workspace_id:
+                close_error = "Session group does not belong to workspace"
+            elif workspace_named and group is None:
+                close_error = "Session group does not belong to workspace"
+            sessions = session_manager.get_group_sessions(group_id)
+            if not close_error and not sessions and group is None:
+                close_error = "Session group not found"
+                close_status = 404
+            if not close_error:
+                for session in sessions:
+                    session_manager.close_session(session.session_id)
+                # The user explicitly closed this group, so it must not survive
+                # on the empty-group grace period.
+                pruned_workspace_ids = session_manager.clear_disconnected_sessions(
+                    force_group_ids={group_id}
+                )
+                closed_workspace_id = (
+                    group.workspace_id if group else workspace_id
+                )
+                closed_session_ids = [
+                    session.session_id for session in sessions
+                ]
+            else:
+                pruned_workspace_ids = []
+                closed_workspace_id = workspace_id
+                closed_session_ids = []
+        if close_error:
+            return jsonify({"error": close_error}), close_status
+        for session_id in closed_session_ids:
+            _close_ssh_connection(session_id, clear_buffer=True)
+        _broadcast_session_groups_updated(
+            "group_closed",
+            group_id=group_id,
+            workspace_id=closed_workspace_id,
+        )
+        for pruned_workspace_id in pruned_workspace_ids:
+            if pruned_workspace_id != closed_workspace_id:
+                _broadcast_session_groups_updated(
+                    "workspace_pruned",
+                    workspace_id=pruned_workspace_id,
+                )
         return jsonify({"message": "Session group closed successfully", "group_id": group_id})
 
+    affected_workspace_ids = [
+        workspace.workspace_id
+        for workspace in session_manager.get_all_workspaces()
+        if session_manager.get_workspace_groups(workspace.workspace_id)
+    ] or [DEFAULT_WORKSPACE_ID]
     session_manager.close_all_sessions()
     _close_all_ssh_connections(clear_buffers=True)
     session_manager.reset_sessions()
-    _broadcast_session_groups_updated("all_closed")
+    for affected_workspace_id in affected_workspace_ids:
+        _broadcast_session_groups_updated(
+            "all_closed",
+            workspace_id=affected_workspace_id,
+        )
 
     return jsonify({"message": "All sessions closed successfully"})
 
@@ -2439,6 +2666,36 @@ def handle_disconnect():
     """Handle client disconnection."""
     logger.info(f"Client disconnected: {request.sid}") # type: ignore
     _clear_client_joined_sessions(request.sid) # type: ignore
+
+
+@socketio.on('join_workspace')
+def handle_join_workspace(data):
+    """Join the room that carries one workspace's group-list updates."""
+    try:
+        workspace_id = normalize_workspace_id(
+            data.get("workspace_id") if isinstance(data, dict) else None
+        )
+    except ValueError as exc:
+        emit("error", {"message": str(exc)})
+        return
+    if not _workspace_exists(workspace_id):
+        emit("error", {"message": "Workspace not found"})
+        return
+    join_room(workspace_room(workspace_id))
+    emit("workspace_joined", {"workspace_id": workspace_id})
+
+
+@socketio.on('leave_workspace')
+def handle_leave_workspace(data):
+    """Leave a workspace update room."""
+    try:
+        workspace_id = normalize_workspace_id(
+            data.get("workspace_id") if isinstance(data, dict) else None
+        )
+    except ValueError as exc:
+        emit("error", {"message": str(exc)})
+        return
+    leave_room(workspace_room(workspace_id))
 
 
 _TERMINAL_QUERY_RE = re.compile(

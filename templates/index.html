@@ -126,7 +126,7 @@
 
         <div class="action-bar">
             <div class="action-bar-left action-stack">
-                <a href="/terminals" class="secondary-link" target="gridvibe-sessions" onclick="return viewActiveTerminals(event)">
+                <a href="/terminals?workspace=default" class="secondary-link" target="gridvibe-workspace-default" onclick="return viewActiveTerminals(event)">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
                     View Active Terminals
                 </a>
@@ -237,6 +237,7 @@
 
 <script>
     const BROWSER_SHUTDOWN_TOKEN = {{ browser_shutdown_token | tojson }};
+    const MULTI_WORKSPACE_ENABLED = {{ multi_workspace_enabled | tojson }};
     const AGENT_OPTIONS = {{ agent_options|tojson }};
     const LOCAL_WINDOWS_SHELLS_AVAILABLE = {{ local_windows_shells_available|tojson }};
 </script>

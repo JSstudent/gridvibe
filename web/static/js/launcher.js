@@ -2254,9 +2254,15 @@
         console.info(`[GridVibe Launcher] ${action}`, details);
     }
 
-    async function viewActiveTerminals(event, preferredGroupId = '', nativeZoomFactor = null) {
+    async function viewActiveTerminals(
+        event,
+        preferredGroupId = '',
+        nativeZoomFactor = null,
+        workspaceId = 'default'
+    ) {
         event.preventDefault();
         const normalizedZoomFactor = normalizeNativeZoomFactor(nativeZoomFactor);
+        const resolvedWorkspaceId = String(workspaceId || 'default');
         logLauncherWindowAction('View Active Terminals clicked', {
             pywebview: Boolean(window.pywebview?.api)
         });
@@ -2265,25 +2271,45 @@
            it cannot honour a requested group — a restore goes straight to
            open_session_window, which retargets an existing window. A zoomed
            restore also needs that path so the native window receives its zoom. */
-        if (!preferredGroupId && normalizedZoomFactor === null && window.pywebview?.api?.focus_session_window) {
+        if (
+            !preferredGroupId
+            && normalizedZoomFactor === null
+            && (
+                window.pywebview?.api?.focus_workspace_window
+                || window.pywebview?.api?.focus_session_window
+            )
+        ) {
             try {
-                const result = await window.pywebview.api.focus_session_window();
-                logLauncherWindowAction('focus_session_window result', result || {});
+                const result = window.pywebview.api.focus_workspace_window
+                    ? await window.pywebview.api.focus_workspace_window(resolvedWorkspaceId)
+                    : await window.pywebview.api.focus_session_window();
+                logLauncherWindowAction('focus workspace window result', result || {});
                 if (result?.ok) {
                     return false;
                 }
             } catch (error) {
-                console.error('[GridVibe Launcher] focus_session_window failed:', error);
+                console.error('[GridVibe Launcher] focus workspace window failed:', error);
             }
         }
 
-        await openTerminalsIfActive(preferredGroupId, normalizedZoomFactor);
+        await openTerminalsIfActive(
+            preferredGroupId,
+            normalizedZoomFactor,
+            resolvedWorkspaceId
+        );
         return false;
     }
 
-    async function openTerminalsIfActive(preferredGroupId = '', nativeZoomFactor = null) {
+    async function openTerminalsIfActive(
+        preferredGroupId = '',
+        nativeZoomFactor = null,
+        workspaceId = 'default'
+    ) {
+        const resolvedWorkspaceId = String(workspaceId || 'default');
         try {
-            const resp = await fetch('/api/sessions');
+            const resp = await fetch(
+                `/api/sessions?workspace_id=${encodeURIComponent(resolvedWorkspaceId)}`
+            );
             const data = await resp.json();
             logLauncherWindowAction('Fetched sessions before opening terminals', {
                 count: Array.isArray(data.sessions) ? data.sessions.length : 0,
@@ -2304,13 +2330,23 @@
             const targetGroupId = liveGroupIds.has(preferredGroupId)
                 ? preferredGroupId
                 : (data.sessions.find(session => session.group_id)?.group_id || '');
-            if (window.pywebview?.api?.open_session_window) {
+            if (
+                window.pywebview?.api?.open_workspace_window
+                || window.pywebview?.api?.open_session_window
+            ) {
                 try {
-                    const result = await window.pywebview.api.open_session_window(
-                        targetGroupId,
-                        normalizeNativeZoomFactor(nativeZoomFactor)
-                    );
-                    logLauncherWindowAction('open_session_window result', {
+                    const result = window.pywebview.api.open_workspace_window
+                        ? await window.pywebview.api.open_workspace_window(
+                            resolvedWorkspaceId,
+                            targetGroupId,
+                            normalizeNativeZoomFactor(nativeZoomFactor)
+                        )
+                        : await window.pywebview.api.open_session_window(
+                            targetGroupId,
+                            normalizeNativeZoomFactor(nativeZoomFactor)
+                        );
+                    logLauncherWindowAction('open workspace window result', {
+                        workspace_id: resolvedWorkspaceId,
                         requested_group_id: targetGroupId || 'all',
                         ...(result || {})
                     });
@@ -2318,13 +2354,17 @@
                         return;
                     }
                 } catch (error) {
-                    console.error('[GridVibe Launcher] open_session_window failed:', error);
+                    console.error('[GridVibe Launcher] open workspace window failed:', error);
                 }
             }
 
+            const params = new URLSearchParams({ workspace: resolvedWorkspaceId });
+            if (targetGroupId) {
+                params.set('group', targetGroupId);
+            }
             window.open(
-                targetGroupId ? `/terminals?group=${encodeURIComponent(targetGroupId)}` : '/terminals',
-                'gridvibe-sessions'
+                `/terminals?${params.toString()}`,
+                `gridvibe-workspace-${resolvedWorkspaceId}`
             );
             logLauncherWindowAction('Opened browser terminals window fallback', {
                 requested_group_id: targetGroupId || 'all'
@@ -2604,23 +2644,38 @@
             showMessage(launchMessage, launchWarnings.length ? 'warning' : 'success');
             if (data.launch_target === 'web') {
                 setTimeout(async () => {
-                    const targetUrl = `/terminals?group=${encodeURIComponent(data.group_id)}`;
-                    if (window.pywebview?.api?.open_session_window) {
+                    const workspaceId = String(data.workspace_id || 'default');
+                    const targetParams = new URLSearchParams({
+                        workspace: workspaceId,
+                        group: data.group_id
+                    });
+                    const targetUrl = `/terminals?${targetParams.toString()}`;
+                    const windowName = `gridvibe-workspace-${workspaceId}`;
+                    if (
+                        window.pywebview?.api?.open_workspace_window
+                        || window.pywebview?.api?.open_session_window
+                    ) {
                         try {
-                            const result = await window.pywebview.api.open_session_window(data.group_id);
-                            logLauncherWindowAction('open_session_window after launch', {
+                            const result = window.pywebview.api.open_workspace_window
+                                ? await window.pywebview.api.open_workspace_window(
+                                    workspaceId,
+                                    data.group_id
+                                )
+                                : await window.pywebview.api.open_session_window(data.group_id);
+                            logLauncherWindowAction('open workspace window after launch', {
+                                workspace_id: workspaceId,
                                 requested_group_id: data.group_id,
                                 ...(result || {})
                             });
                             if (!result?.ok) {
-                                window.open(targetUrl, 'gridvibe-sessions');
+                                window.open(targetUrl, windowName);
                             }
                         } catch (error) {
                             console.error('[GridVibe Launcher] launch window open failed:', error);
-                            window.open(targetUrl, 'gridvibe-sessions');
+                            window.open(targetUrl, windowName);
                         }
                     } else {
-                        window.open(targetUrl, 'gridvibe-sessions');
+                        window.open(targetUrl, windowName);
                     }
                     setLaunchButtonLoading(button, false);
                 }, 450);

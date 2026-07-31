@@ -206,6 +206,7 @@ class RuntimeConfig:
         self.terminal_font_family = "Consolas, Monaco, 'Courier New', monospace"
         self.app_theme = "system"
         self.app_surface_mode = "normal"
+        self.multi_workspace_enabled = False
         self.workspace_autosave_interval_minutes = AUTOSAVE_INTERVAL_MINUTES_DEFAULT
         self.explorer_search_max_files = EXPLORER_SEARCH_MAX_FILES_DEFAULT
         self.explorer_search_max_matches = EXPLORER_SEARCH_MAX_MATCHES_DEFAULT
@@ -257,6 +258,12 @@ class RuntimeConfig:
 
         workspace_config = self.app_config.get("workspace", {})
         self.app_surface_mode = _normalize_surface_mode(workspace_config.get("surface_mode"))
+        multi_workspace_enabled = workspace_config.get("multi_workspace_enabled", False)
+        self.multi_workspace_enabled = (
+            multi_workspace_enabled
+            if isinstance(multi_workspace_enabled, bool)
+            else False
+        )
         try:
             self.workspace_autosave_interval_minutes = max(
                 AUTOSAVE_INTERVAL_MINUTES_MIN,
