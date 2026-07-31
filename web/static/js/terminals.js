@@ -1206,7 +1206,193 @@
         button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
         if (shouldOpen) {
             closeSessionsMenu();
+            refreshWorkspaceMenuLists();
         }
+    }
+
+    /* ─────────────────────────────────────────────
+       Multi-workspace: menus, move, window lifecycle
+
+       This window's workspace identity, filtered loading, cache eviction and
+       room joins live here; every workspace API call, destination list and
+       window dispatch goes through workspaces.js (guardrail 6).
+    ───────────────────────────────────────────── */
+
+    async function refreshWorkspaceMenuLists() {
+        if (!isMultiWorkspaceEnabled()) {
+            return;
+        }
+        const openList = document.getElementById('openWorkspaceList');
+        const moveList = document.getElementById('moveWorkspaceList');
+        if (!openList && !moveList) {
+            return;
+        }
+
+        const workspaces = await fetchLiveWorkspaces();
+        const targetGroupId = getActiveWorkspaceGroupId();
+        renderWorkspaceMenuList(
+            openList,
+            workspaces.map((workspace, index) => ({
+                label: workspaceDisplayLabel(workspace, index),
+                current: workspace.workspace_id === currentWorkspaceId,
+                disabled: workspace.workspace_id === currentWorkspaceId,
+                icon: workspace.workspace_id === currentWorkspaceId ? '' : WORKSPACE_ICONS.window,
+                onSelect: () => {
+                    closeWorkspaceMenu();
+                    openWorkspaceWindow(workspace.workspace_id);
+                }
+            }))
+        );
+
+        const moveEntries = workspaces
+            .filter(workspace => workspace.workspace_id !== currentWorkspaceId)
+            .map((workspace, index) => ({
+                label: workspaceDisplayLabel(workspace, index),
+                icon: WORKSPACE_ICONS.move,
+                disabled: !targetGroupId,
+                onSelect: () => {
+                    closeWorkspaceMenu();
+                    moveSessionGroupToWorkspace(targetGroupId, { workspaceId: workspace.workspace_id });
+                }
+            }));
+        moveEntries.push({
+            label: 'New workspace ...',
+            icon: WORKSPACE_ICONS.add,
+            disabled: !targetGroupId,
+            onSelect: () => {
+                closeWorkspaceMenu();
+                moveSessionGroupToNewWorkspace(targetGroupId);
+            }
+        });
+        renderWorkspaceMenuList(moveList, moveEntries);
+    }
+
+    async function renameCurrentWorkspace() {
+        const workspaces = await fetchLiveWorkspaces();
+        const current = workspaces.find(workspace => workspace.workspace_id === currentWorkspaceId);
+        const label = await openWorkspaceNameModal({
+            title: 'Rename workspace',
+            copy: 'The name is shown in workspace pickers and on the saved snapshot.',
+            value: current?.label || '',
+            confirmLabel: 'Rename'
+        });
+        if (label === null) {
+            return;
+        }
+        try {
+            const updated = await renameWorkspaceRecord(currentWorkspaceId, label);
+            setWorkspaceSaveMessage(`Workspace renamed to "${workspaceDisplayLabel(updated)}".`, 'success');
+        } catch (error) {
+            setWorkspaceSaveMessage(`Rename failed: ${error.message} — try again.`, 'error');
+        }
+    }
+
+    async function createAndOpenWorkspace() {
+        const label = await openWorkspaceNameModal({
+            title: 'New workspace',
+            copy: 'Opens an empty workspace window. Import a session or move a tab into it.',
+            confirmLabel: 'Create'
+        });
+        if (label === null) {
+            return;
+        }
+        try {
+            const workspace = await createWorkspaceRecord(label);
+            await openWorkspaceWindow(workspace.workspace_id);
+        } catch (error) {
+            setWorkspaceSaveMessage(`Could not create the workspace: ${error.message}`, 'error');
+        }
+    }
+
+    /* Closing the window never closes its sessions: the workspace stays live
+       and can be reopened from the launcher. */
+    async function closeThisWorkspaceWindow() {
+        logSessionWindowAction('Closing this workspace window on request');
+        await closeWorkspaceWindow(currentWorkspaceId);
+    }
+
+    async function moveSessionGroupToNewWorkspace(groupId) {
+        const label = await openWorkspaceNameModal({
+            title: 'Move to new workspace',
+            copy: 'Creates a workspace, moves this session into it, and opens its window.',
+            confirmLabel: 'Move'
+        });
+        if (label === null) {
+            return;
+        }
+        await moveSessionGroupToWorkspace(groupId, { newWorkspace: true, label });
+    }
+
+    async function moveSessionGroupToWorkspace(groupId, target) {
+        const movingGroupId = String(groupId || '');
+        if (!movingGroupId) {
+            return;
+        }
+
+        /* Moving evicts this window's cached view of the tab, which tears down
+           its explorer editors — confirm unsaved buffers first, in page. */
+        if (movingGroupId === visibleGroupId
+            && !(await confirmDiscardAllExplorerEdits('Moving this session'))) {
+            return;
+        }
+
+        try {
+            const result = await moveGroupToWorkspace(movingGroupId, target);
+            if (!result.moved) {
+                showTerminalToast('That session is already in this workspace.', '');
+                return;
+            }
+
+            /* The sessions themselves are untouched — same ids, same processes,
+               same SSH connections, same per-session rooms. Only this window's
+               cached view of the tab goes away. */
+            if (movingGroupId === visibleGroupId) {
+                teardownCurrentGrid();
+            } else {
+                dropCachedGroupView(movingGroupId);
+            }
+            if (activeGroupId === movingGroupId) {
+                activeGroupId = '';
+            }
+            await openWorkspaceWindow(result.workspace_id, { groupId: movingGroupId });
+
+            /* Moving the last group out empties this workspace: the record is
+               already pruned server-side, so re-listing it would 400. Close
+               this window instead — its sessions live on in the destination. */
+            const sourceGroups = Array.isArray(result.source_groups) ? result.source_groups : [];
+            if (!sourceGroups.length) {
+                await _closeWindowAfterLastSession();
+                return;
+            }
+            await loadSessionGroups();
+            await initialLoad();
+        } catch (error) {
+            console.error('[GridVibe Sessions] move session failed:', error);
+            showTerminalToast(`Move failed: ${error.message}`, 'error');
+        }
+    }
+
+    async function openSessionTabContextMenu(event, groupId) {
+        if (!isMultiWorkspaceEnabled()) {
+            return;
+        }
+        event.preventDefault();
+        const workspaces = await fetchLiveWorkspaces();
+        const entries = workspaces
+            .filter(workspace => workspace.workspace_id !== currentWorkspaceId)
+            .map((workspace, index) => ({
+                label: `Move to ${workspaceDisplayLabel(workspace, index)}`,
+                icon: WORKSPACE_ICONS.move,
+                onSelect: () => moveSessionGroupToWorkspace(groupId, {
+                    workspaceId: workspace.workspace_id
+                })
+            }));
+        entries.push({
+            label: 'Move to new workspace ...',
+            icon: WORKSPACE_ICONS.add,
+            onSelect: () => moveSessionGroupToNewWorkspace(groupId)
+        });
+        openWorkspaceContextMenu(event, entries);
     }
 
 
@@ -1491,18 +1677,49 @@
             workspace_layout: config.workspace_layout || null,
             saved_session_id: savedSession.id,
             session_name: buildSavedSessionLaunchName(savedSession, config),
+            // Import Session lands in *this* window's workspace, not globally.
+            workspace_id: currentWorkspaceId,
             sessions
         };
     }
 
+    /* A saved preset is live in at most one workspace at a time (plan §6). When
+       the backend reports the conflict, offer the two honest resolutions rather
+       than silently stealing the tab or minting a duplicate (guardrail 8). */
+    async function resolveSavedSessionConflict(conflict) {
+        const label = String(conflict.workspace_label || '').trim() || 'another workspace';
+        const moveItHere = await openGenericConfirmModal({
+            title: 'Already open elsewhere',
+            copy: `This saved session is open in ${label}.`,
+            note: 'Move it here, or cancel and open that workspace instead.',
+            confirmLabel: 'Move it here'
+        });
+        if (!moveItHere) {
+            await openWorkspaceWindow(conflict.workspace_id, { groupId: conflict.group_id });
+            setWorkspaceSaveMessage(`Opened ${label}.`, '');
+            return false;
+        }
+        await moveGroupToWorkspace(conflict.group_id, { workspaceId: currentWorkspaceId });
+        return true;
+    }
+
     async function launchSavedSession(savedSession) {
         const payload = buildSavedSessionLaunchPayload(savedSession);
-        const response = await fetch('/api/sessions', {
+        const postLaunch = () => fetch('/api/sessions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-        const data = await response.json().catch(() => ({}));
+
+        let response = await postLaunch();
+        let data = await response.json().catch(() => ({}));
+        if (response.status === 409 && data.conflict === 'saved_session_live') {
+            if (!(await resolveSavedSessionConflict(data))) {
+                return;
+            }
+            response = await postLaunch();
+            data = await response.json().catch(() => ({}));
+        }
         if (!response.ok) {
             throw new Error(data.error || `Launch failed with status ${response.status}`);
         }
@@ -2149,6 +2366,12 @@
                     event.preventDefault();
                     closeSessionGroup(group.group_id);
                 }
+            });
+
+            /* Right-click offers the same moveGroupToWorkspace() call as the
+               Workspace ▸ Move Session to Workspace menu. */
+            button.addEventListener('contextmenu', event => {
+                openSessionTabContextMenu(event, group.group_id);
             });
 
             wireSessionTabDragAndDrop(button, container);

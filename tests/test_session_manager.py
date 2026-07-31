@@ -1,3 +1,4 @@
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -637,6 +638,76 @@ class MultiWorkspaceSessionManagerTestCase(unittest.TestCase):
         self.assertEqual(pruned, [self.WORKSPACE_A, self.WORKSPACE_B])
         self.assertIsNotNone(self.manager.get_workspace("default"))
         self.assertIsNone(self.manager.get_workspace(self.WORKSPACE_A))
+
+
+class WorkspaceLifetimeTestCase(unittest.TestCase):
+    """Stage 3 lifetime rules: retention, rename, and rollback removal."""
+
+    WORKSPACE_A = "aaaaaaaaaaaa"
+
+    def setUp(self):
+        self.manager = SessionManager()
+
+    def _group(self, group_id, workspace_id):
+        self.manager.create_group(
+            name=group_id,
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id=group_id,
+            workspace_id=workspace_id,
+        )
+        self.manager.create_session(
+            group_id=group_id,
+            host=f"{group_id}.example",
+            directory="/srv/app",
+        )
+
+    def test_retained_workspace_survives_pruning_until_its_first_group(self):
+        workspace = self.manager.create_workspace("Scratch", retain_when_empty=True)
+        workspace.created_at = time.time() - EMPTY_GROUP_GRACE_SECONDS - 1
+
+        self.assertEqual(self.manager.clear_disconnected_sessions(), [])
+        self.assertIsNotNone(self.manager.get_workspace(workspace.workspace_id))
+
+        # The first group clears the flag; normal pruning resumes from there.
+        self._group("g1", workspace.workspace_id)
+        self.assertFalse(self.manager.get_workspace(workspace.workspace_id).retain_when_empty)
+        self.manager.remove_group("g1")
+        self.assertEqual(
+            self.manager.clear_disconnected_sessions(force_group_ids=["g1"]),
+            [workspace.workspace_id],
+        )
+
+    def test_moving_a_group_in_clears_the_destination_retention_flag(self):
+        source = self.manager.create_workspace("Source")
+        target = self.manager.create_workspace("Target", retain_when_empty=True)
+        self._group("g1", source.workspace_id)
+
+        self.manager.move_group("g1", target.workspace_id)
+
+        self.assertFalse(self.manager.get_workspace(target.workspace_id).retain_when_empty)
+
+    def test_rename_updates_the_label_and_reports_unknown_workspaces(self):
+        workspace = self.manager.create_workspace("Before")
+
+        renamed = self.manager.rename_workspace(workspace.workspace_id, "  After  ")
+
+        self.assertEqual(renamed.label, "After")
+        self.assertIsNone(self.manager.rename_workspace(self.WORKSPACE_A, "Nope"))
+
+    def test_remove_workspace_only_drops_empty_non_default_records(self):
+        workspace = self.manager.create_workspace("Rollback target")
+        self._group("g1", workspace.workspace_id)
+
+        self.assertFalse(self.manager.remove_workspace(workspace.workspace_id))
+        self.manager.remove_group("g1")
+        self.assertTrue(self.manager.remove_workspace(workspace.workspace_id))
+        self.assertFalse(self.manager.remove_workspace(workspace.workspace_id))
+        # "default" is permanent — it is the compatibility target for every
+        # caller and URL that omits a workspace id.
+        self.assertFalse(self.manager.remove_workspace("default"))
+        self.assertIsNotNone(self.manager.get_workspace("default"))
 
 
 class EmptyGroupGracePeriodTestCase(unittest.TestCase):

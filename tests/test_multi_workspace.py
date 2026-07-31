@@ -8,10 +8,36 @@ from unittest.mock import patch
 from sessions.manager import EMPTY_GROUP_GRACE_SECONDS
 from web import api
 from web import runtime_state as web_runtime_state
+from web import saved_sessions as web_saved_sessions
+from web import workspaces as web_workspaces
 from web.workspaces import normalize_workspace_id, workspace_room
 
 
-class MultiWorkspaceApiTestCase(unittest.TestCase):
+def _workspace_events(socket_client):
+    """Return the session_groups_updated payloads one socket received."""
+    return [
+        event["args"][0]
+        for event in socket_client.get_received()
+        if event["name"] == "session_groups_updated"
+    ]
+
+
+class WorkspaceSocketClientMixin:
+    """Join one Socket.IO client to a workspace room and clean it up."""
+
+    def _socket_client(self, workspace_id):
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+        self.addCleanup(socket_client.disconnect)
+        socket_client.get_received()
+        socket_client.emit("join_workspace", {"workspace_id": workspace_id})
+        socket_client.get_received()
+        return socket_client
+
+
+class MultiWorkspaceApiTestCase(WorkspaceSocketClientMixin, unittest.TestCase):
     """Stage 2 HTTP, page, and Socket.IO workspace isolation."""
 
     WORKSPACE_A = "aaaaaaaaaaaa"
@@ -40,25 +66,6 @@ class MultiWorkspaceApiTestCase(unittest.TestCase):
             directory="/srv/app",
         )
         return group, session
-
-    @staticmethod
-    def _workspace_events(socket_client):
-        return [
-            event["args"][0]
-            for event in socket_client.get_received()
-            if event["name"] == "session_groups_updated"
-        ]
-
-    def _socket_client(self, workspace_id):
-        socket_client = api.socketio.test_client(
-            api.app,
-            flask_test_client=self.client,
-        )
-        self.addCleanup(socket_client.disconnect)
-        socket_client.get_received()
-        socket_client.emit("join_workspace", {"workspace_id": workspace_id})
-        socket_client.get_received()
-        return socket_client
 
     def _static(self, path):
         response = self.client.get(f"/static/{path}")
@@ -230,7 +237,7 @@ class MultiWorkspaceApiTestCase(unittest.TestCase):
         )
 
         self.assertEqual(
-            self._workspace_events(client_a),
+            _workspace_events(client_a),
             [
                 {
                     "workspace_id": self.WORKSPACE_A,
@@ -239,7 +246,7 @@ class MultiWorkspaceApiTestCase(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual(self._workspace_events(client_b), [])
+        self.assertEqual(_workspace_events(client_b), [])
 
     def test_closing_last_group_in_one_workspace_preserves_the_other(self):
         self._group("group-a", self.WORKSPACE_A)
@@ -260,10 +267,10 @@ class MultiWorkspaceApiTestCase(unittest.TestCase):
         self.assertIsNotNone(api.session_manager.get_group("group-b"))
         self.assertIsNotNone(api.session_manager.get_session(session_b.session_id))
         self.assertEqual(
-            [event["reason"] for event in self._workspace_events(client_a)],
+            [event["reason"] for event in _workspace_events(client_a)],
             ["group_closed"],
         )
-        self.assertEqual(self._workspace_events(client_b), [])
+        self.assertEqual(_workspace_events(client_b), [])
 
     def test_cleanup_prune_event_is_emitted_after_a_single_session_close(self):
         _group, session = self._group("group-a", self.WORKSPACE_A)
@@ -289,7 +296,7 @@ class MultiWorkspaceApiTestCase(unittest.TestCase):
         self.assertEqual(broadcast_lock_states, [False, False])
         self.assertIsNone(api.session_manager.get_workspace(self.WORKSPACE_B))
         self.assertEqual(
-            self._workspace_events(client_b),
+            _workspace_events(client_b),
             [
                 {
                     "workspace_id": self.WORKSPACE_B,
@@ -321,12 +328,22 @@ class MultiWorkspaceApiTestCase(unittest.TestCase):
 
     def test_browser_window_names_and_urls_are_workspace_scoped(self):
         launcher_js = self._static("js/launcher.js")
+        workspaces_js = self._static("js/workspaces.js")
         page = self.client.get("/").get_data(as_text=True)
 
-        self.assertIn("`gridvibe-workspace-${resolvedWorkspaceId}`", launcher_js)
-        self.assertIn("workspace: resolvedWorkspaceId", launcher_js)
+        # One implementation of the window name and URL, in the shared module.
+        self.assertIn(
+            "return `gridvibe-workspace-${normalizeWorkspaceId(workspaceId)}`;",
+            workspaces_js,
+        )
+        self.assertIn(
+            "const params = new URLSearchParams({ workspace: normalizeWorkspaceId(workspaceId) });",
+            workspaces_js,
+        )
+        self.assertIn("await openWorkspaceWindow(resolvedWorkspaceId, {", launcher_js)
         self.assertIn('target="gridvibe-workspace-default"', page)
         self.assertNotIn("gridvibe-sessions", launcher_js)
+        self.assertNotIn("gridvibe-sessions", workspaces_js)
 
 
 class MultiWorkspacePersistenceTestCase(unittest.TestCase):
@@ -433,6 +450,1033 @@ class MultiWorkspacePersistenceTestCase(unittest.TestCase):
 
         slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
         self.assertEqual(slot["origin"], "manual")
+
+
+
+
+class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase):
+    """Stage 3 destination, uniqueness guard, move, rename, and lifetime."""
+
+    WORKSPACE_A = "aaaaaaaaaaaa"
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        for target, attribute, value in (
+            (web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)),
+        ):
+            patcher = patch.object(target, attribute, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _launch(self, **overrides):
+        body = {
+            "connection_mode": "wsl",
+            "session_name": overrides.pop("session_name", "Files"),
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+        body.update(overrides)
+        return self.client.post("/api/sessions", json=body)
+
+    def _static(self, path):
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    # ── Destination ──
+
+    def test_launch_without_a_destination_still_targets_default(self):
+        response = self._launch()
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertEqual(payload["workspace_id"], "default")
+        self.assertFalse(payload["workspace_created"])
+
+    def test_launch_into_a_new_workspace_creates_and_labels_it(self):
+        response = self._launch(new_workspace=True, workspace_label="Reviews")
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        workspace_id = payload["workspace_id"]
+        self.assertNotEqual(workspace_id, "default")
+        self.assertTrue(payload["workspace_created"])
+        workspace = api.session_manager.get_workspace(workspace_id)
+        self.assertEqual(workspace.label, "Reviews")
+        # A workspace that received a group is no longer "deliberately empty".
+        self.assertFalse(workspace.retain_when_empty)
+        self.assertEqual(
+            [group.group_id for group in api.session_manager.get_workspace_groups("default")],
+            [],
+        )
+
+    def test_launch_into_an_unknown_workspace_is_rejected(self):
+        response = self._launch(workspace_id=self.WORKSPACE_A)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "Workspace not found")
+
+    def test_failed_launch_rolls_back_the_workspace_it_created(self):
+        before = {workspace.workspace_id for workspace in api.session_manager.get_all_workspaces()}
+
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "new_workspace": True,
+                "workspace_label": "Doomed",
+                "sessions": [
+                    {
+                        "title": "Broken",
+                        "startup_mode": "browser",
+                        "initial_command": "ftp://example.test",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        after = {workspace.workspace_id for workspace in api.session_manager.get_all_workspaces()}
+        # A dead destination must never linger in the picker.
+        self.assertEqual(before, after)
+
+    # ── §6 uniqueness table ──
+
+    def test_preset_not_live_anywhere_launches_normally(self):
+        response = self._launch(saved_session_id="alpha", new_workspace=True)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["group_id"], "saved-session-alpha")
+
+    def test_preset_live_in_the_target_workspace_replaces_in_place(self):
+        first = self._launch(saved_session_id="alpha")
+        self.assertEqual(first.status_code, 201)
+        original_session_ids = {
+            session["session_id"] for session in first.get_json()["sessions"]
+        }
+
+        second = self._launch(saved_session_id="alpha")
+
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(second.get_json()["group_id"], "saved-session-alpha")
+        self.assertFalse(
+            original_session_ids
+            & {session["session_id"] for session in second.get_json()["sessions"]}
+        )
+
+    def test_preset_live_in_another_workspace_conflicts_without_stealing(self):
+        first = self._launch(saved_session_id="alpha", new_workspace=True)
+        self.assertEqual(first.status_code, 201)
+        owner_workspace_id = first.get_json()["workspace_id"]
+        api.session_manager.rename_workspace(owner_workspace_id, "Reviews")
+        live_session_ids = {
+            session["session_id"] for session in first.get_json()["sessions"]
+        }
+        workspaces_before = {
+            workspace.workspace_id for workspace in api.session_manager.get_all_workspaces()
+        }
+
+        conflict = self._launch(saved_session_id="alpha", workspace_id="default")
+
+        self.assertEqual(conflict.status_code, 409)
+        payload = conflict.get_json()
+        self.assertEqual(payload["conflict"], "saved_session_live")
+        self.assertEqual(payload["saved_session_id"], "alpha")
+        self.assertEqual(payload["group_id"], "saved-session-alpha")
+        self.assertEqual(payload["workspace_id"], owner_workspace_id)
+        self.assertEqual(payload["workspace_label"], "Reviews")
+        # The owning workspace's live sessions survive untouched: the conflict
+        # is resolved before any destructive replace-in-place.
+        self.assertEqual(
+            {session.session_id for session in api.session_manager.get_group_sessions("saved-session-alpha")},
+            live_session_ids,
+        )
+        self.assertEqual(
+            workspaces_before,
+            {workspace.workspace_id for workspace in api.session_manager.get_all_workspaces()},
+        )
+
+    def test_conflicting_launch_into_a_new_workspace_rolls_it_back(self):
+        self._launch(saved_session_id="alpha")
+        before = {workspace.workspace_id for workspace in api.session_manager.get_all_workspaces()}
+
+        conflict = self._launch(saved_session_id="alpha", new_workspace=True)
+
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(
+            before,
+            {workspace.workspace_id for workspace in api.session_manager.get_all_workspaces()},
+        )
+
+    # ── Workspace CRUD ──
+
+    def test_create_workspace_is_retained_while_deliberately_empty(self):
+        response = self.client.post("/api/workspaces", json={"label": "Scratch"})
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertTrue(payload["retain_when_empty"])
+        self.assertEqual(payload["group_count"], 0)
+        workspace_id = payload["workspace_id"]
+        api.session_manager.get_workspace(workspace_id).created_at = (
+            time.time() - EMPTY_GROUP_GRACE_SECONDS - 1
+        )
+
+        api.session_manager.clear_disconnected_sessions()
+
+        self.assertIsNotNone(api.session_manager.get_workspace(workspace_id))
+
+    def test_first_group_clears_retention_and_normal_pruning_resumes(self):
+        workspace_id = self.client.post("/api/workspaces", json={}).get_json()["workspace_id"]
+        launch = self._launch(workspace_id=workspace_id)
+        self.assertEqual(launch.status_code, 201)
+        self.assertFalse(api.session_manager.get_workspace(workspace_id).retain_when_empty)
+
+        closed = self.client.delete(
+            "/api/sessions",
+            query_string={"workspace_id": workspace_id, "group": launch.get_json()["group_id"]},
+        )
+
+        self.assertEqual(closed.status_code, 200)
+        self.assertIsNone(api.session_manager.get_workspace(workspace_id))
+
+    def test_workspace_list_reports_labels_and_group_counts(self):
+        self._launch(session_name="Main")
+        created = self.client.post("/api/workspaces", json={"label": "Scratch"}).get_json()
+
+        response = self.client.get("/api/workspaces")
+
+        self.assertEqual(response.status_code, 200)
+        rows = {row["workspace_id"]: row for row in response.get_json()["workspaces"]}
+        self.assertEqual(rows["default"]["group_count"], 1)
+        self.assertEqual(rows[created["workspace_id"]]["group_count"], 0)
+        self.assertEqual(rows[created["workspace_id"]]["label"], "Scratch")
+
+    def test_rename_updates_the_live_record_and_the_saved_slot(self):
+        self._launch(session_name="Main")
+        web_runtime_state.capture_workspace(api.session_manager, workspace_id="default")
+
+        response = self.client.patch("/api/workspaces/default", json={"label": "Renamed"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["label"], "Renamed")
+        self.assertEqual(api.session_manager.get_workspace("default").label, "Renamed")
+        self.assertEqual(
+            web_runtime_state.load_restorable_workspace("default")["label"],
+            "Renamed",
+        )
+
+    def test_rename_rejects_unknown_workspaces_and_missing_labels(self):
+        unknown = self.client.patch(
+            f"/api/workspaces/{self.WORKSPACE_A}", json={"label": "Nope"}
+        )
+        missing = self.client.patch("/api/workspaces/default", json={})
+        malformed = self.client.patch("/api/workspaces/NOT-AN-ID", json={"label": "x"})
+
+        self.assertEqual(unknown.status_code, 404)
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(malformed.status_code, 400)
+
+    def test_workspace_label_is_bounded_and_single_line(self):
+        response = self.client.post(
+            "/api/workspaces", json={"label": f"  spaced\n\tname  {'x' * 200}"}
+        )
+
+        label = response.get_json()["label"]
+        self.assertEqual(len(label), 80)
+        self.assertTrue(label.startswith("spaced name x"))
+
+    # ── Move ──
+
+    def test_move_preserves_every_session_and_notifies_both_rooms(self):
+        launch = self._launch(session_name="Main")
+        group_id = launch.get_json()["group_id"]
+        session_ids = {session["session_id"] for session in launch.get_json()["sessions"]}
+        target = self.client.post("/api/workspaces", json={"label": "Reviews"}).get_json()
+        default_client = self._socket_client("default")
+        target_client = self._socket_client(target["workspace_id"])
+        other = api.session_manager.create_workspace("Other")
+        other_client = self._socket_client(other.workspace_id)
+
+        response = self.client.post(
+            f"/api/session-groups/{group_id}/move",
+            json={"target_workspace_id": target["workspace_id"]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["moved"])
+        self.assertEqual(payload["workspace_id"], target["workspace_id"])
+        self.assertEqual(payload["source_workspace_id"], "default")
+        self.assertEqual(payload["source_groups"], [])
+        # Sessions keep their ids: nothing was recreated, closed, or reconnected.
+        self.assertEqual(
+            {session.session_id for session in api.session_manager.get_group_sessions(group_id)},
+            session_ids,
+        )
+        self.assertEqual(
+            [event["reason"] for event in _workspace_events(default_client)],
+            ["moved"],
+        )
+        self.assertEqual(
+            [event["reason"] for event in _workspace_events(target_client)],
+            ["moved"],
+        )
+        self.assertEqual(_workspace_events(other_client), [])
+
+    def test_move_appends_to_the_destination_and_compacts_the_source(self):
+        first = self._launch(session_name="First").get_json()["group_id"]
+        second = self._launch(session_name="Second").get_json()["group_id"]
+        third = self._launch(session_name="Third").get_json()["group_id"]
+        target = self.client.post("/api/workspaces", json={}).get_json()["workspace_id"]
+        self.client.post(
+            f"/api/session-groups/{third}/move", json={"target_workspace_id": target}
+        )
+
+        response = self.client.post(
+            f"/api/session-groups/{first}/move", json={"target_workspace_id": target}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [group.group_id for group in api.session_manager.get_workspace_groups(target)],
+            [third, first],
+        )
+        source_groups = api.session_manager.get_workspace_groups("default")
+        self.assertEqual([group.group_id for group in source_groups], [second])
+        self.assertEqual([group.display_order for group in source_groups], [0])
+
+    def test_move_to_a_new_workspace_creates_the_destination(self):
+        group_id = self._launch().get_json()["group_id"]
+
+        response = self.client.post(
+            f"/api/session-groups/{group_id}/move",
+            json={"new_workspace": True, "label": "Split off"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["workspace_created"])
+        self.assertEqual(
+            api.session_manager.get_workspace(payload["workspace_id"]).label,
+            "Split off",
+        )
+
+    def test_move_into_the_same_workspace_is_a_reported_no_op(self):
+        group_id = self._launch().get_json()["group_id"]
+
+        response = self.client.post(
+            f"/api/session-groups/{group_id}/move",
+            json={"target_workspace_id": "default"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["moved"])
+        self.assertEqual(api.session_manager.get_group(group_id).workspace_id, "default")
+
+    def test_move_rejects_unknown_groups_and_destinations(self):
+        group_id = self._launch().get_json()["group_id"]
+
+        unknown_group = self.client.post(
+            "/api/session-groups/nope/move", json={"target_workspace_id": "default"}
+        )
+        unknown_workspace = self.client.post(
+            f"/api/session-groups/{group_id}/move",
+            json={"target_workspace_id": self.WORKSPACE_A},
+        )
+        malformed_workspace = self.client.post(
+            f"/api/session-groups/{group_id}/move",
+            json={"target_workspace_id": "NOT-AN-ID"},
+        )
+
+        self.assertEqual(unknown_group.status_code, 404)
+        self.assertEqual(unknown_workspace.status_code, 400)
+        self.assertEqual(malformed_workspace.status_code, 400)
+        self.assertEqual(api.session_manager.get_group(group_id).workspace_id, "default")
+
+    def test_move_out_of_a_non_default_workspace_prunes_the_empty_source(self):
+        launch = self._launch(new_workspace=True)
+        group_id = launch.get_json()["group_id"]
+        source_workspace_id = launch.get_json()["workspace_id"]
+
+        response = self.client.post(
+            f"/api/session-groups/{group_id}/move", json={"target_workspace_id": "default"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["source_workspace_pruned"])
+        self.assertIsNone(api.session_manager.get_workspace(source_workspace_id))
+
+    def test_moving_the_active_group_clears_the_sources_front_hint(self):
+        group_id = self._launch().get_json()["group_id"]
+        self._launch(session_name="Stays")
+        api.session_manager.set_active_group("default", group_id)
+        target = self.client.post("/api/workspaces", json={}).get_json()["workspace_id"]
+
+        self.client.post(
+            f"/api/session-groups/{group_id}/move", json={"target_workspace_id": target}
+        )
+
+        self.assertEqual(api.session_manager.get_active_group_id("default"), "")
+
+    # ── Page and menu wiring ──
+
+    def test_terminals_page_ships_the_multi_workspace_menu_items(self):
+        with patch.object(api.runtime_config, "multi_workspace_enabled", True):
+            html = self.client.get("/terminals").get_data(as_text=True)
+
+        for element_id in (
+            "renameWorkspaceItem",
+            "newWorkspaceItem",
+            "openWorkspaceList",
+            "moveWorkspaceList",
+            "closeWorkspaceWindowItem",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn('id="workspaceNameModal"', html)
+        self.assertIn('id="workspaceContextMenu"', html)
+        self.assertIn('id="saveWorkspaceItem"', html)
+
+    def test_workspace_menu_degrades_when_the_flag_is_off(self):
+        with patch.object(api.runtime_config, "multi_workspace_enabled", False):
+            html = self.client.get("/terminals").get_data(as_text=True)
+
+        self.assertIn('id="saveWorkspaceItem"', html)
+        for element_id in ("renameWorkspaceItem", "newWorkspaceItem", "closeWorkspaceWindowItem"):
+            self.assertNotIn(f'id="{element_id}"', html)
+
+    def test_launcher_ships_the_destination_control_behind_the_flag(self):
+        with patch.object(api.runtime_config, "multi_workspace_enabled", True):
+            enabled = self.client.get("/").get_data(as_text=True)
+        with patch.object(api.runtime_config, "multi_workspace_enabled", False):
+            disabled = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="workspaceDestinationSelect"', enabled)
+        self.assertIn('id="workspaceLiveList"', enabled)
+        self.assertNotIn('id="workspaceDestinationSelect"', disabled)
+
+    def test_move_and_conflict_flows_confirm_in_page_only(self):
+        terminals_js = self._static("js/terminals.js")
+        workspaces_js = self._static("js/workspaces.js")
+
+        # A move evicts the cached view and tears down explorer editors, so the
+        # dirty-buffer confirm must run first — in page, never window.confirm.
+        self.assertIn(
+            "!(await confirmDiscardAllExplorerEdits('Moving this session'))",
+            terminals_js,
+        )
+        self.assertIn("async function resolveSavedSessionConflict(conflict)", terminals_js)
+        self.assertIn("await openGenericConfirmModal({", terminals_js)
+        # One move entry point shared by the menu and the tab context menu.
+        self.assertIn("async function moveGroupToWorkspace(groupId, target = {})", workspaces_js)
+        self.assertIn("openSessionTabContextMenu(event, group.group_id)", terminals_js)
+        for banned in ("window.confirm(", "window.prompt(", "window.alert("):
+            self.assertNotIn(banned, workspaces_js)
+
+
+class MultiWorkspaceRestoreTestCase(unittest.TestCase):
+    """Stage 4 selective restore, Forget/Dismiss, the slot cap, and §9.3."""
+
+    WORKSPACE_A = "aaaaaaaaaaaa"
+    WORKSPACE_B = "bbbbbbbbbbbb"
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        self.saved_sessions_path = Path(self.temp_dir.name) / "saved_sessions.json"
+        for target, attribute, value in (
+            (web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)),
+            (web_saved_sessions, "SAVED_SESSIONS_PATH", str(self.saved_sessions_path)),
+        ):
+            patcher = patch.object(target, attribute, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _launch(self, workspace_id="default", **overrides):
+        body = {
+            "connection_mode": "wsl",
+            "session_name": overrides.pop("session_name", "Files"),
+            "workspace_id": workspace_id,
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+        body.update(overrides)
+        response = self.client.post("/api/sessions", json=body)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return response.get_json()
+
+    def _save_slot(self, workspace_id="default", origin="auto", label=None):
+        slot = web_runtime_state.capture_workspace(
+            api.session_manager,
+            workspace_id=workspace_id,
+            origin=origin,
+            label=label,
+        )
+        self.assertIsNotNone(slot)
+        return slot
+
+    def _close_everything(self):
+        self.client.delete("/api/sessions")
+        api.session_manager.reset_sessions()
+
+    def _restore(self, workspace_ids):
+        response = self.client.post(
+            "/api/runtime-state/restore", json={"workspace_ids": workspace_ids}
+        )
+        return response, response.get_json()
+
+    def _seed_preset(self, name="Alpha", directory=None, terminal_count=1, password="preset-secret"):
+        entry = web_saved_sessions.upsert_saved_session(
+            config={
+                "connection_mode": "ssh",
+                "terminal_count": terminal_count,
+                "layout": "single" if terminal_count == 1 else "vertical",
+                "ssh": {
+                    "host": "preset.example",
+                    "username": "ubuntu",
+                    "password": password,
+                    "port": 22,
+                    "default_dir": directory or "/srv",
+                },
+                "terminals": [
+                    {"title": f"Pane {index + 1}", "directory": ""}
+                    for index in range(terminal_count)
+                ],
+            },
+            name=name,
+        )
+        return entry
+
+    # ── Summaries ──
+
+    def test_summaries_expose_counts_and_live_conflicts_without_config(self):
+        self._launch(session_name="Main")
+        self._save_slot()
+
+        response = self.client.get("/api/runtime-state/workspaces")
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.get_json()["workspaces"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["workspace_id"], "default")
+        self.assertEqual(row["group_count"], 1)
+        self.assertEqual(row["pane_count"], 1)
+        self.assertTrue(row["live_conflict"])
+        self.assertNotIn("groups", row)
+        self.assertNotIn("sessions", row)
+
+    # ── R11 / subset restore ──
+
+    def test_subset_restore_opens_only_the_selected_slots(self):
+        self._launch(session_name="Main")
+        api.session_manager.create_workspace("Beta", self.WORKSPACE_B)
+        self._launch(workspace_id=self.WORKSPACE_B, session_name="Beta work")
+        web_runtime_state.capture_live_workspaces(api.session_manager)
+        self._close_everything()
+
+        response, payload = self._restore(["default"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["restored_count"], 1)
+        self.assertTrue(payload["workspaces"][0]["restored"])
+        self.assertEqual(len(api.session_manager.get_workspace_groups("default")), 1)
+        self.assertIsNone(api.session_manager.get_workspace(self.WORKSPACE_B))
+        # R11: the unselected slot survives and is still offered afterwards.
+        remaining = self.client.get("/api/runtime-state/workspaces").get_json()["workspaces"]
+        self.assertIn(
+            self.WORKSPACE_B,
+            [row["workspace_id"] for row in remaining],
+        )
+
+    def test_restore_reuses_the_saved_workspace_id_exactly(self):
+        api.session_manager.create_workspace("Beta", self.WORKSPACE_B)
+        self._launch(workspace_id=self.WORKSPACE_B, session_name="Beta work")
+        self._save_slot(self.WORKSPACE_B)
+        self._close_everything()
+
+        _response, payload = self._restore([self.WORKSPACE_B])
+
+        self.assertTrue(payload["workspaces"][0]["restored"])
+        self.assertIsNotNone(api.session_manager.get_workspace(self.WORKSPACE_B))
+        self.assertEqual(len(api.session_manager.get_workspace_groups(self.WORKSPACE_B)), 1)
+
+    def test_restore_rejects_a_malformed_request(self):
+        empty = self.client.post("/api/runtime-state/restore", json={"workspace_ids": []})
+        missing = self.client.post("/api/runtime-state/restore", json={})
+
+        self.assertEqual(empty.status_code, 400)
+        self.assertEqual(missing.status_code, 400)
+
+    # ── §9.3 rows ──
+
+    def test_r1_deleted_preset_replays_the_snapshot_with_a_warning(self):
+        self._launch(session_name="Main", saved_session_id="gone-forever")
+        self._save_slot()
+        self._close_everything()
+
+        _response, payload = self._restore(["default"])
+
+        group = payload["workspaces"][0]["groups"][0]
+        self.assertTrue(group["started"])
+        self.assertEqual(group["warning"], "preset_missing")
+
+    def test_r2_existing_preset_wins_over_the_snapshot(self):
+        preset = self._seed_preset(name="Alpha")
+        self._launch(session_name="Old name", saved_session_id=preset["id"])
+        self._save_slot()
+        self._close_everything()
+        web_saved_sessions.upsert_saved_session(
+            config={
+                **preset["config"],
+                "ssh": {**preset["config"]["ssh"], "host": "edited.example"},
+            },
+            name="Edited",
+            session_id=preset["id"],
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            _response, payload = self._restore(["default"])
+
+        self.assertTrue(payload["workspaces"][0]["groups"][0]["started"])
+        group = api.session_manager.get_group(f"saved-session-{preset['id']}")
+        self.assertEqual(group.name, "Edited")
+        self.assertEqual(
+            api.session_manager.get_group_sessions(group.group_id)[0].host,
+            "edited.example",
+        )
+
+    def test_r3_layout_is_discarded_when_the_preset_pane_count_changed(self):
+        preset = self._seed_preset(name="Alpha", terminal_count=1)
+        self._launch(
+            session_name="Alpha",
+            saved_session_id=preset["id"],
+            workspace_layout={
+                "split_slot_rects": [{"originSlot": 0, "x": 1, "y": 1, "w": 2, "h": 1}]
+            },
+        )
+        self._save_slot()
+        self._close_everything()
+        web_saved_sessions.upsert_saved_session(
+            config={
+                **preset["config"],
+                "terminal_count": 2,
+                "layout": "vertical",
+                "terminals": [
+                    {"title": "Pane 1", "directory": ""},
+                    {"title": "Pane 2", "directory": ""},
+                ],
+            },
+            name="Alpha",
+            session_id=preset["id"],
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            _response, payload = self._restore(["default"])
+
+        self.assertTrue(payload["workspaces"][0]["groups"][0]["started"])
+        group = api.session_manager.get_group(f"saved-session-{preset['id']}")
+        self.assertEqual(group.terminal_count, 2)
+        # A layout array sized for one pane must not be replayed against two.
+        self.assertIsNone(group.workspace_layout)
+
+    def test_r4_missing_directory_still_restores_the_group(self):
+        self._launch(session_name="Main")
+        self._save_slot()
+        self._close_everything()
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        session = state["workspaces"]["default"]["groups"][0]["sessions"][0]
+        session["directory"] = str(self.repo_dir / "deleted")
+        session["explorer_root_directory"] = session["directory"]
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        _response, payload = self._restore(["default"])
+
+        self.assertTrue(payload["workspaces"][0]["restored"])
+        self.assertEqual(len(api.session_manager.get_workspace_groups("default")), 1)
+
+    def test_r5_and_r12_an_already_live_workspace_is_refused_not_duplicated(self):
+        self._launch(session_name="Main")
+        self._save_slot()
+
+        _response, payload = self._restore(["default"])
+
+        self.assertFalse(payload["workspaces"][0]["restored"])
+        self.assertEqual(payload["workspaces"][0]["reason"], "already_live")
+        self.assertEqual(len(api.session_manager.get_workspace_groups("default")), 1)
+
+    def test_r12_a_second_restore_of_the_same_slot_is_idempotent(self):
+        self._launch(session_name="Main")
+        self._save_slot()
+        self._close_everything()
+
+        self._restore(["default"])
+        _response, payload = self._restore(["default"])
+
+        self.assertEqual(payload["workspaces"][0]["reason"], "already_live")
+        self.assertEqual(len(api.session_manager.get_workspace_groups("default")), 1)
+
+    def test_r12_duplicate_ids_in_one_request_are_collapsed(self):
+        self._launch(session_name="Main")
+        self._save_slot()
+        self._close_everything()
+
+        _response, payload = self._restore(["default", "default"])
+
+        self.assertEqual(len(payload["workspaces"]), 1)
+
+    def test_r6_a_group_whose_preset_is_live_elsewhere_is_skipped(self):
+        preset = self._seed_preset(name="Alpha")
+        api.session_manager.create_workspace("Beta", self.WORKSPACE_B)
+        self._launch(workspace_id=self.WORKSPACE_B, saved_session_id=preset["id"])
+        self._launch(workspace_id=self.WORKSPACE_B, session_name="Plain")
+        self._save_slot(self.WORKSPACE_B)
+        # Close only the saved workspace, then bring the preset back up
+        # somewhere else so the restore hits the §6 conflict.
+        api.session_manager.reset_sessions()
+        with patch.object(api.socketio, "start_background_task"):
+            self._launch(saved_session_id=preset["id"])
+
+        with patch.object(api.socketio, "start_background_task"):
+            _response, payload = self._restore([self.WORKSPACE_B])
+
+        workspace_result = payload["workspaces"][0]
+        self.assertTrue(workspace_result["restored"])
+        skipped = [group for group in workspace_result["groups"] if group.get("skipped")]
+        started = [group for group in workspace_result["groups"] if group["started"]]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["skipped"], "already_live")
+        self.assertEqual(skipped[0]["workspace_id"], "default")
+        self.assertEqual(len(started), 1)
+
+    def test_r7_partial_success_reports_the_failed_group_and_keeps_the_rest(self):
+        self._launch(session_name="Good")
+        self._launch(session_name="Bad")
+        self._save_slot()
+        self._close_everything()
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state["workspaces"]["default"]["groups"][1]["sessions"] = []
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        _response, payload = self._restore(["default"])
+
+        workspace_result = payload["workspaces"][0]
+        self.assertTrue(workspace_result["restored"])
+        self.assertEqual([group["started"] for group in workspace_result["groups"]], [True, False])
+        self.assertTrue(workspace_result["groups"][1]["error"])
+
+    def test_r8_front_group_hint_falls_back_to_the_first_started_group(self):
+        first = self._launch(session_name="First")
+        second = self._launch(session_name="Second")
+        api.session_manager.set_active_group("default", second["group_id"])
+        self._save_slot()
+        self._close_everything()
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["workspaces"]["default"]["active_group_id"], second["group_id"])
+        state["workspaces"]["default"]["groups"][1]["sessions"] = []
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        _response, payload = self._restore(["default"])
+
+        workspace_result = payload["workspaces"][0]
+        started = workspace_result["groups"][0]
+        self.assertEqual(workspace_result["active_group_id"], started["group_id"])
+        self.assertNotEqual(workspace_result["active_group_id"], second["group_id"])
+        self.assertNotEqual(started["group_id"], first["group_id"])
+
+    def test_r8_a_started_front_group_is_honoured(self):
+        self._launch(session_name="First")
+        second = self._launch(session_name="Second")
+        api.session_manager.set_active_group("default", second["group_id"])
+        self._save_slot()
+        self._close_everything()
+
+        _response, payload = self._restore(["default"])
+
+        self.assertEqual(
+            payload["workspaces"][0]["active_group_id"],
+            api.session_manager.get_active_group_id("default"),
+        )
+        self.assertEqual(
+            api.session_manager.get_group(
+                payload["workspaces"][0]["active_group_id"]
+            ).name,
+            "Second",
+        )
+
+    def test_r9_a_blank_label_is_derived_never_a_bare_timestamp(self):
+        self._launch(session_name="Session 12:34:56")
+        self._save_slot()
+        self._close_everything()
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state["workspaces"]["default"]["label"] = ""
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        rows = self.client.get("/api/runtime-state/workspaces").get_json()["workspaces"]
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["label"])
+        self.assertNotEqual(rows[0]["label"], "Session 12:34:56")
+
+    def test_r10_hand_edited_and_legacy_state_degrades_safely(self):
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "workspaces": {
+                        "NOT-AN-ID": {"groups": [{"group_id": "x", "sessions": []}], "origin": "auto"},
+                        "cccccccccccc": {"groups": [], "origin": "auto"},
+                        "dddddddddddd": {"groups": [{"group_id": "y"}], "origin": "unknown"},
+                        "eeeeeeeeeeee": {
+                            "groups": [{"group_id": "z", "name": "Real", "sessions": []}],
+                            "origin": "auto",
+                            "native_zoom_factor": 99,
+                            "unknown_key": "ignored",
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        rows = self.client.get("/api/runtime-state/workspaces").get_json()["workspaces"]
+
+        self.assertEqual([row["workspace_id"] for row in rows], ["eeeeeeeeeeee"])
+        self.assertNotIn("unknown_key", rows[0])
+        slot = web_runtime_state.load_restorable_workspace("eeeeeeeeeeee")
+        self.assertIsNone(slot["native_zoom_factor"])
+
+    def test_a_slot_that_starts_nothing_is_rolled_back(self):
+        api.session_manager.create_workspace("Beta", self.WORKSPACE_B)
+        self._launch(workspace_id=self.WORKSPACE_B, session_name="Beta work")
+        self._save_slot(self.WORKSPACE_B)
+        self._close_everything()
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state["workspaces"][self.WORKSPACE_B]["groups"][0]["sessions"] = []
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        _response, payload = self._restore([self.WORKSPACE_B])
+
+        self.assertFalse(payload["workspaces"][0]["restored"])
+        self.assertEqual(payload["workspaces"][0]["reason"], "no_groups_started")
+        # A failed restore must not become an `already_live` conflict on retry.
+        self.assertIsNone(api.session_manager.get_workspace(self.WORKSPACE_B))
+
+    def test_an_unknown_slot_reports_not_found(self):
+        _response, payload = self._restore([self.WORKSPACE_A, "NOT-AN-ID"])
+
+        self.assertEqual(
+            [entry["reason"] for entry in payload["workspaces"]],
+            ["not_found", "invalid_workspace_id"],
+        )
+
+    def test_max_sessions_mid_restore_fails_one_group_not_the_request(self):
+        self._launch(session_name="Main")
+        self._save_slot()
+        self._close_everything()
+
+        with patch.object(api.runtime_config, "max_sessions", 0):
+            response, payload = self._restore(["default"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(payload["workspaces"][0]["restored"])
+        self.assertIn("Maximum", payload["workspaces"][0]["groups"][0]["error"])
+
+    # ── R13 / R14 Forget ──
+
+    def test_r13_forget_is_idempotent_and_preserves_siblings(self):
+        api.session_manager.create_workspace("Beta", self.WORKSPACE_B)
+        self._launch(session_name="Main")
+        self._launch(workspace_id=self.WORKSPACE_B, session_name="Beta work")
+        web_runtime_state.capture_live_workspaces(api.session_manager)
+        self._close_everything()
+
+        first = self.client.delete(
+            "/api/runtime-state", query_string={"workspace_id": self.WORKSPACE_B}
+        )
+        second = self.client.delete(
+            "/api/runtime-state", query_string={"workspace_id": self.WORKSPACE_B}
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertTrue(first.get_json()["forgotten"])
+        self.assertEqual(second.status_code, 200)
+        self.assertFalse(second.get_json()["forgotten"])
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace("default"))
+
+    def test_r14_forget_is_refused_while_the_workspace_is_live(self):
+        self._launch(session_name="Main")
+        self._save_slot()
+
+        response = self.client.delete("/api/runtime-state")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(response.get_json()["forgotten"])
+        self.assertTrue(response.get_json()["live_conflict"])
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace("default"))
+
+    def test_forget_never_touches_saved_sessions(self):
+        preset = self._seed_preset(name="Alpha")
+        self._launch(session_name="Alpha", saved_session_id=preset["id"])
+        self._save_slot()
+        self._close_everything()
+
+        self.client.delete("/api/runtime-state")
+
+        self.assertIn(preset["id"], [entry["id"] for entry in web_saved_sessions.load_saved_sessions()])
+
+    def test_forgetting_the_default_slot_keeps_the_permanent_live_workspace(self):
+        self._launch(session_name="Main")
+        self._save_slot()
+        self._close_everything()
+
+        response = self.client.delete("/api/runtime-state")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(api.session_manager.get_workspace("default"))
+
+    # ── Slot cap ──
+
+    def test_auto_slot_cap_evicts_oldest_first_and_never_a_manual_slot(self):
+        state = {"version": 2, "workspaces": {}}
+        for index in range(web_runtime_state.MAX_AUTO_WORKSPACE_SLOTS + 3):
+            workspace_id = f"w{index:011d}"
+            state["workspaces"][workspace_id] = {
+                "workspace_id": workspace_id,
+                "label": f"Slot {index}",
+                "origin": "manual" if index == 0 else "auto",
+                "saved_at": 1000.0 + index,
+                "groups": [{"group_id": f"g{index}", "sessions": [{"host": "h"}]}],
+            }
+        manual_id = "w00000000000"
+        oldest_auto = "w00000000001"
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        self._launch(session_name="Live")
+
+        web_runtime_state.capture_live_workspaces(api.session_manager)
+
+        stored = json.loads(self.state_path.read_text(encoding="utf-8"))["workspaces"]
+        auto_count = sum(1 for slot in stored.values() if slot["origin"] == "auto")
+        self.assertEqual(auto_count, web_runtime_state.MAX_AUTO_WORKSPACE_SLOTS)
+        self.assertIn(manual_id, stored)
+        self.assertNotIn(oldest_auto, stored)
+        self.assertIn("default", stored)
+
+    # ── Credentials and the shared launch path ──
+
+    def test_restore_never_returns_or_logs_a_credential(self):
+        preset = self._seed_preset(name="Alpha", password="super-secret-pw")
+        self._launch(session_name="Alpha", saved_session_id=preset["id"])
+        self._save_slot()
+        self._close_everything()
+
+        with patch.object(api.socketio, "start_background_task"), self.assertLogs(
+            "web", level="DEBUG"
+        ) as logs:
+            response, payload = self._restore(["default"])
+
+        body = response.get_data(as_text=True)
+        self.assertNotIn("super-secret-pw", body)
+        self.assertNotIn("super-secret-pw", "\n".join(logs.output))
+        self.assertNotIn("super-secret-pw", self.state_path.read_text(encoding="utf-8"))
+        self.assertTrue(payload["workspaces"][0]["groups"][0]["started"])
+        # The credential still reached the session in-process.
+        group_id = f"saved-session-{preset['id']}"
+        self.assertEqual(
+            api.session_manager.get_group_sessions(group_id)[0].password,
+            "super-secret-pw",
+        )
+
+    def test_launch_request_logging_is_redacted(self):
+        with self.assertLogs("web.api", level="INFO") as logs:
+            self.client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "wsl",
+                    "session_name": "Files",
+                    "sessions": [
+                        {
+                            "directory": str(self.repo_dir),
+                            "title": "Files",
+                            "startup_mode": "explorer",
+                            "password": "never-log-me",
+                        }
+                    ],
+                },
+            )
+
+        launch_lines = [line for line in logs.output if "POST /api/sessions" in line]
+        self.assertEqual(len(launch_lines), 1)
+        self.assertNotIn("never-log-me", launch_lines[0])
+        self.assertIn("'credentials_supplied': True", launch_lines[0])
+
+    def test_restore_and_launch_share_one_code_path(self):
+        self._launch(session_name="Main")
+        self._save_slot()
+        self._close_everything()
+
+        with patch.object(
+            web_workspaces, "launch_session_group", wraps=web_workspaces.launch_session_group
+        ) as launch:
+            self._restore(["default"])
+
+        launch.assert_called_once()
+        self.assertTrue(launch.call_args.args[0]["restore"])
+
+    def test_response_reports_a_started_relaunch_not_a_connection(self):
+        self._launch(session_name="Main")
+        self._save_slot()
+        self._close_everything()
+
+        _response, payload = self._restore(["default"])
+
+        self.assertEqual(payload["message"], "Relaunch started")
+
+    def test_launcher_ships_the_restore_chooser_with_three_verbs(self):
+        with patch.object(api.runtime_config, "multi_workspace_enabled", True):
+            html = self.client.get("/").get_data(as_text=True)
+        launcher_js = self.client.get("/static/js/launcher.js").get_data(as_text=True)
+
+        self.assertIn('id="workspaceRestorePanel"', html)
+        self.assertIn('id="workspaceRestoreSelectedBtn"', html)
+        self.assertIn('id="workspaceSavedEntry"', html)
+        self.assertIn("onclick=\"dismissWorkspaceRestorePanel()\"", html)
+        # Restore and Forget are per row; Dismiss is panel-level and loses
+        # nothing, so the chooser must be reopenable mid-session.
+        self.assertIn("async function forgetWorkspaceRow(summary)", launcher_js)
+        self.assertIn("function openWorkspaceRestorePanel()", launcher_js)
+        self.assertIn(
+            "Forget removes this saved workspace snapshot. Your saved sessions are not affected.",
+            launcher_js,
+        )
+        self.assertIn("danger: true", launcher_js)
 
 
 if __name__ == "__main__":

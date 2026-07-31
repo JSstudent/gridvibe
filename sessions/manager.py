@@ -120,6 +120,11 @@ class Workspace:
     label: str = ""
     created_at: float = field(default_factory=time.time)
     active_group_id: str = ""
+    # Live-only lifecycle hint: a workspace the user deliberately created empty
+    # must survive the empty-workspace pruning that closes a workspace emptied
+    # by a close or a move. Absence of groups alone cannot tell the two apart.
+    # It is never written to runtime_state.json — a saved slot always has groups.
+    retain_when_empty: bool = False
 
     def to_dict(self) -> dict:
         """Convert to a credential-free dictionary."""
@@ -128,6 +133,7 @@ class Workspace:
             "label": self.label,
             "created_at": self.created_at,
             "active_group_id": self.active_group_id,
+            "retain_when_empty": self.retain_when_empty,
         }
 
 
@@ -235,7 +241,11 @@ class SessionManager:
             self.groups[resolved_group_id] = group
             # The session window switches to a newly launched group, so mirror
             # that here: the hint is then right even before a window reports.
-            self.workspaces[resolved_workspace_id].active_group_id = resolved_group_id
+            workspace = self.workspaces[resolved_workspace_id]
+            workspace.active_group_id = resolved_group_id
+            # The workspace now holds content, so normal empty-workspace
+            # pruning applies again from here on.
+            workspace.retain_when_empty = False
 
         return group
 
@@ -243,8 +253,13 @@ class SessionManager:
         self,
         label: str = "",
         workspace_id: Optional[str] = None,
+        retain_when_empty: bool = False,
     ) -> Workspace:
-        """Create and return a distinct live workspace."""
+        """Create and return a distinct live workspace.
+
+        ``retain_when_empty`` marks a workspace the user created deliberately
+        empty so cleanup does not sweep it before its first group arrives.
+        """
         with self.lock:
             if workspace_id is None:
                 while True:
@@ -258,9 +273,41 @@ class SessionManager:
             workspace = Workspace(
                 workspace_id=resolved_workspace_id,
                 label=str(label or "").strip(),
+                retain_when_empty=bool(retain_when_empty),
             )
             self.workspaces[resolved_workspace_id] = workspace
             return workspace
+
+    def rename_workspace(self, workspace_id: str, label: str) -> Optional[Workspace]:
+        """Set one live workspace's display label; ``None`` when unknown."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            if workspace is None:
+                return None
+            workspace.label = str(label or "").strip()
+            return workspace
+
+    def remove_workspace(self, workspace_id: str) -> bool:
+        """Remove one empty non-default workspace record.
+
+        This is the rollback for a destination that was created for a launch
+        that then failed: a dead workspace must never linger in the picker.
+        A workspace that already owns groups is never removed.
+        """
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        if resolved_workspace_id == DEFAULT_WORKSPACE_ID:
+            return False
+        with self.lock:
+            if resolved_workspace_id not in self.workspaces:
+                return False
+            if any(
+                group.workspace_id == resolved_workspace_id
+                for group in self.groups.values()
+            ):
+                return False
+            del self.workspaces[resolved_workspace_id]
+            return True
 
     def get_workspace(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> Optional[Workspace]:
         """Return one live workspace by normalized id."""
@@ -752,6 +799,9 @@ class SessionManager:
             ) + 1
             group.workspace_id = resolved_target_id
             group.display_order = next_order
+            # The destination now holds content: a deliberately empty workspace
+            # stops being retained the moment its first group arrives.
+            self.workspaces[resolved_target_id].retain_when_empty = False
             source_workspace = self.workspaces.get(source_workspace_id)
             if source_workspace and source_workspace.active_group_id == group.group_id:
                 source_workspace.active_group_id = ""
@@ -974,6 +1024,11 @@ class SessionManager:
             }
             for workspace_id, workspace in list(self.workspaces.items()):
                 if workspace_id == DEFAULT_WORKSPACE_ID or workspace_id in live_workspace_ids:
+                    continue
+                # A deliberately empty workspace (Workspace ▸ New Workspace) is
+                # kept until its first group clears the flag; only then does
+                # normal empty-workspace pruning apply to it.
+                if workspace.retain_when_empty:
                     continue
                 if (
                     workspace_id not in forced_workspace_ids

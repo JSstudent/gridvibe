@@ -31,6 +31,12 @@ _runtime_state_lock = threading.Lock()
 
 SCHEMA_VERSION = 2
 RESTORABLE_ORIGINS = ("auto", "manual")
+# The restore offer is deliberately permanent (no maximum age), so with N
+# workspaces "one slot" would grow into "one slot per workspace ever autosaved"
+# and only Forget would ever shrink it. Bound the automatic ones at the single
+# write point; an explicit Save Workspace (origin "manual") is never evicted, so
+# it keeps its permanent-offer promise.
+MAX_AUTO_WORKSPACE_SLOTS = 12
 NATIVE_ZOOM_FACTOR_MIN = 0.25
 NATIVE_ZOOM_FACTOR_MAX = 5.0
 
@@ -298,19 +304,23 @@ def load_restorable_workspace(workspace_id: str = DEFAULT_WORKSPACE_ID) -> Optio
     return slot
 
 
-def clear_workspace(workspace_id: str = DEFAULT_WORKSPACE_ID) -> None:
+def clear_workspace(workspace_id: str = DEFAULT_WORKSPACE_ID) -> bool:
     """Remove one workspace slot, preserving siblings.
 
-    Multi-workspace skeleton: not wired to the single-workspace UI. The file
-    itself is kept (with version 2) even when the last slot is removed.
+    This is the **Forget** action: it deletes the workspace *snapshot* only —
+    saved session presets live in a separate store (``saved_sessions.json``)
+    and other slots may reference the same preset, so they are never touched.
+    The file itself is kept (with version 2) even when the last slot is
+    removed. Idempotent: ``False`` means the slot was already gone.
     """
     workspace_id = normalize_workspace_id(workspace_id)
     with _runtime_state_lock:
         state = _read_state_locked()
         if workspace_id not in state.get("workspaces", {}):
-            return
+            return False
         del state["workspaces"][workspace_id]
         _write_state_locked(state)
+        return True
 
 
 def iter_live_workspaces(session_manager: Any) -> Iterator[Tuple[str, List[Any]]]:
@@ -388,8 +398,37 @@ def capture_live_workspaces(
             workspaces[workspace_id] = slot
             stored_slots[workspace_id] = slot
         if stored_slots:
+            _evict_excess_auto_slots(workspaces)
             _write_state_locked(state)
     return stored_slots
+
+
+def _evict_excess_auto_slots(workspaces: Dict[str, Any]) -> None:
+    """Keep only the newest ``MAX_AUTO_WORKSPACE_SLOTS`` auto slots.
+
+    Applied at the single write point, oldest-first, and only to slots whose
+    origin is still ``"auto"`` — an explicit Save Workspace is pinned. Caller
+    holds ``_runtime_state_lock``.
+    """
+    auto_slots = [
+        (workspace_id, slot)
+        for workspace_id, slot in workspaces.items()
+        if isinstance(slot, dict) and slot.get("origin") != "manual"
+    ]
+    if len(auto_slots) <= MAX_AUTO_WORKSPACE_SLOTS:
+        return
+
+    auto_slots.sort(
+        key=lambda item: (
+            item[1].get("saved_at") if isinstance(item[1].get("saved_at"), (int, float)) else 0,
+            item[0],
+        ),
+        reverse=True,
+    )
+    evicted = [workspace_id for workspace_id, _ in auto_slots[MAX_AUTO_WORKSPACE_SLOTS:]]
+    for workspace_id in evicted:
+        del workspaces[workspace_id]
+    logger.debug("Evicted %d oldest auto workspace slots", len(evicted))
 
 
 def list_restorable_workspaces() -> List[Dict[str, Any]]:

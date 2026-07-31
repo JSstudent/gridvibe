@@ -287,7 +287,16 @@ from web.voice import (  # noqa: F401 - re-exported for backwards compatibility
 )
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
+    _redacted_launch_summary,
+    launch_session_group,
+    list_live_workspaces,
+    list_restorable_workspace_summaries,
+    move_group_to_workspace,
     normalize_workspace_id,
+    normalize_workspace_label,
+    public_workspace_payload,
+    restore_workspaces,
+    workspace_has_groups,
     workspace_room,
 )
 
@@ -1547,6 +1556,66 @@ def search_explorer(session_id: str):
     return _explorer_route_response(session, handler)
 
 
+# ==================== Workspaces (multi-workspace, stage 3) ====================
+
+@app.route('/api/workspaces', methods=['GET'])
+def get_workspaces():
+    """Return live workspace summaries with their group counts."""
+    workspaces = list_live_workspaces()
+    return jsonify({"workspaces": workspaces, "count": len(workspaces)})
+
+
+@app.route('/api/workspaces', methods=['POST'])
+def create_workspace():
+    """Create one live workspace, optionally labelled.
+
+    A workspace created here is deliberately empty, so it is marked
+    ``retain_when_empty`` until its first group arrives — otherwise cleanup
+    could not tell it apart from a workspace emptied by a close or a move.
+    """
+    data = request.get_json(silent=True) or {}
+    label = normalize_workspace_label(data.get("label") or data.get("workspace_label"))
+    workspace = session_manager.create_workspace(label=label, retain_when_empty=True)
+    logger.debug("Created workspace %s label=%r", workspace.workspace_id, workspace.label)
+    return jsonify(public_workspace_payload(workspace, 0)), 201
+
+
+@app.route('/api/workspaces/<workspace_id>', methods=['PATCH'])
+def rename_workspace(workspace_id: str):
+    """Rename one live workspace (label only) and its saved slot."""
+    data = request.get_json(silent=True) or {}
+    try:
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if "label" not in data:
+        return jsonify({"error": "A 'label' is required"}), 400
+
+    label = normalize_workspace_label(data.get("label"))
+    workspace = session_manager.rename_workspace(resolved_workspace_id, label)
+    if workspace is None:
+        return jsonify({"error": "Workspace not found"}), 404
+
+    # Keep the saved slot's label in step so the restore chooser does not keep
+    # offering the old name; an empty workspace has no slot and is skipped.
+    capture_workspace(
+        session_manager,
+        workspace_id=resolved_workspace_id,
+        origin="auto",
+        label=label or None,
+    )
+    groups = session_manager.get_workspace_groups(resolved_workspace_id)
+    return jsonify(public_workspace_payload(workspace, len(groups)))
+
+
+@app.route('/api/session-groups/<group_id>/move', methods=['POST'])
+def move_session_group(group_id: str):
+    """Move one live session tab to another workspace without restarting it."""
+    data = request.get_json(silent=True) or {}
+    payload, status = move_group_to_workspace(group_id, data)
+    return jsonify(payload), status
+
+
 @app.route('/api/session-groups', methods=['GET'])
 def get_session_groups():
     """Return launched groups for the requested workspace."""
@@ -1697,9 +1766,41 @@ def save_runtime_state():
     })
 
 
+@app.route('/api/runtime-state/workspaces', methods=['GET'])
+def get_restorable_workspaces():
+    """Return every restorable slot as a credential-free summary.
+
+    Summaries only: no launch config and no credential ever leaves the process
+    (ISSUE-2026-037). ``live_conflict`` marks a row the endpoint would refuse
+    because that workspace already has live tabs.
+    """
+    summaries = list_restorable_workspace_summaries()
+    return jsonify({"workspaces": summaries, "count": len(summaries)})
+
+
+@app.route('/api/runtime-state/restore', methods=['POST'])
+def restore_runtime_state():
+    """Relaunch a subset of saved workspaces server-side.
+
+    Unselected slots are untouched and stay on offer. The response reports that
+    a relaunch *started*: SSH authentication is asynchronous and its outcome
+    keeps arriving through the existing room-scoped ``session_status`` events
+    and their retry affordance.
+    """
+    data = request.get_json(silent=True) or {}
+    payload, status = restore_workspaces(data.get("workspace_ids"))
+    return jsonify(payload), status
+
+
 @app.route('/api/runtime-state', methods=['DELETE'])
 def dismiss_runtime_state():
-    """Clear one workspace slot (multi-workspace skeleton; not UI-wired yet)."""
+    """Forget one saved workspace snapshot (idempotent, sibling-preserving).
+
+    Snapshot only: ``runtime_state.json`` and ``saved_sessions.json`` are
+    separate stores, and other slots may reference the same preset, so no saved
+    session is ever deleted here. A live workspace is refused — autosave would
+    simply re-capture it, and a Forget that comes back is worse than no Forget.
+    """
     try:
         workspace_id = _resolve_workspace_id(
             request.args.get("workspace_id")
@@ -1707,8 +1808,19 @@ def dismiss_runtime_state():
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    clear_workspace(workspace_id)
-    return jsonify({"message": "Workspace snapshot cleared", "workspace_id": workspace_id})
+    if workspace_has_groups(workspace_id):
+        return jsonify({
+            "error": "Close this workspace first",
+            "forgotten": False,
+            "workspace_id": workspace_id,
+            "live_conflict": True,
+        }), 409
+    forgotten = clear_workspace(workspace_id)
+    return jsonify({
+        "message": "Workspace snapshot cleared" if forgotten else "No saved snapshot to clear",
+        "forgotten": forgotten,
+        "workspace_id": workspace_id,
+    })
 
 
 # ==================== Workspace autosave (10.5 hardening) ====================
@@ -1932,8 +2044,7 @@ def get_saved_session(saved_session_id: str):
 
 @app.route('/api/sessions', methods=['POST'])
 def create_sessions():
-    """
-    Create one or more terminal sessions.
+    """Create one or more terminal sessions in the requested workspace.
 
     Request body:
     {
@@ -1947,221 +2058,25 @@ def create_sessions():
                 "initial_command": "codex",
                 "title": "Terminal 2"
             }
-        ]
+        ],
+        "workspace_id": "<id>",            // or:
+        "new_workspace": true,
+        "workspace_label": "Reviews"
     }
+
+    Thin route: the launch itself lives in ``web/workspaces.py`` so restore
+    builds panes through exactly the same code path.
     """
-    global active_launch_options
-    try:
-        data = request.get_json()
-        logger.info(f"POST /api/sessions  body={data}")
-
-        if not data or 'sessions' not in data:
-            logger.warning("Missing 'sessions' in request body")
-            return jsonify({"error": "Missing 'sessions' in request body"}), 400
-
-        sessions_config = data['sessions']
-        if not isinstance(sessions_config, list) or not sessions_config:
-            logger.warning("Empty or invalid sessions list")
-            return jsonify({"error": "At least one session is required"}), 400
-
-        if len(sessions_config) > runtime_config.max_sessions:
-            logger.warning(f"Too many sessions requested: {len(sessions_config)} > {runtime_config.max_sessions}")
-            return jsonify({"error": f"Maximum {runtime_config.max_sessions} sessions allowed"}), 400
-
-        connection_mode = _normalize_connection_mode(data.get("connection_mode"))
-        layout = _normalize_layout(data.get("layout"), len(sessions_config))
-        workspace_layout = _normalize_workspace_layout(data.get("workspace_layout"), len(sessions_config))
-        session_name = str(data.get("session_name") or "").strip()
-        saved_session_id = _normalize_launch_session_id(data.get("saved_session_id"))
-        stable_group_id = _build_launch_group_id(saved_session_id) or None
-        prepared_sessions = []
-
-        for config in sessions_config:
-            prepared = dict(config)
-            prepared["mode"] = connection_mode
-            startup_mode = _normalize_startup_mode(
-                prepared.get("startup_mode") or prepared.get("initial_command_mode"),
-                connection_mode,
-            )
-            prepared["startup_mode"] = startup_mode
-
-            if connection_mode == "ssh" and startup_mode == "explorer":
-                prepared["initial_command"] = ""
-                prepared["explorer_root_directory"] = prepared.get("directory") or ""
-
-            if connection_mode == "wsl":
-                if startup_mode == "browser":
-                    use_powershell = False
-                    use_wsl = False
-                    browser_tabs = _normalize_browser_tabs(
-                        prepared.get("browser_tabs"),
-                        prepared.get("initial_command") or DEFAULT_BROWSER_URL,
-                    )
-                    if not browser_tabs:
-                        # Every entry was rejected. Re-validate the seed so the
-                        # 400 carries the precise reason (bad scheme, too long,
-                        # ...) rather than a generic "needs a URL".
-                        _normalize_browser_url(
-                            prepared.get("initial_command") or DEFAULT_BROWSER_URL
-                        )
-                        raise ValueError("Browser panes require an HTTP or HTTPS URL")
-                    browser_active_tab = _normalize_browser_active_tab(
-                        prepared.get("browser_active_tab"), browser_tabs
-                    )
-                    prepared["browser_tabs"] = browser_tabs
-                    prepared["browser_active_tab"] = browser_active_tab
-                    prepared["initial_command"] = browser_tabs[browser_active_tab]
-                    prepared["initial_command_mode"] = "browser"
-                    prepared["explorer_root_directory"] = None
-                    prepared["distribution"] = ""
-                    prepared["username"] = ""
-                elif startup_mode == "explorer":
-                    use_powershell = False
-                    use_wsl = False
-                    prepared["initial_command"] = ""
-                    prepared["explorer_root_directory"] = prepared.get("directory") or ""
-                    prepared["distribution"] = ""
-                    prepared["username"] = ""
-                else:
-                    use_powershell = os.name == "nt" and bool(prepared.get("use_powershell"))
-                    use_wsl = os.name == "nt" and bool(prepared.get("use_wsl")) and not use_powershell
-                prepared["password"] = None
-                prepared["port"] = 22
-                prepared["host"] = (
-                    "Browser"
-                    if startup_mode == "browser"
-                    else (
-                        "File Explorer"
-                        if startup_mode == "explorer"
-                        else _local_shell_display_name(
-                            use_wsl=use_wsl,
-                            use_powershell=use_powershell,
-                            distribution=prepared.get("distribution"),
-                        )
-                    )
-                )
-                prepared["use_wsl"] = use_wsl
-                prepared["use_powershell"] = use_powershell
-
-            prepared_sessions.append(prepared)
-
-        # A restore replays a workspace the user already had running; a cold
-        # post-restart agent probe (status "check_failed") must not silently
-        # clear its startup command, which would drop the agent and its auto-mode
-        # flag. Skip preflight-clearing on restore and let the pane surface any
-        # real launch error itself.
-        is_restore = bool(data.get("restore"))
-        launch_warnings = (
-            []
-            if is_restore
-            else _sanitize_agent_launch_commands(connection_mode, prepared_sessions)
-        )
-
+    def _remember_launch_options(options):
         # Atomic reference swap instead of in-place update so concurrent
         # readers never observe a half-updated layout/count pair.
-        active_launch_options = {
-            **active_launch_options,
-            "connection_mode": connection_mode,
-            "layout": layout,
-            "terminal_count": len(prepared_sessions),
-        }
+        global active_launch_options
+        active_launch_options = {**active_launch_options, **options}
 
-        if stable_group_id:
-            _replace_group_sessions(stable_group_id)
-
-        # A restore replays a stored workspace shape: its group name (or a
-        # neutral fallback) wins — it must never mint a fresh "Session
-        # HH:MM:SS" timestamp name (10.5 hardening). The timestamp fallback is
-        # only for genuinely unnamed NEW groups.
-        group_name = session_name or (
-            "Workspace" if is_restore else f"Session {time.strftime('%H:%M:%S')}"
-        )
-        group = session_manager.create_group(
-            name=group_name,
-            connection_mode=connection_mode,
-            layout=layout,
-            terminal_count=len(prepared_sessions),
-            group_id=stable_group_id,
-            saved_session_id=saved_session_id,
-            workspace_layout=workspace_layout,
-            workspace_id=DEFAULT_WORKSPACE_ID,
-        )
-        logger.info(
-            "Created session group group_id=%s saved_session_id=%r name=%r mode=%s layout=%s terminal_count=%d",
-            group.group_id,
-            saved_session_id,
-            group.name,
-            connection_mode,
-            layout,
-            len(prepared_sessions),
-        )
-
-        created_sessions = session_manager.create_sessions(
-            prepared_sessions,
-            group_id=group.group_id,
-        )
-        logger.info(f"Created {len(created_sessions)} sessions")
-        if not created_sessions:
-            logger.error("No valid sessions were created")
-            session_manager.remove_group(group.group_id)
-            return jsonify({"error": "No valid sessions were created"}), 400
-
-        logger.info(
-            "Launch summary group_id=%s sessions=%s",
-            group.group_id,
-            [
-                {
-                    "session_id": session.session_id,
-                    "title": session.title,
-                    "host": session.host,
-                    "directory": session.directory,
-                    "mode": session.mode,
-                }
-                for session in created_sessions
-            ],
-        )
-
-        for session in created_sessions:
-            if _is_explorer_session(session) or _is_browser_session(session):
-                session_manager.update_session_status(session.session_id, SessionStatus.CONNECTED)
-                _broadcast_session_status(session.session_id)
-                continue
-            logger.info(
-                "Spawning connection task for session_id=%s mode=%s host=%s group_id=%s",
-                session.session_id,
-                session.mode,
-                session.host,
-                session.group_id,
-            )
-            socketio.start_background_task(_connect_session, session.session_id)
-
-        _broadcast_session_groups_updated(
-            "launched",
-            group_id=group.group_id,
-            workspace_id=group.workspace_id,
-        )
-
-        return jsonify({
-            "sessions": [s.to_dict() for s in created_sessions],
-            "count": len(created_sessions),
-            "group_id": group.group_id,
-            "workspace_id": group.workspace_id,
-            "group": group.to_dict(),
-            "layout": layout,
-            "connection_mode": connection_mode,
-            "terminal_count": len(created_sessions),
-            "workspace_layout": workspace_layout,
-            "surface_mode": runtime_config.app_surface_mode,
-            "launch_target": "web",
-            "warnings": launch_warnings,
-        }), 201
-
-    except ValueError as e:
-        logger.warning("Invalid session launch request: %s", e)
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        logger.error(f"Error creating sessions: {e}")
-        return jsonify({"error": str(e)}), 500
+    data = request.get_json(silent=True)
+    logger.info("POST /api/sessions %s", _redacted_launch_summary(data or {}))
+    payload, status = launch_session_group(data, on_launch_options=_remember_launch_options)
+    return jsonify(payload), status
 
 
 @app.route('/api/sessions/<session_id>', methods=['GET'])

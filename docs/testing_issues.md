@@ -1,5 +1,5 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-30
+Last updated: 2026-07-31
 
 ## Open Issues
 
@@ -33,14 +33,17 @@ Confirmed by code inspection. Nothing in GridVibe enables or disables mouse trac
 ### Proposed solution:
 Make the recovery explicit instead of incidental. In `web/static/js/terminals.js`, have both `clearTerminalDisplay()` and `refreshTerminalDisplay()` write an explicit mouse-tracking teardown into the pane after `term.reset()` — `\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l` through `term.write()`, which changes only the client's mode state and sends nothing to the shell, so it stays inside the pane's existing behavior and touches no route. For `refreshTerminalDisplay()` the write must happen *after* the replayed buffer is applied, not before the `join_session` round trip, or the replay will overwrite it again; sequencing it against the async replay is the main implementation question. Consider whether the replay itself should be sanitized instead — filtering mode-setting sequences out of `_get_buffered_terminal_output()` is more invasive, risks corrupting a legitimately running TUI's state on rejoin, and should not be done without deciding what a rejoin to a *live* TUI is supposed to look like. A visible affordance is worth considering separately: a pane that is receiving mouse reports at a shell prompt could surface a one-click "Reset terminal modes" action rather than requiring the user to guess. Regression tests belong in `tests/test_api.py` alongside `test_terminals_page_clear_sends_shell_command_and_purges_replay_buffer`, asserting that both handlers emit the teardown sequence and that the refresh path emits it after the rejoin.
 
+## Closed Issues
+
 ### Issue ID: ISSUE-2026-037
 - Title: SSH workspace restore still mishandles unavailable credentials and reports relaunch as connection success
 - Priority: High
-- Status: Open
-- Area: `web/static/js/launcher.js`, `web/api.py`, `web/runtime_state.py`, `web/saved_sessions.py`, `tests/test_api.py`
+- Status: Closed
+- Area: `web/workspaces.py`, `web/api.py`, `web/runtime_state.py`, `web/static/js/launcher.js`, `tests/test_multi_workspace.py`
 - Assignee: Unassigned
 - Tags: `security`, `session`, `launcher`, `terminal`, `ssh`, `logging`, `tests`
 - Reported: 2026-07-24
+- Closed: 2026-07-31
 
 Description:
 The named-preset password restore failure from ISSUE-2026-036 was fixed by commit `7134da1`: restore now fetches a referenced named preset and rebuilds its SSH panes with the saved password. Several adjacent gaps remain. Ad-hoc SSH groups, groups associated with the blank built-in default, and groups whose referenced preset was deleted or cannot be loaded still replay the deliberately password-free runtime snapshot and may be launched without usable authentication. The launcher counts a `201` session-record creation response as a successful restore even though SSH authentication runs asynchronously and may immediately fail. In addition, the current preset-backed fix returns the decrypted password to the browser and posts it back through `/api/sessions`; `create_sessions()` logs the complete request body, which can write that plaintext password to `logs/gridvibe.log`. Existing restore coverage checks JavaScript source strings rather than exercising credential rehydration and connection outcomes end to end.
@@ -61,7 +64,9 @@ Actual behavior / logs:
 ### Proposed solution:
 Add an explicit server-side restore contract that accepts the password-free snapshot plus `saved_session_id`, resolves the preset through `load_saved_sessions()` / `_find_saved_session_entry()`, and rehydrates only an SSH preset whose host, username, and port match the snapshot target. Redact or remove full request-body logging for credential-bearing endpoints, and ensure no response or log exposes the rehydrated password. Return per-group launch state that distinguishes records created from connections established, or change the launcher copy to state that reconnection has started and let room-scoped `session_status` events surface failures with retry. Add functional tests for named-preset password rehydration without disclosure, ad-hoc/default and missing/mismatched/decryption-failed presets, key/agent authentication, remote Explorer and agent panes, multiple groups, asynchronous authentication failure messaging, and log redaction.
 
-## Closed Issues
+Resolution:
+Resolved by the multi-workspace Stage 4 work on 2026-07-31 (`docs/multi_workspace_implementation_plan_2026-07-30.md` §5). Restore is now a server-side operation: `POST /api/runtime-state/restore` loads the password-free slot, resolves each referenced preset and its decrypted credential **in-process** through `web/workspaces.py`, and relaunches every group through the one shared launch service that `POST /api/sessions` also uses — the JavaScript `buildRestoreGroupBody()` replay path is gone, so no decrypted password is sent to the browser or posted back. `GET /api/runtime-state/workspaces` returns counts and metadata only. The launch route's request-body log is replaced by `_redacted_launch_summary()`, which reports shapes and a boolean `credentials_supplied` and never a `password`. The response message is **"Relaunch started"** and each group reports `started`, `warning` (`preset_missing`), `skipped` (`already_live`), or a retryable `error`; authentication outcomes keep arriving through the existing room-scoped `session_status` events and their in-pane Retry affordance. A missing or deleted preset degrades to the password-free snapshot with `warning: "preset_missing"` instead of failing the workspace. Covered by `MultiWorkspaceRestoreTestCase` in `tests/test_multi_workspace.py` — notably `test_restore_never_returns_or_logs_a_credential`, `test_launch_request_logging_is_redacted`, `test_restore_and_launch_share_one_code_path`, `test_response_reports_a_started_relaunch_not_a_connection`, and the §9.3 row tests (`test_r1_...` through `test_r14_...`).
+
 
 ### Issue ID: ISSUE-2026-036
 - Title: Restart restore launches password-auth SSH sessions without credentials

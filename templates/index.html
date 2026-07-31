@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/launcher.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app-settings.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/workspaces.css') }}?v={{ version }}">
 </head>
 <body>
 <div class="app-frame">
@@ -46,6 +47,23 @@
     <div class="restore-banner-actions">
         <button class="ghost-btn" type="button" id="restoreWorkspaceBtn" onclick="restorePreviousWorkspace()">Restore</button>
         <button class="ghost-btn" type="button" onclick="dismissRestoreBanner()">Dismiss</button>
+    </div>
+</div>
+
+<!-- Restore chooser: one row per saved workspace snapshot. Restore and Forget
+     are per row; Dismiss is panel-level ("not now") and loses nothing. -->
+<div id="workspaceRestorePanel" class="workspace-restore-panel" hidden>
+    <div class="workspace-restore-head">
+        <div class="workspace-restore-title">Saved workspaces</div>
+        <div class="workspace-restore-copy">
+            Pick the workspaces to reopen. Live shells do not survive a restart —
+            each selected workspace relaunches with the same layout.
+        </div>
+    </div>
+    <div class="workspace-restore-list" id="workspaceRestoreList"></div>
+    <div class="workspace-restore-actions">
+        <button class="ghost-btn" type="button" id="workspaceRestoreSelectedBtn" onclick="restoreSelectedWorkspaces()">Restore selected</button>
+        <button class="ghost-btn" type="button" id="workspaceRestoreDismissBtn" onclick="dismissWorkspaceRestorePanel()">Dismiss</button>
     </div>
 </div>
 
@@ -124,12 +142,53 @@
             <div id="terminalRows" class="rows-wrap"></div>
         </div>
 
+        {% if multi_workspace_enabled %}
+        <div class="card workspace-destination-card" id="workspaceDestinationCard">
+            <div class="section-head">
+                <div class="section-title">
+                    <span class="step-num">04</span>
+                    Workspace
+                </div>
+            </div>
+            <div class="workspace-destination">
+                <div class="workspace-destination-row">
+                    <select id="workspaceDestinationSelect" aria-label="Launch into workspace"></select>
+                    <input
+                        id="workspaceDestinationLabel"
+                        type="text"
+                        maxlength="80"
+                        autocomplete="off"
+                        placeholder="New workspace name (optional)"
+                        aria-label="New workspace name"
+                        hidden
+                    >
+                </div>
+                <div class="workspace-destination-hint" id="workspaceDestinationHint">
+                    Each workspace opens in its own window with its own session tabs.
+                </div>
+                <div class="workspace-live-list" id="workspaceLiveList"></div>
+            </div>
+        </div>
+        {% endif %}
+
         <div class="action-bar">
             <div class="action-bar-left action-stack">
                 <a href="/terminals?workspace=default" class="secondary-link" target="gridvibe-workspace-default" onclick="return viewActiveTerminals(event)">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
                     View Active Terminals
                 </a>
+                <!-- Re-entry point: Dismiss is "not now", so the chooser must be
+                     reopenable mid-session for restore and housekeeping. -->
+                <button
+                    class="secondary-link workspace-saved-entry"
+                    type="button"
+                    id="workspaceSavedEntry"
+                    onclick="openWorkspaceRestorePanel()"
+                    hidden
+                >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8"></path><path d="M3 8V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3"></path><path d="M10 12h4"></path></svg>
+                    <span id="workspaceSavedEntryLabel">Saved workspaces</span>
+                </button>
                 <button id="launchBtn" type="button" class="action-btn" onclick="launchSessions()">
                     <span class="action-btn-label">Launch Workspace</span>
                     <span class="arrow" aria-hidden="true">→</span>
@@ -242,6 +301,7 @@
     const LOCAL_WINDOWS_SHELLS_AVAILABLE = {{ local_windows_shells_available|tojson }};
 </script>
 <script src="{{ url_for('static', filename='js/shared.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/workspaces.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/app-settings.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/launcher.js') }}?v={{ version }}"></script>
 </body>

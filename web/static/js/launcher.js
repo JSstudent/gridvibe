@@ -2271,24 +2271,12 @@
            it cannot honour a requested group — a restore goes straight to
            open_session_window, which retargets an existing window. A zoomed
            restore also needs that path so the native window receives its zoom. */
-        if (
-            !preferredGroupId
-            && normalizedZoomFactor === null
-            && (
-                window.pywebview?.api?.focus_workspace_window
-                || window.pywebview?.api?.focus_session_window
-            )
-        ) {
-            try {
-                const result = window.pywebview.api.focus_workspace_window
-                    ? await window.pywebview.api.focus_workspace_window(resolvedWorkspaceId)
-                    : await window.pywebview.api.focus_session_window();
-                logLauncherWindowAction('focus workspace window result', result || {});
-                if (result?.ok) {
-                    return false;
-                }
-            } catch (error) {
-                console.error('[GridVibe Launcher] focus workspace window failed:', error);
+        if (!preferredGroupId && normalizedZoomFactor === null) {
+            if (await focusWorkspaceWindow(resolvedWorkspaceId)) {
+                logLauncherWindowAction('focused existing workspace window', {
+                    workspace_id: resolvedWorkspaceId
+                });
+                return false;
             }
         }
 
@@ -2330,43 +2318,12 @@
             const targetGroupId = liveGroupIds.has(preferredGroupId)
                 ? preferredGroupId
                 : (data.sessions.find(session => session.group_id)?.group_id || '');
-            if (
-                window.pywebview?.api?.open_workspace_window
-                || window.pywebview?.api?.open_session_window
-            ) {
-                try {
-                    const result = window.pywebview.api.open_workspace_window
-                        ? await window.pywebview.api.open_workspace_window(
-                            resolvedWorkspaceId,
-                            targetGroupId,
-                            normalizeNativeZoomFactor(nativeZoomFactor)
-                        )
-                        : await window.pywebview.api.open_session_window(
-                            targetGroupId,
-                            normalizeNativeZoomFactor(nativeZoomFactor)
-                        );
-                    logLauncherWindowAction('open workspace window result', {
-                        workspace_id: resolvedWorkspaceId,
-                        requested_group_id: targetGroupId || 'all',
-                        ...(result || {})
-                    });
-                    if (result?.ok) {
-                        return;
-                    }
-                } catch (error) {
-                    console.error('[GridVibe Launcher] open workspace window failed:', error);
-                }
-            }
-
-            const params = new URLSearchParams({ workspace: resolvedWorkspaceId });
-            if (targetGroupId) {
-                params.set('group', targetGroupId);
-            }
-            window.open(
-                `/terminals?${params.toString()}`,
-                `gridvibe-workspace-${resolvedWorkspaceId}`
-            );
-            logLauncherWindowAction('Opened browser terminals window fallback', {
+            await openWorkspaceWindow(resolvedWorkspaceId, {
+                groupId: targetGroupId,
+                nativeZoomFactor
+            });
+            logLauncherWindowAction('opened workspace window', {
+                workspace_id: resolvedWorkspaceId,
                 requested_group_id: targetGroupId || 'all'
             });
         } catch {
@@ -2388,28 +2345,15 @@
     let restorableActiveGroupId = '';
     let restorableNativeZoomFactor = null;
 
-    function formatWorkspaceSavedAgo(savedAt) {
-        const savedSeconds = Number(savedAt);
-        if (!Number.isFinite(savedSeconds) || savedSeconds <= 0) {
-            return '';
-        }
-        const elapsedSeconds = Math.max(0, Math.floor(Date.now() / 1000 - savedSeconds));
-        if (elapsedSeconds < 60) {
-            return 'just now';
-        }
-        const minutes = Math.floor(elapsedSeconds / 60);
-        if (minutes < 60) {
-            return `${minutes} min ago`;
-        }
-        const hours = Math.floor(minutes / 60);
-        if (hours < 24) {
-            return `${hours} h ago`;
-        }
-        const days = Math.floor(hours / 24);
-        return `${days} day${days === 1 ? '' : 's'} ago`;
-    }
-
     async function checkRestorableWorkspace() {
+        /* With N workspaces a single banner stops being coherent — dismissing
+           "the banner" would hide every saved workspace at once. The chooser
+           takes over; the banner remains the single-workspace fallback so the
+           flag off keeps today's behaviour exactly. */
+        if (isMultiWorkspaceEnabled()) {
+            await loadWorkspaceRestoreChooser({ autoOpen: true });
+            return;
+        }
         const banner = document.getElementById('restoreWorkspaceBanner');
         if (!banner) return;
         const response = await fetch('/api/runtime-state');
@@ -2540,6 +2484,306 @@
         }
     }
 
+    /* ─────────────────────────────────────────────
+       Multi-workspace: launch destination and the saved-workspace chooser.
+
+       Every workspace API call and window dispatch goes through workspaces.js;
+       this file keeps only form collection and launch orchestration.
+    ───────────────────────────────────────────── */
+
+    /* The last destination the user picked explicitly in this launcher session.
+       With two or more live workspaces there is no sensible automatic answer,
+       so the previous choice stands rather than silently retargeting. */
+    let lastWorkspaceDestinationChoice = '';
+    let liveWorkspaceCache = [];
+    let restorableWorkspaceSummaries = [];
+    let workspaceRestoreInFlight = false;
+
+    function workspaceDestinationElements() {
+        return {
+            select: document.getElementById('workspaceDestinationSelect'),
+            label: document.getElementById('workspaceDestinationLabel'),
+            list: document.getElementById('workspaceLiveList')
+        };
+    }
+
+    function syncWorkspaceDestinationLabelVisibility() {
+        const { select, label } = workspaceDestinationElements();
+        if (!select || !label) {
+            return;
+        }
+        label.hidden = select.value !== WORKSPACE_NEW_DESTINATION;
+    }
+
+    function onWorkspaceDestinationChanged() {
+        const { select } = workspaceDestinationElements();
+        lastWorkspaceDestinationChoice = select?.value || '';
+        syncWorkspaceDestinationLabelVisibility();
+    }
+
+    /* Default: New workspace when none is live, the single live one when
+       exactly one exists, otherwise this session's last explicit choice. */
+    function defaultWorkspaceDestination(workspaces) {
+        const liveIds = workspaces.map(workspace => workspace.workspace_id);
+        if (lastWorkspaceDestinationChoice
+            && (lastWorkspaceDestinationChoice === WORKSPACE_NEW_DESTINATION
+                || liveIds.includes(lastWorkspaceDestinationChoice))) {
+            return lastWorkspaceDestinationChoice;
+        }
+        if (!workspaces.length) {
+            return WORKSPACE_NEW_DESTINATION;
+        }
+        if (workspaces.length === 1) {
+            return workspaces[0].workspace_id;
+        }
+        return WORKSPACE_NEW_DESTINATION;
+    }
+
+    async function refreshWorkspaceDestinations() {
+        if (!isMultiWorkspaceEnabled()) {
+            return;
+        }
+        const { select, list } = workspaceDestinationElements();
+        if (!select) {
+            return;
+        }
+
+        /* A workspace is only "live" for launch purposes once it has tabs — a
+           just-created empty one is still a valid destination, so both are
+           listed and only the picker's default differs. */
+        liveWorkspaceCache = await fetchLiveWorkspaces();
+        const selection = defaultWorkspaceDestination(liveWorkspaceCache);
+        select.innerHTML = '';
+        liveWorkspaceCache.forEach((workspace, index) => {
+            const option = document.createElement('option');
+            option.value = workspace.workspace_id;
+            const count = Number(workspace.group_count) || 0;
+            option.textContent = `${workspaceDisplayLabel(workspace, index)} (${count} session${count === 1 ? '' : 's'})`;
+            select.appendChild(option);
+        });
+        const newOption = document.createElement('option');
+        newOption.value = WORKSPACE_NEW_DESTINATION;
+        newOption.textContent = 'New workspace';
+        select.appendChild(newOption);
+        select.value = selection;
+        syncWorkspaceDestinationLabelVisibility();
+
+        if (!list) {
+            return;
+        }
+        list.innerHTML = '';
+        liveWorkspaceCache
+            .filter(workspace => (Number(workspace.group_count) || 0) > 0)
+            .forEach((workspace, index) => {
+                const row = document.createElement('div');
+                row.className = 'workspace-live-row';
+                const count = Number(workspace.group_count) || 0;
+                const name = document.createElement('div');
+                name.className = 'workspace-live-name';
+                name.innerHTML = `${WORKSPACE_ICONS.window}<span>${escHtml(workspaceDisplayLabel(workspace, index))}</span>`;
+                const meta = document.createElement('span');
+                meta.className = 'workspace-live-meta';
+                meta.textContent = `${count} session${count === 1 ? '' : 's'}`;
+                const openButton = document.createElement('button');
+                openButton.type = 'button';
+                openButton.className = 'ghost-btn';
+                openButton.textContent = 'Open';
+                openButton.addEventListener('click', async () => {
+                    if (!(await focusWorkspaceWindow(workspace.workspace_id))) {
+                        await openWorkspaceWindow(workspace.workspace_id);
+                    }
+                });
+                row.append(name, meta, openButton);
+                list.appendChild(row);
+            });
+    }
+
+    /* The destination fields POST /api/sessions expects, or {} with the flag
+       off so a single-workspace launch keeps targeting "default". */
+    function collectWorkspaceDestination() {
+        if (!isMultiWorkspaceEnabled()) {
+            return {};
+        }
+        const { select, label } = workspaceDestinationElements();
+        const choice = select?.value || '';
+        if (!choice || choice === WORKSPACE_NEW_DESTINATION) {
+            return {
+                new_workspace: true,
+                workspace_label: String(label?.value || '').trim()
+            };
+        }
+        return { workspace_id: choice };
+    }
+
+    /* ── Saved-workspace chooser (Restore / Forget / Dismiss) ── */
+
+    function updateWorkspaceSavedEntry() {
+        const entry = document.getElementById('workspaceSavedEntry');
+        const label = document.getElementById('workspaceSavedEntryLabel');
+        if (!entry || !label) {
+            return;
+        }
+        entry.hidden = !isMultiWorkspaceEnabled() || restorableWorkspaceSummaries.length === 0;
+        label.textContent = `Saved workspaces (${restorableWorkspaceSummaries.length})`;
+    }
+
+    function renderWorkspaceRestoreRows() {
+        const list = document.getElementById('workspaceRestoreList');
+        if (!list) {
+            return;
+        }
+        list.innerHTML = '';
+        restorableWorkspaceSummaries.forEach(summary => {
+            const row = document.createElement('div');
+            row.className = `workspace-restore-row${summary.live_conflict ? ' is-disabled' : ''}`;
+            row.dataset.workspaceId = summary.workspace_id;
+
+            const label = document.createElement('label');
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'workspace-restore-checkbox';
+            checkbox.value = summary.workspace_id;
+            checkbox.disabled = Boolean(summary.live_conflict);
+            checkbox.checked = !summary.live_conflict;
+
+            const text = document.createElement('span');
+            text.className = 'workspace-restore-text';
+            const name = document.createElement('span');
+            name.className = 'workspace-restore-name';
+            name.textContent = String(summary.label || '').trim() || 'Workspace';
+            const meta = document.createElement('span');
+            meta.className = 'workspace-restore-meta';
+            meta.textContent = describeRestorableWorkspace(summary);
+            text.append(name, meta);
+            if (summary.live_conflict) {
+                const reason = document.createElement('span');
+                reason.className = 'workspace-restore-reason';
+                reason.textContent = 'Already open — close this workspace first';
+                text.appendChild(reason);
+            }
+            label.append(checkbox, text);
+
+            const forget = document.createElement('button');
+            forget.type = 'button';
+            forget.className = 'ghost-btn danger-btn';
+            forget.textContent = 'Forget';
+            forget.disabled = Boolean(summary.live_conflict);
+            forget.title = summary.live_conflict
+                ? 'Close this workspace first'
+                : 'Delete this saved workspace snapshot';
+            forget.addEventListener('click', () => forgetWorkspaceRow(summary));
+
+            row.append(label, forget);
+            list.appendChild(row);
+        });
+    }
+
+    async function loadWorkspaceRestoreChooser({ autoOpen = false } = {}) {
+        const panel = document.getElementById('workspaceRestorePanel');
+        if (!panel) {
+            return;
+        }
+        restorableWorkspaceSummaries = await fetchRestorableWorkspaces();
+        updateWorkspaceSavedEntry();
+        renderWorkspaceRestoreRows();
+        if (!restorableWorkspaceSummaries.length) {
+            panel.hidden = true;
+            return;
+        }
+        if (autoOpen) {
+            panel.hidden = false;
+        }
+    }
+
+    function openWorkspaceRestorePanel() {
+        const panel = document.getElementById('workspaceRestorePanel');
+        if (panel) {
+            panel.hidden = false;
+        }
+        loadWorkspaceRestoreChooser().catch(() => {});
+    }
+
+    /* Panel-level "not now": every slot survives on disk and the chooser
+       reopens from the Saved workspaces entry. */
+    function dismissWorkspaceRestorePanel() {
+        const panel = document.getElementById('workspaceRestorePanel');
+        if (panel) {
+            panel.hidden = true;
+        }
+    }
+
+    async function forgetWorkspaceRow(summary) {
+        const confirmed = await openGenericConfirmModal({
+            title: 'Forget this saved workspace?',
+            copy: `"${String(summary.label || 'Workspace')}" will no longer be offered after a restart.`,
+            note: 'Forget removes this saved workspace snapshot. Your saved sessions are not affected.',
+            confirmLabel: 'Forget',
+            danger: true
+        });
+        if (!confirmed) {
+            return;
+        }
+        try {
+            await forgetSavedWorkspace(summary.workspace_id);
+        } catch (error) {
+            showMessage(error.message, 'error');
+        }
+        await loadWorkspaceRestoreChooser();
+        if (!restorableWorkspaceSummaries.length) {
+            dismissWorkspaceRestorePanel();
+        }
+    }
+
+    async function restoreSelectedWorkspaces() {
+        const panel = document.getElementById('workspaceRestorePanel');
+        if (!panel || workspaceRestoreInFlight) {
+            return;
+        }
+        const workspaceIds = [...panel.querySelectorAll('.workspace-restore-checkbox')]
+            .filter(checkbox => checkbox.checked && !checkbox.disabled)
+            .map(checkbox => checkbox.value);
+        if (!workspaceIds.length) {
+            showMessage('Select at least one workspace to restore.', 'info');
+            return;
+        }
+
+        /* Single-flight in the UI; the endpoint is also idempotent by workspace
+           id, so a double click can never duplicate a workspace's tabs. */
+        workspaceRestoreInFlight = true;
+        panel.classList.add('busy');
+        try {
+            const result = await restoreSavedWorkspaces(workspaceIds);
+            const restored = (result.workspaces || []).filter(entry => entry.restored);
+            for (const entry of restored) {
+                // Only workspaces whose relaunch actually started get a window.
+                await openWorkspaceWindow(entry.workspace_id, {
+                    groupId: entry.active_group_id,
+                    nativeZoomFactor: entry.native_zoom_factor
+                });
+            }
+            const failed = (result.workspaces || []).filter(entry => !entry.restored);
+            if (restored.length) {
+                showMessage(
+                    `Relaunch started for ${restored.length} workspace${restored.length === 1 ? '' : 's'}.`
+                    + (failed.length ? ` ${failed.length} could not be restored.` : ''),
+                    failed.length ? 'warning' : 'success'
+                );
+            } else {
+                showMessage('Could not restore the selected workspaces.', 'error');
+            }
+        } catch (error) {
+            showMessage(`Workspace restore failed: ${error.message} — try again.`, 'error');
+        } finally {
+            workspaceRestoreInFlight = false;
+            panel.classList.remove('busy');
+            await loadWorkspaceRestoreChooser();
+            await refreshWorkspaceDestinations();
+            if (!restorableWorkspaceSummaries.length) {
+                dismissWorkspaceRestorePanel();
+            }
+        }
+    }
+
     /* Expand one launcher config — the live form state or a saved preset — into
        the per-pane `sessions` array that POST /api/sessions expects. Shared by
        the Launch button and workspace restore so both build panes identically;
@@ -2626,14 +2870,32 @@
                     workspace_layout: config.workspace_layout,
                     saved_session_id: activeSavedSessionId,
                     session_name: sessionName,
+                    ...collectWorkspaceDestination(),
                     sessions
                 })
             });
 
             const data = await response.json();
+            if (response.status === 409 && data.conflict === 'saved_session_live') {
+                /* Plan §6: a saved preset is live in at most one workspace.
+                   Explain it and offer the two real resolutions instead of
+                   silently stealing the tab (guardrail 8). */
+                setLaunchButtonLoading(button, false);
+                const openIt = await openGenericConfirmModal({
+                    title: 'Already open elsewhere',
+                    copy: `"${String(data.workspace_label || 'Another workspace')}" already has this saved session open.`,
+                    note: 'Open that workspace, or cancel and pick a different saved session.',
+                    confirmLabel: 'Open it'
+                });
+                if (openIt) {
+                    await openWorkspaceWindow(data.workspace_id, { groupId: data.group_id });
+                }
+                return;
+            }
             if (!response.ok) {
                 throw new Error(data.error || 'Failed to create sessions');
             }
+            await refreshWorkspaceDestinations();
 
             const launchWarnings = Array.isArray(data.warnings)
                 ? data.warnings.filter(item => String(item || '').trim())
@@ -2645,38 +2907,11 @@
             if (data.launch_target === 'web') {
                 setTimeout(async () => {
                     const workspaceId = String(data.workspace_id || 'default');
-                    const targetParams = new URLSearchParams({
-                        workspace: workspaceId,
-                        group: data.group_id
+                    logLauncherWindowAction('open workspace window after launch', {
+                        workspace_id: workspaceId,
+                        requested_group_id: data.group_id
                     });
-                    const targetUrl = `/terminals?${targetParams.toString()}`;
-                    const windowName = `gridvibe-workspace-${workspaceId}`;
-                    if (
-                        window.pywebview?.api?.open_workspace_window
-                        || window.pywebview?.api?.open_session_window
-                    ) {
-                        try {
-                            const result = window.pywebview.api.open_workspace_window
-                                ? await window.pywebview.api.open_workspace_window(
-                                    workspaceId,
-                                    data.group_id
-                                )
-                                : await window.pywebview.api.open_session_window(data.group_id);
-                            logLauncherWindowAction('open workspace window after launch', {
-                                workspace_id: workspaceId,
-                                requested_group_id: data.group_id,
-                                ...(result || {})
-                            });
-                            if (!result?.ok) {
-                                window.open(targetUrl, windowName);
-                            }
-                        } catch (error) {
-                            console.error('[GridVibe Launcher] launch window open failed:', error);
-                            window.open(targetUrl, windowName);
-                        }
-                    } else {
-                        window.open(targetUrl, windowName);
-                    }
+                    await openWorkspaceWindow(workspaceId, { groupId: data.group_id });
                     setLaunchButtonLoading(button, false);
                 }, 450);
             }
@@ -2697,6 +2932,9 @@
         }
     }
 
+    document.getElementById('workspaceDestinationSelect')
+        ?.addEventListener('change', onWorkspaceDestinationChanged);
+
     restoreActiveSavedSessionMeta();
     setupSavedSessionUpdateListeners();
     renderCountOptions();
@@ -2708,6 +2946,7 @@
     loadAppSettings().catch(() => {});
     loadVoicePrefs().catch(() => {});
     checkRestorableWorkspace().catch(() => {});
+    refreshWorkspaceDestinations().catch(() => {});
     updateHeaderBadges();
 
     function updateHeaderBadges() {

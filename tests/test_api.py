@@ -2357,11 +2357,21 @@ class ApiRoutesTestCase(unittest.TestCase):
             launcher_html,
         )
         self.assertIn("activeGroupId,\n                    nativeZoomFactor", launcher_html)
+        # Window dispatch now lives in the shared workspaces.js module, so the
+        # launcher only names the workspace and the group to open on.
         self.assertIn(
-            "const params = new URLSearchParams({ workspace: resolvedWorkspaceId });",
+            "await openWorkspaceWindow(resolvedWorkspaceId, {",
             launcher_html,
         )
-        self.assertIn("`gridvibe-workspace-${resolvedWorkspaceId}`", launcher_html)
+        workspaces_js = self._static("js/workspaces.js")
+        self.assertIn(
+            "return `gridvibe-workspace-${normalizeWorkspaceId(workspaceId)}`;",
+            workspaces_js,
+        )
+        self.assertIn(
+            "const params = new URLSearchParams({ workspace: normalizeWorkspaceId(workspaceId) });",
+            workspaces_js,
+        )
 
     def test_launcher_round_trips_explorer_tab_views_and_markdown_appearance(self):
         """2.f: launcher carries tab views + Markdown appearance without editing them."""
@@ -11972,6 +11982,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
     BANNED_GLYPHS = ("📁", "🌐", "🎤", "☾", "☀", "❌")
     STATIC_JS = (
         "js/shared.js",
+        "js/workspaces.js",
         "js/app-settings.js",
         "js/launcher.js",
         "js/terminals.js",
@@ -14771,7 +14782,7 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         """Bug 2: a restore replays the workspace verbatim, so a cold post-restart
         agent probe must not clear the command and drop its auto-mode flag."""
         with patch.object(api.socketio, "start_background_task"), patch.object(
-            api, "_sanitize_agent_launch_commands"
+            web_agents, "_sanitize_agent_launch_commands"
         ) as sanitize:
             response = self.client.post(
                 "/api/sessions",
@@ -14801,7 +14812,7 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
 
     def test_normal_launch_still_runs_agent_preflight_clearing(self):
         with patch.object(api.socketio, "start_background_task"), patch.object(
-            api, "_sanitize_agent_launch_commands", return_value=[]
+            web_agents, "_sanitize_agent_launch_commands", return_value=[]
         ) as sanitize:
             response = self.client.post(
                 "/api/sessions",
@@ -14826,8 +14837,15 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
     def test_delete_endpoint_clears_only_that_workspace_slot(self):
         self._launch_explorer_group()
         web_runtime_state.capture_workspace(api.session_manager)
+        # Forget is refused while the workspace is live (the next autosave
+        # would simply re-capture it), so close it first.
+        live_response = self.client.delete("/api/runtime-state")
+        self.assertEqual(live_response.status_code, 409)
+        self.assertFalse(live_response.get_json()["forgotten"])
+        self.client.delete("/api/sessions")
         response = self.client.delete("/api/runtime-state")
         self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["forgotten"])
         self.assertIsNone(web_runtime_state.load_restorable_workspace())
         # The file itself stays (v2 skeleton); only the slot is removed.
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -14923,7 +14941,9 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertIn("async function getNativeSessionZoomFactor()", shared_js)
         launcher_js = self._static("js/launcher.js")
         self.assertIn("body: JSON.stringify({ native_zoom_factor: nativeZoomFactor })", launcher_js)
-        self.assertIn("open_workspace_window(\n                            resolvedWorkspaceId,", launcher_js)
+        workspaces_js = self._static("js/workspaces.js")
+        self.assertIn("api.open_workspace_window(", workspaces_js)
+        self.assertIn("resolvedWorkspaceId,\n                    groupId,", workspaces_js)
 
 
 class SettingsLauncherConfigTestCase(unittest.TestCase):

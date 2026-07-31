@@ -2,7 +2,7 @@
 
 Date: 2026-07-30
 Updated: 2026-07-31
-Status: Stages 1–2 implemented; Stages 3–4 revised and pending
+Status: Stages 1–4 implemented (2026-07-31)
 Scope: Multiple live workspaces, one terminal window per workspace, moving a
 session group between workspaces, and selective restore after restart.
 
@@ -119,7 +119,7 @@ multiplying the client-side replay path across N workspaces.
 Each stage ends with `python tests/run_tests.py` + `python -m ruff check .`
 green, and is independently mergeable.
 
-### Implementation record — 2026-07-31
+### Implementation record — 2026-07-31 (Stages 1–2)
 
 Stages 1 and 2 are implemented behind
 `workspace.multi_workspace_enabled` (default `false`):
@@ -155,6 +155,96 @@ Implementation exposed four requirements for the remaining stages:
    roll it back if no group starts. Autosave already preserves a slot's
    `origin: "manual"` so the Stage 4 auto-slot cap can never demote or evict a
    manual save.
+
+### Implementation record — 2026-07-31 (Stages 3–4)
+
+Stages 3 and 4 are implemented, still behind
+`workspace.multi_workspace_enabled` (default `false`). The flag hides UI only;
+ownership checks, the uniqueness guard, and every validation path run either
+way.
+
+**Backend.** `web/workspaces.py` grew from an identity helper into the
+orchestration module the plan asked for: destination resolution
+(`resolve_launch_destination`, `rollback_created_workspace`), the §6 guard
+(`saved_session_conflict`), the **one** launch service (`launch_session_group`),
+the move (`move_group_to_workspace`), and server-side restore
+(`restore_workspace`, `restore_workspaces`, `list_restorable_workspace_summaries`).
+`sessions/manager.py` imports this module at import time, so every collaborator
+that leads back to the manager (`web.app`, `web.terminal_io`,
+`web.saved_sessions`) is imported lazily inside the function that needs it — the
+cycle exists only at import time. `web/api.py` keeps thin routes; the old
+~210-line `POST /api/sessions` body is deleted, not duplicated.
+
+**Manager.** `Workspace.retain_when_empty` (live-only, never persisted),
+`rename_workspace()`, and `remove_workspace()` — the rollback for a destination
+created for a launch that then failed. Creating a group in, or moving one into,
+a workspace clears its retention flag, after which normal empty-workspace
+pruning applies again. `"default"` stays permanent.
+
+**Routes.** `GET`/`POST /api/workspaces`, `PATCH /api/workspaces/<id>`,
+`POST /api/session-groups/<group_id>/move`,
+`GET /api/runtime-state/workspaces`, `POST /api/runtime-state/restore`, and
+`DELETE /api/runtime-state` returning `{"forgotten": bool}` (`409` while that
+workspace is live). `POST /api/sessions` accepts `workspace_id` **or**
+`new_workspace` + `workspace_label` and returns `workspace_id` +
+`workspace_created`.
+
+**Frontend.** New `web/static/js/workspaces.js` and
+`web/static/css/workspaces.css`, loaded by both pages: workspace identity, every
+workspace API call, destination lists, the single `moveGroupToWorkspace()`, and
+browser/native window dispatch. The duplicated dispatch previously inlined three
+times in `launcher.js` now calls `openWorkspaceWindow()` /
+`focusWorkspaceWindow()`. `launcher.js` keeps form collection and launch
+orchestration (destination select, live-workspace list, restore chooser);
+`terminals.js` keeps page integration (workspace menus, tab context menu, cache
+eviction, move flow). Every confirm goes through `openGenericConfirmModal(...)`
+and naming through the new in-page `workspaceNameModal` — no `window.confirm`,
+`prompt`, or `alert` anywhere. Icons are stroke `currentColor` SVG; colours come
+from `tokens.css` variables only.
+
+**Decisions taken during implementation** (not spelled out in the plan above):
+
+1. **"Already live" means *has groups*, not *record exists*.** The `"default"`
+   workspace record is permanent, so an existence check would have made the
+   default slot permanently unrestorable and permanently un-forgettable.
+   `workspace_has_groups()` is the single predicate behind R5, R12, and the
+   Forget refusal.
+2. **Moving the last group out closes the source window** (§8) rather than
+   leaving it on a pruned workspace. The move response carries `source_groups`,
+   so the source window decides without re-listing a workspace the backend has
+   already removed — re-listing would `400`.
+3. **Rename also refreshes the saved slot's label** through `capture_workspace`,
+   so the restore chooser stops offering the old name. An empty workspace has no
+   slot and is skipped.
+4. **`build_sessions_from_saved_config()` is a deliberate server-side twin** of
+   `buildSessionsFromConfig()` in `launcher.js`, including the directory
+   resolution mirrored from `shared.js`. Restore needs the preset expanded
+   in-process (that is the whole point of ISSUE-2026-037), and both twins feed
+   the same launch service, so a restored pane and a launched pane are built
+   from the same fields.
+5. **The `409` conflict has two callers with different affordances.** From the
+   launcher the honest action is *Open it* (the launcher has no workspace of its
+   own to move into); from a terminal window it is *Move it here* with *Open
+   that workspace* as the cancel path. Both route through the same endpoints.
+
+**ISSUE-2026-037 is closed by Stage 4.** Decrypted passwords never leave the
+process, `_redacted_launch_summary()` replaced the full request-body log
+(reporting shapes and a boolean `credentials_supplied`), and the response says
+*Relaunch started*.
+
+**Coverage.** `tests/test_multi_workspace.py` gains
+`MultiWorkspaceStage3TestCase` (destination, rollback, the full §6 table, move
+ordering/pruning/rooms, rename, retention lifetime, flag-gated markup) and
+`MultiWorkspaceRestoreTestCase` (all fourteen §9.3 rows, subset restore, Forget
+idempotency and the live refusal, the auto-slot cap, credential and log
+redaction, and an assertion that restore and launch share one code path).
+`tests/test_session_manager.py` gains `WorkspaceLifetimeTestCase`. Suite: 972
+tests, Ruff clean.
+
+**Not shipped (unchanged from the plan).** The optional drag destination tray
+(§5 Stage 3 step 9) was cut; it shares the same `moveGroupToWorkspace()` call,
+so adding it later changes no contract. Tab drag-and-drop still reorders within
+a window only.
 
 ---
 
@@ -319,6 +409,8 @@ reimplementing them.
 
 ### Stage 3 — Destination, workspace menus, and move
 
+**Implementation status (2026-07-31): Complete.**
+
 **Goal.** The feature becomes usable: launch into a chosen workspace, manage
 workspaces from inside a window, move a tab between workspaces.
 
@@ -409,6 +501,8 @@ workspaces from inside a window, move a tab between workspaces.
 ---
 
 ### Stage 4 — Selective, server-side restore
+
+**Implementation status (2026-07-31): Complete.**
 
 **Goal.** After a restart, restore any subset of saved workspaces, one window
 each, without ever handing a credential to the browser.
@@ -800,6 +894,10 @@ rename; the workspace menu items exist and are wired in the served page (the
 existing `test_api.py` markup-assertion pattern); dirty-editor confirm blocks;
 `GuardrailAuditFixesTestCase` still passes (no `window.confirm/prompt/alert`).
 
+Implemented automated coverage: `MultiWorkspaceStage3TestCase` in
+`tests/test_multi_workspace.py` and `WorkspaceLifetimeTestCase` in
+`tests/test_session_manager.py`.
+
 **Stage 4 — restore**
 All fourteen rows of §9.3; **Forget** removes exactly one slot and preserves
 siblings, is idempotent, is refused for a live workspace, and never touches
@@ -809,6 +907,10 @@ never evicts a `manual` slot; partial results; credential rehydration happens
 server-side; the launch-request log contains no password; the response wording
 is *relaunch started*; unselected slots survive; the shared launch service is
 used by both paths (one code path, asserted).
+
+Implemented automated coverage: `MultiWorkspaceRestoreTestCase` in
+`tests/test_multi_workspace.py`, with one test per §9.3 row
+(`test_r1_...` through `test_r14_...`).
 
 **Manual matrix** (both themes, browser **and** native): launch into existing
 and new workspaces; right-click and drag moves; cancel/retry paths; source-tab
