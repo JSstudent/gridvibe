@@ -1606,7 +1606,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function toggleExplorerTreeDirectory(index, path)", html)
         self.assertIn("function renderExplorerTreePanel(index)", html)
         self.assertIn("function loadExplorerTreeChildren(index, path)", html)
-        self.assertIn("function revealExplorerTreePath(index)", html)
+        self.assertIn("function revealExplorerTreePath(index, targetPath = '')", html)
         self.assertIn("function reloadExplorerTree(index)", html)
         self.assertIn(
             'wireCardButton(card, `[data-explorer-tree-toggle="${i}"]`, () => toggleExplorerTreeSidebar(i));',
@@ -2216,7 +2216,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # The name button navigates and expands, but never collapses.
         open_dir = html[
             html.index("async function openExplorerTreeDirectory(index, path)"):
-            html.index("async function revealExplorerTreePath(index)")
+            html.index("async function revealExplorerTreePath(index, targetPath = '')")
         ]
         self.assertEqual(open_dir.count("await loadExplorerPane(index, path);"), 1)
         self.assertNotIn("pane._explorerTreeExpanded.delete(path);", open_dir)
@@ -2227,8 +2227,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Navigating still reveals the target row, but no longer force-expands
         # the directory itself (that would undo the collapse click).
         reveal = html[
-            html.index("async function revealExplorerTreePath(index)"):
-            html.index("async function loadExplorerTree(index)")
+            html.index("async function revealExplorerTreePath(index, targetPath = '')"):
+            html.index("function focusExplorerTreeRow(index, path)")
         ]
         self.assertIn("segments.pop();", reveal)
         self.assertNotIn("if (pane._explorerMode === 'file') {", reveal)
@@ -2310,6 +2310,54 @@ class ApiRoutesTestCase(unittest.TestCase):
             "pane._explorerActiveTabId === tab.id && pane._explorerRenderedTabId === tab.id",
             html,
         )
+
+    def test_terminals_page_tab_strip_copy_path_and_locate_in_tree(self):
+        """Pinned tabs get the copy-path menu and a locate-in-tree double-click."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # A pinned tab joins the shared copy-path menu (the tree and Git rows
+        # carry the same hook); the permanent Preview tab does not, and no
+        # context kind is exposed, so the tab menu stays copy-only.
+        self.assertIn("const copyPath = (!isPreview && tab.path)", html)
+        self.assertIn('data-explorer-copy-path="${escHtml(tab.path)}"', html)
+        wire = html[
+            html.index("function wireExplorerTabStripInteractions(index, tabEl)"):
+            html.index("function clearExplorerTabDragMarkers(index)")
+        ]
+        # Double-click: the Preview tab still promotes (its branch returns
+        # first), every pinned tab locates its file in the Files tree.
+        self.assertLess(
+            wire.index("promoteExplorerPreviewTab(index);"),
+            wire.index("revealExplorerTabInTree(index, id);"),
+        )
+        reveal = html[
+            html.index("async function revealExplorerTabInTree(index, id)"):
+            html.index("function renderExplorerViewerEmpty(index)")
+        ]
+        # Opening the Files panel is awaited so its own reveal cannot race the
+        # ancestor expansion through the in-flight children guard.
+        self.assertIn("await setExplorerTreeSidebarOpen(index, true);", reveal)
+        self.assertIn("await revealExplorerTreePath(index, path);", reveal)
+        self.assertIn("focusExplorerTreeRow(index, path);", reveal)
+        # Locating is a pure reveal: it never re-opens or re-fetches the file.
+        self.assertNotIn("openExplorerFile(", reveal)
+        # The reveal targets an explicit path instead of whatever the viewer
+        # happens to show, and the panel setters hand back the open promise.
+        self.assertIn(
+            "async function revealExplorerTreePath(index, targetPath = '')",
+            html,
+        )
+        self.assertIn("return setExplorerSidebarPanelOpen(index, 'tree', open);", html)
+        self.assertIn("function focusExplorerTreeRow(index, path)", html)
+        self.assertIn("row.scrollIntoView({ block: 'nearest' });", html)
+        # Token-driven flash styling only (Regression Guardrail 7).
+        located_css = html[html.index(".explorer-tree-row.explorer-tree-located {"):]
+        located_css = located_css[:located_css.index("}")]
+        self.assertIn("var(--t-accent)", located_css)
+        self.assertIn("var(--explorer-row-active)", located_css)
+        self.assertNotRegex(located_css, r"#[0-9a-fA-F]{3,8}\b")
 
     def test_launcher_round_trips_explorer_open_tabs(self):
         """ISSUE-2026-015: launcher carries open tabs through without editing them."""

@@ -1635,21 +1635,22 @@
         });
     }
 
+    /* Returns whatever the panel's onOpen hook returns (a promise for the
+       panels that load), so a caller that needs the panel populated — the
+       tab strip's locate-in-tree gesture — can await it. */
     function setExplorerSidebarPanelOpen(index, key, open) {
         const panel = EXPLORER_SIDEBAR_PANELS.find(entry => entry.key === key);
         const pane = terminals[index];
         if (!panel || !pane) {
-            return;
+            return undefined;
         }
         pane[panel.openFlag] = Boolean(open);
         syncExplorerSidebar(index);
-        if (pane[panel.openFlag]) {
-            panel.onOpen?.(index);
-        }
+        return pane[panel.openFlag] ? panel.onOpen?.(index) : undefined;
     }
 
     function setExplorerGitSidebarOpen(index, open) {
-        setExplorerSidebarPanelOpen(index, 'git', open);
+        return setExplorerSidebarPanelOpen(index, 'git', open);
     }
 
     function toggleExplorerGitSidebar(index) {
@@ -1658,7 +1659,7 @@
     }
 
     function setExplorerTreeSidebarOpen(index, open) {
-        setExplorerSidebarPanelOpen(index, 'tree', open);
+        return setExplorerSidebarPanelOpen(index, 'tree', open);
     }
 
     function toggleExplorerTreeSidebar(index) {
@@ -2063,17 +2064,19 @@
         await childrenLoading;
     }
 
-    /* Expand every ancestor of the pane's current directory or open file. */
-    async function revealExplorerTreePath(index) {
+    /* Expand every ancestor of the pane's current directory or open file — or
+       of an explicit path, which the tab strip's locate-in-tree gesture uses
+       to point at a tab's file without depending on what the viewer shows. */
+    async function revealExplorerTreePath(index, targetPath = '') {
         const pane = terminals[index];
         if (!pane?._explorerTreeSidebarOpen) {
             return;
         }
 
         ensureExplorerTreeState(pane);
-        const target = pane._explorerMode === 'file'
+        const target = targetPath || (pane._explorerMode === 'file'
             ? (pane._explorerFilePath || '')
-            : (pane._explorerPath || '');
+            : (pane._explorerPath || ''));
         const segments = String(target).split('/').filter(Boolean);
         /* Expand ancestors so the target's own row becomes visible; whether
            the target directory itself expands stays a tree-click decision —
@@ -2088,6 +2091,28 @@
             await loadExplorerTreeChildren(index, current);
         }
         renderExplorerTreePanel(index);
+    }
+
+    /* Scroll a file's tree row into view and flash it. The row's own `.active`
+       styling still marks the open file; this only draws the eye to it after
+       the tree scrolls. A row that is not rendered (a collapsed or still
+       loading branch) is left alone — the expansion above is the visible
+       part of the reveal. */
+    function focusExplorerTreeRow(index, path) {
+        const panel = document.getElementById(`explorer-tree-panel-${index}`);
+        if (!panel || !path) {
+            return false;
+        }
+        const button = Array.from(panel.querySelectorAll('[data-explorer-tree-file]'))
+            .find(entry => (entry.dataset.explorerTreeFile || '') === path);
+        const row = button?.closest('.explorer-tree-row');
+        if (!row) {
+            return false;
+        }
+        row.scrollIntoView({ block: 'nearest' });
+        row.classList.add('explorer-tree-located');
+        window.setTimeout(() => row.classList.remove('explorer-tree-located'), 1200);
+        return true;
     }
 
     async function loadExplorerTree(index) {
@@ -5710,8 +5735,14 @@
             const closeButton = isPreview
                 ? ''
                 : `<button type="button" class="explorer-tab-close" data-explorer-tab-close="${escHtml(tab.id)}" title="Close tab" aria-label="Close ${escHtml(label)}">×</button>`;
+            /* A pinned tab joins the shared copy-path context menu (the tree
+               and Git rows carry the same hook). No context kind is exposed,
+               so the tab menu stays copy-only — no filesystem mutations. */
+            const copyPath = (!isPreview && tab.path)
+                ? ` data-explorer-copy-path="${escHtml(tab.path)}"`
+                : '';
             return `
-                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}${dirty ? ' is-dirty' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}"${tabStates.length ? ' aria-label="' + escHtml(`${label} (${tabStates.join(', ')})`) + '"' : ''} data-explorer-tab="${escHtml(tab.id)}"${isPreview ? '' : ' draggable="true"'} title="${escHtml(`${dirty ? '● ' : ''}${gitLabel ? `${gitLabel} ` : ''}${tab.path || label}`)}">
+                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}${dirty ? ' is-dirty' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}"${tabStates.length ? ' aria-label="' + escHtml(`${label} (${tabStates.join(', ')})`) + '"' : ''} data-explorer-tab="${escHtml(tab.id)}"${copyPath}${isPreview ? '' : ' draggable="true"'} title="${escHtml(`${dirty ? '● ' : ''}${gitLabel ? `${gitLabel} ` : ''}${tab.path || label}`)}">
                     <button type="button" class="explorer-tab-main" data-explorer-tab-open="${escHtml(tab.id)}">
                         ${icon}
                         <span class="explorer-tab-name">${escHtml(label)}</span>
@@ -5738,9 +5769,10 @@
 
     /* 2.g tab-strip affordances: middle-click closes a pinned tab (same
        guard as the ×), pinned tabs drag-reorder among themselves (OD-6: the
-       permanent Preview tab keeps the first slot and is not draggable), and
+       permanent Preview tab keeps the first slot and is not draggable),
        double-clicking the Preview tab promotes its shown file to a pinned
-       tab in the same view mode. */
+       tab in the same view mode, and double-clicking a pinned tab locates
+       its file in the Files tree. */
     function wireExplorerTabStripInteractions(index, tabEl) {
         const id = tabEl.dataset.explorerTab || '';
         if (id === EXPLORER_PREVIEW_TAB_ID) {
@@ -5749,6 +5781,9 @@
             });
             return;
         }
+        tabEl.querySelector('.explorer-tab-main')?.addEventListener('dblclick', () => {
+            revealExplorerTabInTree(index, id);
+        });
         tabEl.addEventListener('mousedown', event => {
             if (event.button === 1) {
                 event.preventDefault(); // suppress middle-click autoscroll
@@ -5888,6 +5923,28 @@
         pane._explorerRenderedTabId = pinnedTab.id;
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
+    }
+
+    /* 2.g: double-clicking a pinned tab locates its file in the Files tree —
+       the same ancestor expansion a tab switch performs, plus a scroll and a
+       brief flash so the row can be found again on the tab that is already
+       active. The Files sidebar opens when closed: the gesture is a request
+       to see the file in the tree, and there is nothing to point at
+       otherwise. Read-only — nothing about the file changes. */
+    async function revealExplorerTabInTree(index, id) {
+        const pane = terminals[index];
+        const tab = pane ? explorerFindTab(pane, id) : null;
+        const path = tab?.path || '';
+        if (!path) {
+            return;
+        }
+        if (!pane._explorerTreeSidebarOpen) {
+            // Awaited so the panel's own initial reveal cannot race the
+            // ancestor expansion below through the in-flight children guard.
+            await setExplorerTreeSidebarOpen(index, true);
+        }
+        await revealExplorerTreePath(index, path);
+        focusExplorerTreeRow(index, path);
     }
 
     function renderExplorerViewerEmpty(index) {

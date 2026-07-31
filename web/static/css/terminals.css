@@ -2457,6 +2457,14 @@
             background: var(--explorer-row-active);
         }
 
+        /* Locate-in-tree flash: double-clicking a pinned tab scrolls its row
+           into view and pulses it briefly so the eye lands on the file. */
+        .explorer-tree-row.explorer-tree-located {
+            background: var(--explorer-row-active);
+            outline: 1px solid var(--t-accent);
+            outline-offset: -1px;
+        }
+
         .explorer-tree-main {
             display: grid;
             grid-template-columns: 20px minmax(0, 1fr);
