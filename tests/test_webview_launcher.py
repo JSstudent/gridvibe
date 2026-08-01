@@ -66,6 +66,7 @@ class _FakeWindow:
         self.events = Mock(
             minimized=_FakeEvent(),
             restored=_FakeEvent(),
+            maximized=_FakeEvent(),
             before_show=_FakeEvent(),
             shown=_FakeEvent(),
             loaded=_FakeEvent(),
@@ -328,6 +329,55 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertEqual(len(fake_webview.create_window.return_value.events.before_show.handlers), 1)
         self.assertEqual(len(fake_webview.create_window.return_value.events.shown.handlers), 1)
 
+    def test_maximized_event_clears_stale_minimized_flag(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        fake_thread = _FakeThread()
+        fake_webview = Mock()
+        fake_webview.create_window.return_value = _FakeWindow()
+
+        with patch.object(
+            webview_launcher.sys,
+            "argv",
+            ["webview_launcher.py", "--mode", "native"],
+        ), patch.object(
+            webview_launcher.os.path,
+            "exists",
+            return_value=False,
+        ), patch.object(
+            webview_launcher,
+            "setup_logging",
+        ), patch.object(
+            webview_launcher,
+            "_wait_for_server",
+            return_value=True,
+        ), patch.object(
+            webview_launcher.threading,
+            "Thread",
+            return_value=fake_thread,
+        ), patch.object(
+            webview_launcher,
+            "webview",
+            fake_webview,
+        ), patch.object(
+            webview_launcher,
+            "_preferred_pywebview_gui",
+            return_value=None,
+        ), patch.object(
+            webview_launcher,
+            "_set_linux_qtwebengine_env",
+        ), patch.object(
+            webview_launcher,
+            "GridVibeApi",
+            return_value=api_bridge,
+        ):
+            webview_launcher.main()
+
+        events = fake_webview.create_window.return_value.events
+        self.assertEqual(len(events.maximized.handlers), 1)
+        api_bridge._set_window_minimized("launcher", True)
+        events.maximized.handlers[0]()
+        self.assertFalse(api_bridge._is_window_minimized("launcher"))
+
     def test_session_window_uses_resizable_native_frame(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
         fake_webview = Mock()
@@ -558,6 +608,34 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertEqual(window.restore_calls, 1)
         self.assertEqual(window.show_calls, 1)
         self.assertFalse(api_bridge._is_window_minimized("session"))
+
+    def test_restore_minimized_window_prefers_sw_restore_on_windows(self):
+        window = _ExplodingWindow()
+        fake_user32 = Mock()
+        fake_windll = Mock(user32=fake_user32)
+
+        with patch.object(
+            webview_launcher.sys, "platform", "win32"
+        ), patch.object(
+            webview_launcher, "_resolve_native_window_handle", return_value=1234
+        ), patch.object(
+            webview_launcher.ctypes, "windll", fake_windll, create=True
+        ):
+            result = webview_launcher._restore_minimized_window(window)
+
+        self.assertTrue(result)
+        fake_user32.ShowWindow.assert_called_once()
+        self.assertEqual(fake_user32.ShowWindow.call_args.args[1], 9)  # SW_RESTORE
+        self.assertEqual(window.restore_calls, 0)
+
+    def test_restore_minimized_window_falls_back_without_native_handle(self):
+        window = _ExplodingWindow()
+
+        with patch.object(webview_launcher.sys, "platform", "win32"):
+            result = webview_launcher._restore_minimized_window(window)
+
+        self.assertTrue(result)
+        self.assertEqual(window.restore_calls, 1)
 
     def test_bring_to_front_skips_top_most_pulse_for_session_window_on_windows(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")

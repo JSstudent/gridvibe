@@ -84,6 +84,39 @@ def _resolve_native_window_handle(window) -> int | None:
         return None
 
 
+def _restore_minimized_window(window) -> bool:
+    """Restore a minimized window to the state it had before the minimize.
+
+    pywebview's ``Window.restore()`` hard-codes ``WindowState.Normal`` on
+    WinForms, which shrinks a window that was maximized before it was
+    minimized. ``ShowWindow(SW_RESTORE)`` returns the window to its
+    pre-minimize state (the same thing the taskbar does), so prefer it on
+    Windows and keep ``restore()`` as the fallback elsewhere.
+    """
+    if sys.platform == "win32":
+        hwnd = _resolve_native_window_handle(window)
+        windll = getattr(ctypes, "windll", None)
+        user32 = getattr(windll, "user32", None) if windll is not None else None
+        if hwnd is not None and user32 is not None:
+            try:
+                user32.ShowWindow(ctypes.c_void_p(hwnd), 9)  # SW_RESTORE
+                return True
+            except Exception:
+                logger.debug(
+                    "SW_RESTORE failed; falling back to pywebview restore",
+                    exc_info=True,
+                )
+    restore = getattr(window, "restore", None)
+    if not callable(restore):
+        return False
+    try:
+        restore()
+        return True
+    except Exception:
+        logger.debug("pywebview window restore failed", exc_info=True)
+        return False
+
+
 def _run_on_native_ui_thread(window, callback):
     """Run a native-window callback on the WinForms UI thread when possible."""
     native = getattr(window, "native", None)
@@ -900,10 +933,17 @@ class GridVibeApi:
                 window_name,
                 was_minimized,
             )
-            if was_minimized and hasattr(window, "restore"):
-                window.restore()
-                self._set_window_minimized(window_name, False)
-                logger.info("Restored minimized %s window before focus", window_name)
+            if was_minimized:
+                if _restore_minimized_window(window):
+                    self._set_window_minimized(window_name, False)
+                    logger.info(
+                        "Restored minimized %s window before focus", window_name
+                    )
+                else:
+                    logger.warning(
+                        "Could not restore minimized %s window before focus",
+                        window_name,
+                    )
 
             window.show()
 
@@ -1385,6 +1425,16 @@ def main():
             logger.info("GridVibe %s window restored", kind)
             api_bridge._set_window_minimized(kind, False)
 
+        def _handle_maximized(*_args):
+            # pywebview only fires `restored` on transitions back to Normal,
+            # so a window the taskbar returned straight to Maximized would
+            # keep a stale minimized flag; a maximized window is never
+            # minimized. Without this, the next workspace switch calls
+            # restore() and shrinks the window out of Maximized.
+            if api_bridge._is_window_minimized(kind):
+                logger.info("GridVibe %s window restored to maximized", kind)
+                api_bridge._set_window_minimized(kind, False)
+
         def _handle_closed(*_args):
             logger.info("GridVibe %s window closed", kind)
             open_windows.discard(kind)
@@ -1426,6 +1476,10 @@ def main():
             restored_event = getattr(window.events, "restore", None)
         if restored_event is not None:
             restored_event += _handle_restored
+
+        maximized_event = getattr(window.events, "maximized", None)
+        if maximized_event is not None:
+            maximized_event += _handle_maximized
 
         before_show_event = getattr(window.events, "before_show", None)
         if before_show_event is not None:
