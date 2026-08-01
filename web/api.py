@@ -184,6 +184,7 @@ from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compa
     _saved_session_meta,
     _saved_session_response,
     _utc_timestamp,
+    build_live_session_view_updates,
     delete_saved_sessions,
     load_saved_sessions,
     load_session_config,
@@ -2008,11 +2009,22 @@ def create_saved_session():
         session_id=data.get("id"),
         set_last_session=activate_saved_session,
     )
+    live_view_update = {}
+    if data.get("workspace_only") is True:
+        live_view_update = {
+            "layout": saved_entry["config"].get("layout"),
+            "workspace_layout": saved_entry["config"].get("workspace_layout"),
+            "session_view_updates": build_live_session_view_updates(
+                raw_config,
+                saved_entry["config"],
+            ),
+        }
     group = (
         session_manager.update_group_saved_session(
             group_id,
             saved_entry["id"],
             saved_entry["name"],
+            **live_view_update,
         )
         if group_id
         else None

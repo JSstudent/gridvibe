@@ -3,6 +3,7 @@ Session Manager for GridVibe.
 Manages SSH sessions for web-based terminal display.
 """
 
+import copy
 import logging
 import threading
 import time
@@ -22,6 +23,24 @@ logger = logging.getLogger(__name__)
 # How long a group with no sessions is protected from cleanup after creation,
 # covering the window between create_group and create_session during a launch.
 EMPTY_GROUP_GRACE_SECONDS = 5.0
+
+# Pane presentation restored when an already-live workspace window is reopened.
+# Connection/process metadata deliberately stays untouched: saving a view must
+# never retarget or restart a running terminal.
+_SAVED_SESSION_VIEW_FIELDS = {
+    "explorer_tree_open",
+    "explorer_git_open",
+    "explorer_search_open",
+    "explorer_open_tabs",
+    "explorer_active_tab",
+    "explorer_tab_views",
+    "explorer_md_preset",
+    "explorer_md_font",
+    "explorer_theme",
+    "browser_tabs",
+    "browser_active_tab",
+}
+_UNCHANGED = object()
 
 
 class SessionStatus(Enum):
@@ -649,8 +668,19 @@ class SessionManager:
         group_id: str,
         saved_session_id: str,
         name: Optional[str] = None,
+        *,
+        layout: Optional[str] = None,
+        workspace_layout: Any = _UNCHANGED,
+        session_view_updates: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Optional[SessionGroup]:
-        """Update the saved-session target metadata for one launched group."""
+        """Update a live group's saved target and its reopenable view snapshot.
+
+        ``session_view_updates`` is keyed by live session id. Only presentation
+        fields are accepted, and the session must still belong to this group;
+        connection/process metadata is never changed by a saved-view refresh.
+        The entire check-and-update transaction stays inside one lock hold so a
+        concurrent group move or close cannot update the wrong live session.
+        """
         with self.lock:
             group = self.groups.get(group_id)
             if not group:
@@ -660,6 +690,19 @@ class SessionManager:
             normalized_name = str(name or "").strip()
             if normalized_name:
                 group.name = normalized_name
+            normalized_layout = str(layout or "").strip()
+            if normalized_layout:
+                group.layout = normalized_layout
+            if workspace_layout is not _UNCHANGED:
+                group.workspace_layout = copy.deepcopy(workspace_layout)
+
+            for session_id, updates in (session_view_updates or {}).items():
+                session = self.sessions.get(str(session_id or "").strip())
+                if session is None or session.group_id != group_id:
+                    continue
+                for field_name, value in updates.items():
+                    if field_name in _SAVED_SESSION_VIEW_FIELDS:
+                        setattr(session, field_name, copy.deepcopy(value))
             return group
 
     def reorder_groups(

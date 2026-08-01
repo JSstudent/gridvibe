@@ -330,6 +330,7 @@ class MultiWorkspaceApiTestCase(WorkspaceSocketClientMixin, unittest.TestCase):
     def test_browser_window_names_and_urls_are_workspace_scoped(self):
         launcher_js = self._static("js/launcher.js")
         workspaces_js = self._static("js/workspaces.js")
+        terminals_js = self._static("js/terminals.js")
         page = self.client.get("/").get_data(as_text=True)
 
         # One implementation of the window name and URL, in the shared module.
@@ -342,6 +343,12 @@ class MultiWorkspaceApiTestCase(WorkspaceSocketClientMixin, unittest.TestCase):
             workspaces_js,
         )
         self.assertIn("await openWorkspaceWindow(resolvedWorkspaceId, {", launcher_js)
+        self.assertIn("groupId: workspace.active_group_id", launcher_js)
+        self.assertIn(
+            "openWorkspaceWindow(workspace.workspace_id, {",
+            terminals_js,
+        )
+        self.assertIn("groupId: target.active_group_id", terminals_js)
         # The launcher never hardcodes a window *name*: it is derived from the
         # workspace id in workspaces.js. "View Active Terminals" stays the
         # single-workspace entry point and is hidden with the flag on, where the

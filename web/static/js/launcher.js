@@ -2703,7 +2703,9 @@
             openButton.textContent = 'Open';
             openButton.addEventListener('click', async () => {
                 if (!(await focusWorkspaceWindow(workspace.workspace_id))) {
-                    await openWorkspaceWindow(workspace.workspace_id);
+                    await openWorkspaceWindow(workspace.workspace_id, {
+                        groupId: workspace.active_group_id
+                    });
                 }
             });
             row.append(name, meta, openButton);

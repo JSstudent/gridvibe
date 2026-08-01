@@ -581,6 +581,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         entry_start = html.index("function buildWorkspaceTerminalEntry")
         entry_end = html.index("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)", entry_start)
         entry_html = html[entry_start:entry_end]
+        self.assertIn("session_id: session.session_id || ''", entry_html)
         self.assertIn("session.explorer_root_directory || session.directory", entry_html)
         self.assertNotIn("terminal?._explorerPath", entry_html)
         self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
@@ -2388,6 +2389,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertIn("active_group_id: activeGroupId,", terminals_html)
         self.assertIn("native_zoom_factor: nativeZoomFactor", terminals_html)
+        self.assertIn("notifyWorkspacesChanged('workspace_saved');", terminals_html)
 
         launcher_html = self._page_html(self.client.get("/"))
         self.assertIn(
@@ -2411,6 +2413,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             "await openWorkspaceWindow(resolvedWorkspaceId, {",
             launcher_html,
         )
+        # Reopening a still-live workspace also carries the last focused group;
+        # otherwise the terminals page falls back to the newest group.
+        self.assertIn("groupId: workspace.active_group_id", launcher_html)
         workspaces_js = self._static("js/workspaces.js")
         self.assertIn(
             "return `gridvibe-workspace-${normalizeWorkspaceId(workspaceId)}`;",
@@ -8613,6 +8618,99 @@ class ApiRoutesTestCase(unittest.TestCase):
             api.session_manager.get_group(version_group.group_id).saved_session_id,
             created["id"],
         )
+
+    def test_workspace_save_refreshes_live_view_used_by_launcher_reopen(self):
+        group = api.session_manager.create_group(
+            name="Files",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+            group_id="group-live-reopen",
+        )
+        session = api.session_manager.create_sessions(
+            [
+                {
+                    "directory": "C:\\repo",
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                    "explorer_open_tabs": ["old.md"],
+                    "explorer_active_tab": "old.md",
+                    "explorer_theme": "dark",
+                }
+            ],
+            group_id=group.group_id,
+        )[0]
+        workspace_layout = {
+            "split_slot_rects": [
+                {"originSlot": 0, "x": 1, "y": 1, "w": 2, "h": 1}
+            ],
+            "split_column_weights": [1.5, 0.5],
+            "split_row_weights": [1],
+            "original_split_slot_count": 1,
+        }
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "Files",
+                "group_id": group.group_id,
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "wsl",
+                    "terminal_count": 1,
+                    "layout": "single",
+                    "workspace_layout": workspace_layout,
+                    "terminals": [
+                        {
+                            "session_id": session.session_id,
+                            "title": "Files",
+                            "directory": "C:\\repo",
+                            "startup_mode": "explorer",
+                            "explorer_tree_open": True,
+                            "explorer_git_open": True,
+                            "explorer_search_open": True,
+                            "explorer_open_tabs": ["README.md"],
+                            "explorer_active_tab": "README.md",
+                            "explorer_tab_views": {
+                                "README.md": {
+                                    "mode": "preview",
+                                    "scroll": 0.32,
+                                    "font_size": 18,
+                                }
+                            },
+                            "explorer_theme": "light",
+                        }
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        # Live ids are only correlation data and must never enter saved presets.
+        self.assertNotIn("session_id", payload["config"]["terminals"][0])
+        reopened = api.session_manager.get_session(session.session_id)
+        self.assertTrue(reopened.explorer_tree_open)
+        self.assertTrue(reopened.explorer_git_open)
+        self.assertTrue(reopened.explorer_search_open)
+        self.assertEqual(reopened.explorer_open_tabs, ["README.md"])
+        self.assertEqual(reopened.explorer_active_tab, "README.md")
+        self.assertEqual(reopened.explorer_tab_views["README.md"]["mode"], "preview")
+        self.assertEqual(reopened.explorer_tab_views["README.md"]["scroll"], 0.32)
+        self.assertEqual(reopened.explorer_tab_views["README.md"]["font_size"], 18)
+        self.assertEqual(reopened.explorer_theme, "light")
+        self.assertEqual(
+            api.session_manager.get_group(group.group_id).workspace_layout,
+            payload["config"]["workspace_layout"],
+        )
+        saved_workspace = self.client.post(
+            "/api/runtime-state/save",
+            json={"workspace_id": "default", "active_group_id": group.group_id},
+        )
+        self.assertEqual(saved_workspace.status_code, 200)
+        snapshot_session = saved_workspace.get_json()["groups"][0]["sessions"][0]
+        self.assertEqual(snapshot_session["explorer_open_tabs"], ["README.md"])
+        self.assertEqual(snapshot_session["explorer_tab_views"]["README.md"]["mode"], "preview")
 
     def test_save_as_without_activation_preserves_live_group_and_launcher_selection(self):
         active_payload = {

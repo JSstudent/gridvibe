@@ -1308,7 +1308,9 @@
                 icon: workspace.workspace_id === currentWorkspaceId ? '' : WORKSPACE_ICONS.window,
                 onSelect: () => {
                     closeWorkspaceMenu();
-                    openWorkspaceWindow(workspace.workspace_id);
+                    openWorkspaceWindow(workspace.workspace_id, {
+                        groupId: workspace.active_group_id
+                    });
                 }
             }))
         );
@@ -2125,6 +2127,10 @@
             : '';
 
         return {
+            /* Request-only identity: the backend strips this before persisting
+               the preset and uses it to refresh this exact live pane's view
+               state for a later launcher reopen. */
+            session_id: session.session_id || '',
             title: session.title || `Terminal ${index + 1}`,
             directory: selectedDirectory,
             initial_command: startupMode === 'explorer' ? '' : (session.initial_command || ''),
@@ -2389,6 +2395,9 @@
             if (!response.ok) {
                 throw new Error(data.error || `Save failed with status ${response.status}`);
             }
+            /* Refresh the launcher's live-workspace row while this window is
+               still open, so its Open action carries the just-saved front tab. */
+            notifyWorkspacesChanged('workspace_saved');
             const savedLabel = String(data.label || '').trim();
             const savedAt = Number(data.saved_at);
             const savedTime = Number.isFinite(savedAt)
@@ -6512,7 +6521,9 @@
                 showTerminalToast('No other workspace is open.', '');
                 return;
             }
-            await openWorkspaceWindow(target.workspace_id);
+            await openWorkspaceWindow(target.workspace_id, {
+                groupId: target.active_group_id
+            });
         } catch (error) {
             console.error('[GridVibe Sessions] workspace switch failed:', error);
             showTerminalToast(`Could not switch workspace: ${error.message}`, 'error');
