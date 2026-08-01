@@ -1,3 +1,4 @@
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -499,6 +500,214 @@ class SessionManagerTestCase(unittest.TestCase):
         self.manager.clear_disconnected_sessions()
 
         self.assertEqual(self.manager.get_group("group-a").terminal_count, 1)
+
+
+class MultiWorkspaceSessionManagerTestCase(unittest.TestCase):
+    """Stages 1–2: ownership, ordering, activity, moves, and pruning."""
+
+    WORKSPACE_A = "aaaaaaaaaaaa"
+    WORKSPACE_B = "bbbbbbbbbbbb"
+
+    def setUp(self):
+        self.manager = SessionManager()
+        self.manager.create_workspace("Alpha", self.WORKSPACE_A)
+        self.manager.create_workspace("Beta", self.WORKSPACE_B)
+
+    def _group(self, group_id, workspace_id, saved_session_id=""):
+        group = self.manager.create_group(
+            name=group_id,
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id=group_id,
+            saved_session_id=saved_session_id,
+            workspace_id=workspace_id,
+        )
+        session = self.manager.create_session(
+            group_id=group_id,
+            host=f"{group_id}.example",
+            directory="/srv/app",
+            password="not-serialized",
+        )
+        return group, session
+
+    def test_default_workspace_is_permanent_and_ids_are_validated(self):
+        self.assertEqual(
+            [workspace.workspace_id for workspace in self.manager.get_all_workspaces()],
+            ["default", self.WORKSPACE_A, self.WORKSPACE_B],
+        )
+        with self.assertRaisesRegex(ValueError, "Invalid workspace id"):
+            self.manager.create_workspace("Invalid", "UPPERCASE")
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self.manager.create_workspace("Duplicate", self.WORKSPACE_A)
+
+    def test_group_lists_orders_and_active_hints_are_independent(self):
+        self._group("a-1", self.WORKSPACE_A)
+        self._group("a-2", self.WORKSPACE_A)
+        self._group("b-1", self.WORKSPACE_B)
+        self._group("b-2", self.WORKSPACE_B)
+
+        self.manager.reorder_groups(self.WORKSPACE_A, ["a-2", "a-1"])
+        self.manager.set_active_group(self.WORKSPACE_A, "a-1")
+        self.manager.set_active_group(self.WORKSPACE_B, "b-2")
+
+        self.assertEqual(
+            [group.group_id for group in self.manager.get_workspace_groups(self.WORKSPACE_A)],
+            ["a-2", "a-1"],
+        )
+        self.assertEqual(
+            [group.group_id for group in self.manager.get_workspace_groups(self.WORKSPACE_B)],
+            ["b-1", "b-2"],
+        )
+        self.assertEqual(self.manager.get_active_group_id(self.WORKSPACE_A), "a-1")
+        self.assertEqual(self.manager.get_active_group_id(self.WORKSPACE_B), "b-2")
+
+    def test_explicit_order_and_active_updates_reject_foreign_groups_atomically(self):
+        self._group("a-1", self.WORKSPACE_A)
+        self._group("b-1", self.WORKSPACE_B)
+
+        with self.assertRaisesRegex(ValueError, "All groups must belong"):
+            self.manager.reorder_groups(self.WORKSPACE_A, ["b-1"])
+        with self.assertRaisesRegex(ValueError, "does not belong"):
+            self.manager.set_active_group(
+                self.WORKSPACE_A,
+                "b-1",
+                require_owned=True,
+            )
+
+        self.assertEqual(
+            [group.group_id for group in self.manager.get_workspace_groups(self.WORKSPACE_A)],
+            ["a-1"],
+        )
+        self.assertEqual(self.manager.get_active_group_id(self.WORKSPACE_A), "a-1")
+
+    def test_move_preserves_sessions_and_compacts_both_orders(self):
+        self._group("a-1", self.WORKSPACE_A)
+        moved_group, moved_session = self._group("a-2", self.WORKSPACE_A)
+        self._group("b-1", self.WORKSPACE_B)
+        self.manager.set_active_group(self.WORKSPACE_A, moved_group.group_id)
+
+        moved = self.manager.move_group(moved_group.group_id, self.WORKSPACE_B)
+
+        self.assertIs(moved, moved_group)
+        self.assertEqual(
+            [group.group_id for group in self.manager.get_workspace_groups(self.WORKSPACE_A)],
+            ["a-1"],
+        )
+        self.assertEqual(
+            [group.group_id for group in self.manager.get_workspace_groups(self.WORKSPACE_B)],
+            ["b-1", "a-2"],
+        )
+        self.assertEqual(
+            [group.display_order for group in self.manager.get_workspace_groups(self.WORKSPACE_B)],
+            [0, 1],
+        )
+        self.assertIs(self.manager.get_session(moved_session.session_id), moved_session)
+        self.assertEqual(self.manager.get_active_group_id(self.WORKSPACE_A), "")
+
+    def test_saved_session_lookup_and_consistent_snapshot_are_global(self):
+        self._group("a-1", self.WORKSPACE_A, saved_session_id="preset-a")
+        self._group("b-1", self.WORKSPACE_B, saved_session_id="preset-b")
+
+        snapshots = self.manager.snapshot_live_workspaces()
+
+        self.assertEqual(set(snapshots), {self.WORKSPACE_A, self.WORKSPACE_B})
+        self.assertEqual(
+            snapshots[self.WORKSPACE_A]["groups"][0]["workspace_id"],
+            self.WORKSPACE_A,
+        )
+        self.assertNotIn(
+            "password",
+            snapshots[self.WORKSPACE_A]["groups"][0]["sessions"][0],
+        )
+        self.assertEqual(
+            self.manager.find_saved_session_group("preset-b").workspace_id,
+            self.WORKSPACE_B,
+        )
+
+    def test_cleanup_prunes_old_empty_nondefault_workspace_but_not_default(self):
+        self.manager.get_workspace(self.WORKSPACE_A).created_at -= (
+            EMPTY_GROUP_GRACE_SECONDS + 1
+        )
+        self.manager.get_workspace(self.WORKSPACE_B).created_at -= (
+            EMPTY_GROUP_GRACE_SECONDS + 1
+        )
+
+        pruned = self.manager.clear_disconnected_sessions()
+
+        self.assertEqual(pruned, [self.WORKSPACE_A, self.WORKSPACE_B])
+        self.assertIsNotNone(self.manager.get_workspace("default"))
+        self.assertIsNone(self.manager.get_workspace(self.WORKSPACE_A))
+
+
+class WorkspaceLifetimeTestCase(unittest.TestCase):
+    """Stage 3 lifetime rules: retention, rename, and rollback removal."""
+
+    WORKSPACE_A = "aaaaaaaaaaaa"
+
+    def setUp(self):
+        self.manager = SessionManager()
+
+    def _group(self, group_id, workspace_id):
+        self.manager.create_group(
+            name=group_id,
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id=group_id,
+            workspace_id=workspace_id,
+        )
+        self.manager.create_session(
+            group_id=group_id,
+            host=f"{group_id}.example",
+            directory="/srv/app",
+        )
+
+    def test_retained_workspace_survives_pruning_until_its_first_group(self):
+        workspace = self.manager.create_workspace("Scratch", retain_when_empty=True)
+        workspace.created_at = time.time() - EMPTY_GROUP_GRACE_SECONDS - 1
+
+        self.assertEqual(self.manager.clear_disconnected_sessions(), [])
+        self.assertIsNotNone(self.manager.get_workspace(workspace.workspace_id))
+
+        # The first group clears the flag; normal pruning resumes from there.
+        self._group("g1", workspace.workspace_id)
+        self.assertFalse(self.manager.get_workspace(workspace.workspace_id).retain_when_empty)
+        self.manager.remove_group("g1")
+        self.assertEqual(
+            self.manager.clear_disconnected_sessions(force_group_ids=["g1"]),
+            [workspace.workspace_id],
+        )
+
+    def test_moving_a_group_in_clears_the_destination_retention_flag(self):
+        source = self.manager.create_workspace("Source")
+        target = self.manager.create_workspace("Target", retain_when_empty=True)
+        self._group("g1", source.workspace_id)
+
+        self.manager.move_group("g1", target.workspace_id)
+
+        self.assertFalse(self.manager.get_workspace(target.workspace_id).retain_when_empty)
+
+    def test_rename_updates_the_label_and_reports_unknown_workspaces(self):
+        workspace = self.manager.create_workspace("Before")
+
+        renamed = self.manager.rename_workspace(workspace.workspace_id, "  After  ")
+
+        self.assertEqual(renamed.label, "After")
+        self.assertIsNone(self.manager.rename_workspace(self.WORKSPACE_A, "Nope"))
+
+    def test_remove_workspace_only_drops_empty_non_default_records(self):
+        workspace = self.manager.create_workspace("Rollback target")
+        self._group("g1", workspace.workspace_id)
+
+        self.assertFalse(self.manager.remove_workspace(workspace.workspace_id))
+        self.manager.remove_group("g1")
+        self.assertTrue(self.manager.remove_workspace(workspace.workspace_id))
+        self.assertFalse(self.manager.remove_workspace(workspace.workspace_id))
+        # "default" is permanent — it is the compatibility target for every
+        # caller and URL that omits a workspace id.
+        self.assertFalse(self.manager.remove_workspace("default"))
+        self.assertIsNotNone(self.manager.get_workspace("default"))
 
 
 class EmptyGroupGracePeriodTestCase(unittest.TestCase):

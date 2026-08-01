@@ -581,6 +581,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         entry_start = html.index("function buildWorkspaceTerminalEntry")
         entry_end = html.index("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)", entry_start)
         entry_html = html[entry_start:entry_end]
+        self.assertIn("session_id: session.session_id || ''", entry_html)
         self.assertIn("session.explorer_root_directory || session.directory", entry_html)
         self.assertNotIn("terminal?._explorerPath", entry_html)
         self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
@@ -1606,7 +1607,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function toggleExplorerTreeDirectory(index, path)", html)
         self.assertIn("function renderExplorerTreePanel(index)", html)
         self.assertIn("function loadExplorerTreeChildren(index, path)", html)
-        self.assertIn("function revealExplorerTreePath(index)", html)
+        self.assertIn("function revealExplorerTreePath(index, targetPath = '')", html)
         self.assertIn("function reloadExplorerTree(index)", html)
         self.assertIn(
             'wireCardButton(card, `[data-explorer-tree-toggle="${i}"]`, () => toggleExplorerTreeSidebar(i));',
@@ -2216,7 +2217,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # The name button navigates and expands, but never collapses.
         open_dir = html[
             html.index("async function openExplorerTreeDirectory(index, path)"):
-            html.index("async function revealExplorerTreePath(index)")
+            html.index("async function revealExplorerTreePath(index, targetPath = '')")
         ]
         self.assertEqual(open_dir.count("await loadExplorerPane(index, path);"), 1)
         self.assertNotIn("pane._explorerTreeExpanded.delete(path);", open_dir)
@@ -2227,8 +2228,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Navigating still reveals the target row, but no longer force-expands
         # the directory itself (that would undo the collapse click).
         reveal = html[
-            html.index("async function revealExplorerTreePath(index)"):
-            html.index("async function loadExplorerTree(index)")
+            html.index("async function revealExplorerTreePath(index, targetPath = '')"):
+            html.index("function focusExplorerTreeRow(index, path)")
         ]
         self.assertIn("segments.pop();", reveal)
         self.assertNotIn("if (pane._explorerMode === 'file') {", reveal)
@@ -2311,6 +2312,54 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
 
+    def test_terminals_page_tab_strip_copy_path_and_locate_in_tree(self):
+        """Pinned tabs get the copy-path menu and a locate-in-tree double-click."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # A pinned tab joins the shared copy-path menu (the tree and Git rows
+        # carry the same hook); the permanent Preview tab does not, and no
+        # context kind is exposed, so the tab menu stays copy-only.
+        self.assertIn("const copyPath = (!isPreview && tab.path)", html)
+        self.assertIn('data-explorer-copy-path="${escHtml(tab.path)}"', html)
+        wire = html[
+            html.index("function wireExplorerTabStripInteractions(index, tabEl)"):
+            html.index("function clearExplorerTabDragMarkers(index)")
+        ]
+        # Double-click: the Preview tab still promotes (its branch returns
+        # first), every pinned tab locates its file in the Files tree.
+        self.assertLess(
+            wire.index("promoteExplorerPreviewTab(index);"),
+            wire.index("revealExplorerTabInTree(index, id);"),
+        )
+        reveal = html[
+            html.index("async function revealExplorerTabInTree(index, id)"):
+            html.index("function renderExplorerViewerEmpty(index)")
+        ]
+        # Opening the Files panel is awaited so its own reveal cannot race the
+        # ancestor expansion through the in-flight children guard.
+        self.assertIn("await setExplorerTreeSidebarOpen(index, true);", reveal)
+        self.assertIn("await revealExplorerTreePath(index, path);", reveal)
+        self.assertIn("focusExplorerTreeRow(index, path);", reveal)
+        # Locating is a pure reveal: it never re-opens or re-fetches the file.
+        self.assertNotIn("openExplorerFile(", reveal)
+        # The reveal targets an explicit path instead of whatever the viewer
+        # happens to show, and the panel setters hand back the open promise.
+        self.assertIn(
+            "async function revealExplorerTreePath(index, targetPath = '')",
+            html,
+        )
+        self.assertIn("return setExplorerSidebarPanelOpen(index, 'tree', open);", html)
+        self.assertIn("function focusExplorerTreeRow(index, path)", html)
+        self.assertIn("row.scrollIntoView({ block: 'nearest' });", html)
+        # Token-driven flash styling only (Regression Guardrail 7).
+        located_css = html[html.index(".explorer-tree-row.explorer-tree-located {"):]
+        located_css = located_css[:located_css.index("}")]
+        self.assertIn("var(--t-accent)", located_css)
+        self.assertIn("var(--explorer-row-active)", located_css)
+        self.assertNotRegex(located_css, r"#[0-9a-fA-F]{3,8}\b")
+
     def test_launcher_round_trips_explorer_open_tabs(self):
         """ISSUE-2026-015: launcher carries open tabs through without editing them."""
         response = self.client.get("/")
@@ -2335,11 +2384,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         # An explicit Save Workspace names the saving window's own group and,
         # when desktop mode is active, carries the session window zoom.
         self.assertIn(
-            "const nativeZoomFactor = await getNativeSessionZoomFactor();",
+            "const nativeZoomFactor = await getCurrentWorkspaceNativeZoomFactor();",
             terminals_html,
         )
         self.assertIn("active_group_id: activeGroupId,", terminals_html)
         self.assertIn("native_zoom_factor: nativeZoomFactor", terminals_html)
+        self.assertIn("notifyWorkspacesChanged('workspace_saved');", terminals_html)
 
         launcher_html = self._page_html(self.client.get("/"))
         self.assertIn(
@@ -2357,8 +2407,23 @@ class ApiRoutesTestCase(unittest.TestCase):
             launcher_html,
         )
         self.assertIn("activeGroupId,\n                    nativeZoomFactor", launcher_html)
+        # Window dispatch now lives in the shared workspaces.js module, so the
+        # launcher only names the workspace and the group to open on.
         self.assertIn(
-            "`/terminals?group=${encodeURIComponent(targetGroupId)}`", launcher_html
+            "await openWorkspaceWindow(resolvedWorkspaceId, {",
+            launcher_html,
+        )
+        # Reopening a still-live workspace also carries the last focused group;
+        # otherwise the terminals page falls back to the newest group.
+        self.assertIn("groupId: workspace.active_group_id", launcher_html)
+        workspaces_js = self._static("js/workspaces.js")
+        self.assertIn(
+            "return `gridvibe-workspace-${normalizeWorkspaceId(workspaceId)}`;",
+            workspaces_js,
+        )
+        self.assertIn(
+            "const params = new URLSearchParams({ workspace: normalizeWorkspaceId(workspaceId) });",
+            workspaces_js,
         )
 
     def test_launcher_round_trips_explorer_tab_views_and_markdown_appearance(self):
@@ -3324,6 +3389,7 @@ class ApiRoutesTestCase(unittest.TestCase):
                 },
                 "workspace": {
                     "surface_mode": "max",
+                    "multi_workspace_enabled": False,
                 },
                 "terminal": {
                     "font_family": api.runtime_config.terminal_font_family,
@@ -8553,6 +8619,99 @@ class ApiRoutesTestCase(unittest.TestCase):
             created["id"],
         )
 
+    def test_workspace_save_refreshes_live_view_used_by_launcher_reopen(self):
+        group = api.session_manager.create_group(
+            name="Files",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+            group_id="group-live-reopen",
+        )
+        session = api.session_manager.create_sessions(
+            [
+                {
+                    "directory": "C:\\repo",
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                    "explorer_open_tabs": ["old.md"],
+                    "explorer_active_tab": "old.md",
+                    "explorer_theme": "dark",
+                }
+            ],
+            group_id=group.group_id,
+        )[0]
+        workspace_layout = {
+            "split_slot_rects": [
+                {"originSlot": 0, "x": 1, "y": 1, "w": 2, "h": 1}
+            ],
+            "split_column_weights": [1.5, 0.5],
+            "split_row_weights": [1],
+            "original_split_slot_count": 1,
+        }
+
+        response = self.client.post(
+            "/api/saved-sessions",
+            json={
+                "name": "Files",
+                "group_id": group.group_id,
+                "workspace_only": True,
+                "config": {
+                    "connection_mode": "wsl",
+                    "terminal_count": 1,
+                    "layout": "single",
+                    "workspace_layout": workspace_layout,
+                    "terminals": [
+                        {
+                            "session_id": session.session_id,
+                            "title": "Files",
+                            "directory": "C:\\repo",
+                            "startup_mode": "explorer",
+                            "explorer_tree_open": True,
+                            "explorer_git_open": True,
+                            "explorer_search_open": True,
+                            "explorer_open_tabs": ["README.md"],
+                            "explorer_active_tab": "README.md",
+                            "explorer_tab_views": {
+                                "README.md": {
+                                    "mode": "preview",
+                                    "scroll": 0.32,
+                                    "font_size": 18,
+                                }
+                            },
+                            "explorer_theme": "light",
+                        }
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        # Live ids are only correlation data and must never enter saved presets.
+        self.assertNotIn("session_id", payload["config"]["terminals"][0])
+        reopened = api.session_manager.get_session(session.session_id)
+        self.assertTrue(reopened.explorer_tree_open)
+        self.assertTrue(reopened.explorer_git_open)
+        self.assertTrue(reopened.explorer_search_open)
+        self.assertEqual(reopened.explorer_open_tabs, ["README.md"])
+        self.assertEqual(reopened.explorer_active_tab, "README.md")
+        self.assertEqual(reopened.explorer_tab_views["README.md"]["mode"], "preview")
+        self.assertEqual(reopened.explorer_tab_views["README.md"]["scroll"], 0.32)
+        self.assertEqual(reopened.explorer_tab_views["README.md"]["font_size"], 18)
+        self.assertEqual(reopened.explorer_theme, "light")
+        self.assertEqual(
+            api.session_manager.get_group(group.group_id).workspace_layout,
+            payload["config"]["workspace_layout"],
+        )
+        saved_workspace = self.client.post(
+            "/api/runtime-state/save",
+            json={"workspace_id": "default", "active_group_id": group.group_id},
+        )
+        self.assertEqual(saved_workspace.status_code, 200)
+        snapshot_session = saved_workspace.get_json()["groups"][0]["sessions"][0]
+        self.assertEqual(snapshot_session["explorer_open_tabs"], ["README.md"])
+        self.assertEqual(snapshot_session["explorer_tab_views"]["README.md"]["mode"], "preview")
+
     def test_save_as_without_activation_preserves_live_group_and_launcher_selection(self):
         active_payload = {
             "name": "GridVibe",
@@ -11411,6 +11570,8 @@ class SessionGroupsUpdatedBroadcastTestCase(unittest.TestCase):
         )
         self.addCleanup(socket_client.disconnect)
         socket_client.get_received()
+        socket_client.emit("join_workspace", {"workspace_id": "default"})
+        socket_client.get_received()
         return socket_client
 
     def _received_reasons(self, socket_client):
@@ -11967,6 +12128,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
     BANNED_GLYPHS = ("📁", "🌐", "🎤", "☾", "☀", "❌")
     STATIC_JS = (
         "js/shared.js",
+        "js/workspaces.js",
         "js/app-settings.js",
         "js/launcher.js",
         "js/terminals.js",
@@ -14492,25 +14654,44 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertIsNone(web_runtime_state.load_restorable_workspace())
         self.state_path.write_text("not json", encoding="utf-8")
         self.assertIsNone(web_runtime_state.load_restorable_workspace())
-        self.assertIsNone(web_runtime_state.load_restorable_workspace("nonexistent"))
+        self.assertIsNone(
+            web_runtime_state.load_restorable_workspace("cccccccccccc")
+        )
 
     def test_capture_and_clear_preserve_sibling_slots(self):
-        self._launch_explorer_group()
-        web_runtime_state.capture_workspace(api.session_manager, workspace_id="alpha")
-        web_runtime_state.capture_workspace(api.session_manager, workspace_id="beta")
-        # Overwriting slot A must leave slot B intact.
+        workspace_a = "aaaaaaaaaaaa"
+        workspace_b = "bbbbbbbbbbbb"
+        api.session_manager.create_workspace("A", workspace_a)
+        api.session_manager.create_workspace("B", workspace_b)
+        group_a = self._launch_explorer_group("A")
+        api.session_manager.move_group(group_a, workspace_a)
+        group_b = self._launch_explorer_group("B")
+        api.session_manager.move_group(group_b, workspace_b)
         web_runtime_state.capture_workspace(
-            api.session_manager, workspace_id="alpha", origin="manual"
+            api.session_manager,
+            workspace_id=workspace_a,
+        )
+        web_runtime_state.capture_workspace(
+            api.session_manager,
+            workspace_id=workspace_b,
+        )
+        # Overwriting slot A must leave slot B intact.
+        before = json.loads(self.state_path.read_text(encoding="utf-8"))
+        sibling_before = before["workspaces"][workspace_b]
+        web_runtime_state.capture_workspace(
+            api.session_manager,
+            workspace_id=workspace_a,
+            origin="manual",
         )
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(set(data["workspaces"]), {"alpha", "beta"})
-        self.assertEqual(data["workspaces"]["alpha"]["origin"], "manual")
-        self.assertEqual(data["workspaces"]["beta"]["origin"], "auto")
+        self.assertEqual(set(data["workspaces"]), {workspace_a, workspace_b})
+        self.assertEqual(data["workspaces"][workspace_a]["origin"], "manual")
+        self.assertEqual(data["workspaces"][workspace_b], sibling_before)
         # Clearing slot A must leave slot B intact, and the file stays v2.
-        web_runtime_state.clear_workspace("alpha")
+        web_runtime_state.clear_workspace(workspace_a)
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
         self.assertEqual(data["version"], 2)
-        self.assertEqual(set(data["workspaces"]), {"beta"})
+        self.assertEqual(set(data["workspaces"]), {workspace_b})
 
     def test_autosave_tick_captures_a_live_workspace(self):
         self._launch_explorer_group()
@@ -14747,7 +14928,7 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         """Bug 2: a restore replays the workspace verbatim, so a cold post-restart
         agent probe must not clear the command and drop its auto-mode flag."""
         with patch.object(api.socketio, "start_background_task"), patch.object(
-            api, "_sanitize_agent_launch_commands"
+            web_agents, "_sanitize_agent_launch_commands"
         ) as sanitize:
             response = self.client.post(
                 "/api/sessions",
@@ -14777,7 +14958,7 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
 
     def test_normal_launch_still_runs_agent_preflight_clearing(self):
         with patch.object(api.socketio, "start_background_task"), patch.object(
-            api, "_sanitize_agent_launch_commands", return_value=[]
+            web_agents, "_sanitize_agent_launch_commands", return_value=[]
         ) as sanitize:
             response = self.client.post(
                 "/api/sessions",
@@ -14802,8 +14983,15 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
     def test_delete_endpoint_clears_only_that_workspace_slot(self):
         self._launch_explorer_group()
         web_runtime_state.capture_workspace(api.session_manager)
+        # Forget is refused while the workspace is live (the next autosave
+        # would simply re-capture it), so close it first.
+        live_response = self.client.delete("/api/runtime-state")
+        self.assertEqual(live_response.status_code, 409)
+        self.assertFalse(live_response.get_json()["forgotten"])
+        self.client.delete("/api/sessions")
         response = self.client.delete("/api/runtime-state")
         self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["forgotten"])
         self.assertIsNone(web_runtime_state.load_restorable_workspace())
         # The file itself stays (v2 skeleton); only the slot is removed.
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -14899,7 +15087,9 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertIn("async function getNativeSessionZoomFactor()", shared_js)
         launcher_js = self._static("js/launcher.js")
         self.assertIn("body: JSON.stringify({ native_zoom_factor: nativeZoomFactor })", launcher_js)
-        self.assertIn("open_session_window(\n                        targetGroupId,", launcher_js)
+        workspaces_js = self._static("js/workspaces.js")
+        self.assertIn("api.open_workspace_window(", workspaces_js)
+        self.assertIn("resolvedWorkspaceId,\n                    groupId,", workspaces_js)
 
 
 class SettingsLauncherConfigTestCase(unittest.TestCase):
@@ -14966,6 +15156,27 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         )
         self.assertEqual(
             payload["terminal"]["max_sessions"], api.runtime_config.max_sessions
+        )
+
+    def test_multi_workspace_flag_is_wired_through_runtime_and_both_pages(self):
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"multi_workspace_enabled": True}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["workspace"]["multi_workspace_enabled"])
+        self.assertTrue(api.runtime_config.multi_workspace_enabled)
+        self.assertTrue(
+            api.load_config()["workspace"]["multi_workspace_enabled"]
+        )
+        self.assertIn(
+            "const MULTI_WORKSPACE_ENABLED = true;",
+            self.client.get("/").get_data(as_text=True),
+        )
+        self.assertIn(
+            "const MULTI_WORKSPACE_ENABLED = true;",
+            self.client.get("/terminals").get_data(as_text=True),
         )
 
     def test_app_config_persists_terminal_settings(self):

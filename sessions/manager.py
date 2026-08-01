@@ -3,6 +3,7 @@ Session Manager for GridVibe.
 Manages SSH sessions for web-based terminal display.
 """
 
+import copy
 import logging
 import threading
 import time
@@ -11,11 +12,35 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional
 
+from web.workspaces import (
+    DEFAULT_WORKSPACE_ID,
+    generate_workspace_id,
+    normalize_workspace_id,
+)
+
 logger = logging.getLogger(__name__)
 
 # How long a group with no sessions is protected from cleanup after creation,
 # covering the window between create_group and create_session during a launch.
 EMPTY_GROUP_GRACE_SECONDS = 5.0
+
+# Pane presentation restored when an already-live workspace window is reopened.
+# Connection/process metadata deliberately stays untouched: saving a view must
+# never retarget or restart a running terminal.
+_SAVED_SESSION_VIEW_FIELDS = {
+    "explorer_tree_open",
+    "explorer_git_open",
+    "explorer_search_open",
+    "explorer_open_tabs",
+    "explorer_active_tab",
+    "explorer_tab_views",
+    "explorer_md_preset",
+    "explorer_md_font",
+    "explorer_theme",
+    "browser_tabs",
+    "browser_active_tab",
+}
+_UNCHANGED = object()
 
 
 class SessionStatus(Enum):
@@ -108,6 +133,30 @@ class TerminalSession:
 
 
 @dataclass
+class Workspace:
+    """One live terminal-window workspace."""
+    workspace_id: str
+    label: str = ""
+    created_at: float = field(default_factory=time.time)
+    active_group_id: str = ""
+    # Live-only lifecycle hint: a workspace the user deliberately created empty
+    # must survive the empty-workspace pruning that closes a workspace emptied
+    # by a close or a move. Absence of groups alone cannot tell the two apart.
+    # It is never written to runtime_state.json — a saved slot always has groups.
+    retain_when_empty: bool = False
+
+    def to_dict(self) -> dict:
+        """Convert to a credential-free dictionary."""
+        return {
+            "workspace_id": self.workspace_id,
+            "label": self.label,
+            "created_at": self.created_at,
+            "active_group_id": self.active_group_id,
+            "retain_when_empty": self.retain_when_empty,
+        }
+
+
+@dataclass
 class SessionGroup:
     """Represents one launched terminal group shown as a session tab."""
     group_id: str
@@ -116,6 +165,7 @@ class SessionGroup:
     layout: str
     terminal_count: int
     display_order: int = 0
+    workspace_id: str = DEFAULT_WORKSPACE_ID
     saved_session_id: str = ""
     workspace_layout: Optional[Dict[str, Any]] = None
     created_at: float = field(default_factory=time.time)
@@ -129,6 +179,7 @@ class SessionGroup:
             "layout": self.layout,
             "terminal_count": self.terminal_count,
             "display_order": self.display_order,
+            "workspace_id": self.workspace_id,
             "saved_session_id": self.saved_session_id,
             "workspace_layout": self.workspace_layout,
             "created_at": self.created_at,
@@ -145,10 +196,9 @@ class SessionManager:
         """Initialize the session manager."""
         self.sessions: Dict[str, TerminalSession] = {}
         self.groups: Dict[str, SessionGroup] = {}
-        # Which group the session window last had in front. A workspace-shape
-        # hint only — never session state — captured with the workspace so a
-        # restore reopens on the group the user was actually working in.
-        self._active_group_id: str = ""
+        self.workspaces: Dict[str, Workspace] = {
+            DEFAULT_WORKSPACE_ID: Workspace(workspace_id=DEFAULT_WORKSPACE_ID)
+        }
         # Lock ordering: web/api.py's connection_lock may be held while taking
         # this lock; code holding this lock must never take connection_lock.
         self.lock = threading.RLock()
@@ -162,6 +212,7 @@ class SessionManager:
         group_id: Optional[str] = None,
         saved_session_id: str = "",
         workspace_layout: Optional[Dict[str, Any]] = None,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
     ) -> SessionGroup:
         """Create one group of launched sessions.
 
@@ -170,13 +221,29 @@ class SessionManager:
         that every window reads live, so a group can never pin a stale copy.
         """
         resolved_group_id = str(group_id or uuid.uuid4().hex[:12])
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
 
         with self.lock:
+            if resolved_workspace_id not in self.workspaces:
+                raise ValueError("Workspace not found")
             existing_group = self.groups.get(resolved_group_id)
+            if (
+                existing_group is not None
+                and existing_group.workspace_id != resolved_workspace_id
+            ):
+                raise ValueError("Session group belongs to another workspace")
             next_display_order = (
                 existing_group.display_order
                 if existing_group is not None
-                else max((group.display_order for group in self.groups.values()), default=-1) + 1
+                else max(
+                    (
+                        group.display_order
+                        for group in self.groups.values()
+                        if group.workspace_id == resolved_workspace_id
+                    ),
+                    default=-1,
+                )
+                + 1
             )
 
             group = SessionGroup(
@@ -186,34 +253,144 @@ class SessionManager:
                 layout=layout,
                 terminal_count=terminal_count,
                 display_order=next_display_order,
+                workspace_id=resolved_workspace_id,
                 saved_session_id=str(saved_session_id or "").strip(),
                 workspace_layout=workspace_layout,
             )
             self.groups[resolved_group_id] = group
             # The session window switches to a newly launched group, so mirror
             # that here: the hint is then right even before a window reports.
-            self._active_group_id = resolved_group_id
+            workspace = self.workspaces[resolved_workspace_id]
+            workspace.active_group_id = resolved_group_id
+            # The workspace now holds content, so normal empty-workspace
+            # pruning applies again from here on.
+            workspace.retain_when_empty = False
 
         return group
 
-    def set_active_group(self, group_id: str) -> str:
+    def create_workspace(
+        self,
+        label: str = "",
+        workspace_id: Optional[str] = None,
+        retain_when_empty: bool = False,
+    ) -> Workspace:
+        """Create and return a distinct live workspace.
+
+        ``retain_when_empty`` marks a workspace the user created deliberately
+        empty so cleanup does not sweep it before its first group arrives.
+        """
+        with self.lock:
+            if workspace_id is None:
+                while True:
+                    resolved_workspace_id = generate_workspace_id()
+                    if resolved_workspace_id not in self.workspaces:
+                        break
+            else:
+                resolved_workspace_id = normalize_workspace_id(workspace_id)
+            if resolved_workspace_id in self.workspaces:
+                raise ValueError("Workspace already exists")
+            workspace = Workspace(
+                workspace_id=resolved_workspace_id,
+                label=str(label or "").strip(),
+                retain_when_empty=bool(retain_when_empty),
+            )
+            self.workspaces[resolved_workspace_id] = workspace
+            return workspace
+
+    def rename_workspace(self, workspace_id: str, label: str) -> Optional[Workspace]:
+        """Set one live workspace's display label; ``None`` when unknown."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            if workspace is None:
+                return None
+            workspace.label = str(label or "").strip()
+            return workspace
+
+    def remove_workspace(self, workspace_id: str) -> bool:
+        """Remove one empty non-default workspace record.
+
+        This is the rollback for a destination that was created for a launch
+        that then failed: a dead workspace must never linger in the picker.
+        A workspace that already owns groups is never removed.
+        """
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        if resolved_workspace_id == DEFAULT_WORKSPACE_ID:
+            return False
+        with self.lock:
+            if resolved_workspace_id not in self.workspaces:
+                return False
+            if any(
+                group.workspace_id == resolved_workspace_id
+                for group in self.groups.values()
+            ):
+                return False
+            del self.workspaces[resolved_workspace_id]
+            return True
+
+    def get_workspace(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> Optional[Workspace]:
+        """Return one live workspace by normalized id."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            return self.workspaces.get(resolved_workspace_id)
+
+    def get_all_workspaces(self) -> List[Workspace]:
+        """Return live workspaces in creation order, with default first."""
+        with self.lock:
+            return sorted(
+                self.workspaces.values(),
+                key=lambda workspace: (
+                    workspace.workspace_id != DEFAULT_WORKSPACE_ID,
+                    workspace.created_at,
+                    workspace.workspace_id,
+                ),
+            )
+
+    def set_active_group(
+        self,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        group_id: Optional[str] = None,
+        *,
+        require_owned: bool = False,
+    ) -> str:
         """Record which group the session window has in front; return the hint.
 
         Unknown ids are ignored rather than stored, so a stale tab can never
         point a workspace restore at a group that no longer exists.
-        """
-        candidate = str(group_id or "").strip()
-        with self.lock:
-            if candidate and candidate in self.groups:
-                self._active_group_id = candidate
-            return self.get_active_group_id()
 
-    def get_active_group_id(self) -> str:
-        """Return the active-group hint, or "" once that group is gone."""
+        The one-argument form remains the legacy ``default`` workspace API.
+        """
+        if group_id is None:
+            candidate = str(workspace_id or "").strip()
+            resolved_workspace_id = DEFAULT_WORKSPACE_ID
+        else:
+            candidate = str(group_id or "").strip()
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
         with self.lock:
-            if self._active_group_id not in self.groups:
-                self._active_group_id = ""
-            return self._active_group_id
+            workspace = self.workspaces.get(resolved_workspace_id)
+            if workspace is None:
+                if require_owned:
+                    raise ValueError("Workspace not found")
+                return ""
+            group = self.groups.get(candidate)
+            if group is None or group.workspace_id != resolved_workspace_id:
+                if require_owned:
+                    raise ValueError("Session group does not belong to workspace")
+            else:
+                workspace.active_group_id = candidate
+            return self.get_active_group_id(resolved_workspace_id)
+
+    def get_active_group_id(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> str:
+        """Return the active-group hint, or "" once that group is gone."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            if workspace is None:
+                return ""
+            group = self.groups.get(workspace.active_group_id)
+            if group is None or group.workspace_id != resolved_workspace_id:
+                workspace.active_group_id = ""
+            return workspace.active_group_id
 
     def _generate_session_id(self) -> str:
         """Return a short session id that is not already in use.
@@ -460,6 +637,29 @@ class SessionManager:
         with self.lock:
             return sorted(
                 self.groups.values(),
+                key=lambda group: (
+                    self.workspaces.get(
+                        group.workspace_id,
+                        Workspace(group.workspace_id),
+                    ).created_at,
+                    group.display_order,
+                    group.created_at,
+                ),
+            )
+
+    def get_workspace_groups(
+        self,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+    ) -> List[SessionGroup]:
+        """Return one workspace's groups in its independent display order."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            return sorted(
+                (
+                    group
+                    for group in self.groups.values()
+                    if group.workspace_id == resolved_workspace_id
+                ),
                 key=lambda group: (group.display_order, group.created_at),
             )
 
@@ -468,8 +668,19 @@ class SessionManager:
         group_id: str,
         saved_session_id: str,
         name: Optional[str] = None,
+        *,
+        layout: Optional[str] = None,
+        workspace_layout: Any = _UNCHANGED,
+        session_view_updates: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Optional[SessionGroup]:
-        """Update the saved-session target metadata for one launched group."""
+        """Update a live group's saved target and its reopenable view snapshot.
+
+        ``session_view_updates`` is keyed by live session id. Only presentation
+        fields are accepted, and the session must still belong to this group;
+        connection/process metadata is never changed by a saved-view refresh.
+        The entire check-and-update transaction stays inside one lock hold so a
+        concurrent group move or close cannot update the wrong live session.
+        """
         with self.lock:
             group = self.groups.get(group_id)
             if not group:
@@ -479,16 +690,56 @@ class SessionManager:
             normalized_name = str(name or "").strip()
             if normalized_name:
                 group.name = normalized_name
+            normalized_layout = str(layout or "").strip()
+            if normalized_layout:
+                group.layout = normalized_layout
+            if workspace_layout is not _UNCHANGED:
+                group.workspace_layout = copy.deepcopy(workspace_layout)
+
+            for session_id, updates in (session_view_updates or {}).items():
+                session = self.sessions.get(str(session_id or "").strip())
+                if session is None or session.group_id != group_id:
+                    continue
+                for field_name, value in updates.items():
+                    if field_name in _SAVED_SESSION_VIEW_FIELDS:
+                        setattr(session, field_name, copy.deepcopy(value))
             return group
 
-    def reorder_groups(self, ordered_group_ids: List[str]) -> List[SessionGroup]:
-        """Persist a new display order for known groups."""
+    def reorder_groups(
+        self,
+        workspace_id: Any = DEFAULT_WORKSPACE_ID,
+        ordered_group_ids: Optional[List[str]] = None,
+    ) -> List[SessionGroup]:
+        """Persist a display order inside one workspace.
+
+        ``reorder_groups(ids)`` remains the legacy default-workspace form.
+        """
+        workspace_was_explicit = ordered_group_ids is not None
+        if not workspace_was_explicit:
+            ordered_group_ids = workspace_id
+            resolved_workspace_id = DEFAULT_WORKSPACE_ID
+        else:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        if not isinstance(ordered_group_ids, list):
+            raise ValueError("ordered_group_ids must be a list")
+
         with self.lock:
-            current_groups = self.get_all_groups()
+            if (
+                workspace_was_explicit
+                and resolved_workspace_id not in self.workspaces
+            ):
+                raise ValueError("Workspace not found")
+            current_groups = self.get_workspace_groups(resolved_workspace_id)
+            known_group_ids = {group.group_id for group in current_groups}
+            if workspace_was_explicit and any(
+                group_id not in known_group_ids
+                for group_id in ordered_group_ids
+            ):
+                raise ValueError(
+                    "All groups must belong to the requested workspace"
+                )
             if not current_groups:
                 return []
-
-            known_group_ids = {group.group_id for group in current_groups}
             next_order = []
             seen = set()
 
@@ -510,6 +761,129 @@ class SessionManager:
         """Get sessions belonging to one group."""
         with self.lock:
             return [s for s in self.sessions.values() if s.group_id == group_id]
+
+    def get_workspace_sessions(
+        self,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+    ) -> List[TerminalSession]:
+        """Return sessions belonging to groups owned by one workspace."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            ordered_group_ids = [
+                group.group_id
+                for group in self.get_workspace_groups(resolved_workspace_id)
+            ]
+            sessions_by_group = {
+                group_id: [
+                    session
+                    for session in self.sessions.values()
+                    if session.group_id == group_id
+                ]
+                for group_id in ordered_group_ids
+            }
+            return [
+                session
+                for group_id in ordered_group_ids
+                for session in sessions_by_group[group_id]
+            ]
+
+    def find_saved_session_group(self, saved_session_id: str) -> Optional[SessionGroup]:
+        """Find a live saved-preset-backed group globally."""
+        candidate = str(saved_session_id or "").strip()
+        if not candidate:
+            return None
+        with self.lock:
+            return next(
+                (
+                    group
+                    for group in self.groups.values()
+                    if group.saved_session_id == candidate
+                ),
+                None,
+            )
+
+    def _compact_workspace_order_locked(self, workspace_id: str) -> None:
+        """Compact one workspace's display order. Caller holds ``self.lock``."""
+        groups = sorted(
+            (
+                group
+                for group in self.groups.values()
+                if group.workspace_id == workspace_id
+            ),
+            key=lambda group: (group.display_order, group.created_at),
+        )
+        for index, group in enumerate(groups):
+            group.display_order = index
+
+    def move_group(
+        self,
+        group_id: str,
+        target_workspace_id: str,
+    ) -> Optional[SessionGroup]:
+        """Move a group without recreating any of its terminal sessions."""
+        resolved_target_id = normalize_workspace_id(target_workspace_id)
+        with self.lock:
+            group = self.groups.get(str(group_id or "").strip())
+            if group is None:
+                return None
+            if resolved_target_id not in self.workspaces:
+                raise ValueError("Workspace not found")
+            source_workspace_id = group.workspace_id
+            if source_workspace_id == resolved_target_id:
+                return group
+
+            next_order = max(
+                (
+                    candidate.display_order
+                    for candidate in self.groups.values()
+                    if candidate.workspace_id == resolved_target_id
+                ),
+                default=-1,
+            ) + 1
+            group.workspace_id = resolved_target_id
+            group.display_order = next_order
+            # The destination now holds content: a deliberately empty workspace
+            # stops being retained the moment its first group arrives.
+            self.workspaces[resolved_target_id].retain_when_empty = False
+            source_workspace = self.workspaces.get(source_workspace_id)
+            if source_workspace and source_workspace.active_group_id == group.group_id:
+                source_workspace.active_group_id = ""
+            self._compact_workspace_order_locked(source_workspace_id)
+            self._compact_workspace_order_locked(resolved_target_id)
+            return group
+
+    def snapshot_live_workspaces(self) -> Dict[str, Dict[str, Any]]:
+        """Take one consistent, password-free snapshot of all live workspaces."""
+        with self.lock:
+            snapshots: Dict[str, Dict[str, Any]] = {}
+            for workspace in self.get_all_workspaces():
+                groups = []
+                for group in self.get_workspace_groups(workspace.workspace_id):
+                    sessions = [
+                        session.to_dict()
+                        for session in self.sessions.values()
+                        if session.group_id == group.group_id
+                    ]
+                    if not sessions:
+                        continue
+                    group_data = group.to_dict()
+                    group_data["sessions"] = sessions
+                    groups.append(group_data)
+                if not groups:
+                    continue
+                captured_group_ids = {group["group_id"] for group in groups}
+                snapshots[workspace.workspace_id] = {
+                    "workspace_id": workspace.workspace_id,
+                    "label": workspace.label,
+                    "created_at": workspace.created_at,
+                    "active_group_id": (
+                        workspace.active_group_id
+                        if workspace.active_group_id in captured_group_ids
+                        else ""
+                    ),
+                    "groups": groups,
+                }
+            return snapshots
 
     def get_active_sessions(self) -> List[TerminalSession]:
         """Get all active (connected) sessions."""
@@ -591,8 +965,14 @@ class SessionManager:
     def remove_group(self, group_id: str):
         """Remove one group and its callback registrations once it is fully closed."""
         with self.lock:
+            group = self.groups.get(group_id)
             self._remove_group_sessions_locked(group_id)
             self.groups.pop(group_id, None)
+            if group is not None:
+                workspace = self.workspaces.get(group.workspace_id)
+                if workspace and workspace.active_group_id == group_id:
+                    workspace.active_group_id = ""
+                self._compact_workspace_order_locked(group.workspace_id)
 
     def remove_group_sessions(self, group_id: str) -> List[str]:
         """Remove tracked sessions for one group while keeping the group entry."""
@@ -615,17 +995,25 @@ class SessionManager:
         with self.lock:
             self.sessions.clear()
             self.groups.clear()
+            self.workspaces.clear()
+            self.workspaces[DEFAULT_WORKSPACE_ID] = Workspace(
+                workspace_id=DEFAULT_WORKSPACE_ID
+            )
 
     def get_session_count(self) -> int:
         """Get total number of sessions."""
         with self.lock:
             return len(self.sessions)
 
-    def clear_disconnected_sessions(self, force_group_ids: Optional[Iterable[str]] = None):
+    def clear_disconnected_sessions(
+        self,
+        force_group_ids: Optional[Iterable[str]] = None,
+    ) -> List[str]:
         """Remove disconnected sessions from the manager.
 
         Groups in `force_group_ids` (e.g. a group the user explicitly closed)
         are removed when empty regardless of the grace period.
+        Returns non-default workspace ids pruned after their last group left.
         """
         forced_groups = set(force_group_ids or ())
         with self.lock:
@@ -651,9 +1039,45 @@ class SessionManager:
                     or now - group.created_at > EMPTY_GROUP_GRACE_SECONDS
                 )
             ]
+            affected_workspace_ids = {
+                self.groups[group_id].workspace_id
+                for group_id in disconnected_groups
+                if group_id in self.groups
+            }
+            forced_workspace_ids = {
+                self.groups[group_id].workspace_id
+                for group_id in disconnected_groups
+                if group_id in forced_groups and group_id in self.groups
+            }
             for group_id in disconnected_groups:
                 del self.groups[group_id]
+            for workspace_id in affected_workspace_ids:
+                self._compact_workspace_order_locked(workspace_id)
+                workspace = self.workspaces.get(workspace_id)
+                if workspace is not None and workspace.active_group_id in disconnected_groups:
+                    workspace.active_group_id = ""
             for group_id, count in active_group_counts.items():
                 group = self.groups.get(group_id)
                 if group is not None:
                     group.terminal_count = count
+
+            pruned_workspace_ids = []
+            live_workspace_ids = {
+                group.workspace_id for group in self.groups.values()
+            }
+            for workspace_id, workspace in list(self.workspaces.items()):
+                if workspace_id == DEFAULT_WORKSPACE_ID or workspace_id in live_workspace_ids:
+                    continue
+                # A deliberately empty workspace (Workspace ▸ New Workspace) is
+                # kept until its first group clears the flag; only then does
+                # normal empty-workspace pruning apply to it.
+                if workspace.retain_when_empty:
+                    continue
+                if (
+                    workspace_id not in forced_workspace_ids
+                    and now - workspace.created_at <= EMPTY_GROUP_GRACE_SECONDS
+                ):
+                    continue
+                del self.workspaces[workspace_id]
+                pruned_workspace_ids.append(workspace_id)
+            return sorted(pruned_workspace_ids)

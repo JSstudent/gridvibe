@@ -36,6 +36,7 @@ from web.explorer import (
     _is_explorer_session,
 )
 from web.hostkeys import _apply_host_key_policy
+from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id, workspace_room
 
 try:
     import pty
@@ -97,7 +98,11 @@ def _broadcast_session_status(session_id: str):
         socketio.emit('session_status', payload, room=session_id)
 
 
-def _broadcast_session_groups_updated(reason: str = "", group_id: str = ""):
+def _broadcast_session_groups_updated(
+    reason: str = "",
+    group_id: str = "",
+    workspace_id: Optional[str] = None,
+):
     """Notify open terminal windows that the set of session groups changed.
 
     Lets the frontend refresh on push instead of relying on its old 3-second
@@ -107,7 +112,25 @@ def _broadcast_session_groups_updated(reason: str = "", group_id: str = ""):
     autosave timer and the explicit Save Workspace action capture it (10.5
     hardening), so transient mid-event shapes never reach the snapshot.
     """
-    socketio.emit('session_groups_updated', {"reason": reason})
+    resolved_group_id = str(group_id or "").strip()
+    if workspace_id is None and resolved_group_id:
+        with session_manager.lock:
+            group = session_manager.groups.get(resolved_group_id)
+            workspace_id = group.workspace_id if group is not None else None
+    resolved_workspace_id = normalize_workspace_id(
+        workspace_id if workspace_id is not None else DEFAULT_WORKSPACE_ID
+    )
+    payload = {
+        "workspace_id": resolved_workspace_id,
+        "reason": str(reason or ""),
+    }
+    if resolved_group_id:
+        payload["group_id"] = resolved_group_id
+    socketio.emit(
+        'session_groups_updated',
+        payload,
+        room=workspace_room(resolved_workspace_id),
+    )
 
 
 def _cache_terminal_output(session_id: str, output: str):

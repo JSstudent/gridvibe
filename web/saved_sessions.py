@@ -540,6 +540,54 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
     return normalized
 
 
+_LIVE_SESSION_VIEW_FIELDS = (
+    "explorer_tree_open",
+    "explorer_git_open",
+    "explorer_search_open",
+    "explorer_open_tabs",
+    "explorer_active_tab",
+    "explorer_tab_views",
+    "explorer_md_preset",
+    "explorer_md_font",
+    "explorer_theme",
+    "browser_tabs",
+    "browser_active_tab",
+)
+
+
+def build_live_session_view_updates(
+    raw_config: Dict[str, Any],
+    saved_config: Dict[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    """Pair normalized saved view state with the live pane ids that supplied it.
+
+    ``session_id`` is request-only identity added by the terminals page. The
+    saved-session normalizer intentionally strips it before persistence, while
+    this helper uses it to refresh an already-live workspace safely by identity
+    rather than by a pane's current visual position.
+    """
+    raw_terminals = raw_config.get("terminals")
+    saved_terminals = saved_config.get("terminals")
+    if not isinstance(raw_terminals, list) or not isinstance(saved_terminals, list):
+        return {}
+
+    updates: Dict[str, Dict[str, Any]] = {}
+    for index, raw_terminal in enumerate(raw_terminals):
+        if index >= len(saved_terminals):
+            break
+        if not isinstance(raw_terminal, dict) or not isinstance(saved_terminals[index], dict):
+            continue
+        session_id = str(raw_terminal.get("session_id") or "").strip()
+        if not session_id:
+            continue
+        updates[session_id] = {
+            field_name: saved_terminals[index][field_name]
+            for field_name in _LIVE_SESSION_VIEW_FIELDS
+            if field_name in saved_terminals[index]
+        }
+    return updates
+
+
 def _normalize_session_config(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Normalize persisted form state before saving or returning it."""
     data = data or {}

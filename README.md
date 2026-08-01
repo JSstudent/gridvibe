@@ -113,10 +113,13 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 | **Session groups** | Numbered, draggable, closable tabs. `Alt+1`–`Alt+9` to switch, middle-click to close. |
 | **Presets** | `Save Session`, `Save Session as…`, `Save All Sessions`, `Import Session`. SSH passwords are Fernet-encrypted in `saved_sessions.json`. |
 | **Workspace snapshot** | Background autosave (1–15 min) plus explicit **Save Workspace** writes `runtime_state.json` — never passwords. After a restart the launcher offers the workspace back by name and reopens on the group you left. |
+| **Multiple workspaces** | Opt-in — the switch in the launcher's **Workspaces** card (step 04), stored as `workspace.multi_workspace_enabled`. Launch into a chosen workspace or a new one, each in its own window with its own tabs; move a tab between workspaces without restarting a single terminal; rename a workspace; restore any subset of saved workspaces after a restart. `Alt+W` walks the open workspaces (`Alt+Shift+W` walks back). |
 | **Broadcast typing** | One keystroke, every pane in the group. |
 | **Self-update** | **Check for updates** does a git fast-forward, or save the workspace and restart in one action. |
 
-Preset-backed groups restore from the preset's *current* config, so edits to a saved session survive the round trip.
+Preset-backed groups restore from the preset's *current* config, so edits to a saved session survive the round trip. Restore runs entirely on the server: a saved session's password is resolved in-process and never sent to the browser or written to the log.
+
+With multiple workspaces enabled, a saved preset is live in **at most one workspace at a time** — launching it elsewhere explains the conflict and offers to open that workspace or move the tab, instead of silently stealing it or opening a duplicate. Each saved workspace can be restored, left for later, or permanently **forgotten** (the snapshot only — saved sessions are never touched).
 
 ## File Explorer
 
@@ -181,6 +184,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | Shortcut | Action |
 | --- | --- |
 | `Alt+1`–`Alt+9` | Switch session group |
+| `Alt+W` / `Alt+Shift+W` | Next / previous workspace window (multiple workspaces only) |
 | `Ctrl+Shift+F` | Terminal scrollback search — or, on an explorer pane, toggle repository search |
 | `Ctrl+F` | Find in the open file |
 | `Ctrl+Shift+V` | Toggle Markdown rendered preview |
@@ -191,7 +195,7 @@ Drag the dividers between panes to resize them.
 
 ## Configuration
 
-Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, workspace autosave interval, SSH host-key policy, and all voice options.
+Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, workspace autosave interval, SSH host-key policy, and all voice options. The one exception is **Multiple workspaces**: it changes what every launch does, so its switch sits in the launcher's Workspaces card instead of the dialog.
 
 On disk, settings load from `config.json` (git-ignored) falling back to `default_config.json`:
 
@@ -200,7 +204,7 @@ On disk, settings load from `config.json` (git-ignored) falling back to `default
   "server": { "host": "127.0.0.1", "port": 5050 },
   "appearance": { "theme": "dark" },
   "terminal": { "max_sessions": 16, "font_size": 14 },
-  "workspace": { "surface_mode": "normal", "autosave_interval_minutes": 5 },
+  "workspace": { "surface_mode": "normal", "autosave_interval_minutes": 5, "multi_workspace_enabled": false },
   "ssh": { "host_key_policy": "auto-add" },
   "explorer_search": { "max_files": 2000, "max_matches": 5000, "timeout_seconds": 20 }
 }

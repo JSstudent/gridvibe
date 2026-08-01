@@ -66,6 +66,7 @@ class _FakeWindow:
         self.events = Mock(
             minimized=_FakeEvent(),
             restored=_FakeEvent(),
+            maximized=_FakeEvent(),
             before_show=_FakeEvent(),
             shown=_FakeEvent(),
             loaded=_FakeEvent(),
@@ -328,6 +329,55 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertEqual(len(fake_webview.create_window.return_value.events.before_show.handlers), 1)
         self.assertEqual(len(fake_webview.create_window.return_value.events.shown.handlers), 1)
 
+    def test_maximized_event_clears_stale_minimized_flag(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        fake_thread = _FakeThread()
+        fake_webview = Mock()
+        fake_webview.create_window.return_value = _FakeWindow()
+
+        with patch.object(
+            webview_launcher.sys,
+            "argv",
+            ["webview_launcher.py", "--mode", "native"],
+        ), patch.object(
+            webview_launcher.os.path,
+            "exists",
+            return_value=False,
+        ), patch.object(
+            webview_launcher,
+            "setup_logging",
+        ), patch.object(
+            webview_launcher,
+            "_wait_for_server",
+            return_value=True,
+        ), patch.object(
+            webview_launcher.threading,
+            "Thread",
+            return_value=fake_thread,
+        ), patch.object(
+            webview_launcher,
+            "webview",
+            fake_webview,
+        ), patch.object(
+            webview_launcher,
+            "_preferred_pywebview_gui",
+            return_value=None,
+        ), patch.object(
+            webview_launcher,
+            "_set_linux_qtwebengine_env",
+        ), patch.object(
+            webview_launcher,
+            "GridVibeApi",
+            return_value=api_bridge,
+        ):
+            webview_launcher.main()
+
+        events = fake_webview.create_window.return_value.events
+        self.assertEqual(len(events.maximized.handlers), 1)
+        api_bridge._set_window_minimized("launcher", True)
+        events.maximized.handlers[0]()
+        self.assertFalse(api_bridge._is_window_minimized("launcher"))
+
     def test_session_window_uses_resizable_native_frame(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
         fake_webview = Mock()
@@ -393,6 +443,86 @@ class WebviewLauncherTestCase(unittest.TestCase):
         window.events.loaded.handlers[0]()
         self.assertEqual(window.native.webview.ZoomFactor, 1.4)
         self.assertIsNone(api_bridge._pending_session_native_zoom_factor)
+
+    def test_two_workspace_ids_create_distinct_native_windows_and_urls(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        first_window = _ExplodingWindow()
+        second_window = _ExplodingWindow()
+        fake_webview = Mock()
+        fake_webview.create_window.side_effect = [first_window, second_window]
+
+        with patch.object(webview_launcher, "webview", fake_webview):
+            first = api_bridge.open_workspace_window("aaaaaaaaaaaa", "group-a")
+            second = api_bridge.open_workspace_window("bbbbbbbbbbbb", "group-b")
+
+        self.assertEqual(first, {"ok": True, "reused": False})
+        self.assertEqual(second, {"ok": True, "reused": False})
+        self.assertIs(
+            api_bridge._workspace_windows["aaaaaaaaaaaa"],
+            first_window,
+        )
+        self.assertIs(
+            api_bridge._workspace_windows["bbbbbbbbbbbb"],
+            second_window,
+        )
+        urls = [entry.args[1] for entry in fake_webview.create_window.call_args_list]
+        self.assertEqual(
+            urls,
+            [
+                "http://127.0.0.1:5050/terminals?workspace=aaaaaaaaaaaa&group=group-a",
+                "http://127.0.0.1:5050/terminals?workspace=bbbbbbbbbbbb&group=group-b",
+            ],
+        )
+
+    def test_workspace_window_reuse_and_close_are_scoped_by_id(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        first_window = _ExplodingWindow()
+        second_window = _ExplodingWindow()
+        api_bridge._attach_workspace_window("aaaaaaaaaaaa", first_window, "group-a")
+        api_bridge._attach_workspace_window("bbbbbbbbbbbb", second_window, "group-b")
+
+        reused = api_bridge.open_workspace_window("aaaaaaaaaaaa", "group-other")
+        closed = api_bridge.close_workspace_window("aaaaaaaaaaaa")
+
+        self.assertEqual(reused, {"ok": True, "reused": True})
+        self.assertEqual(closed, {"ok": True})
+        self.assertEqual(first_window.show_calls, 1)
+        self.assertEqual(first_window.destroy_calls, 1)
+        self.assertEqual(second_window.show_calls, 0)
+        self.assertEqual(second_window.destroy_calls, 0)
+        self.assertIs(
+            api_bridge._workspace_windows["bbbbbbbbbbbb"],
+            second_window,
+        )
+
+    def test_workspace_fullscreen_and_zoom_target_only_requested_window(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        first_window = Mock()
+        first_window.native = _FakeZoomNative()
+        first_window.native.webview.ZoomFactor = 1.25
+        second_window = Mock()
+        second_window.native = _FakeZoomNative()
+        second_window.native.webview.ZoomFactor = 1.75
+        api_bridge._attach_workspace_window("aaaaaaaaaaaa", first_window)
+        api_bridge._attach_workspace_window("bbbbbbbbbbbb", second_window)
+
+        toggled = api_bridge.toggle_workspace_fullscreen("bbbbbbbbbbbb")
+        zoom = api_bridge.get_workspace_native_zoom("bbbbbbbbbbbb")
+
+        self.assertEqual(toggled, {"ok": True})
+        second_window.toggle_fullscreen.assert_called_once_with()
+        first_window.toggle_fullscreen.assert_not_called()
+        self.assertEqual(zoom, {"ok": True, "zoom_factor": 1.75})
+        self.assertFalse(
+            api_bridge.get_workspace_fullscreen_state("aaaaaaaaaaaa")[
+                "is_fullscreen"
+            ]
+        )
+        self.assertTrue(
+            api_bridge.get_workspace_fullscreen_state("bbbbbbbbbbbb")[
+                "is_fullscreen"
+            ]
+        )
 
     def test_hex_to_colorref_converts_rgb_to_windows_colorref(self):
         self.assertEqual(webview_launcher._hex_to_colorref("#112233"), 0x332211)
@@ -478,6 +608,34 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertEqual(window.restore_calls, 1)
         self.assertEqual(window.show_calls, 1)
         self.assertFalse(api_bridge._is_window_minimized("session"))
+
+    def test_restore_minimized_window_prefers_sw_restore_on_windows(self):
+        window = _ExplodingWindow()
+        fake_user32 = Mock()
+        fake_windll = Mock(user32=fake_user32)
+
+        with patch.object(
+            webview_launcher.sys, "platform", "win32"
+        ), patch.object(
+            webview_launcher, "_resolve_native_window_handle", return_value=1234
+        ), patch.object(
+            webview_launcher.ctypes, "windll", fake_windll, create=True
+        ):
+            result = webview_launcher._restore_minimized_window(window)
+
+        self.assertTrue(result)
+        fake_user32.ShowWindow.assert_called_once()
+        self.assertEqual(fake_user32.ShowWindow.call_args.args[1], 9)  # SW_RESTORE
+        self.assertEqual(window.restore_calls, 0)
+
+    def test_restore_minimized_window_falls_back_without_native_handle(self):
+        window = _ExplodingWindow()
+
+        with patch.object(webview_launcher.sys, "platform", "win32"):
+            result = webview_launcher._restore_minimized_window(window)
+
+        self.assertTrue(result)
+        self.assertEqual(window.restore_calls, 1)
 
     def test_bring_to_front_skips_top_most_pulse_for_session_window_on_windows(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
@@ -879,6 +1037,25 @@ class SaveDownloadBridgeTestCase(unittest.TestCase):
             )
         self.assertFalse(result["ok"])
         self.assertTrue(result["cancelled"])
+
+    def test_workspace_id_targets_the_calling_workspace_dialog(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        first_window = Mock()
+        second_window = Mock()
+        second_window.create_file_dialog.return_value = None
+        api_bridge._attach_workspace_window("aaaaaaaaaaaa", first_window)
+        api_bridge._attach_workspace_window("bbbbbbbbbbbb", second_window)
+
+        with patch.object(webview_launcher, "webview", Mock()):
+            result = api_bridge.save_download(
+                "/api/explorer/abc/download?path=a.txt",
+                "a.txt",
+                "bbbbbbbbbbbb",
+            )
+
+        self.assertTrue(result["cancelled"])
+        first_window.create_file_dialog.assert_not_called()
+        second_window.create_file_dialog.assert_called_once()
 
     def test_saves_fetched_bytes_to_the_chosen_path(self):
         with tempfile.TemporaryDirectory() as tmp:

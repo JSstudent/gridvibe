@@ -19,7 +19,8 @@
         }),
         workspace: Object.freeze({
             surface_mode: 'normal',
-            autosave_interval_minutes: 5
+            autosave_interval_minutes: 5,
+            multi_workspace_enabled: false
         }),
         ssh: Object.freeze({
             host_key_policy: 'auto-add'
@@ -539,6 +540,11 @@
                     Number(document.getElementById('appWorkspaceAutosaveInterval')?.value)
                         || DEFAULT_APP_SETTINGS.workspace.autosave_interval_minutes
                 ))
+                /* multi_workspace_enabled is deliberately absent: the launcher's
+                   Workspaces switch owns it, and an omitted key keeps whatever
+                   the server already has (web/api.py _normalize_app_config_update),
+                   so saving this dialog can never move the mode behind the
+                   user's back. */
             },
             ssh: {
                 host_key_policy: document.getElementById('appSshHostKeyPolicy')?.value || DEFAULT_APP_SETTINGS.ssh.host_key_policy
@@ -571,7 +577,8 @@
                 theme: normalizeThemePreference(appSettings?.appearance?.theme)
             },
             workspace: {
-                surface_mode: appSettings?.workspace?.surface_mode === 'max' ? 'max' : 'normal'
+                surface_mode: appSettings?.workspace?.surface_mode === 'max' ? 'max' : 'normal',
+                multi_workspace_enabled: Boolean(appSettings?.workspace?.multi_workspace_enabled)
             },
             terminal: {
                 font_family: String(appSettings?.terminal?.font_family || DEFAULT_APP_SETTINGS.terminal.font_family),
@@ -579,7 +586,8 @@
                 apply_scope: applyScope === 'all' ? 'all' : 'session'
             },
             timestamp: Date.now(),
-            nonce: Math.random().toString(36).slice(2)
+            nonce: Math.random().toString(36).slice(2),
+            source: GRIDVIBE_WINDOW_ID
         };
 
         try {
@@ -637,6 +645,7 @@
 
         try {
             const settingsForm = collectAppSettingsForm();
+
             const [settingsResponse] = await Promise.all([
                 fetch('/api/app-config', {
                     method: 'POST',

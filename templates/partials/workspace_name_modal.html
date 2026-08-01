@@ -1,0 +1,37 @@
+{# Workspace name dialog shared by the launcher and the session workspace.
+
+   Both pages include this partial and load web/static/js/workspaces.js, which
+   owns it (openWorkspaceNameModal / closeWorkspaceNameModal). It replaces
+   window.prompt everywhere — WebView2 blocks native dialogs (guardrail 4).
+   Buttons use the partial's own .workspace-modal-btn class so the markup does
+   not depend on either page's button styles; web/static/css/workspaces.css
+   styles everything here, scoped to #workspaceNameModal. #}
+<div id="workspaceNameModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card workspace-name-card" role="dialog" aria-modal="true" aria-labelledby="workspaceNameTitle">
+        <div class="modal-head">
+            <div>
+                <div id="workspaceNameTitle" class="modal-title">New workspace</div>
+                <div id="workspaceNameCopy" class="modal-copy"></div>
+            </div>
+        </div>
+        <form id="workspaceNameForm" class="workspace-modal-form">
+            <div class="workspace-modal-field">
+                <label for="workspaceNameInput">Workspace name</label>
+                <input
+                    id="workspaceNameInput"
+                    class="workspace-modal-input"
+                    type="text"
+                    maxlength="80"
+                    autocomplete="off"
+                    spellcheck="false"
+                >
+            </div>
+        </form>
+        <div class="modal-actions">
+            <div class="modal-actions-buttons">
+                <button id="workspaceNameCancel" class="workspace-modal-btn" type="button">Cancel</button>
+                <button id="workspaceNameAccept" class="workspace-modal-btn is-primary" type="submit" form="workspaceNameForm">Save</button>
+            </div>
+        </div>
+    </div>
+</div>

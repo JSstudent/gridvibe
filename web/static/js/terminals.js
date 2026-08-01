@@ -177,10 +177,22 @@
         applyAppConfigTheme(message);
         applyAppConfigSurfaceMode(message);
         applyAppConfigTerminalFont(message);
+        applyAppConfigMultiWorkspace(message);
         /* Voice enable/engine and the push-to-talk keybind are saved from the
            same App Settings dialog, so re-read both here instead of leaving
            open tabs on boot-time values until a restart (stage J issue 3). */
         _refreshVoiceRuntimeState();
+    }
+
+    /* The Workspace menu's multi-workspace items are server-rendered, so this
+       window re-renders itself when the mode changes elsewhere. A window whose
+       workspace was closed by that change closes instead (workspaces.js). */
+    function applyAppConfigMultiWorkspace(message) {
+        const enabled = message?.workspace?.multi_workspace_enabled;
+        if (typeof enabled !== 'boolean' || enabled === isMultiWorkspaceEnabled()) {
+            return;
+        }
+        reactToMultiWorkspaceFlagChange(enabled, { currentWorkspaceId }).catch(() => {});
     }
 
     /* Per-session font overrides (OD-14): keyed by session-group id — the
@@ -306,7 +318,12 @@
             try {
                 const channel = new BroadcastChannel(APP_CONFIG_BROADCAST_CHANNEL);
                 channel.onmessage = event => {
-                    applyAppConfigUpdate(event.data || {});
+                    /* A window that saved the settings has already applied them
+                       and may still be acting on the change; its own broadcast
+                       is not news (shared.js explains the same-document case). */
+                    if (!isOwnBroadcast(event.data)) {
+                        applyAppConfigUpdate(event.data || {});
+                    }
                 };
             } catch (_error) {}
         }
@@ -511,7 +528,10 @@
     let draggedSessionTabOriginOrder = [];
     let sessionTabDropHandled = false;
     let suppressSessionTabClickUntil = 0;
-    let activeGroupId = new URLSearchParams(window.location.search).get('group') || '';
+    const initialRouteParams = new URLSearchParams(window.location.search);
+    const currentWorkspaceId = String(CURRENT_WORKSPACE_ID || 'default');
+    const workspaceWasExplicit = initialRouteParams.has('workspace');
+    let activeGroupId = initialRouteParams.get('group') || '';
     let sessionGroups = [];
     let activeLoadToken = 0;
     let knownGroupIds = [];
@@ -577,9 +597,11 @@
        reloadBrowserPane, openBrowserPaneExternally, browserSerializeTabs. */
 
     function getSessionApiPath(groupId = activeGroupId) {
-        return groupId
-            ? `/api/sessions?group=${encodeURIComponent(groupId)}`
-            : '/api/sessions';
+        const params = new URLSearchParams({ workspace_id: currentWorkspaceId });
+        if (groupId) {
+            params.set('group', groupId);
+        }
+        return `/api/sessions?${params.toString()}`;
     }
 
     function getGroupById(groupId) {
@@ -846,17 +868,51 @@
         });
     }
 
+    /* Which workspace this window is. Nothing else on screen says so once two
+       windows are open, so it leads the session line and the window title. */
+    let currentWorkspaceLabel = String(
+        typeof CURRENT_WORKSPACE_LABEL !== 'undefined' ? CURRENT_WORKSPACE_LABEL : ''
+    ).trim();
+
+    function currentWorkspaceDisplayLabel() {
+        return currentWorkspaceLabel
+            || workspaceDisplayLabel({ workspace_id: currentWorkspaceId });
+    }
+
+    function setCurrentWorkspaceLabel(label) {
+        currentWorkspaceLabel = String(label || '').trim();
+        updateSessionChrome(terminals.length);
+    }
+
     function updateSessionChrome(count, groupId = activeGroupId) {
         const activeGroup = getGroupById(groupId);
         const labelParts = [
+            isMultiWorkspaceEnabled() ? `(${currentWorkspaceDisplayLabel()})` : '',
             activeGroup?.name || 'Session',
             `${count} terminal${count !== 1 ? 's' : ''}`,
             activeGroup?.connection_mode === 'wsl' ? 'Local Repo' : 'SSH'
         ].filter(Boolean);
         document.getElementById('sessionLabel').textContent = labelParts.join(' • ');
-        document.title = activeGroup?.name
-            ? `GridVibe — ${activeGroup.name}`
+        const titleParts = [
+            isMultiWorkspaceEnabled() ? currentWorkspaceDisplayLabel() : '',
+            activeGroup?.name || ''
+        ].filter(Boolean);
+        document.title = titleParts.length
+            ? `GridVibe — ${titleParts.join(' — ')}`
             : 'GridVibe — Terminals';
+    }
+
+    /* The session line has two shapes — the live grid's chrome and the empty
+       state. Both are written from here so a *deferred* rewrite (the save
+       confirmation handing the line back after its timer) can never disagree
+       with what is actually on screen. */
+    function renderSessionLine() {
+        if (!terminals.length) {
+            document.getElementById('sessionLabel').textContent =
+                sessionGroups.length ? 'No terminals in this session' : 'No sessions';
+            return;
+        }
+        updateSessionChrome(terminals.length);
     }
 
     function cacheVisibleGroupView(groupId = visibleGroupId) {
@@ -1027,7 +1083,10 @@
         fetch('/api/session-groups/active', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ group_id: normalized })
+            body: JSON.stringify({
+                workspace_id: currentWorkspaceId,
+                group_id: normalized
+            })
         }).catch(() => {
             reportedActiveGroupId = '';
         });
@@ -1035,6 +1094,9 @@
 
     function syncLocationToGroup(groupId) {
         const url = new URL(window.location.href);
+        if (currentWorkspaceId !== 'default' || workspaceWasExplicit) {
+            url.searchParams.set('workspace', currentWorkspaceId);
+        }
         if (groupId) {
             url.searchParams.set('group', groupId);
         } else {
@@ -1195,7 +1257,235 @@
         button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
         if (shouldOpen) {
             closeSessionsMenu();
+            refreshWorkspaceMenuLists();
         }
+    }
+
+    /* ─────────────────────────────────────────────
+       Multi-workspace: menus, move, window lifecycle
+
+       This window's workspace identity, filtered loading, cache eviction and
+       room joins live here; every workspace API call, destination list and
+       window dispatch goes through workspaces.js (guardrail 6).
+    ───────────────────────────────────────────── */
+
+    /* The Move list always acts on the active session tab, which the heading
+       names — "Move Session to Workspace" alone reads as if it were about to
+       move whatever the destination entry is. */
+    function setMoveWorkspaceScopeLabel(groupId) {
+        const group = getGroupById(groupId);
+        const name = group ? (group.name || group.group_id) : '';
+        const scope = document.getElementById('moveWorkspaceScope');
+        if (scope) {
+            scope.textContent = name ? `(${name})` : '';
+            scope.hidden = !name;
+        }
+        document.getElementById('moveWorkspaceList')?.setAttribute(
+            'aria-label',
+            name ? `Move session ${name} to workspace` : 'Move session to workspace'
+        );
+    }
+
+    async function refreshWorkspaceMenuLists() {
+        if (!isMultiWorkspaceEnabled()) {
+            return;
+        }
+        const openList = document.getElementById('openWorkspaceList');
+        const moveList = document.getElementById('moveWorkspaceList');
+        if (!openList && !moveList) {
+            return;
+        }
+
+        const workspaces = await fetchLiveWorkspaces();
+        const targetGroupId = getActiveWorkspaceGroupId();
+        setMoveWorkspaceScopeLabel(targetGroupId);
+        renderWorkspaceMenuList(
+            openList,
+            workspaces.map((workspace, index) => ({
+                label: workspaceDisplayLabel(workspace, index),
+                current: workspace.workspace_id === currentWorkspaceId,
+                disabled: workspace.workspace_id === currentWorkspaceId,
+                icon: workspace.workspace_id === currentWorkspaceId ? '' : WORKSPACE_ICONS.window,
+                onSelect: () => {
+                    closeWorkspaceMenu();
+                    openWorkspaceWindow(workspace.workspace_id, {
+                        groupId: workspace.active_group_id
+                    });
+                }
+            }))
+        );
+
+        const moveEntries = workspaces
+            .filter(workspace => workspace.workspace_id !== currentWorkspaceId)
+            .map((workspace, index) => ({
+                label: workspaceDisplayLabel(workspace, index),
+                icon: WORKSPACE_ICONS.move,
+                disabled: !targetGroupId,
+                onSelect: () => {
+                    closeWorkspaceMenu();
+                    moveSessionGroupToWorkspace(targetGroupId, { workspaceId: workspace.workspace_id });
+                }
+            }));
+        moveEntries.push({
+            label: 'New workspace ...',
+            icon: WORKSPACE_ICONS.add,
+            disabled: !targetGroupId,
+            onSelect: () => {
+                closeWorkspaceMenu();
+                moveSessionGroupToNewWorkspace(targetGroupId);
+            }
+        });
+        renderWorkspaceMenuList(moveList, moveEntries);
+    }
+
+    async function renameCurrentWorkspace() {
+        const workspaces = await fetchLiveWorkspaces();
+        const current = workspaces.find(workspace => workspace.workspace_id === currentWorkspaceId);
+        const label = await openWorkspaceNameModal({
+            title: 'Rename workspace',
+            copy: 'The name is shown in workspace pickers and on the saved snapshot.',
+            value: current?.label || '',
+            confirmLabel: 'Rename'
+        });
+        if (label === null) {
+            return;
+        }
+        try {
+            const updated = await renameWorkspaceRecord(currentWorkspaceId, label);
+            setCurrentWorkspaceLabel(workspaceDisplayLabel(updated));
+            /* A rename changes no group, so it produces no room event: tell the
+               launcher (and any other window) directly, or their pickers keep
+               offering the old name until the next reload. */
+            notifyWorkspacesChanged('renamed');
+            setWorkspaceSaveMessage(`Workspace renamed to "${workspaceDisplayLabel(updated)}".`, 'success');
+        } catch (error) {
+            setWorkspaceSaveMessage(`Rename failed: ${error.message} — try again.`, 'error');
+        }
+    }
+
+    async function createAndOpenWorkspace() {
+        const label = await openWorkspaceNameModal({
+            title: 'New workspace',
+            copy: 'Opens an empty workspace window. Import a session or move a tab into it.',
+            confirmLabel: 'Create'
+        });
+        if (label === null) {
+            return;
+        }
+        try {
+            const workspace = await createWorkspaceRecord(label);
+            notifyWorkspacesChanged('created');
+            await openWorkspaceWindow(workspace.workspace_id);
+        } catch (error) {
+            setWorkspaceSaveMessage(`Could not create the workspace: ${error.message}`, 'error');
+        }
+    }
+
+    /* Closing the window never closes its sessions: the workspace stays live
+       and can be reopened from the launcher. */
+    async function closeThisWorkspaceWindow() {
+        logSessionWindowAction('Closing this workspace window on request');
+        await closeWorkspaceWindow(currentWorkspaceId);
+    }
+
+    /* This window can outlive its workspace: the last tab closed here, that
+       tab's last pane closed, or the last tab pulled out by another window all
+       empty a non-default workspace, which is then removed globally (§8). The
+       window has nothing left to render and cannot reload — every workspace
+       read answers `workspace_missing` — so it closes itself instead of
+       lingering as a load error over a stale tab list. */
+    let workspaceGone = false;
+
+    async function handleWorkspaceGone() {
+        if (workspaceGone) {
+            return;
+        }
+        workspaceGone = true;
+        await _closeWindowAfterLastSession('Workspace no longer exists');
+    }
+
+    async function moveSessionGroupToNewWorkspace(groupId) {
+        const label = await openWorkspaceNameModal({
+            title: 'Move to new workspace',
+            copy: 'Creates a workspace, moves this session into it, and opens its window.',
+            confirmLabel: 'Move'
+        });
+        if (label === null) {
+            return;
+        }
+        await moveSessionGroupToWorkspace(groupId, { newWorkspace: true, label });
+    }
+
+    async function moveSessionGroupToWorkspace(groupId, target) {
+        const movingGroupId = String(groupId || '');
+        if (!movingGroupId) {
+            return;
+        }
+
+        /* Moving evicts this window's cached view of the tab, which tears down
+           its explorer editors — confirm unsaved buffers first, in page. */
+        if (movingGroupId === visibleGroupId
+            && !(await confirmDiscardAllExplorerEdits('Moving this session'))) {
+            return;
+        }
+
+        try {
+            const result = await moveGroupToWorkspace(movingGroupId, target);
+            if (!result.moved) {
+                showTerminalToast('That session is already in this workspace.', '');
+                return;
+            }
+
+            /* The sessions themselves are untouched — same ids, same processes,
+               same SSH connections, same per-session rooms. Only this window's
+               cached view of the tab goes away. */
+            if (movingGroupId === visibleGroupId) {
+                teardownCurrentGrid();
+            } else {
+                dropCachedGroupView(movingGroupId);
+            }
+            if (activeGroupId === movingGroupId) {
+                activeGroupId = '';
+            }
+            await openWorkspaceWindow(result.workspace_id, { groupId: movingGroupId });
+
+            /* Moving the last group out empties this workspace: the record is
+               already pruned server-side, so re-listing it would 400. Close
+               this window instead — its sessions live on in the destination. */
+            const sourceGroups = Array.isArray(result.source_groups) ? result.source_groups : [];
+            if (!sourceGroups.length) {
+                await _closeWindowAfterLastSession();
+                return;
+            }
+            await loadSessionGroups();
+            await initialLoad();
+        } catch (error) {
+            console.error('[GridVibe Sessions] move session failed:', error);
+            showTerminalToast(`Move failed: ${error.message}`, 'error');
+        }
+    }
+
+    async function openSessionTabContextMenu(event, groupId) {
+        if (!isMultiWorkspaceEnabled()) {
+            return;
+        }
+        event.preventDefault();
+        const workspaces = await fetchLiveWorkspaces();
+        const entries = workspaces
+            .filter(workspace => workspace.workspace_id !== currentWorkspaceId)
+            .map((workspace, index) => ({
+                label: `Move to ${workspaceDisplayLabel(workspace, index)}`,
+                icon: WORKSPACE_ICONS.move,
+                onSelect: () => moveSessionGroupToWorkspace(groupId, {
+                    workspaceId: workspace.workspace_id
+                })
+            }));
+        entries.push({
+            label: 'Move to new workspace ...',
+            icon: WORKSPACE_ICONS.add,
+            onSelect: () => moveSessionGroupToNewWorkspace(groupId)
+        });
+        openWorkspaceContextMenu(event, entries);
     }
 
 
@@ -1480,18 +1770,49 @@
             workspace_layout: config.workspace_layout || null,
             saved_session_id: savedSession.id,
             session_name: buildSavedSessionLaunchName(savedSession, config),
+            // Import Session lands in *this* window's workspace, not globally.
+            workspace_id: currentWorkspaceId,
             sessions
         };
     }
 
+    /* A saved preset is live in at most one workspace at a time (plan §6). When
+       the backend reports the conflict, offer the two honest resolutions rather
+       than silently stealing the tab or minting a duplicate (guardrail 8). */
+    async function resolveSavedSessionConflict(conflict) {
+        const label = String(conflict.workspace_label || '').trim() || 'another workspace';
+        const moveItHere = await openGenericConfirmModal({
+            title: 'Already open elsewhere',
+            copy: `This saved session is open in ${label}.`,
+            note: 'Move it here, or cancel and open that workspace instead.',
+            confirmLabel: 'Move it here'
+        });
+        if (!moveItHere) {
+            await openWorkspaceWindow(conflict.workspace_id, { groupId: conflict.group_id });
+            setWorkspaceSaveMessage(`Opened ${label}.`, '');
+            return false;
+        }
+        await moveGroupToWorkspace(conflict.group_id, { workspaceId: currentWorkspaceId });
+        return true;
+    }
+
     async function launchSavedSession(savedSession) {
         const payload = buildSavedSessionLaunchPayload(savedSession);
-        const response = await fetch('/api/sessions', {
+        const postLaunch = () => fetch('/api/sessions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-        const data = await response.json().catch(() => ({}));
+
+        let response = await postLaunch();
+        let data = await response.json().catch(() => ({}));
+        if (response.status === 409 && data.conflict === 'saved_session_live') {
+            if (!(await resolveSavedSessionConflict(data))) {
+                return;
+            }
+            response = await postLaunch();
+            data = await response.json().catch(() => ({}));
+        }
         if (!response.ok) {
             throw new Error(data.error || `Launch failed with status ${response.status}`);
         }
@@ -1640,6 +1961,14 @@
         }
     });
 
+    /* The save confirmation borrows the session line, which is otherwise only
+       rewritten when the active tab changes. With a single tab nothing ever
+       rewrote it, so the confirmation stayed in the window chrome for the rest
+       of the session and read as part of the workspace name. It is a
+       confirmation, not a state: hand the line back on a timer. */
+    const WORKSPACE_SAVE_MESSAGE_MS = 6000;
+    let workspaceSaveMessageTimer = null;
+
     function setWorkspaceSaveMessage(message, type = '') {
         const label = document.getElementById('sessionLabel');
         if (!label || !message) {
@@ -1647,6 +1976,25 @@
         }
         label.textContent = message;
         label.dataset.workspaceSaveStatus = type;
+        if (workspaceSaveMessageTimer) {
+            clearTimeout(workspaceSaveMessageTimer);
+        }
+        workspaceSaveMessageTimer = setTimeout(
+            clearWorkspaceSaveMessage,
+            WORKSPACE_SAVE_MESSAGE_MS
+        );
+    }
+
+    function clearWorkspaceSaveMessage() {
+        if (workspaceSaveMessageTimer) {
+            clearTimeout(workspaceSaveMessageTimer);
+            workspaceSaveMessageTimer = null;
+        }
+        const label = document.getElementById('sessionLabel');
+        if (label) {
+            delete label.dataset.workspaceSaveStatus;
+        }
+        renderSessionLine();
     }
 
     function buildWorkspaceLayoutSnapshotFromState(count, className, rects, columnWeights, rowWeights, baseCount) {
@@ -1779,6 +2127,10 @@
             : '';
 
         return {
+            /* Request-only identity: the backend strips this before persisting
+               the preset and uses it to refresh this exact live pane's view
+               state for a later launcher reopen. */
+            session_id: session.session_id || '',
             title: session.title || `Terminal ${index + 1}`,
             directory: selectedDirectory,
             initial_command: startupMode === 'explorer' ? '' : (session.initial_command || ''),
@@ -2002,6 +2354,19 @@
         }
     }
 
+    async function getCurrentWorkspaceNativeZoomFactor() {
+        const api = window.pywebview?.api;
+        if (api?.get_workspace_native_zoom) {
+            try {
+                const result = await api.get_workspace_native_zoom(currentWorkspaceId);
+                if (result?.ok) {
+                    return normalizeNativeZoomFactor(result.zoom_factor);
+                }
+            } catch (_) {}
+        }
+        return getNativeSessionZoomFactor();
+    }
+
     async function saveWorkspace(button = null) {
         if (!sessionGroups.length) {
             setWorkspaceSaveMessage('No sessions to save.', 'error');
@@ -2014,13 +2379,14 @@
         }
 
         try {
-            const nativeZoomFactor = await getNativeSessionZoomFactor();
+            const nativeZoomFactor = await getCurrentWorkspaceNativeZoomFactor();
             const response = await fetch('/api/runtime-state/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 // Name the group this window is on, so the restore reopens here;
                 // desktop mode also carries the session window's current zoom.
                 body: JSON.stringify({
+                    workspace_id: currentWorkspaceId,
                     active_group_id: activeGroupId,
                     native_zoom_factor: nativeZoomFactor
                 })
@@ -2029,6 +2395,9 @@
             if (!response.ok) {
                 throw new Error(data.error || `Save failed with status ${response.status}`);
             }
+            /* Refresh the launcher's live-workspace row while this window is
+               still open, so its Open action carries the just-saved front tab. */
+            notifyWorkspacesChanged('workspace_saved');
             const savedLabel = String(data.label || '').trim();
             const savedAt = Number(data.saved_at);
             const savedTime = Number.isFinite(savedAt)
@@ -2126,6 +2495,12 @@
                 }
             });
 
+            /* Right-click offers the same moveGroupToWorkspace() call as the
+               Workspace ▸ Move Session to Workspace menu. */
+            button.addEventListener('contextmenu', event => {
+                openSessionTabContextMenu(event, group.group_id);
+            });
+
             wireSessionTabDragAndDrop(button, container);
             container.appendChild(button);
         });
@@ -2194,7 +2569,10 @@
         const response = await fetch('/api/session-groups/order', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ group_ids: groupIds })
+            body: JSON.stringify({
+                workspace_id: currentWorkspaceId,
+                group_ids: groupIds
+            })
         });
         const data = await response.json();
         if (!response.ok) {
@@ -3585,6 +3963,15 @@
                 && event.shiftKey
                 && !event.altKey
                 && event.code === 'KeyF') {
+                return false;
+            }
+            /* Same for Alt+W (workspace switch): xterm would send it on to the
+               shell as ESC w, so hand it to the document handler instead. */
+            if (event.type === 'keydown'
+                && event.altKey
+                && !event.ctrlKey
+                && !event.metaKey
+                && event.code === 'KeyW') {
                 return false;
             }
             return true;
@@ -6112,6 +6499,54 @@
         switchGroup(targetGroup.group_id);
     });
 
+    /* Alt+W walks the live workspaces (Alt+Shift+W walks back), so swapping
+       windows costs one keystroke instead of a trip through Workspace ▸ Open
+       Workspace. Opening a workspace that already has a window only focuses it,
+       so a repeated press is a plain cycle and never a second window. The
+       in-flight guard keeps a held key from queueing a burst of window opens. */
+    let workspaceCycleInFlight = false;
+
+    async function cycleWorkspaceWindow(step) {
+        if (workspaceCycleInFlight) {
+            return;
+        }
+        workspaceCycleInFlight = true;
+        try {
+            const target = nextWorkspaceInCycle(
+                await fetchLiveWorkspaces(),
+                currentWorkspaceId,
+                step
+            );
+            if (!target) {
+                showTerminalToast('No other workspace is open.', '');
+                return;
+            }
+            await openWorkspaceWindow(target.workspace_id, {
+                groupId: target.active_group_id
+            });
+        } catch (error) {
+            console.error('[GridVibe Sessions] workspace switch failed:', error);
+            showTerminalToast(`Could not switch workspace: ${error.message}`, 'error');
+        } finally {
+            workspaceCycleInFlight = false;
+        }
+    }
+
+    document.addEventListener('keydown', event => {
+        if (!event.altKey || event.ctrlKey || event.metaKey || event.repeat) {
+            return;
+        }
+        if (event.code !== 'KeyW' || isEditableShortcutTarget(event.target)) {
+            return;
+        }
+        if (!isMultiWorkspaceEnabled()) {
+            return;
+        }
+
+        event.preventDefault();
+        cycleWorkspaceWindow(event.shiftKey ? -1 : 1);
+    });
+
     document.addEventListener('keydown', async event => {
         if (!_voicePrefs.pttEnabled || !_voicePrefs.pttKeybind) return;
         if (_pttActive || _pttProcessing) return;
@@ -6449,6 +6884,19 @@
             if (loadToken !== activeLoadToken) {
                 return;
             }
+            if (workspaceGone) {
+                /* The close is already under way; a browser tab the user opened
+                   by hand cannot close itself, so leave an honest empty state
+                   rather than a load error over tabs that no longer exist. */
+                sessionGroups = [];
+                knownGroupIds = [];
+                activeGroupId = '';
+                renderSessionTabs();
+                label.textContent = 'This workspace was closed.';
+                grid.style.display = 'none';
+                document.getElementById('emptyState').classList.add('visible');
+                return;
+            }
             console.error('Initial load failed:', e);
             label.textContent = `Load error: ${e.message}`;
             grid.style.display = 'none';
@@ -6552,9 +7000,16 @@
     }
 
     async function loadSessionGroups() {
-        const response = await fetch('/api/session-groups');
+        const response = await fetch(
+            `/api/session-groups?workspace_id=${encodeURIComponent(currentWorkspaceId)}`
+        );
         const data = await response.json();
         if (!response.ok) {
+            /* Every refresh path leads here, so this is the one place that has
+               to notice the workspace itself is gone. */
+            if (data?.workspace_missing) {
+                await handleWorkspaceGone();
+            }
             throw new Error(data.error || 'Failed to load session tabs');
         }
 
@@ -6606,14 +7061,21 @@
     }
 
     async function syncNativeFullscreenState() {
-        if (!isPywebviewAvailable() || !window.pywebview.api.get_session_fullscreen_state) {
+        if (!isPywebviewAvailable()) {
             nativeFullscreen = false;
             updateFullscreenButton();
             return;
         }
 
         try {
-            const result = await window.pywebview.api.get_session_fullscreen_state();
+            const api = window.pywebview.api;
+            const result = api.get_workspace_fullscreen_state
+                ? await api.get_workspace_fullscreen_state(currentWorkspaceId)
+                : (
+                    api.get_session_fullscreen_state
+                        ? await api.get_session_fullscreen_state()
+                        : null
+                );
             nativeFullscreen = Boolean(result && result.ok && result.is_fullscreen);
         } catch (error) {
             console.error('Fullscreen state sync failed:', error);
@@ -6625,8 +7087,15 @@
 
     async function resetFullscreenState() {
         try {
-            if (isPywebviewAvailable() && window.pywebview.api.exit_session_fullscreen) {
-                const result = await window.pywebview.api.exit_session_fullscreen();
+            if (isPywebviewAvailable()) {
+                const api = window.pywebview.api;
+                const result = api.exit_workspace_fullscreen
+                    ? await api.exit_workspace_fullscreen(currentWorkspaceId)
+                    : (
+                        api.exit_session_fullscreen
+                            ? await api.exit_session_fullscreen()
+                            : null
+                    );
                 if (result && result.ok) {
                     nativeFullscreen = false;
                 }
@@ -6647,9 +7116,14 @@
     async function toggleFullscreen() {
         try {
             if (isPywebviewAvailable()) {
-                const result = await window.pywebview.api.toggle_session_fullscreen
-                    ? await window.pywebview.api.toggle_session_fullscreen()
-                    : null;
+                const api = window.pywebview.api;
+                const result = api.toggle_workspace_fullscreen
+                    ? await api.toggle_workspace_fullscreen(currentWorkspaceId)
+                    : (
+                        api.toggle_session_fullscreen
+                            ? await api.toggle_session_fullscreen()
+                            : null
+                    );
                 if (result && result.ok) {
                     nativeFullscreen = !nativeFullscreen;
                     updateFullscreenButton();
@@ -6689,7 +7163,7 @@
         clearActiveGridResize();
         clearResizeHandles();
         document.getElementById('emptyState').classList.add('visible');
-        document.getElementById('sessionLabel').textContent = sessionGroups.length ? 'No terminals in this session' : 'No sessions';
+        renderSessionLine();
         document.title = 'GridVibe — Terminals';
     }
 
@@ -6754,7 +7228,7 @@
     ───────────────────────────────────────────── */
     let statusRefreshTimer = null;
     function scheduleStatusRefresh() {
-        if (statusRefreshTimer) return;
+        if (statusRefreshTimer || workspaceGone) return;
         statusRefreshTimer = setTimeout(() => {
             statusRefreshTimer = null;
             refreshStatuses();
@@ -6762,6 +7236,9 @@
     }
 
     async function refreshStatuses() {
+        /* Nothing to reconcile against a workspace that no longer exists — the
+           window is closing, and every read would 400. */
+        if (workspaceGone) return;
         if (!gridBuilt) { initialLoad(); return; }
         try {
             const groupChanged = await loadSessionGroups();
@@ -6871,7 +7348,12 @@
                 await initialLoad();
             }
         } catch (e) {
-            console.error('Close session failed:', e);
+            /* Closing the last tab of a non-default workspace removes the
+               workspace with it, so the reload above legitimately fails —
+               loadSessionGroups() has already started closing this window. */
+            if (!workspaceGone) {
+                console.error('Close session failed:', e);
+            }
         }
     }
 
@@ -6879,14 +7361,28 @@
         await closeSessionGroup(activeGroupId);
     }
 
-    async function _closeWindowAfterLastSession() {
-        logSessionWindowAction('Last session closed — closing window');
-        if (isPywebviewAvailable() && window.pywebview.api.close_session_window) {
+    async function _closeWindowAfterLastSession(reason = 'Last session closed') {
+        logSessionWindowAction(`${reason} — closing window`);
+        /* Announce before closing: the room event that would normally relay
+           this change races the window teardown, and an emptied non-default
+           workspace is removed globally (record *and* saved snapshot), so a
+           launcher that missed it would keep listing a workspace that is gone. */
+        notifyWorkspacesChanged('workspace_emptied');
+        if (isPywebviewAvailable()) {
             try {
-                await window.pywebview.api.close_session_window();
-                return;
+                const api = window.pywebview.api;
+                const result = api.close_workspace_window
+                    ? await api.close_workspace_window(currentWorkspaceId)
+                    : (
+                        api.close_session_window
+                            ? await api.close_session_window()
+                            : null
+                    );
+                if (result?.ok) {
+                    return;
+                }
             } catch (e) {
-                console.error('[GridVibe Sessions] close_session_window failed:', e);
+                console.error('[GridVibe Sessions] close workspace window failed:', e);
             }
         }
         window.close();
@@ -7046,8 +7542,14 @@
             applyAppConfigUpdate(message || {});
         });
 
-        socket.on('session_groups_updated', () => {
-            scheduleStatusRefresh();
+        socket.on('session_groups_updated', message => {
+            if (message?.workspace_id === currentWorkspaceId) {
+                scheduleStatusRefresh();
+            }
+            /* The launcher is not in any workspace room (it has no socket), so
+               its workspace list would otherwise go stale for the whole run.
+               Relay the invalidation to it. */
+            notifyWorkspacesChanged(message?.reason || 'session_groups_updated');
         });
 
         /* Voice preferences and backend availability can change from the
@@ -7064,6 +7566,7 @@
            Skipped on the first connect — initialLoad() covers boot. */
         let hadSocketConnection = false;
         socket.on('connect', () => {
+            socket.emit('join_workspace', { workspace_id: currentWorkspaceId });
             if (!hadSocketConnection) {
                 hadSocketConnection = true;
                 return;
@@ -7136,6 +7639,11 @@
     window.addEventListener('pageshow', () => {
         _refreshVoiceRuntimeState();
         reconcileAppConfig();
+    });
+    window.addEventListener('pagehide', () => {
+        if (socket?.connected) {
+            socket.emit('leave_workspace', { workspace_id: currentWorkspaceId });
+        }
     });
     document.addEventListener('fullscreenchange', updateFullscreenButton);
     /* ─────────────────────────────────────────────

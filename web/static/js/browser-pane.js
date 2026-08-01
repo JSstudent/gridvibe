@@ -428,7 +428,7 @@
         /* `window.open(url, 'some-name')` means "reuse the window called that",
            which maps to reusing the tab we opened under that name. Without this
            every click of a button that reuses a named window (GridVibe's own
-           "Show active terminals" targets `gridvibe-sessions`) would stack up
+           "Show active terminals" targets `gridvibe-workspace-<id>`) would stack up
            another tab. */
         if (windowName) {
             const existing = pane._browserTabs.findIndex(tab => tab.windowName === windowName);

@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/terminals.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app-settings.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/workspaces.css') }}?v={{ version }}">
 </head>
 <body
     data-voice-enabled="{{ 'true' if voice_enabled else 'false' }}"
@@ -86,6 +87,45 @@
                     role="menuitem"
                     onclick="closeWorkspaceMenu(); saveWorkspace(this);"
                 >Save Workspace</button>
+                {% if multi_workspace_enabled %}
+                <button
+                    type="button"
+                    class="app-menu-item"
+                    id="renameWorkspaceItem"
+                    role="menuitem"
+                    onclick="closeWorkspaceMenu(); renameCurrentWorkspace();"
+                >Rename Workspace ...</button>
+                <button
+                    type="button"
+                    class="app-menu-item"
+                    id="newWorkspaceItem"
+                    role="menuitem"
+                    onclick="closeWorkspaceMenu(); createAndOpenWorkspace();"
+                >New Workspace ...</button>
+                <div class="workspace-submenu">
+                    <div class="workspace-submenu-title">
+                        <span>Open Workspace</span>
+                        <span class="workspace-submenu-hint">Alt+W</span>
+                    </div>
+                    <div id="openWorkspaceList" role="group" aria-label="Open workspace"></div>
+                </div>
+                <div class="workspace-submenu">
+                    <div class="workspace-submenu-title">
+                        <span>Move Session to Workspace</span>
+                        <span class="workspace-submenu-scope" id="moveWorkspaceScope" hidden></span>
+                    </div>
+                    <div id="moveWorkspaceList" role="group" aria-label="Move session to workspace"></div>
+                </div>
+                <div class="workspace-submenu">
+                    <button
+                        type="button"
+                        class="app-menu-item"
+                        id="closeWorkspaceWindowItem"
+                        role="menuitem"
+                        onclick="closeWorkspaceMenu(); closeThisWorkspaceWindow();"
+                    >Close Workspace Window</button>
+                </div>
+                {% endif %}
             </div>
         </div>
         <span class="topbar-sub" id="sessionLabel">Loading…</span>
@@ -280,6 +320,14 @@
     </div>
 </div>
 
+<!-- Workspace naming (New Workspace / Rename Workspace). In-page, never
+     window.prompt — WebView2 blocks it and GuardrailAuditFixesTestCase
+     enforces the rule. -->
+{% include 'partials/workspace_name_modal.html' %}
+
+<!-- Right-click a session tab: Move to Workspace ▸ / Move to New Workspace. -->
+<div id="workspaceContextMenu" class="workspace-context-menu" role="menu" hidden></div>
+
 <!-- One name dialog serves New file, New folder, and Rename (explorer-fs.js). -->
 <div id="explorerNameModal" class="modal-shell" aria-hidden="true">
     <div class="modal-card explorer-name-card" role="dialog" aria-modal="true" aria-labelledby="explorerNameTitle">
@@ -327,11 +375,15 @@
 <script>
     const DEFAULT_SURFACE_MODE = {{ app_surface_mode|tojson }};
     const MAX_SESSIONS = {{ max_sessions | tojson }};
+    const CURRENT_WORKSPACE_ID = {{ workspace_id | tojson }};
+    const CURRENT_WORKSPACE_LABEL = {{ workspace_label | tojson }};
+    const MULTI_WORKSPACE_ENABLED = {{ multi_workspace_enabled | tojson }};
     /* cmd / PowerShell / WSL panes only exist on Windows hosts, so the header
        shell picker is offered there only. */
     const LOCAL_SHELL_MODES_AVAILABLE = {{ local_windows_shells_available|tojson }};
 </script>
 <script src="{{ url_for('static', filename='js/shared.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/workspaces.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/app-settings.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminal-icons.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/voice-input.js') }}?v={{ version }}"></script>

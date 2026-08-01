@@ -439,9 +439,21 @@
             align-content: start;
         }
 
+        /* Three rows, not two: the Workspaces card sits between the Terminal
+           Setup card and the action bar when multi-workspace is on. Leaving the
+           third row implicit was survivable, but `.card { min-height: 0 }`
+           removes each item's automatic minimum, so the `1fr` row could be
+           squeezed to nothing and Terminal Setup collapsed to a clipped header
+           strip. The floors below keep the content cards readable and let the
+           column scroll instead. */
         .column-right {
-            grid-template-rows: 1fr auto;
+            grid-template-rows: minmax(0, 1fr) auto auto;
             align-content: start;
+        }
+
+        .column-left > .card:not(.terminal-layout-card),
+        .column-right > .terminal-card {
+            min-height: 220px;
         }
 
         .card {
@@ -1609,6 +1621,75 @@
             animation: tf-spin 0.9s linear infinite;
         }
 
+        /* Split CTA: the destination lives on the button that uses it, so there
+           is no separate control to mentally connect to the launch. The caret
+           half is hidden entirely when multi-workspace is off, leaving today's
+           single button. */
+        .launch-split {
+            display: inline-flex;
+            align-items: stretch;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 217, 255, 0.25);
+        }
+
+        .launch-split:hover {
+            box-shadow: 0 6px 28px rgba(0, 217, 255, 0.35);
+        }
+
+        .launch-split .action-btn {
+            box-shadow: none;
+        }
+
+        .launch-split .action-btn:hover {
+            box-shadow: none;
+            transform: none;
+        }
+
+        .launch-split.has-destination #launchBtn {
+            border-top-right-radius: 0;
+            border-bottom-right-radius: 0;
+        }
+
+        .action-btn-text {
+            display: inline-flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 1px;
+            min-width: 0;
+        }
+
+        .action-btn-destination {
+            font-size: 0.68rem;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+            text-transform: none;
+            opacity: 0.72;
+            max-width: 220px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .action-btn-destination[hidden] {
+            display: none;
+        }
+
+        .launch-destination-btn {
+            padding: 14px 12px;
+            border-top-left-radius: 0;
+            border-bottom-left-radius: 0;
+            border-left: 1px solid rgba(7, 11, 24, 0.28);
+        }
+
+        .launch-destination-btn[hidden] {
+            display: none;
+        }
+
+        .launch-destination-btn svg {
+            width: 18px;
+            height: 18px;
+        }
+
         .secondary-link {
             padding: 10px 18px;
             border-radius: 12px;
@@ -1616,12 +1697,21 @@
             background: var(--bg-input);
             color: var(--text);
             text-decoration: none;
+            font: inherit;
             font-size: 0.84rem;
             font-weight: 500;
             display: inline-flex;
             align-items: center;
             gap: 8px;
+            cursor: pointer;
             transition: border-color 0.2s ease, background 0.2s ease;
+        }
+
+        /* `display: inline-flex` above is an author rule, so it beats the user
+           agent's `[hidden] { display: none }` outright — hiding one of these
+           from JS needs this. */
+        .secondary-link[hidden] {
+            display: none;
         }
 
         .secondary-link:hover {
@@ -1836,7 +1926,7 @@
 
             .column-left,
             .column-right {
-                grid-template-rows: auto auto;
+                grid-template-rows: auto auto auto;
             }
 
             .terminal-card {
@@ -1998,6 +2088,15 @@
 
             .action-stack {
                 flex-direction: column;
+            }
+
+            .launch-split {
+                width: 100%;
+            }
+
+            .launch-split #launchBtn {
+                flex: 1 1 auto;
+                width: auto;
             }
 
             .action-btn {

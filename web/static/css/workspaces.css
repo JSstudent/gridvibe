@@ -1,0 +1,449 @@
+/* Multi-workspace surfaces shared by the launcher and terminals pages:
+   the launch destination control, the live-workspace list, the workspace
+   submenus, and the saved-workspace restore chooser.
+
+   Colours and radii come from tokens.css variables only — no palette literals
+   (guardrail 7). Both pages already load tokens.css before this file. */
+
+/* ── Dialog layering ──
+   Both pages stack their own `.modal-shell` dialogs (20 on the launcher, 12000
+   on the workspace page) and the shared App Settings dialog (12000), so the top
+   of the stack was decided by document order. Multi-workspace broke that: the
+   confirm and name dialogs are answers to a question *another* dialog asked —
+   Forget from the restore chooser, "Turn off multiple workspaces?" from App
+   Settings — and both of those sit later in the document, so the question was
+   painted behind the dialog that asked it and could not be clicked.
+
+   These two are always the response to whatever is already open, so they lead
+   the stack outright rather than depending on where the markup happens to sit.
+   This file is loaded last by both pages, and an id beats a class, so one rule
+   covers both. */
+#genericConfirmModal,
+#workspaceNameModal {
+    z-index: 12100;
+}
+
+.workspace-icon {
+    width: 15px;
+    height: 15px;
+    flex: 0 0 auto;
+}
+
+/* ── Workspace submenus (Open ▸ / Move to Workspace ▸) ── */
+
+.workspace-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.workspace-menu-item.is-current {
+    color: var(--gv-accent);
+}
+
+.workspace-menu-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.workspace-menu-empty {
+    padding: 8px 12px;
+    font-size: 12px;
+    color: var(--gv-dialog-muted);
+}
+
+.workspace-submenu {
+    border-top: 1px solid var(--gv-dialog-border);
+    margin-top: 4px;
+    padding-top: 4px;
+}
+
+.workspace-submenu-title {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 4px 12px;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: var(--gv-dialog-muted);
+}
+
+/* The shortcut hint and the session name are read as written, so neither takes
+   the heading's uppercasing. The hint sits at the far edge; the name follows
+   the heading it qualifies and ellipsizes when it is too long for the panel. */
+.workspace-submenu-hint,
+.workspace-submenu-scope {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    letter-spacing: 0;
+    text-transform: none;
+    opacity: 0.75;
+}
+
+.workspace-submenu-hint {
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+.workspace-submenu-scope {
+    flex: 0 1 auto;
+}
+
+.workspace-submenu-scope[hidden] {
+    display: none;
+}
+
+/* ── Session tab context menu ── */
+
+.workspace-context-menu {
+    position: fixed;
+    z-index: 1200;
+    min-width: 210px;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 6px 0;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-m);
+    background: var(--gv-dialog-bg);
+    box-shadow: var(--gv-dialog-shadow);
+    backdrop-filter: blur(12px);
+}
+
+.workspace-context-menu[hidden] {
+    display: none;
+}
+
+.workspace-context-menu .workspace-menu-item {
+    width: 100%;
+    padding: 8px 12px;
+    border: 0;
+    background: transparent;
+    color: var(--gv-dialog-text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.workspace-context-menu .workspace-menu-item:hover:not(:disabled),
+.workspace-context-menu .workspace-menu-item:focus-visible:not(:disabled) {
+    background: var(--gv-accent-soft);
+}
+
+.workspace-context-menu .workspace-menu-item:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* ── The workspace mode switch (launcher, card 04) ──
+   Sized to read as the card's headline control rather than a settings row: it
+   decides whether every launch below it can open its own window. */
+
+.workspace-mode-switch {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    padding: 14px 16px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-m);
+    background: var(--gv-dialog-panel-soft);
+    color: var(--gv-dialog-text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.workspace-mode-switch:hover:not(.is-busy),
+.workspace-mode-switch:focus-visible {
+    border-color: var(--gv-accent);
+}
+
+.workspace-mode-switch.is-on {
+    border-color: var(--gv-accent);
+    background: var(--gv-accent-soft);
+}
+
+.workspace-mode-switch.is-busy {
+    opacity: 0.6;
+    cursor: progress;
+}
+
+.workspace-mode-track {
+    position: relative;
+    flex: 0 0 auto;
+    width: 52px;
+    height: 30px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: 999px;
+    background: var(--gv-dialog-field-bg);
+    transition: background 0.18s ease, border-color 0.18s ease;
+}
+
+.workspace-mode-switch.is-on .workspace-mode-track {
+    border-color: var(--gv-accent);
+    background: var(--gv-accent);
+}
+
+.workspace-mode-thumb {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--gv-dialog-muted);
+    transition: transform 0.18s ease, background 0.18s ease;
+}
+
+.workspace-mode-switch.is-on .workspace-mode-thumb {
+    transform: translateX(22px);
+    background: var(--gv-dialog-field-bg);
+}
+
+.workspace-mode-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+
+.workspace-mode-copy strong {
+    font-size: 0.95rem;
+    letter-spacing: 0.2px;
+}
+
+.workspace-mode-state {
+    font-size: 12px;
+    color: var(--gv-dialog-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .workspace-mode-switch,
+    .workspace-mode-track,
+    .workspace-mode-thumb {
+        transition: none;
+    }
+}
+
+/* ── Launch destination (launcher, step 2) ── */
+
+.workspace-destination {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.workspace-mode-switch + .workspace-destination {
+    margin-top: 12px;
+}
+
+.workspace-destination-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.workspace-destination-row select,
+.workspace-destination-row input {
+    flex: 1 1 160px;
+    min-width: 0;
+}
+
+.workspace-destination-hint {
+    font-size: 12px;
+    color: var(--gv-dialog-muted);
+}
+
+.workspace-live-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.workspace-live-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-s);
+    background: var(--gv-dialog-panel-soft);
+}
+
+.workspace-live-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    color: var(--gv-dialog-text);
+}
+
+.workspace-live-name span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.workspace-live-meta {
+    font-size: 12px;
+    color: var(--gv-dialog-muted);
+    white-space: nowrap;
+}
+
+.workspace-live-empty {
+    padding: 10px 2px;
+    font-size: 12px;
+    color: var(--gv-dialog-muted);
+}
+
+.workspace-live-empty[hidden] {
+    display: none;
+}
+
+/* ── Restore chooser (launcher) ──
+   A dialog rather than an inline panel: its height follows the number of saved
+   workspaces, and inline it reflowed the launcher grid behind it (collapsing
+   the Terminal Setup card into a clipped header strip). */
+
+.workspace-restore-card {
+    width: min(100%, 760px);
+}
+
+.workspace-restore-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 40vh;
+    overflow-y: auto;
+}
+
+.workspace-restore-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-s);
+    background: var(--gv-dialog-field-bg);
+}
+
+.workspace-restore-row.is-disabled {
+    opacity: 0.62;
+}
+
+.workspace-restore-row label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1 1 auto;
+    min-width: 0;
+    cursor: pointer;
+}
+
+.workspace-restore-row.is-disabled label {
+    cursor: default;
+}
+
+.workspace-restore-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.workspace-restore-name {
+    color: var(--gv-dialog-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.workspace-restore-meta {
+    font-size: 12px;
+    color: var(--gv-dialog-muted);
+}
+
+.workspace-restore-reason {
+    font-size: 12px;
+    color: var(--gv-warning);
+}
+
+/* Busy states toggle a class rather than rewriting button markup
+   (guardrail 8). */
+.workspace-restore-card.busy .workspace-restore-list,
+.workspace-restore-card.busy .modal-actions button {
+    pointer-events: none;
+    opacity: 0.6;
+}
+
+.workspace-saved-entry[hidden] {
+    display: none;
+}
+
+/* ── Workspace name dialog (shared partial) ──
+   Styled here, scoped to the dialog, so the partial does not depend on either
+   page's button/field classes (the App Settings dialog uses the same trick). */
+
+#workspaceNameModal .workspace-name-card {
+    width: min(100%, 460px);
+}
+
+#workspaceNameModal .workspace-modal-form {
+    margin: 4px 0 8px;
+}
+
+#workspaceNameModal .workspace-modal-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+#workspaceNameModal .workspace-modal-field label {
+    font-size: 12px;
+    color: var(--gv-dialog-muted);
+}
+
+#workspaceNameModal .workspace-modal-input {
+    width: 100%;
+    padding: 9px 11px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-s);
+    background: var(--gv-dialog-field-bg);
+    color: var(--gv-dialog-text);
+    font: inherit;
+}
+
+#workspaceNameModal .workspace-modal-input:focus {
+    outline: none;
+    border-color: var(--gv-accent);
+}
+
+#workspaceNameModal .workspace-modal-btn {
+    padding: 8px 16px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-s);
+    background: var(--gv-dialog-field-bg);
+    color: var(--gv-dialog-text);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+#workspaceNameModal .workspace-modal-btn:hover {
+    border-color: var(--gv-accent);
+}
+
+#workspaceNameModal .workspace-modal-btn.is-primary {
+    border-color: var(--gv-accent);
+    background: var(--gv-accent-soft);
+    color: var(--gv-accent);
+    font-weight: 600;
+}
