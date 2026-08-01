@@ -1269,6 +1269,23 @@
        window dispatch goes through workspaces.js (guardrail 6).
     ───────────────────────────────────────────── */
 
+    /* The Move list always acts on the active session tab, which the heading
+       names — "Move Session to Workspace" alone reads as if it were about to
+       move whatever the destination entry is. */
+    function setMoveWorkspaceScopeLabel(groupId) {
+        const group = getGroupById(groupId);
+        const name = group ? (group.name || group.group_id) : '';
+        const scope = document.getElementById('moveWorkspaceScope');
+        if (scope) {
+            scope.textContent = name ? `(${name})` : '';
+            scope.hidden = !name;
+        }
+        document.getElementById('moveWorkspaceList')?.setAttribute(
+            'aria-label',
+            name ? `Move session ${name} to workspace` : 'Move session to workspace'
+        );
+    }
+
     async function refreshWorkspaceMenuLists() {
         if (!isMultiWorkspaceEnabled()) {
             return;
@@ -1281,6 +1298,7 @@
 
         const workspaces = await fetchLiveWorkspaces();
         const targetGroupId = getActiveWorkspaceGroupId();
+        setMoveWorkspaceScopeLabel(targetGroupId);
         renderWorkspaceMenuList(
             openList,
             workspaces.map((workspace, index) => ({
@@ -3938,6 +3956,15 @@
                 && event.code === 'KeyF') {
                 return false;
             }
+            /* Same for Alt+W (workspace switch): xterm would send it on to the
+               shell as ESC w, so hand it to the document handler instead. */
+            if (event.type === 'keydown'
+                && event.altKey
+                && !event.ctrlKey
+                && !event.metaKey
+                && event.code === 'KeyW') {
+                return false;
+            }
             return true;
         });
         return { term, fitAddon, searchAddon };
@@ -6461,6 +6488,52 @@
 
         event.preventDefault();
         switchGroup(targetGroup.group_id);
+    });
+
+    /* Alt+W walks the live workspaces (Alt+Shift+W walks back), so swapping
+       windows costs one keystroke instead of a trip through Workspace ▸ Open
+       Workspace. Opening a workspace that already has a window only focuses it,
+       so a repeated press is a plain cycle and never a second window. The
+       in-flight guard keeps a held key from queueing a burst of window opens. */
+    let workspaceCycleInFlight = false;
+
+    async function cycleWorkspaceWindow(step) {
+        if (workspaceCycleInFlight) {
+            return;
+        }
+        workspaceCycleInFlight = true;
+        try {
+            const target = nextWorkspaceInCycle(
+                await fetchLiveWorkspaces(),
+                currentWorkspaceId,
+                step
+            );
+            if (!target) {
+                showTerminalToast('No other workspace is open.', '');
+                return;
+            }
+            await openWorkspaceWindow(target.workspace_id);
+        } catch (error) {
+            console.error('[GridVibe Sessions] workspace switch failed:', error);
+            showTerminalToast(`Could not switch workspace: ${error.message}`, 'error');
+        } finally {
+            workspaceCycleInFlight = false;
+        }
+    }
+
+    document.addEventListener('keydown', event => {
+        if (!event.altKey || event.ctrlKey || event.metaKey || event.repeat) {
+            return;
+        }
+        if (event.code !== 'KeyW' || isEditableShortcutTarget(event.target)) {
+            return;
+        }
+        if (!isMultiWorkspaceEnabled()) {
+            return;
+        }
+
+        event.preventDefault();
+        cycleWorkspaceWindow(event.shiftKey ? -1 : 1);
     });
 
     document.addEventListener('keydown', async event => {

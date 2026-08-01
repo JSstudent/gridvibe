@@ -904,6 +904,42 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
         for banned in ("window.confirm(", "window.prompt(", "window.alert("):
             self.assertNotIn(banned, workspaces_js)
 
+    def test_move_submenu_names_the_session_it_acts_on(self):
+        with patch.object(api.runtime_config, "multi_workspace_enabled", True):
+            html = self.client.get("/terminals").get_data(as_text=True)
+        terminals_js = self._static("js/terminals.js")
+
+        # "Move Session to Workspace" alone does not say which session, so the
+        # heading carries the active tab's name and the list its aria-label.
+        self.assertIn('id="moveWorkspaceScope"', html)
+        self.assertIn("function setMoveWorkspaceScopeLabel(groupId)", terminals_js)
+        self.assertIn("setMoveWorkspaceScopeLabel(targetGroupId);", terminals_js)
+        self.assertIn("`Move session ${name} to workspace`", terminals_js)
+
+    def test_alt_w_walks_the_workspaces_without_the_menu(self):
+        with patch.object(api.runtime_config, "multi_workspace_enabled", True):
+            html = self.client.get("/terminals").get_data(as_text=True)
+        terminals_js = self._static("js/terminals.js")
+        workspaces_js = self._static("js/workspaces.js")
+
+        # The shortcut is discoverable from the menu it replaces.
+        self.assertIn('<span class="workspace-submenu-hint">Alt+W</span>', html)
+        # One ordering for the menu and the shortcut, so they cannot disagree.
+        self.assertIn(
+            "function nextWorkspaceInCycle(workspaces, currentWorkspaceId, step = 1)",
+            workspaces_js,
+        )
+        self.assertIn("async function cycleWorkspaceWindow(step)", terminals_js)
+        self.assertIn("cycleWorkspaceWindow(event.shiftKey ? -1 : 1);", terminals_js)
+        # It is gated on the mode and never fires while typing.
+        self.assertIn("if (!isMultiWorkspaceEnabled()) {", terminals_js)
+        self.assertIn(
+            "if (event.code !== 'KeyW' || isEditableShortcutTarget(event.target)) {",
+            terminals_js,
+        )
+        # xterm must not send Alt+W on to the shell as ESC w.
+        self.assertIn("&& event.code === 'KeyW') {", terminals_js)
+
 
 class MultiWorkspaceRestoreTestCase(unittest.TestCase):
     """Stage 4 selective restore, Forget/Dismiss, the slot cap, and §9.3."""

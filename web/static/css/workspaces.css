@@ -60,11 +60,41 @@
 }
 
 .workspace-submenu-title {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
     padding: 4px 12px;
     font-size: 11px;
     letter-spacing: 0.06em;
     text-transform: uppercase;
+    white-space: nowrap;
     color: var(--gv-dialog-muted);
+}
+
+/* The shortcut hint and the session name are read as written, so neither takes
+   the heading's uppercasing. The hint sits at the far edge; the name follows
+   the heading it qualifies and ellipsizes when it is too long for the panel. */
+.workspace-submenu-hint,
+.workspace-submenu-scope {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    letter-spacing: 0;
+    text-transform: none;
+    opacity: 0.75;
+}
+
+.workspace-submenu-hint {
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+.workspace-submenu-scope {
+    flex: 0 1 auto;
+}
+
+.workspace-submenu-scope[hidden] {
+    display: none;
 }
 
 /* ── Session tab context menu ── */

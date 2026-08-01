@@ -75,6 +75,24 @@
         return ok && Array.isArray(data.workspaces) ? data.workspaces : [];
     }
 
+    /* The Alt+W walk. Same list, same order as the Open Workspace menu, so the
+       shortcut and the menu can never disagree about what "the next workspace"
+       is. Returns null when there is nowhere else to go — a window whose own
+       workspace is not in the list (it was just pruned) still walks from the
+       front rather than getting stuck. */
+    function nextWorkspaceInCycle(workspaces, currentWorkspaceId, step = 1) {
+        const list = Array.isArray(workspaces) ? workspaces : [];
+        if (list.length < 2) {
+            return null;
+        }
+        const currentIndex = list.findIndex(
+            workspace => workspace.workspace_id === currentWorkspaceId
+        );
+        const offset = currentIndex === -1 ? 0 : currentIndex + step;
+        const next = list[((offset % list.length) + list.length) % list.length];
+        return next && next.workspace_id !== currentWorkspaceId ? next : null;
+    }
+
     /* ── Cross-window workspace invalidation ──
        The launcher has no Socket.IO connection, so the workspace rooms cannot
        reach it. Terminal windows announce every change that alters a workspace

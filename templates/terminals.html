@@ -103,11 +103,17 @@
                     onclick="closeWorkspaceMenu(); createAndOpenWorkspace();"
                 >New Workspace ...</button>
                 <div class="workspace-submenu">
-                    <div class="workspace-submenu-title">Open Workspace</div>
+                    <div class="workspace-submenu-title">
+                        <span>Open Workspace</span>
+                        <span class="workspace-submenu-hint">Alt+W</span>
+                    </div>
                     <div id="openWorkspaceList" role="group" aria-label="Open workspace"></div>
                 </div>
                 <div class="workspace-submenu">
-                    <div class="workspace-submenu-title">Move Session to Workspace</div>
+                    <div class="workspace-submenu-title">
+                        <span>Move Session to Workspace</span>
+                        <span class="workspace-submenu-scope" id="moveWorkspaceScope" hidden></span>
+                    </div>
                     <div id="moveWorkspaceList" role="group" aria-label="Move session to workspace"></div>
                 </div>
                 <div class="workspace-submenu">
