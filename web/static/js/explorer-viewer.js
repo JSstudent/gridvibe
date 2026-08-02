@@ -6111,12 +6111,24 @@
         const wasActive = pane._explorerActiveTabId === id;
         pane._explorerTabs.splice(position, 1);
         if (wasActive) {
-            const fallback = pane._explorerTabs[Math.max(0, position - 1)] || explorerPreviewTab(pane);
-            activateExplorerTab(index, fallback.id);
-        } else {
-            renderExplorerTabStrip(index);
-            persistExplorerTabsToSession(index);
+            /* Closing the tab you are reading falls back to Preview, not to
+               whichever pinned tab happened to sit beside it — the neighbour
+               is an accident of open order, so landing there means reading a
+               file you did not ask for and (because tabs load lazily) paying a
+               fetch for it. Preview is the pane's own navigation surface and
+               returns to the listing or file it was already holding.
+               Re-pointed and rendered here rather than through
+               activateExplorerTab: its already-shown guard would short-circuit
+               in the one state where the viewer holds Preview while a pinned
+               tab is active (a pinned tab whose file failed to open over a
+               directory listing), leaving the closed tab in the strip. The
+               outgoing tab's view is not captured — it is being discarded with
+               the tab, and its record is already gone. */
+            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+            renderExplorerActiveTab(index);
         }
+        renderExplorerTabStrip(index);
+        persistExplorerTabsToSession(index);
     }
 
     /* One-shot per session id: re-apply the Markdown appearance a saved

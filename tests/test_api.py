@@ -2766,6 +2766,31 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("var(--t-accent)", located)
         self.assertNotIn("#", located)
 
+    def test_closing_the_active_tab_falls_back_to_preview(self):
+        """Closing the tab you are reading lands on Preview, not the neighbour."""
+        viewer = self._static("js/explorer-viewer.js")
+        close = viewer[
+            viewer.index("async function closeExplorerTab(index, id)"):
+            viewer.index("const appliedExplorerMdSessions = new Set();")
+        ]
+        # No positional neighbour lookup survives.
+        self.assertNotIn("position - 1", close)
+        self.assertIn("pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;", close)
+        # Rendered directly rather than through activateExplorerTab, whose
+        # already-shown guard would short-circuit in the one state where the
+        # viewer holds Preview while a pinned tab is active, stranding the
+        # closed tab in the strip.
+        self.assertNotIn("activateExplorerTab(index", close)
+        self.assertIn("renderExplorerActiveTab(index);", close)
+        # Both paths (active and background close) update the strip and the
+        # persisted tab set exactly once.
+        self.assertEqual(close.count("renderExplorerTabStrip(index);"), 1)
+        self.assertEqual(close.count("persistExplorerTabsToSession(index);"), 1)
+        # The permanent Preview tab is still not closable, and a dirty edit in
+        # the closed tab is still confirmed before anything is discarded.
+        self.assertIn("if (!pane || id === EXPLORER_PREVIEW_TAB_ID) {", close)
+        self.assertIn("confirmDiscardExplorerEdit(index, 'Closing this tab')", close)
+
     def test_terminals_page_explorer_preview_back_button_removed(self):
         """Wave 1 / 2.a (OD-3): the vestigial single-file Back button is gone."""
         response = self.client.get("/terminals")
