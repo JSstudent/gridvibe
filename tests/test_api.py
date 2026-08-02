@@ -15823,7 +15823,11 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
     def test_sessions_post_round_trips_agent_auto_mode(self):
         api.session_manager.reset_sessions()
         self.addCleanup(api.session_manager.reset_sessions)
-        with patch.object(api, "_sanitize_agent_launch_commands", return_value=[]), patch.object(
+        # Patch the module the launch path actually resolves: `launch_session_group()`
+        # re-imports the symbol from `web.agents` at call time, so patching the
+        # `web.api` re-export is a no-op and the real preflight runs — which
+        # clears the command on any machine without the `claude` CLI.
+        with patch.object(web_agents, "_sanitize_agent_launch_commands", return_value=[]), patch.object(
             api.socketio, "start_background_task"
         ):
             response = self.client.post(
