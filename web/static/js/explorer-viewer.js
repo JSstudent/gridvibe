@@ -5820,7 +5820,7 @@
     /* 2.g tab-strip affordances: middle-click closes a pinned tab (same
        guard as the ×), pinned tabs drag-reorder among themselves (OD-6: the
        permanent Preview tab keeps the first slot and is not draggable),
-       double-clicking the Preview tab promotes its shown file to a pinned
+       double-clicking the Preview tab pins its shown file as a background
        tab in the same view mode, and double-clicking a pinned tab locates
        its file in the Files tree. */
     function wireExplorerTabStripInteractions(index, tabEl) {
@@ -5925,10 +5925,12 @@
     }
 
     /* 2.g: double-clicking the Preview tab keeps its transient file — the
-       shown file becomes a pinned tab carrying the same view mode, scroll,
-       and zoom. The already-rendered viewer DOM is handed to the pinned tab
-       (nothing is re-fetched); an existing pinned tab for the path is just
-       activated, never clobbered. */
+       shown file gains a pinned tab carrying the same view mode, scroll, and
+       zoom. Like the tree's ↗ it opens in the *background*: the viewer stays
+       on Preview showing the same file, so a double-click is a bookmark and
+       not a jump. Nothing is fetched — the new tab reloads lazily on its
+       first click, restoring the copied view state. An existing pinned tab
+       for the path is flashed, never clobbered or activated. */
     function promoteExplorerPreviewTab(index) {
         const pane = terminals[index];
         if (!pane) {
@@ -5946,13 +5948,17 @@
         const key = explorerNormalizeTabPath(path);
         const existing = pane._explorerTabs.find(tab => tab.pinned && explorerNormalizeTabPath(tab.path) === key);
         if (existing) {
-            activateExplorerTab(index, existing.id);
+            flashExplorerTab(index, existing.id);
             return;
         }
         // Fold the live mode + scroll into the Preview record, then copy the
-        // full per-tab state onto the new pinned tab.
+        // full per-tab state onto the new pinned tab. Focus is untouched, so
+        // the capture stores against the tab whose DOM is actually shown.
         explorerCaptureActiveTabView(index);
-        const pinnedTab = explorerAssignOpenTab(pane, path, { pinned: true });
+        const pinnedTab = explorerEnsurePinnedTab(pane, path);
+        if (!pinnedTab) {
+            return;
+        }
         /* The promoted tab shows the file the Preview tab was already showing,
            so it inherits that file's Git badge. Without this the new tab
            renders unbadged (no `?` on a brand-new file, no `M` on a modified
@@ -5970,7 +5976,6 @@
         if (preview.preferredMode) {
             pinnedTab.preferredMode = preview.preferredMode;
         }
-        pane._explorerRenderedTabId = pinnedTab.id;
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
     }
