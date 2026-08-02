@@ -151,7 +151,6 @@ from web.runtime_state import (  # noqa: F401 - re-exported for backwards compat
     capture_live_workspaces,
     capture_workspace,
     clear_workspace,
-    iter_live_workspaces,
     list_restorable_workspaces,
     load_restorable_workspace,
 )
@@ -2615,7 +2614,6 @@ def close_all_sessions():
 def handle_connect():
     """Handle client connection."""
     logger.info(f"Client connected: {request.sid}") # type: ignore
-    emit('connected', {'status': 'connected'})
 
 
 @socketio.on('disconnect')
@@ -2633,13 +2631,12 @@ def handle_join_workspace(data):
             data.get("workspace_id") if isinstance(data, dict) else None
         )
     except ValueError as exc:
-        emit("error", {"message": str(exc)})
+        logger.warning(f"join_workspace rejected: {exc}")
         return
     if not _workspace_exists(workspace_id):
-        emit("error", {"message": "Workspace not found"})
+        logger.warning(f"join_workspace: workspace not found: {workspace_id}")
         return
     join_room(workspace_room(workspace_id))
-    emit("workspace_joined", {"workspace_id": workspace_id})
 
 
 @socketio.on('leave_workspace')
@@ -2650,7 +2647,7 @@ def handle_leave_workspace(data):
             data.get("workspace_id") if isinstance(data, dict) else None
         )
     except ValueError as exc:
-        emit("error", {"message": str(exc)})
+        logger.warning(f"leave_workspace rejected: {exc}")
         return
     leave_room(workspace_room(workspace_id))
 
@@ -2679,7 +2676,7 @@ def handle_join_session(data):
     session_id = data.get('session_id')
 
     if not session_id:
-        emit('error', {'message': 'Missing session_id'})
+        logger.warning("join_session rejected: missing session_id")
         return
 
     session = session_manager.get_session(session_id)
@@ -2735,7 +2732,7 @@ def handle_clear_terminal_buffer(data):
     session_id = data.get('session_id')
 
     if not session_id:
-        emit('error', {'message': 'Missing session_id'})
+        logger.warning("clear_terminal_buffer rejected: missing session_id")
         return
 
     _clear_terminal_output_buffer(session_id)
@@ -2756,14 +2753,14 @@ def handle_terminal_input(data):
     input_data = data.get('data', '')
 
     if not session_id:
-        emit('error', {'message': 'Missing session_id'})
+        logger.warning("terminal_input rejected: missing session_id")
         return
 
     with connection_lock:
         connection = ssh_connections.get(session_id)
 
     if not connection:
-        emit('error', {'message': 'Session is not connected'})
+        logger.warning(f"terminal_input: session {session_id} is not connected")
         return
 
     try:

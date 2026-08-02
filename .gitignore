@@ -41,8 +41,8 @@ runtime_state.json
 gridvibe.log
 .encryption_key
 .known_hosts
-config.json
-config.local.json
+config*.json
+!default_config.json
 .voice-deps-declined
 
 # Local environment and credentials

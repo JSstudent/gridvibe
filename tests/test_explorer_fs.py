@@ -1562,7 +1562,7 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
         self.assertIn("pane._explorerFsBusy", self.controller)
         self.assertIn("function cancelExplorerFilesystemUiForSession", self.controller)
         self.assertIn("function hasActiveExplorerFilesystemOperation", self.controller)
-        self.assertIn("closeGenericConfirmModalForOwner", self.terminals)
+        self.assertIn("closeGenericConfirmModalForOwner", self.controller)
         for caller in ("closeTerminalPane", "closeSessionGroup", "switchGroup"):
             section = self.terminals[self.terminals.index(f"function {caller}") :]
             self.assertIn("cancelExplorerFilesystemUiForSession", section[:3000])

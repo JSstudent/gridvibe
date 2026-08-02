@@ -406,37 +406,6 @@
         return metaParts;
     }
 
-    function explorerFindRanges(content, query, maxMatches = EXPLORER_SEARCH_MAX_MATCHES) {
-        const source = String(content || '');
-        const needle = String(query || '');
-        if (!source || !needle) {
-            return [];
-        }
-
-        const ranges = [];
-        const normalizedNeedle = needle.toLowerCase();
-        const stride = Math.max(EXPLORER_SEARCH_CHUNK_SIZE, normalizedNeedle.length);
-        for (let offset = 0; offset < source.length && ranges.length < maxMatches; offset += stride) {
-            const chunkEnd = Math.min(source.length, offset + stride + normalizedNeedle.length - 1);
-            const normalizedChunk = source.slice(offset, chunkEnd).toLowerCase();
-            let localCursor = 0;
-            while (localCursor < normalizedChunk.length && ranges.length < maxMatches) {
-                const matchIndex = normalizedChunk.indexOf(normalizedNeedle, localCursor);
-                if (matchIndex === -1) {
-                    break;
-                }
-                const absoluteIndex = offset + matchIndex;
-                if (absoluteIndex >= offset + stride && chunkEnd < source.length) {
-                    break;
-                }
-                ranges.push({ start: absoluteIndex, end: absoluteIndex + needle.length });
-                localCursor = matchIndex + Math.max(needle.length, 1);
-            }
-        }
-        ranges.capped = ranges.length >= maxMatches;
-        return ranges;
-    }
-
     async function explorerFindRangesAsync(content, query, token, maxMatches = EXPLORER_SEARCH_MAX_MATCHES) {
         const source = String(content || '');
         const needle = String(query || '');
@@ -1302,12 +1271,6 @@
         }
         panel.dataset.contextMenuWired = 'true';
         panel.addEventListener('contextmenu', event => handleExplorerContextMenu(event, index));
-    }
-
-    /* Backwards-compatible name retained for extracted-page contract tests and
-       callers outside this module; all behavior lives in the generalized menu. */
-    function handleExplorerCopyPathMenu(event, index) {
-        handleExplorerContextMenu(event, index);
     }
 
     function wireExplorerCopyPathMenu(panel, index) {
@@ -5663,10 +5626,6 @@
             viewer = document.getElementById(`explorer-viewer-${index}`);
         }
         return viewer;
-    }
-
-    function explorerViewerEl(index) {
-        return explorerEnsureViewerShell(index);
     }
 
     /* ── Preview-header breadcrumb (2.d, OD-3) ──

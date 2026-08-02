@@ -82,17 +82,6 @@
         }
     }
 
-    function _saveVoicePrefs() {
-        try {
-            window.localStorage?.setItem(VOICE_PREFS_STORAGE_KEY, JSON.stringify(_voicePrefs));
-        } catch (_) {}
-        fetch('/api/voice-prefs', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(_voicePrefs)
-        }).catch(() => {});
-    }
-
     async function _loadVoicePrefsFromServer() {
         try {
             const resp = await fetch('/api/voice-prefs');

@@ -546,8 +546,6 @@
     let savedSessionResolver = null;
     let saveSessionAsResolver = null;
     let closeSessionConfirmResolver = null;
-    let genericConfirmResolver = null;
-    let genericConfirmOwner = null;
     const MAX_SPLIT_TERMINALS = Math.min(16, Number(MAX_SESSIONS || 16));
 
     function isSessionModeSwitchPending(sessionId) {
@@ -1622,58 +1620,6 @@
         });
     }
 
-    function closeGenericConfirmModal(result = false) {
-        const modal = document.getElementById('genericConfirmModal');
-        if (!modal) {
-            return;
-        }
-        modal.classList.remove('visible');
-        modal.setAttribute('aria-hidden', 'true');
-        if (genericConfirmResolver) {
-            const resolver = genericConfirmResolver;
-            genericConfirmResolver = null;
-            genericConfirmOwner = null;
-            resolver(result);
-        }
-    }
-
-    function closeGenericConfirmModalForOwner(owner, result = false) {
-        if (!owner || genericConfirmOwner !== owner) {
-            return false;
-        }
-        closeGenericConfirmModal(result);
-        return true;
-    }
-
-    /* Reusable in-page confirm shell for irreversible actions (WebView2 blocks
-       window.confirm). Resolves true on accept, false on cancel/dismiss. */
-    function openGenericConfirmModal({ title = 'Are you sure?', copy = '', note = '', confirmLabel = 'Confirm', danger = false, owner = null } = {}) {
-        const modal = document.getElementById('genericConfirmModal');
-        if (!modal) {
-            return Promise.resolve(false);
-        }
-        closeGenericConfirmModal(false);
-        genericConfirmOwner = owner;
-        document.getElementById('genericConfirmTitle').textContent = title;
-        document.getElementById('genericConfirmCopy').textContent = copy;
-        const noteEl = document.getElementById('genericConfirmNote');
-        noteEl.textContent = note || '';
-        noteEl.hidden = !note;
-        const acceptButton = document.getElementById('genericConfirmAccept');
-        acceptButton.textContent = confirmLabel;
-        acceptButton.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`;
-        modal.classList.add('visible');
-        modal.setAttribute('aria-hidden', 'false');
-
-        window.setTimeout(() => {
-            document.getElementById('genericConfirmCancel').focus();
-        }, 0);
-
-        return new Promise(resolve => {
-            genericConfirmResolver = resolve;
-        });
-    }
-
     /* One misclick on a tab's × must not silently kill live terminals
        (sessions are memory-only), so closing a group with ≥1 connected
        terminal asks first. Dead groups close without the dialog. */
@@ -1928,20 +1874,6 @@
         closeCloseSessionConfirmModal(true);
     });
 
-    document.getElementById('genericConfirmModal').addEventListener('click', event => {
-        if (event.target.id === 'genericConfirmModal') {
-            closeGenericConfirmModal(false);
-        }
-    });
-
-    document.getElementById('genericConfirmCancel').addEventListener('click', () => {
-        closeGenericConfirmModal(false);
-    });
-
-    document.getElementById('genericConfirmAccept').addEventListener('click', () => {
-        closeGenericConfirmModal(true);
-    });
-
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             closeSessionsMenu();
@@ -1954,9 +1886,6 @@
             }
             if (document.getElementById('closeSessionConfirmModal').classList.contains('visible')) {
                 closeCloseSessionConfirmModal(false);
-            }
-            if (document.getElementById('genericConfirmModal').classList.contains('visible')) {
-                closeGenericConfirmModal(false);
             }
         }
     });
@@ -2888,10 +2817,6 @@
             return Math.floor(availableWidth / cellWidth) >= MIN_SPLIT_COLS
                 && Math.floor(availableHeight / cellHeight) >= MIN_SPLIT_ROWS;
         });
-    }
-
-    function hasSharedGridEdge(rects, axis, lineIndex) {
-        return getSharedGridEdgeSegments(rects, axis, lineIndex).length > 0;
     }
 
     function getSharedGridEdgeSegments(rects, axis, lineIndex) {
@@ -7355,10 +7280,6 @@
                 console.error('Close session failed:', e);
             }
         }
-    }
-
-    async function closeCurrentSession() {
-        await closeSessionGroup(activeGroupId);
     }
 
     async function _closeWindowAfterLastSession(reason = 'Last session closed') {
