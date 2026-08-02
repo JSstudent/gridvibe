@@ -1857,6 +1857,22 @@
         return pane._explorerMode === 'file' && (pane._explorerFilePath || '') === path;
     }
 
+    /* Find a tree row's entry record by path in the loaded children of its
+       parent directory. Used to carry the row's Git status onto a tab the row
+       opens; null whenever that directory is not loaded. */
+    function explorerTreeEntryForPath(pane, path) {
+        const value = String(path || '');
+        if (!value || !(pane?._explorerTreeChildren instanceof Map)) {
+            return null;
+        }
+        const separator = value.lastIndexOf('/');
+        const entries = pane._explorerTreeChildren.get(separator === -1 ? '' : value.slice(0, separator));
+        if (!Array.isArray(entries)) {
+            return null;
+        }
+        return entries.find(entry => (entry.path || '') === value) || null;
+    }
+
     function explorerTreeRowHtml(pane, entry, depth) {
         const isDirectory = entry.type === 'directory';
         const path = entry.path || '';
@@ -1977,7 +1993,10 @@
         panel.querySelectorAll('[data-explorer-tree-open-tab]').forEach(button => {
             button.addEventListener('click', event => {
                 event.stopPropagation();
-                openExplorerFile(index, button.dataset.explorerTreeOpenTab || '', { pinned: true });
+                const path = button.dataset.explorerTreeOpenTab || '';
+                openExplorerFileInBackgroundTab(index, path, {
+                    git: explorerTreeEntryForPath(terminals[index], path)?.git || null
+                });
             });
         });
         if (typeof refreshExplorerFilesystemCutSource === 'function') {
@@ -5565,14 +5584,41 @@
         }
     }
 
-    /* Choose (and if needed create) the tab a file should load into. A `+`
-       action or Markdown link pins a deduplicated tab; an explicit `tab`
-       re-renders that tab; every other plain click (Files tree, Git sidebar)
-       loads into the permanent Preview tab — pinned tabs are never hijacked,
-       even when they already show the same path. */
-    function explorerAssignOpenTab(pane, path, { pinned = false, tab = '' } = {}) {
+    /* Create (or reuse) the deduplicated pinned tab for a path without
+       deciding what the viewer shows — the caller owns focus. At the cap the
+       oldest pinned tab that is not the active one is evicted. */
+    function explorerEnsurePinnedTab(pane, path) {
         ensureExplorerTabState(pane);
         const key = explorerNormalizeTabPath(path);
+        if (!key) {
+            return null;
+        }
+        const name = explorerBaseName(path);
+        let pinnedTab = pane._explorerTabs.find(entry => entry.pinned && explorerNormalizeTabPath(entry.path) === key);
+        if (!pinnedTab) {
+            const pinnedCount = pane._explorerTabs.filter(entry => entry.pinned).length;
+            if (pinnedCount >= EXPLORER_MAX_PINNED_TABS) {
+                const oldest = pane._explorerTabs.findIndex(entry => entry.pinned && entry.id !== pane._explorerActiveTabId);
+                if (oldest !== -1) {
+                    pane._explorerTabs.splice(oldest, 1);
+                }
+            }
+            pinnedTab = { id: key, pinned: true, path, name };
+            pane._explorerTabs.push(pinnedTab);
+        } else {
+            pinnedTab.path = path;
+            pinnedTab.name = name;
+        }
+        return pinnedTab;
+    }
+
+    /* Choose (and if needed create) the tab a file should load into. A
+       Markdown link pins a deduplicated tab; an explicit `tab` re-renders
+       that tab; every other plain click (Files tree, Git sidebar) loads into
+       the permanent Preview tab — pinned tabs are never hijacked, even when
+       they already show the same path. */
+    function explorerAssignOpenTab(pane, path, { pinned = false, tab = '' } = {}) {
+        ensureExplorerTabState(pane);
         const name = explorerBaseName(path);
 
         if (tab) {
@@ -5585,24 +5631,12 @@
             }
         }
 
-        if (pinned && key) {
-            let pinnedTab = pane._explorerTabs.find(entry => entry.pinned && explorerNormalizeTabPath(entry.path) === key);
-            if (!pinnedTab) {
-                const pinnedCount = pane._explorerTabs.filter(entry => entry.pinned).length;
-                if (pinnedCount >= EXPLORER_MAX_PINNED_TABS) {
-                    const oldest = pane._explorerTabs.findIndex(entry => entry.pinned && entry.id !== pane._explorerActiveTabId);
-                    if (oldest !== -1) {
-                        pane._explorerTabs.splice(oldest, 1);
-                    }
-                }
-                pinnedTab = { id: key, pinned: true, path, name };
-                pane._explorerTabs.push(pinnedTab);
-            } else {
-                pinnedTab.path = path;
-                pinnedTab.name = name;
+        if (pinned) {
+            const pinnedTab = explorerEnsurePinnedTab(pane, path);
+            if (pinnedTab) {
+                pane._explorerActiveTabId = pinnedTab.id;
+                return pinnedTab;
             }
-            pane._explorerActiveTabId = pinnedTab.id;
-            return pinnedTab;
         }
 
         const preview = explorerPreviewTab(pane);
@@ -5610,6 +5644,63 @@
         preview.name = name;
         pane._explorerActiveTabId = preview.id;
         return preview;
+    }
+
+    /* Scroll a tab into view in the strip and pulse it. Clicking ↗ on a file
+       that already has a tab deliberately changes no focus, so without this
+       the click looks like it did nothing; the pulse points at the tab that
+       was already there. Mirrors focusExplorerTreeRow's locate flash. */
+    function flashExplorerTab(index, id) {
+        const strip = document.getElementById(`explorer-tabs-${index}`);
+        if (!strip || !id) {
+            return false;
+        }
+        // Matched by dataset rather than an attribute selector: a tab id is a
+        // file path, which is not safe to interpolate into a CSS selector.
+        const tabEl = Array.from(strip.querySelectorAll('[data-explorer-tab]'))
+            .find(entry => (entry.dataset.explorerTab || '') === id);
+        if (!tabEl) {
+            return false;
+        }
+        tabEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        tabEl.classList.add('explorer-tab-located');
+        window.setTimeout(() => tabEl.classList.remove('explorer-tab-located'), 1200);
+        return true;
+    }
+
+    /* The tree row's ↗ opens a file in a *background* tab: the tab joins the
+       strip while the viewer keeps showing whatever the user is reading, so
+       several files can be queued without losing the current one. Nothing is
+       fetched here — the tab carries only its path, and activateExplorerTab
+       loads it on first click exactly like a tab restored from a snapshot.
+       An already-open path is not re-focused either; it only flashes, so the
+       repeated click still answers without moving the viewer. */
+    function openExplorerFileInBackgroundTab(index, path, { git = null } = {}) {
+        const pane = terminals[index];
+        if (!pane || !isExplorerSession(pane._session) || !sessionIds[index]) {
+            return false;
+        }
+        const key = explorerNormalizeTabPath(path);
+        const alreadyOpen = Boolean(key) && ensureExplorerTabState(pane)
+            .some(tab => tab.pinned && explorerNormalizeTabPath(tab.path) === key);
+        const pinnedTab = explorerEnsurePinnedTab(pane, path);
+        if (!pinnedTab) {
+            return false;
+        }
+        /* Seed the Git badge from the tree row that opened the tab, so a
+           background tab is badged the same as one opened in the foreground
+           (renderExplorerFile sets it from the fetched file); a later sidebar
+           sync reconciles it. */
+        if (git && !pinnedTab.git) {
+            pinnedTab.git = git;
+        }
+        renderExplorerTabStrip(index);
+        persistExplorerTabsToSession(index);
+        // After the strip is rebuilt, so the flash lands on the live element.
+        if (alreadyOpen) {
+            flashExplorerTab(index, pinnedTab.id);
+        }
+        return true;
     }
 
     function explorerEnsureViewerShell(index) {
