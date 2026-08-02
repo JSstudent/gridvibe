@@ -2291,19 +2291,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("tab.pinned && tab.id === draggedId", reorder)
         self.assertIn("insertAt = Math.max(insertAt, previewPosition + 1);", reorder)
         self.assertIn("persistExplorerTabsToSession(index);", reorder)
-        # Promotion hands the rendered DOM to the new pinned tab with the same
-        # view mode / scroll / zoom — no re-fetch — and never clobbers an
+        # Promotion copies the Preview tab's view mode / scroll / zoom onto the
+        # new pinned tab — no re-fetch — and never clobbers or activates an
         # existing pinned tab for the path.
         promote = html[
             html.index("function promoteExplorerPreviewTab(index)"):
             html.index("function renderExplorerViewerEmpty(index)")
         ]
         self.assertIn("pinnedTab.view = { ...preview.view };", promote)
-        self.assertIn("pane._explorerRenderedTabId = pinnedTab.id;", promote)
         self.assertNotIn("openExplorerFile(", promote)
-        self.assertIn("activateExplorerTab(index, existing.id);", promote)
+        self.assertIn("flashExplorerTab(index, existing.id);", promote)
         # Activating an already-shown tab is a no-op, so the double-click's
-        # leading single-clicks cannot race the promotion with re-fetches.
+        # leading single-clicks on the Preview tab cannot race the promotion
+        # with re-fetches.
         self.assertIn(
             "pane._explorerActiveTabId === tab.id && pane._explorerRenderedTabId === tab.id",
             html,
@@ -2765,6 +2765,36 @@ class ApiRoutesTestCase(unittest.TestCase):
         located = located[: located.index("}")]
         self.assertIn("var(--t-accent)", located)
         self.assertNotIn("#", located)
+
+    def test_preview_double_click_pins_in_the_background(self):
+        """Double-clicking Preview bookmarks its file; the viewer does not jump."""
+        viewer = self._static("js/explorer-viewer.js")
+        promote = viewer[
+            viewer.index("function promoteExplorerPreviewTab(index)"):
+            viewer.index("function revealExplorerTabInTree(index, id)")
+        ]
+        # Focus is untouched: the non-focusing helper is used, the rendered-tab
+        # stamp stays on Preview (whose DOM is still what the viewer shows),
+        # and an existing tab for the path flashes instead of being activated.
+        self.assertIn("explorerEnsurePinnedTab(pane, path)", promote)
+        self.assertNotIn("explorerAssignOpenTab", promote)
+        self.assertNotIn("_explorerActiveTabId =", promote)
+        self.assertNotIn("_explorerRenderedTabId =", promote)
+        self.assertIn("flashExplorerTab(index, existing.id);", promote)
+        self.assertNotIn("activateExplorerTab(index", promote)
+        # The carried per-tab state still rides along, so the first click on
+        # the new tab restores the mode/scroll/zoom Preview had.
+        for carried in (
+            "pinnedTab.git = preview.git || null;",
+            "pinnedTab.view = { ...preview.view };",
+            "pinnedTab.fontSize = preview.fontSize;",
+            "pinnedTab.lineWrap = { ...preview.lineWrap };",
+            "pinnedTab.preferredMode = preview.preferredMode;",
+        ):
+            self.assertIn(carried, promote)
+        # Still refuses to pin a directory listing or a half-loaded viewer.
+        self.assertIn("pane._explorerMode !== 'file'", promote)
+        self.assertIn("pane._explorerRenderedTabId !== EXPLORER_PREVIEW_TAB_ID", promote)
 
     def test_closing_the_active_tab_falls_back_to_preview(self):
         """Closing the tab you are reading lands on Preview, not the neighbour."""
