@@ -2588,6 +2588,16 @@
             color: var(--explorer-text);
         }
 
+        /* Already-open flash: the tree's ↗ on a file that already has a tab
+           deliberately keeps the viewer where it is, so it pulses the tab that
+           was already there instead. Same idea as the locate-in-tree flash. */
+        .explorer-tab.explorer-tab-located {
+            border-color: var(--t-accent);
+            outline: 1px solid var(--t-accent);
+            outline-offset: -1px;
+            color: var(--explorer-text);
+        }
+
         .explorer-tab-main {
             display: inline-flex;
             align-items: center;

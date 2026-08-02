@@ -1699,12 +1699,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="explorer-viewer-${index}"', html)
         self.assertIn("data-explorer-tab-open", html)
         self.assertIn("data-explorer-tab-close", html)
-        # A `+` control on each tree file row opens a pinned tab (event-isolated).
+        # A `↗` control on each tree file row opens a pinned tab (event-isolated)
+        # in the background — see the focus contract test below.
         self.assertIn("data-explorer-tree-open-tab", html)
-        self.assertIn(
-            "openExplorerFile(index, button.dataset.explorerTreeOpenTab || '', { pinned: true });",
-            html,
-        )
+        self.assertIn("openExplorerFileInBackgroundTab(index, path, {", html)
         # First show routes through the viewer, not a directory listing.
         self.assertIn("return openExplorerViewer(index);", html)
         # Styling hooks (token-driven, no palette literals).
@@ -2702,6 +2700,96 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("background: var(--explorer-open-folder-bg);", html)
         self.assertIn("color: var(--explorer-open-folder-text);", html)
         self.assertIn("background: var(--explorer-open-folder-hover-bg);", html)
+
+    def test_tree_open_tab_button_opens_the_tab_in_the_background(self):
+        """The tree row ↗ queues a tab without stealing the viewer's focus.
+
+        Opening three files in a row must leave the reader on the file they
+        were already looking at, so the opener only touches the tab strip.
+        """
+        viewer = self._static("js/explorer-viewer.js")
+        opener = viewer[
+            viewer.index("function openExplorerFileInBackgroundTab(index, path,"):
+            viewer.index("function explorerEnsureViewerShell(index)")
+        ]
+        # No focus change, no viewer repaint, and no fetch — activateExplorerTab
+        # loads the file lazily when the tab is first clicked.
+        self.assertNotIn("_explorerActiveTabId =", opener)
+        self.assertNotIn("_explorerRenderedTabId", opener)
+        self.assertNotIn("openExplorerFile(", opener)
+        self.assertNotIn("fetch(", opener)
+        # The tab still joins the strip and the persisted session snapshot.
+        self.assertIn("explorerEnsurePinnedTab(pane, path)", opener)
+        self.assertIn("renderExplorerTabStrip(index);", opener)
+        self.assertIn("persistExplorerTabsToSession(index);", opener)
+        # The ↗ handler routes there and carries the row's Git badge along.
+        self.assertIn(
+            "git: explorerTreeEntryForPath(terminals[index], path)?.git || null",
+            viewer,
+        )
+
+    def test_reopening_an_already_open_tab_flashes_it_instead_of_focusing(self):
+        """↗ on a file that already has a tab answers without moving the viewer."""
+        viewer = self._static("js/explorer-viewer.js")
+        opener = viewer[
+            viewer.index("function openExplorerFileInBackgroundTab(index, path,"):
+            viewer.index("function explorerEnsureViewerShell(index)")
+        ]
+        # The already-open case is decided before the tab is ensured, then
+        # flashed after the strip is rebuilt so the class lands on live DOM.
+        self.assertIn("const alreadyOpen = Boolean(key) && ensureExplorerTabState(pane)", opener)
+        self.assertLess(
+            opener.index("renderExplorerTabStrip(index);"),
+            opener.index("flashExplorerTab(index, pinnedTab.id);"),
+        )
+        # It still does not activate the tab — the flash replaces focus.
+        self.assertNotIn("activateExplorerTab", opener)
+        flash = viewer[
+            viewer.index("function flashExplorerTab(index, id)"):
+            viewer.index("function openExplorerFileInBackgroundTab(index, path,")
+        ]
+        # A tab id is a file path, so it is matched by dataset rather than
+        # interpolated into a CSS selector.
+        self.assertNotIn("querySelector(`[data-explorer-tab=", flash)
+        self.assertIn("entry.dataset.explorerTab || '') === id", flash)
+        # The pulse self-clears, like the locate-in-tree flash it mirrors.
+        self.assertIn("tabEl.classList.add('explorer-tab-located');", flash)
+        self.assertIn(
+            "window.setTimeout(() => tabEl.classList.remove('explorer-tab-located'), 1200);",
+            flash,
+        )
+        # Token-driven styling, no palette literals.
+        css = self._static("css/terminals.css")
+        self.assertIn(".explorer-tab.explorer-tab-located {", css)
+        located = css[css.index(".explorer-tab.explorer-tab-located {"):]
+        located = located[: located.index("}")]
+        self.assertIn("var(--t-accent)", located)
+        self.assertNotIn("#", located)
+
+    def test_closing_the_active_tab_falls_back_to_preview(self):
+        """Closing the tab you are reading lands on Preview, not the neighbour."""
+        viewer = self._static("js/explorer-viewer.js")
+        close = viewer[
+            viewer.index("async function closeExplorerTab(index, id)"):
+            viewer.index("const appliedExplorerMdSessions = new Set();")
+        ]
+        # No positional neighbour lookup survives.
+        self.assertNotIn("position - 1", close)
+        self.assertIn("pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;", close)
+        # Rendered directly rather than through activateExplorerTab, whose
+        # already-shown guard would short-circuit in the one state where the
+        # viewer holds Preview while a pinned tab is active, stranding the
+        # closed tab in the strip.
+        self.assertNotIn("activateExplorerTab(index", close)
+        self.assertIn("renderExplorerActiveTab(index);", close)
+        # Both paths (active and background close) update the strip and the
+        # persisted tab set exactly once.
+        self.assertEqual(close.count("renderExplorerTabStrip(index);"), 1)
+        self.assertEqual(close.count("persistExplorerTabsToSession(index);"), 1)
+        # The permanent Preview tab is still not closable, and a dirty edit in
+        # the closed tab is still confirmed before anything is discarded.
+        self.assertIn("if (!pane || id === EXPLORER_PREVIEW_TAB_ID) {", close)
+        self.assertIn("confirmDiscardExplorerEdit(index, 'Closing this tab')", close)
 
     def test_terminals_page_explorer_preview_back_button_removed(self):
         """Wave 1 / 2.a (OD-3): the vestigial single-file Back button is gone."""
