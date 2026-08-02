@@ -21,6 +21,98 @@
     const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';
     const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';
 
+    /* One confirmation controller serves both pages. The shared template puts
+       each page's button classes on the modal as data attributes, so the
+       behavior stays shared without coupling it to either page stylesheet. */
+    let genericConfirmResolver = null;
+    let genericConfirmOwner = null;
+
+    function closeGenericConfirmModal(result = false) {
+        const modal = document.getElementById('genericConfirmModal');
+        if (!modal) {
+            return;
+        }
+        modal.classList.remove('visible');
+        modal.setAttribute('aria-hidden', 'true');
+        const resolver = genericConfirmResolver;
+        genericConfirmResolver = null;
+        genericConfirmOwner = null;
+        if (resolver) {
+            resolver(result);
+        }
+    }
+
+    function closeGenericConfirmModalForOwner(owner, result = false) {
+        if (!owner || genericConfirmOwner !== owner) {
+            return false;
+        }
+        closeGenericConfirmModal(result);
+        return true;
+    }
+
+    /* Reusable in-page confirm shell for irreversible actions. WebView2 blocks
+       window.confirm, so every confirmation goes through this Promise API. */
+    function openGenericConfirmModal({
+        title = 'Are you sure?',
+        copy = '',
+        note = '',
+        confirmLabel = 'Confirm',
+        danger = false,
+        owner = null
+    } = {}) {
+        const modal = document.getElementById('genericConfirmModal');
+        if (!modal) {
+            return Promise.resolve(false);
+        }
+
+        closeGenericConfirmModal(false);
+        genericConfirmOwner = owner;
+        document.getElementById('genericConfirmTitle').textContent = title;
+        document.getElementById('genericConfirmCopy').textContent = copy;
+        const noteEl = document.getElementById('genericConfirmNote');
+        noteEl.textContent = note || '';
+        noteEl.hidden = !note;
+        const acceptButton = document.getElementById('genericConfirmAccept');
+        acceptButton.textContent = confirmLabel;
+        acceptButton.className = danger
+            ? modal.dataset.dangerClass
+            : modal.dataset.confirmClass;
+        modal.classList.add('visible');
+        modal.setAttribute('aria-hidden', 'false');
+
+        window.setTimeout(() => {
+            document.getElementById('genericConfirmCancel').focus();
+        }, 0);
+
+        return new Promise(resolve => {
+            genericConfirmResolver = resolve;
+        });
+    }
+
+    function initGenericConfirmModal() {
+        const modal = document.getElementById('genericConfirmModal');
+        const cancelButton = document.getElementById('genericConfirmCancel');
+        const acceptButton = document.getElementById('genericConfirmAccept');
+        if (!modal || !cancelButton || !acceptButton) {
+            return;
+        }
+
+        modal.addEventListener('click', event => {
+            if (event.target === modal) {
+                closeGenericConfirmModal(false);
+            }
+        });
+        cancelButton.addEventListener('click', () => closeGenericConfirmModal(false));
+        acceptButton.addEventListener('click', () => closeGenericConfirmModal(true));
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape' && modal.classList.contains('visible')) {
+                closeGenericConfirmModal(false);
+            }
+        });
+    }
+
+    initGenericConfirmModal();
+
     /* Identifies this document on every cross-window broadcast. A
        BroadcastChannel never delivers a message back to the object that posted
        it — but it does deliver to any *other* channel object in the same

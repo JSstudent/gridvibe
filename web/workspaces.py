@@ -627,18 +627,23 @@ def move_group_to_workspace(group_id: str, data: Dict[str, Any]) -> Tuple[Dict[s
         rollback_created_workspace(created_workspace_id)
         return {"error": "Session group not found"}, 404
 
-    # Snapshot both sides under the manager's own lock, then emit outside it.
-    source_groups = [
-        item.to_dict() for item in session_manager.get_workspace_groups(source_workspace_id)
-    ]
-    target_groups = [
-        item.to_dict() for item in session_manager.get_workspace_groups(target_workspace_id)
-    ]
-    pruned_source = (
-        source_workspace_id != DEFAULT_WORKSPACE_ID
-        and not source_groups
-        and session_manager.remove_workspace(source_workspace_id)
-    )
+    # Snapshot both sides and make the prune decision atomically. The manager
+    # uses an RLock, so its helpers may safely re-enter it here. Broadcasts and
+    # snapshot cleanup remain below, after the lock is released.
+    with session_manager.lock:
+        source_groups = [
+            item.to_dict()
+            for item in session_manager.get_workspace_groups(source_workspace_id)
+        ]
+        target_groups = [
+            item.to_dict()
+            for item in session_manager.get_workspace_groups(target_workspace_id)
+        ]
+        pruned_source = (
+            source_workspace_id != DEFAULT_WORKSPACE_ID
+            and not source_groups
+            and session_manager.remove_workspace(source_workspace_id)
+        )
     if pruned_source:
         # The source workspace no longer exists; its saved snapshot goes with it
         # so the restore chooser cannot offer a workspace the launcher no longer

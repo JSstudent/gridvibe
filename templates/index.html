@@ -300,23 +300,8 @@
     </div>
 </div>
 
-<div id="genericConfirmModal" class="modal-shell" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="genericConfirmTitle">
-        <div class="modal-head">
-            <div>
-                <div id="genericConfirmTitle" class="modal-title">Are you sure?</div>
-                <div id="genericConfirmCopy" class="modal-copy"></div>
-            </div>
-        </div>
-        <div class="modal-actions">
-            <div id="genericConfirmNote" class="modal-copy" hidden></div>
-            <div class="modal-actions-buttons">
-                <button id="genericConfirmCancel" class="ghost-btn" type="button">Cancel</button>
-                <button id="genericConfirmAccept" class="ghost-btn danger-btn" type="button">Confirm</button>
-            </div>
-        </div>
-    </div>
-</div>
+{% set generic_confirm_variant = 'launcher' %}
+{% include 'partials/generic_confirm_modal.html' %}
 
 <!-- Restore chooser: one row per saved workspace snapshot. Restore and Forget
      are per row; "Not now" is dialog-level and loses nothing. It is a dialog

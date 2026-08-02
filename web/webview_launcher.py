@@ -656,7 +656,7 @@ class GridVibeApi:
     def _pulse_on_top(self, window, window_name: str) -> bool:
         """Temporarily promote a window to top-most to improve activation reliability."""
         if not hasattr(window, "on_top"):
-            logger.info("%s window does not expose on_top; skipping top-most pulse", window_name)
+            logger.debug("%s window does not expose on_top; skipping top-most pulse", window_name)
             return False
 
         try:
@@ -665,9 +665,9 @@ class GridVibeApi:
                 window.on_top = True
                 time.sleep(0.05)
                 window.on_top = False
-                logger.info("Applied temporary top-most pulse to %s window", window_name)
+                logger.debug("Applied temporary top-most pulse to %s window", window_name)
             else:
-                logger.info("%s window is already top-most; skipping pulse reset", window_name)
+                logger.debug("%s window is already top-most; skipping pulse reset", window_name)
             return True
         except Exception as exc:
             logger.warning("Failed to apply top-most pulse to %s window: %s", window_name, exc)
@@ -928,7 +928,7 @@ class GridVibeApi:
 
         try:
             was_minimized = self._is_window_minimized(window_name)
-            logger.info(
+            logger.debug(
                 "Bringing %s window to front (tracked_minimized=%s)",
                 window_name,
                 was_minimized,
@@ -936,7 +936,7 @@ class GridVibeApi:
             if was_minimized:
                 if _restore_minimized_window(window):
                     self._set_window_minimized(window_name, False)
-                    logger.info(
+                    logger.debug(
                         "Restored minimized %s window before focus", window_name
                     )
                 else:
@@ -948,7 +948,7 @@ class GridVibeApi:
             window.show()
 
             if self._should_skip_top_most_pulse(window_name):
-                logger.info(
+                logger.debug(
                     "Skipping top-most pulse for %s window to avoid WebView2 focus artefacts",
                     window_name,
                 )
@@ -990,7 +990,7 @@ class GridVibeApi:
             "",
         )
         window_name = f"workspace:{resolved_workspace_id}"
-        logger.info(
+        logger.debug(
             "Focusing existing workspace window workspace=%s group=%s",
             resolved_workspace_id,
             group_id or "unknown",
@@ -1046,7 +1046,7 @@ class GridVibeApi:
             window_name = f"workspace:{resolved_workspace_id}"
             if window is not None:
                 should_retarget = resolved_group_id != current_group_id
-                logger.info(
+                logger.debug(
                     (
                         "Reusing existing workspace window "
                         "(workspace=%s requested_group=%s current_group=%s)"
@@ -1056,7 +1056,7 @@ class GridVibeApi:
                     current_group_id or "unknown",
                 )
                 if should_retarget:
-                    logger.info(
+                    logger.debug(
                         "Keeping existing workspace window open; frontend will reconcile its groups"
                     )
                 if requested_zoom is not None and _set_native_window_zoom(
@@ -1140,7 +1140,7 @@ class GridVibeApi:
         try:
             if not self._bring_to_front(self._window, "launcher"):
                 return {"ok": False, "error": "Failed to focus launcher window"}
-            logger.info("Focused launcher window")
+            logger.debug("Focused launcher window")
             return {"ok": True}
         except Exception as exc:
             logger.exception("Failed to focus launcher window")
@@ -1418,11 +1418,11 @@ def main():
         api_bridge._set_window_minimized(kind, False)
 
         def _handle_minimized(*_args):
-            logger.info("GridVibe %s window minimized", kind)
+            logger.debug("GridVibe %s window minimized", kind)
             api_bridge._set_window_minimized(kind, True)
 
         def _handle_restored(*_args):
-            logger.info("GridVibe %s window restored", kind)
+            logger.debug("GridVibe %s window restored", kind)
             api_bridge._set_window_minimized(kind, False)
 
         def _handle_maximized(*_args):
@@ -1432,7 +1432,7 @@ def main():
             # minimized. Without this, the next workspace switch calls
             # restore() and shrinks the window out of Maximized.
             if api_bridge._is_window_minimized(kind):
-                logger.info("GridVibe %s window restored to maximized", kind)
+                logger.debug("GridVibe %s window restored to maximized", kind)
                 api_bridge._set_window_minimized(kind, False)
 
         def _handle_closed(*_args):

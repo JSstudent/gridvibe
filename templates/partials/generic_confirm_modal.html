@@ -1,0 +1,29 @@
+{# Shared confirmation shell. The controller lives in static/js/shared.js;
+   only the page-specific button classes vary between the two legacy themes. #}
+{% set generic_confirm_is_launcher = generic_confirm_variant == 'launcher' %}
+{% set generic_confirm_cancel_class = 'ghost-btn' if generic_confirm_is_launcher else 'btn btn-neutral' %}
+{% set generic_confirm_confirm_class = 'ghost-btn' if generic_confirm_is_launcher else 'btn btn-primary' %}
+{% set generic_confirm_danger_class = 'ghost-btn danger-btn' if generic_confirm_is_launcher else 'btn btn-danger' %}
+<div
+    id="genericConfirmModal"
+    class="modal-shell"
+    aria-hidden="true"
+    data-confirm-class="{{ generic_confirm_confirm_class }}"
+    data-danger-class="{{ generic_confirm_danger_class }}"
+>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="genericConfirmTitle">
+        <div class="modal-head">
+            <div>
+                <div id="genericConfirmTitle" class="modal-title">Are you sure?</div>
+                <div id="genericConfirmCopy" class="modal-copy"></div>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <div id="genericConfirmNote" class="modal-copy" hidden></div>
+            <div class="modal-actions-buttons">
+                <button id="genericConfirmCancel" class="{{ generic_confirm_cancel_class }}" type="button">Cancel</button>
+                <button id="genericConfirmAccept" class="{{ generic_confirm_danger_class }}" type="button">Confirm</button>
+            </div>
+        </div>
+    </div>
+</div>

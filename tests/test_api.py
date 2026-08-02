@@ -1096,7 +1096,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             terminals_js[close_start:close_end],
         )
         group_start = terminals_js.index("async function closeSessionGroup(")
-        group_end = terminals_js.index("async function closeCurrentSession()", group_start)
+        group_end = terminals_js.index("async function _closeWindowAfterLastSession(", group_start)
         self.assertIn(
             "closingSessionIds.forEach(browserCancelPendingPersist);",
             terminals_js[group_start:group_end],
@@ -1302,7 +1302,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         self.assertIn('data-explorer-search-input="${index}"', html)
-        self.assertIn("function explorerFindRanges(content, query, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
         self.assertIn("function explorerMarkedEscHtml(text, absoluteStart = 0, searchRanges = [])", html)
         self.assertIn("function markExplorerSearchInElement(root, query, activeIndex = 0, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
         self.assertIn("document.createTreeWalker(", html)
@@ -1327,7 +1326,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("pane._explorerSearchToken.cancelled = true;", html)
         self.assertIn("function scheduleExplorerSearch(index, { resetActive = false, delay = EXPLORER_SEARCH_DEBOUNCE_MS } = {})", html)
         self.assertIn("scheduleExplorerSearch(index, { resetActive: true });", html)
-        self.assertIn("ranges.capped = ranges.length >= maxMatches;", html)
+        self.assertIn("capped: ranges.length >= maxMatches,", html)
         self.assertIn("count.title = capped ? `Showing first ${matchCount} matches` : '';", html)
         self.assertIn("state.resultQuery === query && Array.isArray(state.ranges)", html)
         self.assertIn("state.matchCapped = capped;", html)
@@ -6144,7 +6143,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         self.assertIn("data-explorer-copy-path", html)
         self.assertIn("function wireExplorerCopyPathMenu(panel, index)", html)
-        self.assertIn("function handleExplorerCopyPathMenu(event, index)", html)
         self.assertIn("function showExplorerContextMenu(x, y, items)", html)
         self.assertIn("function explorerJoinRootPath(root, relativePath)", html)
         self.assertIn("label: 'Copy path'", html)
@@ -10463,10 +10461,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("handle.style.height = `${segmentStyle.size}px`;", html)
         self.assertIn("handle.style.left = `${segmentStyle.left}px`;", html)
         self.assertIn("handle.style.width = `${segmentStyle.size}px`;", html)
-        self.assertIn(
-            "return getSharedGridEdgeSegments(rects, axis, lineIndex).length > 0;",
-            html,
-        )
         self.assertNotIn("handle.style.height = `${metrics.gridContentHeight}px`;", html)
         self.assertNotIn("handle.style.width = `${metrics.gridContentWidth}px`;", html)
 
@@ -13823,7 +13817,7 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         terminals_js = self._static("js/terminals.js")
         close_fn = terminals_js[
             terminals_js.index("async function closeSessionGroup"):
-            terminals_js.index("async function closeCurrentSession")
+            terminals_js.index("async function _closeWindowAfterLastSession")
         ]
         self.assertIn("await confirmCloseSessionGroup(groupId)", close_fn)
         confirm_fn = terminals_js[

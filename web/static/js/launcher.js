@@ -121,7 +121,6 @@
     let connectionMode = 'ssh';
     let savedSessionResolver = null;
     let saveSessionNameResolver = null;
-    let genericConfirmResolver = null;
     let savedSessionModalMode = 'import';
     let activeSavedSessionId = '';
     let activeSavedSessionName = '';
@@ -1855,49 +1854,6 @@
         }
     }
 
-    function closeGenericConfirmModal(result = false) {
-        const modal = document.getElementById('genericConfirmModal');
-        if (!modal) {
-            return;
-        }
-        modal.classList.remove('visible');
-        modal.setAttribute('aria-hidden', 'true');
-        if (genericConfirmResolver) {
-            const resolver = genericConfirmResolver;
-            genericConfirmResolver = null;
-            resolver(result);
-        }
-    }
-
-    /* Reusable in-page confirm shell for irreversible actions (WebView2 blocks
-       window.confirm — same shell as the terminals page). Resolves true on
-       accept, false on cancel/dismiss. */
-    function openGenericConfirmModal({ title = 'Are you sure?', copy = '', note = '', confirmLabel = 'Confirm', danger = false } = {}) {
-        const modal = document.getElementById('genericConfirmModal');
-        if (!modal) {
-            return Promise.resolve(false);
-        }
-        closeGenericConfirmModal(false);
-        document.getElementById('genericConfirmTitle').textContent = title;
-        document.getElementById('genericConfirmCopy').textContent = copy;
-        const noteEl = document.getElementById('genericConfirmNote');
-        noteEl.textContent = note || '';
-        noteEl.hidden = !note;
-        const acceptButton = document.getElementById('genericConfirmAccept');
-        acceptButton.textContent = confirmLabel;
-        acceptButton.className = danger ? 'ghost-btn danger-btn' : 'ghost-btn';
-        modal.classList.add('visible');
-        modal.setAttribute('aria-hidden', 'false');
-
-        window.setTimeout(() => {
-            document.getElementById('genericConfirmCancel').focus();
-        }, 0);
-
-        return new Promise(resolve => {
-            genericConfirmResolver = resolve;
-        });
-    }
-
     function closeSaveSessionNameModal(result = null) {
         const modal = document.getElementById('saveSessionNameModal');
         modal.classList.remove('visible');
@@ -3186,25 +3142,11 @@
         closeSaveSessionNameModal({ name: document.getElementById('saveSessionNameInput').value });
     });
 
-    document.getElementById('genericConfirmModal').addEventListener('click', event => {
-        if (event.target.id === 'genericConfirmModal') {
-            closeGenericConfirmModal(false);
-        }
-    });
-
     document.getElementById('workspaceRestoreModal')?.addEventListener('click', event => {
         /* Clicking the backdrop is "not now", never a restore or a forget. */
         if (event.target.id === 'workspaceRestoreModal' && !workspaceRestoreInFlight) {
             dismissWorkspaceRestorePanel();
         }
-    });
-
-    document.getElementById('genericConfirmCancel').addEventListener('click', () => {
-        closeGenericConfirmModal(false);
-    });
-
-    document.getElementById('genericConfirmAccept').addEventListener('click', () => {
-        closeGenericConfirmModal(true);
     });
 
     document.addEventListener('keydown', event => {
@@ -3213,9 +3155,6 @@
         }
         if (event.key === 'Escape' && document.getElementById('saveSessionNameModal').classList.contains('visible')) {
             closeSaveSessionNameModal();
-        }
-        if (event.key === 'Escape' && document.getElementById('genericConfirmModal').classList.contains('visible')) {
-            closeGenericConfirmModal(false);
         }
         if (event.key === 'Escape' && isWorkspaceRestoreModalVisible() && !workspaceRestoreInFlight) {
             dismissWorkspaceRestorePanel();

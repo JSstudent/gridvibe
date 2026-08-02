@@ -465,6 +465,66 @@ class MultiWorkspacePersistenceTestCase(unittest.TestCase):
         slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
         self.assertEqual(slot["origin"], "manual")
 
+    def test_capture_workspace_preserves_manual_pin_but_keeps_auto_slots_auto(self):
+        self._group("group-a", self.WORKSPACE_A, "secret-a")
+        self._group("group-b", self.WORKSPACE_B, "secret-b")
+        web_runtime_state.capture_workspace(
+            api.session_manager,
+            workspace_id=self.WORKSPACE_A,
+            origin="manual",
+        )
+        web_runtime_state.capture_workspace(
+            api.session_manager,
+            workspace_id=self.WORKSPACE_B,
+            origin="auto",
+        )
+
+        # The rename route recaptures with origin="auto" and the new label.
+        web_runtime_state.capture_workspace(
+            api.session_manager,
+            workspace_id=self.WORKSPACE_A,
+            origin="auto",
+            label="Renamed",
+        )
+        web_runtime_state.capture_workspace(
+            api.session_manager,
+            workspace_id=self.WORKSPACE_B,
+            origin="auto",
+            label="Renamed B",
+        )
+
+        manual_slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+        self.assertEqual(manual_slot["origin"], "manual")
+        self.assertEqual(manual_slot["label"], "Renamed")
+        auto_slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_B)
+        self.assertEqual(auto_slot["origin"], "auto")
+        self.assertEqual(auto_slot["label"], "Renamed B")
+
+    def test_capture_workspace_enforces_the_auto_slot_cap(self):
+        self._group("group-a", self.WORKSPACE_A, "secret-a")
+        state = {"version": 2, "workspaces": {}}
+        for index in range(web_runtime_state.MAX_AUTO_WORKSPACE_SLOTS):
+            workspace_id = f"w{index:011d}"
+            state["workspaces"][workspace_id] = {
+                "workspace_id": workspace_id,
+                "label": f"Slot {index}",
+                "origin": "auto",
+                "saved_at": 1000.0 + index,
+                "groups": [{"group_id": f"g{index}", "sessions": [{"host": "h"}]}],
+            }
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        web_runtime_state.capture_workspace(
+            api.session_manager,
+            workspace_id=self.WORKSPACE_A,
+        )
+
+        stored = json.loads(self.state_path.read_text(encoding="utf-8"))["workspaces"]
+        auto_count = sum(1 for slot in stored.values() if slot["origin"] == "auto")
+        self.assertEqual(auto_count, web_runtime_state.MAX_AUTO_WORKSPACE_SLOTS)
+        self.assertNotIn("w00000000000", stored)
+        self.assertIn(self.WORKSPACE_A, stored)
+
 
 
 
@@ -683,17 +743,20 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
 
     def test_rename_updates_the_live_record_and_the_saved_slot(self):
         self._launch(session_name="Main")
-        web_runtime_state.capture_workspace(api.session_manager, workspace_id="default")
+        web_runtime_state.capture_workspace(
+            api.session_manager,
+            workspace_id="default",
+            origin="manual",
+        )
 
         response = self.client.patch("/api/workspaces/default", json={"label": "Renamed"})
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["label"], "Renamed")
         self.assertEqual(api.session_manager.get_workspace("default").label, "Renamed")
-        self.assertEqual(
-            web_runtime_state.load_restorable_workspace("default")["label"],
-            "Renamed",
-        )
+        saved_slot = web_runtime_state.load_restorable_workspace("default")
+        self.assertEqual(saved_slot["label"], "Renamed")
+        self.assertEqual(saved_slot["origin"], "manual")
 
     def test_rename_rejects_unknown_workspaces_and_missing_labels(self):
         unknown = self.client.patch(

@@ -2,10 +2,10 @@
 
 Deep-dive feature 10.5: live shells cannot survive a backend restart by
 design, but the workspace *shape* (groups + per-session launch config) can.
-Schema v2 stores one slot per workspace id (``workspaces`` dict) so a future
-multi-window upgrade is additive; today there is exactly one ``"default"``
-workspace. Exactly two writers exist — the autosave timer and the explicit
-Save Workspace action — and both funnel through ``capture_workspace``. A slot
+Schema v2 stores one slot per workspace id (``workspaces`` dict); with
+multi-workspace there is one slot per captured workspace. Three writers
+exist: the autosave timer (``capture_live_workspaces``), the explicit Save
+Workspace action, and workspace rename (both ``capture_workspace``). A slot
 also records which group was in front (``active_group_id``) so the restore
 reopens the workspace on it rather than on whichever group happens to be
 newest. The snapshot never contains passwords — a restored SSH session
@@ -19,7 +19,8 @@ import math
 import os
 import threading
 import time
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+import uuid
+from typing import Any, Dict, List, Optional
 
 from web.paths import BASE_DIR
 from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id
@@ -187,7 +188,10 @@ def _read_state_locked() -> Dict[str, Any]:
 
 def _write_state_locked(state: Dict[str, Any]) -> None:
     """Atomically persist the state. Caller holds the lock."""
-    temp_path = f"{RUNTIME_STATE_PATH}.tmp"
+    temp_path = os.path.join(
+        os.path.dirname(os.path.abspath(RUNTIME_STATE_PATH)) or ".",
+        f".{os.path.basename(RUNTIME_STATE_PATH)}.{uuid.uuid4().hex}.tmp",
+    )
     try:
         with open(temp_path, "w", encoding="utf-8") as handle:
             json.dump(state, handle, indent=2)
@@ -246,12 +250,12 @@ def capture_workspace(
 
     with _runtime_state_lock:
         state = _read_state_locked()
+        previous_slot = state.get("workspaces", {}).get(workspace_id)
+        previous_slot = previous_slot if isinstance(previous_slot, dict) else {}
         if normalized_zoom is None:
-            previous_slot = state.get("workspaces", {}).get(workspace_id)
-            if isinstance(previous_slot, dict):
-                normalized_zoom = normalize_native_zoom_factor(
-                    previous_slot.get("native_zoom_factor")
-                )
+            normalized_zoom = normalize_native_zoom_factor(
+                previous_slot.get("native_zoom_factor")
+            )
         slot = {
             "workspace_id": workspace_id,
             "label": (
@@ -259,14 +263,23 @@ def capture_workspace(
                 or workspace_label
                 or _derive_workspace_label(groups)
             ),
-            "origin": "manual" if origin == "manual" else "auto",
+            # A manual save is pinned for the Stage-4 auto-slot cap. Later
+            # auto captures (autosave refresh, workspace rename) update the
+            # slot without silently demoting it to an evictable auto slot.
+            "origin": (
+                "manual"
+                if origin == "manual" or previous_slot.get("origin") == "manual"
+                else "auto"
+            ),
             "saved_at": time.time(),
             "active_group_id": active_group_id if active_group_id in captured_group_ids else "",
             "groups": groups,
         }
         if normalized_zoom is not None:
             slot["native_zoom_factor"] = normalized_zoom
-        state.setdefault("workspaces", {})[workspace_id] = slot
+        workspaces = state.setdefault("workspaces", {})
+        workspaces[workspace_id] = slot
+        _evict_excess_auto_slots(workspaces)
         _write_state_locked(state)
     return slot
 
@@ -321,25 +334,6 @@ def clear_workspace(workspace_id: str = DEFAULT_WORKSPACE_ID) -> bool:
         del state["workspaces"][workspace_id]
         _write_state_locked(state)
         return True
-
-
-def iter_live_workspaces(session_manager: Any) -> Iterator[Tuple[str, List[Any]]]:
-    """Yield ``(workspace_id, groups)`` for each live workspace with sessions.
-
-    The manager owns the authoritative group partition. The returned lists are
-    snapshots, so callers never hold ``SessionManager.lock`` while yielding.
-    """
-    with session_manager.lock:
-        snapshots = []
-        for workspace in session_manager.get_all_workspaces():
-            groups = [
-                group
-                for group in session_manager.get_workspace_groups(workspace.workspace_id)
-                if session_manager.get_group_sessions(group.group_id)
-            ]
-            if groups:
-                snapshots.append((workspace.workspace_id, groups))
-    yield from snapshots
 
 
 def capture_live_workspaces(
