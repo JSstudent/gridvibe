@@ -345,7 +345,7 @@ class MultiWorkspaceApiTestCase(WorkspaceSocketClientMixin, unittest.TestCase):
         self.assertIn("await openWorkspaceWindow(resolvedWorkspaceId, {", launcher_js)
         self.assertIn("groupId: workspace.active_group_id", launcher_js)
         self.assertIn(
-            "openWorkspaceWindow(workspace.workspace_id, {",
+            "switchToWorkspaceWindow(workspace.workspace_id, {",
             terminals_js,
         )
         self.assertIn("groupId: target.active_group_id", terminals_js)
@@ -1001,14 +1001,61 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
         )
         self.assertIn("async function cycleWorkspaceWindow(step)", terminals_js)
         self.assertIn("cycleWorkspaceWindow(event.shiftKey ? -1 : 1);", terminals_js)
-        # It is gated on the mode and never fires while typing.
+        # It is gated on the mode and never fires while typing in a real input.
         self.assertIn("if (!isMultiWorkspaceEnabled()) {", terminals_js)
         self.assertIn(
-            "if (event.code !== 'KeyW' || isEditableShortcutTarget(event.target)) {",
+            "if (event.code !== 'KeyW' || isWorkspaceCycleBlockingTarget(event.target)) {",
             terminals_js,
         )
         # xterm must not send Alt+W on to the shell as ESC w.
         self.assertIn("&& event.code === 'KeyW') {", terminals_js)
+
+    def test_alt_w_still_cycles_from_a_focused_terminal(self):
+        terminals_js = self._static("js/terminals.js")
+
+        # xterm's helper textarea is the keyboard target of every focused pane,
+        # so the plain editable-target guard would swallow the shortcut exactly
+        # when a terminal is highlighted and leave the user stuck in the pane.
+        self.assertIn("function isWorkspaceCycleBlockingTarget(target)", terminals_js)
+        self.assertIn("target.closest('.xterm-helper-textarea')", terminals_js)
+
+    def test_one_custom_key_event_handler_per_terminal(self):
+        terminals_js = self._static("js/terminals.js")
+
+        # xterm keeps a single custom key event handler: a second
+        # attachCustomKeyEventHandler call replaces the first, which silently
+        # dropped the Alt+W pass-through (xterm cancels the keys it claims with
+        # stopPropagation, so the document shortcut never ran) and sent ESC w to
+        # the shell instead. There must be exactly one install site.
+        self.assertEqual(terminals_js.count("attachCustomKeyEventHandler("), 1)
+        self.assertIn("function attachTerminalKeyEventHandler(term)", terminals_js)
+        self.assertIn("attachTerminalKeyEventHandler(term);", terminals_js)
+        # …and it still carries both the pass-throughs and the clipboard keys.
+        self.assertIn("&& event.code === 'KeyW') {", terminals_js)
+        self.assertIn("_copyText(term.getSelection());", terminals_js)
+        self.assertIn("_pasteToTerminal(index);", terminals_js)
+
+    def test_leaving_a_workspace_drops_this_window_terminal_focus(self):
+        terminals_js = self._static("js/terminals.js")
+
+        # Focus survives a window switch, so a pane left focused would swallow
+        # the workspace/tab shortcuts the moment the window returns to front.
+        self.assertIn(
+            "function dropTerminalFocusForWindowSwitch()",
+            terminals_js,
+        )
+        self.assertIn("clearActiveTerminalHighlight();", terminals_js)
+        # Clicking straight into another window never reaches the in-app switch
+        # path, so the window losing focus drops the highlight too — deferred a
+        # tick so focus moving into a browser pane's iframe does not count.
+        self.assertIn("window.addEventListener('blur', () => {", terminals_js)
+        self.assertIn("if (!document.hasFocus()) {", terminals_js)
+        # Every in-app switch path goes through the one wrapper (guardrail 6):
+        # the only bare openWorkspaceWindow call left in this page is inside it.
+        self.assertIn("async function switchToWorkspaceWindow(workspaceId, options = {})", terminals_js)
+        self.assertIn("dropTerminalFocusForWindowSwitch();\n        return openWorkspaceWindow(", terminals_js)
+        self.assertEqual(terminals_js.count("openWorkspaceWindow("), 1)
+        self.assertEqual(terminals_js.count("switchToWorkspaceWindow("), 6)
 
 
 class MultiWorkspaceRestoreTestCase(unittest.TestCase):

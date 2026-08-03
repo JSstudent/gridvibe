@@ -11343,6 +11343,113 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("preview.git = null;", viewer)
 
 
+class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
+    """Selecting a word in the Source view tints its other occurrences, and a
+    seeded find no longer jumps to the top of the file or unfolds it."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path: str) -> str:
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def test_selection_occurrences_are_painted_without_touching_the_dom(self):
+        viewer = self._static("js/explorer-viewer.js")
+        self.assertIn("document.addEventListener('selectionchange'", viewer)
+        self.assertIn("const EXPLORER_OCCURRENCE_HIGHLIGHT = 'explorer-occurrence';", viewer)
+        refresh = viewer[
+            viewer.index("function refreshExplorerOccurrenceHighlight()"):
+            viewer.index("function scheduleExplorerOccurrenceHighlight()")
+        ]
+        # The CSS Custom Highlight API paints ranges, so the Source rows are
+        # never rewritten: folds, scroll position and the live selection all
+        # survive (the find widget cannot manage that — that is the point).
+        self.assertIn("highlight.add(range)", refresh)
+        for banned in ("innerHTML", "replaceWith(", "createElement("):
+            with self.subTest(banned=banned):
+                self.assertNotIn(banned, refresh)
+        ranges_fn = viewer[
+            viewer.index("function explorerOccurrenceRanges(root, query, selectionRange)"):
+            viewer.index("function refreshExplorerOccurrenceHighlight()")
+        ]
+        self.assertIn("selectionRange.intersectsNode(node)", ranges_fn)
+        self.assertIn("ranges.length < EXPLORER_OCCURRENCE_MAX_MATCHES", ranges_fn)
+
+    def test_occurrence_highlight_is_bounded_debounced_and_source_only(self):
+        viewer = self._static("js/explorer-viewer.js")
+        self.assertIn("const EXPLORER_OCCURRENCE_MAX_MATCHES = 500;", viewer)
+        self.assertIn("const EXPLORER_OCCURRENCE_MAX_QUERY = 200;", viewer)
+        self.assertIn("const EXPLORER_OCCURRENCE_DEBOUNCE_MS = 90;", viewer)
+        target = viewer[
+            viewer.index("function explorerOccurrenceTarget()"):
+            viewer.index("function explorerOccurrenceIsWholeWord(value, start, end)")
+        ]
+        # Only single-line selections inside one pane's Source view qualify.
+        self.assertIn("selection.isCollapsed", target)
+        self.assertIn("/[\\r\\n]/.test(query)", target)
+        self.assertIn(".closest('.explorer-source-lines')", target)
+        self.assertIn("root.contains(range.endContainer)", target)
+        # Missing API (older WebViews) degrades to no tint, never to an error.
+        self.assertIn("typeof window.Highlight !== 'function' || !window.CSS?.highlights", viewer)
+
+    def test_occurrence_highlight_has_a_style_in_both_themes(self):
+        css = self._static("css/terminals.css")
+        self.assertIn("::highlight(explorer-occurrence)", css)
+        self.assertIn(
+            '.explorer-pane[data-explorer-theme="dark"] ::highlight(explorer-occurrence)', css
+        )
+
+    def test_seeded_find_opens_on_the_match_under_the_caret(self):
+        viewer = self._static("js/explorer-viewer.js")
+        self.assertIn(
+            "function focusExplorerSearch(index, seedQuery = '', { seekLine = 0 } = {})", viewer
+        )
+        # Only the Source view can seek — it is the only view a content offset
+        # means anything in.
+        self.assertIn("state.seekOffset = activeExplorerFileView(index) === 'source'", viewer)
+        self.assertIn(
+            "seekLine ? explorerLineStartOffset(pane, seekLine) : explorerSelectionContentOffset(pane)",
+            viewer,
+        )
+        resolve = viewer[
+            viewer.index("function explorerResolveSearchActiveIndex(state, ranges)"):
+            viewer.index("function explorerLineStartOffset(pane, line)")
+        ]
+        self.assertIn("ranges.findIndex(range => range.start >= seekOffset)", resolve)
+        # Consumed once, so paging through matches is not dragged back.
+        self.assertIn("state.seekOffset = null;", resolve)
+        self.assertIn("state.activeIndex = explorerResolveSearchActiveIndex(state, ranges);", viewer)
+        # A repo-search hit anchors on the line that was clicked.
+        search = self._static("js/explorer-search.js")
+        self.assertIn("focusExplorerSearch(index, state.query, { seekLine: line });", search)
+
+    def test_find_only_unfolds_the_markdown_sections_holding_matches(self):
+        viewer = self._static("js/explorer-viewer.js")
+        # A find used to disable Markdown collapse outright, unfolding the whole
+        # document; the fold state now survives it.
+        self.assertIn("const allowMarkdownCollapse = normalizedLanguage === 'markdown';", viewer)
+        self.assertNotIn(
+            "normalizedLanguage === 'markdown' && !searchRanges.length", viewer
+        )
+        reveal = viewer[
+            viewer.index("function explorerRevealMarkdownSearchMatches(index, searchRanges)"):
+            viewer.index("function toggleExplorerMarkdownSection(index, lineNumber")
+        ]
+        self.assertIn(
+            "searchRanges.some(range => range.start >= bodyStart && range.start < bodyEnd)", reveal
+        )
+        self.assertIn("collapsedLines.delete(lineNumber);", reveal)
+        self.assertIn("persistExplorerTabsToSession(index);", reveal)
+        # Only for freshly computed results, so collapsing a section during a
+        # live find is not undone on the next re-render.
+        self.assertEqual(viewer.count("explorerRevealMarkdownSearchMatches(index, ranges);"), 1)
+
+
 # ---------------------------------------------------------------------------
 #  Phase 1-3 regression tests (code_review_2026_03_31.md)
 # ---------------------------------------------------------------------------

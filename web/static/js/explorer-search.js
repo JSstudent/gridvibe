@@ -538,8 +538,10 @@
         }
         scrollExplorerSourceToLine(index, line);
         /* Seed the in-file find with the same query so every other hit in the
-           file is highlighted too. */
-        focusExplorerSearch(index, state.query);
+           file is highlighted too — anchored on the line that was clicked, so
+           the find opens on that hit instead of scrolling back to the file's
+           first one. */
+        focusExplorerSearch(index, state.query, { seekLine: line });
     }
 
     function scrollExplorerSourceToLine(index, line) {
