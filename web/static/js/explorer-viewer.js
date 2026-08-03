@@ -3745,7 +3745,15 @@
     function ensureExplorerSearchState(pane, mode = pane?._explorerMode) {
         const key = mode === 'directory' ? '_explorerDirectorySearch' : '_explorerSearch';
         if (!pane[key]) {
-            pane[key] = { query: '', activeIndex: 0, matchCount: 0, matchCapped: false, ranges: [], resultQuery: '' };
+            pane[key] = {
+                query: '',
+                activeIndex: 0,
+                matchCount: 0,
+                matchCapped: false,
+                ranges: [],
+                resultQuery: '',
+                seekOffset: null
+            };
         }
         return pane[key];
     }
@@ -4288,7 +4296,12 @@
         const markdownHeadings = normalizedLanguage === 'markdown'
             ? explorerMarkdownHeadingLevels(records)
             : new Map();
-        const allowMarkdownCollapse = normalizedLanguage === 'markdown' && !searchRanges.length;
+        /* Folds survive a find: a search used to unfold the whole document so
+           no match could hide inside a collapsed section, which threw away the
+           reader's fold state on every Ctrl+F. Only the sections a match
+           actually lands in are opened now, by
+           explorerRevealMarkdownSearchMatches() before this renders. */
+        const allowMarkdownCollapse = normalizedLanguage === 'markdown';
         // Whole-document Highlight.js pass (Phase 1); null for unsupported
         // languages, the log/markdown special renderers, oversized files, or any
         // Highlight.js failure, in which case each line uses the fallback lexer.
@@ -4328,6 +4341,54 @@
         });
 
         return `<div class="explorer-source-lines">${rows.join('')}</div>`;
+    }
+
+    /* A match hidden inside a collapsed Markdown section has no row to
+       highlight and nothing for Enter to scroll to, so the sections that
+       contain matches are opened — and only those, leaving every other fold as
+       the reader left it. Called once per freshly computed result set (not on
+       every re-render), so collapsing a section during a live find sticks
+       instead of springing straight back open. */
+    function explorerRevealMarkdownSearchMatches(index, searchRanges) {
+        const pane = terminals[index];
+        if (!pane
+            || !searchRanges.length
+            || normalizeExplorerLanguage(pane._explorerFileLanguage || '') !== 'markdown') {
+            return;
+        }
+        const collapsedLines = ensureExplorerMarkdownCollapsedLines(pane);
+        if (!collapsedLines.size) {
+            return;
+        }
+
+        const content = pane._explorerFileContent || '';
+        const records = explorerSourceLineRecords(content);
+        const headings = explorerMarkdownHeadingLevels(records);
+        const ordered = Array.from(headings.entries())
+            .map(([number, level]) => ({ number, level }))
+            .sort((a, b) => a.number - b.number);
+        let revealed = false;
+
+        Array.from(collapsedLines).forEach(lineNumber => {
+            const level = headings.get(lineNumber);
+            // Records are 0-based, so records[lineNumber] is the line *after*
+            // the heading — where the hidden body starts.
+            const bodyStart = records[lineNumber]?.start;
+            if (!level || bodyStart === undefined) {
+                return;
+            }
+            const headingIndex = ordered.findIndex(entry => entry.number === lineNumber);
+            const next = ordered.slice(headingIndex + 1).find(entry => entry.level <= level);
+            const bodyEnd = next ? records[next.number - 1].start : content.length;
+            if (searchRanges.some(range => range.start >= bodyStart && range.start < bodyEnd)) {
+                collapsedLines.delete(lineNumber);
+                revealed = true;
+            }
+        });
+
+        if (revealed) {
+            persistExplorerTabsToSession(index);
+        }
     }
 
     function toggleExplorerMarkdownSection(index, lineNumber, { allSameLevel = false } = {}) {
@@ -4412,6 +4473,9 @@
             ensureExplorerMarkdownCollapsedLines(pane)
         );
         wireExplorerMarkdownSectionControls(index);
+        // The rebuilt rows dropped the nodes the occurrence tint was anchored
+        // to; re-derive it from whatever selection survived the render.
+        scheduleExplorerOccurrenceHighlight();
     }
 
     function explorerPreviewBlockLanguage(code) {
@@ -4923,10 +4987,11 @@
                 ranges.capped = result.capped;
                 state.ranges = ranges;
                 state.resultQuery = query;
+                explorerRevealMarkdownSearchMatches(index, ranges);
             }
             matchCount = ranges.length;
             capped = Boolean(ranges.capped);
-            state.activeIndex = matchCount ? Math.min(state.activeIndex || 0, matchCount - 1) : 0;
+            state.activeIndex = explorerResolveSearchActiveIndex(state, ranges);
             renderExplorerSource(index, decorateExplorerSearchRanges(ranges, state.activeIndex));
         } else if (query && view === 'preview') {
             cancelExplorerSearch(index);
@@ -4996,6 +5061,41 @@
         }
     }
 
+    /* Which match a freshly computed result set opens on. A seeded find (Ctrl+F
+       over a selection, a repo-search hit) opens on the first match at or after
+       the spot it was seeded from — without this every seeded find snapped the
+       Source view back to the file's first match. Everything else keeps its
+       current position, clamped to the new result count. */
+    function explorerResolveSearchActiveIndex(state, ranges) {
+        const seekOffset = state.seekOffset;
+        state.seekOffset = null;
+        if (!ranges.length) {
+            return 0;
+        }
+        if (Number.isFinite(seekOffset)) {
+            const seekIndex = ranges.findIndex(range => range.start >= seekOffset);
+            return seekIndex === -1 ? 0 : seekIndex;
+        }
+        return Math.min(state.activeIndex || 0, ranges.length - 1);
+    }
+
+    function explorerLineStartOffset(pane, line) {
+        const record = explorerSourceLineRecords(pane?._explorerFileContent || '')[Number(line) - 1];
+        return record ? record.start : null;
+    }
+
+    /* Content offset of the line the current selection starts on, so a find
+       seeded from that selection can open on the match under it. */
+    function explorerSelectionContentOffset(pane) {
+        const selection = window.getSelection?.();
+        if (!pane || !selection || !selection.rangeCount) {
+            return null;
+        }
+        const row = explorerElementForNode(selection.getRangeAt(0).startContainer)
+            ?.closest('[data-explorer-line]');
+        return row ? explorerLineStartOffset(pane, Number(row.dataset.explorerLine || 0)) : null;
+    }
+
     function stepExplorerSearch(index, delta) {
         const pane = terminals[index];
         if (!pane) {
@@ -5022,11 +5122,12 @@
         state.matchCapped = false;
         state.ranges = [];
         state.resultQuery = '';
+        state.seekOffset = null;
         applyExplorerSearch(index);
         document.querySelector(`[data-explorer-search-input="${index}"]`)?.focus();
     }
 
-    function focusExplorerSearch(index, seedQuery = '') {
+    function focusExplorerSearch(index, seedQuery = '', { seekLine = 0 } = {}) {
         const pane = terminals[index];
         if (!pane || !isExplorerSearchablePane(pane)) {
             return false;
@@ -5043,6 +5144,13 @@
             const state = ensureExplorerSearchState(pane);
             state.query = seedQuery;
             state.activeIndex = 0;
+            /* Open on the match the reader is already looking at — the caret's
+               line, or the line a repo-search hit landed on — instead of the
+               file's first match, which used to fling the Source view back to
+               the top of the document. */
+            state.seekOffset = activeExplorerFileView(index) === 'source'
+                ? (seekLine ? explorerLineStartOffset(pane, seekLine) : explorerSelectionContentOffset(pane))
+                : null;
             state.ranges = [];
             state.resultQuery = '';
             state.matchCapped = false;
@@ -5071,6 +5179,8 @@
             nextState.ranges = [];
             nextState.resultQuery = '';
             nextState.matchCapped = false;
+            // Typing is its own starting point; only a seeded find seeks.
+            nextState.seekOffset = null;
             scheduleExplorerSearch(index, { resetActive: true });
         });
         input.addEventListener('keydown', event => {
@@ -5093,6 +5203,137 @@
             clearExplorerSearch(index);
         });
     }
+
+    /* ── Selection occurrence highlight (Source view) ──
+       Double-clicking a word — or selecting any single-line snippet — tints
+       every other occurrence of it in the same file, the way an editor does.
+       It is painted through the CSS Custom Highlight API instead of <mark>
+       wrappers because the Source DOM must not be rewritten: rewriting it is
+       what makes the find widget re-run the Markdown fold pass, lose the
+       scroll position and drop the live selection. Browsers without the API
+       just get no tint; the find widget stays the explicit fallback. */
+    const EXPLORER_OCCURRENCE_HIGHLIGHT = 'explorer-occurrence';
+    const EXPLORER_OCCURRENCE_MAX_MATCHES = 500;
+    const EXPLORER_OCCURRENCE_MAX_QUERY = 200;
+    const EXPLORER_OCCURRENCE_DEBOUNCE_MS = 90;
+    const EXPLORER_OCCURRENCE_WORD_RE = /^[\w$]+$/;
+    let _explorerOccurrenceTimer = null;
+
+    function explorerElementForNode(node) {
+        if (!node) {
+            return null;
+        }
+        return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    }
+
+    function explorerOccurrenceHighlight() {
+        if (typeof window.Highlight !== 'function' || !window.CSS?.highlights) {
+            return null;
+        }
+        let highlight = window.CSS.highlights.get(EXPLORER_OCCURRENCE_HIGHLIGHT);
+        if (!highlight) {
+            highlight = new window.Highlight();
+            window.CSS.highlights.set(EXPLORER_OCCURRENCE_HIGHLIGHT, highlight);
+        }
+        return highlight;
+    }
+
+    /* The Source view the selection sits in, or null when there is nothing to
+       highlight: a collapsed selection, one spanning lines or panes, or one
+       outside a Source view (Preview, Diff and the edit textarea are not it). */
+    function explorerOccurrenceTarget() {
+        const selection = window.getSelection?.();
+        if (!selection || selection.isCollapsed || !selection.rangeCount) {
+            return null;
+        }
+        const query = (selection.toString() || '').trim();
+        if (!query || query.length > EXPLORER_OCCURRENCE_MAX_QUERY || /[\r\n]/.test(query)) {
+            return null;
+        }
+        const range = selection.getRangeAt(0);
+        const root = explorerElementForNode(range.startContainer)?.closest('.explorer-source-lines');
+        if (!root || !root.contains(range.endContainer)) {
+            return null;
+        }
+        return { root, range, query };
+    }
+
+    /* A selection that is a bare identifier matches whole words only, so
+       double-clicking `id` does not light up every `width` in the file. */
+    function explorerOccurrenceIsWholeWord(value, start, end) {
+        const before = start > 0 ? value[start - 1] : '';
+        const after = end < value.length ? value[end] : '';
+        return !EXPLORER_OCCURRENCE_WORD_RE.test(before) && !EXPLORER_OCCURRENCE_WORD_RE.test(after);
+    }
+
+    function explorerOccurrenceRanges(root, query, selectionRange) {
+        const needle = query.toLowerCase();
+        const wholeWord = EXPLORER_OCCURRENCE_WORD_RE.test(query);
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        const ranges = [];
+
+        while (ranges.length < EXPLORER_OCCURRENCE_MAX_MATCHES && walker.nextNode()) {
+            const node = walker.currentNode;
+            const value = node.nodeValue || '';
+            // The selected text already carries the browser's own selection
+            // paint, and skipping its nodes keeps the tint off a partially
+            // selected token.
+            if (!value || selectionRange.intersectsNode(node)) {
+                continue;
+            }
+            const haystack = value.toLowerCase();
+            let cursor = 0;
+            while (ranges.length < EXPLORER_OCCURRENCE_MAX_MATCHES) {
+                const start = haystack.indexOf(needle, cursor);
+                if (start === -1) {
+                    break;
+                }
+                const end = start + query.length;
+                cursor = end;
+                if (wholeWord && !explorerOccurrenceIsWholeWord(value, start, end)) {
+                    continue;
+                }
+                const range = document.createRange();
+                range.setStart(node, start);
+                range.setEnd(node, end);
+                ranges.push(range);
+            }
+        }
+
+        return ranges;
+    }
+
+    function refreshExplorerOccurrenceHighlight() {
+        const highlight = explorerOccurrenceHighlight();
+        if (!highlight) {
+            return;
+        }
+        highlight.clear();
+        const target = explorerOccurrenceTarget();
+        if (!target) {
+            return;
+        }
+        explorerOccurrenceRanges(target.root, target.query, target.range)
+            .forEach(range => highlight.add(range));
+    }
+
+    function scheduleExplorerOccurrenceHighlight() {
+        if (typeof window.Highlight !== 'function' || !window.CSS?.highlights) {
+            return;
+        }
+        window.clearTimeout(_explorerOccurrenceTimer);
+        // Debounced: a drag-select fires selectionchange on every mouse move.
+        _explorerOccurrenceTimer = window.setTimeout(() => {
+            _explorerOccurrenceTimer = null;
+            refreshExplorerOccurrenceHighlight();
+        }, EXPLORER_OCCURRENCE_DEBOUNCE_MS);
+    }
+
+    function installExplorerOccurrenceHighlight() {
+        document.addEventListener('selectionchange', scheduleExplorerOccurrenceHighlight);
+    }
+
+    installExplorerOccurrenceHighlight();
 
     function explorerPanelScrollTarget(panel) {
         if (!panel) {

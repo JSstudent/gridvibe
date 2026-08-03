@@ -4041,6 +4041,20 @@
             box-shadow: 0 0 0 1px rgba(17, 24, 39, .3);
         }
 
+        /* Occurrences of the selected word in the Source view, painted through
+           the CSS Custom Highlight API (colour properties only — no radius or
+           padding is available there). Deliberately weaker than the find
+           highlight above so an active find still reads as the stronger
+           signal, and weaker than the native selection so the word the reader
+           actually selected stays the anchor. */
+        ::highlight(explorer-occurrence) {
+            background-color: rgba(250, 204, 21, .34);
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] ::highlight(explorer-occurrence) {
+            background-color: rgba(250, 204, 21, .24);
+        }
+
         .explorer-pane[data-explorer-theme="dark"] .explorer-code-keyword {
             color: #c4b5fd;
         }
