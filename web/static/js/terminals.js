@@ -1267,6 +1267,18 @@
        window dispatch goes through workspaces.js (guardrail 6).
     ───────────────────────────────────────────── */
 
+    /* Every in-app path that hands focus to another workspace window goes
+       through here (guardrail 6), so leaving a workspace always drops this
+       window's terminal focus first — the window-blur handler covers the rest
+       (clicking another window directly). Without it the pane keeps real DOM
+       focus while the window sits in the background and is focused again the
+       moment the window comes back, leaving the user typing into the pane
+       instead of driving the workspace shortcuts. */
+    async function switchToWorkspaceWindow(workspaceId, options = {}) {
+        dropTerminalFocusForWindowSwitch();
+        return openWorkspaceWindow(workspaceId, options);
+    }
+
     /* The Move list always acts on the active session tab, which the heading
        names — "Move Session to Workspace" alone reads as if it were about to
        move whatever the destination entry is. */
@@ -1306,7 +1318,7 @@
                 icon: workspace.workspace_id === currentWorkspaceId ? '' : WORKSPACE_ICONS.window,
                 onSelect: () => {
                     closeWorkspaceMenu();
-                    openWorkspaceWindow(workspace.workspace_id, {
+                    switchToWorkspaceWindow(workspace.workspace_id, {
                         groupId: workspace.active_group_id
                     });
                 }
@@ -1373,7 +1385,7 @@
         try {
             const workspace = await createWorkspaceRecord(label);
             notifyWorkspacesChanged('created');
-            await openWorkspaceWindow(workspace.workspace_id);
+            await switchToWorkspaceWindow(workspace.workspace_id);
         } catch (error) {
             setWorkspaceSaveMessage(`Could not create the workspace: ${error.message}`, 'error');
         }
@@ -1445,7 +1457,7 @@
             if (activeGroupId === movingGroupId) {
                 activeGroupId = '';
             }
-            await openWorkspaceWindow(result.workspace_id, { groupId: movingGroupId });
+            await switchToWorkspaceWindow(result.workspace_id, { groupId: movingGroupId });
 
             /* Moving the last group out empties this workspace: the record is
                already pruned server-side, so re-listing it would 400. Close
@@ -1734,7 +1746,7 @@
             confirmLabel: 'Move it here'
         });
         if (!moveItHere) {
-            await openWorkspaceWindow(conflict.workspace_id, { groupId: conflict.group_id });
+            await switchToWorkspaceWindow(conflict.workspace_id, { groupId: conflict.group_id });
             setWorkspaceSaveMessage(`Opened ${label}.`, '');
             return false;
         }
@@ -3880,11 +3892,32 @@
                 window.open(uri, '_blank', 'noopener');
             }));
         }
+        attachTerminalKeyEventHandler(term);
+        return { term, fitAddon, searchAddon };
+    }
+
+    /* xterm keeps exactly ONE custom key event handler per terminal, so every
+       key rule has to live in this single install — a second
+       `attachCustomKeyEventHandler` call silently replaces the first, which is
+       how the clipboard wiring used to drop the shortcut pass-throughs below.
+
+       Returning false means "xterm must not act on this key". That matters for
+       more than the shell: xterm cancels the keys it claims with
+       `preventDefault()` *and* `stopPropagation()`, so a key it handles never
+       reaches the document-level shortcut listeners at all. */
+    function paneIndexForTerminal(term) {
+        return terminals.findIndex(pane => pane?.term === term);
+    }
+
+    function attachTerminalKeyEventHandler(term) {
         term.attachCustomKeyEventHandler(event => {
+            if (event.type !== 'keydown') {
+                return true;
+            }
+
             /* Hand Ctrl+Shift+F to the document-level search-overlay shortcut
                instead of letting xterm swallow it. */
-            if (event.type === 'keydown'
-                && (event.ctrlKey || event.metaKey)
+            if ((event.ctrlKey || event.metaKey)
                 && event.shiftKey
                 && !event.altKey
                 && event.code === 'KeyF') {
@@ -3892,16 +3925,30 @@
             }
             /* Same for Alt+W (workspace switch): xterm would send it on to the
                shell as ESC w, so hand it to the document handler instead. */
-            if (event.type === 'keydown'
-                && event.altKey
+            if (event.altKey
                 && !event.ctrlKey
                 && !event.metaKey
                 && event.code === 'KeyW') {
                 return false;
             }
+
+            /* Ctrl+Shift+C → copy selection */
+            if (event.ctrlKey && event.shiftKey && event.code === 'KeyC') {
+                _copyText(term.getSelection());
+                return false;
+            }
+
+            /* Ctrl+V → paste from clipboard */
+            if (event.ctrlKey && !event.shiftKey && event.code === 'KeyV') {
+                const index = paneIndexForTerminal(term);
+                if (index !== -1) {
+                    _pasteToTerminal(index);
+                }
+                return false;
+            }
+
             return true;
         });
-        return { term, fitAddon, searchAddon };
     }
 
     function emitTerminalResize(index, force = false) {
@@ -4987,6 +5034,36 @@
         paintActiveTerminalCard(-1);
         document.getElementById('terminalsGrid')?.classList.remove('terminal-focus');
     }
+
+    /* Leaving this workspace window: blur whatever pane holds keyboard focus so
+       the window is parked with nothing selected. DOM focus survives a window
+       switch, so without this the pane that was active when you left is active
+       again the instant the window returns to the front, and every keystroke —
+       including the workspace and tab shortcuts — goes into it. The blur fires
+       focusout, which clears the highlight; the explicit clear covers panes
+       that never take real focus (browser/explorer iframes). */
+    function dropTerminalFocusForWindowSwitch() {
+        const active = document.activeElement;
+        if (active instanceof HTMLElement
+            && active.closest?.('.terminal-container')) {
+            try { active.blur(); } catch (_) {}
+        }
+        clearActiveTerminalHighlight();
+    }
+
+    /* Clicking another window is a workspace switch too — on a second screen it
+       is the *usual* one — and it never runs through `switchToWorkspaceWindow`,
+       so the drop has to hang off the window losing focus as well. Focus moving
+       into a same-page iframe (a browser pane) also fires `blur` here, so the
+       decision is deferred one tick and taken only when the document really
+       lost focus. */
+    window.addEventListener('blur', () => {
+        setTimeout(() => {
+            if (!document.hasFocus()) {
+                dropTerminalFocusForWindowSwitch();
+            }
+        }, 0);
+    });
 
     /* Full reset on teardown. */
     function resetFocusedTerminal() {
@@ -6111,25 +6188,9 @@
             if (sel) _copyText(sel);
         });
 
-        /* Intercept keys before xterm processes them */
-        term.attachCustomKeyEventHandler(e => {
-            if (e.type !== 'keydown') return true;
-
-            /* Ctrl+Shift+C → copy selection */
-            if (e.ctrlKey && e.shiftKey && e.code === 'KeyC') {
-                const sel = term.getSelection();
-                _copyText(sel);
-                return false;
-            }
-
-            /* Ctrl+V → paste from clipboard */
-            if (e.ctrlKey && !e.shiftKey && e.code === 'KeyV') {
-                _pasteToTerminal(index);
-                return false;
-            }
-
-            return true;
-        });
+        /* Copy/paste keys are handled by the terminal's single custom key
+           event handler (`attachTerminalKeyEventHandler`) — installing another
+           one here would replace it and take the shortcut pass-throughs with it. */
 
         /* Handle browser right-click → Paste menu item (fires paste event on textarea) */
         if (term.textarea) {
@@ -6446,7 +6507,7 @@
                 showTerminalToast('No other workspace is open.', '');
                 return;
             }
-            await openWorkspaceWindow(target.workspace_id, {
+            await switchToWorkspaceWindow(target.workspace_id, {
                 groupId: target.active_group_id
             });
         } catch (error) {
@@ -6457,11 +6518,24 @@
         }
     }
 
+    /* A focused terminal must not block the cycle: xterm's helper textarea is
+       the keyboard target of every focused pane, so the plain editable-target
+       guard would swallow Alt+W in exactly the case makeTerminal already
+       declines the key for (it returns false so this handler can act, and the
+       shell never sees an ESC w) — leaving the user stuck in the pane. Real
+       inputs (search boxes, name fields, explorer controls) still block it. */
+    function isWorkspaceCycleBlockingTarget(target) {
+        if (target instanceof Element && target.closest('.xterm-helper-textarea')) {
+            return false;
+        }
+        return isEditableShortcutTarget(target);
+    }
+
     document.addEventListener('keydown', event => {
         if (!event.altKey || event.ctrlKey || event.metaKey || event.repeat) {
             return;
         }
-        if (event.code !== 'KeyW' || isEditableShortcutTarget(event.target)) {
+        if (event.code !== 'KeyW' || isWorkspaceCycleBlockingTarget(event.target)) {
             return;
         }
         if (!isMultiWorkspaceEnabled()) {
