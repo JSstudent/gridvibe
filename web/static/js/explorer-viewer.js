@@ -1032,8 +1032,14 @@
             const revertButton = (action === 'stage' && explorerGitCanRevert(status))
                 ? `<button type="button" class="explorer-search-btn explorer-git-revert-btn" data-explorer-git-revert="${escHtml(path)}" data-explorer-git-revert-status="${escHtml(status)}" title="${discardLabel}" aria-label="${discardLabel}">${EXPLORER_GIT_REVERT_ICON}</button>`
                 : '';
+            /* Download reads the worktree, so it is only offered where the
+               worktree copy is the file the row names: not for deleted files
+               and not for history rows (those show a past commit's version). */
+            const downloadPath = (path && !commitHash && status !== 'deleted')
+                ? ` data-explorer-download-path="${escHtml(path)}"`
+                : '';
             return `
-                <div class="explorer-diff-commit-file" title="${escHtml(path)}" data-explorer-copy-path="${escHtml(path)}">
+                <div class="explorer-diff-commit-file" title="${escHtml(path)}" data-explorer-copy-path="${escHtml(path)}"${downloadPath}>
                     ${explorerDiffSidebarStatusHtml(file.git)}
                     ${explorerFileTypeIconHtml(path)}
                     <button type="button" class="explorer-diff-commit-file-path" ${pathAction}>${escHtml(path || file.name || 'Changed file')}</button>
@@ -1247,6 +1253,18 @@
         ];
         if (relativePath) {
             pathItems.push({ label: 'Copy relative path', action: () => _copyText(relativePath) });
+        }
+        /* Downloading is a read, so it belongs with the copy entries. It is
+           offered per row (not only for the open file) because a format the
+           viewer can't render never reaches editor mode and its toolbar
+           download button. */
+        const downloadPath = row?.dataset.explorerDownloadPath || '';
+        if (downloadPath) {
+            pathItems.push({
+                label: 'Download file',
+                title: `Download ${downloadPath}`,
+                action: () => downloadExplorerFile(index, { path: downloadPath })
+            });
         }
         if (beforePath.length) {
             pathItems[0].separatorBefore = true;
@@ -1912,6 +1930,7 @@
                 data-explorer-context-kind="${escHtml(entry.entry_kind || '')}"
                 data-explorer-context-revision="${escHtml(entry.revision || '')}"
                 data-explorer-context-surface="tree"
+                ${isDirectory ? '' : `data-explorer-download-path="${escHtml(path)}"`}
             >
                 ${chevron}
                 <button type="button" class="explorer-tree-main" ${action} title="${escHtml(path)}">
@@ -4809,7 +4828,8 @@
                 data-explorer-context-path="${escHtml(entry.path || '')}"
                 data-explorer-context-kind="${escHtml(entry.entry_kind || '')}"
                 data-explorer-context-revision="${escHtml(entry.revision || '')}"
-                data-explorer-context-surface="preview"`;
+                data-explorer-context-surface="preview"
+                ${isDirectory ? '' : `data-explorer-download-path="${escHtml(entry.path || '')}"`}`;
 
         return `
             <button
@@ -5636,14 +5656,23 @@
             <path d="M5.4 13.5a7 7 0 1 0 1.7-6.4L5 10"/>
         </svg>
     `;
-    async function downloadExplorerFile(index) {
+    /* `options.path` downloads a specific file instead of whatever the viewer
+       has open — the context-menu entry point, so files GridVibe can't render
+       (and therefore never open in the editor) are still reachable. */
+    async function downloadExplorerFile(index, options = {}) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
-        if (!pane || !sessionId || pane._explorerMode !== 'file') {
+        if (!pane || !sessionId) {
             return;
         }
-        const path = pane._explorerFilePath || '';
-        const fileName = pane._explorerFileName || 'download';
+        const explicitPath = String(options.path || '');
+        if (!explicitPath && pane._explorerMode !== 'file') {
+            return;
+        }
+        const path = explicitPath || pane._explorerFilePath || '';
+        const fileName = explicitPath
+            ? (getDownloadBaseName(explicitPath) || 'download')
+            : (pane._explorerFileName || 'download');
         const url = `/api/explorer/${encodeURIComponent(sessionId)}/download?path=${encodeURIComponent(path)}`;
 
         /* WebView2 silently ignores programmatic <a download> clicks, so in the
@@ -6028,9 +6057,10 @@
                 : `<button type="button" class="explorer-tab-close" data-explorer-tab-close="${escHtml(tab.id)}" title="Close tab" aria-label="Close ${escHtml(label)}">×</button>`;
             /* A pinned tab joins the shared copy-path context menu (the tree
                and Git rows carry the same hook). No context kind is exposed,
-               so the tab menu stays copy-only — no filesystem mutations. */
+               so the tab menu stays read-only — copy and download only, no
+               filesystem mutations. */
             const copyPath = (!isPreview && tab.path)
-                ? ` data-explorer-copy-path="${escHtml(tab.path)}"`
+                ? ` data-explorer-copy-path="${escHtml(tab.path)}" data-explorer-download-path="${escHtml(tab.path)}"`
                 : '';
             return `
                 <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}${dirty ? ' is-dirty' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}"${tabStates.length ? ' aria-label="' + escHtml(`${label} (${tabStates.join(', ')})`) + '"' : ''} data-explorer-tab="${escHtml(tab.id)}"${copyPath}${isPreview ? '' : ' draggable="true"'} title="${escHtml(`${dirty ? '● ' : ''}${gitLabel ? `${gitLabel} ` : ''}${tab.path || label}`)}">

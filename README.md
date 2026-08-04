@@ -127,7 +127,7 @@ Swap any pane between a terminal and a file explorer with one button — same di
 
 | | |
 | --- | --- |
-| **Read** | Tabbed viewer with pinned file tabs (drag to reorder, middle-click to close), each remembering its view mode, scroll, zoom, and wrap. Breadcrumbs, lazy file tree, directory search, `Ctrl+F` in-file find (seeded from the selection, opening on the match under the caret), download (100 MB cap). Double-clicking a word in the Source view tints its other occurrences without disturbing folds or scroll. |
+| **Read** | Tabbed viewer with pinned file tabs (drag to reorder, middle-click to close), each remembering its view mode, scroll, zoom, and wrap. Breadcrumbs, lazy file tree, directory search, `Ctrl+F` in-file find (seeded from the selection, opening on the match under the caret), download (100 MB cap) from the viewer toolbar or by right-clicking any file row or tab — so a format the viewer can't render still comes down. Double-clicking a word in the Source view tints its other occurrences without disturbing folds or scroll. |
 | **Preview** | Syntax coloring, Markdown render with Mermaid (`Ctrl+Shift+V`), heading folds, reading-surface presets, inline image viewer (25 MB cap). Text caps at 10 MiB. |
 | **Edit** | In-place editing of complete UTF-8 text files. `Ctrl+S` saves atomically, preserving line-ending style, BOM, and permission bits. Changed on disk since you opened it? You get a conflict prompt, not a silent overwrite. |
 | **Git** | Branch/dirty status, per-file badges, colour-coded commit graph, historical diffs. Stage · unstage · commit · publish · discard — plus per-line **and** per-block undo right in the diff view. |

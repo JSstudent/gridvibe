@@ -14326,11 +14326,40 @@ class ExplorerDownloadTestCase(unittest.TestCase):
     def test_file_viewer_ships_download_button(self):
         # Explorer viewer moved to explorer-viewer.js (2026-07-23 split).
         terminals_js = self._static("js/explorer-viewer.js")
-        self.assertIn("function downloadExplorerFile(index)", terminals_js)
+        self.assertIn("function downloadExplorerFile(index, options = {})", terminals_js)
         self.assertIn("data-explorer-download", terminals_js)
         self.assertIn("/download?path=", terminals_js)
         terminals_css = self._static("css/terminals.css")
         self.assertIn(".explorer-download-btn", terminals_css)
+
+    def test_context_menu_downloads_a_row_without_opening_it(self):
+        # A format the viewer cannot render never reaches editor mode, so its
+        # toolbar download button is unreachable: the right-click path section
+        # downloads the row directly instead.
+        viewer_js = self._static("js/explorer-viewer.js")
+        self.assertIn("label: 'Download file'", viewer_js)
+        self.assertIn(
+            "action: () => downloadExplorerFile(index, { path: downloadPath })",
+            viewer_js,
+        )
+        self.assertIn(
+            "const downloadPath = row?.dataset.explorerDownloadPath || '';",
+            viewer_js,
+        )
+        # Offered next to the copy entries, and only for file rows.
+        self.assertLess(
+            viewer_js.index("label: 'Copy relative path'"),
+            viewer_js.index("label: 'Download file'"),
+        )
+        self.assertIn(
+            "${isDirectory ? '' : `data-explorer-download-path=",
+            viewer_js,
+        )
+        # Worktree-only: never for deleted files or historic commit rows.
+        self.assertIn(
+            "const downloadPath = (path && !commitHash && status !== 'deleted')",
+            viewer_js,
+        )
 
     def test_native_window_downloads_route_through_the_bridge(self):
         # WebView2 drops anchor downloads, so the native window must use the
