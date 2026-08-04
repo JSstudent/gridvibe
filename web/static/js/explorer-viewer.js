@@ -5211,7 +5211,7 @@
         applyExplorerSearch(index);
     }
 
-    function clearExplorerSearch(index) {
+    function clearExplorerSearch(index, { focus = true } = {}) {
         const pane = terminals[index];
         if (!pane) {
             return;
@@ -5225,10 +5225,12 @@
         state.resultQuery = '';
         state.seekOffset = null;
         applyExplorerSearch(index);
-        document.querySelector(`[data-explorer-search-input="${index}"]`)?.focus();
+        if (focus) {
+            document.querySelector(`[data-explorer-search-input="${index}"]`)?.focus();
+        }
     }
 
-    function focusExplorerSearch(index, seedQuery = '', { seekLine = 0 } = {}) {
+    function focusExplorerSearch(index, seedQuery = '') {
         const pane = terminals[index];
         if (!pane || !isExplorerSearchablePane(pane)) {
             return false;
@@ -5245,12 +5247,10 @@
             const state = ensureExplorerSearchState(pane);
             state.query = seedQuery;
             state.activeIndex = 0;
-            /* Open on the match the reader is already looking at — the caret's
-               line, or the line a repo-search hit landed on — instead of the
-               file's first match, which used to fling the Source view back to
-               the top of the document. */
+            /* Open on the match the reader is already looking at instead of
+               snapping the Source view back to the file's first match. */
             state.seekOffset = activeExplorerFileView(index) === 'source'
-                ? (seekLine ? explorerLineStartOffset(pane, seekLine) : explorerSelectionContentOffset(pane))
+                ? explorerSelectionContentOffset(pane)
                 : null;
             state.ranges = [];
             state.resultQuery = '';
@@ -7081,7 +7081,7 @@
         return true;
     }
 
-    function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '', diffMode = '', tab = '', pinned = false } = {}) {
+    function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '', diffMode = '', tab = '', pinned = false, restoreTabView = true } = {}) {
         const pane = terminals[index];
         const list = document.getElementById(`explorer-list-${index}`);
         const viewer = explorerEnsureViewerShell(index);
@@ -7117,7 +7117,7 @@
         }
         /* 2.e: restore the tab's stored view mode + scroll when the content is
            still what the snapshot was taken from (OD-4 identity check). */
-        const restoredTabView = scrollState
+        const restoredTabView = !restoreTabView || scrollState
             ? null
             : explorerMatchingTabView(
                 assignedTab,
@@ -7509,7 +7509,7 @@
         return true;
     }
 
-    async function openExplorerFile(index, path, { showLoading = true, preserveScroll = false, openDiff = false, diffCommit = '', diffMode = '', pinned = false, tab = '' } = {}) {
+    async function openExplorerFile(index, path, { showLoading = true, preserveScroll = false, openDiff = false, diffCommit = '', diffMode = '', pinned = false, tab = '', restoreTabView = true } = {}) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !isExplorerSession(pane._session) || !sessionId || !path) {
@@ -7544,7 +7544,15 @@
             ) {
                 return true;
             }
-            const rendered = renderExplorerFile(index, data, { scrollState, openDiff, diffCommit, diffMode, pinned, tab });
+            const rendered = renderExplorerFile(index, data, {
+                scrollState,
+                openDiff,
+                diffCommit,
+                diffMode,
+                pinned,
+                tab,
+                restoreTabView
+            });
             if (rendered) {
                 revealExplorerTreePath(index);
             }

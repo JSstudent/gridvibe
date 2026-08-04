@@ -4966,13 +4966,17 @@
     }
 
     function findExplorerShortcutTargetIndex(target = document.activeElement) {
-        const targetCard = target?.closest?.('.terminal-container');
-        if (targetCard) {
-            return explorerPaneIndexFromTarget(target);
-        }
+        /* Pointer interaction is the source of truth for explorer panes. Many
+           explorer controls deliberately prevent mousedown focus so toolbar
+           clicks do not steal a selection; in that case document.activeElement
+           can still belong to a different pane. */
         if (_activeExplorerIndex !== -1
             && isExplorerSession(terminals[_activeExplorerIndex]?._session)) {
             return _activeExplorerIndex;
+        }
+        const targetCard = target?.closest?.('.terminal-container');
+        if (targetCard) {
+            return explorerPaneIndexFromTarget(target);
         }
         const explorerIndexes = terminals
             .map((pane, index) => isExplorerSession(pane?._session) ? index : -1)
@@ -6224,24 +6228,8 @@
 
 
     function findExplorerSearchTargetIndex() {
-        const activeCard = document.activeElement?.closest?.('.explorer-pane');
-        const activeSlot = activeCard ? Number(activeCard.dataset.slot) : -1;
-        if (Number.isInteger(activeSlot)
-            && isExplorerSearchablePane(terminals[activeSlot])) {
-            return activeSlot;
-        }
-
-        if (_focusedTerminalIndex !== -1
-            && isExplorerSearchablePane(terminals[_focusedTerminalIndex])) {
-            return _focusedTerminalIndex;
-        }
-
-        for (let i = 0; i < terminals.length; i++) {
-            if (isExplorerSearchablePane(terminals[i])) {
-                return i;
-            }
-        }
-        return -1;
+        const index = findExplorerShortcutTargetIndex();
+        return index !== -1 && isExplorerSearchablePane(terminals[index]) ? index : -1;
     }
 
     /* The highlighted string, when the current selection sits inside this
@@ -6421,26 +6409,8 @@
     }
 
     function findExplorerRepoSearchTargetIndex() {
-        const activeCard = document.activeElement?.closest?.('.explorer-pane');
-        const activeSlot = activeCard ? Number(activeCard.dataset.slot) : -1;
-        if (Number.isInteger(activeSlot) && isExplorerRepoSearchablePane(activeSlot)) {
-            return activeSlot;
-        }
-        if (_focusedTerminalIndex !== -1 && isExplorerRepoSearchablePane(_focusedTerminalIndex)) {
-            return _focusedTerminalIndex;
-        }
-        /* Only when no terminal-searchable pane exists either does the
-           shortcut fall back to the first explorer pane, so a workspace of
-           explorer panes with focus nowhere still responds. */
-        if (findTerminalSearchTargetIndex() !== -1) {
-            return -1;
-        }
-        for (let i = 0; i < terminals.length; i++) {
-            if (isExplorerRepoSearchablePane(i)) {
-                return i;
-            }
-        }
-        return -1;
+        const index = findExplorerShortcutTargetIndex();
+        return index !== -1 && isExplorerRepoSearchablePane(index) ? index : -1;
     }
 
     document.addEventListener('keydown', event => {

@@ -531,17 +531,21 @@
         if (!pane || !path) {
             return;
         }
-        const state = ensureExplorerRepoSearchState(pane);
-        const opened = await openExplorerFile(index, path, { pinned: Boolean(pinned) });
+        const opened = await openExplorerFile(index, path, {
+            pinned: Boolean(pinned),
+            restoreTabView: false
+        });
         if (!opened) {
             return;
         }
+        /* A repository hit is an exact source location, not a request to start
+           a second, pane-local find. Clear any old in-file query before it can
+           scroll the newly rendered file to its own active (often first)
+           match, and reveal the source row even when this tab remembered a
+           Markdown Preview or Diff view. */
+        clearExplorerSearch(index, { focus: false });
+        setExplorerFileView(index, 'source');
         scrollExplorerSourceToLine(index, line);
-        /* Seed the in-file find with the same query so every other hit in the
-           file is highlighted too — anchored on the line that was clicked, so
-           the find opens on that hit instead of scrolling back to the file's
-           first one. */
-        focusExplorerSearch(index, state.query, { seekLine: line });
     }
 
     function scrollExplorerSourceToLine(index, line) {

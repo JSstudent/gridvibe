@@ -762,6 +762,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('title="Refresh explorer (F5)"', html)
         self.assertIn('title="Go to parent directory (Mouse Back)"', html)
         self.assertIn("function findExplorerShortcutTargetIndex(", html)
+        shortcut_target = html[
+            html.index("function findExplorerShortcutTargetIndex("):
+            html.index("function navigateExplorerToParent(index)")
+        ]
+        self.assertLess(
+            shortcut_target.index("if (_activeExplorerIndex !== -1"),
+            shortcut_target.index("const targetCard = target?.closest?.('.terminal-container');")
+        )
         self.assertIn("function navigateExplorerToParent(index)", html)
         self.assertIn("event.key !== 'F5'", html)
         self.assertIn("refreshTerminalDisplay(index);", html)
@@ -1308,6 +1316,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("node.replaceWith(fragment);", html)
         self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
         self.assertIn("function findExplorerSearchTargetIndex()", html)
+        target = html[
+            html.index("function findExplorerSearchTargetIndex()"):
+            html.index("function explorerSelectionQuery(index)")
+        ]
+        self.assertIn("const index = findExplorerShortcutTargetIndex();", target)
         self.assertIn("event.code !== 'KeyF'", html)
         self.assertNotIn("/api/explorer-search", html)
 
@@ -1357,8 +1370,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         self.assertIn("function isExplorerSearchablePane(pane)", html)
         self.assertIn("pane?._explorerMode === 'file' || pane?._explorerMode === 'directory'", html)
-        self.assertIn("isExplorerSearchablePane(terminals[activeSlot])", html)
-        self.assertIn("isExplorerSearchablePane(terminals[_focusedTerminalIndex])", html)
+        target = html[
+            html.index("function findExplorerSearchTargetIndex()"):
+            html.index("function explorerSelectionQuery(index)")
+        ]
+        self.assertIn("const index = findExplorerShortcutTargetIndex();", target)
+        self.assertIn("isExplorerSearchablePane(terminals[index])", target)
         self.assertIn("!pane || !isExplorerSearchablePane(pane)", html)
         self.assertNotIn("!pane || pane._explorerMode !== 'file'", html)
 
@@ -1644,6 +1661,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function activateExplorerSearchHit(index, path, line,", html)
         self.assertIn("function focusExplorerRepoSearch(index, seedQuery = '')", html)
         self.assertIn("function findExplorerRepoSearchTargetIndex()", html)
+        target = html[
+            html.index("function findExplorerRepoSearchTargetIndex()"):
+            html.index("document.addEventListener('keydown'", html.index("function findExplorerRepoSearchTargetIndex()"))
+        ]
+        self.assertIn("const index = findExplorerShortcutTargetIndex();", target)
         self.assertIn("data-explorer-repo-search-input", html)
         self.assertIn("/api/explorer/${encodeURIComponent(sessionId)}/search?", html)
         self.assertIn(
@@ -11540,15 +11562,12 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
     def test_seeded_find_opens_on_the_match_under_the_caret(self):
         viewer = self._static("js/explorer-viewer.js")
         self.assertIn(
-            "function focusExplorerSearch(index, seedQuery = '', { seekLine = 0 } = {})", viewer
+            "function focusExplorerSearch(index, seedQuery = '')", viewer
         )
         # Only the Source view can seek — it is the only view a content offset
         # means anything in.
         self.assertIn("state.seekOffset = activeExplorerFileView(index) === 'source'", viewer)
-        self.assertIn(
-            "seekLine ? explorerLineStartOffset(pane, seekLine) : explorerSelectionContentOffset(pane)",
-            viewer,
-        )
+        self.assertIn("? explorerSelectionContentOffset(pane)", viewer)
         resolve = viewer[
             viewer.index("function explorerResolveSearchActiveIndex(state, ranges)"):
             viewer.index("function explorerLineStartOffset(pane, line)")
@@ -11557,9 +11576,25 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
         # Consumed once, so paging through matches is not dragged back.
         self.assertIn("state.seekOffset = null;", resolve)
         self.assertIn("state.activeIndex = explorerResolveSearchActiveIndex(state, ranges);", viewer)
-        # A repo-search hit anchors on the line that was clicked.
+
+    def test_repo_search_hit_uses_exact_source_line_without_local_find(self):
         search = self._static("js/explorer-search.js")
-        self.assertIn("focusExplorerSearch(index, state.query, { seekLine: line });", search)
+        activation = search[
+            search.index("async function activateExplorerSearchHit("):
+            search.index("function scrollExplorerSourceToLine(")
+        ]
+        self.assertIn("restoreTabView: false", activation)
+        self.assertIn("clearExplorerSearch(index, { focus: false });", activation)
+        self.assertIn("setExplorerFileView(index, 'source');", activation)
+        self.assertIn("scrollExplorerSourceToLine(index, line);", activation)
+        self.assertNotIn("focusExplorerSearch(", activation)
+        self.assertLess(
+            activation.index("clearExplorerSearch(index, { focus: false });"),
+            activation.index("scrollExplorerSourceToLine(index, line);")
+        )
+        viewer = self._static("js/explorer-viewer.js")
+        self.assertIn("const restoredTabView = !restoreTabView || scrollState", viewer)
+        self.assertIn("restoreTabView\n            });", viewer)
 
     def test_find_only_unfolds_the_markdown_sections_holding_matches(self):
         viewer = self._static("js/explorer-viewer.js")
