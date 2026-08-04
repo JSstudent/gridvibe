@@ -1512,11 +1512,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("diffStyle: 'char',", html)
         self.assertIn("synchronisedScroll: false,", html)
         self.assertIn("matchingMaxComparisons: 1500,", html)
-        self.assertIn("maxLineLengthHighlight: 2000", html)
+        # Lines past this length lose intraline emphasis entirely, so the cap
+        # tracks Diff2Html's own default rather than sitting below it.
+        self.assertIn("maxLineLengthHighlight: 10000", html)
         self.assertIn(
             "new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs)",
             html,
         )
+        # draw() highlights on its own because the config sets `highlight: true`.
+        # A second highlightCode() pass nests a duplicate hljs span inside every
+        # span the first pass produced, so there must be exactly one draw call
+        # and no explicit re-highlight.
+        self.assertIn("ui.draw();", html)
+        self.assertNotIn("ui.highlightCode();", html)
         # Both wrapped and unwrapped paths prefer Diff2Html; only unavailable
         # vendor assets use the handwritten renderer.
         self.assertIn("function renderExplorerDiffWithDiff2Html(index, code, diff, banner)", html)
@@ -2547,6 +2555,15 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
         self.assertIn("max-width: 4em;", html)
+        # Both sides must wrap inside the pane. Each side is its own table, so
+        # the left-only `@@ ... @@` block header has to wrap as well — an
+        # unwrappable header set the left table's width and clipped that column
+        # with no scrollbar left to recover it.
+        self.assertIn(".d2h-info .d2h-code-side-line {", html)
+        # ...but not by pinning the tables: fixed layout gives the number
+        # column an equal half of the side while its own max-width holds the
+        # cell at 4em, leaving a blank gap in front of every code line.
+        self.assertNotIn(".explorer-diff2html .d2h-diff-table {\n            table-layout", html)
         self.assertIn(".explorer-markdown-preview.wrap-lines > * {", html)
         self.assertIn(".explorer-markdown-preview p,", html)
         self.assertIn("text-align: justify;", html)

@@ -2716,7 +2716,14 @@
             highlight: true,
             synchronisedScroll: false,
             matchingMaxComparisons: 1500,
-            maxLineLengthHighlight: 2000
+            /* Diff2Html's own default. A line longer than this gets a plain
+               red/green block and no intraline ins/del at all, so the previous
+               2000 silently dropped emphasis on generated SQL, minified assets,
+               and long single-statement lines. The char diff is O(n·d) in the
+               edit distance, which stays cheap for the usual small edit inside
+               a long line; the bounded diff payload (256 KiB / 4,000 lines)
+               caps how many pairs can reach it. */
+            maxLineLengthHighlight: 10000
         };
     }
 
@@ -3399,8 +3406,11 @@
             const host = document.createElement('div');
             host.className = 'explorer-diff2html';
             const ui = new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs);
+            // draw() already runs highlightCode() because the config sets
+            // `highlight: true`. Calling it a second time re-highlights markup
+            // that is already highlighted, which nests a duplicate hljs span
+            // inside every existing one.
             ui.draw();
-            ui.highlightCode();
             if (!host.querySelector('.d2h-diff-table, .d2h-code-line, .d2h-file-wrapper')) {
                 return false;
             }

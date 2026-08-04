@@ -4298,6 +4298,29 @@
             white-space: nowrap;
         }
 
+        /* Each side is its own table, so a row that cannot wrap sets that
+           side's minimum width and pushes every row below it past the pane,
+           where the overflow rule above clips it with no scrollbar left to
+           recover it. The block-header row was that row: Git puts the
+           enclosing section (function, class, statement) in the `@@ ... @@`
+           header, Diff2Html renders it on the left side only (the right side
+           gets a blank placeholder), and its text sits directly in the line
+           div above with no .d2h-code-line-ctn to wrap inside — so the rule
+           above kept it on one line and long headers cut the left column off
+           while the right one wrapped normally. Letting the header wrap is the
+           whole fix; do NOT reach for `table-layout: fixed` on
+           .d2h-diff-table as a belt-and-braces guard. The number cell's own
+           `max-width: 4em` keeps its box at 4em while fixed layout hands the
+           column an equal half of the side, so the gutter renders 4em wide
+           with the rest of its column left as a blank gap before the code
+           (docs/images/diff_empty_space.png). */
+        .explorer-diff-content.wrap-lines
+        .explorer-diff2html
+        .d2h-info .d2h-code-side-line {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+
         .explorer-diff-content.wrap-lines .explorer-diff2html .d2h-code-line-ctn {
             display: inline;
             width: auto;
