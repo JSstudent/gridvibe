@@ -274,6 +274,7 @@
                 : {},
             explorer_md_preset: resolvedStartupMode === 'explorer' ? (terminal?.explorer_md_preset || '') : '',
             explorer_md_font: resolvedStartupMode === 'explorer' ? (terminal?.explorer_md_font || '') : '',
+            explorer_source_font: resolvedStartupMode === 'explorer' ? (terminal?.explorer_source_font || '') : '',
             explorer_theme: resolvedStartupMode === 'explorer' ? (terminal?.explorer_theme || 'dark') : '',
             startup_mode: resolvedStartupMode,
             use_wsl: shellFlagsAllowed && Boolean(terminal?.use_wsl),

@@ -131,8 +131,10 @@
     }
 
     /* While editing, the non-editor file chrome is disabled so a stray click
-       cannot swap views, search, download the old disk copy, or restyle the
-       preview. Zoom stays live (it only sets the shared font-size variable). */
+       cannot swap views, search, or download the old disk copy. Zoom, line
+       wrapping and the appearance menu stay live — like the wrap toggle they
+       only restyle the surface (CSS custom properties on panels that are not
+       rebuilt), and the Source font they set is the one being typed into. */
     function setExplorerEditChromeDisabled(index, disabled) {
         const list = document.getElementById(`explorer-list-${index}`);
         if (!list) {
@@ -145,7 +147,6 @@
         const selectors = [
             '[data-explorer-file-view]',
             `[data-explorer-download="${index}"]`,
-            `[data-explorer-md-appearance="${index}"]`,
             `[data-explorer-search-input="${index}"]`,
             `[data-explorer-search-prev="${index}"]`,
             `[data-explorer-search-next="${index}"]`,

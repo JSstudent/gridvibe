@@ -781,6 +781,7 @@ def build_sessions_from_saved_config(
             "explorer_tab_views": dict(terminal.get("explorer_tab_views") or {}),
             "explorer_md_preset": terminal.get("explorer_md_preset") or "",
             "explorer_md_font": terminal.get("explorer_md_font") or "",
+            "explorer_source_font": terminal.get("explorer_source_font") or "",
             "explorer_theme": terminal.get("explorer_theme") or "dark",
             "browser_tabs": list(terminal.get("browser_tabs") or []),
             "browser_active_tab": int(terminal.get("browser_active_tab") or 0),

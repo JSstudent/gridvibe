@@ -186,6 +186,7 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(sessions[0].explorer_tab_views, {})
         self.assertEqual(sessions[0].explorer_md_preset, "")
         self.assertEqual(sessions[0].explorer_md_font, "")
+        self.assertEqual(sessions[0].explorer_source_font, "")
         self.assertEqual(sessions[0].explorer_theme, "dark")
 
     def test_create_sessions_carries_explorer_theme(self):
@@ -220,6 +221,7 @@ class SessionManagerTestCase(unittest.TestCase):
                     "explorer_tab_views": tab_views,
                     "explorer_md_preset": "vscode",
                     "explorer_md_font": "serif",
+                    "explorer_source_font": "jetbrains-mono",
                 }
             ],
             group_id="group-tab-views",
@@ -228,10 +230,12 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(sessions[0].explorer_tab_views, tab_views)
         self.assertEqual(sessions[0].explorer_md_preset, "vscode")
         self.assertEqual(sessions[0].explorer_md_font, "serif")
+        self.assertEqual(sessions[0].explorer_source_font, "jetbrains-mono")
         data = sessions[0].to_dict()
         self.assertEqual(data["explorer_tab_views"], tab_views)
         self.assertEqual(data["explorer_md_preset"], "vscode")
         self.assertEqual(data["explorer_md_font"], "serif")
+        self.assertEqual(data["explorer_source_font"], "jetbrains-mono")
 
     def test_create_sessions_supports_agent_metadata(self):
         sessions = self.manager.create_sessions(

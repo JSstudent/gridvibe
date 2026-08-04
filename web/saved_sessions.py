@@ -49,11 +49,20 @@ EXPLORER_MD_PRESETS = ("default", "paper", "contrast", "vscode")
 EXPLORER_MD_FONTS = (
     "system",
     "serif",
-    "consolas",
     "cascadia-code",
     "jetbrains-mono",
     "courier-new",
 )
+EXPLORER_SOURCE_FONTS = (
+    "default",
+    "cascadia-code",
+    "jetbrains-mono",
+    "courier-new",
+)
+# Retired options mapped onto their nearest survivor so an older saved session
+# keeps its intent: "consolas" was dropped when it rendered identically to
+# JetBrains Mono, whose stack fell back to it before the faces were vendored.
+EXPLORER_FONT_ALIASES = {"consolas": "jetbrains-mono"}
 
 
 def _normalize_explorer_tab_path(value: Any) -> str:
@@ -99,9 +108,10 @@ def _normalize_explorer_active_tab(value: Any, open_tabs: List[str]) -> str:
     return path if path in open_tabs else ""
 
 
-def _normalize_explorer_md_choice(value: Any, allowed: tuple) -> str:
-    """Return an allowlisted Markdown appearance value, or "" for unset."""
+def _normalize_explorer_md_choice(value: Any, allowed: tuple, aliases: dict = None) -> str:
+    """Return an allowlisted viewer appearance value, or "" for unset."""
     text = str(value or "").strip()
+    text = (aliases or {}).get(text, text)
     return text if text in allowed else ""
 
 
@@ -271,6 +281,7 @@ def _default_terminal_entries():
             "explorer_tab_views": {},
             "explorer_md_preset": "",
             "explorer_md_font": "",
+            "explorer_source_font": "",
             "explorer_theme": "dark",
             "browser_tabs": [],
             "browser_active_tab": 0,
@@ -527,7 +538,12 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
                 "explorer_active_tab": _normalize_explorer_active_tab(entry.get("explorer_active_tab"), open_tabs),
                 "explorer_tab_views": _normalize_explorer_tab_views(entry.get("explorer_tab_views"), open_tabs),
                 "explorer_md_preset": _normalize_explorer_md_choice(entry.get("explorer_md_preset"), EXPLORER_MD_PRESETS),
-                "explorer_md_font": _normalize_explorer_md_choice(entry.get("explorer_md_font"), EXPLORER_MD_FONTS),
+                "explorer_md_font": _normalize_explorer_md_choice(
+                    entry.get("explorer_md_font"), EXPLORER_MD_FONTS, EXPLORER_FONT_ALIASES
+                ),
+                "explorer_source_font": _normalize_explorer_md_choice(
+                    entry.get("explorer_source_font"), EXPLORER_SOURCE_FONTS, EXPLORER_FONT_ALIASES
+                ),
                 "explorer_theme": _normalize_explorer_theme(entry.get("explorer_theme")),
                 "browser_tabs": browser_tabs,
                 "browser_active_tab": browser_active_tab,
@@ -549,6 +565,7 @@ _LIVE_SESSION_VIEW_FIELDS = (
     "explorer_tab_views",
     "explorer_md_preset",
     "explorer_md_font",
+    "explorer_source_font",
     "explorer_theme",
     "browser_tabs",
     "browser_active_tab",
@@ -702,6 +719,9 @@ def _merge_workspace_session_config(
         )
         saved_terminal["explorer_md_font"] = (
             workspace_terminal["explorer_md_font"] if startup_mode == "explorer" else ""
+        )
+        saved_terminal["explorer_source_font"] = (
+            workspace_terminal["explorer_source_font"] if startup_mode == "explorer" else ""
         )
         saved_terminal["explorer_theme"] = (
             workspace_terminal["explorer_theme"] if startup_mode == "explorer" else "dark"

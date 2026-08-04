@@ -3218,7 +3218,7 @@
             overflow: auto;
             color: var(--explorer-text);
             background: var(--explorer-bg);
-            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-family: var(--source-view-font);
             font-size: var(--explorer-editor-font-size, .78rem);
             line-height: 1.45;
             tab-size: 4;
@@ -3235,11 +3235,11 @@
             outline-offset: -2px;
         }
 
-        /* Line wrapping stays live while editing (like zoom, it only restyles the
-           surface), so its button is not dimmed with the disabled chrome. */
+        /* Line wrapping and the appearance menu stay live while editing (like
+           zoom, they only restyle the surface), so their buttons are not dimmed
+           with the disabled chrome. */
         .explorer-editor.is-editing .explorer-editor-tab,
-        .explorer-editor.is-editing .explorer-download-btn,
-        .explorer-editor.is-editing .explorer-md-appearance-btn {
+        .explorer-editor.is-editing .explorer-download-btn {
             opacity: .5;
         }
 
@@ -3431,16 +3431,39 @@
         }
 
         .explorer-source-view {
+            /* Font-family axis of the viewer appearance menu: the source-font-*
+               class remaps this property, which the edit textarea and the
+               per-row code cells inside the panel read (see the note on
+               .explorer-source-line-code — the cells cannot just inherit). */
+            --source-view-font: Consolas, Monaco, 'Courier New', monospace;
             min-height: 0;
             margin: 0;
             padding: 0;
             overflow: auto;
             color: var(--explorer-text);
             background: var(--explorer-bg);
-            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-family: var(--source-view-font);
             font-size: var(--explorer-editor-font-size, .78rem);
             line-height: 1.45;
             tab-size: 4;
+        }
+
+        /* Source view fonts are monospace only; `default` keeps the stack the
+           view has always used. Font names are not palette. */
+        .explorer-source-view.source-font-default {
+            --source-view-font: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        .explorer-source-view.source-font-cascadia-code {
+            --source-view-font: 'Cascadia Code', 'Cascadia Mono', Consolas, monospace;
+        }
+
+        .explorer-source-view.source-font-jetbrains-mono {
+            --source-view-font: 'JetBrains Mono', Consolas, monospace;
+        }
+
+        .explorer-source-view.source-font-courier-new {
+            --source-view-font: 'Courier New', Courier, monospace;
         }
 
         /* Unwrapped source keeps every line on one row and scrolls sideways, so
@@ -3501,10 +3524,15 @@
             color: var(--t-accent);
         }
 
+        /* Each row's code cell is a <code>, and the UA stylesheet's
+           `code { font-family: monospace }` matches it directly — which beats
+           the value inherited from .explorer-source-view, so the source font
+           has to be restated here or only the number gutter follows it. */
         .explorer-source-line-code {
             min-width: 0;
             padding: 0 14px;
             white-space: pre;
+            font-family: var(--source-view-font);
         }
 
         /* Wrapped rows grow downward; the number gutter is a stretched grid cell
@@ -4558,10 +4586,6 @@
             --md-preview-font: Georgia, 'Times New Roman', 'Iowan Old Style', serif;
         }
 
-        .explorer-markdown-preview.md-font-consolas {
-            --md-preview-font: Consolas, Monaco, 'Courier New', monospace;
-        }
-
         .explorer-markdown-preview.md-font-cascadia-code {
             --md-preview-font: 'Cascadia Code', 'Cascadia Mono', Consolas, monospace;
         }
@@ -4833,7 +4857,7 @@
             --md-callout-bg: var(--explorer-callout-caution-bg);
         }
 
-        /* Markdown appearance popover (ISSUE-2026-030). */
+        /* Viewer appearance popover (ISSUE-2026-030). */
         #explorer-md-menu {
             /* Stroke-style check glyph (guardrail 7) tinted via currentColor. */
             --explorer-md-check-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E");

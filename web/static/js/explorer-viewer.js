@@ -3872,19 +3872,33 @@
         applyExplorerEditorFontSize(index);
     }
 
-    // ── Markdown preview appearance (ISSUE-2026-030) ─────────────────────────
-    // Two orthogonal axes: a reading-surface preset and a font family. Both are
-    // bounded allowlists persisted in localStorage and applied idempotently to
-    // every open preview via preset classes + CSS custom properties (defined
-    // from tokens in terminals.css), so no palette literals live in JS.
+    // ── Viewer appearance (ISSUE-2026-030) ───────────────────────────────────
+    // Three orthogonal axes: the preview's reading-surface preset, the preview
+    // font family, and the Source view's font family. All are bounded
+    // allowlists persisted in localStorage (and carried by saved sessions) and
+    // applied idempotently to every open panel via classes + CSS custom
+    // properties (defined from tokens in terminals.css), so no palette literals
+    // live in JS.
     const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast', 'vscode'];
     const EXPLORER_MD_FONTS = [
-        'system', 'serif', 'consolas', 'cascadia-code', 'jetbrains-mono', 'courier-new'
+        'system', 'serif', 'cascadia-code', 'jetbrains-mono', 'courier-new'
     ];
+    /* Source is code: monospace only, with `default` keeping the stack the view
+       has always used. */
+    const EXPLORER_SOURCE_FONTS = [
+        'default', 'cascadia-code', 'jetbrains-mono', 'courier-new'
+    ];
+    /* Retired options mapped onto their nearest survivor, so a stored (or saved
+       session) value keeps its intent instead of snapping back to the default.
+       `consolas` was dropped when it rendered identically to JetBrains Mono —
+       that stack fell back to it before the faces were vendored (tokens.css). */
+    const EXPLORER_FONT_ALIASES = { consolas: 'jetbrains-mono' };
     const EXPLORER_MD_PRESET_DEFAULT = 'default';
     const EXPLORER_MD_FONT_DEFAULT = 'system';
+    const EXPLORER_SOURCE_FONT_DEFAULT = 'default';
     const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';
     const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';
+    const EXPLORER_SOURCE_FONT_KEY = 'gridvibe.sourceViewFont';
     /* Line wrapping is per explorer tab, like the editor zoom above: each tab
        record carries its own source/preview/diff flags instead of one
        workspace-global preference, so every tab keeps the wrapping it was left
@@ -3902,7 +3916,12 @@
     const EXPLORER_MD_FONT_LABELS = {
         system: 'System',
         serif: 'Serif',
-        consolas: 'Consolas',
+        'cascadia-code': 'Cascadia Code',
+        'jetbrains-mono': 'JetBrains Mono',
+        'courier-new': 'Courier New',
+    };
+    const EXPLORER_SOURCE_FONT_LABELS = {
+        default: 'Default',
         'cascadia-code': 'Cascadia Code',
         'jetbrains-mono': 'JetBrains Mono',
         'courier-new': 'Courier New',
@@ -4023,6 +4042,12 @@
         applyExplorerLineWrapState(index);
     }
 
+    function normalizeExplorerAppearanceChoice(value, allowed, fallback) {
+        const text = String(value || '');
+        const aliased = EXPLORER_FONT_ALIASES[text] || text;
+        return allowed.includes(aliased) ? aliased : fallback;
+    }
+
     function readExplorerMarkdownPref(key, allowed, fallback) {
         let stored = '';
         try {
@@ -4030,7 +4055,7 @@
         } catch (err) {
             stored = '';
         }
-        return allowed.includes(stored) ? stored : fallback;
+        return normalizeExplorerAppearanceChoice(stored, allowed, fallback);
     }
 
     function explorerMarkdownAppearance() {
@@ -4040,6 +4065,9 @@
             ),
             font: readExplorerMarkdownPref(
                 EXPLORER_MD_FONT_KEY, EXPLORER_MD_FONTS, EXPLORER_MD_FONT_DEFAULT
+            ),
+            sourceFont: readExplorerMarkdownPref(
+                EXPLORER_SOURCE_FONT_KEY, EXPLORER_SOURCE_FONTS, EXPLORER_SOURCE_FONT_DEFAULT
             ),
         };
     }
@@ -4057,22 +4085,46 @@
         preview.dataset.mdFont = font;
     }
 
+    /* Same shape as the preview above: the class carries a `--source-view-font`
+       custom property that the edit textarea and the per-row code cells inside
+       the panel both read. */
+    function applyExplorerSourceFontToElement(view, appearance) {
+        if (!view) {
+            return;
+        }
+        const { sourceFont } = appearance || explorerMarkdownAppearance();
+        EXPLORER_SOURCE_FONTS.forEach(name => view.classList.remove(`source-font-${name}`));
+        view.classList.add(`source-font-${sourceFont}`);
+        view.dataset.sourceFont = sourceFont;
+    }
+
     function applyExplorerMarkdownAppearanceToAll() {
         const appearance = explorerMarkdownAppearance();
         document.querySelectorAll('.explorer-markdown-preview').forEach(preview => {
             applyExplorerMarkdownAppearanceToElement(preview, appearance);
+        });
+        document.querySelectorAll('.explorer-source-view').forEach(view => {
+            applyExplorerSourceFontToElement(view, appearance);
         });
     }
 
     function setExplorerMarkdownAppearance(patch) {
         const current = explorerMarkdownAppearance();
         const next = {
-            preset: EXPLORER_MD_PRESETS.includes(patch?.preset) ? patch.preset : current.preset,
-            font: EXPLORER_MD_FONTS.includes(patch?.font) ? patch.font : current.font,
+            preset: normalizeExplorerAppearanceChoice(
+                patch?.preset, EXPLORER_MD_PRESETS, current.preset
+            ),
+            font: normalizeExplorerAppearanceChoice(
+                patch?.font, EXPLORER_MD_FONTS, current.font
+            ),
+            sourceFont: normalizeExplorerAppearanceChoice(
+                patch?.sourceFont, EXPLORER_SOURCE_FONTS, current.sourceFont
+            ),
         };
         try {
             window.localStorage.setItem(EXPLORER_MD_PRESET_KEY, next.preset);
             window.localStorage.setItem(EXPLORER_MD_FONT_KEY, next.font);
+            window.localStorage.setItem(EXPLORER_SOURCE_FONT_KEY, next.sourceFont);
         } catch (err) {
             // Non-fatal: appearance still applies to the live DOM this session.
         }
@@ -4136,6 +4188,12 @@
         menu.querySelectorAll('[data-md-font]').forEach(button => {
             button.setAttribute('aria-checked', button.dataset.mdFont === appearance.font ? 'true' : 'false');
         });
+        menu.querySelectorAll('[data-source-font]').forEach(button => {
+            button.setAttribute(
+                'aria-checked',
+                button.dataset.sourceFont === appearance.sourceFont ? 'true' : 'false'
+            );
+        });
     }
 
     function buildExplorerMarkdownMenuGroup(labelText, options, activeValue, datasetKey, onSelect) {
@@ -4162,29 +4220,42 @@
         return group;
     }
 
-    function showExplorerMarkdownAppearanceMenu(anchor) {
+    function showExplorerMarkdownAppearanceMenu(anchor, options = {}) {
         dismissExplorerMarkdownAppearanceMenu();
         if (!anchor) {
             return;
         }
+        /* The preview groups are dropped for a file with no preview: the
+           settings are workspace-global, so offering them here would be
+           offering controls that change nothing the pane can show. */
+        const includeMarkdown = options.includeMarkdown !== false;
         const appearance = explorerMarkdownAppearance();
         const menu = document.createElement('div');
         menu.id = 'explorer-md-menu';
         menu.setAttribute('role', 'menu');
-        menu.setAttribute('aria-label', 'Markdown preview appearance');
+        menu.setAttribute('aria-label', 'Viewer appearance');
+        if (includeMarkdown) {
+            menu.appendChild(buildExplorerMarkdownMenuGroup(
+                'Preview theme',
+                EXPLORER_MD_PRESETS.map(value => ({ value, label: EXPLORER_MD_PRESET_LABELS[value] })),
+                appearance.preset,
+                'mdPreset',
+                value => setExplorerMarkdownAppearance({ preset: value })
+            ));
+            menu.appendChild(buildExplorerMarkdownMenuGroup(
+                'Preview font',
+                EXPLORER_MD_FONTS.map(value => ({ value, label: EXPLORER_MD_FONT_LABELS[value] })),
+                appearance.font,
+                'mdFont',
+                value => setExplorerMarkdownAppearance({ font: value })
+            ));
+        }
         menu.appendChild(buildExplorerMarkdownMenuGroup(
-            'Theme',
-            EXPLORER_MD_PRESETS.map(value => ({ value, label: EXPLORER_MD_PRESET_LABELS[value] })),
-            appearance.preset,
-            'mdPreset',
-            value => setExplorerMarkdownAppearance({ preset: value })
-        ));
-        menu.appendChild(buildExplorerMarkdownMenuGroup(
-            'Font',
-            EXPLORER_MD_FONTS.map(value => ({ value, label: EXPLORER_MD_FONT_LABELS[value] })),
-            appearance.font,
-            'mdFont',
-            value => setExplorerMarkdownAppearance({ font: value })
+            'Source font',
+            EXPLORER_SOURCE_FONTS.map(value => ({ value, label: EXPLORER_SOURCE_FONT_LABELS[value] })),
+            appearance.sourceFont,
+            'sourceFont',
+            value => setExplorerMarkdownAppearance({ sourceFont: value })
         ));
 
         menu.style.visibility = 'hidden';
@@ -6417,8 +6488,8 @@
         persistExplorerTabsToSession(index);
     }
 
-    /* One-shot per session id: re-apply the Markdown appearance a saved
-       session or restart snapshot carries (ISSUE-2026-033). The set keeps a
+    /* One-shot per session id: re-apply the viewer appearance a saved session
+       or restart snapshot carries (ISSUE-2026-033). The set keeps a
        close-driven rebuild of the same session from clobbering an appearance
        the user changed since launch; setExplorerMarkdownAppearance validates
        the values and syncs the shared localStorage keys. */
@@ -6428,11 +6499,13 @@
         const session = terminals[index]?._session || {};
         const preset = session.explorer_md_preset || '';
         const font = session.explorer_md_font || '';
-        if (!sessionId || appliedExplorerMdSessions.has(sessionId) || (!preset && !font)) {
+        const sourceFont = session.explorer_source_font || '';
+        const hasAny = Boolean(preset || font || sourceFont);
+        if (!sessionId || appliedExplorerMdSessions.has(sessionId) || !hasAny) {
             return;
         }
         appliedExplorerMdSessions.add(sessionId);
-        setExplorerMarkdownAppearance({ preset, font });
+        setExplorerMarkdownAppearance({ preset, font, sourceFont });
     }
 
     /* Entry point when an explorer pane first shows: empty read-only viewer with
@@ -7152,7 +7225,7 @@
                         <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">+</button>
                     </div>
                     ${explorerLineWrapControlHtml(index, initialFileView)}
-                    ${hasPreview ? `<button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Markdown appearance" aria-label="Markdown preview appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>` : ''}
+                    <button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Appearance" aria-label="Viewer appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>
                     ${explorerEditorControlsHtml(index)}
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
                     <div class="explorer-editor-search" data-explorer-search="${index}">
@@ -7182,6 +7255,9 @@
         `;
 
         renderExplorerSource(index);
+        applyExplorerSourceFontToElement(
+            document.getElementById(`explorer-code-${index}`), explorerMarkdownAppearance()
+        );
         const preview = document.getElementById(`explorer-preview-${index}`);
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
@@ -7199,7 +7275,7 @@
                 if (document.getElementById('explorer-md-menu')) {
                     dismissExplorerMarkdownAppearanceMenu();
                 } else {
-                    showExplorerMarkdownAppearanceMenu(appearanceButton);
+                    showExplorerMarkdownAppearanceMenu(appearanceButton, { includeMarkdown: hasPreview });
                 }
             });
         }

@@ -2088,6 +2088,7 @@
             explorer_tab_views: explorerTabs.tab_views,
             explorer_md_preset: mdAppearance ? mdAppearance.preset : '',
             explorer_md_font: mdAppearance ? mdAppearance.font : '',
+            explorer_source_font: mdAppearance ? mdAppearance.sourceFont : '',
             explorer_theme: explorerTheme,
             /* Save Workspace captures the pane's whole live tab strip, not just
                the URL it launched with, so a saved browser pane reopens every
@@ -7381,6 +7382,19 @@
             }
         }
         window.close();
+    }
+
+    /* The coding fonts are vendored web fonts (tokens.css), so a pane whose
+       terminal font is one of them can be measured against the fallback face
+       and then repainted with the real one, leaving the grid a fraction off.
+       One re-fit when the document's fonts have settled corrects it; panes on
+       an installed font measure the same twice and see nothing. */
+    if (document.fonts?.ready) {
+        document.fonts.ready.then(() => {
+            terminals.forEach((terminal, index) => {
+                if (terminal._attached) scheduleFit(index);
+            });
+        });
     }
 
     /* ─────────────────────────────────────────────

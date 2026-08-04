@@ -2026,6 +2026,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorer_tab_views: explorerTabs.tab_views,", html)
         self.assertIn("explorer_md_preset: mdAppearance ? mdAppearance.preset : '',", html)
         self.assertIn("explorer_md_font: mdAppearance ? mdAppearance.font : '',", html)
+        self.assertIn("explorer_source_font: mdAppearance ? mdAppearance.sourceFont : '',", html)
         # Restore: persisted views seed the rebuilt tab records; the OD-4
         # identity check decides at render time whether they still apply.
         self.assertIn("function explorerInflatePersistedTabView(raw)", html)
@@ -2051,7 +2052,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Markdown appearance re-applies once per session id (ISSUE-2026-033) so
         # a close rebuild cannot clobber an appearance changed since launch.
         self.assertIn("function applyExplorerSessionMarkdownAppearance(index)", html)
-        self.assertIn("setExplorerMarkdownAppearance({ preset, font });", html)
+        self.assertIn("setExplorerMarkdownAppearance({ preset, font, sourceFont });", html)
         self.assertIn("applyExplorerSessionMarkdownAppearance(index);", html)
 
     def test_terminals_page_preview_tab_keeps_separated_path(self):
@@ -2441,10 +2442,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("data-explorer-tab-views=", html)
         self.assertIn("data-explorer-md-preset=", html)
         self.assertIn("data-explorer-md-font=", html)
+        self.assertIn("data-explorer-source-font=", html)
         self.assertIn("data-explorer-theme=", html)
         self.assertIn("explorer_tab_views: commandMode === 'explorer'", html)
         self.assertIn("explorer_tab_views: resolvedStartupMode === 'explorer'", html)
         self.assertIn("explorer_md_preset: resolvedStartupMode === 'explorer'", html)
+        self.assertIn("explorer_source_font: commandMode === 'explorer'", html)
         self.assertIn("explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : ''", html)
         self.assertIn("explorer_theme: resolvedStartupMode === 'explorer'", html)
 
@@ -2627,16 +2630,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerMarkdownAppearance()", html)
         self.assertIn("function setExplorerMarkdownAppearance(patch)", html)
         self.assertIn("function applyExplorerMarkdownAppearanceToElement(preview, appearance)", html)
-        self.assertIn("function showExplorerMarkdownAppearanceMenu(anchor)", html)
+        self.assertIn("function showExplorerMarkdownAppearanceMenu(anchor, options = {})", html)
         # Bounded allowlists and persisted preference keys.
         self.assertIn("const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast', 'vscode'];", html)
         self.assertIn(
-            "'system', 'serif', 'consolas', 'cascadia-code', 'jetbrains-mono', 'courier-new'",
+            "'system', 'serif', 'cascadia-code', 'jetbrains-mono', 'courier-new'",
             html,
         )
         self.assertIn("const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';", html)
         self.assertIn("const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';", html)
-        # Header control is present and gated to previewable files.
+        # Header control is present.
         self.assertIn('data-explorer-md-appearance="${index}"', html)
         # Appearance is applied idempotently on both preview render paths.
         self.assertEqual(
@@ -2658,6 +2661,91 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn(".explorer-markdown-preview.md-font-menlo {", html)
         self.assertIn("--md-preview-surface: var(--md-preset-paper-bg);", html)
         self.assertIn("--md-preset-paper-bg: #f4ecd8;", html)
+        # Consolas is retired: the JetBrains Mono stack falls back to it, so the
+        # two entries rendered identically. Stored values alias onto the survivor.
+        self.assertNotIn(".explorer-markdown-preview.md-font-consolas {", html)
+        self.assertNotIn("consolas: 'Consolas',", html)
+        self.assertIn("const EXPLORER_FONT_ALIASES = { consolas: 'jetbrains-mono' };", html)
+
+    def test_terminals_page_source_view_font_setting(self):
+        """The Source view carries its own persisted font, same rules as preview."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Monospace-only allowlist, own localStorage key, same read/normalize path.
+        self.assertIn(
+            "'default', 'cascadia-code', 'jetbrains-mono', 'courier-new'",
+            html,
+        )
+        self.assertIn("const EXPLORER_SOURCE_FONT_KEY = 'gridvibe.sourceViewFont';", html)
+        self.assertIn("const EXPLORER_SOURCE_FONT_DEFAULT = 'default';", html)
+        self.assertIn("function applyExplorerSourceFontToElement(view, appearance)", html)
+        self.assertIn("window.localStorage.setItem(EXPLORER_SOURCE_FONT_KEY, next.sourceFont);", html)
+        # Applied to every open source panel, and to a freshly rendered file.
+        self.assertIn("document.querySelectorAll('.explorer-source-view').forEach(view => {", html)
+        self.assertIn("applyExplorerSourceFontToElement(", html)
+        # Its own menu group, alongside the preview groups.
+        self.assertIn("'Source font',", html)
+        self.assertIn("value => setExplorerMarkdownAppearance({ sourceFont: value })", html)
+        # The appearance button is no longer gated to previewable files; the
+        # preview-only groups are dropped instead.
+        self.assertIn("showExplorerMarkdownAppearanceMenu(appearanceButton, { includeMarkdown: hasPreview });", html)
+        # Token-driven CSS: one custom property the rows and the edit textarea inherit.
+        self.assertIn("--source-view-font: Consolas, Monaco, 'Courier New', monospace;", html)
+        self.assertIn(".explorer-source-view.source-font-cascadia-code {", html)
+        self.assertIn(".explorer-source-view.source-font-jetbrains-mono {", html)
+        self.assertIn(".explorer-source-view.source-font-courier-new {", html)
+        # All three surfaces name the property rather than relying on
+        # inheritance: the panel, the edit textarea, and — crucially — the
+        # per-row <code> cell, which the UA stylesheet's
+        # `code { font-family: monospace }` matches directly and so beats the
+        # inherited value (until it was restated there, only the line-number
+        # gutter followed the setting).
+        self.assertEqual(html.count("font-family: var(--source-view-font);"), 3)
+        source_line_code = html[html.index(".explorer-source-line-code {"):][:400]
+        self.assertIn("font-family: var(--source-view-font);", source_line_code)
+
+    def test_coding_fonts_are_vendored_and_declared_once(self):
+        """The picker's fonts ship with the app — they are not on a stock Windows
+        box, and both stacks fall back to Consolas, so an unvendored entry is a
+        control that visibly does nothing."""
+        tokens = self._static("css/tokens.css")
+
+        # Declared in the one stylesheet both pages load, so the explorer picker
+        # and the App Settings terminal-font list resolve the same faces.
+        self.assertEqual(tokens.count("@font-face"), 4)
+        for family in ("'JetBrains Mono'", "'Cascadia Code'"):
+            self.assertIn(f"font-family: {family};", tokens)
+        for weight in (400, 700):
+            self.assertIn(
+                f"url('../vendor/fonts/jetbrains-mono-latin-{weight}-normal.woff2') format('woff2')",
+                tokens,
+            )
+            self.assertIn(
+                f"url('../vendor/fonts/cascadia-code-latin-{weight}-normal.woff2') format('woff2')",
+                tokens,
+            )
+        # Text stays visible while the face loads.
+        self.assertEqual(tokens.count("font-display: swap;"), 4)
+
+        # The files themselves are served locally (offline-capable, no CDN).
+        for name in (
+            "jetbrains-mono-latin-400-normal.woff2",
+            "jetbrains-mono-latin-700-normal.woff2",
+            "cascadia-code-latin-400-normal.woff2",
+            "cascadia-code-latin-700-normal.woff2",
+        ):
+            with self.subTest(font=name):
+                asset = self.client.get(f"/static/vendor/fonts/{name}")
+                self.assertEqual(asset.status_code, 200)
+                self.assertGreater(len(asset.data), 10_000)
+                self.assertEqual(asset.data[:4], b"wOF2")
+                asset.close()
+
+        # A pane measured against the fallback face re-fits once the real one
+        # has loaded, so a terminal on a vendored font is not left off-grid.
+        self.assertIn("document.fonts.ready.then(() => {", self._static("js/terminals.js"))
 
     def test_terminals_page_renders_mermaid_and_exposes_preview_shortcut(self):
         response = self.client.get("/terminals")
@@ -8150,6 +8238,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(normalized[0]["explorer_tab_views"], {})
         self.assertEqual(normalized[0]["explorer_md_preset"], "")
         self.assertEqual(normalized[0]["explorer_md_font"], "")
+        self.assertEqual(normalized[0]["explorer_source_font"], "")
 
     def test_normalize_terminal_entries_validates_tab_views_and_md_appearance(self):
         """2.f: per-tab view snapshots and Markdown appearance are allowlist-validated."""
@@ -8265,7 +8354,6 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_normalize_terminal_entries_accepts_terminal_markdown_fonts(self):
         expected = {
-            "consolas",
             "cascadia-code",
             "jetbrains-mono",
             "courier-new",
@@ -8277,6 +8365,30 @@ class ApiRoutesTestCase(unittest.TestCase):
                     [{"startup_mode": "explorer", "explorer_md_font": font}]
                 )
                 self.assertEqual(normalized[0]["explorer_md_font"], font)
+
+    def test_normalize_terminal_entries_source_font_and_retired_consolas(self):
+        """Source font normalizes like the preview font; "consolas" aliases over."""
+        for font in ("default", "cascadia-code", "jetbrains-mono", "courier-new"):
+            with self.subTest(font=font):
+                normalized = web_saved_sessions._normalize_terminal_entries(
+                    [{"startup_mode": "explorer", "explorer_source_font": font}]
+                )
+                self.assertEqual(normalized[0]["explorer_source_font"], font)
+
+        # Unset and out-of-allowlist values fall back to "".
+        normalized = web_saved_sessions._normalize_terminal_entries(
+            [
+                {"startup_mode": "explorer"},
+                {"startup_mode": "explorer", "explorer_source_font": "comic-sans"},
+                # Retired option: kept as its nearest survivor rather than dropped.
+                {"startup_mode": "explorer", "explorer_source_font": "consolas"},
+                {"startup_mode": "explorer", "explorer_md_font": "consolas"},
+            ]
+        )
+        self.assertEqual(normalized[0]["explorer_source_font"], "")
+        self.assertEqual(normalized[1]["explorer_source_font"], "")
+        self.assertEqual(normalized[2]["explorer_source_font"], "jetbrains-mono")
+        self.assertEqual(normalized[3]["explorer_md_font"], "jetbrains-mono")
 
     def test_workspace_save_round_trips_tab_views_and_md_appearance(self):
         """2.f / ISSUE-2026-033: view snapshots + appearance persist, gated to explorer panes."""
@@ -8324,7 +8436,8 @@ class ApiRoutesTestCase(unittest.TestCase):
                                 }
                             },
                             "explorer_md_preset": "paper",
-                            "explorer_md_font": "consolas",
+                            "explorer_md_font": "serif",
+                            "explorer_source_font": "jetbrains-mono",
                             "explorer_theme": "light",
                         },
                         {
@@ -8335,7 +8448,8 @@ class ApiRoutesTestCase(unittest.TestCase):
                                 "x.md": {"mode": "source", "scroll": 0.1, "identity": "id2"}
                             },
                             "explorer_md_preset": "paper",
-                            "explorer_md_font": "consolas",
+                            "explorer_md_font": "serif",
+                            "explorer_source_font": "jetbrains-mono",
                             "explorer_theme": "light",
                         },
                     ],
@@ -8358,12 +8472,14 @@ class ApiRoutesTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(config["terminals"][0]["explorer_md_preset"], "paper")
-        self.assertEqual(config["terminals"][0]["explorer_md_font"], "consolas")
+        self.assertEqual(config["terminals"][0]["explorer_md_font"], "serif")
+        self.assertEqual(config["terminals"][0]["explorer_source_font"], "jetbrains-mono")
         self.assertEqual(config["terminals"][0]["explorer_theme"], "light")
-        # Non-explorer panes never carry tab views or a Markdown appearance.
+        # Non-explorer panes never carry tab views or a viewer appearance.
         self.assertEqual(config["terminals"][1]["explorer_tab_views"], {})
         self.assertEqual(config["terminals"][1]["explorer_md_preset"], "")
         self.assertEqual(config["terminals"][1]["explorer_md_font"], "")
+        self.assertEqual(config["terminals"][1]["explorer_source_font"], "")
         # Theme is gated to explorer panes; a terminal pane falls back to dark.
         self.assertEqual(config["terminals"][1]["explorer_theme"], "dark")
 
@@ -16015,6 +16131,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertIn("explorer_tab_views", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_md_preset", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_md_font", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
+        self.assertIn("explorer_source_font", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_theme", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
 
     def test_launcher_wires_the_auto_mode_toggle(self):

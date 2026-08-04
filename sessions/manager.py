@@ -36,6 +36,7 @@ _SAVED_SESSION_VIEW_FIELDS = {
     "explorer_tab_views",
     "explorer_md_preset",
     "explorer_md_font",
+    "explorer_source_font",
     "explorer_theme",
     "browser_tabs",
     "browser_active_tab",
@@ -82,6 +83,7 @@ class TerminalSession:
     explorer_tab_views: Dict[str, Any] = field(default_factory=dict)
     explorer_md_preset: str = ""
     explorer_md_font: str = ""
+    explorer_source_font: str = ""
     explorer_theme: str = "dark"
     # Browser panes are tabbed: `browser_tabs` holds one HTTP(S) URL per open
     # tab and `browser_active_tab` indexes into it. `initial_command` stays the
@@ -122,6 +124,7 @@ class TerminalSession:
             "explorer_tab_views": dict(self.explorer_tab_views),
             "explorer_md_preset": self.explorer_md_preset,
             "explorer_md_font": self.explorer_md_font,
+            "explorer_source_font": self.explorer_source_font,
             "explorer_theme": self.explorer_theme,
             "browser_tabs": list(self.browser_tabs),
             "browser_active_tab": self.browser_active_tab,
@@ -493,6 +496,7 @@ class SessionManager:
                     explorer_tab_views=dict(config.get("explorer_tab_views") or {}),
                     explorer_md_preset=str(config.get("explorer_md_preset") or ""),
                     explorer_md_font=str(config.get("explorer_md_font") or ""),
+                    explorer_source_font=str(config.get("explorer_source_font") or ""),
                     explorer_theme="light" if config.get("explorer_theme") == "light" else "dark",
                     browser_tabs=list(config.get("browser_tabs") or []),
                     browser_active_tab=int(config.get("browser_active_tab") or 0),

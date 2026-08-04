@@ -4,6 +4,47 @@
    names onto these tokens (--accent: var(--gv-accent),
    --t-accent: var(--gv-accent)) instead of redefining colors locally.
    Loaded before launcher.css / terminals.css on both pages. */
+/* Vendored coding fonts (web/static/vendor/fonts, OFL-1.1), served locally
+   like every other vendored asset so GridVibe works offline. Declared here
+   because both pages load tokens.css: the explorer font picker and the App
+   Settings terminal-font list otherwise offered families that are not
+   installed on a stock Windows box, and both stacks fall back to Consolas —
+   so picking JetBrains Mono or Cascadia Code changed nothing at all. Latin
+   subset only; any glyph a face lacks falls through to the next family in the
+   stack. `swap` keeps text visible while loading, and italics are synthesized
+   from the regular face. */
+@font-face {
+    font-family: 'JetBrains Mono';
+    src: url('../vendor/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'JetBrains Mono';
+    src: url('../vendor/fonts/jetbrains-mono-latin-700-normal.woff2') format('woff2');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'Cascadia Code';
+    src: url('../vendor/fonts/cascadia-code-latin-400-normal.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'Cascadia Code';
+    src: url('../vendor/fonts/cascadia-code-latin-700-normal.woff2') format('woff2');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+
 :root {
     --gv-bg-app: #0d0d0d;
     --gv-accent: #00d9ff;

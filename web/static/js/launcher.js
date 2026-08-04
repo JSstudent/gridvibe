@@ -108,6 +108,7 @@
         explorer_tab_views: {},
         explorer_md_preset: '',
         explorer_md_font: '',
+        explorer_source_font: '',
         explorer_theme: 'dark',
         browser_tabs: [],
         browser_active_tab: 0,
@@ -704,6 +705,7 @@
                 explorer_tab_views: commandMode === 'explorer' ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews) : {},
                 explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
                 explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
+                explorer_source_font: commandMode === 'explorer' ? (row.dataset.explorerSourceFont || '') : '',
                 explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : '',
                 /* Browser rows only expose the active URL as an input; the rest
                    of the tab strip rides along in the dataset so importing a
@@ -1538,6 +1540,7 @@
                     data-explorer-tab-views="${escHtml(JSON.stringify(terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object' ? terminal.explorer_tab_views : {}))}"
                     data-explorer-md-preset="${escHtml(terminal.explorer_md_preset || '')}"
                     data-explorer-md-font="${escHtml(terminal.explorer_md_font || '')}"
+                    data-explorer-source-font="${escHtml(terminal.explorer_source_font || '')}"
                     data-explorer-theme="${escHtml(terminal.explorer_theme || 'dark')}"
                     data-browser-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.browser_tabs) ? terminal.browser_tabs : []))}"
                     data-browser-active-tab="${escHtml(String(Number(terminal.browser_active_tab) || 0))}"
