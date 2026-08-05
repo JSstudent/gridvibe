@@ -213,6 +213,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/explorer-search.js",
             "js/explorer-fs.js",
             "js/explorer-git-watch.js",
+            "js/explorer-overview.js",
             "js/browser-pane.js",
             "js/terminal-shell.js",
             "js/terminals.js",
@@ -5803,6 +5804,91 @@ class ApiRoutesTestCase(unittest.TestCase):
         payload = diff_response.get_json()
         self.assertEqual(payload["mode"], "commit")
         self.assertIn("+second", payload["diff"])
+
+    def test_explorer_git_diff_head_hunk_lines_match_worktree(self):
+        # The contract the source-view change model stands on: new-side line
+        # numbers in a mode=head diff address the current worktree file.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        original = [f"line {number}" for number in range(1, 11)]
+        readme.write_text("\n".join(original) + "\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        self._run_git(repo_dir, "commit", "-m", "ten lines")
+        worktree = original[:]
+        worktree.remove("line 2")  # one deleted block
+        worktree[7:7] = ["added a", "added b"]  # one added block after "line 8"
+        readme.write_text("\n".join(worktree) + "\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "head"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload["truncated"])
+        diff = payload["diff"]
+        self.assertIn("-line 2", diff)
+        # Walk the patch the way explorerDiffChangeBlocks() does and check
+        # every added line against the worktree line its new-side number
+        # points at.
+        new_line = 0
+        added = []
+        for row in diff.splitlines():
+            hunk = re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", row)
+            if hunk:
+                new_line = int(hunk.group(2))
+                continue
+            if not new_line:
+                continue
+            if row.startswith("+") and not row.startswith("+++"):
+                added.append((new_line, row[1:]))
+                new_line += 1
+            elif row.startswith(" "):
+                new_line += 1
+        self.assertEqual([text for _, text in added], ["added a", "added b"])
+        for number, text in added:
+            self.assertEqual(worktree[number - 1], text)
+        # The deleted line is gone from the worktree the numbers address.
+        self.assertNotIn("line 2", worktree)
+
+    def test_explorer_git_diff_head_is_empty_for_untracked_file(self):
+        # No HEAD blob means `git diff HEAD -- path` is legitimately empty, so
+        # an untracked file gets no change markers (same as VS Code).
+        repo_dir = self._init_committed_repo()
+        (repo_dir / "notes.txt").write_text("new\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "notes.txt", "mode": "head"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["diff"], "")
+        self.assertFalse(payload["truncated"])
+
+    def test_explorer_git_diff_head_reports_truncation(self):
+        # A diff beyond the 4,000-line bound must say so; the overview has to
+        # surface that instead of silently under-reporting changes.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("".join(f"old {number}\n" for number in range(2100)), encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        self._run_git(repo_dir, "commit", "-m", "long file")
+        readme.write_text("".join(f"new {number}\n" for number in range(2100)), encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "head"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["truncated"])
 
     def test_explorer_git_repo_returns_changes_and_graph(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -12946,6 +13032,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/explorer-search.js",
             "js/explorer-fs.js",
             "js/explorer-git-watch.js",
+            "js/explorer-overview.js",
             "js/browser-pane.js",
             "js/terminal-shell.js",
             "js/terminals.js",

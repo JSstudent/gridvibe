@@ -78,6 +78,12 @@
        inheritance chain, and only a root-level declaration is reliably
        visible to an unattached ::highlight() rule. */
     --gv-match-rgb: 250, 204, 21;
+    /* Change-marker hues (diff gutters, the source-view change marks). Kept
+       opaque so both the gutter bars and the deletion wedge can use them
+       directly; the green/red match the existing diff-cell bases. */
+    --gv-diff-add: #22c55e;
+    --gv-diff-modified: #58a6ff;
+    --gv-diff-delete: #ef4444;
 }
 
 [data-theme="light"] {
@@ -99,4 +105,7 @@
     --gv-dialog-placeholder: #6b7280;
     --gv-dialog-border: rgba(75, 85, 99, 0.28);
     --gv-dialog-shadow: 0 18px 46px rgba(15, 23, 42, 0.13);
+    --gv-diff-add: #047857;
+    --gv-diff-modified: #0969da;
+    --gv-diff-delete: #dc2626;
 }

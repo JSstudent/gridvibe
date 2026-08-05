@@ -1,8 +1,62 @@
 # Source View Change Overview — implementation plan
 
-Status: **Phase 0 implemented** (see §5); Phases 1–4 not yet implemented.
+Status: **Phase 0 + Phase 1 implemented** (see §5); Phases 2–4 not yet implemented.
 Target surface: the explorer file viewer's **Source** panel only (Preview and
 Diff are untouched).
+
+### Phase 1 — implemented
+
+Landed, delivering the gutter change markers on their own (no overview element
+yet), verified by `tests/test_explorer_overview.py` (contract-level) and three
+new behavioral `git/diff` tests in `tests/test_api.py`:
+
+- New `web/static/js/explorer-overview.js`, loaded in `templates/terminals.html`
+  after `explorer-git-watch.js` and before `terminals.js`, exposing exactly the
+  four planned entry points: `loadExplorerChangeMarks(index)`,
+  `applyExplorerChangeMarks(index)`, `refreshExplorerOverview(index, reason)`,
+  `teardownExplorerOverview(index)`.
+- Change model per §4.2: fetches `git/diff?mode=head` (reusing the Diff panel's
+  cached HEAD diff on an exact mode-scoped cache-key match), parses with the
+  unchanged `explorerDiffChangeBlocks()`, classifies blocks into `added` /
+  `modified` line marks and `deleted` wedges (`{ atLine, count }`), and caches
+  on the pane as `_explorerChangeMarksKey` (`path \n git-revision`, revision =
+  `_explorerGitContext.head`) + `_explorerChangeMarks`. The model records the
+  endpoint's `truncated` flag for the Phase 4 indicator. Skipped (no request)
+  outside a Git worktree, on commit-diff tabs, in the editor, and when no
+  Source panel exists (image viewer).
+- Gutter marks: `applyExplorerChangeMarks` runs at the tail of
+  `renderExplorerSource()`, so search keystrokes, wrap toggles and Markdown
+  folds re-apply the cached model with one `querySelectorAll` pass and no
+  fetch. Rows carry `data-explorer-change="added|modified|deleted"`; a
+  deletion wedges the row below the boundary, or — `explorer-source-change-after`
+  — the last surviving row for an end-of-file deletion. Boundaries hidden by a
+  Markdown fold get no wedge until unfolded. A line mark is never overwritten
+  by a wedge.
+- Refresh triggers per §4.3, all piggybacking on existing signals:
+  `renderExplorerFile` kicks off the load (file open, GridVibe Git actions,
+  panel-structure-changing saves/undos) after resetting the marks key;
+  `updateExplorerFileInPlace` force-loads (quiet `/file/state` refresh,
+  in-place save, diff-undo — content moved while HEAD usually did not);
+  `explorer-git-watch.js` gained `explorerOverviewWatchConsumer` on the shared
+  `/git/state` poll (silent bootstrap, same eligibility gates, covers commits
+  made in a terminal) calling `refreshExplorerOverview(index, 'git-revision')`;
+  `loadExplorerPane` and the image viewer call `teardownExplorerOverview`.
+- CSS + tokens: `data-explorer-change` gutter-bar rules and the deletion-wedge
+  triangle live in `terminals.css` next to `.explorer-source-line-number`;
+  `--gv-diff-add` / `--gv-diff-modified` / `--gv-diff-delete` are declared in
+  `tokens.css` for both `:root` and `[data-theme="light"]` (green/red match the
+  existing diff-cell bases; modified is blue, matching the reference IDE).
+- New behavioral tests (`tests/test_api.py`): `mode=head` hunk new-side line
+  numbers address the worktree file (one added + one deleted block), an
+  untracked file returns an empty diff, and a >4 000-line diff reports
+  `truncated: true`.
+
+Not done in Phase 1 (later phases, unchanged from the plan below): the
+`<aside class="explorer-source-overview">` element and its geometry/canvas/
+interaction (Phase 2 ruler, Phase 3 map + Appearance-menu toggle), the
+search-match lane, `Ctrl+E` / `Ctrl+Q` navigation, hover tooltips, and the
+truncated-diff indicator (Phase 4). `CHANGELOG.md` / `README.md` / `CLAUDE.md`
+updates stay deferred per §8 until the full feature lands.
 
 ### Phase 0 — implemented
 
@@ -368,7 +422,7 @@ Each phase is independently shippable and independently reviewable.
 | # | Scope | Why this order |
 | --- | --- | --- |
 | **0** ✅ | Memoize `explorerHighlightDocumentLines()` per pane; add the `.explorer-source-frame` wrapper + `explorerPanelScrollTarget` branch; no visible change | Isolates the one refactor with blast radius into a diff that can be verified by "nothing changed" |
-| **1** | `explorer-overview.js` skeleton: change model, fetch + cache, classification, gutter markers, refresh triggers, tokens + CSS | Delivers the line-number marking from the screenshot on its own |
+| **1** ✅ | `explorer-overview.js` skeleton: change model, fetch + cache, classification, gutter markers, refresh triggers, tokens + CSS | Delivers the line-number marking from the screenshot on its own |
 | **2** | Overview element in `ruler` mode: geometry helper, change lane, viewport box, click / drag / wheel navigation | Delivers "click through a file for changes" with no canvas-painting risk |
 | **3** | `map` mode: canvas glyph paint, colour probing, DPR, Appearance-menu toggle + persistence, automatic ruler fallback | The visual payload; safe to land late because ruler mode already works |
 | **4** | Extras: search-match lane, `Ctrl+E` / `Ctrl+Q` navigation, hover tooltips, truncated-diff indicator | Polish |

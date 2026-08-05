@@ -79,9 +79,23 @@
        shortcut and the menu can never disagree about what "the next workspace"
        is. Returns null when there is nowhere else to go — a window whose own
        workspace is not in the list (it was just pruned) still walks from the
-       front rather than getting stuck. */
+       front rather than getting stuck.
+
+       Only workspaces that still hold a group are walked. A live workspace
+       record is not the same thing as an open window: the `default` record is
+       permanent and Workspace ▸ New Workspace keeps its (empty) workspace until
+       its first group arrives, so an empty record routinely outlives — or never
+       had — a window. Losing its last group is exactly when a window closes
+       itself, so `group_count > 0` is the honest test for "there is a window
+       there to switch to", and without it a single-window session cycles onto
+       an empty record and *opens* a blank second window instead of switching.
+       The current workspace stays in the list either way so the walk keeps its
+       place in the order. */
     function nextWorkspaceInCycle(workspaces, currentWorkspaceId, step = 1) {
-        const list = Array.isArray(workspaces) ? workspaces : [];
+        const list = (Array.isArray(workspaces) ? workspaces : []).filter(
+            workspace => Number(workspace?.group_count) > 0
+                || workspace?.workspace_id === currentWorkspaceId
+        );
         if (list.length < 2) {
             return null;
         }

@@ -4606,6 +4606,9 @@
         // The rebuilt rows dropped the nodes the occurrence tint was anchored
         // to; re-derive it from whatever selection survived the render.
         scheduleExplorerOccurrenceHighlight();
+        // Re-paint the cached HEAD change marks onto the fresh rows (cheap;
+        // no fetch — loads are triggered by the change signals only).
+        applyExplorerChangeMarks(index);
     }
 
     function explorerPreviewBlockLanguage(code) {
@@ -7118,6 +7121,9 @@
         pane._explorerDiffSplit = false;
         pane._explorerDiffCommit = '';
         pane._explorerDiffMode = '';
+        // No Source rows on the image viewer; drop any marks the pane held
+        // for the previous file.
+        teardownExplorerOverview(index);
         pane._explorerLastFileView = 'source';
         pane._explorerPendingDiffScroll = null;
 
@@ -7291,6 +7297,11 @@
         pane._explorerDiffSplit = keepDiffSplit;
         pane._explorerDiffCommit = requestedDiffCommit;
         pane._explorerDiffMode = requestedDiffMode;
+        // The change-mark cache is keyed by path + HEAD, so a rebuild of the
+        // same file could legitimately hit it — but renderExplorerFile is
+        // also how saves/undos with a changed panel set land, and those move
+        // the diff. Drop the key and let the load below refetch.
+        pane._explorerChangeMarksKey = '';
         pane._explorerLastFileView = initialFileView === 'preview'
             ? 'preview'
             : (pane._explorerLastFileView === 'preview' && hasPreview ? 'preview' : 'source');
@@ -7360,6 +7371,10 @@
         `;
 
         renderExplorerSource(index);
+        // Kick off the HEAD change-mark load for the Source gutter (async;
+        // paints itself when the diff arrives). Gated internally on a Git
+        // worktree, a non-commit view and no active editor.
+        loadExplorerChangeMarks(index);
         const sourceFontAppearance = explorerMarkdownAppearance();
         applyExplorerSourceFontToElement(
             document.getElementById(`explorer-code-${index}`), sourceFontAppearance
@@ -7476,6 +7491,10 @@
         pane._explorerDiffCacheKey = '';
         pane._explorerDiffContent = '';
         renderExplorerSource(index);
+        // An in-place refresh means the file moved on disk (save, undo,
+        // watcher) while HEAD usually did not, so the path + HEAD cache key
+        // would serve stale marks: force the refetch.
+        loadExplorerChangeMarks(index, { force: true });
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
             if (!pane._explorerFilePlain) {
@@ -7778,6 +7797,7 @@
             pane._explorerGitContext = data.git || null;
             pane._explorerDiffLoaded = false;
             pane._explorerDiffContent = '';
+            teardownExplorerOverview(index);
             pane._explorerPath = data.path || '';
             pane._explorerParentPath = data.parent_path || '';
             pane._explorerEntries = Array.isArray(data.entries) ? data.entries : [];

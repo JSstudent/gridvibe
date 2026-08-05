@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 import time
 import unittest
 from pathlib import Path
@@ -12,6 +14,25 @@ from web import saved_sessions as web_saved_sessions
 from web import terminal_io as web_terminal_io
 from web import workspaces as web_workspaces
 from web.workspaces import normalize_workspace_id, workspace_room
+
+
+def _js_function_source(script, name):
+    """Return one top-level JS function's source, brace-matched, from `script`.
+
+    Lets a test exercise a shipped frontend helper for real instead of
+    asserting on its source text: the helpers worth testing this way are pure,
+    but the file around them touches `document` at load time.
+    """
+    start = script.index(f"function {name}(")
+    depth = 0
+    for index in range(script.index("{", start), len(script)):
+        if script[index] == "{":
+            depth += 1
+        elif script[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return script[start:index + 1]
+    raise AssertionError(f"unbalanced braces in {name}")
 
 
 def _workspace_events(socket_client):
@@ -1009,6 +1030,63 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
         )
         # xterm must not send Alt+W on to the shell as ESC w.
         self.assertIn("&& event.code === 'KeyW') {", terminals_js)
+
+    def test_alt_w_never_walks_onto_a_workspace_with_no_window(self):
+        """The walk must switch windows, never conjure an empty one.
+
+        A live workspace record is not an open window: ``default`` is permanent
+        and Workspace ▸ New Workspace retains its workspace while it is empty,
+        while a window closes itself as soon as its last group goes. Walking
+        onto such a record opened a blank second window from a single-window
+        session instead of reporting there was nowhere to go.
+        """
+        work = {"workspace_id": "aaaaaaaaaaaa", "group_count": 1}
+        empty_default = {"workspace_id": "default", "group_count": 0}
+        other = {"workspace_id": "bbbbbbbbbbbb", "group_count": 2}
+
+        cycle = self._js_workspace_cycle(
+            [
+                # The report: one window, plus the empty records around it.
+                ([empty_default, work], "aaaaaaaaaaaa", 1),
+                ([empty_default, work], "aaaaaaaaaaaa", -1),
+                ([empty_default, work, {**other, "group_count": 0}], "aaaaaaaaaaaa", 1),
+                # Two real windows still cycle, forwards and backwards.
+                ([work, other], "aaaaaaaaaaaa", 1),
+                ([work, other], "aaaaaaaaaaaa", -1),
+                # An empty record between two windows is stepped over, not into.
+                ([work, empty_default, other], "aaaaaaaaaaaa", 1),
+            ]
+        )
+
+        self.assertEqual(
+            cycle,
+            [None, None, None, "bbbbbbbbbbbb", "bbbbbbbbbbbb", "bbbbbbbbbbbb"],
+        )
+
+    def _js_workspace_cycle(self, cases):
+        """Run the shipped nextWorkspaceInCycle over cases, returning target ids."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        source = _js_function_source(self._static("js/workspaces.js"), "nextWorkspaceInCycle")
+        script = (
+            f"{source}\n"
+            "const out = JSON.parse(process.argv[2]).map(\n"
+            "    ([list, current, step]) => (nextWorkspaceInCycle(list, current, step)\n"
+            "        || {}).workspace_id || null\n"
+            ");\n"
+            "process.stdout.write(JSON.stringify(out));\n"
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "cycle.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path), json.dumps(cases)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        return json.loads(completed.stdout)
 
     def test_alt_w_still_cycles_from_a_focused_terminal(self):
         terminals_js = self._static("js/terminals.js")
