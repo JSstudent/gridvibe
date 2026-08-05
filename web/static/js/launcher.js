@@ -538,19 +538,52 @@
         };
     }
 
-    function renderAgentOptions(selectedValue) {
-        const normalizedValue = String(selectedValue || '').trim().toLowerCase();
-        const options = [
-            '<option value="" data-base-label="Select agent">Select agent</option>',
-            ...AGENT_OPTIONS.map(option => `
-                <option
-                    value="${escHtml(option.value)}"
-                    data-base-label="${escHtml(option.label)}"
-                    ${normalizedValue === option.value ? 'selected' : ''}
-                >${escHtml(option.label)}</option>
-            `)
-        ];
-        return options.join('');
+    /* The startup-mode select carries the agent choice inline — plain mode
+       values plus "agent:<name>" entries in an Agent optgroup — so one
+       dropdown answers "what does this pane run" in a single pick. The
+       saved-session payload keeps its separate startup_mode/agent_selection
+       fields; only the control is combined. */
+    function startupSelectValue(mode, agentSelection) {
+        return mode === 'agent'
+            ? `agent:${String(agentSelection || '').trim().toLowerCase()}`
+            : mode;
+    }
+
+    function parseStartupSelection(value) {
+        const raw = String(value || '').trim();
+        if (raw.startsWith('agent:')) {
+            return { mode: 'agent', agent: raw.slice('agent:'.length) };
+        }
+        return { mode: raw, agent: '' };
+    }
+
+    function getRowAgentSelection(row) {
+        return parseStartupSelection(row?.querySelector('.startup-mode-select')?.value).agent;
+    }
+
+    function renderStartupModeOptions(commandUi) {
+        const mode = commandUi.mode;
+        const agent = String(commandUi.agentSelection || '').trim().toLowerCase();
+        const agentOptions = AGENT_OPTIONS.map(option => `
+            <option
+                value="agent:${escHtml(option.value)}"
+                data-base-label="${escHtml(option.label)}"
+                ${mode === 'agent' && agent === option.value ? 'selected' : ''}
+            >${escHtml(option.label)}</option>
+        `).join('');
+        /* The hidden "agent:" placeholder exists so a draft saved in agent
+           mode without a chosen agent still has an option to select; it is
+           not offered in the open dropdown. */
+        return `
+            <option value="terminal" ${mode === 'terminal' ? 'selected' : ''}>Terminal</option>
+            <option value="command" ${mode === 'command' ? 'selected' : ''}>Initial Command</option>
+            <option value="explorer" ${mode === 'explorer' ? 'selected' : ''}>File Explorer</option>
+            <option value="browser" ${mode === 'browser' ? 'selected' : ''} ${connectionMode === 'wsl' ? '' : 'disabled'}>Browser</option>
+            <optgroup label="Agent">
+                <option value="agent:" hidden ${mode === 'agent' && !agent ? 'selected' : ''}>Select agent…</option>
+                ${agentOptions}
+            </optgroup>
+        `;
     }
 
     function getTerminalCommandMode(row) {
@@ -579,7 +612,7 @@
             return normalizeBrowserPaneUrl(row.querySelector('.t-browser-url')?.value || '');
         }
         if (commandMode === 'agent') {
-            const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
+            const selectedAgent = getRowAgentSelection(row);
             if (selectedAgent === 'other') {
                 return row.querySelector('.t-agent-custom')?.value.trim() || '';
             }
@@ -680,14 +713,12 @@
                 startup_mode: commandMode === 'agent'
                     ? 'agent'
                     : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'terminal'),
-                agent_selection: commandMode === 'agent'
-                    ? (row.querySelector('.t-agent-select')?.value.trim() || '')
-                    : '',
+                agent_selection: commandMode === 'agent' ? getRowAgentSelection(row) : '',
                 custom_agent: commandMode === 'agent'
                     ? (row.querySelector('.t-agent-custom')?.value.trim() || '')
                     : '',
                 agent_auto_mode: commandMode === 'agent'
-                    && Boolean(agentAutoModeFlag(row.querySelector('.t-agent-select')?.value.trim() || ''))
+                    && Boolean(agentAutoModeFlag(getRowAgentSelection(row)))
                     && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
@@ -1174,10 +1205,11 @@
         const customAgentField = row.querySelector('.t-agent-custom-field');
         const browserField = row.querySelector('.t-browser-field');
         const startupModeSelect = row.querySelector('.startup-mode-select');
-        const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
+        const selection = parseStartupSelection(startupModeSelect?.value);
+        const selectedAgent = commandMode === 'agent' ? selection.agent : '';
 
-        if (startupModeSelect && startupModeSelect.value !== commandMode) {
-            startupModeSelect.value = commandMode;
+        if (startupModeSelect && selection.mode !== commandMode) {
+            startupModeSelect.value = startupSelectValue(commandMode, selectedAgent);
         }
 
         commandField?.classList.toggle('hidden', commandMode !== 'command');
@@ -1205,12 +1237,18 @@
         const flag = agentAutoModeFlag(selectedAgent);
         const available = commandMode === 'agent' && Boolean(flag);
         autoField.classList.toggle('hidden', !available);
-        const help = autoField.querySelector('.t-agent-auto-help');
+        /* The explanation hides behind the check-field's ? tip; it updates
+           in place while open, and closes when auto mode goes away. */
+        const help = row.querySelector('.t-agent-auto-help');
         if (help) {
             const description = available ? agentAutoModeDescription(selectedAgent) : '';
             help.textContent = available
                 ? `Launches as "${selectedAgent} ${flag}".${description ? ` ${description}` : ''}`
                 : '';
+            if (!available) {
+                help.classList.remove('visible');
+                autoField.querySelector('.tip-btn')?.setAttribute('aria-expanded', 'false');
+            }
         }
         if (!available) {
             const checkbox = autoField.querySelector('.t-agent-auto-mode');
@@ -1223,15 +1261,15 @@
     function resetTerminalCommandOnModeChange(row, nextMode) {
         const previousMode = getTerminalCommandMode(row);
         const commandInput = row.querySelector('.t-cmd');
-        const agentSelect = row.querySelector('.t-agent-select');
         const customAgentInput = row.querySelector('.t-agent-custom');
 
         if (previousMode === 'command' && nextMode !== 'command' && commandInput) {
             commandInput.value = '';
         }
 
+        /* The agent choice itself needs no clearing: it lives in the same
+           select, so picking a non-agent mode already replaced it. */
         if (previousMode === 'agent' && nextMode !== 'agent') {
-            if (agentSelect) agentSelect.value = '';
             if (customAgentInput) customAgentInput.value = '';
             const autoModeCheckbox = row.querySelector('.t-agent-auto-mode');
             if (autoModeCheckbox) autoModeCheckbox.checked = false;
@@ -1265,7 +1303,7 @@
     }
 
     function clearAgentPreflight(row) {
-        const select = row?.querySelector('.t-agent-select');
+        const select = row?.querySelector('.startup-mode-select');
         const disclosure = row?.querySelector('.agent-preflight-disclosure');
         const summary = row?.querySelector('.agent-preflight-summary');
         const summaryLabel = row?.querySelector('.agent-preflight-summary-label');
@@ -1297,7 +1335,7 @@
     }
 
     function renderAgentPreflight(row, payload) {
-        const select = row?.querySelector('.t-agent-select');
+        const select = row?.querySelector('.startup-mode-select');
         const disclosure = row?.querySelector('.agent-preflight-disclosure');
         const summary = row?.querySelector('.agent-preflight-summary');
         const summaryLabel = row?.querySelector('.agent-preflight-summary-label');
@@ -1343,8 +1381,10 @@
         select.title = [message, targetLabel ? `Target: ${targetLabel}` : '', prerequisite, installCommand ? `${installLabel || 'Install'}: ${installCommand}` : '', warning]
             .filter(Boolean)
             .join('\n');
-        if (selectedOption && selectedOption.value) {
-            selectedOption.textContent = `${selectedOption.dataset.baseLabel || selectedOption.textContent} · ${label}`;
+        /* Only agent entries carry data-base-label; the plain mode options
+           must never grow a status suffix. */
+        if (selectedOption && selectedOption.dataset.baseLabel) {
+            selectedOption.textContent = `${selectedOption.dataset.baseLabel} · ${label}`;
         }
 
         summary.className = `agent-preflight-summary ${escHtml(status)}`.trim();
@@ -1356,7 +1396,7 @@
 
     function buildAgentPreflightPayload(row) {
         return {
-            agent: row?.querySelector('.t-agent-select')?.value.trim() || '',
+            agent: getRowAgentSelection(row),
             connection_mode: connectionMode,
             ssh: {
                 host: document.getElementById('ssh_host')?.value.trim() || '',
@@ -1404,7 +1444,7 @@
             return;
         }
 
-        const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
+        const selectedAgent = getRowAgentSelection(row);
         if (!selectedAgent || selectedAgent === 'other') {
             clearAgentPreflight(row);
             return;
@@ -1490,18 +1530,13 @@
         document.querySelectorAll('.t-row').forEach(row => {
             const wslCheckbox = row.querySelector('.t-use-wsl');
             const powershellCheckbox = row.querySelector('.t-use-powershell');
-            const agentSelect = row.querySelector('.t-agent-select');
             const distributionInput = row.querySelector('.t-distribution');
             const startupModeSelect = row.querySelector('.startup-mode-select');
 
             startupModeSelect?.addEventListener('change', () => {
-                const nextMode = startupModeSelect.value;
+                const nextMode = parseStartupSelection(startupModeSelect.value).mode;
                 resetTerminalCommandOnModeChange(row, nextMode);
                 row.dataset.commandMode = nextMode;
-                syncTerminalCommandState(row);
-                scheduleAgentPreflight(row, 60);
-            });
-            agentSelect?.addEventListener('change', () => {
                 syncTerminalCommandState(row);
                 scheduleAgentPreflight(row, 60);
             });
@@ -1517,9 +1552,11 @@
     function buildTerminalRows(count, drafts = DEFAULT_TERMINALS) {
         const container = document.getElementById('terminalRows');
         const usableDrafts = drafts.length ? drafts : DEFAULT_TERMINALS;
-        const columns = count >= 3 ? 3 : count;
-
-        container.style.setProperty('--terminal-columns', String(columns));
+        /* Rows are rebuilt from scratch on every count change and import, so
+           the fold state (view-only, never part of the draft payload) has to
+           be snapshotted here and re-applied by index or it would reset. */
+        const previousFoldState = Array.from(container.querySelectorAll('.t-row'))
+            .map(row => row.classList.contains('t-row-collapsed'));
 
         container.innerHTML = Array.from({ length: count }, (_, index) => {
             const terminal = usableDrafts[index] || DEFAULT_TERMINALS[index];
@@ -1528,9 +1565,12 @@
                 commandUi.mode = 'terminal';
                 commandUi.commandValue = '';
             }
+            const rowCollapsed = index < previousFoldState.length
+                ? previousFoldState[index]
+                : count >= 3;
             return `
                 <div
-                    class="t-row"
+                    class="t-row${rowCollapsed ? ' t-row-collapsed' : ''}"
                     data-command-mode="${escHtml(commandUi.mode)}"
                     data-explorer-tree-open="${terminal.explorer_tree_open ? 'true' : 'false'}"
                     data-explorer-git-open="${terminal.explorer_git_open ? 'true' : 'false'}"
@@ -1546,24 +1586,30 @@
                     data-browser-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.browser_tabs) ? terminal.browser_tabs : []))}"
                     data-browser-active-tab="${escHtml(String(Number(terminal.browser_active_tab) || 0))}"
                 >
-                    <div class="t-row-head">
+                    <div class="t-row-head" onclick="onTerminalRowHeadClick(event)">
                         <span class="t-badge">T${index + 1}</span>
                         <input class="t-title" type="text" value="${escHtml(terminal.title || `Terminal ${index + 1}`)}" placeholder="Terminal ${index + 1}" aria-label="Terminal ${index + 1} title">
+                        <button
+                            type="button"
+                            class="t-row-fold-btn"
+                            onclick="toggleTerminalRowFold(this)"
+                            aria-expanded="${rowCollapsed ? 'false' : 'true'}"
+                            aria-label="Fold Terminal ${index + 1} settings"
+                            title="Fold Terminal ${index + 1} settings"
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"></path></svg>
+                        </button>
                         <span class="t-status-dot"></span>
                     </div>
                     <div class="t-fields">
                         <div class="field">
                             <label>Subdirectory</label>
-                            <input class="t-dir" type="text" value="${escHtml(terminal.directory || '')}" placeholder="Optional path inside Step 2 default">
+                            <input class="t-dir" type="text" value="${escHtml(terminal.directory || '')}" placeholder="Relative to Step 2 folder" title="Optional path inside the Step 2 default folder">
                         </div>
                         <div class="field">
                             <label>Startup Mode</label>
                             <select class="startup-mode-select">
-                                <option value="terminal" ${commandUi.mode === 'terminal' ? 'selected' : ''}>Terminal</option>
-                                <option value="command" ${commandUi.mode === 'command' ? 'selected' : ''}>Initial Command</option>
-                                <option value="agent" ${commandUi.mode === 'agent' ? 'selected' : ''}>Agent</option>
-                                <option value="explorer" ${commandUi.mode === 'explorer' ? 'selected' : ''}>File Explorer</option>
-                                <option value="browser" ${commandUi.mode === 'browser' ? 'selected' : ''} ${connectionMode === 'wsl' ? '' : 'disabled'}>Browser</option>
+                                ${renderStartupModeOptions(commandUi)}
                             </select>
                         </div>
                         <div class="field t-command-field ${commandUi.mode === 'command' ? '' : 'hidden'}">
@@ -1575,10 +1621,6 @@
                             <input class="t-browser-url" type="url" value="${escHtml(commandUi.commandValue || 'http://127.0.0.1:3000')}" placeholder="http://127.0.0.1:3000">
                         </div>
                         <div class="field t-agent-field ${commandUi.mode === 'agent' ? '' : 'hidden'}">
-                            <label>Agent</label>
-                            <select class="t-agent-select">
-                                ${renderAgentOptions(commandUi.agentSelection)}
-                            </select>
                             <details class="agent-preflight-disclosure">
                                 <summary class="agent-preflight-summary">
                                     <span class="agent-preflight-summary-label"></span>
@@ -1589,9 +1631,16 @@
                                 <input class="t-agent-auto-mode" type="checkbox" ${commandUi.agentAutoMode ? 'checked' : ''} aria-label="Launch agent in auto mode">
                                 <span class="check-copy">
                                     <strong>Auto mode</strong>
-                                    <span class="t-agent-auto-help"></span>
                                 </span>
+                                <button
+                                    type="button"
+                                    class="tip-btn"
+                                    aria-expanded="false"
+                                    aria-label="Explain auto mode"
+                                    onclick="toggleInlineTip(this)"
+                                >?</button>
                             </label>
+                            <div class="inline-tip t-agent-auto-help"></div>
                         </div>
                         <div class="field t-agent-custom-field ${commandUi.mode === 'agent' && commandUi.agentSelection === 'other' ? '' : 'hidden'}">
                             <label>Custom Agent</label>
@@ -1646,6 +1695,83 @@
         }).join('');
 
         bindTerminalRowInteractions();
+    }
+
+    function toggleTerminalRowFold(button) {
+        const row = button.closest('.t-row');
+        if (!row) {
+            return;
+        }
+        const collapsed = row.classList.toggle('t-row-collapsed');
+        button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        if (!collapsed) {
+            /* Opening a card should show the whole card, not leave it half
+               under the panel fold. Wait a frame so the grid has its final
+               height before measuring; a card taller than the panel viewport
+               pins its top instead. */
+            requestAnimationFrame(() => {
+                const wrap = row.closest('.rows-wrap');
+                const block = wrap && row.offsetHeight >= wrap.clientHeight ? 'start' : 'nearest';
+                row.scrollIntoView({ block, behavior: 'smooth' });
+            });
+        }
+    }
+
+    /* The whole head is a fold target so the chevron isn't the only way in;
+       clicks on the title input (or the chevron itself, which already
+       toggles) fall through to their own handlers. */
+    function onTerminalRowHeadClick(event) {
+        if (event.target.closest('input, button')) {
+            return;
+        }
+        const button = event.currentTarget.querySelector('.t-row-fold-btn');
+        if (button) {
+            toggleTerminalRowFold(button);
+        }
+    }
+
+    /* Panel fold state is a per-browser view preference, so it lives in
+       localStorage (same pattern as the theme key in shared.js) and never in
+       the saved-session payload. */
+    const LAUNCHER_PANEL_FOLD_KEYS = {
+        terminalSetupCard: 'gv_fold_terminal_setup',
+        workspaceDestinationCard: 'gv_fold_workspaces'
+    };
+
+    function syncLauncherPanelFoldChrome(card, cardId, folded) {
+        const button = card.querySelector('.card-fold-btn');
+        if (button) {
+            button.setAttribute('aria-expanded', folded ? 'false' : 'true');
+        }
+        if (cardId === 'terminalSetupCard') {
+            card.closest('.column-right')?.classList.toggle('terminal-setup-folded', folded);
+        }
+    }
+
+    function toggleLauncherCardFold(cardId) {
+        const card = document.getElementById(cardId);
+        if (!card) {
+            return;
+        }
+        const folded = card.classList.toggle('card-folded');
+        syncLauncherPanelFoldChrome(card, cardId, folded);
+        const storageKey = LAUNCHER_PANEL_FOLD_KEYS[cardId];
+        if (storageKey) {
+            try { localStorage.setItem(storageKey, folded ? '1' : '0'); } catch (_error) {}
+        }
+    }
+
+    function restoreLauncherPanelFolds() {
+        Object.entries(LAUNCHER_PANEL_FOLD_KEYS).forEach(([cardId, storageKey]) => {
+            const card = document.getElementById(cardId);
+            if (!card) {
+                return;
+            }
+            let folded = false;
+            try { folded = localStorage.getItem(storageKey) === '1'; } catch (_error) {}
+            card.classList.toggle('card-folded', folded);
+            syncLauncherPanelFoldChrome(card, cardId, folded);
+        });
     }
 
     function collectFormConfig() {
@@ -3085,6 +3211,7 @@
     renderLayoutOptions();
     renderModeFields();
     buildTerminalRows(selectedCount, DEFAULT_TERMINALS);
+    restoreLauncherPanelFolds();
     updateTerminalTargetSignature(connectionMode, collectModeInputs());
     loadPersistedConfig(true);
     loadAppSettings().catch(() => {});

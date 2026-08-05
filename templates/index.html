@@ -113,13 +113,24 @@
     </section>
 
     <section class="column column-right">
-        <div class="card terminal-card">
+        <div class="card terminal-card" id="terminalSetupCard">
             <div class="section-head">
                 <div class="section-title">
                     <span class="step-num">03</span>
                     Terminal Setup
                 </div>
                 <button type="button" class="add-terminal-btn" id="addTerminalBtn" onclick="addTerminalFromButton()">+ Add Terminal</button>
+                <button
+                    type="button"
+                    class="card-fold-btn"
+                    id="terminalSetupFoldBtn"
+                    onclick="toggleLauncherCardFold('terminalSetupCard')"
+                    aria-expanded="true"
+                    aria-label="Fold Terminal Setup panel"
+                    title="Fold Terminal Setup panel"
+                >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"></path></svg>
+                </button>
             </div>
             <div class="message">Configure each terminal tab before launch.</div>
             <div id="terminalRows" class="rows-wrap"></div>
@@ -146,6 +157,17 @@
                 >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8"></path><path d="M3 8V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3"></path><path d="M10 12h4"></path></svg>
                     <span id="workspaceSavedEntryLabel">Reopen saved…</span>
+                </button>
+                <button
+                    type="button"
+                    class="card-fold-btn"
+                    id="workspaceCardFoldBtn"
+                    onclick="toggleLauncherCardFold('workspaceDestinationCard')"
+                    aria-expanded="true"
+                    aria-label="Fold Workspaces panel"
+                    title="Fold Workspaces panel"
+                >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"></path></svg>
                 </button>
             </div>
 

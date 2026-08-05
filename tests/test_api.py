@@ -410,7 +410,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const AGENT_OPTIONS = [", html)
         self.assertIn('class="startup-mode-select"', html)
         self.assertIn('<option value="terminal"', html)
-        self.assertIn('<option value="agent"', html)
+        # The agent choice rides inline in the startup-mode select as an
+        # optgroup of "agent:<name>" values; there is no separate agent select.
+        self.assertIn('<optgroup label="Agent">', html)
+        self.assertIn('value="agent:${escHtml(option.value)}"', html)
         self.assertIn('aria-label="Terminal ${index + 1} title"', html)
         self.assertIn("function normalizeTerminalCommandUi(terminal)", html)
         self.assertIn("Custom Agent", html)
@@ -10769,7 +10772,6 @@ class ApiRoutesTestCase(unittest.TestCase):
             '[data-theme="light"] .count-btn',
             '[data-theme="light"] .field input',
             '[data-theme="light"] .t-row',
-            '[data-theme="light"] .t-agent-select',
             '[data-theme="light"] .startup-mode-select',
             '[data-theme="light"] .check-field',
             '[data-theme="light"] .modal-card',
