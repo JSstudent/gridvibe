@@ -759,6 +759,26 @@
         return lines;
     }
 
+    /* Whole-document tokenization is the expensive part of a Source re-render,
+       and re-renders that leave the content untouched are frequent: every
+       search keystroke, wrap toggle and Markdown fold rebuilds the rows. Cache
+       the token map on the pane, keyed by content + normalized language, so
+       those re-renders reuse it; a real content change (file refresh, tab
+       switch, editor save) misses the key and re-tokenizes. Cached `null`
+       (unsupported language, oversized file, Highlight.js failure) is a valid
+       hit — it must not trigger a re-tokenize on every render either. */
+    function explorerHighlightDocumentLinesCached(pane, content, normalizedLanguage) {
+        const cache = pane ? pane._explorerHighlightCache : null;
+        if (cache && cache.content === content && cache.language === normalizedLanguage) {
+            return cache.lines;
+        }
+        const lines = explorerHighlightDocumentLines(content, normalizedLanguage);
+        if (pane) {
+            pane._explorerHighlightCache = { content, language: normalizedLanguage, lines };
+        }
+        return lines;
+    }
+
     /* Render one line's worth of Highlight.js runs, reusing the shared
        escape+search-mark helpers so search marks coexist with syntax spans. */
     function explorerRenderHighlightedRuns(runs, searchRanges = []) {
@@ -4389,7 +4409,7 @@
         `;
     }
 
-    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set()) {
+    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines) {
         const normalizedLanguage = normalizeExplorerLanguage(language);
         const records = explorerSourceLineRecords(content);
         const languageClass = explorerLanguageClass(language);
@@ -4406,7 +4426,11 @@
         // Whole-document Highlight.js pass (Phase 1); null for unsupported
         // languages, the log/markdown special renderers, oversized files, or any
         // Highlight.js failure, in which case each line uses the fallback lexer.
-        const highlightedLines = explorerHighlightDocumentLines(content, normalizedLanguage);
+        // Callers with a pane pass the pane-cached map in (undefined here means
+        // "tokenize now"); a passed-in null is a legitimate cached miss.
+        const runs = highlightedLines !== undefined
+            ? highlightedLines
+            : explorerHighlightDocumentLines(content, normalizedLanguage);
         const rows = [];
         let hiddenUntilHeadingLevel = 0;
 
@@ -4420,8 +4444,8 @@
             }
 
             const collapsed = allowMarkdownCollapse && headingLevel && collapsedLines.has(record.number);
-            const lineHtml = highlightedLines
-                ? explorerRenderHighlightedRuns(highlightedLines.get(record.number), searchRanges)
+            const lineHtml = runs
+                ? explorerRenderHighlightedRuns(runs.get(record.number), searchRanges)
                 : highlightExplorerCode(record.text, language, searchRanges, record.start);
             // Heading-only Markdown tokeniser (OD-8): the fence-aware heading map
             // already computed for section collapse doubles as the highlighter,
@@ -4566,12 +4590,17 @@
             return;
         }
 
+        const content = pane._explorerFileContent || '';
         const language = pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '');
+        const highlightedLines = explorerHighlightDocumentLinesCached(
+            pane, content, normalizeExplorerLanguage(language)
+        );
         code.innerHTML = renderExplorerSourceLines(
-            pane._explorerFileContent || '',
+            content,
             language,
             searchRanges,
-            ensureExplorerMarkdownCollapsedLines(pane)
+            ensureExplorerMarkdownCollapsedLines(pane),
+            highlightedLines
         );
         wireExplorerMarkdownSectionControls(index);
         // The rebuilt rows dropped the nodes the occurrence tint was anchored
@@ -5448,14 +5477,21 @@
         if (!panel) {
             return null;
         }
-        // Edit mode moves Source scrolling into its full-height textarea.
-        // Capture that inner viewport so Save can restore the same location
-        // when the highlighted read-only Source panel is rebuilt.
+        /* The source frame (.explorer-source-frame) is overflow:hidden — a
+           fixed frame has to be, so anything docked beside the text never
+           scrolls away — and the element that actually scrolls is the inner
+           .explorer-source-view, exactly as the diff panel's inner
+           .explorer-diff-content scrolls inside its own fixed wrapper. */
         if (panel.dataset.explorerFilePanel === 'source') {
-            const editor = panel.querySelector('.explorer-source-editor');
-            if (editor) {
-                return editor;
+            const view = panel.querySelector('.explorer-source-view');
+            if (!view) {
+                return panel;
             }
+            // Edit mode moves Source scrolling into its full-height textarea.
+            // Capture that inner viewport so Save can restore the same location
+            // when the highlighted read-only Source panel is rebuilt.
+            const editor = view.querySelector('.explorer-source-editor');
+            return editor || view;
         }
         // The diff panel wrapper (.explorer-diff-split) is overflow:hidden; the
         // element that actually scrolls is the inner .explorer-diff-content.
@@ -7315,7 +7351,7 @@
                 </div>
                 <div class="explorer-editor-body${keepDiffSplit ? ' split-diff' : ''}">
                     <div class="explorer-editor-main">
-                        <div class="explorer-source-view explorer-editor-panel" id="explorer-code-${index}" data-explorer-file-panel="source" ${initialFileView === 'source' ? '' : 'hidden'}></div>
+                        <div class="explorer-source-frame explorer-editor-panel" data-explorer-file-panel="source" ${initialFileView === 'source' ? '' : 'hidden'}><div class="explorer-source-view" id="explorer-code-${index}"></div></div>
                         ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" ${initialFileView === 'preview' ? '' : 'hidden'}></div>` : ''}
                     </div>
                     ${hasGitDiff ? `<aside class="explorer-diff-split" id="explorer-diff-panel-${index}" data-explorer-file-panel="diff" ${keepDiffSplit ? '' : 'hidden'}><div class="explorer-diff-content" id="explorer-diff-code-${index}"></div></aside>` : ''}

@@ -1,7 +1,37 @@
 # Source View Change Overview — implementation plan
 
-Status: **proposal, not yet implemented.** Target surface: the explorer file
-viewer's **Source** panel only (Preview and Diff are untouched).
+Status: **Phase 0 implemented** (see §5); Phases 1–4 not yet implemented.
+Target surface: the explorer file viewer's **Source** panel only (Preview and
+Diff are untouched).
+
+### Phase 0 — implemented
+
+Landed, with no user-visible change, verified by `tests/test_explorer_source_frame.py`:
+
+- `explorerHighlightDocumentLinesCached(pane, content, normalizedLanguage)` in
+  `explorer-viewer.js` memoizes the whole-document token map on the pane
+  (`pane._explorerHighlightCache`), keyed by content + normalized language;
+  `renderExplorerSource()` passes the cached map into
+  `renderExplorerSourceLines()`, which only tokenizes inline when no map is
+  provided (an explicit `null` — unsupported language, oversized file,
+  Highlight.js failure — is a valid cached miss and does not re-tokenize).
+  Search keystrokes, wrap toggles and Markdown folds now reuse the map.
+- The Source panel markup is wrapped in
+  `.explorer-source-frame.explorer-editor-panel`, which carries
+  `data-explorer-file-panel="source"`; the inner `.explorer-source-view` keeps
+  `id="explorer-code-N"` and remains the scroll container, so all existing
+  `explorer-code-N` lookups are unchanged.
+- `explorerPanelScrollTarget()` gained a `source` branch returning the inner
+  `.explorer-source-view` (or the edit textarea inside it), mirroring the
+  existing `diff` branch.
+- `terminals.css` gained `.explorer-source-frame { display: grid;
+  grid-template-columns: minmax(0, 1fr) auto; overflow: hidden; }`, placed
+  after `.explorer-editor-panel` so its `overflow` override wins while
+  `.explorer-editor-panel[hidden]` still hides the frame.
+
+Not done in Phase 0 (later phases, unchanged from the plan below): the
+`<aside class="explorer-source-overview">` element, gutter markers, the
+overview modes, and the Appearance-menu toggle.
 
 ## 1. What is being built
 
@@ -337,7 +367,7 @@ Each phase is independently shippable and independently reviewable.
 
 | # | Scope | Why this order |
 | --- | --- | --- |
-| **0** | Memoize `explorerHighlightDocumentLines()` per pane; add the `.explorer-source-frame` wrapper + `explorerPanelScrollTarget` branch; no visible change | Isolates the one refactor with blast radius into a diff that can be verified by "nothing changed" |
+| **0** ✅ | Memoize `explorerHighlightDocumentLines()` per pane; add the `.explorer-source-frame` wrapper + `explorerPanelScrollTarget` branch; no visible change | Isolates the one refactor with blast radius into a diff that can be verified by "nothing changed" |
 | **1** | `explorer-overview.js` skeleton: change model, fetch + cache, classification, gutter markers, refresh triggers, tokens + CSS | Delivers the line-number marking from the screenshot on its own |
 | **2** | Overview element in `ruler` mode: geometry helper, change lane, viewport box, click / drag / wheel navigation | Delivers "click through a file for changes" with no canvas-painting risk |
 | **3** | `map` mode: canvas glyph paint, colour probing, DPR, Appearance-menu toggle + persistence, automatic ruler fallback | The visual payload; safe to land late because ruler mode already works |

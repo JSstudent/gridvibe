@@ -3374,6 +3374,17 @@
             display: none;
         }
 
+        /* Fixed (non-scrolling) frame around the Source view: the text scrolls
+           inside .explorer-source-view while the frame stays put, so anything
+           docked in the grid's second column never scrolls away and never
+           overlaps the horizontal scrollbar. Must come after the
+           .explorer-editor-panel rule above — it overrides its overflow. */
+        .explorer-source-frame {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            overflow: hidden;
+        }
+
         /* Read-only image viewer. A theme-aware checkerboard makes transparent
            images legible in both light and dark explorer themes; the image is
            fit to the pane and scrolls if it overflows. */

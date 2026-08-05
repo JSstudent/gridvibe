@@ -1274,7 +1274,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
         self.assertIn(".explorer-source-line-number", html)
-        self.assertIn("function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set())", html)
+        self.assertIn("function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines)", html)
         self.assertIn("function highlightExplorerCode(content, language, searchRanges = [])", html)
         self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
         self.assertIn("const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({", html)
@@ -1512,8 +1512,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerRenderHighlightedRuns(runs, searchRanges = [])", html)
         self.assertIn("engine.highlight(source, { language: grammar, ignoreIllegal: true })", html)
         # Source rendering prefers the whole-document pass, falling back per line.
-        self.assertIn("const highlightedLines = explorerHighlightDocumentLines(content, normalizedLanguage);", html)
-        self.assertIn("? explorerRenderHighlightedRuns(highlightedLines.get(record.number), searchRanges)", html)
+        self.assertIn(": explorerHighlightDocumentLines(content, normalizedLanguage);", html)
+        self.assertIn("? explorerRenderHighlightedRuns(runs.get(record.number), searchRanges)", html)
         self.assertIn(": highlightExplorerCode(record.text, language, searchRanges, record.start);", html)
         # The oversized-file guard is preserved for the highlighter.
         self.assertIn("if (source.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD) {", html)
@@ -1813,8 +1813,10 @@ class ApiRoutesTestCase(unittest.TestCase):
             enter.index("textarea.focus({ preventScroll: true });"),
         )
         # Save captures the textarea (the real edit-mode scroller), allowing
-        # the highlighted Source view to return to the same location.
-        self.assertIn("panel.querySelector('.explorer-source-editor')", viewer)
+        # the highlighted Source view to return to the same location. The
+        # scroll target sees through the fixed source frame to the inner view.
+        self.assertIn("panel.querySelector('.explorer-source-view')", viewer)
+        self.assertIn("view.querySelector('.explorer-source-editor')", viewer)
         exit_mode = editor[
             editor.index("function exitExplorerEditMode(index)"):
             editor.index("async function cancelExplorerEdit(index)")
