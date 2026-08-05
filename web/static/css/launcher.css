@@ -440,27 +440,28 @@
         }
 
         /* Three rows, not two: the Workspaces card sits between the Terminal
-           Setup card and the action bar when multi-workspace is on. Leaving the
-           third row implicit was survivable, but `.card { min-height: 0 }`
-           removes each item's automatic minimum, so the `1fr` row could be
-           squeezed to nothing and Terminal Setup collapsed to a clipped header
-           strip. The floors below keep the content cards readable and let the
-           column scroll instead. */
+           Setup card and the action bar when multi-workspace is on, and leaving
+           the third row implicit put the action bar in whatever the browser
+           improvised.
+
+           Every row is content-sized and the column stacks from the top. No row
+           claims the column's leftover space, which is the whole point: a `1fr`
+           first row made Terminal Setup grow into all of it and squeeze the
+           Workspaces card below, while a floor on that card meant the card
+           could end up taller than its own track — and a grid item taller than
+           its track *overflows* it rather than pushing the next row down, so
+           Workspaces painted its background straight over the bottom terminal
+           cards. With `auto` rows, Terminal Setup wraps exactly what it holds
+           (see its cap below), Workspaces takes the space that leaves, and the
+           column scrolls (`.column { overflow: auto }`) only when the two of
+           them genuinely do not fit. */
         .column-right {
-            grid-template-rows: minmax(0, 1fr) auto auto;
+            grid-template-rows: auto auto auto;
             align-content: start;
         }
 
         .column-left > .card:not(.terminal-layout-card) {
             min-height: 220px;
-        }
-
-        /* Terminal Setup is the working surface of this column: its floor is
-           sized so one fully expanded terminal card (agent mode, ~400px) fits
-           without inner clipping even with the Workspaces card open below —
-           the column scrolls before step 03 gets crushed. */
-        .column-right > .terminal-card {
-            min-height: min(520px, 64vh);
         }
 
         .card {
@@ -1158,58 +1159,35 @@
             color: #111827;
         }
 
+        /* Agent preflight status paints the control's frame only. A native
+           select hands its own background-color and color down to the popup
+           list, so tinting the closed control repainted every Startup Mode
+           option — Terminal, File Explorer, Browser — in the agent's status
+           colour. The frame carries the signal; the status word itself lives
+           in the selected option's " · Installed" suffix, the preflight
+           summary chip, and the select's title tooltip. Theme-aware tokens
+           replace this block's old per-theme literals. */
         .startup-mode-select.status-installed {
-            border-color: rgba(57, 212, 166, 0.52);
-            background-color: #0c2520;
-            color: var(--success);
+            border-color: var(--gv-success);
+            box-shadow: inset 0 0 0 1px var(--gv-success);
         }
 
         .startup-mode-select.status-missing,
         .startup-mode-select.status-needs_manual_install {
-            border-color: rgba(255, 189, 89, 0.48);
-            background-color: #231a06;
-            color: #ffd084;
+            border-color: var(--gv-warning);
+            box-shadow: inset 0 0 0 1px var(--gv-warning);
         }
 
         .startup-mode-select.status-missing_prerequisite,
         .startup-mode-select.status-check_failed,
         .startup-mode-select.status-unsupported_here {
-            border-color: rgba(255, 111, 125, 0.48);
-            background-color: #22090e;
-            color: #ff8b96;
+            border-color: var(--gv-danger);
+            box-shadow: inset 0 0 0 1px var(--gv-danger);
         }
 
         .startup-mode-select.status-target_incomplete {
-            border-color: rgba(0, 217, 255, 0.48);
-            background-color: #061921;
-            color: var(--accent);
-        }
-
-        [data-theme="light"] .startup-mode-select.status-installed {
-            border-color: rgba(4, 120, 87, 0.54);
-            background-color: #ecfdf5;
-            color: #047857;
-        }
-
-        [data-theme="light"] .startup-mode-select.status-missing,
-        [data-theme="light"] .startup-mode-select.status-needs_manual_install {
-            border-color: rgba(180, 83, 9, 0.54);
-            background-color: #fffbeb;
-            color: #92400e;
-        }
-
-        [data-theme="light"] .startup-mode-select.status-missing_prerequisite,
-        [data-theme="light"] .startup-mode-select.status-check_failed,
-        [data-theme="light"] .startup-mode-select.status-unsupported_here {
-            border-color: rgba(220, 38, 38, 0.54);
-            background-color: #fef2f2;
-            color: #b91c1c;
-        }
-
-        [data-theme="light"] .startup-mode-select.status-target_incomplete {
-            border-color: rgba(8, 145, 178, 0.54);
-            background-color: #ecfeff;
-            color: #0e7490;
+            border-color: var(--gv-accent);
+            box-shadow: inset 0 0 0 1px var(--gv-accent);
         }
 
         .agent-preflight-disclosure {
@@ -1428,11 +1406,17 @@
             line-height: 1.35;
         }
 
+        /* The card wraps its terminal tiles rather than filling the column, so
+           a set of folded tiles takes only the height it needs. The cap is one
+           fully expanded tile (agent mode is the tallest, ~400px) plus the card
+           chrome: expanding a tile grows the card up to that and `.rows-wrap`
+           scrolls past it, so a second expanded tile never pushes into the
+           Workspaces card below. */
         .terminal-card {
             display: flex;
             flex-direction: column;
             padding: 18px 20px;
-            max-height: calc(100vh - 200px);
+            max-height: min(520px, 58vh);
             min-height: 0;
         }
 
@@ -1610,8 +1594,6 @@
 
         .terminal-card.card-folded {
             max-height: none;
-            min-height: 0;
-            flex: 0 0 auto;
         }
 
         .terminal-card.card-folded .rows-wrap,
@@ -1624,17 +1606,11 @@
             display: none;
         }
 
-        /* The live-workspace list scrolls once it would start squeezing
-           Terminal Setup above it; the card cannot grow without bound. */
+        /* The live-workspace list scrolls rather than growing without bound, so
+           a long list still leaves the action bar below it on screen. */
         .workspace-destination {
             max-height: min(30vh, 280px);
             overflow: auto;
-        }
-
-        /* The 1fr row exists to stretch Terminal Setup; folded it would be a
-           hole, so let every row size to content. */
-        .column-right.terminal-setup-folded {
-            grid-template-rows: auto auto auto;
         }
 
         .t-fields {

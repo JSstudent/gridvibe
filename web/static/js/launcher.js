@@ -92,6 +92,15 @@
     window.name = 'gridvibe-launcher';
     const MAX_SESSIONS = Number(document.querySelector('.shell').dataset.maxSessions || 4);
     const COUNT_OPTIONS = [1, 2, 3, 4, 6, 8].filter(value => value <= MAX_SESSIONS);
+    /* What the launcher will actually go up to: the count ladder's top, which
+       is 8 unless a lower configured max_sessions trims the ladder. It is
+       usually *below* MAX_SESSIONS, because a count needs a layout preset in
+       LAYOUT_COPY to be offerable at all. */
+    const LAUNCHER_MAX_TERMINALS = COUNT_OPTIONS[COUNT_OPTIONS.length - 1];
+    /* Fallback address for a browser pane that has no saved URL of its own —
+       mirrors BROWSER_DEFAULT_URL in browser-pane.js, which the launcher page
+       does not load. */
+    const DEFAULT_BROWSER_PANE_URL = 'http://127.0.0.1:3000';
     const DEFAULT_TERMINALS = Array.from({ length: MAX_SESSIONS }, (_, index) => ({
         title: `Terminal ${index + 1}`,
         directory: '',
@@ -506,7 +515,7 @@
         if (mode === 'browser') {
             return {
                 mode,
-                commandValue: initialCommand || 'http://127.0.0.1:3000',
+                commandValue: initialCommand || DEFAULT_BROWSER_PANE_URL,
                 agentSelection: '',
                 customAgent: ''
             };
@@ -1614,11 +1623,16 @@
                         </div>
                         <div class="field t-command-field ${commandUi.mode === 'command' ? '' : 'hidden'}">
                             <label>Initial Command</label>
-                            <input class="t-cmd" type="text" value="${escHtml(commandUi.commandValue)}" placeholder="Blank = shell only">
+                            <input class="t-cmd" type="text" value="${escHtml(commandUi.mode === 'command' ? commandUi.commandValue : '')}" placeholder="Blank = shell only">
                         </div>
                         <div class="field t-browser-field ${commandUi.mode === 'browser' ? '' : 'hidden'}">
                             <label>Browser URL</label>
-                            <input class="t-browser-url" type="url" value="${escHtml(commandUi.commandValue || 'http://127.0.0.1:3000')}" placeholder="http://127.0.0.1:3000">
+                            <!-- Each mode seeds only its own input. commandValue is the
+                                 draft's single initial_command, so in agent mode it holds
+                                 the agent name ("claude") — piping it into the hidden URL
+                                 box left the pane pointed at http://claude/ the moment the
+                                 user switched to Browser. -->
+                            <input class="t-browser-url" type="url" value="${escHtml(commandUi.mode === 'browser' ? (commandUi.commandValue || DEFAULT_BROWSER_PANE_URL) : DEFAULT_BROWSER_PANE_URL)}" placeholder="${escHtml(DEFAULT_BROWSER_PANE_URL)}">
                         </div>
                         <div class="field t-agent-field ${commandUi.mode === 'agent' ? '' : 'hidden'}">
                             <details class="agent-preflight-disclosure">
@@ -1738,13 +1752,13 @@
         workspaceDestinationCard: 'gv_fold_workspaces'
     };
 
-    function syncLauncherPanelFoldChrome(card, cardId, folded) {
+    /* No `terminal-setup-folded` marker on the column any more: its rows are
+       content-sized whether or not a card is folded, so folding one is already
+       just a shorter row. */
+    function syncLauncherPanelFoldChrome(card, folded) {
         const button = card.querySelector('.card-fold-btn');
         if (button) {
             button.setAttribute('aria-expanded', folded ? 'false' : 'true');
-        }
-        if (cardId === 'terminalSetupCard') {
-            card.closest('.column-right')?.classList.toggle('terminal-setup-folded', folded);
         }
     }
 
@@ -1754,7 +1768,7 @@
             return;
         }
         const folded = card.classList.toggle('card-folded');
-        syncLauncherPanelFoldChrome(card, cardId, folded);
+        syncLauncherPanelFoldChrome(card, folded);
         const storageKey = LAUNCHER_PANEL_FOLD_KEYS[cardId];
         if (storageKey) {
             try { localStorage.setItem(storageKey, folded ? '1' : '0'); } catch (_error) {}
@@ -1770,7 +1784,7 @@
             let folded = false;
             try { folded = localStorage.getItem(storageKey) === '1'; } catch (_error) {}
             card.classList.toggle('card-folded', folded);
-            syncLauncherPanelFoldChrome(card, cardId, folded);
+            syncLauncherPanelFoldChrome(card, folded);
         });
     }
 
@@ -3232,23 +3246,20 @@
     }
 
     function addTerminalFromButton() {
-        if (selectedCount >= MAX_SESSIONS) {
-            showMessage(`Maximum ${MAX_SESSIONS} terminals allowed.`, 'error');
+        /* COUNT_OPTIONS is sorted ascending, so the next offered count is
+           simply the first entry above the current one — and the ceiling is
+           the ladder's top rather than MAX_SESSIONS. The two are not the same
+           number: MAX_SESSIONS is the backend's per-group limit (16 by
+           default) while the launcher only has layout presets up to 8, so
+           quoting it announced "Maximum 16 terminals allowed" from a button
+           that stops adding at 8. */
+        const nextValid = COUNT_OPTIONS.find(count => count > selectedCount);
+        if (!nextValid) {
+            showMessage(`Maximum ${LAUNCHER_MAX_TERMINALS} terminals allowed.`, 'error');
             return;
         }
         const drafts = collectTerminalDrafts();
-        const nextCount = selectedCount + 1;
-        if (COUNT_OPTIONS.includes(nextCount)) {
-            selectedCount = nextCount;
-        } else {
-            const nextValid = COUNT_OPTIONS.find(n => n > selectedCount);
-            if (nextValid) {
-                selectedCount = nextValid;
-            } else {
-                showMessage(`Maximum ${MAX_SESSIONS} terminals allowed.`, 'error');
-                return;
-            }
-        }
+        selectedCount = nextValid;
         selectedLayout = defaultLayoutForCount(selectedCount);
         layoutChooserOpen = false;
         renderCountOptions();
