@@ -288,15 +288,6 @@
         return true;
     }
 
-    function getGridMetrics(count) {
-        if (count >= 8) {
-            return { columns: 4, rows: 2 };
-        }
-        if (count >= 6) {
-            return { columns: 3, rows: 2 };
-        }
-        return { columns: 2, rows: 2 };
-    }
 
     function buildDefaultSessionName() {
         const isDefaultSelection = !activeSavedSessionId || activeSavedSessionId === DEFAULT_SESSION_ID;
@@ -333,13 +324,6 @@
     }
 
 
-    function getStep2DefaultDirectory(config, modeOverride = '') {
-        const mode = modeOverride || config?.connection_mode || connectionMode;
-        if (mode === 'wsl') {
-            return String(config?.wsl?.default_dir || '').trim();
-        }
-        return String(config?.ssh?.default_dir || '').trim();
-    }
 
 
 
@@ -835,8 +819,10 @@
         container.className = `layout-grid${keys.length === 1 ? ' single' : ''}`;
         container.innerHTML = keys.map(key => {
             const option = options[key];
+            // The preview draws a grid for any count the grid option offers, so
+            // it keeps a 2×2 floor where the shared helper has no grid shape.
             const gridMetrics = option.preview === 'grid'
-                ? getGridMetrics(selectedCount)
+                ? (getGridMetrics(selectedCount) || { columns: 2, rows: 2 })
                 : null;
             const previewStyle = gridMetrics
                 ? ` style="--preview-columns:${gridMetrics.columns}; --preview-rows:${gridMetrics.rows};"`
@@ -2896,7 +2882,7 @@
        restore reuses it to replay a group's *current* saved preset. */
     function buildSessionsFromConfig(config, count) {
         const sessions = [];
-        const configuredDefaultDir = getStep2DefaultDirectory(config);
+        const configuredDefaultDir = getStep2DefaultDirectory(config, connectionMode);
         const launchDefaultDir = configuredDefaultDir || (config.connection_mode === 'ssh' ? '/' : '');
 
         (Array.isArray(config.terminals) ? config.terminals : []).slice(0, count).forEach((terminal, index) => {

@@ -71,6 +71,13 @@
     --gv-dialog-placeholder: #64748b;
     --gv-dialog-border: rgba(148, 163, 184, 0.16);
     --gv-dialog-shadow: 0 24px 60px rgba(4, 8, 20, 0.52);
+    /* Find-match hue, as bare channels so the same colour can be painted
+       solid (the Source view's search mark) and translucent (the selected-
+       word occurrence tint). It lives on :root rather than on .explorer-pane
+       because ::highlight() ranges resolve custom properties through the
+       inheritance chain, and only a root-level declaration is reliably
+       visible to an unattached ::highlight() rule. */
+    --gv-match-rgb: 250, 204, 21;
 }
 
 [data-theme="light"] {

@@ -1,6 +1,5 @@
     /* ─────────────────────────────────────────────
-       Explorer repository search — third explorer sidebar panel
-       (docs/r&d/explorer_repository_search_proposal.md).
+       Explorer repository search — third explorer sidebar panel.
        Backend-executed, bounded, read-only search across every file under an
        explorer pane's root, rendered as per-file foldable groups. Loaded after
        explorer-editor.js and before terminals.js; plain global-scope script

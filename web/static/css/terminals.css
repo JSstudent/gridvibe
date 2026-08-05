@@ -2512,6 +2512,12 @@
             line-height: 1;
         }
 
+        .explorer-tree-chevron-btn svg {
+            display: block;
+            width: 12px;
+            height: 12px;
+        }
+
         .explorer-tree-chevron-btn:hover {
             color: var(--t-accent);
         }
@@ -2588,7 +2594,7 @@
             color: var(--explorer-text);
         }
 
-        /* Already-open flash: the tree's ↗ on a file that already has a tab
+        /* Already-open flash: the tree's open-in-new-tab on a file that already has a tab
            deliberately keeps the viewer where it is, so it pulses the tab that
            was already there instead. Same idea as the locate-in-tree flash. */
         .explorer-tab.explorer-tab-located {
@@ -2970,9 +2976,11 @@
         }
 
         .explorer-open-folder-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             width: 22px;
             height: 22px;
-            font-size: .68rem;
             border-color: var(--explorer-open-folder-border);
             background: var(--explorer-open-folder-bg);
             color: var(--explorer-open-folder-text);
@@ -2987,16 +2995,25 @@
         /* The tree row "open in a new tab" control reuses .explorer-search-btn
            markup but, like its open-folder sibling, takes its surface from the
            theme-aware --explorer-open-folder-* tokens so it tracks light/dark
-           correctly. It carries a distinct ↗ glyph (not the git stage "+") so
-           the two controls never read as the same button. */
+           correctly. It carries a distinct external-link icon (not the folder
+           icon, not the git stage "+") so no two controls read as the same
+           button. */
         .explorer-open-tab-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             width: 22px;
             height: 22px;
-            font-size: .9rem;
-            font-weight: 600;
             border-color: var(--explorer-open-folder-border);
             background: var(--explorer-open-folder-bg);
             color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-open-folder-btn .explorer-btn-icon,
+        .explorer-open-tab-btn .explorer-btn-icon {
+            display: block;
+            width: 13px;
+            height: 13px;
         }
 
         .explorer-open-tab-btn:hover,
@@ -3146,7 +3163,7 @@
             height: 14px;
         }
 
-        /* ── In-app editor controls (docs/text_editor_2026-07-20.md) ── */
+        /* ── In-app editor controls ── */
         .explorer-editor-actions {
             display: inline-flex;
             align-items: center;
@@ -3519,9 +3536,17 @@
         }
 
         .explorer-source-chevron {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             width: 10px;
-            text-align: center;
             color: var(--t-accent);
+        }
+
+        .explorer-source-chevron svg {
+            display: block;
+            width: 10px;
+            height: 10px;
         }
 
         /* Each row's code cell is a <code>, and the UA stylesheet's
@@ -3693,8 +3718,16 @@
         }
 
         .explorer-diff-commit-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             color: var(--explorer-muted);
-            text-align: center;
+        }
+
+        .explorer-diff-commit-toggle svg {
+            display: block;
+            width: 12px;
+            height: 12px;
         }
 
         .explorer-diff-commit-hash {
@@ -4056,10 +4089,14 @@
             color: #b91c1c;
         }
 
+        /* One source for the find-match hue (--gv-match-rgb in tokens.css):
+           the search mark paints it solid, the occurrence tint below paints it
+           translucent. Spelling the same colour two ways — hex here, rgba()
+           there — is what let this block drift the last time it was touched. */
         .explorer-search-match {
             border-radius: 2px;
             padding: 0 1px;
-            background: #facc15;
+            background: rgb(var(--gv-match-rgb));
             color: #111827;
         }
 
@@ -4076,11 +4113,11 @@
            signal, and weaker than the native selection so the word the reader
            actually selected stays the anchor. */
         ::highlight(explorer-occurrence) {
-            background-color: rgba(250, 204, 21, .34);
+            background-color: rgba(var(--gv-match-rgb), .34);
         }
 
         .explorer-pane[data-explorer-theme="dark"] ::highlight(explorer-occurrence) {
-            background-color: rgba(250, 204, 21, .24);
+            background-color: rgba(var(--gv-match-rgb), .24);
         }
 
         .explorer-pane[data-explorer-theme="dark"] .explorer-code-keyword {
@@ -4117,8 +4154,8 @@
             color: #fca5a5;
         }
 
-        /* ── Highlight.js token palette (Phase 1, docs/source_diff_analysis.md
-           §5.2). Explorer-scoped so the pinned highlighter's classes track the
+        /* ── Highlight.js token palette.
+           Explorer-scoped so the pinned highlighter's classes track the
            explorer light/dark theme without leaking into the rest of the page.
            Reuses the same hues as the handwritten-lexer classes above, plus
            richer categories (function/type/attribute/tag/decorator). The
@@ -4248,7 +4285,7 @@
             color: #fca5a5;
         }
 
-        /* ── Diff2Html host (Phase 2, docs/source_diff_analysis.md §5.3).
+        /* ── Diff2Html host.
            GridVibe overrides live here rather than in the vendored CSS so the
            pinned file can be replaced verbatim on upgrade. Font size tracks the
            per-tab editor zoom. The two sides stay fixed at equal widths while

@@ -1,9 +1,6 @@
     /* ─────────────────────────────────────────────
-       Explorer change listener
-       (docs/r&d/planed/done/explorer_git_change_listener_plan_2026-07-30.md,
-       and its §14 amendment, which supersedes that plan's invariant 2 and its
-       "no file-changed notice for an open file" non-goal for the *viewer*
-       only — the editor buffer stays untouchable).
+       Explorer change listener. A file changed outside GridVibe refreshes in
+       the *viewer* only — the editor buffer stays untouchable.
 
        One page-level scheduler runs two independent per-pane requests while
        the page is visible, feeding three surfaces:

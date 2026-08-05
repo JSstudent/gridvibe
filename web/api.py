@@ -2760,7 +2760,11 @@ def handle_terminal_input(data):
         connection = ssh_connections.get(session_id)
 
     if not connection:
-        logger.warning(f"terminal_input: session {session_id} is not connected")
+        # DEBUG, not WARNING: xterm's onData has no connection guard, so a
+        # disconnected pane produces one of these per keystroke (and per TUI
+        # mouse-tracking sequence). The condition already surfaces to the user
+        # through session_status; here it is diagnostic only.
+        logger.debug(f"terminal_input: session {session_id} is not connected")
         return
 
     try:
@@ -2861,8 +2865,7 @@ def start_voice_deps_install():
 
     The recovery path for a machine where the launcher's optional voice
     packages were skipped: without it, enabling voice input in App Settings
-    is a silent no-op until GridVibe is closed and re-launched
-    (docs/stage_j_issues_analysis_2026-07-26.md, issue 2). Same-origin only
+    is a silent no-op until GridVibe is closed and re-launched. Same-origin only
     (the cross-origin write guard covers every state-changing request) and it
     installs nothing but the repository's own pinned requirements file.
     """
@@ -2889,8 +2892,7 @@ def set_voice_prefs():
             current[key] = data[key]
     _save_voice_prefs(current)
     # Open workspaces read _voicePrefs at event time but only loaded it at boot,
-    # so a changed push-to-talk keybind used to need a full restart
-    # (docs/stage_j_issues_analysis_2026-07-26.md, issue 3).
+    # so a changed push-to-talk keybind used to need a full restart.
     socketio.emit('voice_prefs_updated', {
         'prefs': current,
         'timestamp': int(time.time() * 1000),

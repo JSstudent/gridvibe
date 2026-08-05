@@ -1047,6 +1047,8 @@
         }
 
         (cached.sessionIds || []).forEach(cancelExplorerFilesystemUiForSession);
+        (cached.sessionIds || []).forEach(forgetExplorerSessionMarkdownAppearance);
+        workspaceSaveTargets.delete(groupId);
         clearFitTimers(cached.terminals || []);
         disconnectObservers(cached.resizeObservers || []);
         if (socket) {
@@ -1499,11 +1501,6 @@
     }
 
 
-    function getStep2DefaultDirectory(config) {
-        return config?.connection_mode === 'wsl'
-            ? String(config?.wsl?.default_dir || '').trim()
-            : String(config?.ssh?.default_dir || '').trim();
-    }
 
 
 
@@ -2640,19 +2637,6 @@
         }
         if (count >= 4) return 'layout-grid';
         return '';
-    }
-
-    function getGridMetrics(count) {
-        if (count >= 8) {
-            return { columns: 4, rows: 2 };
-        }
-        if (count >= 6) {
-            return { columns: 3, rows: 2 };
-        }
-        if (count >= 4) {
-            return { columns: 2, rows: 2 };
-        }
-        return null;
     }
 
     function cloneSplitSlotRects(rects = splitSlotRects) {
@@ -6009,6 +5993,8 @@
             return;
         }
         browserCancelPendingPersist(plan.sessionId);
+        // Past the confirm and the layout check: this pane is really closing.
+        forgetExplorerSessionMarkdownAppearance(plan.sessionId);
 
         const button = document.getElementById(`tclose-${index}`);
         if (button) {
@@ -7291,6 +7277,10 @@
             return;
         }
         closingSessionIds.forEach(browserCancelPendingPersist);
+        // Past both confirmations, so this close is really happening: drop the
+        // per-session/per-group entries that would otherwise outlive it.
+        closingSessionIds.forEach(forgetExplorerSessionMarkdownAppearance);
+        workspaceSaveTargets.delete(groupId);
 
         try {
             const closingGroupId = groupId;

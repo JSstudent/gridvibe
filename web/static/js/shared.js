@@ -158,6 +158,35 @@
     function getConnectionModeLabel(mode) {
         return mode === 'wsl' ? 'Local Repo' : 'SSH';
     }
+    /* The configured default directory for a launcher config's connection mode.
+       `modeOverride` wins over the config's own `connection_mode` — the launcher
+       passes its live form state, which can differ from the config being read.
+       Callers with no mode of their own pass nothing and get the config's. */
+    function getStep2DefaultDirectory(config, modeOverride = '') {
+        const mode = modeOverride || config?.connection_mode || '';
+        if (mode === 'wsl') {
+            return String(config?.wsl?.default_dir || '').trim();
+        }
+        return String(config?.ssh?.default_dir || '').trim();
+    }
+
+    /* Columns/rows for a grid arrangement of `count` panes, or null when the
+       count has no grid shape of its own (below 4 the layouts are the dedicated
+       1/2/3-pane classes). Callers that must have numbers — the launcher's
+       layout preview, the terminals split-slot planner — apply their own
+       `|| { columns: 2, rows: 2 }` fallback. */
+    function getGridMetrics(count) {
+        if (count >= 8) {
+            return { columns: 4, rows: 2 };
+        }
+        if (count >= 6) {
+            return { columns: 3, rows: 2 };
+        }
+        if (count >= 4) {
+            return { columns: 2, rows: 2 };
+        }
+        return null;
+    }
     function isAbsoluteDirectory(path, mode) {
         const trimmed = String(path || '').trim();
         if (!trimmed) {

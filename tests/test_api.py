@@ -1496,7 +1496,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("Staged Changes", html)
 
     def test_terminals_page_vendors_highlightjs_source_highlighting(self):
-        """Phase 1 (docs/source_diff_analysis.md): the Source viewer highlights
+        """The Source viewer highlights
         the whole document once with the pinned Highlight.js build and keeps the
         handwritten lexer as a fallback."""
         response = self.client.get("/terminals")
@@ -1530,7 +1530,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
     def test_terminals_page_vendors_diff2html_precise_diffs(self):
-        """Phase 2 (docs/source_diff_analysis.md): diffs render through the
+        """Diffs render through the
         pinned Diff2Html build with intraline emphasis, surface truncation, and
         keep the tolerant side-by-side renderer as a fallback."""
         response = self.client.get("/terminals")
@@ -1745,7 +1745,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="explorer-viewer-${index}"', html)
         self.assertIn("data-explorer-tab-open", html)
         self.assertIn("data-explorer-tab-close", html)
-        # A `↗` control on each tree file row opens a pinned tab (event-isolated)
+        # An open-in-new-tab control on each tree file row opens a pinned tab (event-isolated)
         # in the background — see the focus contract test below.
         self.assertIn("data-explorer-tree-open-tab", html)
         self.assertIn("openExplorerFileInBackgroundTab(index, path, {", html)
@@ -1756,7 +1756,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".explorer-empty-viewer {", html)
 
     def test_terminals_page_explorer_editor_controls_and_wiring(self):
-        """docs/text_editor_2026-07-20.md §5: Edit/Save/Cancel wiring + textarea."""
+        """In-app editor: Edit/Save/Cancel wiring + textarea."""
         editor = self._static("js/explorer-editor.js")
         viewer = self._static("js/explorer-viewer.js")
 
@@ -2883,11 +2883,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         # The control still reuses the search-btn markup in the tree row.
         self.assertIn('class="explorer-search-btn explorer-open-tab-btn"', html)
-        # ...but carries a distinct ↗ glyph so it never reads as the git stage "+".
-        self.assertIn(
-            'aria-label="Open ${escHtml(entry.name || path)} in a new tab">↗</button>',
-            html,
-        )
+        # ...but carries its own icon so it never reads as the git stage "+" or
+        # as its open-folder sibling.
+        self.assertIn("const EXPLORER_OPEN_TAB_ICON = ", html)
+        self.assertIn("${EXPLORER_OPEN_TAB_ICON}</button>", html)
         # ...but now has its own rule drawing from the theme-aware explorer tokens.
         self.assertIn(".explorer-open-tab-btn {", html)
         self.assertIn(".explorer-open-tab-btn:hover,", html)
@@ -2898,7 +2897,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("background: var(--explorer-open-folder-hover-bg);", html)
 
     def test_tree_open_tab_button_opens_the_tab_in_the_background(self):
-        """The tree row ↗ queues a tab without stealing the viewer's focus.
+        """The tree row open-in-new-tab control queues a tab without stealing the viewer's focus.
 
         Opening three files in a row must leave the reader on the file they
         were already looking at, so the opener only touches the tab strip.
@@ -2918,14 +2917,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorerEnsurePinnedTab(pane, path)", opener)
         self.assertIn("renderExplorerTabStrip(index);", opener)
         self.assertIn("persistExplorerTabsToSession(index);", opener)
-        # The ↗ handler routes there and carries the row's Git badge along.
+        # The open-in-new-tab handler routes there and carries the row's Git badge along.
         self.assertIn(
             "git: explorerTreeEntryForPath(terminals[index], path)?.git || null",
             viewer,
         )
 
     def test_reopening_an_already_open_tab_flashes_it_instead_of_focusing(self):
-        """↗ on a file that already has a tab answers without moving the viewer."""
+        """Open-in-new-tab on a file that already has a tab answers without moving the viewer."""
         viewer = self._static("js/explorer-viewer.js")
         opener = viewer[
             viewer.index("function openExplorerFileInBackgroundTab(index, path,"):
@@ -6808,7 +6807,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("<h1>Project</h1>", payload["preview_html"])
         self.assertEqual(payload["language"], "markdown")
 
-    # ── In-app editor: read metadata (docs/text_editor_2026-07-20.md) ──
+    # ── In-app editor: read metadata ──
     def test_explorer_file_returns_editor_metadata_for_complete_file(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()

@@ -1,5 +1,5 @@
     /* ─────────────────────────────────────────────
-       Explorer in-app text editor — docs/text_editor_2026-07-20.md.
+       Explorer in-app text editor.
        Owns edit state, the Source-view textarea, save/conflict flows, and the
        unsaved-work discard guards. Loaded after explorer-viewer.js and before
        terminals.js so it can reuse both files' render/navigation hooks and the

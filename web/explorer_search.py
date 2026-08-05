@@ -1,4 +1,4 @@
-"""Repository-wide explorer search (docs/r&d/explorer_repository_search_proposal.md).
+"""Repository-wide explorer search.
 
 A bounded, read-only "where does this string appear under this explorer root"
 search. `git grep` is the primary engine on both backends (one subprocess /

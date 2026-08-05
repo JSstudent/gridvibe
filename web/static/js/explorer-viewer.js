@@ -1,6 +1,6 @@
     /* ─────────────────────────────────────────────
-       Explorer viewer — extracted from terminals.js per
-       docs/terminals_js_split_plan_2026-07-23.md (Phase 1, move-only).
+       Explorer viewer — extracted from terminals.js by the move-only second
+       phase of the terminals.js split.
        File-type classifier, syntax highlight, Git diff, source/markdown
        render, image/mermaid viewer, tabbed viewer, breadcrumb, per-tab
        view/scroll state and saved-tab persistence.
@@ -185,7 +185,7 @@
         powershell: ['Get-ChildItem', 'Get-Content', 'New-Item', 'Remove-Item', 'Select-Object', 'Set-Content', 'Where-Object', 'Write-Host']
     });
 
-    /* Phase 1 (docs/source_diff_analysis.md): the explorer's own normalized
+    /* The explorer's own normalized
        language name → the Highlight.js grammar name in the pinned custom build
        (web/static/vendor/highlight.min.js). Languages absent here — config,
        dotenv, gitignore, jsonl, log, markdown, text — keep the handwritten
@@ -672,7 +672,7 @@
         return output;
     }
 
-    /* Phase 1 (docs/source_diff_analysis.md §5.2): tokenize the whole document
+    /* Tokenize the whole document
        once with Highlight.js so multiline constructs (block comments, triple-
        quoted / template strings, embedded languages) keep their state across
        newlines — the per-line highlightExplorerCode lexer above cannot. Returns
@@ -760,8 +760,7 @@
     }
 
     /* Render one line's worth of Highlight.js runs, reusing the shared
-       escape+search-mark helpers so search marks coexist with syntax spans
-       (docs/source_diff_analysis.md §5.4). */
+       escape+search-mark helpers so search marks coexist with syntax spans. */
     function explorerRenderHighlightedRuns(runs, searchRanges = []) {
         if (!runs || !runs.length) {
             return '';
@@ -1046,7 +1045,7 @@
                     <span class="explorer-diff-commit-file-actions">
                         ${revertButton}
                         ${actionButton}
-                        <button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">↪</button>
+                        <button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">${EXPLORER_OPEN_FOLDER_ICON}</button>
                     </span>
                 </div>
             `;
@@ -1341,7 +1340,7 @@
                 return `
                     <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
                         <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
-                        <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
+                        <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</span>
                         <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${escHtml(commit.subject || commit.line || '')}</span>
                     </button>
                     ${expanded ? `<div class="explorer-diff-commit-files">${renderExplorerGitFileRows(index, commit.files, { emptyText: 'No files recorded for this commit.', commitHash: hash })}</div>` : ''}
@@ -1912,15 +1911,15 @@
                 title="${expanded ? 'Collapse folder' : 'Expand folder'}"
                 aria-label="${expanded ? 'Collapse' : 'Expand'} ${escHtml(entry.name || path)}"
                 ${indent}
-            >${expanded ? '▾' : '▸'}</button>`
+            >${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</button>`
             : `<span class="explorer-tree-chevron" aria-hidden="true" ${indent}></span>`;
         const badge = explorerGitStatusLabel(entry.git) ? explorerGitBadgeHtml(entry.git) : '';
         const openFolder = isDirectory
-            ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">↪</button>`
+            ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">${EXPLORER_OPEN_FOLDER_ICON}</button>`
             : '';
         const openTab = isDirectory
             ? ''
-            : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">↗</button>`;
+            : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">${EXPLORER_OPEN_TAB_ICON}</button>`;
 
         return `
             <div
@@ -2701,7 +2700,7 @@
         performExplorerGitAction(index, 'publish', {});
     }
 
-    /* Phase 2 (docs/source_diff_analysis.md §5.3): Diff2HtmlUI configuration.
+    /* Diff2HtmlUI configuration.
        `matching: 'words'` + `diffStyle: 'char'` give character-level intraline
        emphasis and LCS-based line matching instead of the fallback renderer's
        FIFO pairing; the comparison limits are explicit so pathological diffs
@@ -3658,8 +3657,8 @@
             pane._explorerDiffLoaded = true;
             pane._explorerDiffCacheKey = cacheKey;
             pane._explorerDiffContent = data.diff || '';
-            // Phase 2 (docs/source_diff_analysis.md §5.3): the backend already
-            // bounds diffs to 256 KiB / 4,000 lines and reports truncation; keep
+            // The backend already bounds diffs to 256 KiB / 4,000 lines and
+            // reports truncation; keep
             // the flag so the rendered patch is never mistaken for the whole change.
             pane._explorerDiffTruncated = Boolean(data.truncated);
             renderExplorerDiff(index);
@@ -4382,7 +4381,7 @@
                 aria-expanded="${collapsed ? 'false' : 'true'}"
                 title="${collapsed ? 'Expand Markdown section (Alt: expand all at this level)' : 'Collapse Markdown section (Alt: collapse all at this level)'}"
             >
-                <span class="explorer-source-chevron" aria-hidden="true">${collapsed ? '▸' : '▾'}</span>
+                <span class="explorer-source-chevron" aria-hidden="true">${collapsed ? UI_CHEVRON_RIGHT_ICON : UI_CHEVRON_DOWN_ICON}</span>
                 <span>${record.number}</span>
             </button>
         `;
@@ -5997,8 +5996,8 @@
         return preview;
     }
 
-    /* Scroll a tab into view in the strip and pulse it. Clicking ↗ on a file
-       that already has a tab deliberately changes no focus, so without this
+    /* Scroll a tab into view in the strip and pulse it. Clicking open-in-new-tab
+       on a file that already has a tab deliberately changes no focus, so without this
        the click looks like it did nothing; the pulse points at the tab that
        was already there. Mirrors focusExplorerTreeRow's locate flash. */
     function flashExplorerTab(index, id) {
@@ -6019,7 +6018,8 @@
         return true;
     }
 
-    /* The tree row's ↗ opens a file in a *background* tab: the tab joins the
+    /* The tree row's open-in-new-tab control opens a file in a *background*
+       tab: the tab joins the
        strip while the viewer keeps showing whatever the user is reading, so
        several files can be queued without losing the current one. Nothing is
        fetched here — the tab carries only its path, and activateExplorerTab
@@ -6278,7 +6278,8 @@
 
     /* 2.g: double-clicking the Preview tab keeps its transient file — the
        shown file gains a pinned tab carrying the same view mode, scroll, and
-       zoom. Like the tree's ↗ it opens in the *background*: the viewer stays
+       zoom. Like the tree's open-in-new-tab control it opens in the
+       *background*: the viewer stays
        on Preview showing the same file, so a double-click is a bookmark and
        not a jump. Nothing is fetched — the new tab reloads lazily on its
        first click, restoring the copied view state. An existing pinned tab
@@ -6506,6 +6507,16 @@
         }
         appliedExplorerMdSessions.add(sessionId);
         setExplorerMarkdownAppearance({ preset, font, sourceFont });
+    }
+
+    /* Called only where a session is genuinely gone — a closed pane, a closed
+       session group, or a group this window no longer owns. Switching groups
+       must *not* reach this: the sessions live on in another window or behind a
+       cached view, and forgetting them would re-apply a saved appearance over a
+       change the user made since launch, which is the exact thing the set
+       exists to prevent. */
+    function forgetExplorerSessionMarkdownAppearance(sessionId) {
+        appliedExplorerMdSessions.delete(String(sessionId || ''));
     }
 
     /* Entry point when an explorer pane first shows: empty read-only viewer with

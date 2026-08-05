@@ -157,7 +157,7 @@ def _voice_engine_unavailable_message(engine: Optional[str] = None, vosk_service
 # GridVibe.bat only offers the voice packages when voice input is already
 # enabled, and remembers a decline in .voice-deps-declined. This is the
 # in-app recovery path so enabling voice input never dead-ends in a silent
-# no-op (docs/stage_j_issues_analysis_2026-07-26.md, issues 2 and 4).
+# no-op.
 
 VOICE_REQUIREMENTS_FILE = os.path.join(BASE_DIR, "requirements-voice.txt")
 VOICE_DEPS_DECLINED_MARKER = os.path.join(BASE_DIR, ".voice-deps-declined")
