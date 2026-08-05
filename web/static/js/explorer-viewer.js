@@ -5328,16 +5328,23 @@
         return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
     }
 
-    function explorerOccurrenceHighlight() {
+    /* Registry entry for one named Custom Highlight, created on first use.
+       Shared with the repository-search hit paint in explorer-search.js —
+       both need the same "does this browser have the API" guard. */
+    function explorerNamedHighlight(name) {
         if (typeof window.Highlight !== 'function' || !window.CSS?.highlights) {
             return null;
         }
-        let highlight = window.CSS.highlights.get(EXPLORER_OCCURRENCE_HIGHLIGHT);
+        let highlight = window.CSS.highlights.get(name);
         if (!highlight) {
             highlight = new window.Highlight();
-            window.CSS.highlights.set(EXPLORER_OCCURRENCE_HIGHLIGHT, highlight);
+            window.CSS.highlights.set(name, highlight);
         }
         return highlight;
+    }
+
+    function explorerOccurrenceHighlight() {
+        return explorerNamedHighlight(EXPLORER_OCCURRENCE_HIGHLIGHT);
     }
 
     /* The Source view the selection sits in, or null when there is nothing to

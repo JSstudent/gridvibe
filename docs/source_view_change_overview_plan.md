@@ -256,50 +256,80 @@ search-heavy use even before the minimap exists, and is worth landing first.
 | Drag (pointer capture) | Continuous scrub; `pointercancel` / `lostpointercapture` release |
 | Wheel over the overview | Forwarded to the source scroller |
 | Click a change marker | Scroll the change into view and flash the row via `.explorer-source-line-flash` |
-| `Alt+E` / `Alt+Q` | Next / previous change; wraps at the ends |
+| `Ctrl+E` / `Ctrl+Q` | Next / previous change; wraps at the ends |
 | Hover a change marker | Tooltip `+n −m` for that block |
+
+`Alt`+letter was rejected: `Alt` already drives workspace and session-group
+switching (`Alt+W`, `Alt+1`…`Alt+9`), so a mistyped `Alt+E` sits one key away
+from throwing the user into another workspace. `Ctrl` carries no navigation role
+in GridVibe.
 
 Accessibility: the `<aside>` gets `role="scrollbar"`, `aria-controls` on the
 source view, `aria-orientation="vertical"`, and `aria-valuenow` updated with the
 scroll ratio. The viewport box is `aria-hidden` (decorative). Keyboard users are
-served by the `Alt+E` / `Alt+Q` pair, not by focusing the canvas. Both buttons in
-the header control (Phase 4) carry
-`aria-keyshortcuts="Alt+E"` / `aria-keyshortcuts="Alt+Q"` and a matching `title`,
-following the Preview tab's existing precedent (`explorer-viewer.js:7280`).
+served by the `Ctrl+E` / `Ctrl+Q` pair, not by focusing the canvas. Both buttons
+in the header control (Phase 4) carry
+`aria-keyshortcuts="Control+E"` / `aria-keyshortcuts="Control+Q"` and a matching
+`title`, following the Preview tab's existing precedent
+(`explorer-viewer.js:7280`).
 
-#### Alt+E / Alt+Q collision audit
+#### Ctrl+E / Ctrl+Q collision audit
 
-Every `altKey` handler in the codebase was checked. Neither chord is taken:
+**In-app: clear.** Every `ctrlKey` and `altKey` handler in the codebase was
+checked and neither chord is taken:
 
 | Existing binding | Where | Conflict |
 | --- | --- | --- |
-| `Alt+1`…`Alt+9` — session-group switch | `terminals.js:6429` | No — digits only |
-| `Alt+W` / `Alt+Shift+W` — workspace cycle | `terminals.js:6492` | No |
-| `Alt`+click on a Markdown line number — fold all at level | `explorer-viewer.js:4556` | No — mouse, not key |
-| `Tab` guard in the in-place editor | `explorer-editor.js:270` | No |
-| `Ctrl+F`, `Ctrl+Shift+F`, `F5`, `Ctrl+Shift+V` | `terminals.js:6243,6403,6258,7399` | No |
-| Push-to-talk keybind | `voice-input.js:999` | **Soft** — defaults to empty (`web/voice.py:563`) but is user-configurable, so a user could bind `Alt+Q` |
+| `Ctrl+F` — find in file | `terminals.js:6243` | No |
+| `Ctrl+Shift+F` — repo search overlay | `terminals.js:6403` | No |
+| `Ctrl+Shift+V` — Markdown preview | `terminals.js:7398` | No |
+| `Ctrl+S` — save in the in-place editor | `explorer-editor.js:278` | No |
+| `Ctrl+Shift+C` / `Ctrl+V` — xterm copy/paste | `terminals.js:3921,3927` | No |
+| `Ctrl`+click — open search hit in a pinned tab | `explorer-search.js:312` | No — mouse |
+| `Alt+1`…`Alt+9`, `Alt+W` — group / workspace switch | `terminals.js:6429,6492` | No — this is what the change of binding avoids |
+| Push-to-talk keybind | `voice-input.js:999` | **Soft** — defaults to empty (`web/voice.py:563`) but is user-configurable, so a user could bind `Ctrl+Q` |
 
 Two guards follow from that audit:
 
 1. **Pane scope.** The handler only fires when the focused element is inside an
    explorer *source* panel that has an open file with marks — so it cannot reach
-   a terminal pane. This also sidesteps xterm entirely: xterm's custom key
-   handler (`terminals.js:3905`) only forwards `Ctrl+Shift+F` and `Alt+W` to the
-   document, and any other `Alt`+letter typed into a focused terminal is passed
-   through to the shell as `ESC q` / `ESC e` — which stays correct, because the
-   shortcut never claims those keys while a terminal has focus.
+   a terminal pane. That matters more for `Ctrl` than it did for `Alt`: in a
+   shell, `Ctrl+Q` is XON (resume output after `Ctrl+S`) and `Ctrl+E` is
+   end-of-line in emacs-mode readline. xterm's custom key handler
+   (`terminals.js:3905`) only diverts `Ctrl+Shift+F` and `Alt+W` to the document,
+   so both keys keep reaching the shell untouched while a terminal has focus —
+   and the shortcut must never claim them there.
 2. **Push-to-talk yields first.** If the configured `pttKeybind` is the same
    chord, the explorer handler returns without acting; the user's own binding
    wins. `isEditableShortcutTarget` (`terminals.js:6420`) is reused so the chord
    is also inert inside inputs, textareas and the keybind recorder.
 
-One residual, worth knowing rather than fixing: in **browser mode** on
-Chrome/Edge/Firefox, `Alt`+letter is a menu mnemonic (`Alt+E` opens the Chrome
-menu / the Firefox Edit menu on Windows). Calling `preventDefault()` on the
-keydown suppresses it in practice, and **native-window mode (WebView2) has no
-menu bar at all**, so the primary GridVibe surface is unaffected. Verify this
-during Phase 4's manual pass on both surfaces.
+**Browser-level: one genuine hazard, and it is worse than the `Alt` case.**
+In native-window mode (WebView2) there is no browser UI and both chords are free.
+In *browser* mode:
+
+- `Ctrl+E` focuses the address/search bar in Chrome, Edge and Firefox. It is not
+  on Chrome's reserved list, so `preventDefault()` on the keydown suppresses it.
+  Low risk.
+- **`Ctrl+Q` quits Firefox** (and Chrome on Linux) — a whole-application quit,
+  not a tab action. Whether a page can suppress it is not reliable across
+  versions; Firefox gates it behind the `browser.quitShortcut.disabled` pref
+  precisely because pages cannot be trusted to. Losing every live terminal
+  session to a mistyped shortcut is the exact failure the in-page close-confirm
+  guardrail exists to prevent.
+
+Mitigation, in order of preference:
+
+1. Ship `Ctrl+E` / `Ctrl+Q` as decided, and **verify `Ctrl+Q` under Firefox and
+   Chrome-on-Linux during Phase 4's manual pass**. If `preventDefault()` holds,
+   nothing more is needed — Chrome/Edge on Windows and WebView2 (the primary
+   surfaces) are unaffected either way.
+2. If it does not hold, keep `Ctrl+E` for next and move *previous* to
+   `Ctrl+Shift+E`. This keeps one memorable key, costs nothing on the common
+   surface, and never risks a browser quit.
+
+This is a decision to make with test evidence in Phase 4, not up front; nothing
+in Phases 0–3 depends on it.
 
 ## 5. Phases
 
@@ -311,7 +341,7 @@ Each phase is independently shippable and independently reviewable.
 | **1** | `explorer-overview.js` skeleton: change model, fetch + cache, classification, gutter markers, refresh triggers, tokens + CSS | Delivers the line-number marking from the screenshot on its own |
 | **2** | Overview element in `ruler` mode: geometry helper, change lane, viewport box, click / drag / wheel navigation | Delivers "click through a file for changes" with no canvas-painting risk |
 | **3** | `map` mode: canvas glyph paint, colour probing, DPR, Appearance-menu toggle + persistence, automatic ruler fallback | The visual payload; safe to land late because ruler mode already works |
-| **4** | Extras: search-match lane, `Alt+E` / `Alt+Q` navigation, hover tooltips, truncated-diff indicator | Polish |
+| **4** | Extras: search-match lane, `Ctrl+E` / `Ctrl+Q` navigation, hover tooltips, truncated-diff indicator | Polish |
 
 Rough effort: Phase 0 small, 1 medium, 2 medium, 3 medium–large, 4 small.
 
@@ -345,18 +375,19 @@ hooks, `aria-*`, CSS custom properties and selectors, named constants):**
 - `role="scrollbar"` and `aria-orientation="vertical"` are present on the aside
 - named constants `EXPLORER_OVERVIEW_MAX_ROWS` and the
   `gridvibe.sourceOverview` storage key are present
-- `aria-keyshortcuts="Alt+E"` / `aria-keyshortcuts="Alt+Q"` are declared on the
-  next/previous-change controls
+- `aria-keyshortcuts="Control+E"` / `aria-keyshortcuts="Control+Q"` are declared
+  on the next/previous-change controls
 
 **Manual checklist** (no JS test runner exists):
 wrapped and unwrapped source · a Markdown file with folded sections · a >2 MiB
 file (ruler fallback) · light and dark explorer themes · each of the four source
 fonts · editor mode enter/exit · staged vs unstaged vs partially staged file ·
 untracked file · commit-diff tab (no markers) · SSH pane · pane resize · a file
-whose diff is truncated · `Alt+E` / `Alt+Q` in **both** browser mode (menu
-mnemonic suppressed) and native-window mode · `Alt+E` typed into a focused
-terminal pane still reaches the shell · a push-to-talk keybind set to `Alt+Q`
-still wins.
+whose diff is truncated · `Ctrl+E` / `Ctrl+Q` in **both** browser mode and
+native-window mode · **`Ctrl+Q` under Firefox specifically — confirm the browser
+does not quit** (§4.7 mitigation 2 if it does) · `Ctrl+Q` typed into a focused
+terminal pane still reaches the shell as XON · a push-to-talk keybind set to
+`Ctrl+Q` still wins.
 
 ## 7. Risks and the alternatives that were rejected
 
@@ -367,6 +398,7 @@ still wins.
 | Minimap repaint on every search keystroke | Repaint is gated on content/marks/geometry identity; search only repaints its own 2 px lane |
 | A second consumer of `explorerDiffChangeBlocks()` deepens coupling to `explorer-viewer.js` | Accepted, and noted: it strengthens the standing `explorer-diff.js` extraction guardrail. Extracting the diff domain **first** is the cleaner order if that refactor is already planned; this feature does not require it |
 | Marks drift from the file after an external edit | The existing `/file/state` watcher already refreshes the open file; marks refresh on the same signal |
+| `Ctrl+Q` quits the browser in Firefox / Chrome-on-Linux, killing every live session | Unaffected on WebView2 and Chrome/Edge-on-Windows; verified in Phase 4, with `Ctrl+Shift+E` as the drop-in replacement for *previous* if `preventDefault()` does not hold (§4.7) |
 
 **Rejected alternatives:**
 - *Scaled DOM clone* (`transform: scale(0.1)` on a copy of the rows) — doubles
@@ -402,6 +434,10 @@ Resolved by the maintainer; treat these as fixed for the implementation.
 3. **Diff panel: no overview.** Source view only, as specified. The geometry
    helper in §4.5 would transfer if that ever changes, so keep it free of
    source-panel-specific assumptions — but build nothing for the Diff panel now.
-4. **Change navigation: `Alt+E` (next) / `Alt+Q` (previous).** Audited clear of
-   every existing binding; see the collision audit in §4.7 for the two guards
-   (pane scope, push-to-talk yields) and the one residual browser-mnemonic note.
+4. **Change navigation: `Ctrl+E` (next) / `Ctrl+Q` (previous).** `Alt`+letter was
+   rejected because `Alt` already drives workspace and session-group switching,
+   making a misfire costly. Audited clear of every in-app binding; see §4.7 for
+   the two guards (pane scope, push-to-talk yields) and for the one real
+   browser-level hazard — **`Ctrl+Q` quits Firefox** — which Phase 4 must verify
+   and, if `preventDefault()` does not hold, resolve by moving *previous* to
+   `Ctrl+Shift+E`.

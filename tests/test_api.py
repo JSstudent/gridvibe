@@ -11792,6 +11792,42 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
         self.assertIn("const restoredTabView = !restoreTabView || scrollState", viewer)
         self.assertIn("restoreTabView\n            });", viewer)
 
+    def test_repo_search_hit_paints_the_matched_string_on_the_opened_line(self):
+        search = self._static("js/explorer-search.js")
+        self.assertIn("const EXPLORER_SEARCH_HIT_HIGHLIGHT = 'explorer-search-hit';", search)
+        activation = search[
+            search.index("async function activateExplorerSearchHit("):
+            search.index("function scrollExplorerSourceToLine(")
+        ]
+        # The row flash locates the line; the paint locates the string on it,
+        # so the reader has something to double-click and take into Ctrl+F.
+        self.assertIn("paintExplorerSearchHitMatches(index, line, match);", activation)
+        paint = search[
+            search.index("function paintExplorerSearchHitMatches(index, line, match)"):
+            search.index("function clearExplorerSearchHitMatches()")
+        ]
+        # Painted through the Custom Highlight API: the Source DOM stays as
+        # rendered, so folds and scroll position survive the jump.
+        self.assertIn("highlight.add(range)", paint)
+        for banned in ("innerHTML", "replaceWith(", "createElement("):
+            with self.subTest(banned=banned):
+                self.assertNotIn(banned, paint)
+        # Server offsets count code points; a mismatch re-finds the string.
+        self.assertIn("text.indexOf(span.text)", paint)
+        # Both activation paths carry the match record the ranges come from.
+        self.assertIn("match: explorerRepoSearchMatchAt(state, path, line)", search)
+        self.assertIn("{ pinned: false, match: hit.match }", search)
+
+    def test_repo_search_hit_paint_has_a_style_and_degrades_without_the_api(self):
+        css = self._static("css/terminals.css")
+        self.assertIn("::highlight(explorer-search-hit)", css)
+        # No palette literals for the hue — same token as the find mark.
+        self.assertIn("background-color: rgb(var(--gv-match-rgb));", css)
+        viewer = self._static("js/explorer-viewer.js")
+        # One guarded registry helper for both named highlights.
+        self.assertIn("function explorerNamedHighlight(name)", viewer)
+        self.assertIn("typeof window.Highlight !== 'function' || !window.CSS?.highlights", viewer)
+
     def test_find_only_unfolds_the_markdown_sections_holding_matches(self):
         viewer = self._static("js/explorer-viewer.js")
         # A find used to disable Markdown collapse outright, unfolding the whole

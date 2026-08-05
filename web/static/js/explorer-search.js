@@ -68,10 +68,19 @@
         const hits = [];
         files.forEach(file => {
             (file.matches || []).forEach(match => {
-                hits.push({ path: file.path, line: match.line });
+                hits.push({ path: file.path, line: match.line, match });
             });
         });
         return hits;
+    }
+
+    /* The backend emits one match record per matching line, so path:line
+       identifies the record a clicked hit button came from — no need to encode
+       its ranges into the markup. */
+    function explorerRepoSearchMatchAt(state, path, line) {
+        const files = state.payload && Array.isArray(state.payload.files) ? state.payload.files : [];
+        const file = files.find(entry => entry.path === path);
+        return (file?.matches || []).find(match => Number(match.line) === Number(line)) || null;
     }
 
     function explorerRepoSearchParams(index, state) {
@@ -309,7 +318,8 @@
                 const path = button.dataset.explorerSearchPath || '';
                 const line = Number(button.dataset.explorerSearchLine || 0);
                 activateExplorerSearchHit(index, path, line, {
-                    pinned: Boolean(event.ctrlKey || event.metaKey)
+                    pinned: Boolean(event.ctrlKey || event.metaKey),
+                    match: explorerRepoSearchMatchAt(state, path, line)
                 });
             });
         });
@@ -488,7 +498,7 @@
             state.activeHit = next;
             const hit = hits[next];
             renderExplorerSearchResults(index);
-            activateExplorerSearchHit(index, hit.path, hit.line, { pinned: false });
+            activateExplorerSearchHit(index, hit.path, hit.line, { pinned: false, match: hit.match });
             return;
         }
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -518,6 +528,7 @@
                 state.error = '';
                 state.activeHit = -1;
                 state.abort?.abort();
+                clearExplorerSearchHitMatches();
                 renderExplorerSearchPanel(index);
             } else {
                 setExplorerSearchSidebarOpen(index, false);
@@ -525,7 +536,7 @@
         }
     }
 
-    async function activateExplorerSearchHit(index, path, line, { pinned = false } = {}) {
+    async function activateExplorerSearchHit(index, path, line, { pinned = false, match = null } = {}) {
         const pane = terminals[index];
         if (!pane || !path) {
             return;
@@ -545,6 +556,7 @@
         clearExplorerSearch(index, { focus: false });
         setExplorerFileView(index, 'source');
         scrollExplorerSourceToLine(index, line);
+        paintExplorerSearchHitMatches(index, line, match);
     }
 
     function scrollExplorerSourceToLine(index, line) {
@@ -556,6 +568,105 @@
         row.scrollIntoView({ block: 'center' });
         row.classList.add('explorer-source-line-flash');
         setTimeout(() => row.classList.remove('explorer-source-line-flash'), 1200);
+    }
+
+    /* ── Hit match paint (Source view) ──
+       The row flash says "this line"; the paint below says "this string on
+       it", so an opened hit reads like the panel entry the reader clicked and
+       gives them something to double-click and take into Ctrl+F. Painted
+       through the CSS Custom Highlight API — same reasoning as the selection
+       occurrence tint: the Source DOM must not be rewritten, because that is
+       what re-runs the Markdown fold pass and throws away the scroll position.
+       The ranges detach with the row when the Source view re-renders, so the
+       paint clears itself on the next file, tab or find. */
+    const EXPLORER_SEARCH_HIT_HIGHLIGHT = 'explorer-search-hit';
+
+    /* Whole-line offsets of a hit's matched substrings, recovered from the
+       (possibly windowed) snippet the backend returned with it. */
+    function explorerSearchHitSpans(match) {
+        const text = String(match?.text ?? '');
+        const offset = Number(match?.text_offset || 0);
+        const ranges = Array.isArray(match?.ranges) ? match.ranges : [];
+        return ranges
+            .map(range => {
+                const start = Math.max(0, Math.min(Number(range[0]) || 0, text.length));
+                const end = Math.max(start, Math.min(Number(range[1]) || 0, text.length));
+                return { start: offset + start, end: offset + end, text: text.slice(start, end) };
+            })
+            .filter(span => span.text);
+    }
+
+    /* Text nodes of one rendered source row, with the offset each one starts
+       at — the row is a run of syntax-highlighted <span>s, so a match can
+       straddle several of them. */
+    function explorerSourceLineTextNodes(row) {
+        const code = row?.querySelector('.explorer-source-line-code');
+        if (!code) {
+            return { nodes: [], text: '' };
+        }
+        const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+        const nodes = [];
+        let text = '';
+        while (walker.nextNode()) {
+            const node = walker.currentNode;
+            const value = node.nodeValue || '';
+            nodes.push({ node, start: text.length, end: text.length + value.length });
+            text += value;
+        }
+        return { nodes, text };
+    }
+
+    function explorerSourceLineRange(nodes, start, end) {
+        const startNode = nodes.find(entry => start >= entry.start && start < entry.end);
+        const endNode = nodes.find(entry => end > entry.start && end <= entry.end);
+        if (!startNode || !endNode) {
+            return null;
+        }
+        const range = document.createRange();
+        range.setStart(startNode.node, start - startNode.start);
+        range.setEnd(endNode.node, end - endNode.start);
+        return range;
+    }
+
+    function paintExplorerSearchHitMatches(index, line, match) {
+        const highlight = explorerNamedHighlight(EXPLORER_SEARCH_HIT_HIGHLIGHT);
+        if (!highlight) {
+            return;
+        }
+        highlight.clear();
+        // Wins over the selection occurrence tint where the two overlap.
+        highlight.priority = 1;
+        const spans = explorerSearchHitSpans(match);
+        const card = document.getElementById(`tc-${index}`);
+        const row = card?.querySelector(`[data-explorer-line="${line}"]`);
+        if (!row || !spans.length) {
+            return;
+        }
+        const { nodes, text } = explorerSourceLineTextNodes(row);
+        if (!nodes.length) {
+            return;
+        }
+        spans.forEach(span => {
+            /* Server offsets count code points, the DOM counts UTF-16 units,
+               so an astral character earlier on the line shifts them. Trust
+               them only where the text they point at is the text that
+               matched; otherwise re-find the matched string on the row. */
+            let start = span.start;
+            if (text.slice(start, start + span.text.length) !== span.text) {
+                start = text.indexOf(span.text);
+                if (start === -1) {
+                    return;
+                }
+            }
+            const range = explorerSourceLineRange(nodes, start, start + span.text.length);
+            if (range) {
+                highlight.add(range);
+            }
+        });
+    }
+
+    function clearExplorerSearchHitMatches() {
+        explorerNamedHighlight(EXPLORER_SEARCH_HIT_HIGHLIGHT)?.clear();
     }
 
     /* Ctrl+Shift+F entry point: open the panel, focus the input, and seed it

@@ -4127,6 +4127,16 @@
             background-color: rgba(var(--gv-match-rgb), .24);
         }
 
+        /* The matched string of an opened repository-search hit, painted the
+           same hue as the find mark above so the text the reader searched for
+           reads the same in the results panel and in the file. Solid, unlike
+           the occurrence tint, because this one is the exact spot the click
+           asked for. */
+        ::highlight(explorer-search-hit) {
+            background-color: rgb(var(--gv-match-rgb));
+            color: #111827;
+        }
+
         .explorer-pane[data-explorer-theme="dark"] .explorer-code-keyword {
             color: #c4b5fd;
         }
