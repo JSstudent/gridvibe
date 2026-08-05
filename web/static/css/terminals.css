@@ -3447,12 +3447,19 @@
             tab-size: 4;
         }
 
-        .explorer-source-view {
-            /* Font-family axis of the viewer appearance menu: the source-font-*
-               class remaps this property, which the edit textarea and the
-               per-row code cells inside the panel read (see the note on
-               .explorer-source-line-code — the cells cannot just inherit). */
+        /* Font-family axis of the viewer appearance menu: the source-font-*
+           class remaps this property, which the edit textarea, the per-row code
+           cells inside the source panel (see the note on
+           .explorer-source-line-code — the cells cannot just inherit), and both
+           diff renderers read. The diff panel is a *sibling* of the source
+           view, not a descendant, so it has to be its own host for the property
+           and carry the source-font-* class itself. */
+        .explorer-source-view,
+        .explorer-diff-content {
             --source-view-font: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        .explorer-source-view {
             min-height: 0;
             margin: 0;
             padding: 0;
@@ -3467,19 +3474,19 @@
 
         /* Source view fonts are monospace only; `default` keeps the stack the
            view has always used. Font names are not palette. */
-        .explorer-source-view.source-font-default {
+        :is(.explorer-source-view, .explorer-diff-content).source-font-default {
             --source-view-font: Consolas, Monaco, 'Courier New', monospace;
         }
 
-        .explorer-source-view.source-font-cascadia-code {
+        :is(.explorer-source-view, .explorer-diff-content).source-font-cascadia-code {
             --source-view-font: 'Cascadia Code', 'Cascadia Mono', Consolas, monospace;
         }
 
-        .explorer-source-view.source-font-jetbrains-mono {
+        :is(.explorer-source-view, .explorer-diff-content).source-font-jetbrains-mono {
             --source-view-font: 'JetBrains Mono', Consolas, monospace;
         }
 
-        .explorer-source-view.source-font-courier-new {
+        :is(.explorer-source-view, .explorer-diff-content).source-font-courier-new {
             --source-view-font: 'Courier New', Courier, monospace;
         }
 
@@ -3857,7 +3864,7 @@
             display: grid;
             align-content: start;
             color: var(--explorer-text);
-            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-family: var(--source-view-font);
             font-size: var(--explorer-editor-font-size, .78rem);
             line-height: 1.45;
         }
@@ -4298,11 +4305,13 @@
             width: 100%;
         }
 
-        /* Diff2Html pins its table to 13px. Let the table inherit the host's
-           per-tab zoom so Source, Preview, and Diff respond to the same
-           controls and restored font-size setting. */
+        /* Diff2Html pins its table to 13px and to its own Menlo stack. Let the
+           table inherit the host's per-tab zoom and the viewer's source font so
+           Source, Preview, and Diff respond to the same controls and restored
+           settings. */
         .explorer-diff2html .d2h-diff-table {
             font-size: inherit;
+            font-family: var(--source-view-font);
         }
 
         .explorer-diff2html .d2h-wrapper,

@@ -2773,8 +2773,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const EXPLORER_SOURCE_FONT_DEFAULT = 'default';", html)
         self.assertIn("function applyExplorerSourceFontToElement(view, appearance)", html)
         self.assertIn("window.localStorage.setItem(EXPLORER_SOURCE_FONT_KEY, next.sourceFont);", html)
-        # Applied to every open source panel, and to a freshly rendered file.
-        self.assertIn("document.querySelectorAll('.explorer-source-view').forEach(view => {", html)
+        # Applied to every open source panel and diff panel, and to a freshly
+        # rendered file.
+        self.assertIn(
+            "document.querySelectorAll('.explorer-source-view, .explorer-diff-content')"
+            ".forEach(view => {",
+            html,
+        )
         self.assertIn("applyExplorerSourceFontToElement(", html)
         # Its own menu group, alongside the preview groups.
         self.assertIn("'Source font',", html)
@@ -2782,20 +2787,38 @@ class ApiRoutesTestCase(unittest.TestCase):
         # The appearance button is no longer gated to previewable files; the
         # preview-only groups are dropped instead.
         self.assertIn("showExplorerMarkdownAppearanceMenu(appearanceButton, { includeMarkdown: hasPreview });", html)
-        # Token-driven CSS: one custom property the rows and the edit textarea inherit.
+        # Token-driven CSS: one custom property the rows and the edit textarea
+        # inherit. The diff panel is a sibling of the source view, so it hosts
+        # the property itself and carries the same source-font-* class.
         self.assertIn("--source-view-font: Consolas, Monaco, 'Courier New', monospace;", html)
-        self.assertIn(".explorer-source-view.source-font-cascadia-code {", html)
-        self.assertIn(".explorer-source-view.source-font-jetbrains-mono {", html)
-        self.assertIn(".explorer-source-view.source-font-courier-new {", html)
-        # All three surfaces name the property rather than relying on
-        # inheritance: the panel, the edit textarea, and — crucially — the
-        # per-row <code> cell, which the UA stylesheet's
-        # `code { font-family: monospace }` matches directly and so beats the
-        # inherited value (until it was restated there, only the line-number
-        # gutter followed the setting).
-        self.assertEqual(html.count("font-family: var(--source-view-font);"), 3)
-        source_line_code = html[html.index(".explorer-source-line-code {"):][:400]
-        self.assertIn("font-family: var(--source-view-font);", source_line_code)
+        self.assertIn(".explorer-source-view,\n        .explorer-diff-content {", html)
+        self.assertIn(
+            ":is(.explorer-source-view, .explorer-diff-content).source-font-cascadia-code {", html
+        )
+        self.assertIn(
+            ":is(.explorer-source-view, .explorer-diff-content).source-font-jetbrains-mono {", html
+        )
+        self.assertIn(
+            ":is(.explorer-source-view, .explorer-diff-content).source-font-courier-new {", html
+        )
+        # Every surface names the property rather than relying on inheritance:
+        # the panel, the edit textarea, and — crucially — the per-row <code>
+        # cell, which the UA stylesheet's `code { font-family: monospace }`
+        # matches directly and so beats the inherited value (until it was
+        # restated there, only the line-number gutter followed the setting).
+        # The two diff renderers restate it for the same reason: the handwritten
+        # side-by-side table and Diff2Html's own table both pin a stack of their
+        # own that would otherwise win.
+        self.assertEqual(html.count("font-family: var(--source-view-font);"), 5)
+        for block in (
+            ".explorer-source-line-code {",
+            ".explorer-side-by-side-diff {",
+            ".explorer-diff2html .d2h-diff-table {",
+        ):
+            with self.subTest(block=block):
+                self.assertIn(
+                    "font-family: var(--source-view-font);", html[html.index(block):][:400]
+                )
 
     def test_coding_fonts_are_vendored_and_declared_once(self):
         """The picker's fonts ship with the app — they are not on a stock Windows

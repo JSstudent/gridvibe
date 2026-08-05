@@ -4085,8 +4085,10 @@
     }
 
     /* Same shape as the preview above: the class carries a `--source-view-font`
-       custom property that the edit textarea and the per-row code cells inside
-       the panel both read. */
+       custom property that the edit textarea, the per-row code cells inside the
+       panel, and the diff renderers all read. Applied to the source view and to
+       the diff panel separately — they are siblings, so the diff panel cannot
+       inherit the property from the source view. */
     function applyExplorerSourceFontToElement(view, appearance) {
         if (!view) {
             return;
@@ -4102,7 +4104,7 @@
         document.querySelectorAll('.explorer-markdown-preview').forEach(preview => {
             applyExplorerMarkdownAppearanceToElement(preview, appearance);
         });
-        document.querySelectorAll('.explorer-source-view').forEach(view => {
+        document.querySelectorAll('.explorer-source-view, .explorer-diff-content').forEach(view => {
             applyExplorerSourceFontToElement(view, appearance);
         });
     }
@@ -7315,8 +7317,12 @@
         `;
 
         renderExplorerSource(index);
+        const sourceFontAppearance = explorerMarkdownAppearance();
         applyExplorerSourceFontToElement(
-            document.getElementById(`explorer-code-${index}`), explorerMarkdownAppearance()
+            document.getElementById(`explorer-code-${index}`), sourceFontAppearance
+        );
+        applyExplorerSourceFontToElement(
+            document.getElementById(`explorer-diff-code-${index}`), sourceFontAppearance
         );
         const preview = document.getElementById(`explorer-preview-${index}`);
         if (preview && hasPreview) {
@@ -7564,6 +7570,9 @@
         wireExplorerLineWrapControl(index);
         wireExplorerSearchControls(index);
         applyExplorerEditorFontSize(index);
+        applyExplorerSourceFontToElement(
+            document.getElementById(`explorer-diff-code-${index}`), explorerMarkdownAppearance()
+        );
         loadExplorerDiff(index);
         renderExplorerTabStrip(index);
         return true;
