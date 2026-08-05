@@ -289,6 +289,7 @@ from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     _redacted_launch_summary,
     close_extra_workspaces,
+    forget_emptied_default_workspace,
     forget_pruned_workspaces,
     launch_session_group,
     list_live_workspaces,
@@ -2515,6 +2516,9 @@ def close_session(session_id: str):
 
     _close_ssh_connection(session_id, clear_buffer=True)
     forget_pruned_workspaces(pruned_workspace_ids)
+    # Closing the last pane of the last group in `default` empties it just as
+    # surely as a prune empties a sibling; its snapshot goes the same way.
+    forget_emptied_default_workspace(workspace_id)
     _broadcast_session_groups_updated(
         "session_closed",
         group_id=group_id,
@@ -2578,6 +2582,7 @@ def close_all_sessions():
         # is already gone, so its saved snapshot must go too or the restore
         # chooser keeps offering a workspace the launcher no longer lists.
         forget_pruned_workspaces(pruned_workspace_ids)
+        forget_emptied_default_workspace(closed_workspace_id)
         _broadcast_session_groups_updated(
             "group_closed",
             group_id=group_id,

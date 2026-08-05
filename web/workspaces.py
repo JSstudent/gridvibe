@@ -141,8 +141,9 @@ def forget_pruned_workspaces(workspace_ids: Any) -> List[str]:
 
     Two deliberate exclusions:
 
-    * ``default`` is permanent and never reaches this path, so single-workspace
-      restore-after-restart keeps working exactly as before.
+    * ``default`` never reaches this path — its live record is permanent, so it
+      is never *pruned* and has no id to pass here. Emptying it is handled by
+      :func:`forget_emptied_default_workspace`, which the same callers invoke.
     * Leaving multi-workspace mode (``close_extra_workspaces``) removes its
       workspaces without pruning them here, so everything autosave or
       Workspace ▸ Save Workspace already wrote stays restorable.
@@ -169,6 +170,49 @@ def forget_pruned_workspaces(workspace_ids: Any) -> List[str]:
             )
     if forgotten:
         logger.debug("Forgot saved snapshots for pruned workspaces: %s", forgotten)
+    return forgotten
+
+
+def forget_emptied_default_workspace(closed_workspace_id: Any) -> bool:
+    """Drop ``default``'s snapshot when an explicit close just emptied it.
+
+    ``default``'s live record is permanent, so it never reaches
+    :func:`forget_pruned_workspaces` and its snapshot used to be immortal: every
+    other workspace forgets its shape on losing its last group, while a group
+    once run in ``default`` stayed on offer in the restore chooser forever, only
+    removable by hand. It came back on every restore — including as a workspace
+    the user had already closed minutes earlier.
+
+    The narrow condition is what keeps restore-after-restart intact:
+
+    * ``closed_workspace_id`` must be ``default`` itself. A close in a sibling
+      workspace leaves an *unrelated* empty ``default`` behind (it may simply
+      never have been used this run) and must not touch its snapshot.
+    * ``default`` must own no groups afterwards, so closing one of several tabs
+      keeps the workspace — and its slot — alive.
+    * Only explicit user closes and moves call this. A process exit does not, so
+      the snapshot still survives a restart and is still offered, which is the
+      whole point of the feature.
+
+    Returns ``True`` only when a snapshot actually existed and was removed. The
+    caller must not hold ``SessionManager.lock`` — this writes the state file.
+    """
+    from web.runtime_state import clear_workspace
+
+    try:
+        if normalize_workspace_id(closed_workspace_id) != DEFAULT_WORKSPACE_ID:
+            return False
+    except ValueError:
+        return False
+    if _manager().get_workspace_groups(DEFAULT_WORKSPACE_ID):
+        return False
+    try:
+        forgotten = clear_workspace(DEFAULT_WORKSPACE_ID)
+    except Exception:
+        logger.exception("Could not clear the saved snapshot for the default workspace")
+        return False
+    if forgotten:
+        logger.debug("Forgot the saved snapshot of the emptied default workspace")
     return forgotten
 
 
@@ -649,6 +693,10 @@ def move_group_to_workspace(group_id: str, data: Dict[str, Any]) -> Tuple[Dict[s
         # so the restore chooser cannot offer a workspace the launcher no longer
         # lists.
         forget_pruned_workspaces([source_workspace_id])
+    else:
+        # `default` is never pruned, but moving its last group out leaves its
+        # snapshot describing a workspace that is now empty.
+        forget_emptied_default_workspace(source_workspace_id)
 
     _broadcast_session_groups_updated(
         "moved",

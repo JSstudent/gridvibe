@@ -15588,11 +15588,30 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         # Closing the group must not write (or clear) the snapshot either.
         self.assertFalse(self.state_path.exists())
 
-    def test_group_close_preserves_the_previously_saved_slot(self):
+    def test_group_close_forgets_the_slot_of_the_workspace_it_emptied(self):
+        """Closing the last group is the user saying they are done with it.
+
+        Leaving the snapshot behind made the restore chooser keep offering a
+        workspace that had just been emptied — it came back on the next
+        restore. A restart still restores: only an explicit close forgets.
+        """
         group_id = self._launch_explorer_group()
         web_runtime_state.capture_workspace(api.session_manager)
-        before = self.state_path.read_text(encoding="utf-8")
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace())
+
         response = self.client.delete(f"/api/sessions?group={group_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+
+    def test_closing_one_of_two_groups_preserves_the_saved_slot(self):
+        first = self._launch_explorer_group()
+        self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager)
+        before = self.state_path.read_text(encoding="utf-8")
+
+        response = self.client.delete(f"/api/sessions?group={first}")
+
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
         self.assertIsNotNone(web_runtime_state.load_restorable_workspace())

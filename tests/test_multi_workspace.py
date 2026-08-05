@@ -1609,6 +1609,91 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(api.session_manager.get_workspace("default"))
 
+    # ── Emptying `default` forgets its slot ──
+    #
+    # Every other workspace forgets its shape on losing its last group. The
+    # `default` record is permanent, so it is never pruned and its snapshot used
+    # to be immortal: a group run there once stayed on offer in the restore
+    # chooser forever and came back on the next restore.
+
+    def test_closing_the_last_group_in_default_forgets_its_slot(self):
+        launched = self._launch(session_name="Scratch")
+        self._save_slot()
+
+        self.client.delete(f"/api/sessions?group={launched['group_id']}")
+
+        self.assertIsNone(web_runtime_state.load_restorable_workspace("default"))
+        self.assertIsNotNone(api.session_manager.get_workspace("default"))
+
+    def test_closing_the_last_pane_in_default_forgets_its_slot(self):
+        launched = self._launch(session_name="Scratch")
+        self._save_slot()
+        session_id = launched["sessions"][0]["session_id"]
+        # The per-session close prunes on the grace period rather than forcing
+        # the group, so age it past the window the way real use does.
+        api.session_manager.get_group(launched["group_id"]).created_at -= (
+            EMPTY_GROUP_GRACE_SECONDS + 1
+        )
+
+        self.client.delete(f"/api/sessions/{session_id}")
+
+        self.assertIsNone(web_runtime_state.load_restorable_workspace("default"))
+
+    def test_a_group_still_inside_its_grace_window_keeps_the_default_slot(self):
+        """`default` is only "empty" once the group itself is gone: an emptied
+        group inside its grace window is still listed, so the slot stays."""
+        launched = self._launch(session_name="Scratch")
+        self._save_slot()
+
+        self.client.delete(f"/api/sessions/{launched['sessions'][0]['session_id']}")
+
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace("default"))
+
+    def test_closing_one_of_several_groups_in_default_keeps_its_slot(self):
+        first = self._launch(session_name="Kept")
+        self._launch(session_name="Closed")
+        self._save_slot()
+
+        self.client.delete(f"/api/sessions?group={first['group_id']}")
+
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace("default"))
+
+    def test_closing_a_sibling_workspace_never_touches_the_default_slot(self):
+        """An empty `default` may simply be one this run never used."""
+        self._launch(session_name="Saved earlier")
+        self._save_slot()
+        self._close_everything()
+        api.session_manager.create_workspace("Beta", self.WORKSPACE_B)
+        launched = self._launch(workspace_id=self.WORKSPACE_B, session_name="Beta work")
+
+        self.client.delete(
+            f"/api/sessions?workspace_id={self.WORKSPACE_B}&group={launched['group_id']}"
+        )
+
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace("default"))
+
+    def test_moving_the_last_group_out_of_default_forgets_its_slot(self):
+        launched = self._launch(session_name="Scratch")
+        self._save_slot()
+
+        response = self.client.post(
+            f"/api/session-groups/{launched['group_id']}/move",
+            json={"new_workspace": True, "label": "Elsewhere"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(web_runtime_state.load_restorable_workspace("default"))
+
+    def test_restore_after_restart_still_offers_the_default_slot(self):
+        """The promise this narrowing must not break: a teardown that is not an
+        explicit per-group close leaves the snapshot on offer."""
+        self._launch(session_name="Main")
+        self._save_slot()
+
+        self._close_everything()
+
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace("default"))
+
     # ── Slot cap ──
 
     def test_auto_slot_cap_evicts_oldest_first_and_never_a_manual_slot(self):
@@ -2117,17 +2202,20 @@ class WorkspaceEmptiedRemovalTestCase(unittest.TestCase):
         # Only the emptied source is forgotten; the destination keeps its slot.
         self.assertEqual(self._saved_slot_ids(), {"default"})
 
-    def test_the_permanent_default_workspace_keeps_its_snapshot(self):
+    def test_the_permanent_default_workspace_forgets_its_emptied_snapshot(self):
         launched = self._launch()
         self.assertEqual(launched["workspace_id"], "default")
         self._capture("default")
 
         self.client.delete(f"/api/sessions?group={launched['group_id']}")
 
-        # "default" is never pruned, so single-workspace restore-after-restart
-        # keeps working exactly as it did before multi-workspace.
+        # The *record* is permanent — "default" is never pruned — but the
+        # snapshot follows the same rule as every sibling's: closing the last
+        # group forgets the shape, or the chooser would keep offering a
+        # workspace the user just emptied. Restore-after-restart is unaffected:
+        # a process exit never reaches this path.
         self.assertIsNotNone(api.session_manager.get_workspace("default"))
-        self.assertIn("default", self._saved_slot_ids())
+        self.assertNotIn("default", self._saved_slot_ids())
 
     def test_a_failed_restore_rollback_keeps_the_slot_restorable(self):
         launched = self._launch(new_workspace=True)

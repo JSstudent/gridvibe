@@ -2844,11 +2844,30 @@
         label.textContent = `Reopen saved… (${restorableWorkspaceSummaries.length})`;
     }
 
+    /* Which rows the user has ticked, by workspace id. The list is re-rendered
+       from scratch after a Forget and after a restore, and a blanket "check
+       everything" there silently re-selected rows the user had deliberately
+       unticked — the next Restore then reopened a workspace they had excluded
+       (a stale `default` slot was the usual victim). Selection belongs to the
+       user, so it is carried across renders; only rows this render has not seen
+       before fall back to the default. */
+    function readWorkspaceRestoreSelection() {
+        const list = document.getElementById('workspaceRestoreList');
+        if (!list) {
+            return new Map();
+        }
+        return new Map(
+            [...list.querySelectorAll('.workspace-restore-checkbox')]
+                .map(checkbox => [checkbox.value, checkbox.checked])
+        );
+    }
+
     function renderWorkspaceRestoreRows() {
         const list = document.getElementById('workspaceRestoreList');
         if (!list) {
             return;
         }
+        const previousSelection = readWorkspaceRestoreSelection();
         list.innerHTML = '';
         restorableWorkspaceSummaries.forEach(summary => {
             const row = document.createElement('div');
@@ -2861,7 +2880,13 @@
             checkbox.className = 'workspace-restore-checkbox';
             checkbox.value = summary.workspace_id;
             checkbox.disabled = Boolean(summary.live_conflict);
-            checkbox.checked = !summary.live_conflict;
+            /* A row that is already open can never be restored, so it is
+               unticked regardless of what the user had chosen for it. */
+            checkbox.checked = !summary.live_conflict && (
+                previousSelection.has(summary.workspace_id)
+                    ? previousSelection.get(summary.workspace_id)
+                    : true
+            );
 
             const text = document.createElement('span');
             text.className = 'workspace-restore-text';
