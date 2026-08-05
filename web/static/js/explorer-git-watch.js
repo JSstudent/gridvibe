@@ -398,9 +398,10 @@
     }
 
     function explorerFileWatchOnFailure(pane, status) {
-        // A 404 means the session is gone; a 400 means the open file no longer
-        // resolves (deleted or moved outside GridVibe). Neither recovers by
-        // retrying, so stop immediately — silently, keeping the last good view.
+        // A 404 means the session is gone or the open file no longer exists
+        // (deleted or moved outside GridVibe); a 400 means it no longer
+        // resolves. None recovers by retrying, so stop immediately — silently,
+        // keeping the last good view.
         if (status === 404 || status === 400) {
             pane._explorerFileWatchFailures = EXPLORER_GIT_WATCH_MAX_FAILURES;
         } else {

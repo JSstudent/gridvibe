@@ -543,6 +543,30 @@ class ExplorerFileTooLargeError(ExplorerRouteError):
     code = "file_too_large"
 
 
+class ExplorerPathNotFoundError(ExplorerRouteError):
+    """The requested path does not exist under this pane's explorer root.
+
+    Distinguished from a plain validation error so the frontend can tell a
+    dangling path (a persisted tab restored under a different root, a file
+    deleted since it was saved) from a transient backend failure and prune it
+    instead of leaving a dead tab behind.
+    """
+
+    status_code = 404
+    code = "not_found"
+
+
+def _explorer_missing_path_error(relative_path: str) -> ExplorerPathNotFoundError:
+    """Build the shared not-found error, naming the path relative to the root."""
+    shown = str(relative_path or "").strip() or "The requested path"
+    return ExplorerPathNotFoundError(f"{shown} no longer exists in this explorer root")
+
+
+def _os_error_is_missing_path(exc: OSError) -> bool:
+    """Return whether an OS/SFTP error means "no such file or directory"."""
+    return isinstance(exc, FileNotFoundError) or getattr(exc, "errno", None) == errno.ENOENT
+
+
 # A short-held claim set prevents GridVibe's own saves, copies, and deletes from
 # racing on the same path or an ancestor/descendant. Keys are backend-namespaced
 # absolute paths, so panes on one root conflict even when their session ids
@@ -800,6 +824,8 @@ def _resolve_explorer_candidate_path(
 def _resolve_explorer_paths(session: Any, requested_path: Any = "") -> Tuple[str, str]:
     """Resolve an explorer directory path while keeping it inside the session root."""
     root_path, candidate = _resolve_explorer_candidate_path(session, requested_path)
+    if not os.path.exists(candidate):
+        raise _explorer_missing_path_error(_relative_explorer_path(root_path, candidate))
     if not os.path.isdir(candidate):
         raise ValueError("Explorer path is not a directory")
 
@@ -813,6 +839,11 @@ def _resolve_explorer_file_path(session: Any, requested_path: Any = "") -> Tuple
         requested_path,
         allow_empty_root=False,
     )
+    # A path that is simply gone is reported as not-found rather than as a
+    # generic "not a file": only the former means the caller is holding a
+    # dangling path it should drop.
+    if not os.path.exists(candidate):
+        raise _explorer_missing_path_error(_relative_explorer_path(root_path, candidate))
     if os.path.isdir(candidate):
         raise ValueError("Explorer path is a directory")
     if not os.path.isfile(candidate):
@@ -2910,7 +2941,12 @@ def _resolve_remote_explorer_candidate_path(
     if not root_raw:
         raise ValueError("Explorer root directory is not configured")
 
-    root_path = sftp.normalize(root_raw)
+    try:
+        root_path = sftp.normalize(root_raw)
+    except OSError as exc:
+        if _os_error_is_missing_path(exc):
+            raise ValueError("Explorer root directory does not exist") from exc
+        raise
     if not _remote_is_directory(sftp, root_path):
         raise ValueError("Explorer root directory does not exist")
 
@@ -2928,7 +2964,21 @@ def _resolve_remote_explorer_candidate_path(
             candidate_raw = raw_path
         else:
             candidate_raw = _remote_path_join(root_path, raw_path)
-        candidate = sftp.normalize(candidate_raw)
+        # SFTP normalize resolves against the server, so it fails outright on a
+        # path that is not there. Report that as not-found instead of letting
+        # the raw "[Errno 2] No such file" surface as a 500 — but only for a
+        # path that was already inside the root, so a probe aimed outside it
+        # still gets the containment error below.
+        try:
+            candidate = sftp.normalize(candidate_raw)
+        except OSError as exc:
+            if not _os_error_is_missing_path(exc):
+                raise
+            if not _remote_path_inside(root_path, candidate_raw):
+                raise ValueError("Explorer path must stay inside the configured root") from exc
+            raise _explorer_missing_path_error(
+                _relative_remote_explorer_path(root_path, candidate_raw)
+            ) from exc
 
     if not _remote_path_inside(root_path, candidate):
         raise ValueError("Explorer path must stay inside the configured root")
@@ -2939,9 +2989,21 @@ def _resolve_remote_explorer_candidate_path(
 def _resolve_remote_explorer_paths(sftp: Any, session: Any, requested_path: Any = "") -> Tuple[str, str]:
     """Resolve a remote explorer directory path inside the configured root."""
     root_path, candidate = _resolve_remote_explorer_candidate_path(sftp, session, requested_path)
-    if not _remote_is_directory(sftp, candidate):
+    if not _remote_stat_is_directory(sftp, root_path, candidate):
         raise ValueError("Explorer path is not a directory")
     return root_path, candidate
+
+
+def _remote_stat_is_directory(sftp: Any, root_path: str, candidate: str) -> bool:
+    """Stat a remote path, converting a vanished path into a not-found error."""
+    try:
+        return _remote_is_directory(sftp, candidate)
+    except OSError as exc:
+        if _os_error_is_missing_path(exc):
+            raise _explorer_missing_path_error(
+                _relative_remote_explorer_path(root_path, candidate)
+            ) from exc
+        raise
 
 
 def _resolve_remote_explorer_file_path(sftp: Any, session: Any, requested_path: Any = "") -> Tuple[str, str]:
@@ -2952,7 +3014,7 @@ def _resolve_remote_explorer_file_path(sftp: Any, session: Any, requested_path: 
         requested_path,
         allow_empty_root=False,
     )
-    if _remote_is_directory(sftp, candidate):
+    if _remote_stat_is_directory(sftp, root_path, candidate):
         raise ValueError("Explorer path is a directory")
     if not _remote_is_file(sftp, candidate):
         raise ValueError("Explorer path is not a file")

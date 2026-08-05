@@ -1,4 +1,5 @@
 import base64
+import errno
 import io
 import json
 import os
@@ -83,6 +84,21 @@ class FakeSftp:
 
     def close(self):
         self.closed = True
+
+
+class RealpathFakeSftp(FakeSftp):
+    """FakeSftp whose normalize fails on a missing path, like a real server.
+
+    OpenSSH answers SSH_FXP_REALPATH with realpath(3), so paramiko raises
+    "[Errno 2] No such file" before any stat happens. Plain FakeSftp normalizes
+    anything, which hid the raw-errno 500 a dangling explorer path produced.
+    """
+
+    def normalize(self, path):
+        normalized = super().normalize(path)
+        if normalized not in self.entries:
+            raise FileNotFoundError(errno.ENOENT, "No such file")
+        return normalized
 
 
 class FakeSshStream:
@@ -2035,6 +2051,33 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Bounded pinned-tab count shared with the backend cap.
         self.assertIn("const EXPLORER_MAX_PINNED_TABS = 12;", html)
 
+    def test_terminals_page_restore_recovers_from_dangling_explorer_tabs(self):
+        """A tab saved under another root must not strand the pane on an error.
+
+        Restoring a session whose explorer root changed reopens paths that are
+        no longer there. Before, the failed open left the pane unattached: the
+        viewer showed the raw backend error and the breadcrumb stayed inert
+        until the user clicked the tree.
+        """
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # The restore opens the active tab itself so it can see the outcome.
+        self.assertIn("const opened = await openExplorerFile(index, activeTab.path, {", html)
+        # Only a backend not_found prunes the tab — a transient failure keeps it.
+        self.assertIn("function explorerRestoredPathIsGone(index)", html)
+        self.assertIn("_explorerOpenErrorCode === 'not_found'", html)
+        self.assertIn("pane._explorerOpenErrorCode = String(data.code || '');", html)
+        self.assertIn(
+            "pane._explorerTabs = pane._explorerTabs.filter(tab => tab.id !== activeTab.id);",
+            html,
+        )
+        # Either way the pane lands on a directory listing, so the breadcrumb
+        # is live; a saved directory that is gone too falls back to the root.
+        self.assertIn("async function restoreExplorerDirectoryFallback(index, dirPath)", html)
+        self.assertIn("return loadExplorerPane(index, '');", html)
+
     def test_terminals_page_persists_tab_views_and_markdown_appearance(self):
         """2.f: per-tab mode/scroll and the Markdown appearance round-trip sessions."""
         response = self.client.get("/terminals")
@@ -2100,7 +2143,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("previewTab.dirPath = savedPreviewDir;", html)
         self.assertIn("openExplorerFile(index, savedPreviewPath, {", html)
         self.assertIn("...explorerTabPersistedDiffTarget(previewTab)", html)
-        self.assertIn("loadExplorerPane(index, savedPreviewDir);", html)
+        # Re-browsing the saved dir goes through the fallback so a dir that no
+        # longer exists under this root lands on the root listing, not on a
+        # bare error with an inert breadcrumb.
+        self.assertIn("restoreExplorerDirectoryFallback(index, savedPreviewDir);", html)
         # The terminal-close snapshot carries dirPath through the rebuild.
         self.assertIn("dirPath: tab.dirPath || ''", html)
         self.assertIn("tab.dirPath = saved.dirPath;", html)
@@ -2400,6 +2446,29 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("data-explorer-active-tab=", html)
         self.assertIn("explorer_open_tabs: commandMode === 'explorer'", html)
         self.assertIn("explorer_open_tabs: resolvedStartupMode === 'explorer'", html)
+
+    def test_launcher_drops_explorer_tabs_when_the_row_directory_changes(self):
+        """Retargeting the root invalidates paths captured under the old one.
+
+        Editing the directory of an imported explorer row relaunches the pane on
+        a different root, where the carried tab paths resolve to nothing.
+        """
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # The row records the directory its carried tabs belong to...
+        self.assertIn("data-explorer-tabs-dir=", html)
+        # ...and the collected draft keeps them only while it still matches.
+        self.assertIn(
+            "const explorerTabsMatchRoot = directory === (row.dataset.explorerTabsDir || '');",
+            html,
+        )
+        for field in ("explorer_open_tabs", "explorer_active_tab", "explorer_tab_views"):
+            self.assertIn(
+                f"{field}: commandMode === 'explorer' && explorerTabsMatchRoot",
+                html,
+            )
 
     def test_pages_carry_the_active_session_group_through_workspace_restore(self):
         """Both save paths record the front group; the restore reopens on it."""
@@ -6621,6 +6690,100 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("inside the configured root", response.get_json()["error"])
 
+    def test_explorer_file_reports_missing_local_path_as_not_found(self):
+        """A dangling path answers 404/not_found, not a generic rejection.
+
+        A pane restored under a different root (an imported session whose
+        directory was edited) reopens tab paths that were relative to the old
+        one. The frontend prunes such a tab only on this code, so a transient
+        failure cannot be mistaken for a file that is genuinely absent.
+        """
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "documentation/triggers.md"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.get_json()
+        self.assertEqual(payload["code"], "not_found")
+        self.assertIn("documentation/triggers.md", payload["error"])
+        self.assertNotIn("Errno", payload["error"])
+
+    def test_explorer_entries_report_missing_local_directory_as_not_found(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/entries",
+            query_string={"path": "documentation"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["code"], "not_found")
+
+    def test_explorer_file_reports_missing_ssh_path_as_not_found(self):
+        """SFTP normalize fails outright on a missing path; map it, don't leak it."""
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = RealpathFakeSftp({"/srv/app": {"type": "directory"}})
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "documentation/triggers.md"},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.get_json()
+        self.assertEqual(payload["code"], "not_found")
+        self.assertNotIn("Errno", payload["error"])
+
+    def test_explorer_file_keeps_containment_error_for_missing_ssh_path_outside_root(self):
+        """A path that never was inside the root must not become an existence probe."""
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = RealpathFakeSftp({"/srv/app": {"type": "directory"}})
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "/etc/missing.conf"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("inside the configured root", response.get_json()["error"])
+
     def test_explorer_file_returns_text_content_inside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -6819,13 +6982,23 @@ class ApiRoutesTestCase(unittest.TestCase):
         (repo_dir / "data.bin").write_bytes(b"\x00\x01")
         session_id = self._create_explorer_session(repo_dir)
 
-        for path in ("../escape.py", "app.py/../..", "missing.py", "data.bin"):
+        for path in ("../escape.py", "app.py/../..", "data.bin"):
             with self.subTest(path=path):
                 response = self.client.put(
                     f"/api/explorer/{session_id}/file",
                     json={"path": path, "content": "x\n", "base_revision": "sha256:x"},
                 )
                 self.assertEqual(response.status_code, 400)
+
+        # A path that is simply gone is a distinct outcome from a rejected one:
+        # it answers 404/not_found so a caller holding a dangling path can tell
+        # "this file is not here" from "this request was invalid".
+        missing = self.client.put(
+            f"/api/explorer/{session_id}/file",
+            json={"path": "missing.py", "content": "x\n", "base_revision": "sha256:x"},
+        )
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.get_json()["code"], "not_found")
 
     def test_explorer_save_rejects_oversized_replacement(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -11183,12 +11356,13 @@ class ExplorerFileStateTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
-    def test_file_state_missing_file_returns_400(self):
+    def test_file_state_missing_file_returns_404(self):
         session_id = self._create_explorer_session(self.root)
 
         response = self._file_state(session_id, "gone.txt")
 
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["code"], "not_found")
 
     def test_file_state_refuses_paths_outside_the_root(self):
         (Path(self.temp_dir.name) / "outside.txt").write_text("secret\n", encoding="utf-8")

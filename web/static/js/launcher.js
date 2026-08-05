@@ -662,6 +662,14 @@
         const drafts = rows.map((row, index) => {
             const commandMode = getTerminalCommandMode(row);
             const initialCommand = buildTerminalInitialCommand(row);
+            const directory = row.querySelector('.t-dir').value.trim();
+            /* Persisted explorer tab paths are relative to the root the pane
+               was saved under, and the row's directory is what selects that
+               root. Editing it after importing a saved session retargets the
+               pane, so paths captured under the old root would reopen as
+               missing files — drop them and let the relaunched pane start on
+               its own root instead. */
+            const explorerTabsMatchRoot = directory === (row.dataset.explorerTabsDir || '');
             /* Browser rows only expose the active URL as an input; the rest of
                the tab strip rides along in the dataset so importing a saved
                multi-tab pane and re-saving it keeps every tab. The visible
@@ -680,7 +688,7 @@
             }
             return {
                 title: row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`,
-                directory: row.querySelector('.t-dir').value.trim(),
+                directory,
                 initial_command: initialCommand,
                 initial_command_mode: commandMode === 'agent'
                     ? 'agent'
@@ -700,9 +708,15 @@
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
                 explorer_search_open: commandMode === 'explorer' && row.dataset.explorerSearchOpen === 'true',
-                explorer_open_tabs: commandMode === 'explorer' ? parseStringArrayDataset(row.dataset.explorerOpenTabs) : [],
-                explorer_active_tab: commandMode === 'explorer' ? (row.dataset.explorerActiveTab || '') : '',
-                explorer_tab_views: commandMode === 'explorer' ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews) : {},
+                explorer_open_tabs: commandMode === 'explorer' && explorerTabsMatchRoot
+                    ? parseStringArrayDataset(row.dataset.explorerOpenTabs)
+                    : [],
+                explorer_active_tab: commandMode === 'explorer' && explorerTabsMatchRoot
+                    ? (row.dataset.explorerActiveTab || '')
+                    : '',
+                explorer_tab_views: commandMode === 'explorer' && explorerTabsMatchRoot
+                    ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews)
+                    : {},
                 explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
                 explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
                 explorer_source_font: commandMode === 'explorer' ? (row.dataset.explorerSourceFont || '') : '',
@@ -1536,6 +1550,7 @@
                     data-explorer-git-open="${terminal.explorer_git_open ? 'true' : 'false'}"
                     data-explorer-search-open="${terminal.explorer_search_open ? 'true' : 'false'}"
                     data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
+                    data-explorer-tabs-dir="${escHtml(terminal.directory || '')}"
                     data-explorer-active-tab="${escHtml(terminal.explorer_active_tab || '')}"
                     data-explorer-tab-views="${escHtml(JSON.stringify(terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object' ? terminal.explorer_tab_views : {}))}"
                     data-explorer-md-preset="${escHtml(terminal.explorer_md_preset || '')}"

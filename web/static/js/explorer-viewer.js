@@ -6864,7 +6864,32 @@
         pane._session.explorer_tab_views = serialized.tab_views;
     }
 
-    function restoreExplorerPersistedTabs(index) {
+    /* Restore fell through to nothing showable: browse a directory so the pane
+       ends up attached with a live breadcrumb instead of stranded on a bare
+       error message (the state that made the path bar inert until the user
+       clicked the tree). A saved directory that is itself gone falls back to
+       the root, which the session guarantees exists. */
+    async function restoreExplorerDirectoryFallback(index, dirPath) {
+        if (dirPath && await loadExplorerPane(index, dirPath)) {
+            return true;
+        }
+        const pane = terminals[index];
+        if (pane && dirPath) {
+            explorerPreviewTab(pane).dirPath = '';
+        }
+        return loadExplorerPane(index, '');
+    }
+
+    /* Paths persisted with a pane are relative to the root it was saved under.
+       Relaunching under a different root — an imported session whose directory
+       was edited, a moved repo — or deleting the file since makes them dangle,
+       so a restored tab that comes back not-found is dropped rather than left
+       pointing at a file this explorer does not have. */
+    function explorerRestoredPathIsGone(index) {
+        return terminals[index]?._explorerOpenErrorCode === 'not_found';
+    }
+
+    async function restoreExplorerPersistedTabs(index) {
         const pane = terminals[index];
         if (!pane || pane._explorerTabsRestored) {
             return;
@@ -6904,14 +6929,23 @@
            saved as active — an active pinned tab wins the viewer, and the
            seeded path/dirPath above brings the Preview content back whenever
            the user returns to the tab. */
-        const restorePreviewContent = () => {
+        const restorePreviewContent = async () => {
             if (savedPreviewPath) {
-                openExplorerFile(index, savedPreviewPath, {
+                const opened = await openExplorerFile(index, savedPreviewPath, {
                     tab: EXPLORER_PREVIEW_TAB_ID,
                     ...explorerTabPersistedDiffTarget(previewTab)
                 });
+                if (opened) {
+                    return;
+                }
+                if (explorerRestoredPathIsGone(index)) {
+                    previewTab.path = '';
+                    previewTab.name = '';
+                    previewTab.git = null;
+                }
+                await restoreExplorerDirectoryFallback(index, savedPreviewDir);
             } else if (savedPreviewDir) {
-                loadExplorerPane(index, savedPreviewDir);
+                await restoreExplorerDirectoryFallback(index, savedPreviewDir);
             } else {
                 renderExplorerTabStrip(index);
             }
@@ -6921,7 +6955,7 @@
             previewTab.name = explorerBaseName(savedPreviewPath);
         }
         if (!rawTabs.length) {
-            restorePreviewContent();
+            await restorePreviewContent();
             return;
         }
         const seen = new Set();
@@ -6956,11 +6990,26 @@
         const activeTab = activeKey
             ? pane._explorerTabs.find(tab => tab.pinned && explorerNormalizeTabPath(tab.path) === activeKey)
             : null;
-        if (activeTab) {
-            activateExplorerTab(index, activeTab.id);
-        } else {
-            restorePreviewContent();
+        if (!activeTab) {
+            await restorePreviewContent();
+            return;
         }
+        /* Opened here rather than through activateExplorerTab so the restore
+           can see whether the file actually came back. */
+        pane._explorerActiveTabId = activeTab.id;
+        renderExplorerTabStrip(index);
+        const opened = await openExplorerFile(index, activeTab.path, {
+            tab: activeTab.id,
+            ...explorerTabPersistedDiffTarget(activeTab)
+        });
+        if (!opened) {
+            if (explorerRestoredPathIsGone(index)) {
+                pane._explorerTabs = pane._explorerTabs.filter(tab => tab.id !== activeTab.id);
+            }
+            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+            await restorePreviewContent();
+        }
+        persistExplorerTabsToSession(index);
     }
 
     /* Read-only inline image viewer (ISSUE-2026 image support). The backend
@@ -7515,6 +7564,11 @@
         if (!pane || !isExplorerSession(pane._session) || !sessionId || !path) {
             return false;
         }
+        /* Cleared before any early return and read back by the tab restore,
+           which prunes a tab only when the backend says the path is gone — a
+           connection hiccup, or a caller that never got as far as a request,
+           must not throw away a tab whose file is still there. */
+        pane._explorerOpenErrorCode = '';
         // Replacing the viewer with another file discards any active edit.
         if (!(await confirmDiscardExplorerEdit(index, 'Opening another file'))) {
             return false;
@@ -7533,6 +7587,7 @@
             const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(path)}`);
             const data = await response.json();
             if (!response.ok) {
+                pane._explorerOpenErrorCode = String(data.code || '');
                 throw new Error(data.error || 'Failed to open file');
             }
             if (
