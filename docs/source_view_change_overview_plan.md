@@ -221,14 +221,15 @@ Three modes, selectable from the existing Appearance menu (the
 `gridvibe.sourceViewFont` localStorage pattern at `explorer-viewer.js:3900`
 generalises to `gridvibe.sourceOverview` = `map` | `ruler` | `off`):
 
-- **`map`** (default) — canvas minimap. Per rendered row, draw one band of
+- **`map`** — the default. Canvas minimap. Per rendered row, draw one band of
   ~1 px-per-character blocks from the cached
   `explorerHighlightDocumentLines()` runs, coloured per token class. Colours are
   resolved once per paint by probing `getComputedStyle` on throwaway
   `.hljs-keyword` / `.hljs-string` / … spans inside the panel, so the explorer
   theme and light/dark both follow automatically and **no palette literal enters
-  the JS** (guardrail #7). Canvas is DPR-scaled; width `--explorer-overview-width`
-  (default 110 px).
+  the JS** (guardrail #7). Canvas is DPR-scaled; width is the fixed token
+  `--explorer-overview-width` (110 px) — **not** user-draggable, so there is no
+  new per-pane width to persist, capture in the scroll state, or restore.
 - **`ruler`** — no glyphs, just the marker lanes and the viewport box. Automatic
   fallback when the file is above `EXPLORER_PLAIN_PREVIEW_THRESHOLD`
   (`_explorerFilePlain`), when the tokenizer returns `null`, or above the row cap.
@@ -255,13 +256,50 @@ search-heavy use even before the minimap exists, and is worth landing first.
 | Drag (pointer capture) | Continuous scrub; `pointercancel` / `lostpointercapture` release |
 | Wheel over the overview | Forwarded to the source scroller |
 | Click a change marker | Scroll the change into view and flash the row via `.explorer-source-line-flash` |
-| `Alt+F5` / `Shift+Alt+F5` | Next / previous change (VS Code parity); wraps at the ends |
+| `Alt+E` / `Alt+Q` | Next / previous change; wraps at the ends |
 | Hover a change marker | Tooltip `+n −m` for that block |
 
 Accessibility: the `<aside>` gets `role="scrollbar"`, `aria-controls` on the
 source view, `aria-orientation="vertical"`, and `aria-valuenow` updated with the
 scroll ratio. The viewport box is `aria-hidden` (decorative). Keyboard users are
-served by the `Alt+F5` pair, not by focusing the canvas.
+served by the `Alt+E` / `Alt+Q` pair, not by focusing the canvas. Both buttons in
+the header control (Phase 4) carry
+`aria-keyshortcuts="Alt+E"` / `aria-keyshortcuts="Alt+Q"` and a matching `title`,
+following the Preview tab's existing precedent (`explorer-viewer.js:7280`).
+
+#### Alt+E / Alt+Q collision audit
+
+Every `altKey` handler in the codebase was checked. Neither chord is taken:
+
+| Existing binding | Where | Conflict |
+| --- | --- | --- |
+| `Alt+1`…`Alt+9` — session-group switch | `terminals.js:6429` | No — digits only |
+| `Alt+W` / `Alt+Shift+W` — workspace cycle | `terminals.js:6492` | No |
+| `Alt`+click on a Markdown line number — fold all at level | `explorer-viewer.js:4556` | No — mouse, not key |
+| `Tab` guard in the in-place editor | `explorer-editor.js:270` | No |
+| `Ctrl+F`, `Ctrl+Shift+F`, `F5`, `Ctrl+Shift+V` | `terminals.js:6243,6403,6258,7399` | No |
+| Push-to-talk keybind | `voice-input.js:999` | **Soft** — defaults to empty (`web/voice.py:563`) but is user-configurable, so a user could bind `Alt+Q` |
+
+Two guards follow from that audit:
+
+1. **Pane scope.** The handler only fires when the focused element is inside an
+   explorer *source* panel that has an open file with marks — so it cannot reach
+   a terminal pane. This also sidesteps xterm entirely: xterm's custom key
+   handler (`terminals.js:3905`) only forwards `Ctrl+Shift+F` and `Alt+W` to the
+   document, and any other `Alt`+letter typed into a focused terminal is passed
+   through to the shell as `ESC q` / `ESC e` — which stays correct, because the
+   shortcut never claims those keys while a terminal has focus.
+2. **Push-to-talk yields first.** If the configured `pttKeybind` is the same
+   chord, the explorer handler returns without acting; the user's own binding
+   wins. `isEditableShortcutTarget` (`terminals.js:6420`) is reused so the chord
+   is also inert inside inputs, textareas and the keybind recorder.
+
+One residual, worth knowing rather than fixing: in **browser mode** on
+Chrome/Edge/Firefox, `Alt`+letter is a menu mnemonic (`Alt+E` opens the Chrome
+menu / the Firefox Edit menu on Windows). Calling `preventDefault()` on the
+keydown suppresses it in practice, and **native-window mode (WebView2) has no
+menu bar at all**, so the primary GridVibe surface is unaffected. Verify this
+during Phase 4's manual pass on both surfaces.
 
 ## 5. Phases
 
@@ -273,7 +311,7 @@ Each phase is independently shippable and independently reviewable.
 | **1** | `explorer-overview.js` skeleton: change model, fetch + cache, classification, gutter markers, refresh triggers, tokens + CSS | Delivers the line-number marking from the screenshot on its own |
 | **2** | Overview element in `ruler` mode: geometry helper, change lane, viewport box, click / drag / wheel navigation | Delivers "click through a file for changes" with no canvas-painting risk |
 | **3** | `map` mode: canvas glyph paint, colour probing, DPR, Appearance-menu toggle + persistence, automatic ruler fallback | The visual payload; safe to land late because ruler mode already works |
-| **4** | Extras: search-match lane, `Alt+F5` navigation, hover tooltips, truncated-diff indicator | Polish |
+| **4** | Extras: search-match lane, `Alt+E` / `Alt+Q` navigation, hover tooltips, truncated-diff indicator | Polish |
 
 Rough effort: Phase 0 small, 1 medium, 2 medium, 3 medium–large, 4 small.
 
@@ -307,13 +345,18 @@ hooks, `aria-*`, CSS custom properties and selectors, named constants):**
 - `role="scrollbar"` and `aria-orientation="vertical"` are present on the aside
 - named constants `EXPLORER_OVERVIEW_MAX_ROWS` and the
   `gridvibe.sourceOverview` storage key are present
+- `aria-keyshortcuts="Alt+E"` / `aria-keyshortcuts="Alt+Q"` are declared on the
+  next/previous-change controls
 
 **Manual checklist** (no JS test runner exists):
 wrapped and unwrapped source · a Markdown file with folded sections · a >2 MiB
 file (ruler fallback) · light and dark explorer themes · each of the four source
 fonts · editor mode enter/exit · staged vs unstaged vs partially staged file ·
 untracked file · commit-diff tab (no markers) · SSH pane · pane resize · a file
-whose diff is truncated.
+whose diff is truncated · `Alt+E` / `Alt+Q` in **both** browser mode (menu
+mnemonic suppressed) and native-window mode · `Alt+E` typed into a focused
+terminal pane still reaches the shell · a push-to-talk keybind set to `Alt+Q`
+still wins.
 
 ## 7. Risks and the alternatives that were rejected
 
@@ -346,15 +389,19 @@ whose diff is truncated.
 - The read-only explorer contract in `CLAUDE.md` needs **no change**: the feature
   adds no mutation, and `git/diff` is already an established read.
 
-## 9. Open questions for the maintainer
+## 9. Settled decisions
 
-1. **Default mode** — ship with `map` on by default (matches the screenshot), or
-   `ruler` on by default with `map` opt-in? Recommendation: `map`, with the
-   automatic ruler fallback carrying the large-file case.
-2. **Overview width** — fixed 110 px, or draggable? Recommendation: fixed token,
-   revisit if it feels cramped.
-3. **Should the overview also appear in the Diff panel?** Out of scope as
-   requested ("source view only"), and the diff already has its own scroll
-   machinery — but the geometry helper would transfer.
-4. **`Alt+F5` binding** — VS Code parity, but confirm it does not collide with a
-   terminal-pane binding in `terminals.js`.
+Resolved by the maintainer; treat these as fixed for the implementation.
+
+1. **Default mode: `map`.** The minimap is on by default, matching the reference
+   screenshot. The automatic `ruler` fallback (§4.6) carries the large-file and
+   unsupported-language cases, and `ruler` / `off` stay available from the
+   Appearance menu.
+2. **Overview width: fixed.** `--explorer-overview-width: 110px`, not draggable.
+   No new per-pane width state to persist or restore.
+3. **Diff panel: no overview.** Source view only, as specified. The geometry
+   helper in §4.5 would transfer if that ever changes, so keep it free of
+   source-panel-specific assumptions — but build nothing for the Diff panel now.
+4. **Change navigation: `Alt+E` (next) / `Alt+Q` (previous).** Audited clear of
+   every existing binding; see the collision audit in §4.7 for the two guards
+   (pane scope, push-to-talk yields) and the one residual browser-mnemonic note.
