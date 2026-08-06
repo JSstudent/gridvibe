@@ -3751,8 +3751,7 @@
         }
 
         .explorer-diff-file-path,
-        .explorer-diff-commit-subject,
-        .explorer-diff-commit-file-path {
+        .explorer-diff-commit-subject {
             min-width: 0;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -3798,9 +3797,16 @@
             padding: 1px 0 4px 28px;
         }
 
+        /* The Staged/Changes lists are top-level sections, not rows nested
+           under a commit, so they drop the graph indent and start flush with
+           their section title. */
+        .explorer-diff-commit-files.explorer-git-change-list {
+            padding-left: 0;
+        }
+
         .explorer-diff-commit-file {
             display: grid;
-            grid-template-columns: 22px 18px minmax(0, 1fr) auto;
+            grid-template-columns: 18px minmax(0, 1fr) auto auto;
             align-items: center;
             gap: 6px;
             padding: 4px 10px 4px 7px;
@@ -3823,6 +3829,12 @@
         }
 
         button.explorer-diff-commit-file-path {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            min-width: 0;
+            overflow: hidden;
+            white-space: nowrap;
             border: 0;
             background: transparent;
             color: inherit;
@@ -3835,6 +3847,27 @@
         button.explorer-diff-commit-file-path:focus {
             color: var(--t-accent);
             outline: none;
+        }
+
+        /* The directory carries the outsized shrink factor so it is what gets
+           cut off first; the file name only truncates once the directory has
+           collapsed entirely. */
+        .explorer-diff-commit-file-name {
+            flex: 0 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .explorer-diff-commit-file-dir {
+            flex: 0 999 auto;
+            min-width: 0;
+            overflow: hidden;
+            color: var(--explorer-muted);
+            font-size: .92em;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .explorer-git-repo-bar {

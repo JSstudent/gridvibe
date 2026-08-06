@@ -1023,6 +1023,22 @@
         return ['modified', 'deleted', 'renamed'].includes(status || '');
     }
 
+    function explorerGitFileLabelHtml(path, fallbackName) {
+        /* Change rows lead with the file name and trail the muted directory, so
+           the file being changed stays legible at the sidebar's narrow width.
+           The directory is the part allowed to ellipsis away. */
+        const cleaned = String(path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+        const slashIndex = cleaned.lastIndexOf('/');
+        const name = (slashIndex >= 0 ? cleaned.slice(slashIndex + 1) : cleaned)
+            || fallbackName
+            || 'Changed file';
+        const directory = slashIndex > 0 ? cleaned.slice(0, slashIndex) : '';
+        const directoryHtml = directory
+            ? `<span class="explorer-diff-commit-file-dir">${escHtml(directory)}</span>`
+            : '';
+        return `<span class="explorer-diff-commit-file-name">${escHtml(name)}</span>${directoryHtml}`;
+    }
+
     function renderExplorerGitFileRows(index, files, options = {}) {
         const entries = Array.isArray(files) ? files : [];
         if (!entries.length) {
@@ -1059,9 +1075,9 @@
                 : '';
             return `
                 <div class="explorer-diff-commit-file" title="${escHtml(path)}" data-explorer-copy-path="${escHtml(path)}"${downloadPath}>
-                    ${explorerDiffSidebarStatusHtml(file.git)}
                     ${explorerFileTypeIconHtml(path)}
-                    <button type="button" class="explorer-diff-commit-file-path" ${pathAction}>${escHtml(path || file.name || 'Changed file')}</button>
+                    <button type="button" class="explorer-diff-commit-file-path" ${pathAction}>${explorerGitFileLabelHtml(path, file.name)}</button>
+                    ${explorerDiffSidebarStatusHtml(file.git)}
                     <span class="explorer-diff-commit-file-actions">
                         ${revertButton}
                         ${actionButton}
@@ -1377,7 +1393,7 @@
             </div>
             <div class="explorer-diff-sidebar-section">
                 <div class="explorer-diff-sidebar-title">Staged Changes</div>
-                <div class="explorer-diff-commit-files">
+                <div class="explorer-diff-commit-files explorer-git-change-list">
                     ${renderExplorerGitFileRows(index, staged, { emptyText: 'No staged changes.', action: 'unstage' })}
                 </div>
                 <div class="explorer-git-commit-box">
@@ -1393,7 +1409,7 @@
                         <button type="button" class="explorer-search-btn explorer-git-stage-btn explorer-git-stage-all-btn" data-explorer-git-stage-all ${(busy || !unstaged.length) ? 'disabled' : ''} title="Stage all changes" aria-label="Stage all changes">+</button>
                     </span>
                 </div>
-                <div class="explorer-diff-commit-files">
+                <div class="explorer-diff-commit-files explorer-git-change-list">
                     ${renderExplorerGitFileRows(index, unstaged, { emptyText: 'No unstaged changes.', action: 'stage' })}
                 </div>
             </div>

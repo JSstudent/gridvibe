@@ -6575,6 +6575,35 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".explorer-git-section-title", html)
         self.assertIn(".explorer-git-section-actions", html)
 
+    def test_terminals_page_git_change_rows_lead_with_the_file_name(self):
+        # Change rows read "name — muted directory" with the status badge on the
+        # right, so the narrow sidebar truncates the directory rather than the
+        # file name the row exists to identify.
+        response = self.client.get("/terminals")
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function explorerGitFileLabelHtml(path, fallbackName)", html)
+        self.assertIn('class="explorer-diff-commit-file-name"', html)
+        self.assertIn('class="explorer-diff-commit-file-dir"', html)
+        # The badge trails the name and leads the inline actions; the full path
+        # stays on the row.
+        row = html[
+            html.index('<div class="explorer-diff-commit-file" title='):
+            html.index("</div>\n            `;")
+        ]
+        self.assertIn("data-explorer-copy-path", row)
+        self.assertLess(
+            row.index('class="explorer-diff-commit-file-path"'),
+            row.index("${explorerDiffSidebarStatusHtml(file.git)}"),
+        )
+        self.assertLess(
+            row.index("${explorerDiffSidebarStatusHtml(file.git)}"),
+            row.index('class="explorer-diff-commit-file-actions"'),
+        )
+        # Only the top-level Staged/Changes lists drop the commit-graph indent.
+        self.assertIn('class="explorer-diff-commit-files explorer-git-change-list"', html)
+        self.assertIn(".explorer-diff-commit-files.explorer-git-change-list", html)
+
     def test_terminals_page_git_actions_refresh_tree_and_open_file(self):
         # Wave 3 / 1.a (ISSUE-2026-034): every worktree-mutating Git action
         # routes through the shared refresh; publish (remote-only) does not.
