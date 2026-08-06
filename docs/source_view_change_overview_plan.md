@@ -1,6 +1,12 @@
 # Source View Change Overview — implementation plan
 
-Status: **Phases 0–2 implemented** (see §5); Phases 3–4 not yet implemented.
+Status: **Phases 0–2 implemented** (see §5). **Phases 3–4 are deferred pending
+further study** — the shipped ruler column and gutter markers already carry the
+feature, so the `map` mode and the extras are on hold, not queued.
+**Phase 5 — the clickable gutter change marker and its change peek — is the next
+phase to implement; it is planned in §10.** Phase numbers are now identity, not
+order: Phase 5 depends only on Phases 0–2 and nothing in 3 or 4.
+
 Target surface: the explorer file viewer's **Source** panel only (Preview and
 Diff are untouched).
 
@@ -423,6 +429,7 @@ search-heavy use even before the minimap exists, and is worth landing first.
 | Click a change marker | Scroll the change into view and flash the row via `.explorer-source-line-flash` |
 | `Ctrl+E` / `Ctrl+Q` | Next / previous change; wraps at the ends |
 | Hover a change marker | Tooltip `+n −m` for that block |
+| Click a **gutter** change marker | Toggle that block's change peek open (Phase 5, §10). Deliberately *not* the same as clicking the overview marker above: the column stays a scrollbar, the gutter is where a change is inspected |
 
 `Alt`+letter was rejected: `Alt` already drives workspace and session-group
 switching (`Alt+W`, `Alt+1`…`Alt+9`), so a mistyped `Alt+E` sits one key away
@@ -505,10 +512,12 @@ Each phase is independently shippable and independently reviewable.
 | **0** ✅ | Memoize `explorerHighlightDocumentLines()` per pane; add the `.explorer-source-frame` wrapper + `explorerPanelScrollTarget` branch; no visible change | Isolates the one refactor with blast radius into a diff that can be verified by "nothing changed" |
 | **1** ✅ | `explorer-overview.js` skeleton: change model, fetch + cache, classification, gutter markers, refresh triggers, tokens + CSS | Delivers the line-number marking from the screenshot on its own |
 | **2** ✅ | Overview element in `ruler` mode: geometry helper, change lane, viewport box, click / drag / wheel navigation | Delivers "click through a file for changes" with no canvas-painting risk |
-| **3** | `map` mode: canvas glyph paint, colour probing, DPR, Appearance-menu toggle + persistence, automatic ruler fallback | The visual payload; safe to land late because ruler mode already works |
-| **4** | Extras: search-match lane, `Ctrl+E` / `Ctrl+Q` navigation, hover tooltips, truncated-diff indicator | Polish |
+| **3** ⏸ | `map` mode: canvas glyph paint, colour probing, DPR, Appearance-menu toggle + persistence, automatic ruler fallback | The visual payload; safe to land late because ruler mode already works. **Deferred pending further study** |
+| **4** ⏸ | Extras: search-match lane, `Ctrl+E` / `Ctrl+Q` navigation, hover tooltips, truncated-diff indicator | Polish. **Deferred pending further study** |
+| **5** ▶ | Gutter change peek: the change marker becomes a button, a click opens that block's diff inline under the change (§10) | **Next.** Reuses the Phase 1 model whole and the Phase 0 frame; touches neither the overview column nor anything Phases 3–4 own |
 
-Rough effort: Phase 0 small, 1 medium, 2 medium, 3 medium–large, 4 small.
+Rough effort: Phase 0 small, 1 medium, 2 medium, 3 medium–large, 4 small,
+5 medium.
 
 ## 6. Test plan
 
@@ -542,6 +551,9 @@ hooks, `aria-*`, CSS custom properties and selectors, named constants):**
   `gridvibe.sourceOverview` storage key are present
 - `aria-keyshortcuts="Control+E"` / `aria-keyshortcuts="Control+Q"` are declared
   on the next/previous-change controls
+
+Phase 5 carries its own test plan (§10.7); it adds no backend surface, so it
+adds no behavioral test.
 
 **Manual checklist** (no JS test runner exists):
 wrapped and unwrapped source · a Markdown file with folded sections · a >2 MiB
@@ -579,6 +591,12 @@ terminal pane still reaches the shell as XON · a push-to-talk keybind set to
 
 ## 8. Documentation to update when this lands
 
+**With Phase 5**, not "when the full feature lands" — Phases 3–4 are deferred
+pending further study, so Phase 5 is the last phase in flight and the shipped
+behaviour (gutter markers, the ruler overview, and the change peek) is what the
+docs must describe. Leaving them silent until an indefinitely deferred phase is
+the stale-contract failure `CLAUDE.md` warns about.
+
 - `CHANGELOG.md` — user-visible feature entry
 - `README.md` — the explorer/source-view feature list
 - `CLAUDE.md` — add `explorer-overview.js` to the repo-layout tree and to
@@ -606,3 +624,301 @@ Resolved by the maintainer; treat these as fixed for the implementation.
    browser-level hazard — **`Ctrl+Q` quits Firefox** — which Phase 4 must verify
    and, if `preventDefault()` does not hold, resolve by moving *previous* to
    `Ctrl+Shift+E`.
+
+## 10. Phase 5 — the gutter change peek (planned, next)
+
+### 10.1 What is being built
+
+The gutter change marking from Phase 1 becomes **clickable**. A click on the
+coloured bar (or the deletion wedge) beside a line opens a **change peek**: a
+compact diff of *that block alone*, inserted inline into the Source view
+directly under the change, showing the HEAD lines the block replaced above the
+worktree lines that replaced them. Click again — or the peek's close button —
+and it collapses.
+
+Why this and not "switch to the Diff tab": the Diff panel shows the whole file's
+patch in a split pane and costs the reader their place in the source. The peek
+answers "what did this line used to be?" without leaving the line.
+
+Everything it renders is already in memory: the Phase 1 model is parsed from
+`git/diff?mode=head` and each block already carries its worktree lines
+(`expected`) and the HEAD lines they replaced (`replacement`). **No fetch, no
+backend surface, no new endpoint** — the peek is a second view of a model the
+pane already holds.
+
+### 10.2 New constraints (beyond §3)
+
+1. **The line-number cell is already a `<button>` on Markdown headings**
+   (`explorerSourceLineNumberHtml`, `explorer-viewer.js:4410`) — it toggles the
+   section fold. A marker button *inside* it would be a nested button (invalid
+   HTML, and browsers break it), and hijacking the existing button would cost
+   the fold. → the marker is a row-level element, never a child of the gutter
+   cell (§10.3).
+2. **`renderExplorerSource()` rewrites `#explorer-code-N`'s `innerHTML` on every
+   search keystroke, wrap toggle and Markdown fold** (constraint 3). An open
+   peek is destroyed by each one. → the peek is *state on the pane*, re-inserted
+   by the same tail pass that re-applies the gutter marks; it is never the
+   source of truth for itself.
+3. **An inline peek changes row geometry, and the Phase 2 geometry pass has a
+   uniform fast path** that computes `tops[i] = origin + i × uniformHeight`
+   (`explorer-overview.js:369`). That assumption — contiguous, equal-height rows
+   — is exactly what an inserted element breaks, and it is the path taken
+   whenever wrapping is *off*. → the fast path is disabled while a peek is open
+   (§10.5).
+4. **Unwrapped source scrolls horizontally inside a `min-width: max-content`
+   container** (`terminals.css:3565`). A block-level peek in that flow is as wide
+   as the file's longest line and slides out of view sideways. → the peek is
+   `position: sticky; left: 0` at the scroller's own width (§10.6).
+5. **A row can be both marked and a deletion boundary.** Phase 1 already
+   resolves this — a line mark is never overwritten by a wedge
+   (`explorer-overview.js:224`) — so a row carries at most one marker, and the
+   peek inherits that rule rather than inventing a second one.
+6. **One tab stop per changed *line* would be unusable** on a file with 200
+   changed lines. → focusable marker per *block*, not per row (§10.4).
+
+### 10.3 Where the code goes
+
+All of it in **`web/static/js/explorer-overview.js`** (currently 705 lines),
+plus one CSS block in `terminals.css` and two tokens in `tokens.css`.
+
+- The peek is the same domain as the change model — it renders the very blocks
+  the model already parses, and it must re-apply on the same signal the gutter
+  marks do. Splitting it out would mean exporting the model, the eligibility
+  gates and the render hook to a second file for no separation gained.
+- `explorer-viewer.js` is **not touched**. The marker buttons are injected by
+  the existing gutter pass, not by `renderExplorerSourceLines()`, which keeps
+  the largest frontend file out of the diff entirely (guardrail 6).
+- **The five entry points in §4.1 are unchanged.** No module outside
+  `explorer-overview.js` learns that the peek exists;
+  `teardownExplorerOverview()` gains the peek state to clear, that is all.
+- Standing note for the next maintainer: if this file passes ~1200 lines, the
+  peek (render + interaction, self-contained behind the model) is its natural
+  extraction into `explorer-change-peek.js`. It is not one at ~950.
+
+### 10.4 The marker button
+
+Injected by `applyExplorerChangeMarkGutter()` for every row it marks — the pass
+already walks exactly those rows, so this is one `appendChild` per marked row
+and no second query.
+
+```html
+<div class="explorer-source-line" data-explorer-line="42" data-explorer-change="modified">
+  <button type="button" class="explorer-change-marker"
+          data-explorer-change-marker="3"        <!-- block id -->
+          tabindex="-1"                          <!-- 0 on the block's first row -->
+          aria-expanded="false"
+          aria-controls="explorer-change-peek-2"
+          title="Show change: +2 −1"
+          aria-label="Show change at line 42: 2 added, 1 removed"></button>
+  <span class="explorer-source-line-number">42</span>
+  <code class="explorer-source-line-code">…</code>
+</div>
+```
+
+- **Position, not flow.** `.explorer-source-line[data-explorer-change]` gets
+  `position: relative`; the button is `position: absolute; left: 0; top: 0;
+  bottom: 0; width: 8px` — over the gutter's left edge, outside the row's two
+  grid columns, so neither the fold button nor the grid template is disturbed
+  (constraint 1). The 4 px coloured bar becomes the button's own background
+  rather than the current `box-shadow: inset 4px` on the number cell; the
+  remaining 4 px is invisible hit slop, because a 4 px target is not one.
+- **Deletion wedge:** same button, `data-explorer-change-marker-kind="deleted"`,
+  sized to the wedge (8 × 10 px) and pinned to the row's top edge — or its
+  bottom, under the existing `.explorer-source-change-after` rule, for an
+  end-of-file deletion. The wedge triangle moves from the number cell's
+  `::before` onto the button's, so both markers are painted by one element.
+- **One tab stop per block** (constraint 6): every row of a block gets a button
+  (the whole bar is clickable), but only the block's first rendered row carries
+  `tabindex="0"`. Both fire the same block.
+- **Hover** raises the button's opacity; the bar itself is always at full
+  strength, so the marking looks exactly as it does today until the pointer
+  arrives.
+
+Clicks are handled by **one delegated listener on `#explorer-code-N`**, wired
+once per element behind a `dataset` guard (the same pattern as
+`wireExplorerOverview`). The container survives every `innerHTML` rewrite, so
+the listener does too and the per-render cost stays at zero.
+
+### 10.5 The model, extended
+
+`explorerChangeMarksModel()` currently discards the blocks after classifying
+them. It keeps them instead:
+
+```
+{ marks, deletions, truncated,          // unchanged, byte for byte
+  blocks:     [{ id, kind, line, oldLine, expected[], replacement[] }],
+  blockByLine: Map<renderedLine, blockId> }
+```
+
+`kind` is the classification already computed (`added` / `modified` /
+`deleted`); `blockByLine` maps every marked line — and every deletion's anchor
+line — to its block, so the delegated click resolves a row to a block with one
+`Map` lookup and no search. The overview column's lane and marker hit-testing
+read `marks` / `deletions` exactly as they do now: **Phase 2 is untouched.**
+
+**Peek identity is `{ line, oldLine }`, not the block id.** Ids are positional
+and shift whenever a block is added above; the start-line pair survives an
+unrelated edit elsewhere in the file and fails cleanly when the block itself is
+gone. After every model load the peek re-resolves against the new blocks and
+**closes if nothing matches** — which is the honest outcome when the change the
+reader was looking at has just been reverted, saved over, or committed away.
+
+State on the pane: `pane._explorerChangePeek = { line, oldLine }` (or `null`).
+Cleared by `teardownExplorerOverview()` alongside the model.
+
+**Geometry (constraint 3):** `explorerOverviewGeometry()`'s `uniform` flag gains
+`&& !peekOpen`, so an open peek forces the measured per-row pass. `scrollHeight`
+is already in the cache signature, so the insertion invalidates the cache by
+itself; only the *path* needed fixing. Above `EXPLORER_OVERVIEW_MAX_ROWS` the
+uniform approximation still stands in — that file is already flagged
+`approximate: true`, and one peek's worth of drift on a 20 000-row file is
+within what that flag already promises.
+
+### 10.6 The peek
+
+```html
+<div class="explorer-change-peek" id="explorer-change-peek-2"
+     role="region" aria-label="Change at line 42">
+  <div class="explorer-change-peek-head">
+    <span class="explorer-change-peek-stat">+2 −1</span>
+    <span class="explorer-change-peek-range">HEAD 38–38 → 42–43</span>
+    <button type="button" class="explorer-change-peek-close" aria-label="Close change peek">…</button>
+  </div>
+  <div class="explorer-change-peek-body">
+    <div class="explorer-change-peek-line old"><span class="explorer-change-peek-number">38</span><code>…</code></div>
+    <div class="explorer-change-peek-line new"><span class="explorer-change-peek-number">42</span><code>…</code></div>
+  </div>
+</div>
+```
+
+- **Unified, not side by side.** The Source panel is one narrow column and may
+  be half a split pane; two 50 % columns of code there are unreadable. Old lines
+  stack above new lines, tinted, which is also how the block reads in the model.
+- **Line numbers are real:** `block.oldLine + i` for the HEAD lines,
+  `block.line + i` for the worktree lines — so the peek's numbers agree with the
+  Diff panel's and with the gutter it hangs off.
+- **Syntax highlighting reuses `highlightExplorerCode(text,
+  explorerDiffLanguage(index))`** — the same pair the Diff panel's fallback
+  renderer already uses (`explorer-viewer.js:3490`), so the peek highlights
+  identically and no second lexer path appears. Text is escaped through
+  `escHtml` from `shared.js`.
+- **Insertion point:** after the block's last rendered row for `added` /
+  `modified`; before the anchor row for a `deleted` block (where the removed
+  lines used to be), or after it when the anchor is the end-of-file fallback.
+  The insertion is therefore always at or below the row the reader clicked, so
+  nothing above the click moves and **no scroll compensation is needed**. The
+  peek then gets `scrollIntoView({ block: 'nearest' })` in case it opened past
+  the bottom edge.
+- **Width (constraint 4):** `position: sticky; left: 0` with
+  `width: var(--explorer-source-viewport-width)`, a custom property the existing
+  coalesced sync writes on the scroller from `code.clientWidth`. One property
+  write in a frame that already runs on resize; wrapped and unwrapped mode then
+  agree, and the peek never widens the `max-content` container.
+- **Cap:** `EXPLORER_CHANGE_PEEK_MAX_LINES = 200`. Beyond it the peek renders
+  the first 200 lines and a footer — "… 340 more lines" plus a button that calls
+  `setExplorerFileView(index, 'diff')`, handing a genuinely large block to the
+  panel built for it.
+- **Re-render survival:** `applyExplorerChangeMarks()` ends by re-inserting the
+  open peek (constraint 2). If the block's rows are no longer rendered — a
+  Markdown fold closed over them — the peek closes rather than floating loose.
+  It also closes when the editor opens, on the same eligibility gate the marks
+  already use.
+- **Repaint:** opening or closing changes `scrollHeight`, so it ends with the
+  existing `scheduleExplorerOverviewSync(index)` — the overview column's
+  viewport box and lane stay in step through the machinery already there.
+
+**Interaction and accessibility**
+
+| Gesture | Behaviour |
+| --- | --- |
+| Click the marker | Toggle that block's peek; opening a different block replaces the open one (one peek per pane) |
+| `Enter` / `Space` on a focused marker | Same — it is a real `<button>` |
+| Close button | Closes and returns focus to the marker that opened it |
+| `Escape` **while focus is inside the peek** | Closes it. Scoped to the peek, never a document-level handler, so `Ctrl+F`'s own `Escape` is untouched |
+| Click the overview column's marker | **Unchanged** — jump and flash (§4.7). The column stays a scrollbar |
+
+`aria-expanded` on the marker tracks the peek, `aria-controls` points at its id,
+and the peek is a labelled `role="region"`, so a screen reader announces the
+change rather than an anonymous block of code appearing.
+
+**CSS and tokens (guardrail 7)**
+
+New block in `terminals.css` next to the existing `data-explorer-change` rules.
+Add/delete tints come from **two new tokens**, `--gv-diff-add-bg` /
+`--gv-diff-delete-bg`, declared in `tokens.css` for `:root` and
+`[data-theme="light"]` beside the existing `--gv-diff-*` trio. While that block
+is open, the legacy literals it sits next to —
+`.explorer-diff-cell.add { background: rgba(34, 197, 94, .18) }` and its
+`.delete` twin (`terminals.css:4050`) — migrate to the same two tokens, which is
+the "touch a legacy block, migrate its literals" half of guardrail 7 and makes
+the peek and the Diff panel share one palette by construction. Surfaces and
+borders come from the existing `--explorer-*` variables. No hex or `rgba()`
+literal enters the JS; the existing "no hex literal in this file" test keeps it
+that way.
+
+### 10.7 Test plan
+
+Backend unchanged → **no new behavioral test**; `git/diff?mode=head` is already
+covered by the three Phase 1 tests in `tests/test_api.py`. Everything below is
+contract-level on served assets, in `tests/test_explorer_overview.py`
+(new `ExplorerChangePeekTestCase`), restricted to the kinds `CLAUDE.md` allows —
+class names, `data-*` hooks, `aria-*`, CSS selectors and custom properties, and
+named constants:
+
+- `.explorer-change-marker` and `data-explorer-change-marker=` are emitted, and
+  `data-explorer-change-marker-kind="deleted"` for the wedge variant
+- the marker carries `aria-expanded`, `aria-controls` and `tabindex`
+- `.explorer-change-peek`, `-head`, `-body`, `-line`, `-number`, `-close`
+  selectors exist in `terminals.css`, with `.old` / `.new` variants
+- `.explorer-source-line[data-explorer-change] { position: relative }` and the
+  absolutely positioned marker rule exist (the containment contract §10.4
+  stands on)
+- `--gv-diff-add-bg` / `--gv-diff-delete-bg` are declared for **both** themes,
+  and `.explorer-diff-cell.add` / `.delete` no longer carry an `rgba(` literal
+- `--explorer-source-viewport-width` is declared and consumed by the peek rule
+- named constant `EXPLORER_CHANGE_PEEK_MAX_LINES` is present
+- the peek re-render is wired into `applyExplorerChangeMarks` (the pass that
+  runs after every Source rebuild), and `teardownExplorerOverview` clears
+  `_explorerChangePeek`
+- the geometry fast path is gated on the peek: `uniform` is no longer computed
+  from `wrapped` and the row cap alone
+- the existing "no hex literal in `explorer-overview.js`" and "five entry
+  points" assertions still pass unchanged — the second is the guard that this
+  phase adds no public surface
+
+**Manual checklist** (added to §6's): wrapped and unwrapped source · a peek open
+while typing in `Ctrl+F` (survives the re-render) · a peek open during a pane
+resize · a Markdown fold closing over an open peek · a block on a Markdown
+heading row (fold button and marker both work) · a deletion-only block · a
+deletion at end of file · a >200-line block (cap + "open in Diff") · light and
+dark explorer themes · each of the four source fonts · entering the in-place
+editor with a peek open · saving in the editor (peek re-resolves or closes) ·
+committing from a terminal while a peek is open · an SSH pane · unwrapped source
+scrolled fully right (peek stays pinned at the left edge).
+
+### 10.8 Explicitly not in Phase 5
+
+- **No revert/undo button in the peek.** The Diff panel's block undo
+  (`undoExplorerDiffChange`, its `explorerCanUndoDiffLine` gate and the
+  registered-action bookkeeping) would transplant onto the peek, and the block
+  shape is already the right argument — but that is a *mutation* surface with
+  its own eligibility rules, and this phase is a viewing affordance. Deferred
+  deliberately, with the hook named here so the next phase does not have to
+  rediscover it.
+- **No change to the overview column's click behaviour** — a marker there still
+  jumps and flashes (§4.7).
+- **No peek in the Diff panel or the Preview panel** — settled decision 3 holds.
+- **Nothing from Phases 3–4**: no `map` mode, no `Ctrl+E` / `Ctrl+Q`, no
+  search-match lane, no truncated-diff banner. A truncated diff simply has no
+  marker past the cut, and therefore no peek — no extra handling needed.
+
+### 10.9 Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| Inline insertion breaks the overview's uniform geometry path (silently misplacing every mark below the peek on unwrapped files) | The one real coupling in this phase, called out in §10.2/§10.5: `uniform` is gated on the peek, and the manual pass checks unwrapped source specifically |
+| The peek is destroyed by a search keystroke | It is pane state re-applied by the same tail pass as the gutter marks; the manual pass types into `Ctrl+F` with a peek open |
+| Nested `<button>` on a Markdown heading row | The marker is a row-level absolute element, never a child of the gutter cell; tested by the containment rule and checked manually on a heading row |
+| A tab stop per changed line | One focusable marker per block; the rest are `tabindex="-1"` |
+| `explorer-overview.js` grows into the next monolith | ~250 lines onto 705, with the extraction point (`explorer-change-peek.js`) named in §10.3 before it is needed |
+| Peek points at a block that no longer exists after a save or commit | Identity is `{ line, oldLine }`, re-resolved on every model load, closing when unmatched — never silently showing a stale diff |

@@ -371,13 +371,257 @@ All of these should be behavioral tests against routes or public manager/store o
 
 ## Recommended remediation order
 
-1. **Stop further corruption:** isolate the entire test process from production `runtime_state.json`; add the test-mode guard. **Done — MW-01.**
-2. **Lock the persistence contract:** remove rename shape capture, make snapshot shape authoritative, distinguish writer origin from pinning, and make write failures observable.
-3. **Order state commits:** add per-workspace generations/tombstones and serialize capture against clear/forget; add production single-writer protection. **Done — MW-02**, except production single-writer protection.
-4. **Fix close visibility:** force explicit last-pane cleanup and hide the empty internal default record from every user-visible list.
-5. **Make live shape atomic:** stage and atomically install/replace groups and sessions.
-6. **Unify restore:** use the server service in both modes and add a per-workspace restore reservation.
-7. **Harden identity and recovery:** remove sanitized-ID collisions, validate saved slots, handle duplicate preset references, and improve safe diagnostics.
-8. **Resolve product semantics:** name the distinct close/forget actions and decide how deliberately empty workspaces expire.
+Treat each phase below as a contract boundary. A phase may be split into small
+changes, but its exit gate should pass before work starts on a phase that depends
+on it. Findings that span layers intentionally appear in more than one phase;
+each phase's **Findings** line says which part is being closed there.
 
-The first four items address both halves of the reported incident and the most likely remaining intermittent reappearance/collapse paths. The later items remove deeper collision and recovery hazards before more workspace functionality is built on the current contracts.
+### Phase 0 — Contain the observed corruption paths (complete)
+
+**Findings:** MW-01 and MW-02.
+
+The test suite now uses an isolated runtime-state namespace, test mode refuses
+the production path, and in-process tickets/tombstones reject stale captures.
+Keep those regression tests in place throughout the later work.
+
+The remaining recommendations under MW-01 and MW-02 are not discarded. An
+injected state-store owner, persisted generations, and cross-process production
+writer protection move into Phase 1 because they are durability architecture,
+not incident containment.
+
+**Exit gate:** the existing MW-01/MW-02 tests remain green, including direct
+single-test execution and the paused-capture close/manual-save races.
+
+### Phase 1 — Make runtime state a trustworthy, two-writer store
+
+**Findings:** remaining MW-01/MW-02 work, MW-04, MW-10, and the persistence
+foundation of MW-16.
+
+**Goal:** a success response means the intended revision is durable, and only
+timer autosave or the user's **Save Workspace** action can capture workspace
+shape.
+
+Implementation order:
+
+1. Introduce one application-owned runtime-state store/coordinator. It should
+   own the injected path, process lock, file operations, schema version, and
+   per-workspace commit metadata. Routes and background capture should receive
+   that owner instead of mutating module-global paths.
+2. Protect the complete production read-modify-replace operation with an
+   OS-level file lock (or enforce and verify one production server owner).
+   Continue using a unique same-directory temporary file for every atomic
+   replace. Never hold `SessionManager.lock` during file I/O.
+3. Persist a monotonic workspace revision/generation and the information needed
+   to reject a pre-clear capture after a process restart. Retain the existing
+   in-process tickets while migrating; the durable generation becomes the
+   authority for cross-process ordering.
+4. Return a typed commit result or raise a typed persistence error. Manual
+   save/forget routes must return a retryable 5xx response on replace failure;
+   autosave should retain the last good file and emit one structured,
+   rate-limited error rather than claiming a commit.
+5. Remove the rename call to `capture_workspace`. Rename changes the live label,
+   and the next timer/manual capture persists it. Separate `last_capture_origin`
+   from durable pinning metadata such as `manually_saved_at`/`pinned`.
+6. Add schema-version parsing, last-good backup, and malformed-file quarantine
+   before a bad read can be converted to an empty state and overwritten. Start
+   safe commit logging here; complete field-level validation in Phase 5 once the
+   final identity schema is known.
+
+Verification:
+
+- Retain the MW-02 close-versus-autosave and manual-versus-timer barriers, then
+  run equivalent coordinator tests across two store instances/processes.
+- Force read, temporary-write, flush, and replace failures and assert that
+  manual save/forget never return a success payload.
+- Rename while both permitted writers are stubbed and prove that no shape write
+  occurs; then prove the next real capture persists the new label.
+- Feed malformed and unsupported-version files through the public load path and
+  prove they are quarantined while the last-good state remains recoverable.
+
+**Exit gate:** all runtime-state mutations flow through the coordinator; the
+two-writer rule is behavioral-test enforced; acknowledgements match durable
+file contents; and concurrent production processes cannot silently lose each
+other's updates.
+
+### Phase 2 — Make workspace lifecycle and visibility consistent
+
+**Findings:** MW-05, MW-06, MW-12, and MW-15.
+
+**Goal:** an internal container, grace-period artifact, or abandoned empty
+reservation can no longer masquerade as a user workspace, and each close verb
+has one documented persistence effect.
+
+Implementation order:
+
+1. Write one close-action matrix for **Close window**, **Close group/last pane**,
+   **Close live workspace**, and **Close and forget saved workspace** before
+   changing endpoints. Preserve the audit's current last-group expectation:
+   explicitly closing the final group/pane removes the live workspace and its
+   runtime-state slot. If a restorable "close live" action is desired, expose it
+   as a distinct verb that preserves the slot instead of overloading group
+   close. Apply the chosen rules to one group, one workspace, and bulk close.
+2. Define one backend predicate for a user-visible live workspace. Exclude the
+   empty, non-retained internal `default` record, and consume the same filtered
+   result in the API, Workspaces card, launch-destination menu, cycle shortcut,
+   and native-window reconciliation.
+3. Make an explicit last-pane close force cleanup of its owning group. Track
+   launch initialization explicitly so cleanup safety no longer depends on a
+   five-second grace period with no follow-up sweep.
+4. Give retained empty workspaces a terminal lifecycle. Provide **Delete empty
+   workspace**, and release a never-populated reservation when its launch fails
+   or its empty native window is deliberately closed.
+5. Use the shared in-page confirmation flow for destructive variants and keep
+   retry affordances visible when cleanup or persistence fails.
+
+Verification:
+
+- Close the last pane immediately in both `default` and non-default workspaces;
+  assert group removal, public-list removal, native-window reconciliation, and
+  the selected snapshot outcome from the action matrix.
+- Assert every user-visible consumer receives the same workspace IDs after the
+  final default group closes.
+- Exercise creation, failed launch, empty-window close, explicit deletion, and
+  restart for deliberately empty retained workspaces.
+- Replace the existing grace-window assertions that protect stale empty groups.
+
+**Exit gate:** no ghost destination remains after a final close, no explicit
+last-pane close can leave an immortal group, and every close label predicts its
+live-state and persisted-state result.
+
+### Phase 3 — Make live-shape mutation atomic and runtime identity collision-free
+
+**Findings:** MW-07, MW-11, and the initialization part of MW-06.
+
+**Goal:** autosave observes the complete old shape or complete new shape, and no
+external preset identifier can destructively alias another live group.
+
+Implementation order:
+
+1. Add a manager transaction that validates and stages a complete group and all
+   session records before publication, then installs or swaps them in one
+   `SessionManager.lock` hold. Snapshot the displaced transports under the lock;
+   close transports and emit Socket.IO updates only after releasing every
+   shared lock.
+2. Use the same transaction for new launch, stable-group replacement, restore,
+   and rollback. An `initializing`/reservation record may protect ownership, but
+   it must not appear in autosave or user-visible summaries as a completed
+   group, and it must be released in `finally`.
+3. Stop deriving runtime group identity solely from a sanitized
+   `saved_session_id`. Prefer an opaque group-instance ID with the raw preset ID
+   retained only as a template/credential reference; a collision-free encoded
+   ID plus a hash is an acceptable compatibility bridge.
+4. Check actual runtime group ownership before any teardown. Add a versioned
+   compatibility path for snapshots containing legacy derived group IDs without
+   rewriting their user-visible shape merely because they were loaded.
+
+Verification:
+
+- Pause a multi-pane create/replacement at every staging and publication
+  boundary while autosave runs; every committed slot must equal the complete
+  old or complete new shape.
+- Launch `a/b` and `a-b` in the same and different workspaces and prove that no
+  group or transport is replaced by the other.
+- Inject launch failure before and after publication and prove reservations,
+  groups, sessions, and old transports end in a coherent state.
+
+**Exit gate:** there is one atomic group-install path, snapshots cannot contain
+partial launches/replacements, and runtime identity is independent of lossy
+display-safe transformations.
+
+### Phase 4 — Make restore one server-owned, exact-snapshot operation
+
+**Findings:** MW-03, MW-08, MW-09, and MW-13.
+
+**Goal:** both UI modes invoke the same idempotent restore transaction; the
+snapshot is the only source of shape, while presets can supply secrets only.
+
+Implementation order:
+
+1. Make `_restore_group_request` build names, pane count, modes, directories,
+   commands, group layout, and workspace layout exclusively from the captured
+   snapshot. A saved preset may supply a credential only when it can be safely
+   matched to the captured pane through a credential reference; never match a
+   newly edited preset shape by position and never persist the secret into
+   runtime state.
+2. If a credential is missing or cannot be mapped, keep the captured shape and
+   return a per-pane authentication/retry state. Do not substitute the preset's
+   current panes or partially collapse the group.
+3. Atomically reserve the requested workspace for restore under the manager
+   lock, then release the lock before connection work. Release the reservation
+   in `finally` and return deterministic `already_live` or `already_restoring`
+   results to losing requests.
+4. Preflight the complete selected restore set before launching. With the Phase
+   3 identity model, two slots may safely reference the same preset as a
+   template/credential source; they must not share global runtime ownership. If
+   any remaining conflict is unsupported, report all conflicts before changing
+   live state.
+5. Route single-workspace and multi-workspace startup through
+   `POST /api/runtime-state/restore`, including `default`. Remove the browser's
+   raw-slot loop and preset-substitution policy, and have both surfaces consume
+   the same workspace/group/pane report and retry states.
+
+Verification:
+
+- Replace the two "preset wins" tests with the three-pane-snapshot/edited
+  one-pane-preset regression and assert exact snapshot shape.
+- Release two restore requests through a barrier; assert one complete restore
+  and one deterministic conflict response with no duplicate or replacement.
+- Restore into an already-live `default` workspace in single-workspace mode and
+  assert that it is not duplicated or partially replaced.
+- Restore two retained slots referencing one preset and assert two independent
+  live groups, or a complete preflight rejection if a residual policy conflict
+  remains; partial silent success is never acceptable.
+
+**Exit gate:** there is no client-side restore orchestrator, every restore is
+reserved/idempotent, preset edits cannot alter captured shape, and duplicate
+preset references have an explicit non-partial result.
+
+### Phase 5 — Finish retention, validation, and operational recovery
+
+**Findings:** MW-14 and the remaining schema/diagnostic work in MW-16, followed
+by a final cross-check of all findings.
+
+**Goal:** valid live workspaces are never evicted from restore state, corrupt
+state is diagnosable and recoverable, and the completed behavior is documented
+as a stable contract.
+
+Implementation order:
+
+1. Change the automatic-slot cap so the complete current live set is protected.
+   Apply retention only to stale, closed automatic slots; keep manual/pinned
+   slots under their documented policy. If a hard total limit is still needed,
+   reject creation before a workspace becomes uncapturable and expose that
+   limit to the user.
+2. Complete validation against the now-final schema: schema version, normalized
+   workspace/group IDs, nonempty groups and session arrays, bounded pane counts,
+   allowed mode/shape fields, credential-reference form, and layout consistency.
+   Invalid slots are quarantined and omitted from restorable summaries without
+   destroying the last-good file.
+3. Complete safe diagnostics for capture, close/forget, quarantine, migration,
+   and restore. Include IDs, writer, generation, commit result, group count, and
+   pane count; exclude hosts, directories, commands, and credentials.
+4. Run the full regression matrix in this audit, then update `README.md` and
+   `CHANGELOG.md` for the exact-snapshot rule, close-action semantics, empty
+   workspace lifecycle, restore retry behavior, and retention policy.
+
+Verification:
+
+- Autosave 13 or more live workspaces and assert every live workspace remains
+  restorable while only eligible stale closed slots are evicted.
+- Offer zero-pane, malformed, unsupported-version, and legacy-version slots and
+  assert validation, quarantine, migration, summary visibility, and last-good
+  recovery behavior.
+- Review emitted logs to prove they contain enough safe metadata to reconstruct
+  writer/order decisions without leaking connection or command data.
+- Run `make check` (or `python tests/run_tests.py` plus
+  `python -m ruff check .` on Windows) after the complete sequence.
+
+**Exit gate:** every required invariant and regression-matrix row is covered by
+a behavioral test, maintained documentation matches the implementation, and no
+remaining audit finding is left open without an explicit product decision.
+
+This order first makes persistence outcomes reliable, then fixes the lifecycle
+surface users interact with, then provides the atomic manager and identity
+primitives that restore depends on. Restore consolidation follows those
+prerequisites, and retention/schema hardening comes last so it validates the
+final persisted and runtime model rather than an intermediate one.
