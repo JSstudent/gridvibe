@@ -1037,6 +1037,206 @@
         });
     }
 
+    /* ── Connection target dropdown (the caret beside each mode button) ──
+       Step 2 used to be pure recall: to start anything you had to remember an
+       IP, a username, a port, or a repository path. The caret offers the
+       targets the saved presets already use, so a throwaway session can reuse a
+       known address without loading the preset itself — the launch stays a
+       scratch session (no `activeSavedSessionId`), which is what lets the same
+       host be opened over and over as "host", "host (1)", "host (2)".
+
+       Stroke-style currentColor icons only (guardrail 7); `workspace-icon` is
+       the menu's own sizing class from workspaces.js. */
+    const CONNECTION_TARGET_ICONS = {
+        blank: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>',
+        ssh: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2" y="3" width="20" height="14" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>',
+        wsl: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>'
+    };
+
+    const BLANK_CONNECTION_TARGETS = {
+        ssh: { host: '', username: 'ubuntu', password: '', port: '22', default_dir: '' },
+        wsl: { distribution: '', username: '', default_dir: '' }
+    };
+
+    let connectionTargetCache = { ssh: [], wsl: [] };
+
+    function normalizeConnectionTargetMode(mode) {
+        return mode === 'wsl' ? 'wsl' : 'ssh';
+    }
+
+    async function refreshConnectionTargets() {
+        const response = await fetch('/api/session-targets');
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to load saved targets');
+        }
+        connectionTargetCache = {
+            ssh: Array.isArray(data.ssh) ? data.ssh : [],
+            wsl: Array.isArray(data.wsl) ? data.wsl : []
+        };
+        return connectionTargetCache;
+    }
+
+    function describeConnectionTarget(mode, target) {
+        if (normalizeConnectionTargetMode(mode) === 'wsl') {
+            return String(target?.default_dir || '');
+        }
+
+        const port = Number(target?.port) || 22;
+        const authority = `${String(target?.username || 'ubuntu')}@${String(target?.host || '')}`
+            + (port === 22 ? '' : `:${port}`);
+        const directory = String(target?.default_dir || '').trim();
+        return directory ? `${authority} — ${directory}` : authority;
+    }
+
+    /* Comparable form of one target so the menu can tick the entry Step 2 is
+       already filled with, whether it came from this menu or was typed. */
+    function connectionTargetSignature(mode, target) {
+        if (normalizeConnectionTargetMode(mode) === 'wsl') {
+            return JSON.stringify([
+                String(target?.default_dir || '').trim().replace(/\\/g, '/').toLowerCase(),
+                String(target?.distribution || '').trim(),
+                String(target?.username || '').trim()
+            ]);
+        }
+
+        return JSON.stringify([
+            String(target?.host || '').trim().toLowerCase(),
+            String(target?.username || '').trim() || 'ubuntu',
+            Number(target?.port) || 22,
+            String(target?.default_dir || '').trim()
+        ]);
+    }
+
+    function currentConnectionTargetSignature(mode) {
+        const targetMode = normalizeConnectionTargetMode(mode);
+        if (connectionMode !== targetMode) {
+            return '';
+        }
+        const inputs = collectModeInputs();
+        return connectionTargetSignature(targetMode, inputs[targetMode]);
+    }
+
+    function applyConnectionTargetFields(targetMode, target) {
+        const values = collectModeInputs();
+        values[targetMode] = targetMode === 'ssh'
+            ? {
+                host: String(target?.host || ''),
+                username: String(target?.username || '') || 'ubuntu',
+                /* Never carried over from the form: a password belongs to the
+                   preset it was saved with, and is refetched below only for the
+                   picked target. */
+                password: '',
+                port: String(Number(target?.port) || 22),
+                default_dir: String(target?.default_dir || '')
+            }
+            : {
+                distribution: String(target?.distribution || ''),
+                username: String(target?.username || ''),
+                default_dir: String(target?.default_dir || '')
+            };
+
+        if (connectionMode !== targetMode) {
+            connectionMode = targetMode;
+            document.querySelectorAll('.mode-btn').forEach(button => {
+                button.classList.toggle('active', button.dataset.mode === connectionMode);
+            });
+            renderModeFields();
+        }
+        applyModeInputs(values);
+    }
+
+    async function applyConnectionTarget(mode, target) {
+        const targetMode = normalizeConnectionTargetMode(mode);
+        applyConnectionTargetFields(targetMode, target || BLANK_CONNECTION_TARGETS[targetMode]);
+
+        /* Prefilling an address is not importing a preset. Dropping the active
+           saved session is what keeps this launch a scratch session, so the
+           same target can be launched repeatedly instead of replacing the one
+           group that owns the preset. */
+        setActiveSavedSession(null);
+        resetTerminalSetupIfTargetChanged(connectionMode, collectModeInputs());
+        updateHeaderBadges();
+        refreshVisibleAgentPreflights();
+
+        if (!target) {
+            showMessage(
+                targetMode === 'ssh'
+                    ? 'Cleared the SSH target.'
+                    : 'Cleared the local repository.',
+                'info'
+            );
+            return;
+        }
+
+        if (targetMode === 'ssh' && target.has_password && target.session_id) {
+            /* The target list is secret-free on purpose, so the saved password
+               is fetched only now, for the one preset the user picked. */
+            try {
+                const response = await fetch(
+                    `/api/saved-sessions/${encodeURIComponent(target.session_id)}`
+                );
+                const data = await response.json();
+                const field = document.getElementById('ssh_password');
+                if (response.ok && field && connectionMode === 'ssh') {
+                    field.value = String(data?.config?.ssh?.password || '');
+                }
+            } catch (_error) {
+                // A missing password is recoverable — the field stays empty and
+                // the user can type it or rely on key auth.
+            }
+        }
+
+        showMessage(
+            `Started a new session on ${describeConnectionTarget(targetMode, target)}.`,
+            'success'
+        );
+    }
+
+    async function toggleConnectionTargetMenu(event, mode) {
+        event.preventDefault();
+        const targetMode = normalizeConnectionTargetMode(mode);
+        const anchor = event.currentTarget;
+
+        /* One request on a deliberate click keeps the list honest without any
+           polling (guardrail 3); a failure just falls back to the cache. */
+        try {
+            await refreshConnectionTargets();
+        } catch (_error) {}
+
+        const targets = connectionTargetCache[targetMode] || [];
+        const currentSignature = currentConnectionTargetSignature(targetMode);
+        const blankSignature = connectionTargetSignature(
+            targetMode,
+            BLANK_CONNECTION_TARGETS[targetMode]
+        );
+        const entries = [{
+            label: targetMode === 'ssh' ? 'Blank SSH target' : 'Blank local repository',
+            current: currentSignature === blankSignature,
+            icon: currentSignature === blankSignature ? '' : CONNECTION_TARGET_ICONS.blank,
+            onSelect: () => applyConnectionTarget(targetMode, null)
+        }];
+
+        if (!targets.length) {
+            entries.push({
+                label: 'No saved sessions to borrow a target from yet',
+                disabled: true
+            });
+        }
+
+        targets.forEach(target => {
+            const isCurrent = currentSignature === connectionTargetSignature(targetMode, target);
+            entries.push({
+                label: describeConnectionTarget(targetMode, target),
+                current: isCurrent,
+                icon: isCurrent ? '' : CONNECTION_TARGET_ICONS[targetMode],
+                onSelect: () => applyConnectionTarget(targetMode, target)
+            });
+        });
+
+        openWorkspaceContextMenu(event, entries, { anchor });
+    }
+
     async function browseLocalRepo() {
         const currentPath = document.getElementById('wsl_default_dir')?.value ?? '';
 
@@ -2761,7 +2961,7 @@
                 && liveWorkspaceCache.length > 0,
             onSelect: () => chooseNewWorkspaceDestination()
         });
-        openWorkspaceContextMenu(event, entries);
+        openWorkspaceContextMenu(event, entries, { anchor: event.currentTarget });
     }
 
     async function refreshWorkspaceDestinations() {
@@ -3125,7 +3325,12 @@
                     connection_mode: config.connection_mode,
                     layout: config.layout,
                     workspace_layout: config.workspace_layout,
-                    saved_session_id: activeSavedSessionId,
+                    /* The built-in default is a blank form, not a preset. Sending
+                       it as a preset identity made every scratch launch claim the
+                       same group, so the second one replaced the first. */
+                    saved_session_id: activeSavedSessionId === DEFAULT_SESSION_ID
+                        ? ''
+                        : activeSavedSessionId,
                     session_name: sessionName,
                     ...collectWorkspaceDestination(),
                     sessions
@@ -3162,9 +3367,15 @@
             const launchWarnings = Array.isArray(data.warnings)
                 ? data.warnings.filter(item => String(item || '').trim())
                 : [];
+            /* The server has the last word on the name: repeat launches of the
+               same scratch target come back suffixed ("10.0.0.5 (2)"), so quote
+               what was actually opened rather than what was requested. */
+            const launchedName = String(data.group?.name || sessionName || '').trim();
+            const launchIntro = `Launching ${data.count} ${getConnectionModeLabel(config.connection_mode)} terminals`
+                + (launchedName ? ` in "${launchedName}".` : '.');
             const launchMessage = launchWarnings.length
-                ? `Launching ${data.count} ${getConnectionModeLabel(config.connection_mode)} terminals. ${launchWarnings.length === 1 ? launchWarnings[0] : `${launchWarnings.length} startup commands were cleared after preflight failed.`}`
-                : `Launching ${data.count} ${getConnectionModeLabel(config.connection_mode)} terminals.`;
+                ? `${launchIntro} ${launchWarnings.length === 1 ? launchWarnings[0] : `${launchWarnings.length} startup commands were cleared after preflight failed.`}`
+                : launchIntro;
             showMessage(launchMessage, launchWarnings.length ? 'warning' : 'success');
             if (data.launch_target === 'web') {
                 setTimeout(async () => {
@@ -3253,6 +3464,9 @@
     restoreLauncherPanelFolds();
     updateTerminalTargetSignature(connectionMode, collectModeInputs());
     loadPersistedConfig(true);
+    /* Primed once so the first caret click opens instantly; every later open
+       re-reads it, so a session saved in another window is offered right away. */
+    refreshConnectionTargets().catch(() => {});
     loadAppSettings().catch(() => {});
     loadVoicePrefs().catch(() => {});
     checkRestorableWorkspace().catch(() => {});

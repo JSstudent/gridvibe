@@ -183,7 +183,9 @@ from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compa
     _saved_session_meta,
     _saved_session_response,
     _utc_timestamp,
+    build_connection_target_proposals,
     build_live_session_view_updates,
+    build_unique_session_name,
     delete_saved_sessions,
     load_saved_sessions,
     load_session_config,
@@ -1964,6 +1966,19 @@ def agent_preflight():
         return jsonify(_agent_preflight_payload(agent_key, data))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@app.route('/api/session-targets', methods=['GET'])
+def get_session_targets():
+    """Return the distinct connection targets the saved presets already use.
+
+    The launcher's SSH Remote / Local Repo dropdowns prefill Step 2 from this so
+    a throwaway session can reuse a known host or repository path without
+    loading (and then being tied to) the whole preset. Secret-free by design —
+    the picked target's saved password, if any, comes from
+    ``GET /api/saved-sessions/<id>``.
+    """
+    return jsonify(build_connection_target_proposals())
 
 
 @app.route('/api/saved-sessions', methods=['GET'])

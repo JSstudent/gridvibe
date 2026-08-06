@@ -2423,5 +2423,196 @@ class MultiWorkspaceDialogChromeTestCase(unittest.TestCase):
         self.assertIn(".app-menu-item:hover:not(:disabled),", terminals_css)
 
 
+class ScratchSessionLaunchTestCase(unittest.TestCase):
+    """Repeatable launches of the built-in default ("scratch") session.
+
+    The built-in "Default Session" is a blank form, not a stored preset, so it
+    carries no launch identity: every launch mints its own group, and the group
+    name — which the launcher derives from the SSH host or the local repository
+    folder — is numbered when it is already taken.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.saved_sessions_path = Path(self.temp_dir.name) / "saved_sessions.json"
+        patcher = patch.object(
+            web_saved_sessions, "SAVED_SESSIONS_PATH", str(self.saved_sessions_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _launch(self, session_name="10.0.0.5", **overrides):
+        body = {
+            "connection_mode": "wsl",
+            "session_name": session_name,
+            "saved_session_id": "default-session",
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+        body.update(overrides)
+        response = self.client.post("/api/sessions", json=body)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return response.get_json()
+
+    def test_the_default_session_can_be_launched_over_and_over(self):
+        names = [self._launch()["group"]["name"] for _ in range(3)]
+
+        self.assertEqual(names, ["10.0.0.5", "10.0.0.5 (1)", "10.0.0.5 (2)"])
+        self.assertEqual(len(api.session_manager.get_all_groups()), 3)
+
+    def test_the_default_session_never_claims_a_preset_group(self):
+        payload = self._launch()
+
+        # A stable "saved-session-default-session" group id made the second
+        # launch replace the first in place; a scratch launch owns no preset.
+        self.assertNotEqual(payload["group_id"], "saved-session-default-session")
+        self.assertEqual(payload["group"]["saved_session_id"], "")
+
+    def test_the_default_session_opens_in_two_workspaces_at_once(self):
+        first = self._launch()
+        second = self._launch(new_workspace=True, workspace_label="Second")
+
+        self.assertNotEqual(first["workspace_id"], second["workspace_id"])
+        self.assertNotEqual(first["group_id"], second["group_id"])
+
+    def test_saving_a_scratch_session_makes_the_next_launch_skip_its_name(self):
+        self._launch()
+        web_saved_sessions.upsert_saved_session(
+            config={"connection_mode": "wsl", "wsl": {"default_dir": str(self.repo_dir)}},
+            name="10.0.0.5 (1)",
+        )
+
+        self.assertEqual(self._launch()["group"]["name"], "10.0.0.5 (2)")
+
+    def test_a_saved_preset_keeps_its_own_name_verbatim(self):
+        self._launch(session_name="Reviews")
+
+        payload = self._launch(session_name="Reviews", saved_session_id="alpha")
+
+        # A preset is live in at most one workspace, so its tab must read as the
+        # preset it is rather than as a numbered scratch session.
+        self.assertEqual(payload["group"]["name"], "Reviews")
+        self.assertEqual(payload["group_id"], "saved-session-alpha")
+
+    def test_a_restore_replays_a_stored_name_without_renumbering(self):
+        self._launch(session_name="Reviews")
+
+        payload = self._launch(session_name="Reviews", restore=True)
+
+        self.assertEqual(payload["group"]["name"], "Reviews")
+
+    def test_unique_session_name_skips_taken_names_case_insensitively(self):
+        self.assertEqual(
+            web_saved_sessions.build_unique_session_name("Repo", ["repo", "REPO (1)"]),
+            "Repo (2)",
+        )
+        self.assertEqual(
+            web_saved_sessions.build_unique_session_name("Repo", []),
+            "Repo",
+        )
+
+
+class ConnectionTargetProposalTestCase(unittest.TestCase):
+    """`GET /api/session-targets`: reusable addresses, without the secrets."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.saved_sessions_path = Path(self.temp_dir.name) / "saved_sessions.json"
+        patcher = patch.object(
+            web_saved_sessions, "SAVED_SESSIONS_PATH", str(self.saved_sessions_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _save(self, name, config):
+        return web_saved_sessions.upsert_saved_session(config=config, name=name)
+
+    def _targets(self):
+        response = self.client.get("/api/session-targets")
+        self.assertEqual(response.status_code, 200)
+        return response.get_json()
+
+    def test_no_saved_sessions_yields_two_empty_lists(self):
+        self.assertEqual(self._targets(), {"ssh": [], "wsl": []})
+
+    def test_identical_ssh_targets_are_offered_once(self):
+        for name in ("Alpha", "Beta"):
+            self._save(
+                name,
+                {
+                    "connection_mode": "ssh",
+                    "ssh": {
+                        "host": "10.0.0.5",
+                        "username": "ubuntu",
+                        "port": 22,
+                        "default_dir": "/srv/app",
+                    },
+                },
+            )
+
+        targets = self._targets()["ssh"]
+
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["host"], "10.0.0.5")
+        self.assertEqual(targets[0]["default_dir"], "/srv/app")
+
+    def test_a_different_directory_on_one_host_is_a_separate_target(self):
+        for name, directory in (("Alpha", "/srv/app"), ("Beta", "/srv/other")):
+            self._save(
+                name,
+                {
+                    "connection_mode": "ssh",
+                    "ssh": {"host": "10.0.0.5", "username": "ubuntu", "port": 22,
+                            "default_dir": directory},
+                },
+            )
+
+        self.assertEqual(
+            sorted(target["default_dir"] for target in self._targets()["ssh"]),
+            ["/srv/app", "/srv/other"],
+        )
+
+    def test_local_repository_paths_are_offered_under_their_own_mode(self):
+        self._save(
+            "Repo",
+            {"connection_mode": "wsl", "wsl": {"default_dir": "/home/me/repo"}},
+        )
+
+        targets = self._targets()
+        self.assertEqual(targets["ssh"], [])
+        self.assertEqual(targets["wsl"][0]["default_dir"], "/home/me/repo")
+
+    def test_saved_passwords_are_flagged_but_never_listed(self):
+        self._save(
+            "Alpha",
+            {
+                "connection_mode": "ssh",
+                "ssh": {"host": "10.0.0.5", "username": "ubuntu", "port": 22,
+                        "password": "hunter2"},
+            },
+        )
+
+        target = self._targets()["ssh"][0]
+
+        self.assertTrue(target["has_password"])
+        self.assertNotIn("password", target)
+        self.assertNotIn("hunter2", self.client.get("/api/session-targets").get_data(as_text=True))
+
+
 if __name__ == "__main__":
     unittest.main()

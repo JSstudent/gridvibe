@@ -515,6 +515,47 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('<span>Mode</span>', html)
         self.assertNotIn("Configure your terminal workspace before launch.", html)
 
+    def test_launcher_page_ships_the_connection_target_dropdown(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # The caret half of each mode button: one per mode, both aimed at the
+        # single menu entry point.
+        self.assertIn('class="mode-choice"', html)
+        self.assertIn('id="sshTargetBtn"', html)
+        self.assertIn('id="wslTargetBtn"', html)
+        self.assertIn('data-target-mode="ssh"', html)
+        self.assertIn('data-target-mode="wsl"', html)
+        self.assertIn('title="Start from a saved SSH target"', html)
+        self.assertIn('title="Start from a saved local repository"', html)
+        self.assertIn("toggleConnectionTargetMenu(event, 'ssh')", html)
+        self.assertIn("toggleConnectionTargetMenu(event, 'wsl')", html)
+        self.assertIn("/api/session-targets", html)
+        self.assertIn("const CONNECTION_TARGET_ICONS = {", html)
+        self.assertIn("const BLANK_CONNECTION_TARGETS = {", html)
+
+    def test_launcher_prefill_leaves_the_launch_a_scratch_session(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Borrowing an address must not adopt the preset it came from: the
+        # active saved session is dropped, so the launch stays repeatable.
+        self.assertIn("setActiveSavedSession(null);", html)
+        # The built-in default is never sent as a preset identity.
+        self.assertIn("activeSavedSessionId === DEFAULT_SESSION_ID", html)
+
+    def test_launcher_target_menu_reports_its_open_state_on_the_caret(self):
+        launcher_js = self.client.get("/static/js/launcher.js").get_data(as_text=True)
+        workspaces_js = self.client.get("/static/js/workspaces.js").get_data(as_text=True)
+
+        # The shared menu owns aria-expanded for whichever control opened it —
+        # the opener never hears the outside click or Escape that closes it.
+        self.assertIn("function releaseWorkspaceContextMenuAnchor()", workspaces_js)
+        self.assertIn("anchor.setAttribute('aria-expanded', 'true');", workspaces_js)
+        self.assertIn("openWorkspaceContextMenu(event, entries, { anchor });", launcher_js)
+
     def test_launcher_page_resets_terminal_setup_when_connection_target_changes(self):
         response = self.client.get("/")
 

@@ -50,6 +50,7 @@
         [data-theme="light"] .count-btn,
         [data-theme="light"] .layout-btn,
         [data-theme="light"] .mode-btn,
+        [data-theme="light"] .mode-target-btn,
         [data-theme="light"] .ghost-btn {
             background: rgba(255, 255, 255, 0.98);
             border-color: rgba(75, 85, 99, 0.28);
@@ -58,6 +59,7 @@
         [data-theme="light"] .count-btn:hover,
         [data-theme="light"] .layout-btn:hover,
         [data-theme="light"] .mode-btn:hover,
+        [data-theme="light"] .mode-target-btn:hover,
         [data-theme="light"] .ghost-btn:hover {
             border-color: rgba(8, 145, 178, 0.56);
         }
@@ -550,6 +552,7 @@
         .count-btn,
         .layout-btn,
         .mode-btn,
+        .mode-target-btn,
         .ghost-btn,
         .action-btn {
             border: 1px solid var(--border-muted);
@@ -563,6 +566,7 @@
         .count-btn:hover,
         .layout-btn:hover,
         .mode-btn:hover,
+        .mode-target-btn:hover,
         .ghost-btn:hover,
         .action-btn:hover {
             border-color: rgba(0, 217, 255, 0.5);
@@ -940,6 +944,54 @@
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 8px;
             margin-bottom: 10px;
+        }
+
+        /* The mode button and its target caret read as one control, so the
+           hover lift belongs to the pair rather than to either half — lifting
+           only the half under the pointer split the seam open. */
+        .mode-choice {
+            display: flex;
+            align-items: stretch;
+            min-width: 0;
+            transition: transform 0.15s ease;
+        }
+
+        .mode-choice:hover {
+            transform: translateY(-1px);
+        }
+
+        .mode-choice .mode-btn:hover,
+        .mode-choice .mode-target-btn:hover {
+            transform: none;
+        }
+
+        .mode-choice .mode-btn {
+            flex: 1;
+            min-width: 0;
+            border-top-right-radius: 0;
+            border-bottom-right-radius: 0;
+        }
+
+        .mode-target-btn {
+            flex: 0 0 auto;
+            width: 30px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-left-width: 0;
+            border-top-left-radius: 0;
+            border-bottom-left-radius: 0;
+            color: var(--muted);
+        }
+
+        .mode-target-btn:hover {
+            color: var(--text);
+        }
+
+        .mode-target-btn svg {
+            width: 14px;
+            height: 14px;
         }
 
         .mode-btn {

@@ -547,19 +547,33 @@
 
     /* ── Session tab context menu ── */
 
+    /* The control that opened the menu, so its aria-expanded can be told when
+       the menu goes away — the menu closes on an outside click or Escape,
+       neither of which the opener hears. */
+    let workspaceContextMenuAnchor = null;
+
+    function releaseWorkspaceContextMenuAnchor() {
+        if (workspaceContextMenuAnchor) {
+            workspaceContextMenuAnchor.setAttribute('aria-expanded', 'false');
+            workspaceContextMenuAnchor = null;
+        }
+    }
+
     function closeWorkspaceContextMenu() {
         const menu = document.getElementById('workspaceContextMenu');
         if (menu) {
             menu.hidden = true;
             menu.innerHTML = '';
         }
+        releaseWorkspaceContextMenuAnchor();
     }
 
-    function openWorkspaceContextMenu(event, entries) {
+    function openWorkspaceContextMenu(event, entries, { anchor = null } = {}) {
         const menu = document.getElementById('workspaceContextMenu');
         if (!menu || !entries.length) {
             return;
         }
+        releaseWorkspaceContextMenuAnchor();
         menu.innerHTML = '';
         entries.forEach(entry => {
             menu.appendChild(
@@ -577,6 +591,10 @@
         const rect = menu.getBoundingClientRect();
         menu.style.left = `${Math.max(4, Math.min(event.clientX, innerWidth - rect.width - 8))}px`;
         menu.style.top = `${Math.max(4, Math.min(event.clientY, innerHeight - rect.height - 8))}px`;
+        if (anchor?.hasAttribute?.('aria-expanded')) {
+            workspaceContextMenuAnchor = anchor;
+            anchor.setAttribute('aria-expanded', 'true');
+        }
     }
 
     document.addEventListener('pointerdown', event => {

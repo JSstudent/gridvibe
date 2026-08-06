@@ -91,21 +91,57 @@
                 </div>
             </div>
 
+            <!-- Split mode control: the wide half picks the connection mode,
+                 the caret half prefills its fields from a target a saved
+                 session already uses. Prefilling is deliberately not the same
+                 as Import Session — it copies the address only and leaves the
+                 launch a scratch session, so the same host can be opened again
+                 and again without being tied to one preset. -->
             <div class="mode-toggle">
-                <button type="button" class="mode-btn active" data-mode="ssh">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                        <rect x="2" y="3" width="20" height="14" rx="2"></rect>
-                        <line x1="8" y1="21" x2="16" y2="21"></line>
-                        <line x1="12" y1="17" x2="12" y2="21"></line>
-                    </svg>
-                    SSH Remote
-                </button>
-                <button type="button" class="mode-btn" data-mode="wsl">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                    </svg>
-                    Local Repo
-                </button>
+                <div class="mode-choice">
+                    <button type="button" class="mode-btn active" data-mode="ssh">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                            <rect x="2" y="3" width="20" height="14" rx="2"></rect>
+                            <line x1="8" y1="21" x2="16" y2="21"></line>
+                            <line x1="12" y1="17" x2="12" y2="21"></line>
+                        </svg>
+                        SSH Remote
+                    </button>
+                    <button
+                        type="button"
+                        class="mode-target-btn"
+                        id="sshTargetBtn"
+                        data-target-mode="ssh"
+                        onclick="toggleConnectionTargetMenu(event, 'ssh')"
+                        aria-haspopup="true"
+                        aria-expanded="false"
+                        aria-label="Start from a saved SSH target"
+                        title="Start from a saved SSH target"
+                    >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"></path></svg>
+                    </button>
+                </div>
+                <div class="mode-choice">
+                    <button type="button" class="mode-btn" data-mode="wsl">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        Local Repo
+                    </button>
+                    <button
+                        type="button"
+                        class="mode-target-btn"
+                        id="wslTargetBtn"
+                        data-target-mode="wsl"
+                        onclick="toggleConnectionTargetMenu(event, 'wsl')"
+                        aria-haspopup="true"
+                        aria-expanded="false"
+                        aria-label="Start from a saved local repository"
+                        title="Start from a saved local repository"
+                    >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"></path></svg>
+                    </button>
+                </div>
             </div>
 
             <div id="modeFields"></div>

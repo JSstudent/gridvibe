@@ -112,6 +112,7 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 | --- | --- |
 | **Session groups** | Numbered, draggable, closable tabs. `Alt+1`–`Alt+9` to switch, middle-click to close. |
 | **Presets** | `Save Session`, `Save Session as…`, `Save All Sessions`, `Import Session`. SSH passwords are Fernet-encrypted in `saved_sessions.json`. |
+| **Scratch sessions** | The caret beside **SSH Remote** / **Local Repo** in step 02 fills the form from an address a saved session already uses — pick the host or repository and launch, no retyping. The launch stays unattached to any preset, so the same target opens as many times as you like: `10.0.0.5`, `10.0.0.5 (1)`, `10.0.0.5 (2)`. Save one and the next launch skips its number. |
 | **Workspace snapshot** | Background autosave (1–15 min) plus explicit **Save Workspace** writes `runtime_state.json` — never passwords. After a restart the launcher offers the workspace back by name and reopens on the group you left. |
 | **Multiple workspaces** | Opt-in — the switch in the launcher's **Workspaces** card (step 04), stored as `workspace.multi_workspace_enabled`. Launch into a chosen workspace or a new one, each in its own window with its own tabs; move a tab between workspaces without restarting a single terminal; rename a workspace; restore any subset of saved workspaces after a restart. `Alt+W` walks the open workspaces (`Alt+Shift+W` walks back). |
 | **Broadcast typing** | One keystroke, every pane in the group. |

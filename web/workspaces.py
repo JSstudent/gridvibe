@@ -288,6 +288,20 @@ def saved_session_conflict(saved_session_id: str, target_workspace_id: str) -> O
     }
 
 
+def _taken_session_names() -> List[str]:
+    """Every session name a new scratch launch has to stay clear of.
+
+    Live groups *and* saved presets: saving a scratch session under the name it
+    was given ("10.0.0.5 (1)") has to make the next scratch launch skip that
+    number rather than mint a second session with the same name.
+    """
+    from web.saved_sessions import load_saved_sessions
+
+    names = [group.name for group in _manager().get_all_groups()]
+    names.extend(entry["name"] for entry in load_saved_sessions())
+    return names
+
+
 # ==================== Shared launch service ====================
 
 
@@ -435,11 +449,13 @@ def launch_session_group(
     from web.config import runtime_config
     from web.explorer import _is_browser_session, _is_explorer_session
     from web.saved_sessions import (
+        DEFAULT_SAVED_SESSION_ID,
         _build_launch_group_id,
         _normalize_connection_mode,
         _normalize_launch_session_id,
         _normalize_layout,
         _normalize_workspace_layout,
+        build_unique_session_name,
     )
     from web.terminal_io import (
         _broadcast_session_groups_updated,
@@ -477,6 +493,14 @@ def launch_session_group(
         )
         session_name = str(data.get("session_name") or "").strip()
         saved_session_id = _normalize_launch_session_id(data.get("saved_session_id"))
+        # The built-in "Default Session" is a blank *form*, not a stored preset,
+        # so it carries no launch identity. Treating it as one gave every
+        # scratch launch the same stable group id, which made a second launch
+        # replace the first in place (and 409 across workspaces) — the user
+        # could only ever have one session per host or repository open. Scratch
+        # launches now always mint a fresh group.
+        if saved_session_id == DEFAULT_SAVED_SESSION_ID:
+            saved_session_id = ""
         stable_group_id = _build_launch_group_id(saved_session_id) or None
 
         # Destination and the uniqueness guard are settled first, because
@@ -522,6 +546,13 @@ def launch_session_group(
         group_name = session_name or (
             "Workspace" if is_restore else f"Session {time.strftime('%H:%M:%S')}"
         )
+        # A scratch launch is named after its connection target, so launching
+        # the same host or repository twice would produce two identically named
+        # tabs. Suffix the repeats instead. A saved preset keeps its own name
+        # verbatim (it is live in at most one workspace anyway), and a restore
+        # replays a stored shape, so neither is renumbered.
+        if not saved_session_id and not is_restore:
+            group_name = build_unique_session_name(group_name, _taken_session_names())
         group = session_manager.create_group(
             name=group_name,
             connection_mode=connection_mode,
