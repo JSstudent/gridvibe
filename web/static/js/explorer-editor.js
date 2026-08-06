@@ -231,6 +231,13 @@
         textarea.value = state.draft;
         textarea.addEventListener('input', () => handleExplorerEditInput(index));
         textarea.addEventListener('keydown', event => handleExplorerEditKeydown(index, event));
+        /* The panel now holds a textarea instead of numbered rows, so the
+           change marks have nothing to sit on and the overview has nothing to
+           survey. Re-applying them is what stands the overview column down
+           (and exitExplorerEditMode's renderExplorerSource brings it back);
+           the cached model itself is kept, so leaving the editor costs no
+           refetch. */
+        applyExplorerChangeMarks(index);
     }
 
     function handleExplorerEditInput(index) {

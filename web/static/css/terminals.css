@@ -3380,9 +3380,66 @@
            overlaps the horizontal scrollbar. Must come after the
            .explorer-editor-panel rule above — it overrides its overflow. */
         .explorer-source-frame {
+            /* Fixed overview widths (settled decision 2: not draggable, so
+               there is no per-pane width to persist or restore). `map` gets
+               room for glyph bands; `ruler` only has to hold the marker lane
+               and the viewport box. */
+            --explorer-overview-width: 110px;
+            --explorer-overview-ruler-width: 14px;
             display: grid;
             grid-template-columns: minmax(0, 1fr) auto;
             overflow: hidden;
+        }
+
+        /* The source-view overview column (explorer-overview.js): a fixed,
+           non-scrolling survey of the whole file docked in the frame's second
+           grid column. It carries the HEAD change markers in a lane on its
+           left edge and the current viewport as a box, and it acts as the
+           Source panel's scrollbar — click, drag and wheel all drive
+           .explorer-source-view. */
+        .explorer-source-overview {
+            position: relative;
+            min-height: 0;
+            width: var(--explorer-overview-width);
+            overflow: hidden;
+            background: var(--explorer-bar-bg);
+            border-left: 1px solid var(--explorer-row-border);
+            cursor: pointer;
+            user-select: none;
+            /* The drag is pointer-captured; without this a touch drag would be
+               eaten by the browser's own panning. */
+            touch-action: none;
+        }
+
+        .explorer-source-overview[hidden] {
+            display: none;
+        }
+
+        .explorer-source-overview[data-explorer-overview-mode="ruler"] {
+            width: var(--explorer-overview-ruler-width);
+        }
+
+        .explorer-source-overview.is-scrubbing {
+            cursor: grabbing;
+        }
+
+        .explorer-overview-canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Decorative (aria-hidden): the scroll position it shows is reported
+           on the aside as aria-valuenow. Moved by transform only, so a scroll
+           costs no layout and no repaint of the lane beneath it. */
+        .explorer-overview-viewport {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            background: var(--explorer-row-active);
+            opacity: .5;
+            pointer-events: none;
         }
 
         /* Read-only image viewer. A theme-aware checkerboard makes transparent

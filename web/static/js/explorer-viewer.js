@@ -7378,7 +7378,7 @@
                 </div>
                 <div class="explorer-editor-body${keepDiffSplit ? ' split-diff' : ''}">
                     <div class="explorer-editor-main">
-                        <div class="explorer-source-frame explorer-editor-panel" data-explorer-file-panel="source" ${initialFileView === 'source' ? '' : 'hidden'}><div class="explorer-source-view" id="explorer-code-${index}"></div></div>
+                        <div class="explorer-source-frame explorer-editor-panel" data-explorer-file-panel="source" ${initialFileView === 'source' ? '' : 'hidden'}><div class="explorer-source-view" id="explorer-code-${index}"></div>${explorerOverviewHtml(index)}</div>
                         ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" ${initialFileView === 'preview' ? '' : 'hidden'}></div>` : ''}
                     </div>
                     ${hasGitDiff ? `<aside class="explorer-diff-split" id="explorer-diff-panel-${index}" data-explorer-file-panel="diff" ${keepDiffSplit ? '' : 'hidden'}><div class="explorer-diff-content" id="explorer-diff-code-${index}"></div></aside>` : ''}

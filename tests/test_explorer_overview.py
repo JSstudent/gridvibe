@@ -1,14 +1,20 @@
-"""Source-view change marking (Phase 1 of the change-overview plan):
-``web/static/js/explorer-overview.js`` owns the HEAD-relative change model
-for the open file and paints gutter markers (added / modified bars, deletion
-wedges) on the rendered Source rows. There is no JS test runner, so the suite
-is contract-level on the served assets — the allowed kinds only: script
-wiring and load order, ``data-*`` hooks, named functions and constants, CSS
-selectors and custom properties. The behavioural half (that a ``mode=head``
-diff's new-side line numbers address the worktree) is covered by the
-``git/diff`` tests in ``tests/test_api.py``.
+"""Source-view change overview: ``web/static/js/explorer-overview.js`` owns
+the HEAD-relative change model for the open file, paints gutter markers
+(added / modified bars, deletion wedges) on the rendered Source rows
+(Phase 1), and docks the overview column beside them — row geometry, the
+change lane, the viewport box and the click / drag / wheel navigation that
+makes it the Source panel's scrollbar (Phase 2, ``ruler`` mode).
+
+There is no JS test runner, so the suite is contract-level on the served
+assets — the allowed kinds only: script wiring and load order, rendered
+markup hooks (classes, ``data-*``, ``aria-*``), named functions and
+constants, CSS selectors and custom properties. The behavioural half (that a
+``mode=head`` diff's new-side line numbers address the worktree) is covered
+by the ``git/diff`` tests in ``tests/test_api.py``; Phase 2 adds no backend
+surface of its own.
 """
 
+import re
 import unittest
 
 import api
@@ -152,6 +158,187 @@ class ExplorerOverviewTestCase(unittest.TestCase):
         self.assertIn("function explorerOverviewWatchConsumer(pane)", watch)
         self.assertIn("refreshExplorerOverview(index, 'git-revision')", watch)
         self.assertIn("pane._explorerOverviewWatchRevision = revision;", watch)
+
+
+class ExplorerOverviewColumnTestCase(unittest.TestCase):
+    """Phase 2 — the overview column itself: the ``<aside>`` docked in the
+    source frame, its geometry over rendered rows, the change lane, the
+    viewport box, and the click / drag / wheel navigation."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path: str) -> str:
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def _overview(self) -> str:
+        return self._static("js/explorer-overview.js")
+
+    def test_source_frame_renders_the_overview_column(self):
+        viewer = self._static("js/explorer-viewer.js")
+        # The column is a sibling of the scroller inside the fixed frame, so
+        # it takes real layout width instead of overlaying the code, and it
+        # hides with the panel.
+        self.assertIn(
+            '<div class="explorer-source-view" id="explorer-code-${index}"></div>'
+            "${explorerOverviewHtml(index)}",
+            viewer,
+        )
+        self.assertIn("function explorerOverviewHtml(", self._overview())
+
+    def test_overview_markup_carries_its_hooks_and_scrollbar_semantics(self):
+        overview = self._overview()
+        for hook in (
+            'class="explorer-source-overview"',
+            'data-explorer-overview="${index}"',
+            'data-explorer-overview-mode="ruler"',
+            'class="explorer-overview-canvas"',
+            'class="explorer-overview-viewport"',
+        ):
+            with self.subTest(hook=hook):
+                self.assertIn(hook, overview)
+        # It really is the Source panel's scrollbar, so it says so: the
+        # control it drives, its orientation, and a live position.
+        self.assertIn('role="scrollbar"', overview)
+        self.assertIn('aria-controls="explorer-code-${index}"', overview)
+        self.assertIn('aria-orientation="vertical"', overview)
+        self.assertIn("setAttribute('aria-valuenow'", overview)
+        # The box is decorative; the position is on the aside, not on it.
+        self.assertIn('class="explorer-overview-viewport" aria-hidden="true"', overview)
+
+    def test_overview_css_declares_the_column_and_its_fixed_widths(self):
+        css = self._static("css/terminals.css")
+        for selector in (
+            ".explorer-source-overview {",
+            ".explorer-source-overview[hidden] {",
+            '.explorer-source-overview[data-explorer-overview-mode="ruler"] {',
+            ".explorer-overview-canvas {",
+            ".explorer-overview-viewport {",
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(selector, css)
+        # Settled decision 2: the width is a fixed custom property, not a
+        # draggable per-pane value that would need persisting and restoring.
+        frame = css[css.index(".explorer-source-frame {"):]
+        frame = frame[: frame.index("}")]
+        self.assertIn("--explorer-overview-width:", frame)
+        self.assertIn("--explorer-overview-ruler-width:", frame)
+
+    def test_overview_geometry_is_measured_over_rendered_rows_and_cached(self):
+        overview = self._overview()
+        self.assertIn("function explorerOverviewGeometry(", overview)
+        geometry = overview[
+            overview.index("function explorerOverviewGeometry("):
+            overview.index("function explorerOverviewDeletionRow(")
+        ]
+        # Wrapping is on by default and a Markdown fold removes rows from the
+        # DOM, so `line x lineHeight` would be wrong twice over: the pass runs
+        # over the rows that are actually rendered.
+        self.assertIn(".explorer-source-line[data-explorer-line]", geometry)
+        # One uninterrupted read pass, cached against a signature that moves
+        # with the content, the folds, the wrap flag and a resize — so a
+        # search keystroke re-renders without re-measuring.
+        self.assertIn("pane._explorerOverviewGeometry", geometry)
+        self.assertIn("cached.signature === signature", geometry)
+        self.assertIn("parts.code.scrollHeight", geometry)
+        self.assertIn("parts.code.clientWidth", geometry)
+        self.assertIn("wrapped ? 1 : 0", geometry)
+        # Above the cap the per-row pass is skipped for a uniform stand-in
+        # rather than paying a long layout.
+        self.assertIn("const EXPLORER_OVERVIEW_MAX_ROWS = 20000;", overview)
+        self.assertIn("count > EXPLORER_OVERVIEW_MAX_ROWS", geometry)
+
+    def test_overview_marker_colours_come_from_the_shared_tokens(self):
+        overview = self._overview()
+        colors = overview[
+            overview.index("function explorerOverviewColors("):
+            overview.index("function paintExplorerOverview(")
+        ]
+        # Guardrail 7: the canvas cannot use a CSS variable directly, so the
+        # tokens are read back off the live element — the explorer theme and
+        # light/dark then follow with no palette literal in the JS.
+        for token in ("--gv-diff-add", "--gv-diff-modified", "--gv-diff-delete"):
+            with self.subTest(token=token):
+                self.assertIn(token, colors)
+        self.assertIn("window.getComputedStyle(aside)", colors)
+        self.assertIsNone(
+            re.search(r"#[0-9a-fA-F]{3,8}\b", overview),
+            "no palette literal may enter explorer-overview.js",
+        )
+
+    def test_overview_navigates_by_click_drag_and_wheel(self):
+        overview = self._overview()
+        wiring = overview[overview.index("function wireExplorerOverview("):]
+        wiring = wiring[: wiring.index("function syncExplorerOverview(")]
+        # A drag is pointer-captured and released on every way it can end,
+        # so the scrub cannot outlive the gesture.
+        self.assertIn("setPointerCapture", wiring)
+        for event in ("pointerdown", "pointermove", "pointerup", "pointercancel",
+                      "lostpointercapture"):
+            with self.subTest(event=event):
+                self.assertIn(event, wiring)
+        # The column is not a second scrollable surface: a wheel over it
+        # drives the text, which needs a non-passive listener to suppress.
+        self.assertIn("{ passive: false }", wiring)
+        # The scroll listener is passive — the box moves in its own frame and
+        # must never block the scroll it is following.
+        self.assertIn("{ passive: true }", wiring)
+        # A marker click is a jump to that change, reusing the existing
+        # scroll-and-flash affordance rather than a second one.
+        self.assertIn("scrollExplorerSourceToLine(index, line)", wiring)
+        self.assertIn("function explorerOverviewMarkerLineAt(", overview)
+
+    def test_overview_repaints_are_gated_and_scrolls_are_transform_only(self):
+        overview = self._overview()
+        # Guardrail 3: no polling and no per-scroll layout work. A scroll
+        # moves the box inside one coalesced frame; the lane repaint is
+        # reserved for content / marks / geometry / size changes.
+        self.assertIn("function scheduleExplorerOverviewViewport(", overview)
+        self.assertIn("function scheduleExplorerOverviewSync(", overview)
+        self.assertIn("pane._explorerOverviewViewportFrame", overview)
+        self.assertIn("pane._explorerOverviewFrame", overview)
+        viewport = overview[
+            overview.index("function updateExplorerOverviewViewport("):
+            overview.index("function explorerOverviewClampScroll(")
+        ]
+        self.assertIn("translateY(", viewport)
+        # A resize re-wraps the text, so both halves move — the existing
+        # ResizeObserver pattern, not a timer.
+        self.assertIn("new window.ResizeObserver(", overview)
+
+    def test_overview_stands_down_when_there_is_nothing_to_survey(self):
+        overview = self._overview()
+        sync = overview[
+            overview.index("function syncExplorerOverview("):
+            overview.index("function scheduleExplorerOverviewSync(")
+        ]
+        # An empty file, the editor's textarea, or a panel switched away: the
+        # column leaves the layout instead of showing the last file's shape.
+        self.assertIn("parts.aside.hidden = !geometry;", sync)
+        self.assertIn("parts.frame.hidden", sync)
+        # Entering the in-place editor replaces the rows with a textarea, so
+        # the same re-apply that drops the gutter marks stands the column down.
+        editor = self._static("js/explorer-editor.js")
+        render = editor[
+            editor.index("function renderExplorerEditTextarea("):
+            editor.index("function handleExplorerEditInput(")
+        ]
+        self.assertIn("applyExplorerChangeMarks(index);", render)
+
+    def test_teardown_releases_the_observer_and_the_queued_frames(self):
+        overview = self._overview()
+        teardown = overview[
+            overview.index("function teardownExplorerOverview("):
+            overview.index("function explorerOverviewHtml(")
+        ]
+        self.assertIn("pane._explorerOverviewGeometry = null;", teardown)
+        self.assertIn("pane._explorerOverviewObserver?.disconnect();", teardown)
+        self.assertIn("explorerOverviewCancelFrames(pane);", teardown)
 
 
 if __name__ == "__main__":

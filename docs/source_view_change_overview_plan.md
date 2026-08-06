@@ -1,8 +1,84 @@
 # Source View Change Overview — implementation plan
 
-Status: **Phase 0 + Phase 1 implemented** (see §5); Phases 2–4 not yet implemented.
+Status: **Phases 0–2 implemented** (see §5); Phases 3–4 not yet implemented.
 Target surface: the explorer file viewer's **Source** panel only (Preview and
 Diff are untouched).
+
+### Phase 2 — implemented
+
+Landed, delivering the overview column in `ruler` mode — the file is now
+navigable by its changes without leaving Source view — verified by the new
+`ExplorerOverviewColumnTestCase` in `tests/test_explorer_overview.py`. No
+backend surface was added, so there is no new behavioral test: `git/diff`
+already carries the whole feature and is covered by the Phase 1 tests in
+`tests/test_api.py`.
+
+- Markup per §4.4: `explorerOverviewHtml(index)` (a fifth entry point on
+  `explorer-overview.js`, existing only so the frame's render can ask for the
+  column's markup) emits the `<aside class="explorer-source-overview"
+  data-explorer-overview="N" data-explorer-overview-mode="ruler" hidden>` with
+  its `<canvas class="explorer-overview-canvas">` and
+  `<div class="explorer-overview-viewport" aria-hidden="true">` into
+  `.explorer-source-frame`'s second grid column, beside — never over — the
+  scroller. Accessibility per §4.7: `role="scrollbar"`,
+  `aria-controls="explorer-code-N"`, `aria-orientation="vertical"`, and
+  `aria-valuenow` updated with the scroll ratio on every viewport frame.
+- Geometry per §4.5: `explorerOverviewGeometry()` measures **rendered** rows
+  (`.explorer-source-line[data-explorer-line]`) into `Float64Array` tops /
+  heights plus a `line → row` index, all expressed in the scroll container's
+  own coordinate space (`0 … code.scrollHeight`) so the change lane and the
+  viewport box are aligned by construction. One uninterrupted read pass (two
+  rects, then `offsetTop`/`offsetHeight` per row, no interleaved writes);
+  unwrapped rows take the uniform fast path from a single measurement, and
+  above `EXPLORER_OVERVIEW_MAX_ROWS = 20000` the same uniform stand-in is the
+  deliberate degradation (`approximate: true`). Cached against a signature of
+  `rowCount : scrollHeight : clientWidth : wrapOn`, which moves with content,
+  font, folds, wrap and resize — so a search keystroke re-renders the rows and
+  re-uses the measurement.
+- Change lane: `paintExplorerOverview()` DPR-scales the canvas and fills a
+  4 px lane from the *same* `_explorerChangeMarks` model the gutter uses —
+  added/modified as row-height bands, a deletion as a thin rule on the
+  boundary (falling back to the last rendered row above it when the following
+  row is folded away, exactly as the gutter wedge does). Colours are read back
+  from `--gv-diff-add` / `--gv-diff-modified` / `--gv-diff-delete` via
+  `getComputedStyle` on the live element, so the explorer theme and light/dark
+  follow automatically and no palette literal enters the JS (guardrail 7); a
+  test asserts the file contains no hex literal at all.
+- Interaction per §4.7: click or drag anywhere on the track centres that
+  content position (pointer-captured, released on `pointerup`,
+  `pointercancel` *and* `lostpointercapture`); a wheel over the column is
+  forwarded to the scroller through a non-passive listener; a click within the
+  change lane jumps to that change and flashes the row through the existing
+  `scrollExplorerSourceToLine()`. `Ctrl+E` / `Ctrl+Q` and hover tooltips stay
+  in Phase 4.
+- Repaint discipline per §4.6: the lane repaints only on a content / marks /
+  geometry / size change — `applyExplorerChangeMarks()` now schedules one
+  coalesced `requestAnimationFrame` sync after the gutter pass, and a
+  `ResizeObserver` on the frame covers pane resize. A **scroll** moves the box
+  by CSS transform inside its own separate frame: no repaint, no layout read
+  beyond the scroller's metrics, and the scroll listener is passive.
+- Standing down: the column leaves the layout (`hidden`) whenever there is
+  nothing to survey — an empty file, a panel switched to Preview/Diff (whose
+  offsets all read 0, so it is skipped before measuring), or the in-place
+  editor's textarea. `renderExplorerEditTextarea()` re-applies the marks for
+  exactly that reason; the cached model survives, so leaving the editor costs
+  no refetch. `teardownExplorerOverview()` now also disconnects the
+  `ResizeObserver` and cancels both queued frames.
+- CSS: `.explorer-source-overview` / `[hidden]` / `[data-explorer-overview-mode="ruler"]`
+  / `.is-scrubbing`, `.explorer-overview-canvas` and `.explorer-overview-viewport`
+  in `terminals.css`, with `--explorer-overview-width: 110px` and
+  `--explorer-overview-ruler-width: 14px` declared on `.explorer-source-frame`
+  (settled decision 2: fixed, not draggable, so there is no per-pane width to
+  persist or restore). Surfaces and hues come from the existing explorer
+  variables (`--explorer-bar-bg`, `--explorer-row-border`,
+  `--explorer-row-active`).
+
+Not done in Phase 2 (later phases, unchanged from the plan below): `map` mode
+and its canvas glyph paint, colour probing and Appearance-menu toggle +
+persistence (Phase 3 — the mode attribute is already the CSS hook it will
+flip); the search-match lane, `Ctrl+E` / `Ctrl+Q` navigation, hover tooltips
+and the truncated-diff indicator (Phase 4). `CHANGELOG.md` / `README.md` /
+`CLAUDE.md` updates stay deferred per §8 until the full feature lands.
 
 ### Phase 1 — implemented
 
@@ -178,6 +254,11 @@ Responsibilities:
 Nothing else may reach into it except through four entry points:
 `loadExplorerChangeMarks(index)`, `applyExplorerChangeMarks(index)`,
 `refreshExplorerOverview(index, reason)`, `teardownExplorerOverview(index)`.
+
+*(Phase 2 added a fifth, `explorerOverviewHtml(index)`, so the source frame's
+render can ask this module for the column's own markup rather than the viewer
+spelling it out — the alternative was the overview's markup contract living in
+`explorer-viewer.js`, which is the file this split exists to keep out of.)*
 
 ### 4.2 Change model
 
@@ -423,7 +504,7 @@ Each phase is independently shippable and independently reviewable.
 | --- | --- | --- |
 | **0** ✅ | Memoize `explorerHighlightDocumentLines()` per pane; add the `.explorer-source-frame` wrapper + `explorerPanelScrollTarget` branch; no visible change | Isolates the one refactor with blast radius into a diff that can be verified by "nothing changed" |
 | **1** ✅ | `explorer-overview.js` skeleton: change model, fetch + cache, classification, gutter markers, refresh triggers, tokens + CSS | Delivers the line-number marking from the screenshot on its own |
-| **2** | Overview element in `ruler` mode: geometry helper, change lane, viewport box, click / drag / wheel navigation | Delivers "click through a file for changes" with no canvas-painting risk |
+| **2** ✅ | Overview element in `ruler` mode: geometry helper, change lane, viewport box, click / drag / wheel navigation | Delivers "click through a file for changes" with no canvas-painting risk |
 | **3** | `map` mode: canvas glyph paint, colour probing, DPR, Appearance-menu toggle + persistence, automatic ruler fallback | The visual payload; safe to land late because ruler mode already works |
 | **4** | Extras: search-match lane, `Ctrl+E` / `Ctrl+Q` navigation, hover tooltips, truncated-diff indicator | Polish |
 
