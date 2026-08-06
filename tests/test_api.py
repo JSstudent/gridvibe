@@ -149,6 +149,17 @@ class ApiRoutesTestCase(unittest.TestCase):
             str(self.saved_sessions_path),
         )
         self.saved_sessions_patch.start()
+        # Workspace snapshots are process-wide state like the two above: tests
+        # in this class save and capture workspaces, and an unpatched path
+        # would read-modify-replace the developer's real runtime_state.json.
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        self.state_path_patch = patch.object(
+            web_runtime_state,
+            "RUNTIME_STATE_PATH",
+            str(self.state_path),
+        )
+        self.state_path_patch.start()
+        self.addCleanup(self.state_path_patch.stop)
         api._refresh_runtime_config()
         api.app.config["TESTING"] = True
         api.configure_browser_shutdown(False)
@@ -9397,6 +9408,39 @@ class ApiRoutesTestCase(unittest.TestCase):
         snapshot_session = saved_workspace.get_json()["groups"][0]["sessions"][0]
         self.assertEqual(snapshot_session["explorer_open_tabs"], ["README.md"])
         self.assertEqual(snapshot_session["explorer_tab_views"]["README.md"]["mode"], "preview")
+
+    def test_saving_a_workspace_never_touches_the_production_state_file(self):
+        """MW-01: this class saves and captures workspaces for real.
+
+        Its ``config.json`` and ``saved_sessions.json`` were redirected but
+        ``runtime_state.json`` was not, so a test fixture used to land in the
+        developer's real restore slot and reappear as a phantom workspace after
+        the next restart.
+        """
+        production = Path(web_runtime_state.PRODUCTION_STATE_PATH)
+        before = production.read_bytes() if production.exists() else None
+        api.session_manager.create_group(
+            name="Files",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+            group_id="group-isolation",
+        )
+        api.session_manager.create_sessions(
+            [{"directory": "C:\\repo", "title": "Files", "startup_mode": "explorer"}],
+            group_id="group-isolation",
+        )
+
+        response = self.client.post(
+            "/api/runtime-state/save", json={"workspace_id": "default"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["saved"])
+        stored = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertIn("default", stored["workspaces"])
+        after = production.read_bytes() if production.exists() else None
+        self.assertEqual(after, before)
 
     def test_save_as_without_activation_preserves_live_group_and_launcher_selection(self):
         active_payload = {

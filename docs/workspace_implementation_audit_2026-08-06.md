@@ -2,7 +2,9 @@
 
 Date: 2026-08-06
 
-Status: findings and remediation plan only. No runtime behavior was changed as part of this audit.
+Status: findings and remediation plan. **MW-01 and MW-02 are fixed** (see the
+"Resolution" blocks under each); every other finding is still open and describes
+current behavior.
 
 ## Executive summary
 
@@ -88,6 +90,37 @@ Recommended correction:
 - Give production state paths an injectable/configured owner rather than relying on mutable module globals.
 - Do not treat an inter-process lock as sufficient isolation: it would serialize the test overwrite, not prevent it.
 
+**Resolution (fixed).** Confirmed as reported: `ApiRoutesTestCase.setUp` patched
+only `CONFIG_PATH` and `SAVED_SESSIONS_PATH`, and both named tests reach a real
+write — one through `POST /api/runtime-state/save`, one through a direct
+`capture_workspace` call — against the project-local production file.
+
+- `web/runtime_state.py` now resolves its file as
+  `GRIDVIBE_RUNTIME_STATE_PATH or PRODUCTION_STATE_PATH`, and every read and
+  write goes through `_checked_state_path()`, which raises
+  `RuntimeStatePathError` when `GRIDVIBE_TEST_MODE` is set and the resolved path
+  is the canonical `runtime_state.json`. A missed redirect now fails loudly
+  instead of overwriting the user's restore slot.
+- `tests/__init__.py` sets `GRIDVIBE_TEST_MODE` and points
+  `GRIDVIBE_RUNTIME_STATE_PATH` at a per-run temporary directory (removed at
+  exit) before any test module imports `web`. `tests/run_tests.py` imports the
+  package explicitly, because discovery may load the test modules as top-level
+  modules and would otherwise skip the package bootstrap.
+- `ApiRoutesTestCase.setUp` additionally patches `RUNTIME_STATE_PATH` to a file
+  in its own temporary directory, so a single test run in isolation is safe and
+  the class's tests no longer share one slot.
+
+Coverage: `RuntimeStateProductionPathGuardTestCase` (test_multi_workspace.py)
+asserts the suite never resolves the production path, that reads/clears against
+it raise, and that a redirected path is untouched by the guard;
+`ApiRoutes: saving a workspace never touches the production state file` performs
+the real manual save and asserts the temporary file received it while the
+production file's bytes are unchanged.
+
+Still open from the recommendations above: production state paths are still
+mutable module globals rather than an injected owner, and there is still no
+OS-level single-writer lock for two concurrent *production* processes.
+
 ### MW-02 — Critical: stale snapshot commits can resurrect a closed workspace
 
 Both capture functions take the `SessionManager` snapshot before acquiring `_runtime_state_lock` (`web/runtime_state.py:234`, `web/runtime_state.py:351`). `clear_workspace` only coordinates the later file mutation (`web/runtime_state.py:321`). This permits:
@@ -107,6 +140,46 @@ Recommended correction:
 - A close/forget needs a revisioned tombstone, or equivalent serialization, so any capture taken before it is rejected.
 - Record the live-shape generation in the snapshot and verify it at commit time.
 - Add an OS-level single-writer/file lock or enforce one server owner for production state. Test state still needs a separate path.
+
+**Resolution (fixed).** Confirmed as reported: both capture functions read the
+live manager before taking `_runtime_state_lock`, and both real close paths
+(`forget_pruned_workspaces`, `forget_emptied_default_workspace`) call
+`clear_workspace` after the live removal, so the interleaving was reachable from
+an ordinary explicit close.
+
+`web/runtime_state.py` now orders commits per workspace:
+
+- `_next_state_ticket()` hands every capture and every `clear_workspace` a
+  monotonic ticket. A capture takes its ticket **before** it snapshots the
+  manager, so a snapshot read before a close always carries an older ticket than
+  the clear that followed it.
+- `_workspace_commits` records, per workspace, the newest ticket that reached the
+  file and whether it was a `commit` or a `clear`. `_capture_is_stale_locked()`
+  is evaluated inside the state lock: a newer **clear** rejects any capture (no
+  resurrection); a newer **commit** rejects an *auto* capture (no older timer
+  tick collapsing a newer shape), while an explicit Save Workspace still wins
+  over a newer autosave — only a close/forget overrides the user's own save.
+- A rejected capture returns `None`, which the existing callers already handle:
+  autosave stores nothing for that workspace, and `POST /api/runtime-state/save`
+  answers `409 {"saved": false}` — the correct answer when the workspace was
+  closed mid-save.
+- `clear_workspace` records its tombstone before it looks for the slot, so a
+  close of a workspace that was never captured still blocks an in-flight capture
+  of it.
+- `capture_live_workspaces` applies the check per workspace, so one stale
+  workspace in a tick no longer costs the other workspaces their capture.
+
+Coverage: `RuntimeStateCommitOrderingTestCase` (test_multi_workspace.py) pauses a
+capture inside `snapshot_live_workspaces`, performs the close/forget or a newer
+manual save while it is held, releases it, and asserts the file. Four of its five
+cases fail against the previous implementation; the fifth pins the positive path
+(a capture taken *after* a forget still saves, so a tombstone is not permanent).
+
+Still open from the recommendations above: the ordering is per-workspace tickets
+rather than a full state-store coordinator with persisted revisions, the snapshot
+does not record a live-shape generation, and cross-process production writes are
+still unguarded (MW-01 removes the test process from that set, which was the only
+observed instance).
 
 ### MW-03 — High: restore has a second shape source, `saved_sessions.json`
 
@@ -280,13 +353,13 @@ Several tests are valuable but encode contracts that conflict with the desired m
 
 All of these should be behavioral tests against routes or public manager/store operations, not source-text assertions.
 
-1. **Test isolation:** start with a sentinel production state file, run every API test that saves/captures, and prove the sentinel is unchanged while a temporary state file receives the writes.
+1. **Test isolation:** start with a sentinel production state file, run every API test that saves/captures, and prove the sentinel is unchanged while a temporary state file receives the writes. *(Added with MW-01, non-destructively: the test reads the production file's current bytes rather than planting a sentinel in it, and the test-mode guard covers the rest.)*
 2. **Exact snapshot:** save a three-pane preset-backed workspace, edit the preset into one `Files` pane, restore, and assert the original three-pane snapshot.
 3. **Two writers:** rename while the timer/manual writer is mocked; assert no shape capture occurs and the next actual capture persists the label.
 4. **Default close/listing:** restore one group into `default`, close it, then assert no user-visible live workspace/destination remains and no saved slot remains.
 5. **Immediate pane close:** close the last pane immediately after launch in default and non-default workspaces; assert group, workspace visibility, native close signal, and slot cleanup.
-6. **Close versus autosave:** pause autosave after its manager snapshot, close/forget the workspace, resume autosave, and assert the slot stays deleted.
-7. **Manual versus timer ordering:** pause an older timer capture, perform a newer manual capture, release the timer, and assert the manual/newer revision remains.
+6. **Close versus autosave:** pause autosave after its manager snapshot, close/forget the workspace, resume autosave, and assert the slot stays deleted. *(Added with MW-02.)*
+7. **Manual versus timer ordering:** pause an older timer capture, perform a newer manual capture, release the timer, and assert the manual/newer revision remains. *(Added with MW-02.)*
 8. **Atomic launch snapshot:** pause a multi-pane launch at every installation boundary while autosave runs; every stored slot must equal either the complete old shape or complete new shape.
 9. **Concurrent restore:** release two restore requests through a barrier; assert one successful group set and one deterministic conflict response.
 10. **Single-mode live restore:** with default already populated, invoke the single-mode restore route and assert no duplicate or replacement.
@@ -298,9 +371,9 @@ All of these should be behavioral tests against routes or public manager/store o
 
 ## Recommended remediation order
 
-1. **Stop further corruption:** isolate the entire test process from production `runtime_state.json`; add the test-mode guard.
+1. **Stop further corruption:** isolate the entire test process from production `runtime_state.json`; add the test-mode guard. **Done — MW-01.**
 2. **Lock the persistence contract:** remove rename shape capture, make snapshot shape authoritative, distinguish writer origin from pinning, and make write failures observable.
-3. **Order state commits:** add per-workspace generations/tombstones and serialize capture against clear/forget; add production single-writer protection.
+3. **Order state commits:** add per-workspace generations/tombstones and serialize capture against clear/forget; add production single-writer protection. **Done — MW-02**, except production single-writer protection.
 4. **Fix close visibility:** force explicit last-pane cleanup and hide the empty internal default record from every user-visible list.
 5. **Make live shape atomic:** stage and atomically install/replace groups and sessions.
 6. **Unify restore:** use the server service in both modes and add a per-workspace restore reservation.

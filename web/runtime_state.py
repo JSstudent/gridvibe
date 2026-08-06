@@ -11,6 +11,15 @@ reopens the workspace on it rather than on whichever group happens to be
 newest. The snapshot never contains passwords — a restored SSH session
 re-authenticates with keys or a saved-session password. ``runtime_state.json``
 is local state and gitignored.
+
+Two ownership rules keep the file honest. Every capture takes a monotonic
+ordering ticket *before* it reads the live manager, so a snapshot taken before
+an explicit close/forget is rejected at commit time instead of resurrecting the
+slot it was meant to remove. And the file location comes from
+``GRIDVIBE_RUNTIME_STATE_PATH`` when set, with a ``GRIDVIBE_TEST_MODE`` guard
+that refuses the canonical production path outright — the in-process lock
+orders writers within one process only, so a second process (a test run) must
+never share this file.
 """
 
 import json
@@ -27,8 +36,22 @@ from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id
 
 logger = logging.getLogger(__name__)
 
-RUNTIME_STATE_PATH = os.path.join(BASE_DIR, "runtime_state.json")
+# The one file a production process owns. ``RUNTIME_STATE_PATH`` starts there
+# but is deliberately overridable: a test process (or a second GridVibe run)
+# points ``GRIDVIBE_RUNTIME_STATE_PATH`` at its own file so it can never
+# read-modify-replace the user's real workspace snapshots.
+PRODUCTION_STATE_PATH = os.path.join(BASE_DIR, "runtime_state.json")
+RUNTIME_STATE_PATH = os.environ.get("GRIDVIBE_RUNTIME_STATE_PATH") or PRODUCTION_STATE_PATH
 _runtime_state_lock = threading.Lock()
+
+# Commit ordering (one entry per workspace, guarded by _runtime_state_lock).
+# Every capture takes a ticket *before* it snapshots the live manager, so a
+# snapshot taken before a close/forget carries an older ticket than the clear
+# that followed it and is rejected at commit time instead of resurrecting the
+# slot. ``_state_ticket_seq`` is the monotonic source; ``_workspace_commits``
+# maps workspace id -> (newest ticket committed, "commit" | "clear").
+_state_ticket_seq = 0
+_workspace_commits: Dict[str, tuple] = {}
 
 SCHEMA_VERSION = 2
 RESTORABLE_ORIGINS = ("auto", "manual")
@@ -151,15 +174,77 @@ def _empty_state() -> Dict[str, Any]:
     return {"version": SCHEMA_VERSION, "workspaces": {}}
 
 
+class RuntimeStatePathError(RuntimeError):
+    """Raised when this process must not touch the production state file."""
+
+
+def _checked_state_path() -> str:
+    """Return the state file to use, refusing production state under test mode.
+
+    ``GRIDVIBE_TEST_MODE`` marks a process that must never own the user's
+    ``runtime_state.json``: the in-process lock serializes writers inside one
+    process only, so a test run that reached the canonical path would happily
+    read-modify-replace a live app's snapshots (and vice versa). Failing loudly
+    beats corrupting the file that restore-after-restart depends on.
+    """
+    path = RUNTIME_STATE_PATH
+    if os.environ.get("GRIDVIBE_TEST_MODE") and os.path.abspath(path) == os.path.abspath(
+        PRODUCTION_STATE_PATH
+    ):
+        raise RuntimeStatePathError(
+            "Refusing to use the production runtime_state.json in test mode; "
+            "set GRIDVIBE_RUNTIME_STATE_PATH or patch RUNTIME_STATE_PATH."
+        )
+    return path
+
+
+def _next_state_ticket() -> int:
+    """Take the monotonic ordering ticket for one capture/clear operation."""
+    global _state_ticket_seq
+    with _runtime_state_lock:
+        _state_ticket_seq += 1
+        return _state_ticket_seq
+
+
+def _capture_is_stale_locked(workspace_id: str, ticket: int, origin: str) -> bool:
+    """True when this capture must not commit. Caller holds the lock.
+
+    A capture is stale against anything committed after its ticket was taken:
+
+    * a **clear** always wins — the workspace was explicitly closed or
+      forgotten after this snapshot was read, so writing it back would make a
+      closed workspace restorable again;
+    * a newer **commit** wins over an autosave capture, so an older timer tick
+      cannot overwrite the shape a later capture already stored. An explicit
+      Save Workspace still wins over a newer autosave: it is the user's
+      deliberate act, and only a close/forget may override it.
+    """
+    last = _workspace_commits.get(workspace_id)
+    if last is None:
+        return False
+    last_ticket, last_kind = last
+    if last_ticket <= ticket:
+        return False
+    return last_kind == "clear" or origin != "manual"
+
+
+def _record_commit_locked(workspace_id: str, ticket: int, kind: str) -> None:
+    """Record the newest ticket that reached the file. Caller holds the lock."""
+    last = _workspace_commits.get(workspace_id)
+    newest = max(ticket, last[0]) if last else ticket
+    _workspace_commits[workspace_id] = (newest, kind)
+
+
 def _read_state_locked() -> Dict[str, Any]:
     """Read the state file and migrate a legacy v1 blob. Caller holds the lock."""
+    state_path = _checked_state_path()
     try:
-        with open(RUNTIME_STATE_PATH, "r", encoding="utf-8") as handle:
+        with open(state_path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
     except FileNotFoundError:
         return _empty_state()
     except Exception as exc:
-        logger.warning("Could not read %s: %s", RUNTIME_STATE_PATH, exc)
+        logger.warning("Could not read %s: %s", state_path, exc)
         return _empty_state()
 
     if not isinstance(data, dict):
@@ -189,15 +274,16 @@ def _read_state_locked() -> Dict[str, Any]:
 
 def _write_state_locked(state: Dict[str, Any]) -> None:
     """Atomically persist the state. Caller holds the lock."""
+    state_path = _checked_state_path()
     temp_path = os.path.join(
-        os.path.dirname(os.path.abspath(RUNTIME_STATE_PATH)) or ".",
-        f".{os.path.basename(RUNTIME_STATE_PATH)}.{uuid.uuid4().hex}.tmp",
+        os.path.dirname(os.path.abspath(state_path)) or ".",
+        f".{os.path.basename(state_path)}.{uuid.uuid4().hex}.tmp",
     )
     try:
         with open(temp_path, "w", encoding="utf-8") as handle:
             json.dump(state, handle, indent=2)
             handle.write("\n")
-        os.replace(temp_path, RUNTIME_STATE_PATH)
+        os.replace(temp_path, state_path)
     except Exception as exc:
         logger.warning("Could not persist runtime workspace state: %s", exc)
         try:
@@ -229,8 +315,14 @@ def capture_workspace(
     ``native_zoom_factor`` is optional desktop-window state. An explicit manual
     save supplies it; captures without one (notably the autosave timer) preserve
     the value already stored in this workspace's slot.
+
+    The ordering ticket is taken before the live snapshot, so a capture that
+    read the manager before an explicit close/forget is rejected here rather
+    than committed afterwards — see :func:`_capture_is_stale_locked`. ``None``
+    is returned in that case too, exactly as for an empty workspace.
     """
     workspace_id = normalize_workspace_id(workspace_id)
+    ticket = _next_state_ticket()
     live_snapshot = session_manager.snapshot_live_workspaces().get(workspace_id)
     if not live_snapshot:
         return None
@@ -250,6 +342,11 @@ def capture_workspace(
     workspace_label = str(live_snapshot.get("label") or "").strip()
 
     with _runtime_state_lock:
+        if _capture_is_stale_locked(workspace_id, ticket, origin):
+            logger.debug(
+                "Dropped a stale %s capture of workspace %s", origin, workspace_id
+            )
+            return None
         state = _read_state_locked()
         previous_slot = state.get("workspaces", {}).get(workspace_id)
         previous_slot = previous_slot if isinstance(previous_slot, dict) else {}
@@ -281,6 +378,7 @@ def capture_workspace(
         workspaces = state.setdefault("workspaces", {})
         workspaces[workspace_id] = slot
         _evict_excess_auto_slots(workspaces)
+        _record_commit_locked(workspace_id, ticket, "commit")
         _write_state_locked(state)
     return slot
 
@@ -326,9 +424,15 @@ def clear_workspace(workspace_id: str = DEFAULT_WORKSPACE_ID) -> bool:
     and other slots may reference the same preset, so they are never touched.
     The file itself is kept (with version 2) even when the last slot is
     removed. Idempotent: ``False`` means the slot was already gone.
+
+    The tombstone is recorded even when there was nothing to delete: a capture
+    already holding a pre-close snapshot of this workspace must be rejected
+    whether or not that snapshot had reached the file yet.
     """
     workspace_id = normalize_workspace_id(workspace_id)
+    ticket = _next_state_ticket()
     with _runtime_state_lock:
+        _record_commit_locked(workspace_id, ticket, "clear")
         state = _read_state_locked()
         if workspace_id not in state.get("workspaces", {}):
             return False
@@ -346,8 +450,11 @@ def capture_live_workspaces(
     The manager serializes live state during one lock hold and returns before
     this function acquires the file lock, preserving the documented lock order.
     Existing sibling slots for closed workspaces and saved native zoom values
-    are retained.
+    are retained. Workspaces closed, forgotten, or captured again between this
+    tick's snapshot and its commit are skipped individually, so one stale tick
+    can neither resurrect a closed workspace nor undo a newer capture.
     """
+    ticket = _next_state_ticket()
     live_snapshots = session_manager.snapshot_live_workspaces()
     if not live_snapshots:
         return {}
@@ -358,6 +465,11 @@ def capture_live_workspaces(
         workspaces = state.setdefault("workspaces", {})
         stored_slots: Dict[str, Dict[str, Any]] = {}
         for workspace_id, snapshot in live_snapshots.items():
+            if _capture_is_stale_locked(workspace_id, ticket, origin):
+                logger.debug(
+                    "Dropped a stale %s capture of workspace %s", origin, workspace_id
+                )
+                continue
             groups = [
                 _snapshot_group(group, list(group.get("sessions") or []))
                 for group in snapshot.get("groups") or []
@@ -392,6 +504,7 @@ def capture_live_workspaces(
                 slot["native_zoom_factor"] = previous_zoom
             workspaces[workspace_id] = slot
             stored_slots[workspace_id] = slot
+            _record_commit_locked(workspace_id, ticket, "commit")
         if stored_slots:
             _evict_excess_auto_slots(workspaces)
             _write_state_locked(state)

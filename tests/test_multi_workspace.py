@@ -1,6 +1,8 @@
 import json
+import os
 import shutil
 import subprocess
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -547,6 +549,211 @@ class MultiWorkspacePersistenceTestCase(unittest.TestCase):
         self.assertIn(self.WORKSPACE_A, stored)
 
 
+class _PausedSnapshotManager:
+    """Manager proxy that blocks inside ``snapshot_live_workspaces``.
+
+    Lets a test hold a capture at exactly the window MW-02 describes: the live
+    shape has been read, the state-file lock has not been taken yet.
+    """
+
+    def __init__(self, manager, snapshotted, release):
+        self._manager = manager
+        self._snapshotted = snapshotted
+        self._release = release
+
+    def snapshot_live_workspaces(self):
+        snapshot = self._manager.snapshot_live_workspaces()
+        self._snapshotted.set()
+        if not self._release.wait(10):
+            raise AssertionError("paused capture was never released")
+        return snapshot
+
+
+class RuntimeStateCommitOrderingTestCase(unittest.TestCase):
+    """MW-02: a capture that snapshotted earlier must not commit later."""
+
+    WORKSPACE_A = "aaaaaaaaaaaa"
+
+    def setUp(self):
+        api.session_manager.reset_sessions()
+        api.session_manager.create_workspace("Alpha", self.WORKSPACE_A)
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state,
+            "RUNTIME_STATE_PATH",
+            str(self.state_path),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _group(self, group_id):
+        api.session_manager.create_group(
+            name=group_id,
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id=group_id,
+            workspace_id=self.WORKSPACE_A,
+        )
+        api.session_manager.create_session(
+            group_id=group_id,
+            host=f"{group_id}.example",
+            directory="/srv/app",
+        )
+
+    def _stored_workspaces(self):
+        if not self.state_path.exists():
+            return {}
+        return json.loads(self.state_path.read_text(encoding="utf-8"))["workspaces"]
+
+    def _run_paused_capture(self, capture):
+        """Start `capture` on a manager paused after its live snapshot."""
+        snapshotted = threading.Event()
+        release = threading.Event()
+        result = {}
+
+        def run():
+            try:
+                result["value"] = capture(
+                    _PausedSnapshotManager(api.session_manager, snapshotted, release)
+                )
+            except BaseException as exc:  # surfaced by the assertions below
+                result["error"] = exc
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        self.addCleanup(release.set)
+        self.addCleanup(worker.join, 10)
+        self.assertTrue(snapshotted.wait(10), "capture never reached the live snapshot")
+        return release, worker, result
+
+    def _finish(self, release, worker, result):
+        release.set()
+        worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn("error", result)
+        return result.get("value")
+
+    def test_an_autosave_that_snapshotted_before_a_forget_cannot_resurrect_the_slot(self):
+        self._group("group-a")
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A
+        )
+        self.assertIn(self.WORKSPACE_A, self._stored_workspaces())
+
+        release, worker, result = self._run_paused_capture(
+            lambda manager: web_runtime_state.capture_live_workspaces(manager)
+        )
+        # The close happens while the autosave holds its stale live snapshot.
+        api.session_manager.remove_group("group-a")
+        self.assertTrue(web_runtime_state.clear_workspace(self.WORKSPACE_A))
+        stored = self._finish(release, worker, result)
+
+        self.assertNotIn(self.WORKSPACE_A, stored)
+        self.assertNotIn(self.WORKSPACE_A, self._stored_workspaces())
+        self.assertIsNone(
+            web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+        )
+
+    def test_a_manual_save_that_snapshotted_before_a_forget_is_refused(self):
+        self._group("group-a")
+
+        release, worker, result = self._run_paused_capture(
+            lambda manager: web_runtime_state.capture_workspace(
+                manager, workspace_id=self.WORKSPACE_A, origin="manual"
+            )
+        )
+        api.session_manager.remove_group("group-a")
+        web_runtime_state.clear_workspace(self.WORKSPACE_A)
+        slot = self._finish(release, worker, result)
+
+        self.assertIsNone(slot)
+        self.assertNotIn(self.WORKSPACE_A, self._stored_workspaces())
+
+    def test_an_older_autosave_cannot_overwrite_a_newer_manual_save(self):
+        self._group("group-a")
+
+        release, worker, result = self._run_paused_capture(
+            lambda manager: web_runtime_state.capture_live_workspaces(manager)
+        )
+        # A second group joins the workspace and the user saves it explicitly,
+        # all while the timer still holds its one-group snapshot.
+        self._group("group-b")
+        manual = web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A, origin="manual"
+        )
+        self.assertEqual(len(manual["groups"]), 2)
+        stored = self._finish(release, worker, result)
+
+        self.assertNotIn(self.WORKSPACE_A, stored)
+        slot = self._stored_workspaces()[self.WORKSPACE_A]
+        self.assertEqual(slot["origin"], "manual")
+        self.assertEqual(
+            [group["group_id"] for group in slot["groups"]], ["group-a", "group-b"]
+        )
+
+    def test_a_capture_taken_after_a_forget_still_saves_the_workspace(self):
+        self._group("group-a")
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A
+        )
+        web_runtime_state.clear_workspace(self.WORKSPACE_A)
+
+        slot = web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A
+        )
+
+        self.assertIsNotNone(slot)
+        self.assertIn(self.WORKSPACE_A, self._stored_workspaces())
+
+    def test_a_forget_of_an_unsaved_workspace_still_blocks_an_older_capture(self):
+        """The tombstone must be recorded even when no slot existed yet."""
+        self._group("group-a")
+
+        release, worker, result = self._run_paused_capture(
+            lambda manager: web_runtime_state.capture_live_workspaces(manager)
+        )
+        api.session_manager.remove_group("group-a")
+        self.assertFalse(web_runtime_state.clear_workspace(self.WORKSPACE_A))
+        self._finish(release, worker, result)
+
+        self.assertNotIn(self.WORKSPACE_A, self._stored_workspaces())
+
+
+class RuntimeStateProductionPathGuardTestCase(unittest.TestCase):
+    """MW-01: the suite must never own the developer's runtime_state.json."""
+
+    def test_the_suite_resolves_a_state_path_outside_the_project(self):
+        self.assertTrue(os.environ.get("GRIDVIBE_TEST_MODE"))
+        self.assertNotEqual(
+            os.path.abspath(web_runtime_state.RUNTIME_STATE_PATH),
+            os.path.abspath(web_runtime_state.PRODUCTION_STATE_PATH),
+        )
+
+    def test_reads_and_writes_of_the_production_file_are_refused_in_test_mode(self):
+        with patch.object(
+            web_runtime_state,
+            "RUNTIME_STATE_PATH",
+            web_runtime_state.PRODUCTION_STATE_PATH,
+        ):
+            with self.assertRaises(web_runtime_state.RuntimeStatePathError):
+                web_runtime_state.list_restorable_workspaces()
+            with self.assertRaises(web_runtime_state.RuntimeStatePathError):
+                web_runtime_state.load_restorable_workspace()
+            with self.assertRaises(web_runtime_state.RuntimeStatePathError):
+                web_runtime_state.clear_workspace("cccccccccccc")
+
+    def test_the_guard_leaves_a_redirected_path_alone(self):
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "runtime_state.json"
+            with patch.object(
+                web_runtime_state, "RUNTIME_STATE_PATH", str(state_path)
+            ):
+                self.assertEqual(web_runtime_state.list_restorable_workspaces(), [])
+                self.assertFalse(web_runtime_state.clear_workspace("cccccccccccc"))
 
 
 class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase):
