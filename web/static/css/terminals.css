@@ -3538,6 +3538,12 @@
             font-size: var(--explorer-editor-font-size, .78rem);
             line-height: 1.45;
             tab-size: 4;
+            /* The scroller's viewport width in px, written by
+               explorer-overview.js's coalesced sync so the inline change peek
+               can be exactly viewport-wide inside a max-content lines block;
+               the 100% fallback only covers the first frame before the sync
+               runs. */
+            --explorer-source-viewport-width: 100%;
         }
 
         /* Source view fonts are monospace only; `default` keeps the stack the
@@ -3610,44 +3616,203 @@
             box-shadow: inset 0 0 0 2px var(--t-accent);
         }
 
-        /* HEAD change markers (explorer-overview.js): a coloured bar on the
-           line-number gutter for every line added / modified relative to
-           HEAD, and a wedge on the boundary where lines were deleted. The
-           wedge is absolutely positioned so it stays out of flow even on the
-           flex button variant of the gutter cell. */
-        .explorer-source-line[data-explorer-change] .explorer-source-line-number {
+        /* HEAD change markers (explorer-overview.js): the coloured bar / wedge
+           is itself a button — absolute over the gutter's left edge, outside
+           the row's two grid columns, so neither the grid template nor the
+           Markdown fold button in the number cell is disturbed (a button
+           inside that cell would nest illegally on heading rows). The 4 px
+           bar is the button's own inset shadow at full strength; the rest of
+           its 8 px is invisible hit slop, because a 4 px target is not one. */
+        .explorer-source-line[data-explorer-change] {
             position: relative;
         }
 
-        .explorer-source-line[data-explorer-change="added"] .explorer-source-line-number {
-            box-shadow: inset 4px 0 0 var(--gv-diff-add);
+        .explorer-change-marker {
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 8px;
+            padding: 0;
+            border: 0;
+            border-radius: 0;
+            background: transparent;
+            box-shadow: inset 4px 0 0 currentColor;
+            cursor: pointer;
         }
 
-        .explorer-source-line[data-explorer-change="modified"] .explorer-source-line-number {
-            box-shadow: inset 4px 0 0 var(--gv-diff-modified);
+        .explorer-source-line[data-explorer-change="added"] .explorer-change-marker {
+            color: var(--gv-diff-add);
         }
 
-        .explorer-source-line[data-explorer-change="deleted"] .explorer-source-line-number::before {
+        .explorer-source-line[data-explorer-change="modified"] .explorer-change-marker {
+            color: var(--gv-diff-modified);
+        }
+
+        .explorer-source-line[data-explorer-change="deleted"] .explorer-change-marker {
+            color: var(--gv-diff-delete);
+        }
+
+        /* Hover and keyboard focus tint the hit slop; the 4 px bar itself is
+           always at full strength, so the marking looks exactly as it did
+           until the pointer arrives. */
+        .explorer-change-marker:hover,
+        .explorer-change-marker:focus-visible {
+            background: color-mix(in srgb, currentColor 24%, transparent);
+            outline: none;
+        }
+
+        /* The deletion wedge sits on the boundary where the removed lines
+           used to be: pinned to the top edge of the following row and sized
+           to the triangle, which the button's ::before paints. */
+        .explorer-change-marker[data-explorer-change-marker-kind="deleted"] {
+            top: 0;
+            bottom: auto;
+            height: 10px;
+            margin-top: -5px;
+            box-shadow: none;
+        }
+
+        .explorer-change-marker[data-explorer-change-marker-kind="deleted"]::before {
             content: '';
             position: absolute;
             left: 0;
             top: 0;
             width: 0;
             height: 0;
-            margin-top: -5px;
             border-top: 5px solid transparent;
             border-bottom: 5px solid transparent;
-            border-left: 6px solid var(--gv-diff-delete);
+            border-left: 6px solid currentColor;
         }
 
         /* A deletion at end of file has no following row to anchor above, so
            the wedge hangs off the bottom of the last surviving row instead. */
         .explorer-source-line[data-explorer-change="deleted"].explorer-source-change-after
-        .explorer-source-line-number::before {
+        .explorer-change-marker {
             top: auto;
             bottom: 0;
             margin-top: 0;
             margin-bottom: -5px;
+        }
+
+        /* The change peek (explorer-overview.js): a compact unified diff of
+           one block, inserted inline directly under the change it describes.
+           Sticky at the scroller's left edge and exactly the viewport's width
+           — never the max-content width of the lines block — so unwrapped
+           source scrolled sideways keeps it pinned in view. */
+        .explorer-change-peek {
+            position: sticky;
+            left: 0;
+            width: var(--explorer-source-viewport-width);
+            background: var(--explorer-bg);
+            border-top: 1px solid var(--explorer-row-border);
+            border-bottom: 1px solid var(--explorer-row-border);
+        }
+
+        .explorer-change-peek-head {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 3px 10px;
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-bottom: 1px solid var(--explorer-row-border);
+        }
+
+        .explorer-change-peek-stat {
+            white-space: nowrap;
+            font-weight: 600;
+        }
+
+        .explorer-change-peek-range {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .explorer-change-peek-close {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px;
+            height: 20px;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            color: var(--explorer-muted);
+            cursor: pointer;
+        }
+
+        .explorer-change-peek-close:hover,
+        .explorer-change-peek-close:focus-visible {
+            color: var(--explorer-text);
+            outline: none;
+        }
+
+        .explorer-change-peek-close svg {
+            width: 12px;
+            height: 12px;
+        }
+
+        .explorer-change-peek-body {
+            padding: 2px 0;
+        }
+
+        /* Old (HEAD) lines stack above new (worktree) lines, tinted from the
+           same two tokens the Diff panel's cells use. */
+        .explorer-change-peek-line {
+            display: grid;
+            grid-template-columns: minmax(42px, auto) minmax(0, 1fr);
+            min-height: 1.45em;
+        }
+
+        .explorer-change-peek-line.old {
+            background: var(--gv-diff-delete-bg);
+        }
+
+        .explorer-change-peek-line.new {
+            background: var(--gv-diff-add-bg);
+        }
+
+        .explorer-change-peek-number {
+            padding: 0 9px;
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-right: 1px solid var(--explorer-row-border);
+            text-align: right;
+            user-select: none;
+        }
+
+        /* Same <code>-vs-UA-stylesheet restatement as
+           .explorer-source-line-code above: the source font must be restated
+           or the browser's generic monospace wins every peek line. */
+        .explorer-change-peek-code {
+            min-width: 0;
+            padding: 0 14px;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            font-family: var(--source-view-font);
+        }
+
+        .explorer-change-peek-more {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 3px 10px;
+            color: var(--explorer-muted);
+            border-top: 1px solid var(--explorer-row-border);
+        }
+
+        .explorer-change-peek-diff {
+            padding: 0;
+            border: 0;
+            background: transparent;
+            color: var(--t-accent);
+            font: inherit;
+            cursor: pointer;
         }
 
         .explorer-source-chevron {
@@ -4048,11 +4213,11 @@
         }
 
         .explorer-diff-cell.add {
-            background: rgba(34, 197, 94, .18);
+            background: var(--gv-diff-add-bg);
         }
 
         .explorer-diff-cell.delete {
-            background: rgba(239, 68, 68, .18);
+            background: var(--gv-diff-delete-bg);
         }
 
         .explorer-diff-cell.empty {

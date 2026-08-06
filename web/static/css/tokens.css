@@ -84,6 +84,11 @@
     --gv-diff-add: #22c55e;
     --gv-diff-modified: #58a6ff;
     --gv-diff-delete: #ef4444;
+    /* Translucent washes of the same hues for changed-line backgrounds — the
+       Diff panel's cells and the source-view change peek share one palette
+       by construction. */
+    --gv-diff-add-bg: rgba(34, 197, 94, .18);
+    --gv-diff-delete-bg: rgba(239, 68, 68, .18);
 }
 
 [data-theme="light"] {
@@ -108,4 +113,6 @@
     --gv-diff-add: #047857;
     --gv-diff-modified: #0969da;
     --gv-diff-delete: #dc2626;
+    --gv-diff-add-bg: rgba(34, 197, 94, .18);
+    --gv-diff-delete-bg: rgba(239, 68, 68, .18);
 }

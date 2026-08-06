@@ -23,6 +23,13 @@
    `ruler` mode — marker lanes and viewport box, no glyphs; the canvas glyph
    paint and the Appearance-menu mode toggle arrive in Phase 3.
 
+   Phase 5 makes the gutter marking clickable: every marked row carries a
+   marker button (the coloured bar / deletion wedge itself), and clicking it
+   opens a change peek — a compact diff of that block alone, inserted inline
+   under the change. The peek is pane state re-applied by the same tail pass
+   as the gutter marks, and a second view of the model the pane already
+   holds: no fetch, no backend surface.
+
    Entry points — the only functions other modules may call:
    - loadExplorerChangeMarks(index)          fetch + cache + paint
    - applyExplorerChangeMarks(index)         cheap re-paint after a re-render
@@ -45,6 +52,11 @@ const EXPLORER_OVERVIEW_VIEWPORT_MIN_HEIGHT = 12;
 const EXPLORER_OVERVIEW_HIT_SLOP = 4;
 // deltaMode 1 is "lines"; the source rows are ~1.45em of a ~12px font.
 const EXPLORER_OVERVIEW_WHEEL_LINE_HEIGHT = 16;
+/* A block larger than this renders its first lines plus a footer handing the
+   rest to the Diff panel, which is the surface built for a genuinely large
+   change. */
+const EXPLORER_CHANGE_PEEK_MAX_LINES = 200;
+const EXPLORER_CHANGE_PEEK_CLOSE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
 
 /* Marks are HEAD-relative worktree marks, so they are meaningless — and would
    lie — on a commit-history diff tab (whose new-side line numbers address a
@@ -73,25 +85,51 @@ function explorerChangeMarksKey(pane) {
    explorerDiffChangeBlocks): added-only runs mark their lines `added`,
    mixed runs `modified`, and removed-only runs leave no line of their own —
    they become a wedge anchored above the line the deleted block used to
-   precede (`block.line`, the 1-based worktree line the run starts at). */
+   precede (`block.line`, the 1-based worktree line the run starts at).
+
+   The blocks themselves are kept (Phase 5): the change peek renders exactly
+   them, and `blockByLine` maps every marked line — and every deletion's
+   anchor line — to its block, so a marker click resolves to a block with one
+   Map lookup. Ids are positional within one model load; the peek's identity
+   is the { line, oldLine } pair, which survives an unrelated edit elsewhere
+   in the file and fails cleanly when the block itself is gone. */
 function explorerChangeMarksModel(blocks, truncated) {
     const marks = new Map();
     const deletions = [];
+    const modelBlocks = [];
+    const blockByLine = new Map();
     (Array.isArray(blocks) ? blocks : []).forEach(block => {
         const added = block.expected.length;
         const removed = block.replacement.length;
+        const entry = {
+            id: modelBlocks.length + 1,
+            kind: added ? (removed ? 'modified' : 'added') : 'deleted',
+            line: block.line,
+            oldLine: block.oldLine,
+            expected: block.expected,
+            replacement: block.replacement
+        };
+        modelBlocks.push(entry);
         if (added) {
             const kind = removed ? 'modified' : 'added';
             for (let offset = 0; offset < added; offset += 1) {
                 marks.set(block.line + offset, kind);
+                blockByLine.set(block.line + offset, entry.id);
             }
         } else if (removed) {
             deletions.push({ atLine: block.line, count: removed });
+            blockByLine.set(block.line, entry.id);
         }
     });
     // Kept for the truncated-diff indicator (later phase); the model already
     // records it so no second fetch is ever needed to find out.
-    return { marks, deletions, truncated: Boolean(truncated) };
+    return {
+        marks,
+        deletions,
+        truncated: Boolean(truncated),
+        blocks: modelBlocks,
+        blockByLine
+    };
 }
 
 async function loadExplorerChangeMarks(index, { force = false } = {}) {
@@ -164,15 +202,27 @@ async function loadExplorerChangeMarks(index, { force = false } = {}) {
    overview column back in step with them. Runs after every
    renderExplorerSource() rebuild — search keystrokes included — so both
    halves stay cheap: the gutter is one querySelectorAll pass of attribute
-   writes, and the overview work is deferred to one coalesced frame. */
+   writes, and the overview work is deferred to one coalesced frame. The open
+   change peek is re-inserted here too (constraint: the rebuild destroys it,
+   and pane state — never the DOM — is its source of truth). */
 function applyExplorerChangeMarks(index) {
+    wireExplorerChangePeek(index);
     applyExplorerChangeMarkGutter(index);
+    renderExplorerChangePeek(index);
     scheduleExplorerOverviewSync(index);
 }
 
 /* The gutter half. Rows are rebuilt from scratch on every render, so there is
    never anything to clean up — a missing model or an ineligible pane simply
-   means no marks. No layout reads here: the geometry pass owns those. */
+   means no marks. No layout reads here: the geometry pass owns those.
+
+   Every marked row also gains its marker button (Phase 5): the coloured bar /
+   wedge is itself the click target that toggles the block's peek. It is a
+   row-level absolutely positioned element, never a child of the gutter cell —
+   on a Markdown heading row that cell is already the fold <button>, and a
+   nested button is invalid HTML. One `appendChild` per marked row inside the
+   pass that already walks exactly those rows; the clicks are handled by one
+   delegated listener (wireExplorerChangePeek). */
 function applyExplorerChangeMarkGutter(index) {
     const pane = terminals[index];
     const code = document.getElementById(`explorer-code-${index}`);
@@ -188,6 +238,38 @@ function applyExplorerChangeMarkGutter(index) {
         return;
     }
 
+    const blocksById = new Map();
+    (model.blocks || []).forEach(entry => blocksById.set(entry.id, entry));
+    /* One tab stop per block: every row of a block gets a button (the whole
+       bar is clickable), but only the block's first rendered row is in the
+       tab order — a tab stop per changed *line* would be unusable on a file
+       with hundreds of them. */
+    const tabbedBlocks = new Set();
+    const appendMarker = (row, line, entry) => {
+        if (!entry) {
+            return;
+        }
+        const added = entry.expected.length;
+        const removed = entry.replacement.length;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'explorer-change-marker';
+        button.dataset.explorerChangeMarker = String(entry.id);
+        if (entry.kind === 'deleted') {
+            button.dataset.explorerChangeMarkerKind = 'deleted';
+        }
+        button.tabIndex = tabbedBlocks.has(entry.id) ? -1 : 0;
+        tabbedBlocks.add(entry.id);
+        button.setAttribute('aria-expanded', 'false');
+        button.setAttribute('aria-controls', `explorer-change-peek-${index}`);
+        button.title = `Show change: +${added} −${removed}`;
+        button.setAttribute(
+            'aria-label',
+            `Show change at line ${line}: ${added} added, ${removed} removed`
+        );
+        row.appendChild(button);
+    };
+
     const rows = new Map();
     code.querySelectorAll('.explorer-source-line[data-explorer-line]').forEach(row => {
         const line = Number(row.dataset.explorerLine);
@@ -199,6 +281,7 @@ function applyExplorerChangeMarkGutter(index) {
         const kind = model.marks.get(line);
         if (kind) {
             row.dataset.explorerChange = kind;
+            appendMarker(row, line, blocksById.get(model.blockByLine?.get(line)));
         }
     });
     model.deletions.forEach(({ atLine }) => {
@@ -226,6 +309,7 @@ function applyExplorerChangeMarkGutter(index) {
         }
         row.dataset.explorerChange = 'deleted';
         row.classList.toggle('explorer-source-change-after', after);
+        appendMarker(row, atLine, blocksById.get(model.blockByLine?.get(atLine)));
     });
 }
 
@@ -251,6 +335,7 @@ function teardownExplorerOverview(index) {
     }
     pane._explorerChangeMarksKey = '';
     pane._explorerChangeMarks = null;
+    pane._explorerChangePeek = null;
     pane._explorerOverviewGeometry = null;
     pane._explorerOverviewMarkers = null;
     pane._explorerOverviewDrag = null;
@@ -260,6 +345,226 @@ function teardownExplorerOverview(index) {
     pane._explorerOverviewObserver?.disconnect();
     pane._explorerOverviewObserver = null;
     explorerOverviewCancelFrames(pane);
+}
+
+/* ─────────────────────────────────────────────
+   The change peek (Phase 5)
+   ───────────────────────────────────────────── */
+
+/* Peek identity is the block's start-line pair, not its id: ids are
+   positional and shift whenever a block above appears, while the pair
+   survives an unrelated edit elsewhere in the file. The pair is re-resolved
+   against the model's blocks after every load and the peek closes when
+   nothing matches — the honest outcome when the change the reader was
+   looking at has just been reverted, saved over, or committed away. */
+function explorerChangePeekBlock(pane) {
+    const state = pane?._explorerChangePeek;
+    const blocks = pane?._explorerChangeMarks?.blocks;
+    if (!state || !Array.isArray(blocks)) {
+        return null;
+    }
+    return blocks.find(
+        block => block.line === state.line && block.oldLine === state.oldLine
+    ) || null;
+}
+
+/* Real line numbers on both sides, so the peek agrees with the Diff panel
+   and with the gutter it hangs off: `oldLine + i` for the HEAD lines,
+   `line + i` for the worktree lines. An empty side (a pure addition or a
+   pure deletion) has no range to name. */
+function explorerChangePeekRange(block) {
+    const side = (start, count) => (count ? `${start}–${start + count - 1}` : '—');
+    return `HEAD ${side(block.oldLine, block.replacement.length)} → ${side(block.line, block.expected.length)}`;
+}
+
+/* Highlighting reuses the Diff panel's own pair (its fallback renderer at
+   explorerDiffLineCodeHtml), so the peek highlights identically and no
+   second lexer path appears; highlightExplorerCode escapes the text. */
+function explorerChangePeekLineHtml(index, kind, number, text) {
+    const highlighted = highlightExplorerCode(String(text || ''), explorerDiffLanguage(index)) || '&nbsp;';
+    return `<div class="explorer-change-peek-line ${kind}"><span class="explorer-change-peek-number">${number}</span><code class="explorer-change-peek-code">${highlighted}</code></div>`;
+}
+
+/* Unified, not side by side: the Source panel is one narrow column and may
+   be half a split pane, so the HEAD lines the block replaced stack above the
+   worktree lines that replaced them — which is also how the block reads in
+   the model. */
+function explorerChangePeekHtml(index, block) {
+    const added = block.expected.length;
+    const removed = block.replacement.length;
+    const lines = [];
+    block.replacement.forEach((text, offset) => {
+        lines.push({ kind: 'old', number: block.oldLine + offset, text });
+    });
+    block.expected.forEach((text, offset) => {
+        lines.push({ kind: 'new', number: block.line + offset, text });
+    });
+    const capped = lines.length > EXPLORER_CHANGE_PEEK_MAX_LINES;
+    const shown = capped ? lines.slice(0, EXPLORER_CHANGE_PEEK_MAX_LINES) : lines;
+    const more = capped
+        ? `<div class="explorer-change-peek-more">… ${lines.length - shown.length} more lines <button type="button" class="explorer-change-peek-diff">Open in Diff</button></div>`
+        : '';
+    return `<div class="explorer-change-peek" id="explorer-change-peek-${index}" role="region" aria-label="Change at line ${block.line}"><div class="explorer-change-peek-head"><span class="explorer-change-peek-stat">+${added} −${removed}</span><span class="explorer-change-peek-range">${escHtml(explorerChangePeekRange(block))}</span><button type="button" class="explorer-change-peek-close" aria-label="Close change peek">${EXPLORER_CHANGE_PEEK_CLOSE_ICON}</button></div><div class="explorer-change-peek-body">${shown.map(line => explorerChangePeekLineHtml(index, line.kind, line.number, line.text)).join('')}</div>${more}</div>`;
+}
+
+/* Where the peek hangs: after the block's last rendered row for an added /
+   modified block; before the row the deleted lines used to precede, or after
+   the last surviving row above it for an end-of-file deletion (the same
+   fallback the wedge uses). The insertion is therefore always at or below
+   the row the reader clicked, so nothing above the click moves and no scroll
+   compensation is needed. Null when the block's rows are not rendered — a
+   Markdown fold closed over them — in which case the peek closes rather than
+   floating loose. */
+function explorerChangePeekAnchor(code, block) {
+    const rowFor = line => code.querySelector(`.explorer-source-line[data-explorer-line="${line}"]`);
+    if (block.kind === 'deleted') {
+        const anchor = rowFor(block.line);
+        if (anchor) {
+            return { row: anchor, before: true };
+        }
+        let previous = null;
+        code.querySelectorAll('.explorer-source-line[data-explorer-line]').forEach(row => {
+            const line = Number(row.dataset.explorerLine);
+            if (Number.isFinite(line) && line < block.line) {
+                previous = row;
+            }
+        });
+        return previous ? { row: previous, before: false } : null;
+    }
+    for (let line = block.line + block.expected.length - 1; line >= block.line; line -= 1) {
+        const row = rowFor(line);
+        if (row) {
+            return { row, before: false };
+        }
+    }
+    return null;
+}
+
+/* Sync the peek DOM with the pane state. Runs at the tail of
+   applyExplorerChangeMarks — the same pass that re-applies the gutter marks
+   after every Source rebuild — so an open peek survives search keystrokes,
+   wrap toggles and Markdown folds without ever being its own source of
+   truth. `reveal` is for the click that opens it only: a re-insert after a
+   rebuild must not yank the scroll position. */
+function renderExplorerChangePeek(index, { reveal = false } = {}) {
+    const pane = terminals[index];
+    const code = document.getElementById(`explorer-code-${index}`);
+    if (!pane || !code) {
+        return;
+    }
+    const existing = code.querySelector('.explorer-change-peek');
+    let changed = false;
+    if (existing) {
+        existing.remove();
+        changed = true;
+    }
+    /* The in-place editor owning the buffer (or any other loss of
+       eligibility) closes the peek on the same gate the marks use. A stale
+       model — the file or HEAD moved and the reload is still in flight —
+       only hides it; the fresh model re-resolves the state when it lands. */
+    if (!explorerChangeMarksEligible(pane)) {
+        pane._explorerChangePeek = null;
+    }
+    const stale = pane._explorerChangeMarksKey !== explorerChangeMarksKey(pane);
+    if (pane._explorerChangePeek && !stale) {
+        const block = explorerChangePeekBlock(pane);
+        const anchor = block ? explorerChangePeekAnchor(code, block) : null;
+        if (!block || !anchor) {
+            pane._explorerChangePeek = null;
+        } else {
+            anchor.row.insertAdjacentHTML(
+                anchor.before ? 'beforebegin' : 'afterend',
+                explorerChangePeekHtml(index, block)
+            );
+            changed = true;
+            code.querySelectorAll(`[data-explorer-change-marker="${block.id}"]`).forEach(marker => {
+                marker.setAttribute('aria-expanded', 'true');
+            });
+            if (reveal) {
+                code.querySelector('.explorer-change-peek')?.scrollIntoView({ block: 'nearest' });
+            }
+        }
+    }
+    if (!pane._explorerChangePeek) {
+        code.querySelectorAll('[data-explorer-change-marker][aria-expanded="true"]').forEach(marker => {
+            marker.setAttribute('aria-expanded', 'false');
+        });
+    }
+    /* Opening or closing moves scrollHeight; the overview's viewport box and
+       lane stay in step through the existing coalesced sync. */
+    if (changed) {
+        scheduleExplorerOverviewSync(index);
+    }
+}
+
+/* Marker click: toggle that block's peek. Opening a different block replaces
+   the open one — one peek per pane. */
+function toggleExplorerChangePeek(index, marker) {
+    const pane = terminals[index];
+    const blockId = Number(marker?.dataset.explorerChangeMarker);
+    const block = pane?._explorerChangeMarks?.blocks?.find(entry => entry.id === blockId);
+    if (!pane || !block) {
+        return;
+    }
+    const current = pane._explorerChangePeek;
+    if (current && current.line === block.line && current.oldLine === block.oldLine) {
+        pane._explorerChangePeek = null;
+        renderExplorerChangePeek(index);
+        return;
+    }
+    pane._explorerChangePeek = { line: block.line, oldLine: block.oldLine };
+    renderExplorerChangePeek(index, { reveal: true });
+}
+
+function closeExplorerChangePeek(index, { focus = false } = {}) {
+    const pane = terminals[index];
+    if (!pane || !pane._explorerChangePeek) {
+        return;
+    }
+    const block = explorerChangePeekBlock(pane);
+    pane._explorerChangePeek = null;
+    renderExplorerChangePeek(index);
+    /* The close button and Escape both return focus to the marker that
+       opened the peek, so the gesture round-trips. */
+    if (focus && block) {
+        document.getElementById(`explorer-code-${index}`)
+            ?.querySelector(`[data-explorer-change-marker="${block.id}"]`)
+            ?.focus();
+    }
+}
+
+/* One delegated listener on the scroll container, wired once per element
+   behind a dataset guard (the same pattern as wireExplorerOverview): the
+   container survives every innerHTML rewrite, so the listener does too and
+   the per-render cost stays at zero. Escape is scoped to the peek — focus
+   must be inside it for the handler to fire — so Ctrl+F's own Escape and
+   every other Escape consumer are untouched. */
+function wireExplorerChangePeek(index) {
+    const code = document.getElementById(`explorer-code-${index}`);
+    if (!code || code.dataset.explorerChangePeekBound === 'true') {
+        return;
+    }
+    code.dataset.explorerChangePeekBound = 'true';
+    code.addEventListener('click', event => {
+        const marker = event.target.closest('.explorer-change-marker');
+        if (marker && code.contains(marker)) {
+            toggleExplorerChangePeek(index, marker);
+            return;
+        }
+        if (event.target.closest('.explorer-change-peek-close')) {
+            closeExplorerChangePeek(index, { focus: true });
+            return;
+        }
+        if (event.target.closest('.explorer-change-peek-diff')) {
+            setExplorerFileView(index, 'diff');
+        }
+    });
+    code.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && event.target.closest?.('.explorer-change-peek')) {
+            event.preventDefault();
+            closeExplorerChangePeek(index, { focus: true });
+        }
+    });
 }
 
 /* ─────────────────────────────────────────────
@@ -353,14 +658,19 @@ function explorerOverviewGeometry(index, parts) {
     /* One uninterrupted read pass: two rects, then offsetTop/offsetHeight per
        row with no write in between, so the layout flushes exactly once no
        matter how many rows there are. Unwrapped rows are one line tall each,
-       so a single measurement describes all of them; above the row cap the
-       same uniform approximation is the deliberate degradation. */
+       so a single measurement describes all of them — unless an open change
+       peek sits between rows, which is exactly the contiguous-equal-height
+       assumption breaking, so the peek forces the measured pass (scrollHeight
+       is in the cache signature, so the insertion invalidates the cache by
+       itself; only the path needs gating). Above the row cap the uniform
+       approximation stands in either way — that file is already flagged
+       approximate. */
     const first = rows[0];
     const origin = parts.code.scrollTop
         + (first.getBoundingClientRect().top - parts.code.getBoundingClientRect().top);
     const firstOffset = first.offsetTop;
     const uniformHeight = first.offsetHeight || 1;
-    const uniform = !wrapped || count > EXPLORER_OVERVIEW_MAX_ROWS;
+    const uniform = (!wrapped && !pane._explorerChangePeek) || count > EXPLORER_OVERVIEW_MAX_ROWS;
     for (let i = 0; i < count; i += 1) {
         const row = rows[i];
         const line = Number(row.dataset.explorerLine);
@@ -658,6 +968,11 @@ function syncExplorerOverview(index) {
     if (!geometry) {
         return;
     }
+    /* The change peek is as wide as the scroller's viewport, never the
+       max-content lines block. One property write in the frame that already
+       runs on render and on resize keeps wrapped and unwrapped mode in
+       step. */
+    parts.code.style.setProperty('--explorer-source-viewport-width', `${parts.code.clientWidth}px`);
     paintExplorerOverview(index, parts, geometry);
     updateExplorerOverviewViewport(parts);
 }

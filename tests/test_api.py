@@ -2925,10 +2925,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         # restated there, only the line-number gutter followed the setting).
         # The two diff renderers restate it for the same reason: the handwritten
         # side-by-side table and Diff2Html's own table both pin a stack of their
-        # own that would otherwise win.
-        self.assertEqual(html.count("font-family: var(--source-view-font);"), 5)
+        # own that would otherwise win. The change peek's code cell is a <code>
+        # inside the same panel, so it restates it too.
+        self.assertEqual(html.count("font-family: var(--source-view-font);"), 6)
         for block in (
             ".explorer-source-line-code {",
+            ".explorer-change-peek-code {",
             ".explorer-side-by-side-diff {",
             ".explorer-diff2html .d2h-diff-table {",
         ):

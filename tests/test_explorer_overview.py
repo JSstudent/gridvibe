@@ -109,16 +109,19 @@ class ExplorerOverviewTestCase(unittest.TestCase):
 
     def test_gutter_marker_rules_exist_for_all_three_kinds(self):
         css = self._static("css/terminals.css")
+        # Phase 5 moved the paint from the number cell's box-shadow / ::before
+        # onto the marker button itself: the bar / wedge *is* the click
+        # target, painted with currentColor from the per-kind colour rules.
         self.assertIn(
-            '.explorer-source-line[data-explorer-change="added"] .explorer-source-line-number',
+            '.explorer-source-line[data-explorer-change="added"] .explorer-change-marker',
             css,
         )
         self.assertIn(
-            '.explorer-source-line[data-explorer-change="modified"] .explorer-source-line-number',
+            '.explorer-source-line[data-explorer-change="modified"] .explorer-change-marker',
             css,
         )
         self.assertIn(
-            '.explorer-source-line[data-explorer-change="deleted"] .explorer-source-line-number::before',
+            '.explorer-change-marker[data-explorer-change-marker-kind="deleted"]::before',
             css,
         )
         # The colours come from the shared tokens, not palette literals.
@@ -339,6 +342,245 @@ class ExplorerOverviewColumnTestCase(unittest.TestCase):
         self.assertIn("pane._explorerOverviewGeometry = null;", teardown)
         self.assertIn("pane._explorerOverviewObserver?.disconnect();", teardown)
         self.assertIn("explorerOverviewCancelFrames(pane);", teardown)
+
+
+class ExplorerChangePeekTestCase(unittest.TestCase):
+    """Phase 5 — the clickable gutter change marker and its inline change
+    peek: the marker bar / wedge is itself a button, and a click opens a
+    compact diff of that block alone, inserted directly under the change.
+
+    The backend is untouched (the peek is a second view of the model the pane
+    already holds), so this stays contract-level on the served assets — the
+    same allowed kinds as the rest of this file."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def _static(self, path: str) -> str:
+        response = self.client.get(f"/static/{path}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        response.close()
+        return body
+
+    def _overview(self) -> str:
+        return self._static("js/explorer-overview.js")
+
+    def _css_rule(self, css: str, selector: str) -> str:
+        self.assertIn(selector, css)
+        rule = css[css.index(selector):]
+        return rule[: rule.index("}")]
+
+    def test_model_keeps_the_blocks_and_indexes_them_by_line(self):
+        overview = self._overview()
+        # The classification output is unchanged, but the blocks are kept for
+        # the peek, with every marked line — and every deletion's anchor
+        # line — mapping to its block for a one-lookup click resolution.
+        self.assertIn("blocks: modelBlocks", overview)
+        self.assertIn("blockByLine", overview)
+        self.assertIn("blockByLine.set(block.line + offset, entry.id)", overview)
+        self.assertIn("blockByLine.set(block.line, entry.id)", overview)
+        # Peek identity is the start-line pair, which survives an unrelated
+        # edit elsewhere; the positional id alone would not.
+        self.assertIn("pane._explorerChangePeek = { line: block.line, oldLine: block.oldLine };", overview)
+        self.assertIn("block.line === state.line && block.oldLine === state.oldLine", overview)
+
+    def test_marker_button_is_emitted_per_marked_row_with_one_tab_stop_per_block(self):
+        overview = self._overview()
+        # Injected by the gutter pass that already walks exactly the marked
+        # rows — row-level, never a child of the gutter cell (a nested button
+        # on a Markdown heading row would be invalid HTML).
+        gutter = overview[
+            overview.index("function applyExplorerChangeMarkGutter("):
+            overview.index("function refreshExplorerOverview(")
+        ]
+        self.assertIn("explorer-change-marker", gutter)
+        self.assertIn("button.dataset.explorerChangeMarker = String(entry.id);", gutter)
+        # The deletion wedge is the same button with its own kind hook.
+        self.assertIn("button.dataset.explorerChangeMarkerKind = 'deleted';", gutter)
+        # One tab stop per block: the first rendered row carries tabindex 0,
+        # every other row of the block stays clickable at tabindex -1.
+        self.assertIn("button.tabIndex = tabbedBlocks.has(entry.id) ? -1 : 0;", gutter)
+        # The button is a real disclosure control for the peek it opens.
+        self.assertIn("button.setAttribute('aria-expanded', 'false');", gutter)
+        self.assertIn("aria-controls', `explorer-change-peek-${index}`", gutter)
+        self.assertIn("aria-label", gutter)
+        self.assertIn("button.title = `Show change:", gutter)
+
+    def test_peek_markup_is_a_labelled_region_with_real_line_numbers(self):
+        overview = self._overview()
+        for hook in (
+            'class="explorer-change-peek"',
+            'role="region"',
+            'aria-label="Change at line ',
+            'class="explorer-change-peek-head"',
+            'class="explorer-change-peek-stat"',
+            'class="explorer-change-peek-range"',
+            'class="explorer-change-peek-close"',
+            'aria-label="Close change peek"',
+            'class="explorer-change-peek-body"',
+            'class="explorer-change-peek-line ',
+            'class="explorer-change-peek-number"',
+        ):
+            with self.subTest(hook=hook):
+                self.assertIn(hook, overview)
+        # Unified, not side by side: HEAD lines stack above worktree lines,
+        # numbered oldLine + i / line + i so the peek agrees with the Diff
+        # panel and the gutter it hangs off.
+        self.assertIn("lines.push({ kind: 'old', number: block.oldLine + offset, text });", overview)
+        self.assertIn("lines.push({ kind: 'new', number: block.line + offset, text });", overview)
+        # Highlighting reuses the Diff panel's own pair, so no second lexer
+        # path appears.
+        self.assertIn("highlightExplorerCode(String(text || ''), explorerDiffLanguage(index))", overview)
+
+    def test_peek_css_declares_the_block_and_its_variants(self):
+        css = self._static("css/terminals.css")
+        for selector in (
+            ".explorer-change-peek {",
+            ".explorer-change-peek-head {",
+            ".explorer-change-peek-stat {",
+            ".explorer-change-peek-range {",
+            ".explorer-change-peek-close {",
+            ".explorer-change-peek-body {",
+            ".explorer-change-peek-line {",
+            ".explorer-change-peek-line.old {",
+            ".explorer-change-peek-line.new {",
+            ".explorer-change-peek-number {",
+            ".explorer-change-peek-code {",
+            ".explorer-change-peek-more {",
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(selector, css)
+        # The old/new tints come from the same two tokens the Diff panel's
+        # cells use — one palette by construction.
+        old = self._css_rule(css, ".explorer-change-peek-line.old {")
+        new = self._css_rule(css, ".explorer-change-peek-line.new {")
+        self.assertIn("var(--gv-diff-delete-bg)", old)
+        self.assertIn("var(--gv-diff-add-bg)", new)
+
+    def test_marker_containment_contract_holds(self):
+        css = self._static("css/terminals.css")
+        # The row carries the positioning context; the marker button is
+        # absolute over the gutter's left edge, outside the row's two grid
+        # columns — the contract §10.4's no-nested-button argument stands on.
+        row = self._css_rule(css, ".explorer-source-line[data-explorer-change] {")
+        self.assertIn("position: relative", row)
+        marker = self._css_rule(css, ".explorer-change-marker {")
+        self.assertIn("position: absolute", marker)
+        self.assertIn("left: 0", marker)
+        # The wedge variant is sized to the triangle and pinned to the row's
+        # edge, with an end-of-file rule hanging it off the bottom.
+        wedge = self._css_rule(
+            css, '.explorer-change-marker[data-explorer-change-marker-kind="deleted"] {'
+        )
+        self.assertIn("margin-top: -5px", wedge)
+        self.assertIn(
+            '.explorer-source-line[data-explorer-change="deleted"].explorer-source-change-after',
+            css,
+        )
+
+    def test_peek_width_tracks_the_scroller_viewport(self):
+        css = self._static("css/terminals.css")
+        overview = self._overview()
+        # Declared on the scroller, written in px by the existing coalesced
+        # sync, and consumed by the peek rule — so wrapped and unwrapped mode
+        # agree and the peek never widens the max-content container.
+        view = self._css_rule(css, ".explorer-source-view {")
+        self.assertIn("--explorer-source-viewport-width:", view)
+        peek = self._css_rule(css, ".explorer-change-peek {")
+        self.assertIn("position: sticky", peek)
+        self.assertIn("left: 0", peek)
+        self.assertIn("width: var(--explorer-source-viewport-width)", peek)
+        self.assertIn("'--explorer-source-viewport-width'", overview)
+        self.assertIn("`${parts.code.clientWidth}px`", overview)
+
+    def test_peek_tint_tokens_are_declared_for_both_themes(self):
+        tokens = self._static("css/tokens.css")
+        root = tokens[tokens.index(":root {"):]
+        root = root[: root.index("}")]
+        light = tokens[tokens.index('[data-theme="light"] {'):]
+        light = light[: light.index("}")]
+        for token in ("--gv-diff-add-bg", "--gv-diff-delete-bg"):
+            with self.subTest(token=token):
+                self.assertIn(f"{token}:", root)
+                self.assertIn(f"{token}:", light)
+
+    def test_diff_cell_tints_migrated_to_the_shared_tokens(self):
+        css = self._static("css/terminals.css")
+        # Touching the legacy block migrates its literals (guardrail 7): the
+        # Diff panel and the peek now share one palette.
+        add = self._css_rule(css, ".explorer-diff-cell.add {")
+        delete = self._css_rule(css, ".explorer-diff-cell.delete {")
+        self.assertNotIn("rgba(", add)
+        self.assertNotIn("rgba(", delete)
+        self.assertIn("background: var(--gv-diff-add-bg);", add)
+        self.assertIn("background: var(--gv-diff-delete-bg);", delete)
+
+    def test_peek_caps_huge_blocks_and_hands_them_to_the_diff_panel(self):
+        overview = self._overview()
+        self.assertIn("const EXPLORER_CHANGE_PEEK_MAX_LINES = 200;", overview)
+        self.assertIn("lines.slice(0, EXPLORER_CHANGE_PEEK_MAX_LINES)", overview)
+        self.assertIn("more lines", overview)
+        # A genuinely large block goes to the panel built for it.
+        self.assertIn("setExplorerFileView(index, 'diff')", overview)
+
+    def test_peek_is_pane_state_reapplied_by_the_render_tail(self):
+        overview = self._overview()
+        # The Source rebuild destroys the DOM on every search keystroke, wrap
+        # toggle and fold — so the open peek is re-inserted by the same tail
+        # pass that re-applies the gutter marks, never its own source of truth.
+        apply = overview[
+            overview.index("function applyExplorerChangeMarks(index)"):
+            overview.index("function applyExplorerChangeMarkGutter(")
+        ]
+        self.assertIn("renderExplorerChangePeek(index);", apply)
+        self.assertIn("function renderExplorerChangePeek(", overview)
+        # It closes rather than floating loose when the block is gone
+        # (reverted, saved over, committed away) or folded out of the DOM.
+        render = overview[
+            overview.index("function renderExplorerChangePeek("):
+            overview.index("function toggleExplorerChangePeek(")
+        ]
+        self.assertIn("pane._explorerChangePeek = null;", render)
+        self.assertIn("explorerChangeMarksEligible(pane)", render)
+        # aria-expanded tracks the peek on the markers of the open block.
+        self.assertIn("marker.setAttribute('aria-expanded', 'true');", render)
+
+    def test_teardown_clears_the_peek_state(self):
+        overview = self._overview()
+        teardown = overview[
+            overview.index("function teardownExplorerOverview("):
+            overview.index("function explorerOverviewHtml(")
+        ]
+        self.assertIn("pane._explorerChangePeek = null;", teardown)
+
+    def test_geometry_uniform_fast_path_yields_to_an_open_peek(self):
+        overview = self._overview()
+        geometry = overview[
+            overview.index("function explorerOverviewGeometry("):
+            overview.index("function explorerOverviewDeletionRow(")
+        ]
+        # An inserted peek is exactly what the contiguous-equal-height
+        # assumption breaks on, so `uniform` is no longer computed from
+        # `wrapped` and the row cap alone.
+        self.assertIn("pane._explorerChangePeek", geometry)
+        self.assertIn("!wrapped && !pane._explorerChangePeek", geometry)
+        self.assertIn("count > EXPLORER_OVERVIEW_MAX_ROWS", geometry)
+
+    def test_peek_uses_one_delegated_listener_scoped_to_the_container(self):
+        overview = self._overview()
+        wiring = overview[overview.index("function wireExplorerChangePeek("):]
+        wiring = wiring[: wiring.index("The overview column (Phase 2")]
+        # Wired once per element behind a dataset guard — the container
+        # survives every innerHTML rewrite, so the per-render cost stays zero.
+        self.assertIn("code.dataset.explorerChangePeekBound = 'true';", wiring)
+        self.assertIn("toggleExplorerChangePeek(index, marker);", wiring)
+        self.assertIn("closeExplorerChangePeek(index, { focus: true });", wiring)
+        # Escape closes the peek only while focus is inside it — never a
+        # document-level handler, so Ctrl+F's own Escape is untouched.
+        self.assertIn("event.key === 'Escape'", wiring)
+        self.assertIn("event.target.closest?.('.explorer-change-peek')", wiring)
 
 
 if __name__ == "__main__":
