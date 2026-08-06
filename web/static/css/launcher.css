@@ -496,6 +496,18 @@
             flex-wrap: wrap;
         }
 
+        /* Session Source carries four actions — too many to share the title's
+           row without wrapping mid-group — so its head stacks the toolbar
+           under the step title instead. */
+        .section-head-stacked {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        .section-head-stacked .section-title {
+            margin-right: 0;
+        }
+
         .section-title {
             display: flex;
             align-items: center;

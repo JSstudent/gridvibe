@@ -2316,6 +2316,27 @@
         });
     }
 
+    /* One-click "Import Session → Default session": the same load, minus the
+       picker, so a scratch setup is one click away from an already-imported
+       preset. The default entry is virtual, so nothing is written to
+       saved_sessions.json and no existing preset is touched. */
+    async function startScratchSession() {
+        try {
+            const response = await fetch(`/api/saved-sessions/${encodeURIComponent(DEFAULT_SESSION_ID)}`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load the default session');
+            }
+
+            setActiveSavedSession(data);
+            applySessionConfig(data.config);
+            await persistLastUsedConfig(data.id);
+            showMessage('Started a new session from the default preset.', 'success');
+        } catch (error) {
+            showMessage(`New session failed: ${error.message}`, 'error');
+        }
+    }
+
     async function importSavedSession() {
         try {
             const listResponse = await fetch('/api/saved-sessions');

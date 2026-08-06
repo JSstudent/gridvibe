@@ -546,6 +546,43 @@ class ApiRoutesTestCase(unittest.TestCase):
         # The built-in default is never sent as a preset identity.
         self.assertIn("activeSavedSessionId === DEFAULT_SESSION_ID", html)
 
+    def test_launcher_session_source_stacks_its_actions_under_the_title(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn('class="section-head section-head-stacked"', html)
+        self.assertIn(".section-head-stacked {", html)
+
+    def test_launcher_offers_a_one_click_scratch_session(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn('onclick="startScratchSession()"', html)
+        self.assertIn(">New Session</button>", html)
+        # The scratch button leads the Session Source toolbar, ahead of Save.
+        self.assertLess(
+            html.index('onclick="startScratchSession()"'),
+            html.index('onclick="saveCurrentConfig()"'),
+        )
+
+    def test_default_session_loads_without_touching_saved_presets(self):
+        """The scratch button's backing load: the virtual default preset."""
+        self.client.post(
+            "/api/saved-sessions",
+            json={"name": "Keeper", "config": {"connection_mode": "ssh", "terminal_count": 2}},
+        )
+
+        response = self.client.get(f"/api/saved-sessions/{api.DEFAULT_SAVED_SESSION_ID}")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data["is_default"])
+        self.assertEqual(data["config"]["ssh"]["host"], "")
+
+        listed = self.client.get("/api/saved-sessions").get_json()
+        self.assertEqual([entry["name"] for entry in listed["sessions"]], ["Keeper"])
+
     def test_launcher_target_menu_reports_its_open_state_on_the_caret(self):
         launcher_js = self.client.get("/static/js/launcher.js").get_data(as_text=True)
         workspaces_js = self.client.get("/static/js/workspaces.js").get_data(as_text=True)
