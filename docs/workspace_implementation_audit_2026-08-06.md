@@ -2,8 +2,9 @@
 
 Date: 2026-08-06
 
-Status: findings and remediation plan. **MW-01 and MW-02 are fixed** (see the
-"Resolution" blocks under each); every other finding is still open and describes
+Status: findings and remediation plan. **MW-01, MW-02, MW-04, MW-10, and the
+persistence half of MW-16 are fixed** (see the "Resolution" blocks under each) —
+that is Phases 0 and 1 complete. Every other finding is still open and describes
 current behavior.
 
 ## Executive summary
@@ -117,9 +118,14 @@ it raise, and that a redirected path is untouched by the guard;
 the real manual save and asserts the temporary file received it while the
 production file's bytes are unchanged.
 
-Still open from the recommendations above: production state paths are still
-mutable module globals rather than an injected owner, and there is still no
-OS-level single-writer lock for two concurrent *production* processes.
+**Closed in Phase 1.** The two remaining recommendations are now implemented:
+`RuntimeStateStore` owns the path (through an injected resolver, so the
+process-wide default is the only thing that still consults a module global),
+and every read-modify-replace runs under `_CrossProcessStateLock`, an
+OS-level exclusive lock on `<state>.lock` (`fcntl.flock` on POSIX,
+`msvcrt.locking` on Windows, with a bounded wait that raises rather than
+hanging). Two concurrent production processes are now serialized instead of
+silently discarding each other's updates.
 
 ### MW-02 — Critical: stale snapshot commits can resurrect a closed workspace
 
@@ -175,11 +181,39 @@ manual save while it is held, releases it, and asserts the file. Four of its fiv
 cases fail against the previous implementation; the fifth pins the positive path
 (a capture taken *after* a forget still saves, so a tombstone is not permanent).
 
-Still open from the recommendations above: the ordering is per-workspace tickets
-rather than a full state-store coordinator with persisted revisions, the snapshot
-does not record a live-shape generation, and cross-process production writes are
-still unguarded (MW-01 removes the test process from that set, which was the only
-observed instance).
+**Closed in Phase 1.** The ordering now lives in `RuntimeStateStore` and is
+backed by a **durable** per-workspace revision, not only in-process tickets:
+
+- The state file carries a `revisions` map (`{workspace_id: {revision, kind}}`).
+  Every capture reads the revision it is working from *before* it snapshots the
+  live manager (`RuntimeStateStore.observed_revisions`) and re-checks it inside
+  the file lock at commit time, so a clear or a newer commit performed by *any*
+  process — including one that has since exited — rejects the stale capture.
+  `clear_workspace` writes a revisioned tombstone for the workspace even when no
+  slot existed.
+- Tombstones are bounded (`MAX_TOMBSTONES`, newest first) so the map cannot grow
+  without limit; a live slot's entry is never pruned.
+- The in-process tickets are retained alongside the durable revisions, as the
+  phase plan called for.
+- One deliberate limit, documented in `clear_workspace`: when there is **no
+  state file at all**, the tombstone is recorded in memory only. Group close is
+  a caller, and a close must not conjure a `runtime_state.json` the user never
+  saved into (group events are not snapshot writers). With nothing persisted
+  there is no slot for another process to resurrect *from*, and the in-process
+  ticket still orders this process's own captures.
+
+Not implemented: the snapshot still does not record a live-shape *generation*
+from `SessionManager` (that belongs with the Phase 3 atomic-launch work, which
+is what makes such a generation meaningful).
+
+Coverage: `RuntimeStateCrossProcessOrderingTestCase` (test_multi_workspace.py)
+drives two `RuntimeStateStore` instances over one file — each with its own
+ticket sequence, standing in for two processes — and asserts that the other
+owner's forget rejects a pre-clear capture, that its newer manual save survives
+an older paused autosave, that a tombstone written by one owner still rejects a
+capture made by a *freshly constructed* owner (the restart case), that a fresh
+capture after the tombstone still saves, that `_CrossProcessStateLock` is
+exclusive and released, and that the tombstone map stays bounded.
 
 ### MW-03 — High: restore has a second shape source, `saved_sessions.json`
 
@@ -205,6 +239,41 @@ Recommended correction:
 - Under the strict two-writer contract, rename changes only the live label; the next timer/manual capture persists it.
 - If immediate durable label changes are required, implement a metadata-only operation that cannot recapture groups and document it as metadata persistence, not a shape writer.
 - Separate `last_capture_origin` from a `pinned` or `manually_saved_at` field.
+
+**Resolution (fixed).** Confirmed as reported: `PATCH /api/workspaces/<id>`
+called `capture_workspace(..., origin="auto")` after changing the live label,
+the module docstring said "three writers" while `CHANGELOG.md` said two, and
+`origin` was rewritten to `"manual"` on every auto capture of a slot that had
+ever been saved by hand — so it described eviction pinning, not the writer.
+
+- The rename route no longer captures. It changes the live label and returns;
+  its docstring says why, and the next autosave tick or explicit **Save
+  Workspace** persists the label (it reaches the slot through the live
+  workspace record the capture already reads). No metadata-only durable-label
+  operation was added — nothing in the product needs the label durable before
+  the next capture, and the simplest correct answer is fewer writers, not a
+  fourth one.
+- `origin` now names the writer of the *current* shape and nothing else.
+  Durable pinning moved to `manually_saved_at`, set by an explicit save and
+  carried forward untouched by later auto captures. `_slot_is_pinned()` is the
+  one predicate the auto-slot cap consults; it still honours a legacy v2 slot
+  that only carries `origin == "manual"`, and the v2→v3 migration backfills
+  `manually_saved_at` from such a slot's `saved_at`.
+- `list_restorable_workspaces` exposes `manually_saved_at` in its summaries,
+  and the launcher's "saved manually" note in `workspaces.js` reads that field
+  (falling back to the legacy `origin`) so an autosave refresh no longer erases
+  the note from the restore chooser.
+- The module docstring and `CHANGELOG.md` now agree with the code: exactly two
+  writers.
+
+Coverage: `MultiWorkspaceStage3: rename changes the live label without writing
+the snapshot` patches `_write_state_locked` and asserts it is never called
+during a rename; `…the next real capture persists a renamed label` renames and
+then runs one autosave tick, asserting the slot's label follows with
+`origin == "auto"`. `MultiWorkspacePersistence: autosave refresh keeps the pin
+while origin names the writer`, `…a pinned slot survives the auto cap after a
+timer refresh`, and `…a legacy v2 manual slot keeps its pin through migration`
+pin the split itself.
 
 ### MW-05 — High: an empty permanent `default` record leaks into the launch dropdown
 
@@ -287,6 +356,38 @@ Recommended correction:
 - Autosave should log one structured, rate-limited error and retain a last-good backup.
 - A malformed read should not be silently converted into an empty state that the next capture overwrites without quarantine/backup.
 
+**Resolution (fixed).** Confirmed as reported: `_write_state_locked` caught
+every exception, logged a warning, and returned; `capture_workspace` then
+returned its in-memory slot and `POST /api/runtime-state/save` answered `200
+{"saved": true}` for a snapshot that never reached the disk, while
+`clear_workspace` returned `True` after a failed delete write.
+
+- `_write_state_locked` now raises `RuntimeStatePersistenceError` on any
+  failure, after removing its temporary file. It also `fsync`s the temporary
+  file before the replace, and copies the file it is about to replace to
+  `<state>.bak` first.
+- `POST /api/runtime-state/save` answers `503 {"saved": false, "retryable":
+  true}` and `DELETE /api/runtime-state` answers `503 {"forgotten": false,
+  "retryable": true}`. Both clients already treated a non-`ok` response as a
+  failure with retry wording (`terminals.js` shows "Workspace save failed: … —
+  try again", `workspaces.js` surfaces `data.error`), and the launcher's
+  restart path still treats only `409` as "nothing to save", so no frontend
+  change was needed beyond the `manually_saved_at` note under MW-04.
+- The autosave tick reports through `_report_autosave_failure`: one structured
+  `ERROR` naming the failure kind per failure *streak* (rate-limited to one per
+  15 min, reset by the next successful tick), with the rest at `DEBUG`. It
+  never claims a commit, and the last good file is untouched.
+- The last-good backup and quarantine that keep a malformed read from becoming
+  an overwritable empty state are covered under MW-16 below.
+
+Coverage: `RuntimeStatePersistenceFailureTestCase` (test_multi_workspace.py)
+forces a failed temporary write and a failed `os.replace` (asserting the raise
+and that no `.tmp` is left behind), asserts the `503`/no-success-payload
+responses for save and forget with the slot state unchanged in each direction,
+and asserts the autosave streak logs exactly one error across three failing
+ticks while the file's bytes are unchanged — and that a recovered tick re-arms
+the report.
+
 ### MW-11 — High: stable group IDs can collide after sanitization
 
 Saved-session IDs accept arbitrary nonblank strings (`web/saved_sessions.py:808`, `web/api.py:2025`). `_build_launch_group_id` replaces every run of non-`[A-Za-z0-9._-]` characters with `-` (`web/saved_sessions.py:980`). Distinct IDs such as `a/b` and `a-b` therefore map to the same live group ID.
@@ -336,6 +437,40 @@ Recommended correction:
 - Quarantine malformed state and preserve the last-good file.
 - Log safe capture metadata: workspace ID, writer, generation, group count, pane count, and commit result. Do not log hosts, directories, commands, or credentials.
 - Log close/forget with the removed live ID, persisted revision, and whether the public workspace disappeared.
+
+**Resolution (persistence half fixed; field validation deferred to Phase 5, as
+planned).** Confirmed as reported: a read error was swallowed into
+`_empty_state()`, there was no backup or quarantine, a file carrying a version
+this build does not understand was reinterpreted through the v1 migration path
+and then overwritten, and no capture was logged at all.
+
+- `SCHEMA_VERSION` is now `3` and `SUPPORTED_SCHEMA_VERSIONS` is explicit.
+  `_parse_state` returns `None` — meaning "quarantine this" — for a non-object
+  root, a version outside the supported set (notably a *newer* file), or a
+  supported version with the wrong shape. v1 and v2 files still migrate on
+  read; a readable but empty file is not treated as corrupt.
+- `_read_state_locked` quarantines a bad file as
+  `runtime_state.json.corrupt-<UTC timestamp>` (uniquified on collision) and
+  then recovers from `<state>.bak`, the copy taken before the previous commit.
+  The evidence is preserved and the last-good state is what the next capture
+  builds on, so one bad write can no longer erase every saved workspace.
+- `_log_commit` logs each committed capture at DEBUG with workspace id, writer,
+  durable revision, pinned flag, group count, and pane count — and nothing
+  else. Hosts, directories, commands, and credentials are absent by
+  construction. `clear_workspace` logs the workspace id and whether a slot
+  actually existed.
+- Deferred to Phase 5 as the plan specifies: per-group/per-session field
+  validation (normalized ids, nonempty session arrays, bounded pane counts,
+  allowed mode/shape fields, layout consistency). A zero-pane group is still
+  countable in a summary; only the file-level integrity work is closed here.
+
+Coverage: `RuntimeStateSchemaRecoveryTestCase` (test_multi_workspace.py) asserts
+that a corrupt file is quarantined and the last-good backup's shape recovered,
+that a `version: 99` file is quarantined rather than reinterpreted, that a
+corrupt file with no backup is still quarantined and removed, that the
+quarantined bytes survive the next capture verbatim, that a v2 file loads and is
+rewritten at the current version with a `revisions` map, and that the commit log
+carries shape metadata but no host or directory.
 
 ## Existing coverage that currently protects the wrong behavior
 
@@ -392,7 +527,7 @@ not incident containment.
 **Exit gate:** the existing MW-01/MW-02 tests remain green, including direct
 single-test execution and the paused-capture close/manual-save races.
 
-### Phase 1 — Make runtime state a trustworthy, two-writer store
+### Phase 1 — Make runtime state a trustworthy, two-writer store (complete)
 
 **Findings:** remaining MW-01/MW-02 work, MW-04, MW-10, and the persistence
 foundation of MW-16.
@@ -442,6 +577,28 @@ Verification:
 two-writer rule is behavioral-test enforced; acknowledgements match durable
 file contents; and concurrent production processes cannot silently lose each
 other's updates.
+
+**Outcome (all six steps done; exit gate met).**
+
+| Step | Result |
+| --- | --- |
+| 1. One application-owned store | `RuntimeStateStore` owns the injected path resolver, process lock, file operations, schema, and per-workspace commit metadata. `_default_store` is the process-wide owner; the module functions are thin delegates kept for the existing call sites and `web/api.py`'s re-exports. |
+| 2. OS-level lock + unique temp + no manager lock held | `_CrossProcessStateLock` wraps every read-modify-replace; each atomic replace still uses a unique same-directory temp path; every capture reads the live manager and returns *before* the store takes any file lock. |
+| 3. Durable revision | `revisions` map in the file, observed before the live snapshot and re-checked at commit; in-process tickets retained. |
+| 4. Typed persistence result | `RuntimeStatePersistenceError`; `503` from save/forget; rate-limited structured autosave error with the last good file retained. |
+| 5. Rename is not a writer; pinning split out | Rename touches the live label only; `manually_saved_at` carries the pin, `origin` carries the writer. |
+| 6. Schema version, backup, quarantine, safe commit logging | `SCHEMA_VERSION = 3`, `<state>.bak`, `runtime_state.json.corrupt-<ts>`, `_log_commit`. Field-level validation stays in Phase 5 per the plan. |
+
+New sidecar files (`.lock`, `.bak`, `.corrupt-*`) are gitignored.
+`README.md`, `CHANGELOG.md`, `CLAUDE.md`, and `AGENTS.md` were updated for the
+two-writer rule, the honest save/forget failure, and the quarantine behavior.
+Verified with `python tests/run_tests.py` (1135 tests, 7 skipped, 0 failures)
+and `python -m ruff check .`.
+
+Two items were consciously **not** done here, both by the plan's own division of
+labour: the snapshot does not record a `SessionManager` live-shape generation
+(meaningful only once Phase 3 makes launch atomic), and per-field slot
+validation stays in Phase 5 where the final identity schema is known.
 
 ### Phase 2 — Make workspace lifecycle and visibility consistent
 

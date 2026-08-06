@@ -15609,12 +15609,12 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json()["group_id"]
 
-    def test_capture_persists_a_password_free_v2_slot(self):
+    def test_capture_persists_a_password_free_slot(self):
         self._launch_explorer_group()
         slot = web_runtime_state.capture_workspace(api.session_manager)
         self.assertIsNotNone(slot)
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["version"], web_runtime_state.SCHEMA_VERSION)
         stored = data["workspaces"]["default"]
         self.assertEqual(stored["workspace_id"], "default")
         self.assertEqual(stored["origin"], "auto")
@@ -15714,10 +15714,11 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(set(data["workspaces"]), {workspace_a, workspace_b})
         self.assertEqual(data["workspaces"][workspace_a]["origin"], "manual")
         self.assertEqual(data["workspaces"][workspace_b], sibling_before)
-        # Clearing slot A must leave slot B intact, and the file stays v2.
+        # Clearing slot A must leave slot B intact, and the file keeps its
+        # schema skeleton.
         web_runtime_state.clear_workspace(workspace_a)
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["version"], web_runtime_state.SCHEMA_VERSION)
         self.assertEqual(set(data["workspaces"]), {workspace_b})
 
     def test_autosave_tick_captures_a_live_workspace(self):
@@ -16039,9 +16040,9 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["forgotten"])
         self.assertIsNone(web_runtime_state.load_restorable_workspace())
-        # The file itself stays (v2 skeleton); only the slot is removed.
+        # The file itself stays (schema skeleton); only the slot is removed.
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["version"], web_runtime_state.SCHEMA_VERSION)
         self.assertEqual(data["workspaces"], {})
         payload = self.client.get("/api/runtime-state").get_json()
         self.assertFalse(payload["restorable"])

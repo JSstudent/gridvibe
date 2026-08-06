@@ -149,6 +149,7 @@ from web.hostkeys import (  # noqa: F401 - re-exported for backwards compatibili
 )
 from web.paths import BASE_DIR, install_kind
 from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
+    RuntimeStatePersistenceError,
     capture_live_workspaces,
     capture_workspace,
     clear_workspace,
@@ -1611,7 +1612,16 @@ def close_extra_live_workspaces():
 
 @app.route('/api/workspaces/<workspace_id>', methods=['PATCH'])
 def rename_workspace(workspace_id: str):
-    """Rename one live workspace (label only) and its saved slot."""
+    """Rename one live workspace — the live label only.
+
+    Deliberately **not** a snapshot writer. Only the autosave timer and the
+    user's explicit Save Workspace capture workspace shape; a rename that
+    recaptured would persist whatever transient shape happened to be live at
+    the moment a cosmetic label changed (a half-launched group, a tab the user
+    was about to close). The next capture by either real writer picks the new
+    label up from the live workspace record, so the saved slot catches up
+    within one autosave interval — or immediately, if the user saves.
+    """
     data = request.get_json(silent=True) or {}
     try:
         resolved_workspace_id = normalize_workspace_id(workspace_id)
@@ -1625,14 +1635,6 @@ def rename_workspace(workspace_id: str):
     if workspace is None:
         return jsonify({"error": "Workspace not found"}), 404
 
-    # Keep the saved slot's label in step so the restore chooser does not keep
-    # offering the old name; an empty workspace has no slot and is skipped.
-    capture_workspace(
-        session_manager,
-        workspace_id=resolved_workspace_id,
-        origin="auto",
-        label=label or None,
-    )
     groups = session_manager.get_workspace_groups(resolved_workspace_id)
     return jsonify(public_workspace_payload(workspace, len(groups)))
 
@@ -1771,14 +1773,25 @@ def save_runtime_state():
         workspace_id,
         data.get("active_group_id"),
     )
-    slot = capture_workspace(
-        session_manager,
-        workspace_id=workspace_id,
-        origin="manual",
-        label=label,
-        active_group_id=active_group_id,
-        native_zoom_factor=data.get("native_zoom_factor"),
-    )
+    try:
+        slot = capture_workspace(
+            session_manager,
+            workspace_id=workspace_id,
+            origin="manual",
+            label=label,
+            active_group_id=active_group_id,
+            native_zoom_factor=data.get("native_zoom_factor"),
+        )
+    except RuntimeStatePersistenceError as exc:
+        # The revision never reached the disk. Never answer 200/"saved": a
+        # success toast for data that was not stored is worse than an error.
+        logger.error("Workspace save failed for %s: %s", workspace_id, exc)
+        return jsonify({
+            "saved": False,
+            "workspace_id": workspace_id,
+            "error": "The workspace snapshot could not be written to disk",
+            "retryable": True,
+        }), 503
     if slot is None:
         # An empty workspace is never captured, so it never overwrites (or
         # clears) the previously saved slot.
@@ -1844,7 +1857,17 @@ def dismiss_runtime_state():
             "workspace_id": workspace_id,
             "live_conflict": True,
         }), 409
-    forgotten = clear_workspace(workspace_id)
+    try:
+        forgotten = clear_workspace(workspace_id)
+    except RuntimeStatePersistenceError as exc:
+        # The slot may still be on disk, so the Forget did not happen.
+        logger.error("Workspace forget failed for %s: %s", workspace_id, exc)
+        return jsonify({
+            "error": "The workspace snapshot could not be removed from disk",
+            "forgotten": False,
+            "workspace_id": workspace_id,
+            "retryable": True,
+        }), 503
     return jsonify({
         "message": "Workspace snapshot cleared" if forgotten else "No saved snapshot to clear",
         "forgotten": forgotten,
@@ -1856,6 +1879,30 @@ def dismiss_runtime_state():
 
 _workspace_autosave_started = False
 _workspace_autosave_lock = threading.Lock()
+# One structured error per failure streak, not one per tick: a full disk or a
+# locked file fails every minute, and a log the user cannot read is no help.
+WORKSPACE_AUTOSAVE_ERROR_INTERVAL_SECONDS = 15 * 60
+_workspace_autosave_last_error_at = 0.0
+
+
+def _report_autosave_failure(exc: BaseException) -> None:
+    """Log one rate-limited, structured autosave failure.
+
+    Nothing was committed and the previous file is still the last good one, so
+    the failure is reported rather than retried: the next tick tries again.
+    """
+    global _workspace_autosave_last_error_at
+    now = time.time()
+    if now - _workspace_autosave_last_error_at < WORKSPACE_AUTOSAVE_ERROR_INTERVAL_SECONDS:
+        logger.debug("Workspace autosave still failing: %s", exc)
+        return
+    _workspace_autosave_last_error_at = now
+    logger.error(
+        "Workspace autosave could not commit (kind=%s): %s — the last good "
+        "snapshot is unchanged and the next tick will retry",
+        type(exc).__name__,
+        exc,
+    )
 
 
 def _run_workspace_autosave_tick() -> None:
@@ -1865,10 +1912,17 @@ def _run_workspace_autosave_tick() -> None:
     just-restarted process can never wipe the restorable slot — a slot is only
     ever overwritten by the next non-empty capture.
     """
+    global _workspace_autosave_last_error_at
     try:
         capture_live_workspaces(session_manager, origin="auto")
-    except Exception:
-        logger.exception("Workspace autosave failed")
+    except RuntimeStatePersistenceError as exc:
+        _report_autosave_failure(exc)
+        return
+    except Exception as exc:
+        _report_autosave_failure(exc)
+        logger.debug("Workspace autosave traceback", exc_info=True)
+        return
+    _workspace_autosave_last_error_at = 0.0
 
 
 def _workspace_autosave_loop(stop_event: threading.Event) -> None:

@@ -427,9 +427,9 @@ class MultiWorkspacePersistenceTestCase(unittest.TestCase):
         original_write = web_runtime_state._write_state_locked
         write_lock_states = []
 
-        def checked_write(state):
+        def checked_write(state, state_path):
             write_lock_states.append(api.session_manager.lock._is_owned())
-            original_write(state)
+            original_write(state, state_path)
 
         with patch.object(
             web_runtime_state,
@@ -466,6 +466,7 @@ class MultiWorkspacePersistenceTestCase(unittest.TestCase):
                     "workspace_id": self.WORKSPACE_A,
                     "label": "Alpha",
                     "origin": "auto",
+                    "manually_saved_at": None,
                     "saved_at": summaries[0]["saved_at"],
                     "group_count": 1,
                     "pane_count": 1,
@@ -475,53 +476,84 @@ class MultiWorkspacePersistenceTestCase(unittest.TestCase):
         self.assertNotIn("groups", summaries[0])
         self.assertNotIn("sessions", summaries[0])
 
-    def test_autosave_refresh_does_not_demote_a_manual_slot(self):
+    def test_autosave_refresh_keeps_the_pin_while_origin_names_the_writer(self):
+        """MW-04: pinning is durable; ``origin`` describes the last writer."""
         self._group("group-a", self.WORKSPACE_A, "secret-a")
-        web_runtime_state.capture_workspace(
+        manual = web_runtime_state.capture_workspace(
             api.session_manager,
             workspace_id=self.WORKSPACE_A,
             origin="manual",
         )
+        self.assertEqual(manual["origin"], "manual")
+        self.assertIsNotNone(manual["manually_saved_at"])
 
         web_runtime_state.capture_live_workspaces(api.session_manager)
 
         slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
-        self.assertEqual(slot["origin"], "manual")
+        # The timer wrote this shape, and the slot says so...
+        self.assertEqual(slot["origin"], "auto")
+        # ...but the workspace is still one the user saved by hand, so it keeps
+        # its permanent-offer pin and is exempt from the auto-slot cap.
+        self.assertEqual(slot["manually_saved_at"], manual["manually_saved_at"])
+        self.assertTrue(web_runtime_state._slot_is_pinned(slot))
 
-    def test_capture_workspace_preserves_manual_pin_but_keeps_auto_slots_auto(self):
+    def test_a_pinned_slot_survives_the_auto_cap_after_a_timer_refresh(self):
+        """The refreshed pin must still beat eviction, not just be recorded."""
         self._group("group-a", self.WORKSPACE_A, "secret-a")
-        self._group("group-b", self.WORKSPACE_B, "secret-b")
         web_runtime_state.capture_workspace(
             api.session_manager,
             workspace_id=self.WORKSPACE_A,
             origin="manual",
         )
+        web_runtime_state.capture_live_workspaces(api.session_manager)
+
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        for index in range(web_runtime_state.MAX_AUTO_WORKSPACE_SLOTS + 4):
+            workspace_id = f"w{index:011d}"
+            state["workspaces"][workspace_id] = {
+                "workspace_id": workspace_id,
+                "label": f"Slot {index}",
+                "origin": "auto",
+                "saved_at": 9_000_000_000.0 + index,
+                "groups": [{"group_id": f"g{index}", "sessions": [{"host": "h"}]}],
+            }
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        self._group("group-b", self.WORKSPACE_B, "secret-b")
         web_runtime_state.capture_workspace(
-            api.session_manager,
-            workspace_id=self.WORKSPACE_B,
-            origin="auto",
+            api.session_manager, workspace_id=self.WORKSPACE_B
         )
 
-        # The rename route recaptures with origin="auto" and the new label.
-        web_runtime_state.capture_workspace(
-            api.session_manager,
-            workspace_id=self.WORKSPACE_A,
-            origin="auto",
-            label="Renamed",
-        )
-        web_runtime_state.capture_workspace(
-            api.session_manager,
-            workspace_id=self.WORKSPACE_B,
-            origin="auto",
-            label="Renamed B",
+        stored = json.loads(self.state_path.read_text(encoding="utf-8"))["workspaces"]
+        self.assertIn(self.WORKSPACE_A, stored)
+
+    def test_a_legacy_v2_manual_slot_keeps_its_pin_through_migration(self):
+        """Files written before the split only carry origin="manual"."""
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "workspaces": {
+                        self.WORKSPACE_A: {
+                            "workspace_id": self.WORKSPACE_A,
+                            "label": "Alpha",
+                            "origin": "manual",
+                            "saved_at": 1000.0,
+                            "groups": [
+                                {"group_id": "g1", "sessions": [{"host": "h"}]}
+                            ],
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
         )
 
-        manual_slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
-        self.assertEqual(manual_slot["origin"], "manual")
-        self.assertEqual(manual_slot["label"], "Renamed")
-        auto_slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_B)
-        self.assertEqual(auto_slot["origin"], "auto")
-        self.assertEqual(auto_slot["label"], "Renamed B")
+        summaries = web_runtime_state.list_restorable_workspaces()
+
+        self.assertEqual(summaries[0]["manually_saved_at"], 1000.0)
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+        self.assertTrue(web_runtime_state._slot_is_pinned(slot))
 
     def test_capture_workspace_enforces_the_auto_slot_cap(self):
         self._group("group-a", self.WORKSPACE_A, "secret-a")
@@ -721,6 +753,464 @@ class RuntimeStateCommitOrderingTestCase(unittest.TestCase):
         self._finish(release, worker, result)
 
         self.assertNotIn(self.WORKSPACE_A, self._stored_workspaces())
+
+
+class RuntimeStateCrossProcessOrderingTestCase(unittest.TestCase):
+    """Phase 1: two store owners on one file must order against each other.
+
+    Each :class:`RuntimeStateStore` keeps its own in-process tickets, so two
+    instances sharing a path stand in for two GridVibe processes: only the
+    durable per-workspace revisions can order them.
+    """
+
+    WORKSPACE_A = "aaaaaaaaaaaa"
+
+    def setUp(self):
+        api.session_manager.reset_sessions()
+        api.session_manager.create_workspace("Alpha", self.WORKSPACE_A)
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        self.store_a = web_runtime_state.RuntimeStateStore(lambda: str(self.state_path))
+        self.store_b = web_runtime_state.RuntimeStateStore(lambda: str(self.state_path))
+        self._group("group-a")
+
+    def _group(self, group_id):
+        api.session_manager.create_group(
+            name=group_id,
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id=group_id,
+            workspace_id=self.WORKSPACE_A,
+        )
+        api.session_manager.create_session(
+            group_id=group_id, host=f"{group_id}.example", directory="/srv/app"
+        )
+
+    def _stored(self):
+        if not self.state_path.exists():
+            return {}
+        return json.loads(self.state_path.read_text(encoding="utf-8"))["workspaces"]
+
+    def _run_paused_capture(self, store, **kwargs):
+        snapshotted = threading.Event()
+        release = threading.Event()
+        result = {}
+
+        def run():
+            try:
+                result["value"] = store.capture_workspace(
+                    _PausedSnapshotManager(api.session_manager, snapshotted, release),
+                    workspace_id=self.WORKSPACE_A,
+                    **kwargs,
+                )
+            except BaseException as exc:  # surfaced by the assertions below
+                result["error"] = exc
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        self.addCleanup(release.set)
+        self.addCleanup(worker.join, 10)
+        self.assertTrue(snapshotted.wait(10), "capture never reached the snapshot")
+        return release, worker, result
+
+    def _finish(self, release, worker, result):
+        release.set()
+        worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn("error", result)
+        return result.get("value")
+
+    def test_the_other_owners_forget_rejects_a_pre_clear_capture(self):
+        self.store_a.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A
+        )
+
+        release, worker, result = self._run_paused_capture(self.store_a)
+        # The "other process" closes and forgets while A holds its snapshot.
+        self.store_b.clear_workspace(self.WORKSPACE_A)
+        slot = self._finish(release, worker, result)
+
+        self.assertIsNone(slot)
+        self.assertNotIn(self.WORKSPACE_A, self._stored())
+
+    def test_the_other_owners_newer_save_survives_an_older_autosave(self):
+        self.store_a.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A
+        )
+
+        release, worker, result = self._run_paused_capture(self.store_a, origin="auto")
+        self._group("group-b")
+        newer = self.store_b.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A, origin="manual"
+        )
+        self.assertEqual(len(newer["groups"]), 2)
+        self._finish(release, worker, result)
+
+        slot = self._stored()[self.WORKSPACE_A]
+        self.assertEqual(
+            [group["group_id"] for group in slot["groups"]], ["group-a", "group-b"]
+        )
+
+    def test_a_durable_tombstone_outlives_the_owner_that_wrote_it(self):
+        """Restart case: the rejecting store never saw the clear happen."""
+        self.store_a.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A
+        )
+        observed = self.store_a.observed_revisions()[self.WORKSPACE_A]
+        self.store_a.clear_workspace(self.WORKSPACE_A)
+
+        # A brand-new owner (a restarted process) reads the file and still
+        # refuses a capture that observed the pre-clear revision.
+        restarted = web_runtime_state.RuntimeStateStore(lambda: str(self.state_path))
+        with patch.object(
+            restarted, "observed_revisions", return_value={self.WORKSPACE_A: observed}
+        ):
+            slot = restarted.capture_workspace(
+                api.session_manager, workspace_id=self.WORKSPACE_A
+            )
+
+        self.assertIsNone(slot)
+        self.assertNotIn(self.WORKSPACE_A, self._stored())
+
+    def test_a_fresh_capture_after_the_tombstone_still_saves(self):
+        """A tombstone orders in-flight captures; it is not permanent."""
+        self.store_a.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A
+        )
+        self.store_b.clear_workspace(self.WORKSPACE_A)
+
+        slot = self.store_a.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A
+        )
+
+        self.assertIsNotNone(slot)
+        self.assertIn(self.WORKSPACE_A, self._stored())
+
+    def test_the_cross_process_lock_is_exclusive_and_released(self):
+        lock = web_runtime_state._CrossProcessStateLock(str(self.state_path))
+        blocked = {}
+
+        with lock:
+            def contend():
+                try:
+                    with web_runtime_state._CrossProcessStateLock(
+                        str(self.state_path), timeout=0.2
+                    ):
+                        blocked["acquired"] = True
+                except web_runtime_state.RuntimeStatePersistenceError as exc:
+                    blocked["error"] = exc
+
+            worker = threading.Thread(target=contend)
+            worker.start()
+            worker.join(10)
+
+        self.assertNotIn("acquired", blocked)
+        self.assertIn("error", blocked)
+        # Released on exit: the next owner gets it straight away.
+        with web_runtime_state._CrossProcessStateLock(str(self.state_path), timeout=1):
+            pass
+
+    def test_the_tombstone_map_stays_bounded(self):
+        self.store_a.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A
+        )
+        for index in range(web_runtime_state.MAX_TOMBSTONES + 25):
+            self.store_a.clear_workspace(f"t{index:011d}")
+
+        revisions = json.loads(self.state_path.read_text(encoding="utf-8"))["revisions"]
+        tombstones = [key for key in revisions if key != self.WORKSPACE_A]
+        self.assertLessEqual(len(tombstones), web_runtime_state.MAX_TOMBSTONES)
+        # The live slot's own ordering entry is never pruned.
+        self.assertIn(self.WORKSPACE_A, revisions)
+
+
+class RuntimeStatePersistenceFailureTestCase(unittest.TestCase):
+    """MW-10: an acknowledgement must mean the revision reached the disk."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _launch(self):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": "Files",
+                "sessions": [
+                    {
+                        "directory": str(self.repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        return response.get_json()["group_id"]
+
+    def test_a_failed_temporary_write_raises_instead_of_logging_and_returning(self):
+        with patch("builtins.open", side_effect=OSError("No space left on device")):
+            with self.assertRaises(web_runtime_state.RuntimeStatePersistenceError):
+                web_runtime_state._write_state_locked(
+                    {"version": 3, "workspaces": {}, "revisions": {}},
+                    str(self.state_path),
+                )
+        self.assertFalse(self.state_path.exists())
+
+    def test_a_failed_replace_leaves_no_temporary_file_behind(self):
+        with patch("os.replace", side_effect=OSError("locked by antivirus")):
+            with self.assertRaises(web_runtime_state.RuntimeStatePersistenceError):
+                web_runtime_state._write_state_locked(
+                    {"version": 3, "workspaces": {}, "revisions": {}},
+                    str(self.state_path),
+                )
+        leftovers = [
+            entry.name
+            for entry in Path(self.temp_dir.name).iterdir()
+            if entry.name.endswith(".tmp")
+        ]
+        self.assertEqual(leftovers, [])
+
+    def test_manual_save_reports_a_retryable_failure_not_success(self):
+        self._launch()
+
+        with patch.object(
+            web_runtime_state,
+            "_write_state_locked",
+            side_effect=web_runtime_state.RuntimeStatePersistenceError("disk full"),
+        ):
+            response = self.client.post("/api/runtime-state/save", json={})
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.get_json()
+        self.assertFalse(payload["saved"])
+        self.assertTrue(payload["retryable"])
+        self.assertNotIn("groups", payload)
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+
+    def test_forget_reports_a_retryable_failure_not_success(self):
+        group_id = self._launch()
+        web_runtime_state.capture_workspace(api.session_manager)
+        self.client.delete(f"/api/sessions?group={group_id}")
+        # The close already forgot the emptied workspace, so re-capture a slot
+        # for the failing Forget to act on.
+        api.session_manager.reset_sessions()
+        self._launch()
+        web_runtime_state.capture_workspace(api.session_manager)
+        api.session_manager.reset_sessions()
+
+        with patch.object(
+            web_runtime_state,
+            "_write_state_locked",
+            side_effect=web_runtime_state.RuntimeStatePersistenceError("read-only fs"),
+        ):
+            response = self.client.delete("/api/runtime-state")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.get_json()
+        self.assertFalse(payload["forgotten"])
+        self.assertTrue(payload["retryable"])
+        # Nothing was removed, so the slot is still offered.
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace())
+
+    def test_autosave_keeps_the_last_good_file_and_logs_one_error_per_streak(self):
+        self._launch()
+        web_runtime_state.capture_workspace(api.session_manager, origin="manual")
+        good_bytes = self.state_path.read_bytes()
+        api._workspace_autosave_last_error_at = 0.0
+        self.addCleanup(setattr, api, "_workspace_autosave_last_error_at", 0.0)
+
+        with patch.object(
+            web_runtime_state,
+            "_write_state_locked",
+            side_effect=web_runtime_state.RuntimeStatePersistenceError("disk full"),
+        ):
+            with self.assertLogs(api.logger, level="ERROR") as captured:
+                api._run_workspace_autosave_tick()
+                api._run_workspace_autosave_tick()
+                api._run_workspace_autosave_tick()
+
+        # One structured error for the streak, not one per tick.
+        self.assertEqual(len(captured.records), 1)
+        self.assertIn("RuntimeStatePersistenceError", captured.output[0])
+        self.assertEqual(self.state_path.read_bytes(), good_bytes)
+
+    def test_a_recovered_autosave_reports_the_next_failure_again(self):
+        self._launch()
+        api._workspace_autosave_last_error_at = 0.0
+        self.addCleanup(setattr, api, "_workspace_autosave_last_error_at", 0.0)
+
+        with patch.object(
+            web_runtime_state,
+            "_write_state_locked",
+            side_effect=web_runtime_state.RuntimeStatePersistenceError("disk full"),
+        ):
+            with self.assertLogs(api.logger, level="ERROR"):
+                api._run_workspace_autosave_tick()
+        api._run_workspace_autosave_tick()
+        with patch.object(
+            web_runtime_state,
+            "_write_state_locked",
+            side_effect=web_runtime_state.RuntimeStatePersistenceError("disk full"),
+        ):
+            with self.assertLogs(api.logger, level="ERROR") as second:
+                api._run_workspace_autosave_tick()
+
+        self.assertEqual(len(second.records), 1)
+
+
+class RuntimeStateSchemaRecoveryTestCase(unittest.TestCase):
+    """MW-16 (persistence half): a bad file is quarantined, never laundered."""
+
+    def setUp(self):
+        api.session_manager.reset_sessions()
+        api.session_manager.create_workspace("Alpha", "aaaaaaaaaaaa")
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _capture_a_slot(self):
+        api.session_manager.create_group(
+            name="group-a",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-a",
+            workspace_id="aaaaaaaaaaaa",
+        )
+        api.session_manager.create_session(
+            group_id="group-a", host="a.example", directory="/srv/app"
+        )
+        return web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id="aaaaaaaaaaaa", origin="manual"
+        )
+
+    def _quarantined(self):
+        return sorted(
+            entry.name
+            for entry in Path(self.temp_dir.name).iterdir()
+            if ".corrupt-" in entry.name
+        )
+
+    def test_a_corrupt_file_is_quarantined_and_the_last_good_state_recovered(self):
+        self._capture_a_slot()
+        # A second commit copies the first one to the last-good backup, which
+        # is the state recovery falls back to.
+        self._capture_a_slot()
+        backup = json.loads(Path(f"{self.state_path}.bak").read_text(encoding="utf-8"))
+        self.state_path.write_text("{ this is not json", encoding="utf-8")
+
+        summaries = web_runtime_state.list_restorable_workspaces()
+
+        self.assertEqual([row["workspace_id"] for row in summaries], ["aaaaaaaaaaaa"])
+        self.assertEqual(len(self._quarantined()), 1)
+        # Recovery yields the backup's shape, not an empty state.
+        self.assertEqual(
+            summaries[0]["group_count"],
+            len(backup["workspaces"]["aaaaaaaaaaaa"]["groups"]),
+        )
+        self.assertEqual(
+            summaries[0]["saved_at"],
+            backup["workspaces"]["aaaaaaaaaaaa"]["saved_at"],
+        )
+
+    def test_an_unsupported_future_schema_is_quarantined_not_reinterpreted(self):
+        self._capture_a_slot()
+        self._capture_a_slot()
+        self.state_path.write_text(
+            json.dumps({"version": 99, "workspaces": {}, "somethingNew": True}),
+            encoding="utf-8",
+        )
+
+        slot = web_runtime_state.load_restorable_workspace("aaaaaaaaaaaa")
+
+        self.assertIsNotNone(slot)
+        self.assertEqual(len(self._quarantined()), 1)
+
+    def test_a_corrupt_file_with_no_backup_is_still_quarantined(self):
+        self.state_path.write_text("<html>not state at all</html>", encoding="utf-8")
+
+        self.assertEqual(web_runtime_state.list_restorable_workspaces(), [])
+        self.assertEqual(len(self._quarantined()), 1)
+        self.assertFalse(self.state_path.exists())
+
+    def test_a_quarantined_file_is_not_silently_overwritten_by_the_next_capture(self):
+        self._capture_a_slot()
+        self._capture_a_slot()
+        corrupt = "{ truncated"
+        self.state_path.write_text(corrupt, encoding="utf-8")
+
+        self._capture_a_slot()
+
+        quarantined = self._quarantined()
+        self.assertEqual(len(quarantined), 1)
+        self.assertEqual(
+            (Path(self.temp_dir.name) / quarantined[0]).read_text(encoding="utf-8"),
+            corrupt,
+        )
+
+    def test_a_v2_file_still_loads_and_is_rewritten_at_the_current_version(self):
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "workspaces": {
+                        "aaaaaaaaaaaa": {
+                            "workspace_id": "aaaaaaaaaaaa",
+                            "label": "Alpha",
+                            "origin": "auto",
+                            "saved_at": 1000.0,
+                            "groups": [
+                                {"group_id": "g1", "sessions": [{"host": "h"}]}
+                            ],
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace("aaaaaaaaaaaa"))
+        self.assertEqual(self._quarantined(), [])
+
+        self._capture_a_slot()
+
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], web_runtime_state.SCHEMA_VERSION)
+        self.assertIn("revisions", data)
+
+    def test_capture_logs_shape_metadata_without_connection_details(self):
+        with self.assertLogs(web_runtime_state.logger, level="DEBUG") as captured:
+            self._capture_a_slot()
+
+        commits = [line for line in captured.output if "Runtime-state commit" in line]
+        self.assertEqual(len(commits), 1)
+        self.assertIn("writer=manual", commits[0])
+        self.assertIn("groups=1", commits[0])
+        self.assertIn("panes=1", commits[0])
+        self.assertNotIn("a.example", commits[0])
+        self.assertNotIn("/srv/app", commits[0])
 
 
 class RuntimeStateProductionPathGuardTestCase(unittest.TestCase):
@@ -969,22 +1459,36 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
         self.assertEqual(rows[created["workspace_id"]]["group_count"], 0)
         self.assertEqual(rows[created["workspace_id"]]["label"], "Scratch")
 
-    def test_rename_updates_the_live_record_and_the_saved_slot(self):
-        self._launch(session_name="Main")
-        web_runtime_state.capture_workspace(
-            api.session_manager,
-            workspace_id="default",
-            origin="manual",
-        )
+    def test_rename_changes_the_live_label_without_writing_the_snapshot(self):
+        """MW-04: rename is not a third shape writer.
 
-        response = self.client.patch("/api/workspaces/default", json={"label": "Renamed"})
+        Only the autosave timer and an explicit Save Workspace may capture
+        shape. A rename that recaptured would persist whatever transient shape
+        happened to be live when a cosmetic label changed.
+        """
+        self._launch(session_name="Main")
+        with patch.object(
+            web_runtime_state, "_write_state_locked"
+        ) as write_state:
+            response = self.client.patch(
+                "/api/workspaces/default", json={"label": "Renamed"}
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["label"], "Renamed")
         self.assertEqual(api.session_manager.get_workspace("default").label, "Renamed")
+        write_state.assert_not_called()
+
+    def test_the_next_real_capture_persists_a_renamed_label(self):
+        """The label still becomes durable — through a permitted writer."""
+        self._launch(session_name="Main")
+        self.client.patch("/api/workspaces/default", json={"label": "Renamed"})
+
+        api._run_workspace_autosave_tick()
+
         saved_slot = web_runtime_state.load_restorable_workspace("default")
         self.assertEqual(saved_slot["label"], "Renamed")
-        self.assertEqual(saved_slot["origin"], "manual")
+        self.assertEqual(saved_slot["origin"], "auto")
 
     def test_rename_rejects_unknown_workspaces_and_missing_labels(self):
         unknown = self.client.patch(

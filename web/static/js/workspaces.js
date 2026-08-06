@@ -445,7 +445,11 @@
         if (savedAgo) {
             parts.push(`saved ${savedAgo}`);
         }
-        if (summary?.origin === 'manual') {
+        /* "Saved manually" is durable pinning metadata, not the writer of the
+           current shape: a workspace the user saved by hand keeps the note
+           after the autosave timer has refreshed it (which sets origin back to
+           'auto'). Older slots only carry the conflated origin. */
+        if (summary?.manually_saved_at || summary?.origin === 'manual') {
             parts.push('saved manually');
         }
         return parts.join(' • ');
