@@ -921,6 +921,28 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
 
+    def test_terminals_page_offers_split_controls_on_every_pane_kind(self):
+        """Explorer and browser panes split off a terminal, so they carry the
+        same two axis controls a terminal pane does."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("data-terminal-split-v", html)
+        self.assertIn("data-terminal-split-h", html)
+        # The labels say what a split of these panes actually produces.
+        self.assertIn("Split off a terminal beside this pane", html)
+        self.assertIn("Split off a terminal below this pane", html)
+        # Nothing hides the controls per pane kind any more.
+        self.assertNotIn("setTerminalOnlyControlsVisible", html)
+
+        split_start = html.index("async function splitTerminalPane(index")
+        split_end = html.index("function _copyText(text)", split_start)
+        split_body = html[split_start:split_end]
+        # The split terminal opens where the explorer is actually browsing,
+        # not where the pane was originally launched.
+        self.assertIn("getExplorerSelectedDirectory(index)", split_body)
+
     def test_terminals_page_close_preserves_sibling_pane_state(self):
         response = self.client.get("/terminals")
 
@@ -10466,38 +10488,151 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIsNone(stored.initial_command)
         start_task.assert_called_once_with(api._connect_session, created["session_id"])
 
-    def test_split_session_rejects_explorer_and_browser_panes(self):
+    def test_split_local_explorer_pane_appends_terminal_at_browsed_directory(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        nested_dir = repo_dir / "src"
+        nested_dir.mkdir(parents=True)
         api.session_manager.create_group(
             name="Explorer",
             connection_mode="wsl",
             layout="single",
-            terminal_count=2,
+            terminal_count=1,
             group_id="group-explorer",
         )
         explorer = api.session_manager.create_session(
             group_id="group-explorer",
             host="File Explorer",
-            directory="/tmp/project",
+            directory=str(repo_dir),
             mode="wsl",
             startup_mode="explorer",
+            explorer_root_directory=str(repo_dir),
+            use_wsl=True,
+            distribution="Ubuntu",
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                f"/api/sessions/{explorer.session_id}/split",
+                json={"axis": "vertical", "directory": str(nested_dir)},
+            )
+
+        self.assertEqual(response.status_code, 201)
+        created = response.get_json()["session"]
+        self.assertEqual(created["startup_mode"], "terminal")
+        self.assertEqual(Path(created["directory"]), nested_dir.resolve())
+        self.assertEqual(created["host"], "WSL (Ubuntu)")
+        self.assertIsNone(created["initial_command"])
+        # The source pane keeps being an explorer — a split adds a pane, it does
+        # not convert the one it was launched from.
+        self.assertEqual(
+            api.session_manager.get_session(explorer.session_id).startup_mode,
+            "explorer",
+        )
+
+    def test_split_local_explorer_pane_rejects_directory_outside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        outside_dir = Path(self.temp_dir.name) / "outside"
+        outside_dir.mkdir()
+        api.session_manager.create_group(
+            name="Explorer",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+            group_id="group-explorer",
+        )
+        explorer = api.session_manager.create_session(
+            group_id="group-explorer",
+            host="File Explorer",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="explorer",
+            explorer_root_directory=str(repo_dir),
+        )
+
+        response = self.client.post(
+            f"/api/sessions/{explorer.session_id}/split",
+            json={"axis": "vertical", "directory": str(outside_dir)},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(len(api.session_manager.get_group_sessions("group-explorer")), 1)
+
+    def test_split_browser_pane_appends_terminal_at_pane_directory(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        api.session_manager.create_group(
+            name="Browser",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+            group_id="group-browser",
         )
         browser = api.session_manager.create_session(
-            group_id="group-explorer",
+            group_id="group-browser",
             host="Browser",
-            directory="/tmp/project",
+            directory=str(repo_dir),
             mode="wsl",
             startup_mode="browser",
             initial_command="http://127.0.0.1:3000",
             initial_command_mode="browser",
+            use_powershell=True,
         )
 
-        response = self.client.post(f"/api/sessions/{explorer.session_id}/split")
-        browser_response = self.client.post(f"/api/sessions/{browser.session_id}/split")
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                f"/api/sessions/{browser.session_id}/split",
+                json={"axis": "horizontal"},
+            )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(browser_response.status_code, 400)
-        self.assertEqual(response.get_json(), {"error": "Explorer and browser panes cannot be split"})
-        self.assertEqual(browser_response.get_json(), {"error": "Explorer and browser panes cannot be split"})
+        self.assertEqual(response.status_code, 201)
+        created = response.get_json()["session"]
+        self.assertEqual(created["startup_mode"], "terminal")
+        self.assertEqual(created["directory"], str(repo_dir))
+        self.assertEqual(created["host"], "PowerShell")
+        # The browser pane's URL must not ride along as the shell's first command.
+        self.assertIsNone(created["initial_command"])
+
+    def test_split_ssh_explorer_pane_appends_remote_terminal(self):
+        api.session_manager.create_group(
+            name="SSH Explorer",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-ssh-explorer",
+        )
+        explorer = api.session_manager.create_session(
+            group_id="group-ssh-explorer",
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            port=2222,
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/src": {"type": "directory"},
+            }
+        )
+
+        with patch("web.explorer._acquire_ssh_sftp", return_value=(object(), sftp)), patch(
+            "web.explorer._release_ssh_sftp"
+        ), patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                f"/api/sessions/{explorer.session_id}/split",
+                json={"axis": "vertical", "directory": "/srv/app/src"},
+            )
+
+        self.assertEqual(response.status_code, 201)
+        created = response.get_json()["session"]
+        self.assertEqual(created["startup_mode"], "terminal")
+        self.assertEqual(created["directory"], "/srv/app/src")
+        self.assertEqual(created["host"], "example.com")
+        self.assertEqual(created["username"], "ubuntu")
+        self.assertEqual(created["port"], 2222)
 
     def test_split_session_rejects_group_at_max_sessions(self):
         api.session_manager.create_group(

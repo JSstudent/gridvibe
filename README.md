@@ -162,7 +162,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | 🔄 | Reset the view and replay recent output (reloads explorer and browser panes). On a Local Repo terminal it opens a dropdown: **Reset view** plus a **Shell** section that restarts the pane in cmd, PowerShell, or a WSL distro |
 | 📁 ⇄ 💻 | Swap between terminal and file explorer at the current directory |
 | 🌐 ⇄ 💻 | Swap a Local Repo pane between terminal and browser preview |
-| 🪟 | Split side-by-side or stacked (clones the connection) |
+| 🪟 | Split side-by-side or stacked. A terminal clones its connection; an explorer or browser pane splits off a terminal instead — for both SSH and Local Repo — rooted where the explorer is currently browsing |
 | 🧹 | Clear the display and purge the replay buffer |
 | 🎙️ | Start/stop voice input (when enabled) |
 | 🌙 ⇄ ☀️ | Toggle an explorer pane between dark and light |

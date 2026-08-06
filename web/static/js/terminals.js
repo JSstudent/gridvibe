@@ -3418,11 +3418,7 @@
     }
 
     function getSplitCandidates(index, rect) {
-        if (
-            window.innerWidth <= 700
-            || terminals.length >= MAX_SPLIT_TERMINALS
-            || isExplorerSession(terminals[index]?._session)
-        ) {
+        if (window.innerWidth <= 700 || terminals.length >= MAX_SPLIT_TERMINALS) {
             return [];
         }
 
@@ -3777,6 +3773,21 @@
             : `Side-by-side split needs at least ${MIN_SPLIT_COLS} columns in each terminal`;
     }
 
+    /* Explorer and browser panes split into a plain terminal rather than a copy
+       of themselves, so their controls say what they actually produce. */
+    function splitButtonTitles(session) {
+        if (isExplorerSession(session) || isBrowserSession(session)) {
+            return {
+                vertical: 'Split off a terminal beside this pane',
+                horizontal: 'Split off a terminal below this pane'
+            };
+        }
+        return {
+            vertical: 'Split into side-by-side panes',
+            horizontal: 'Split into stacked panes'
+        };
+    }
+
     function updateSplitButtonState(index) {
         const vButton = document.getElementById(`tsplitv-${index}`);
         const hButton = document.getElementById(`tsplith-${index}`);
@@ -3784,16 +3795,7 @@
             return;
         }
 
-        if (isExplorerSession(terminals[index]?._session) || isBrowserSession(terminals[index]?._session)) {
-            [vButton, hButton].forEach(button => {
-                if (button) {
-                    button.hidden = true;
-                    button.disabled = true;
-                }
-            });
-            return;
-        }
-
+        const titles = splitButtonTitles(terminals[index]?._session);
         const grid = document.getElementById('terminalsGrid');
         const card = document.getElementById(`tc-${index}`);
         const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
@@ -3804,13 +3806,13 @@
         applySplitButtonState(
             vButton,
             candidates.includes('vertical'),
-            'Split into side-by-side panes',
+            titles.vertical,
             getSplitDisabledReason('vertical')
         );
         applySplitButtonState(
             hButton,
             candidates.includes('horizontal'),
-            'Split into stacked panes',
+            titles.horizontal,
             getSplitDisabledReason('horizontal')
         );
     }
@@ -4114,8 +4116,11 @@
     }
 
     async function ensureAttachedTerminalsReady(indices) {
+        /* Explorer and browser panes can be handed in (splitting one produces a
+           terminal beside it); they have no xterm to fit, and without the `term`
+           guard each would burn the full retry budget failing fitTerminal. */
         const uniqueIndices = [...new Set(indices)]
-            .filter(index => Number.isInteger(index) && terminals[index]?._attached);
+            .filter(index => Number.isInteger(index) && terminals[index]?._attached && terminals[index]?.term);
         if (uniqueIndices.length === 0) {
             return;
         }
@@ -4608,16 +4613,19 @@
 
     /* Two explicit split controls — one for a side-by-side (vertical divider)
        split, one for a stacked (horizontal divider) split — so the axis is the
-       user's choice rather than an inferred guess. */
-    function splitButtonsHtml(index) {
+       user's choice rather than an inferred guess. Every pane kind carries them:
+       a terminal splits into a second terminal, and an explorer or browser pane
+       splits off a terminal rooted at the directory it is showing. */
+    function splitButtonsHtml(index, session) {
+        const titles = splitButtonTitles(session);
         return `
             <button
                 type="button"
                 class="terminal-action-btn terminal-split-btn terminal-split-v-btn"
                 id="tsplitv-${index}"
                 data-terminal-split-v="${index}"
-                title="Split into side-by-side panes"
-                aria-label="Split into side-by-side panes"
+                title="${escHtml(titles.vertical)}"
+                aria-label="${escHtml(titles.vertical)}"
             >
                 ${SPLIT_VERTICAL_ICON}
             </button>
@@ -4626,8 +4634,8 @@
                 class="terminal-action-btn terminal-split-btn terminal-split-h-btn"
                 id="tsplith-${index}"
                 data-terminal-split-h="${index}"
-                title="Split into stacked panes"
-                aria-label="Split into stacked panes"
+                title="${escHtml(titles.horizontal)}"
+                aria-label="${escHtml(titles.horizontal)}"
             >
                 ${SPLIT_HORIZONTAL_ICON}
             </button>
@@ -4717,7 +4725,7 @@
                                     ${isBrowser ? TERMINAL_PROMPT_ICON : BROWSER_MODE_GLOBE_ICON}
                                 </button>
                             ` : ''}
-                            ${!isExplorer && !isBrowser ? splitButtonsHtml(i) : ''}
+                            ${splitButtonsHtml(i, session)}
                             ${isExplorer ? `
                                 <button
                                     type="button"
@@ -5232,6 +5240,17 @@
     }
 
     function createSplitTerminalCard(sourceCard, session, sourceIndex, targetIndex) {
+        /* Splitting an explorer or browser pane produces a plain terminal, so
+           cloning the source's chrome would carry over its theme toggle, its
+           explorer surface and its inverted mode-toggle label. Build the new
+           card from the session instead — the same path the initial grid uses. */
+        const sourcePane = terminals[sourceIndex];
+        if (isExplorerPaneInstance(sourcePane) || isBrowserPaneInstance(sourcePane)) {
+            const freshCard = buildPaneCard(session, targetIndex);
+            wirePaneControls(freshCard, targetIndex);
+            return freshCard;
+        }
+
         const card = sourceCard.cloneNode(true);
         card.classList.remove('dragging', 'drag-target', 'explorer-pane', 'browser-pane', 'actions-collapsed', 'actions-open');
         card.id = `tc-${targetIndex}`;
@@ -5326,12 +5345,6 @@
         button.innerHTML = loading ? '...' : (isBrowser ? TERMINAL_PROMPT_ICON : BROWSER_MODE_GLOBE_ICON);
         button.title = label;
         button.setAttribute('aria-label', label);
-    }
-
-    function setTerminalOnlyControlsVisible(card, visible) {
-        card.querySelectorAll('[data-terminal-split-v], [data-terminal-split-h]').forEach(button => {
-            button.hidden = !visible;
-        });
     }
 
     function ensureBrowserModeButton(card, index, session, isBrowser = false) {
@@ -5551,7 +5564,10 @@
         return button;
     }
 
-    function ensureSplitControls(card, index) {
+    /* Every pane kind keeps its split controls, so a mode switch only has to
+       make sure they are present — updateAllSplitButtonStates re-labels them for
+       the pane's new kind afterwards. */
+    function ensureSplitControls(card, index, session) {
         const existing = card.querySelectorAll(`[data-terminal-split-v="${index}"], [data-terminal-split-h="${index}"]`);
         if (existing.length) {
             existing.forEach(button => { button.hidden = false; });
@@ -5563,7 +5579,7 @@
             return;
         }
 
-        modeButton.insertAdjacentHTML('afterend', splitButtonsHtml(index));
+        modeButton.insertAdjacentHTML('afterend', splitButtonsHtml(index, session));
         wireSplitButtons(card, index);
     }
 
@@ -5602,7 +5618,7 @@
         card.dataset.explorerThemeKey = explorerThemeKey;
         card.dataset.explorerThemeSource = resolvedExplorerTheme.source;
         card.dataset.explorerTheme = initialExplorerTheme;
-        setTerminalOnlyControlsVisible(card, false);
+        ensureSplitControls(card, index, session);
         const browserModeButton = card.querySelector(`[data-session-browser-toggle="${index}"]`);
         if (browserModeButton) {
             browserModeButton.remove();
@@ -5697,7 +5713,7 @@
         if (modeButton) {
             modeButton.hidden = true;
         }
-        setTerminalOnlyControlsVisible(card, false);
+        ensureSplitControls(card, index, session);
         const browserButton = ensureBrowserModeButton(card, index, session, true);
         updateBrowserModeToggleButton(browserButton, true);
         const nameLabel = document.getElementById(`tname-${index}`);
@@ -5738,7 +5754,7 @@
             explorerThemeButton.remove();
         }
         ensureModeToggleButton(card, index);
-        ensureSplitControls(card, index);
+        ensureSplitControls(card, index, session);
         const modeButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
         if (modeButton) {
             modeButton.hidden = false;
@@ -6062,7 +6078,7 @@
             : [];
         closeAllPaneActionMenus();
         closeAllPaneShellMenus();
-        if (!sourceSessionId || !sourceTerminal || !sourceCard || !grid || isExplorerSession(sourceTerminal._session)) {
+        if (!sourceSessionId || !sourceTerminal || !sourceCard || !grid) {
             return;
         }
         if (terminals.length >= MAX_SPLIT_TERMINALS) {
@@ -6085,11 +6101,18 @@
 
         splitButtons.forEach(button => { button.disabled = true; });
 
+        /* An explorer pane splits off a terminal rooted where the user is
+           actually browsing, not where the pane was launched. */
+        const payload = { axis };
+        if (isExplorerSession(sourceTerminal._session)) {
+            payload.directory = getExplorerSelectedDirectory(index);
+        }
+
         try {
             const response = await fetch(`/api/sessions/${encodeURIComponent(sourceSessionId)}/split`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ axis })
+                body: JSON.stringify(payload)
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {

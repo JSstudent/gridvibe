@@ -124,6 +124,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _remote_path_inside,
     _render_markdown_preview,
     _resolve_explorer_candidate_path,
+    _resolve_pane_terminal_directory,
     _resolve_remote_explorer_candidate_path,
     _sftp_request_error_types,
     get_explorer_file_payload,
@@ -2144,13 +2145,15 @@ def get_session(session_id: str):
 
 @app.route('/api/sessions/<session_id>/split', methods=['POST'])
 def split_session(session_id: str):
-    """Append one cloned terminal session to the source session's group."""
+    """Append one cloned terminal session to the source session's group.
+
+    A terminal pane clones itself. An explorer or browser pane instead splits
+    into a plain terminal rooted at the directory it is currently showing, for
+    both SSH and Local Repo panes — the pane kind is deliberately not cloned.
+    """
     source = session_manager.get_session(session_id)
     if not source:
         return jsonify({"error": "Session not found"}), 404
-
-    if _is_explorer_session(source) or _is_browser_session(source):
-        return jsonify({"error": "Explorer and browser panes cannot be split"}), 400
 
     group = session_manager.get_group(source.group_id)
     if not group:
@@ -2160,11 +2163,37 @@ def split_session(session_id: str):
     if len(group_sessions) >= runtime_config.max_sessions:
         return jsonify({"error": f"Maximum {runtime_config.max_sessions} sessions allowed"}), 400
 
+    host = source.host
+    directory = source.directory
+    root_directory = source.explorer_root_directory
+    startup_mode = source.startup_mode
+
+    if _is_explorer_session(source) or _is_browser_session(source):
+        data = request.get_json(silent=True) or {}
+        try:
+            directory, root_directory = _resolve_pane_terminal_directory(
+                source,
+                data.get("directory", ""),
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": str(exc)}), 500
+        startup_mode = "terminal"
+        if source.mode == "wsl":
+            # The pane's host label reads "File Explorer"/browser chrome; the new
+            # terminal needs the shell name it is actually going to run.
+            host = _local_shell_display_name(
+                use_wsl=source.use_wsl,
+                use_powershell=source.use_powershell,
+                distribution=source.distribution,
+            )
+
     title = f"Terminal {len(group_sessions) + 1}"
     new_session = session_manager.append_session_to_group(
         group_id=group.group_id,
-        host=source.host,
-        directory=source.directory,
+        host=host,
+        directory=directory,
         username=source.username,
         port=source.port,
         password=source.password,
@@ -2177,8 +2206,8 @@ def split_session(session_id: str):
         distribution=source.distribution,
         use_wsl=source.use_wsl,
         use_powershell=source.use_powershell,
-        startup_mode=source.startup_mode,
-        explorer_root_directory=source.explorer_root_directory,
+        startup_mode=startup_mode,
+        explorer_root_directory=root_directory,
     )
     if not new_session:
         return jsonify({"error": "Session group not found"}), 404
@@ -2448,38 +2477,15 @@ def change_session_mode(session_id: str):
     if not (_is_explorer_session(session) or _is_browser_session(session)):
         return jsonify(session.to_dict())
 
-    next_directory = session.directory
-    root_path = _explorer_root_directory(session)
-    if _is_browser_session(session):
-        next_directory = session.directory
-    elif _is_remote_explorer_session(session):
-        client = None
-        sftp = None
-        try:
-            client, sftp = _acquire_ssh_sftp(session)
-            root_path, selected_directory = _resolve_remote_explorer_candidate_path(
-                sftp,
-                session,
-                data.get("directory", ""),
-            )
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except _sftp_request_error_types() as exc:
-            return jsonify({"error": str(exc)}), 500
-        finally:
-            _release_ssh_sftp(session, client, sftp)
-        next_directory = selected_directory
-    else:
-        try:
-            root_path, selected_directory = _resolve_explorer_candidate_path(
-                session,
-                data.get("directory", ""),
-            )
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        if not os.path.isdir(selected_directory):
-            return jsonify({"error": "Selected explorer path is not a directory"}), 400
-        next_directory = selected_directory
+    try:
+        next_directory, root_path = _resolve_pane_terminal_directory(
+            session,
+            data.get("directory", ""),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except _sftp_request_error_types() as exc:
+        return jsonify({"error": str(exc)}), 500
 
     updates = {
         "directory": next_directory,

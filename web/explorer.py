@@ -2986,6 +2986,42 @@ def _resolve_remote_explorer_candidate_path(
     return root_path, candidate
 
 
+def _resolve_pane_terminal_directory(session: Any, requested_directory: Any = "") -> Tuple[str, str]:
+    """Resolve the working directory an explorer/browser pane hands to a terminal.
+
+    Shared by the pane mode switch (explorer/browser -> terminal) and by
+    splitting one of those panes into a terminal: both need the directory the
+    pane is currently showing, resolved through the same root containment rules.
+
+    Returns ``(directory, explorer_root_directory)``. Raises ``ValueError`` for a
+    path the caller should report as a 400; SFTP/connection failures surface as
+    the types in ``_sftp_request_error_types()``.
+    """
+    if _is_browser_session(session):
+        # A browser pane never navigates the filesystem, so its recorded
+        # directory is already the one the shell should start in.
+        return getattr(session, "directory", ""), _explorer_root_directory(session)
+
+    if _is_remote_explorer_session(session):
+        client = None
+        sftp = None
+        try:
+            client, sftp = _acquire_ssh_sftp(session)
+            root_path, selected_directory = _resolve_remote_explorer_candidate_path(
+                sftp,
+                session,
+                requested_directory,
+            )
+        finally:
+            _release_ssh_sftp(session, client, sftp)
+        return selected_directory, root_path
+
+    root_path, selected_directory = _resolve_explorer_candidate_path(session, requested_directory)
+    if not os.path.isdir(selected_directory):
+        raise ValueError("Selected explorer path is not a directory")
+    return selected_directory, root_path
+
+
 def _resolve_remote_explorer_paths(sftp: Any, session: Any, requested_path: Any = "") -> Tuple[str, str]:
     """Resolve a remote explorer directory path inside the configured root."""
     root_path, candidate = _resolve_remote_explorer_candidate_path(sftp, session, requested_path)
