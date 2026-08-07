@@ -293,6 +293,7 @@ from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     _redacted_launch_summary,
     close_extra_workspaces,
+    close_live_workspace,
     forget_emptied_default_workspace,
     forget_pruned_workspaces,
     launch_session_group,
@@ -1574,7 +1575,13 @@ def search_explorer(session_id: str):
 
 @app.route('/api/workspaces', methods=['GET'])
 def get_workspaces():
-    """Return live workspace summaries with their group counts."""
+    """Return user-visible live workspace summaries with their group counts.
+
+    Filtered through the one ``workspace_is_user_visible`` predicate, so every
+    consumer — the Workspaces card, the launch destination menu, the Open/Move
+    menus, the Alt+W cycle — sees the same set. An internal container (an empty
+    ``default``) and a launch still in flight are not workspaces.
+    """
     workspaces = list_live_workspaces()
     return jsonify({"workspaces": workspaces, "count": len(workspaces)})
 
@@ -1637,6 +1644,26 @@ def rename_workspace(workspace_id: str):
 
     groups = session_manager.get_workspace_groups(resolved_workspace_id)
     return jsonify(public_workspace_payload(workspace, len(groups)))
+
+
+@app.route('/api/workspaces/<workspace_id>', methods=['DELETE'])
+def close_workspace(workspace_id: str):
+    """Close one live workspace — the *Close live workspace* verb.
+
+    Ends every session in the workspace and removes its record, while leaving
+    whatever autosave or **Save Workspace** captured on offer in the restore
+    chooser. ``?forget=true`` is the *Close and forget* variant and removes the
+    saved slot too; a failed forget answers a retryable 503 and says plainly
+    that the close itself already happened.
+
+    This is deliberately a different verb from closing the last group (which
+    forgets the slot, because the workspace emptied itself) and from closing a
+    window (which changes nothing live). It is also how a deliberately empty
+    workspace ends: with nothing to close it just releases the reservation.
+    """
+    forget = str(request.args.get("forget", "")).strip().lower() in {"1", "true", "yes"}
+    payload, status = close_live_workspace(workspace_id, forget=forget)
+    return jsonify(payload), status
 
 
 @app.route('/api/session-groups/<group_id>/move', methods=['POST'])
@@ -2567,7 +2594,14 @@ def change_session_mode(session_id: str):
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 def close_session(session_id: str):
-    """Close a specific session."""
+    """Close one pane — the last-pane half of the *Close group* verb.
+
+    Closing the last pane empties its group, and an emptied last group empties
+    its workspace: the record goes and its saved snapshot goes with it, exactly
+    as closing that tab would. See the close-action matrix in
+    ``web/workspaces.py``. Use ``DELETE /api/workspaces/<id>`` for the variant
+    that keeps the snapshot restorable.
+    """
     with session_manager.lock:
         existing_session = session_manager.sessions.get(session_id)
         group = (
@@ -2577,8 +2611,17 @@ def close_session(session_id: str):
         )
         success = session_manager.close_session(session_id)
         if success:
-            pruned_workspace_ids = session_manager.clear_disconnected_sessions()
             group_id = existing_session.group_id
+            # Closing a pane is as explicit as closing a tab, so its group is
+            # forced through cleanup rather than left to the empty-group grace
+            # period (MW-06). Without this, closing the last pane within five
+            # seconds of launch removed the session but left the group behind
+            # forever — nothing sweeps it afterwards — which kept a workspace
+            # alive with no panes in it and its snapshot unforgettable. Forcing
+            # a group that still has panes is a no-op.
+            pruned_workspace_ids = session_manager.clear_disconnected_sessions(
+                force_group_ids={group_id}
+            )
             workspace_id = (
                 group.workspace_id if group else DEFAULT_WORKSPACE_ID
             )
@@ -2611,7 +2654,16 @@ def close_session(session_id: str):
 
 @app.route('/api/sessions', methods=['DELETE'])
 def close_all_sessions():
-    """Close all sessions."""
+    """Close one group, or every session in the process.
+
+    With ``?group=`` this is the *Close group* verb: the group goes, and if it
+    was its workspace's last one the workspace and its snapshot go too.
+
+    Without one it is the process-wide variant of *Close window*: live shells
+    end everywhere and **every snapshot is deliberately left on offer**, which
+    is what makes restore-after-restart work. See the close-action matrix in
+    ``web/workspaces.py``.
+    """
     workspace_named = "workspace_id" in request.args
     try:
         workspace_id = _resolve_workspace_id()

@@ -298,6 +298,15 @@
     white-space: nowrap;
 }
 
+/* Open and Close sit together at the end of the row, so the row keeps its
+   name / count / actions rhythm rather than spreading three ways. */
+.workspace-live-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
 .workspace-live-empty {
     padding: 10px 2px;
     font-size: 12px;

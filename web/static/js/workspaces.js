@@ -23,8 +23,25 @@
         move: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 12h12"></path><path d="M13 8l4 4-4 4"></path><rect x="18" y="4" width="3" height="16" rx="1"></rect></svg>',
         add: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>',
         check: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 6 9 17l-5-5"></path></svg>',
-        forget: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 7h16"></path><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"></path></svg>'
+        forget: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 7h16"></path><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"></path></svg>',
+        close: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9.5 10.5l5 5"></path><path d="M14.5 10.5l-5 5"></path></svg>'
     };
+
+    /* The client half of the one "user-visible live workspace" predicate
+       (MW-05); `workspace_is_user_visible` in web/workspaces.py is the server
+       half and already filters `/api/workspaces`. Kept here so every list this
+       file feeds — the Workspaces card, the launch destination menu, the
+       Open/Move menus, the Alt+W cycle — asks the identical question of a
+       cached summary, and none of them can drift back into showing an internal
+       container as though it were a workspace.
+
+       A record counts when it holds a session tab, or when the user created it
+       deliberately empty (which always opened a window for it). An empty
+       `default` is the permanent backend container, not a workspace. */
+    function isUserVisibleWorkspace(workspace) {
+        return (Number(workspace?.group_count) || 0) > 0
+            || Boolean(workspace?.retain_when_empty);
+    }
 
     function isMultiWorkspaceEnabled() {
         return typeof MULTI_WORKSPACE_ENABLED !== 'undefined' && MULTI_WORKSPACE_ENABLED === true;
@@ -81,19 +98,16 @@
        workspace is not in the list (it was just pruned) still walks from the
        front rather than getting stuck.
 
-       Only workspaces that still hold a group are walked. A live workspace
-       record is not the same thing as an open window: the `default` record is
-       permanent and Workspace ▸ New Workspace keeps its (empty) workspace until
-       its first group arrives, so an empty record routinely outlives — or never
-       had — a window. Losing its last group is exactly when a window closes
-       itself, so `group_count > 0` is the honest test for "there is a window
-       there to switch to", and without it a single-window session cycles onto
-       an empty record and *opens* a blank second window instead of switching.
+       Only user-visible workspaces are walked, through the shared predicate. A
+       live workspace record is not the same thing as an open window: the
+       `default` record is permanent, so an empty one routinely outlives — or
+       never had — a window, and without the filter a single-window session
+       cycles onto it and *opens* a blank second window instead of switching.
        The current workspace stays in the list either way so the walk keeps its
        place in the order. */
     function nextWorkspaceInCycle(workspaces, currentWorkspaceId, step = 1) {
         const list = (Array.isArray(workspaces) ? workspaces : []).filter(
-            workspace => Number(workspace?.group_count) > 0
+            workspace => isUserVisibleWorkspace(workspace)
                 || workspace?.workspace_id === currentWorkspaceId
         );
         if (list.length < 2) {
@@ -278,6 +292,57 @@
         return false;
     }
 
+    /* ── Closing a live workspace ──
+       The close-action matrix in web/workspaces.py, client side. Closing a
+       *window* (above) changes nothing live; this ends the workspace's sessions
+       and removes it. `forget` additionally drops the saved snapshot — without
+       it the workspace stays in the restore chooser, which is the whole point
+       of having a verb separate from closing its last tab. */
+
+    async function closeLiveWorkspace(workspaceId, { forget = false } = {}) {
+        const resolvedWorkspaceId = normalizeWorkspaceId(workspaceId);
+        const query = forget ? '?forget=true' : '';
+        const { ok, status, data } = await workspaceApiRequest(
+            `/api/workspaces/${encodeURIComponent(resolvedWorkspaceId)}${query}`,
+            { method: 'DELETE' }
+        );
+        if (!ok) {
+            const error = new Error(data.error || 'Could not close this workspace');
+            error.status = status;
+            /* A failed forget still closed the workspace, so the caller can
+               tell "nothing happened" from "retry the forget alone". */
+            error.closed = Boolean(data.closed);
+            error.retryable = Boolean(data.retryable);
+            throw error;
+        }
+        notifyWorkspacesChanged('workspace_closed');
+        return data;
+    }
+
+    /* Ending live shells is irreversible, so it confirms in page (guardrail 8,
+       never window.confirm). An empty workspace has nothing to lose and is
+       released without a prompt. */
+    async function confirmCloseLiveWorkspace(workspace, { forget = false } = {}) {
+        const sessionCount = Number(workspace?.group_count) || 0;
+        if (!sessionCount && !forget) {
+            return true;
+        }
+        const name = workspaceDisplayLabel(workspace);
+        return openGenericConfirmModal({
+            title: forget ? `Close and forget "${name}"?` : `Close "${name}"?`,
+            copy: sessionCount
+                ? `${sessionCount} session${sessionCount === 1 ? '' : 's'} in this workspace`
+                    + ' will be closed.'
+                : 'This workspace has no sessions open.',
+            note: forget
+                ? 'Its saved snapshot is removed too, so it will not be offered after a restart.'
+                : 'Whatever auto-save or Workspace ▸ Save Workspace captured stays'
+                    + ' on offer in the restore chooser.',
+            confirmLabel: forget ? 'Close and forget' : 'Close workspace',
+            danger: true
+        });
+    }
+
     /* ── Turning the multi-workspace mode on and off ──
        The launcher's Workspaces card owns the switch but not this policy; it
        lives here so a second surface can only ever call it (guardrail 6). */
@@ -300,7 +365,7 @@
     async function confirmMultiWorkspaceDisable() {
         const extras = (await fetchLiveWorkspaces())
             .filter(workspace => workspace.workspace_id !== WORKSPACE_DEFAULT_ID
-                && (Number(workspace.group_count) || 0) > 0);
+                && isUserVisibleWorkspace(workspace));
         if (!extras.length) {
             return true;
         }

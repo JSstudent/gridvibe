@@ -2849,11 +2849,11 @@
         if (workspaceDestination && findLiveWorkspace(workspaceDestination)) {
             return workspaceDestination;
         }
-        /* Only workspaces that actually have tabs count here: the permanent
-           empty "default" record must not make a single real workspace look
-           like two and push the default answer to "New workspace". */
-        const populated = liveWorkspaceCache
-            .filter(workspace => (Number(workspace.group_count) || 0) > 0);
+        /* Only user-visible workspaces count here (the shared predicate in
+           workspaces.js): an internal container must not make a single real
+           workspace look like two and push the default answer to "New
+           workspace". */
+        const populated = liveWorkspaceCache.filter(isUserVisibleWorkspace);
         if (populated.length === 1) {
             return populated[0].workspace_id;
         }
@@ -2990,9 +2990,9 @@
             return;
         }
 
-        /* A workspace is only "live" for launch purposes once it has tabs — a
-           just-created empty one is still a valid destination, so both are
-           listed and only the default differs. */
+        /* `/api/workspaces` is already filtered to user-visible workspaces
+           server-side; the same predicate is applied here so a stale cache
+           cannot render a row the server would no longer send. */
         liveWorkspaceCache = await fetchLiveWorkspaces();
         syncLaunchDestinationControl();
 
@@ -3001,8 +3001,7 @@
         if (!list) {
             return;
         }
-        const openWorkspaces = liveWorkspaceCache
-            .filter(workspace => (Number(workspace.group_count) || 0) > 0);
+        const openWorkspaces = liveWorkspaceCache.filter(isUserVisibleWorkspace);
         if (empty) {
             empty.hidden = openWorkspaces.length > 0;
         }
@@ -3029,7 +3028,38 @@
                     });
                 }
             });
-            row.append(name, meta, openButton);
+            /* Close live workspace, from the surface that lists them. Distinct
+               from closing its window (which changes nothing) and from closing
+               its last tab (which forgets the snapshot): this ends the sessions
+               and leaves the workspace restorable. */
+            const closeButton = document.createElement('button');
+            closeButton.type = 'button';
+            closeButton.className = 'ghost-btn';
+            closeButton.textContent = 'Close';
+            closeButton.title = 'Close this workspace — its saved snapshot stays on offer';
+            closeButton.addEventListener('click', async () => {
+                if (!(await confirmCloseLiveWorkspace(workspace))) {
+                    return;
+                }
+                /* Busy is a class, never rewritten markup (guardrail 8). */
+                closeButton.classList.add('is-busy');
+                try {
+                    await closeLiveWorkspace(workspace.workspace_id);
+                    showMessage(`Closed ${workspaceDisplayLabel(workspace, index)}.`, 'success');
+                } catch (error) {
+                    showMessage(
+                        `Could not close the workspace: ${error.message} — try again.`,
+                        'error'
+                    );
+                } finally {
+                    closeButton.classList.remove('is-busy');
+                }
+                await refreshWorkspaceDestinations();
+            });
+            const actions = document.createElement('div');
+            actions.className = 'workspace-live-actions';
+            actions.append(openButton, closeButton);
+            row.append(name, meta, actions);
             list.appendChild(row);
         });
     }
@@ -3129,10 +3159,13 @@
             const forget = document.createElement('button');
             forget.type = 'button';
             forget.className = 'ghost-btn danger-btn';
-            forget.textContent = 'Forget';
-            forget.disabled = Boolean(summary.live_conflict);
+            /* An open workspace cannot have its snapshot forgotten out from
+               under it, but "close it yourself first" is a dead end when the
+               row is right here: it offers the *Close and forget* verb instead
+               (the close-action matrix in web/workspaces.py). */
+            forget.textContent = summary.live_conflict ? 'Close and forget' : 'Forget';
             forget.title = summary.live_conflict
-                ? 'Close this workspace first'
+                ? 'Close this open workspace and delete its saved snapshot'
                 : 'Delete this saved workspace snapshot';
             forget.addEventListener('click', () => forgetWorkspaceRow(summary));
 
@@ -3185,20 +3218,34 @@
     }
 
     async function forgetWorkspaceRow(summary) {
+        const live = Boolean(summary.live_conflict);
+        const name = String(summary.label || 'Workspace');
         const confirmed = await openGenericConfirmModal({
-            title: 'Forget this saved workspace?',
-            copy: `"${String(summary.label || 'Workspace')}" will no longer be offered after a restart.`,
-            note: 'Forget removes this saved workspace snapshot. Your saved sessions are not affected.',
-            confirmLabel: 'Forget',
+            title: live ? 'Close and forget this workspace?' : 'Forget this saved workspace?',
+            copy: live
+                ? `"${name}" is open. Its sessions will be closed and it will no longer`
+                    + ' be offered after a restart.'
+                : `"${name}" will no longer be offered after a restart.`,
+            note: 'This removes the saved workspace snapshot. Your saved sessions are not affected.',
+            confirmLabel: live ? 'Close and forget' : 'Forget',
             danger: true
         });
         if (!confirmed) {
             return;
         }
         try {
-            await forgetSavedWorkspace(summary.workspace_id);
+            if (live) {
+                await closeLiveWorkspace(summary.workspace_id, { forget: true });
+            } else {
+                await forgetSavedWorkspace(summary.workspace_id);
+            }
         } catch (error) {
-            showMessage(error.message, 'error');
+            /* A close that succeeded but could not forget says so, and the row
+               stays so the user can retry just the forget. */
+            showMessage(`${error.message}${error.retryable ? ' — try again' : ''}`, 'error');
+        }
+        if (live) {
+            await refreshWorkspaceDestinations();
         }
         await loadWorkspaceRestoreChooser();
         if (!restorableWorkspaceSummaries.length) {

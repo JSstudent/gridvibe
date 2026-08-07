@@ -7,6 +7,7 @@ import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sessions.manager import EMPTY_GROUP_GRACE_SECONDS
@@ -1655,6 +1656,9 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
             "openWorkspaceList",
             "moveWorkspaceList",
             "closeWorkspaceWindowItem",
+            # Close *window* and close *workspace* are separate verbs with
+            # separate persistence effects, so the menu offers both.
+            "closeWorkspaceItem",
         ):
             self.assertIn(f'id="{element_id}"', html)
         self.assertIn('id="workspaceNameModal"', html)
@@ -1666,7 +1670,12 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
             html = self.client.get("/terminals").get_data(as_text=True)
 
         self.assertIn('id="saveWorkspaceItem"', html)
-        for element_id in ("renameWorkspaceItem", "newWorkspaceItem", "closeWorkspaceWindowItem"):
+        for element_id in (
+            "renameWorkspaceItem",
+            "newWorkspaceItem",
+            "closeWorkspaceWindowItem",
+            "closeWorkspaceItem",
+        ):
             self.assertNotIn(f'id="{element_id}"', html)
 
     def test_launcher_ships_the_destination_control_behind_the_flag(self):
@@ -1754,6 +1763,11 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
         work = {"workspace_id": "aaaaaaaaaaaa", "group_count": 1}
         empty_default = {"workspace_id": "default", "group_count": 0}
         other = {"workspace_id": "bbbbbbbbbbbb", "group_count": 2}
+        reserved = {
+            "workspace_id": "cccccccccccc",
+            "group_count": 0,
+            "retain_when_empty": True,
+        }
 
         cycle = self._js_workspace_cycle(
             [
@@ -1766,12 +1780,23 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
                 ([work, other], "aaaaaaaaaaaa", -1),
                 # An empty record between two windows is stepped over, not into.
                 ([work, empty_default, other], "aaaaaaaaaaaa", 1),
+                # A deliberately empty workspace is the one empty record that
+                # *does* have a window: Workspace ▸ New Workspace opened it.
+                ([work, reserved], "aaaaaaaaaaaa", 1),
             ]
         )
 
         self.assertEqual(
             cycle,
-            [None, None, None, "bbbbbbbbbbbb", "bbbbbbbbbbbb", "bbbbbbbbbbbb"],
+            [
+                None,
+                None,
+                None,
+                "bbbbbbbbbbbb",
+                "bbbbbbbbbbbb",
+                "bbbbbbbbbbbb",
+                "cccccccccccc",
+            ],
         )
 
     def _js_workspace_cycle(self, cases):
@@ -1779,7 +1804,13 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
         node = shutil.which("node")
         if not node:
             self.skipTest("node is not installed")
-        source = _js_function_source(self._static("js/workspaces.js"), "nextWorkspaceInCycle")
+        workspaces_js = self._static("js/workspaces.js")
+        # The cycle now asks the one shared user-visible predicate, so both
+        # functions are loaded: the walk and the rule it walks by ship together.
+        source = "\n".join(
+            _js_function_source(workspaces_js, name)
+            for name in ("isUserVisibleWorkspace", "nextWorkspaceInCycle")
+        )
         script = (
             f"{source}\n"
             "const out = JSON.parse(process.argv[2]).map(\n"
@@ -2340,24 +2371,48 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
         launched = self._launch(session_name="Scratch")
         self._save_slot()
         session_id = launched["sessions"][0]["session_id"]
-        # The per-session close prunes on the grace period rather than forcing
-        # the group, so age it past the window the way real use does.
-        api.session_manager.get_group(launched["group_id"]).created_at -= (
-            EMPTY_GROUP_GRACE_SECONDS + 1
-        )
 
         self.client.delete(f"/api/sessions/{session_id}")
 
         self.assertIsNone(web_runtime_state.load_restorable_workspace("default"))
 
-    def test_a_group_still_inside_its_grace_window_keeps_the_default_slot(self):
-        """`default` is only "empty" once the group itself is gone: an emptied
-        group inside its grace window is still listed, so the slot stays."""
+    def test_an_immediate_last_pane_close_forgets_the_default_slot(self):
+        """MW-06: an explicit pane close is explicit, grace period or not.
+
+        The group is *not* aged here. It used to survive its own emptying for
+        five seconds with nothing scheduled to sweep it afterwards, so closing
+        the last pane right after launch left an immortal empty group that kept
+        `default` looking occupied and its snapshot unforgettable.
+        """
         launched = self._launch(session_name="Scratch")
+        self._save_slot()
+
+        response = self.client.delete(
+            f"/api/sessions/{launched['sessions'][0]['session_id']}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(api.session_manager.get_group(launched["group_id"]))
+        self.assertEqual(api.session_manager.get_workspace_groups("default"), [])
+        self.assertIsNone(web_runtime_state.load_restorable_workspace("default"))
+        # …and `default` stops being a user-visible workspace, so no ghost
+        # destination is left behind (MW-05).
+        self.assertEqual(web_workspaces.list_live_workspaces(), [])
+
+    def test_an_immediate_pane_close_keeps_a_group_that_still_has_panes(self):
+        """Forcing the owning group must not sweep a group that is still live."""
+        launched = self._launch(
+            session_name="Scratch",
+            sessions=[
+                {"directory": str(self.repo_dir), "title": "A", "startup_mode": "explorer"},
+                {"directory": str(self.repo_dir), "title": "B", "startup_mode": "explorer"},
+            ],
+        )
         self._save_slot()
 
         self.client.delete(f"/api/sessions/{launched['sessions'][0]['session_id']}")
 
+        self.assertIsNotNone(api.session_manager.get_group(launched["group_id"]))
         self.assertIsNotNone(web_runtime_state.load_restorable_workspace("default"))
 
     def test_closing_one_of_several_groups_in_default_keeps_its_slot(self):
@@ -2519,11 +2574,13 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
         # nothing, so the chooser must be reopenable mid-session.
         self.assertIn("async function forgetWorkspaceRow(summary)", launcher_js)
         self.assertIn("function openWorkspaceRestorePanel()", launcher_js)
-        self.assertIn(
-            "Forget removes this saved workspace snapshot. Your saved sessions are not affected.",
-            launcher_js,
-        )
+        # Forgetting is destructive, so it confirms through the shared in-page
+        # modal and is marked as such — never a blocked window.confirm
+        # (guardrail 4/8).
+        self.assertIn("openGenericConfirmModal({", launcher_js)
         self.assertIn("danger: true", launcher_js)
+        for blocked in ("window.confirm(", "window.prompt(", "window.alert("):
+            self.assertNotIn(blocked, launcher_js)
 
 
 class MultiWorkspaceModeToggleTestCase(unittest.TestCase):
@@ -2877,13 +2934,8 @@ class WorkspaceEmptiedRemovalTestCase(unittest.TestCase):
         workspace_id = launched["workspace_id"]
         self._capture(workspace_id)
         session_id = launched["sessions"][0]["session_id"]
-        # The per-session close prunes on the grace period rather than forcing
-        # the group, so age it past the window the way real use does.
-        group = api.session_manager.get_group(launched["group_id"])
-        group.created_at -= EMPTY_GROUP_GRACE_SECONDS + 1
-        api.session_manager.get_workspace(workspace_id).created_at -= (
-            EMPTY_GROUP_GRACE_SECONDS + 1
-        )
+        # Not aged: an explicit pane close forces its own group through cleanup
+        # (MW-06), so this works immediately after launch too.
 
         response = self.client.delete(f"/api/sessions/{session_id}")
 
@@ -2963,6 +3015,372 @@ class WorkspaceEmptiedRemovalTestCase(unittest.TestCase):
         # The room event that would normally relay this races the window
         # teardown, so the emptied window announces the change itself first.
         self.assertIn("notifyWorkspacesChanged('workspace_emptied');", terminals_js)
+
+
+class WorkspaceVisibilityTestCase(unittest.TestCase):
+    """MW-05: one predicate decides what counts as a user-visible workspace.
+
+    `SessionManager` refuses to remove the permanent `default` record, and every
+    live-workspace list used to render every record. After the final default
+    group closed, the Workspaces card (which filtered to populated workspaces)
+    showed nothing while the launch-destination menu still offered an empty
+    "Main workspace — 0 sessions": an internal backend container presented as a
+    user workspace, and two lists disagreeing about the same state.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+
+    def _launch(self, **overrides):
+        body = {
+            "connection_mode": "wsl",
+            "session_name": overrides.pop("session_name", "Files"),
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+        body.update(overrides)
+        response = self.client.post("/api/sessions", json=body)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return response.get_json()
+
+    def _listed_ids(self):
+        payload = self.client.get("/api/workspaces").get_json()
+        return [workspace["workspace_id"] for workspace in payload["workspaces"]]
+
+    def test_an_emptied_default_leaves_no_ghost_destination(self):
+        launched = self._launch()
+        self.assertEqual(self._listed_ids(), ["default"])
+
+        self.client.delete(f"/api/sessions?group={launched['group_id']}")
+
+        # Gone from the list every destination menu and card reads …
+        self.assertEqual(self._listed_ids(), [])
+        self.assertEqual(self.client.get("/api/workspaces").get_json()["count"], 0)
+        # … while the internal container itself is untouched, so a launch that
+        # names `default` (every single-workspace-mode launch) still works.
+        self.assertIsNotNone(api.session_manager.get_workspace("default"))
+        self.assertEqual(
+            [
+                workspace["workspace_id"]
+                for workspace in web_workspaces.list_live_workspaces(include_hidden=True)
+            ],
+            ["default"],
+        )
+        self.assertEqual(self._launch()["workspace_id"], "default")
+
+    def test_a_launch_in_flight_is_not_yet_a_workspace(self):
+        """A destination between creation and its first group is not a workspace.
+
+        `resolve_launch_destination` creates the record before the group exists,
+        so listing every record briefly advertised a launch as a destination.
+        """
+        in_flight = api.session_manager.create_workspace(label="Half launched")
+
+        self.assertNotIn(in_flight.workspace_id, self._listed_ids())
+        self.assertFalse(
+            web_workspaces.workspace_is_user_visible(in_flight, group_count=0)
+        )
+        self.assertTrue(
+            web_workspaces.workspace_is_user_visible(in_flight, group_count=1)
+        )
+
+    def test_a_deliberately_empty_workspace_is_a_real_destination(self):
+        """Workspace ▸ New Workspace opens a window, so its record is visible."""
+        created = self.client.post("/api/workspaces", json={"label": "Scratch"})
+        workspace_id = created.get_json()["workspace_id"]
+
+        listed = self.client.get("/api/workspaces").get_json()["workspaces"]
+
+        self.assertIn(workspace_id, [item["workspace_id"] for item in listed])
+        entry = next(item for item in listed if item["workspace_id"] == workspace_id)
+        self.assertEqual(entry["group_count"], 0)
+        self.assertTrue(entry["retain_when_empty"])
+
+    def test_the_server_and_client_predicates_agree(self):
+        """The two halves of the one predicate must not drift apart.
+
+        The API filters server-side; the launcher, the Workspaces card, the
+        Open/Move menus and the Alt+W cycle re-apply `isUserVisibleWorkspace`
+        to their cached summaries. Running the shipped JS against the same
+        fixtures is what keeps "one predicate" true across the boundary.
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        fixtures = [
+            {"workspace_id": "default", "group_count": 0, "retain_when_empty": False},
+            {"workspace_id": "default", "group_count": 2, "retain_when_empty": False},
+            {"workspace_id": "aaaaaaaaaaaa", "group_count": 0, "retain_when_empty": False},
+            {"workspace_id": "bbbbbbbbbbbb", "group_count": 0, "retain_when_empty": True},
+            {"workspace_id": "cccccccccccc", "group_count": 3, "retain_when_empty": True},
+        ]
+        server = [
+            web_workspaces.workspace_is_user_visible(
+                SimpleNamespace(**fixture), fixture["group_count"]
+            )
+            for fixture in fixtures
+        ]
+
+        response = self.client.get("/static/js/workspaces.js")
+        self.assertEqual(response.status_code, 200)
+        workspaces_js = response.get_data(as_text=True)
+        response.close()
+        source = _js_function_source(workspaces_js, "isUserVisibleWorkspace")
+        script = (
+            f"{source}\n"
+            "process.stdout.write(JSON.stringify(\n"
+            "    JSON.parse(process.argv[2]).map(isUserVisibleWorkspace)\n"
+            "));\n"
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "visible.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path), json.dumps(fixtures)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+        self.assertEqual(server, [False, True, False, True, True])
+        self.assertEqual(json.loads(completed.stdout), server)
+
+
+class WorkspaceCloseActionMatrixTestCase(unittest.TestCase):
+    """MW-15/MW-12: each close verb has one documented persistence effect.
+
+    The matrix lives in `web/workspaces.py`. Closing a *window* changes nothing
+    live; closing the last *group* removes the workspace and its snapshot;
+    *Close live workspace* ends the sessions but leaves the snapshot on offer;
+    *Close and forget* removes both. Bulk close-all is the process-wide window
+    close and deliberately keeps every snapshot.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _launch(self, **overrides):
+        body = {
+            "connection_mode": "wsl",
+            "session_name": overrides.pop("session_name", "Files"),
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+        body.update(overrides)
+        response = self.client.post("/api/sessions", json=body)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return response.get_json()
+
+    def _capture(self, workspace_id):
+        self.assertIsNotNone(
+            web_runtime_state.capture_workspace(
+                api.session_manager, workspace_id=workspace_id, origin="manual"
+            )
+        )
+
+    # ── Close live workspace ──
+
+    def test_close_live_workspace_ends_the_sessions_and_keeps_the_slot(self):
+        launched = self._launch(new_workspace=True, workspace_label="Alpha")
+        workspace_id = launched["workspace_id"]
+        self._capture(workspace_id)
+
+        response = self.client.delete(f"/api/workspaces/{workspace_id}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["closed"])
+        self.assertTrue(payload["removed"])
+        self.assertFalse(payload["forgotten"])
+        self.assertEqual(payload["group_count"], 1)
+        self.assertEqual(payload["session_count"], 1)
+        # Live: gone entirely, sessions included.
+        self.assertIsNone(api.session_manager.get_workspace(workspace_id))
+        self.assertIsNone(api.session_manager.get_group(launched["group_id"]))
+        self.assertEqual(api.session_manager.get_session_count(), 0)
+        # Persisted: this is the restorable verb, unlike closing the last tab.
+        self.assertIsNotNone(
+            web_runtime_state.load_restorable_workspace(workspace_id)
+        )
+
+    def test_close_and_forget_removes_the_slot_too(self):
+        launched = self._launch(new_workspace=True, workspace_label="Alpha")
+        workspace_id = launched["workspace_id"]
+        self._capture(workspace_id)
+
+        response = self.client.delete(f"/api/workspaces/{workspace_id}?forget=true")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["forgotten"])
+        self.assertIsNone(api.session_manager.get_workspace(workspace_id))
+        self.assertIsNone(web_runtime_state.load_restorable_workspace(workspace_id))
+
+    def test_closing_default_empties_it_without_removing_the_container(self):
+        launched = self._launch(session_name="Scratch")
+        self._capture("default")
+
+        response = self.client.delete("/api/workspaces/default")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["removed"])
+        # The record is permanent, but an empty one is not a workspace, so it
+        # leaves no ghost destination either (MW-05).
+        self.assertIsNotNone(api.session_manager.get_workspace("default"))
+        self.assertIsNone(api.session_manager.get_group(launched["group_id"]))
+        self.assertEqual(web_workspaces.list_live_workspaces(), [])
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace("default"))
+
+    def test_closing_a_workspace_that_is_not_live_reports_it_missing(self):
+        unknown = self.client.delete("/api/workspaces/aaaaaaaaaaaa")
+        malformed = self.client.delete("/api/workspaces/NOT-AN-ID")
+
+        self.assertEqual(unknown.status_code, 404)
+        self.assertTrue(unknown.get_json()["workspace_missing"])
+        self.assertEqual(malformed.status_code, 400)
+
+    def test_a_failed_forget_still_reports_the_close_and_stays_retryable(self):
+        """The live half already happened, so it is never reported as a no-op."""
+        launched = self._launch(new_workspace=True, workspace_label="Alpha")
+        workspace_id = launched["workspace_id"]
+        self._capture(workspace_id)
+
+        with patch.object(
+            web_runtime_state,
+            "clear_workspace",
+            side_effect=web_runtime_state.RuntimeStatePersistenceError("disk full"),
+        ):
+            response = self.client.delete(f"/api/workspaces/{workspace_id}?forget=true")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.get_json()
+        self.assertTrue(payload["closed"])
+        self.assertFalse(payload["forgotten"])
+        self.assertTrue(payload["retryable"])
+        self.assertIsNone(api.session_manager.get_workspace(workspace_id))
+        # The slot survived the failure, so the retry has something to remove.
+        self.assertIsNotNone(
+            web_runtime_state.load_restorable_workspace(workspace_id)
+        )
+
+    # ── The verbs it must stay distinct from ──
+
+    def test_closing_the_last_group_still_forgets_the_slot(self):
+        launched = self._launch(new_workspace=True, workspace_label="Alpha")
+        workspace_id = launched["workspace_id"]
+        self._capture(workspace_id)
+
+        response = self.client.delete(
+            f"/api/sessions?workspace_id={workspace_id}&group={launched['group_id']}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(api.session_manager.get_workspace(workspace_id))
+        self.assertIsNone(web_runtime_state.load_restorable_workspace(workspace_id))
+
+    def test_bulk_close_all_sessions_keeps_every_snapshot(self):
+        """The process-wide window close: shells end, restore stays possible."""
+        self._launch(session_name="Main")
+        alpha = self._launch(new_workspace=True, workspace_label="Alpha")
+        self._capture("default")
+        self._capture(alpha["workspace_id"])
+
+        response = self.client.delete("/api/sessions")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace("default"))
+        self.assertIsNotNone(
+            web_runtime_state.load_restorable_workspace(alpha["workspace_id"])
+        )
+
+    # ── The terminal lifecycle of a deliberately empty workspace (MW-12) ──
+
+    def test_an_abandoned_empty_workspace_can_be_deleted(self):
+        created = self.client.post("/api/workspaces", json={"label": "Scratch"})
+        workspace_id = created.get_json()["workspace_id"]
+        # Cleanup deliberately keeps it: that is what made it immortal before.
+        api.session_manager.clear_disconnected_sessions()
+        self.assertIsNotNone(api.session_manager.get_workspace(workspace_id))
+
+        response = self.client.delete(f"/api/workspaces/{workspace_id}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["removed"])
+        self.assertEqual(payload["group_count"], 0)
+        self.assertEqual(payload["session_count"], 0)
+        self.assertIsNone(api.session_manager.get_workspace(workspace_id))
+        self.assertEqual(web_workspaces.list_live_workspaces(), [])
+
+    def test_deleting_an_empty_workspace_twice_is_not_an_error_state(self):
+        created = self.client.post("/api/workspaces", json={})
+        workspace_id = created.get_json()["workspace_id"]
+
+        first = self.client.delete(f"/api/workspaces/{workspace_id}")
+        second = self.client.delete(f"/api/workspaces/{workspace_id}")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 404)
+        self.assertTrue(second.get_json()["workspace_missing"])
+
+    def test_a_failed_launch_leaves_no_empty_destination_behind(self):
+        before = {
+            workspace.workspace_id
+            for workspace in api.session_manager.get_all_workspaces()
+        }
+
+        response = self.client.post(
+            "/api/sessions",
+            json={"connection_mode": "wsl", "new_workspace": True, "sessions": []},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            {
+                workspace.workspace_id
+                for workspace in api.session_manager.get_all_workspaces()
+            },
+            before,
+        )
+
+    def test_an_empty_workspace_does_not_survive_a_restart(self):
+        """Live records are in-memory only, so a restart is its other terminus."""
+        created = self.client.post("/api/workspaces", json={"label": "Scratch"})
+        workspace_id = created.get_json()["workspace_id"]
+
+        api.session_manager.reset_sessions()
+
+        self.assertIsNone(api.session_manager.get_workspace(workspace_id))
+        self.assertEqual(web_workspaces.list_live_workspaces(), [])
 
 
 class WorkspaceGoneWindowTestCase(unittest.TestCase):

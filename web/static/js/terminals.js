@@ -1394,10 +1394,50 @@
     }
 
     /* Closing the window never closes its sessions: the workspace stays live
-       and can be reopened from the launcher. */
+       and can be reopened from the launcher.
+
+       One exception, and it is a lifecycle rather than a close (MW-12):
+       Workspace ▸ New Workspace reserves a deliberately empty record so
+       cleanup cannot sweep it before its first tab arrives, and closing that
+       window is the user saying the tab is never coming. Without the release
+       an abandoned New Workspace stayed a zero-session launch destination
+       until the process restarted. Nothing is live, so nothing is confirmed. */
     async function closeThisWorkspaceWindow() {
         logSessionWindowAction('Closing this workspace window on request');
+        if (currentWorkspaceId !== WORKSPACE_DEFAULT_ID && sessionGroups.length === 0) {
+            try {
+                await closeLiveWorkspace(currentWorkspaceId);
+            } catch (error) {
+                console.error('[GridVibe Sessions] releasing the empty workspace failed:', error);
+            }
+        }
         await closeWorkspaceWindow(currentWorkspaceId);
+    }
+
+    /* Close live workspace: ends every session here and drops the workspace,
+       while whatever autosave or Save Workspace captured stays on offer — the
+       verb that closing the last tab does not give you, since that forgets the
+       snapshot too. The window has nothing left to show afterwards. */
+    async function closeCurrentWorkspace() {
+        const workspaces = await fetchLiveWorkspaces();
+        const current = workspaces.find(
+            workspace => workspace.workspace_id === currentWorkspaceId
+        ) || {
+            workspace_id: currentWorkspaceId,
+            label: currentWorkspaceLabel,
+            group_count: sessionGroups.length
+        };
+        if (!(await confirmCloseLiveWorkspace(current))) {
+            return;
+        }
+        try {
+            await closeLiveWorkspace(currentWorkspaceId);
+        } catch (error) {
+            setWorkspaceSaveMessage(`Close failed: ${error.message} — try again.`, 'error');
+            return;
+        }
+        workspaceGone = true;
+        await _closeWindowAfterLastSession('Workspace closed');
     }
 
     /* This window can outlive its workspace: the last tab closed here, that

@@ -114,13 +114,26 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 | **Presets** | `Save Session`, `Save Session as…`, `Save All Sessions`, `Import Session`. SSH passwords are Fernet-encrypted in `saved_sessions.json`. |
 | **Scratch sessions** | **New Session** in step 02 clears the form back to the built-in empty preset in one click — the same load as **Import Session → Default session**, without the picker. The caret beside **SSH Remote** / **Local Repo** fills the form from an address a saved session already uses — pick the host or repository and launch, no retyping. The launch stays unattached to any preset, so the same target opens as many times as you like: `10.0.0.5`, `10.0.0.5 (1)`, `10.0.0.5 (2)`. Save one and the next launch skips its number. |
 | **Workspace snapshot** | Background autosave (1–15 min) plus explicit **Save Workspace** writes `runtime_state.json` — never passwords, and these two are the *only* actions that capture workspace shape (renaming a workspace changes its label; the next capture persists it). A save or **Forget** that cannot reach the disk reports a retryable failure rather than a false success, and an unreadable state file is quarantined with its last-good backup loaded in its place. After a restart the launcher offers the workspace back by name and reopens on the group you left. |
-| **Multiple workspaces** | Opt-in — the switch in the launcher's **Workspaces** card (step 04), stored as `workspace.multi_workspace_enabled`. Launch into a chosen workspace or a new one, each in its own window with its own tabs; move a tab between workspaces without restarting a single terminal; rename a workspace; restore any subset of saved workspaces after a restart. `Alt+W` walks the open workspaces (`Alt+Shift+W` walks back). |
+| **Multiple workspaces** | Opt-in — the switch in the launcher's **Workspaces** card (step 04), stored as `workspace.multi_workspace_enabled`. Launch into a chosen workspace or a new one, each in its own window with its own tabs; move a tab between workspaces without restarting a single terminal; rename a workspace; close one; restore any subset of saved workspaces after a restart. `Alt+W` walks the open workspaces (`Alt+Shift+W` walks back). Only workspaces that hold a tab — or that you created deliberately empty — are listed anywhere; an emptied workspace stops being a destination rather than lingering as a "0 sessions" entry. |
 | **Broadcast typing** | One keystroke, every pane in the group. |
 | **Self-update** | **Check for updates** does a git fast-forward, or save the workspace and restart in one action. |
 
 Preset-backed groups restore from the preset's *current* config, so edits to a saved session survive the round trip. Restore runs entirely on the server: a saved session's password is resolved in-process and never sent to the browser or written to the log.
 
 With multiple workspaces enabled, a saved preset is live in **at most one workspace at a time** — launching it elsewhere explains the conflict and offers to open that workspace or move the tab, instead of silently stealing it or opening a duplicate. Each saved workspace can be restored, left for later, or permanently **forgotten** (the snapshot only — saved sessions are never touched).
+
+### What each "close" does
+
+Four verbs, four outcomes — the label tells you what you keep:
+
+| Action | Live sessions | Saved snapshot |
+| --- | --- | --- |
+| **Workspace ▸ Close Workspace Window** | keep running | kept |
+| Close the last tab (or its last pane) | that tab ends; the workspace empties | **removed** — the workspace emptied itself |
+| **Workspace ▸ Close Workspace** (or **Close** in the launcher's Workspaces card) | all end | **kept** — this is the restorable close |
+| **Close and forget** (from the restore chooser, on a workspace that is open) | all end | removed |
+
+`Close All Sessions` is the process-wide version of closing a window: shells end everywhere and every snapshot stays on offer, which is what makes restore-after-restart work. Closing the window of a workspace you created empty and never used releases it, so an abandoned **New Workspace** does not sit in the destination list.
 
 ## File Explorer
 

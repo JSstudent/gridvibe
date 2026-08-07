@@ -91,17 +91,58 @@ def _manager():
     return session_manager
 
 
-def list_live_workspaces() -> List[Dict[str, Any]]:
-    """Return public summaries for every live workspace, default first."""
+def workspace_is_user_visible(workspace: Any, group_count: int = 0) -> bool:
+    """True when a live workspace record is one the user can see and choose.
+
+    The one predicate for "user-visible live workspace" (MW-05). Every surface
+    that lists workspaces — the API, the launcher's Workspaces card and launch
+    destination menu, the Open/Move menus, the Alt+W cycle — answers this same
+    question, so they can no longer disagree about what is open.
+
+    A record qualifies when it holds at least one group, or when the user
+    deliberately created it empty (``retain_when_empty``, which always comes
+    with a window opened for it). Everything else is bookkeeping:
+
+    * ``default`` is a permanent internal container that
+      :meth:`SessionManager.remove_workspace` refuses to remove, so once its
+      last group closes it would otherwise linger as a "Main workspace — 0
+      sessions" destination that the Workspaces card had already dropped.
+    * a non-default record between :func:`resolve_launch_destination` creating
+      it and its first group arriving is a launch in flight, not a workspace.
+
+    Existence is a separate question: routes still resolve and act on a hidden
+    record by id (single-workspace mode always targets ``default``), and
+    ``workspace_missing`` still means the record itself is gone.
+    """
+    if max(0, int(group_count or 0)) > 0:
+        return True
+    return bool(getattr(workspace, "retain_when_empty", False))
+
+
+def list_live_workspaces(include_hidden: bool = False) -> List[Dict[str, Any]]:
+    """Return public summaries for every user-visible workspace, default first.
+
+    ``include_hidden`` returns the raw record set instead; it exists for
+    diagnostics and tests that assert what the filter removed, never for a
+    user-facing list.
+    """
     session_manager = _manager()
     with session_manager.lock:
-        return [
-            public_workspace_payload(
+        summaries = [
+            (
                 workspace,
-                len(session_manager.get_workspace_groups(workspace.workspace_id)),
+                public_workspace_payload(
+                    workspace,
+                    len(session_manager.get_workspace_groups(workspace.workspace_id)),
+                ),
             )
             for workspace in session_manager.get_all_workspaces()
         ]
+    return [
+        payload
+        for workspace, payload in summaries
+        if include_hidden or workspace_is_user_visible(workspace, payload["group_count"])
+    ]
 
 
 def workspace_has_groups(workspace_id: Any) -> bool:
@@ -1139,6 +1180,143 @@ def list_restorable_workspace_summaries() -> List[Dict[str, Any]]:
     return summaries
 
 
+# ==================== Closing a live workspace ====================
+#
+# The close-action matrix (MW-15). Four verbs, one documented persistence
+# effect each; all three code paths below and the two session-close routes in
+# `web/api.py` implement exactly this table:
+#
+#   Close window            no live change              snapshot untouched
+#   Close group / last pane group gone; workspace gone   snapshot cleared when
+#                           when it was the last one     the workspace emptied
+#   Close live workspace    every group and session      snapshot KEPT — this is
+#                           closed; record removed       the restorable verb
+#   Close and forget        as above                     snapshot removed
+#
+# Bulk "close all sessions" (`DELETE /api/sessions` with no group) is the
+# process-wide variant of *Close window*: it ends live shells and deliberately
+# leaves every snapshot on offer, which is what makes restore-after-restart
+# work. `close_extra_workspaces` (leaving multi-workspace mode) is *Close live
+# workspace* applied to every workspace but `default`.
+
+
+def _close_workspace_contents(workspace_id: str) -> Optional[Dict[str, Any]]:
+    """Close every session and group of one live workspace; drop the record.
+
+    The single teardown path behind *Close live workspace* and leaving
+    multi-workspace mode, so both verbs can only ever have the same live
+    effect. Returns ``None`` when the workspace is not live.
+
+    Nothing is captured or cleared here — the caller owns the snapshot half of
+    the matrix. The caller must not hold ``SessionManager.lock``: the SSH
+    teardown and the broadcast below run after every shared lock is released
+    (guardrail 2).
+    """
+    from web.terminal_io import (
+        _broadcast_session_groups_updated,
+        _close_ssh_connection,
+    )
+
+    session_manager = _manager()
+    # Check-then-act in one hold; the slow work happens after it is released.
+    with session_manager.lock:
+        workspace = session_manager.get_workspace(workspace_id)
+        if workspace is None:
+            return None
+        label = str(workspace.label or "").strip()
+        session_ids = [
+            session.session_id
+            for session in session_manager.get_workspace_sessions(workspace_id)
+        ]
+        group_ids = [
+            group.group_id
+            for group in session_manager.get_workspace_groups(workspace_id)
+        ]
+        for session_id in session_ids:
+            session_manager.close_session(session_id)
+        # A workspace created deliberately empty is retained until its first
+        # group arrives; closing it deliberately ends that promise. Cleared
+        # first, so the sweep below is allowed to take it.
+        workspace.retain_when_empty = False
+        # This close is explicit, so these groups must not survive on the
+        # empty-group grace period the way a transient empty one does.
+        session_manager.clear_disconnected_sessions(force_group_ids=set(group_ids))
+        # The sweep prunes the workspace of a forced group itself, so this is
+        # the fallback for the empty-workspace case rather than the only path —
+        # the manager, not either return value, is asked what actually remains.
+        session_manager.remove_workspace(workspace_id)
+        removed = session_manager.get_workspace(workspace_id) is None
+
+    for session_id in session_ids:
+        _close_ssh_connection(session_id, clear_buffer=True)
+    _broadcast_session_groups_updated("workspace_closed", workspace_id=workspace_id)
+    return {
+        "workspace_id": workspace_id,
+        "label": label,
+        "group_count": len(group_ids),
+        "session_count": len(session_ids),
+        "removed": bool(removed),
+    }
+
+
+def close_live_workspace(workspace_id: Any, forget: bool = False) -> Tuple[Dict[str, Any], int]:
+    """Close one live workspace; returns ``(payload, status)``.
+
+    *Close live workspace* by default: the sessions end and the record goes,
+    while whatever autosave or **Save Workspace** captured stays on offer in
+    the restore chooser. ``forget=True`` is the *Close and forget* variant and
+    also removes the saved slot.
+
+    This is also the terminal lifecycle of a deliberately empty workspace
+    (MW-12): with no groups to close it simply releases the reservation, so an
+    abandoned **New Workspace** can no longer sit in the destination list until
+    the process restarts.
+
+    ``default``'s record is permanent, so it is emptied rather than removed —
+    and an empty ``default`` is not a user-visible workspace, so it disappears
+    from every list either way.
+    """
+    from web.runtime_state import clear_workspace
+
+    try:
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+    closed = _close_workspace_contents(resolved_workspace_id)
+    if closed is None:
+        return workspace_missing_payload(), 404
+
+    payload = {**closed, "closed": True, "forgotten": False}
+    logger.debug(
+        "Closed live workspace %s (groups=%d sessions=%d removed=%s forget=%s)",
+        resolved_workspace_id,
+        closed["group_count"],
+        closed["session_count"],
+        closed["removed"],
+        bool(forget),
+    )
+    if not forget:
+        return payload, 200
+
+    # The live half already happened, so a failed forget reports honestly
+    # rather than rolling anything back: the user retries the forget alone.
+    try:
+        payload["forgotten"] = bool(clear_workspace(resolved_workspace_id))
+    except Exception as exc:
+        logger.error(
+            "Could not forget the saved snapshot of closed workspace %s: %s",
+            resolved_workspace_id,
+            exc,
+        )
+        return {
+            **payload,
+            "retryable": True,
+            "error": "The workspace closed, but its saved snapshot could not be removed",
+        }, 503
+    return payload, 200
+
+
 # ==================== Leaving multi-workspace mode ====================
 
 
@@ -1154,11 +1332,6 @@ def close_extra_workspaces() -> Dict[str, Any]:
     whatever the autosave timer or an explicit Workspace ▸ Save Workspace has
     already written, and those slots survive this untouched.
     """
-    from web.terminal_io import (
-        _broadcast_session_groups_updated,
-        _close_ssh_connection,
-    )
-
     session_manager = _manager()
     closed: List[Dict[str, Any]] = []
 
@@ -1167,46 +1340,24 @@ def close_extra_workspaces() -> Dict[str, Any]:
         if workspace_id == DEFAULT_WORKSPACE_ID:
             continue
 
-        # Check-then-act in one hold; the slow work (SSH teardown) and the emit
-        # both happen after the lock is released (guardrail 2).
-        with session_manager.lock:
-            session_ids = [
-                session.session_id
-                for session in session_manager.get_workspace_sessions(workspace_id)
-            ]
-            group_ids = [
-                group.group_id
-                for group in session_manager.get_workspace_groups(workspace_id)
-            ]
-            for session_id in session_ids:
-                session_manager.close_session(session_id)
-            # Leaving the mode is explicit, so these groups must not survive on
-            # the empty-group grace period the way a transient empty one does.
-            session_manager.clear_disconnected_sessions(force_group_ids=set(group_ids))
-            # A workspace created deliberately empty is retained until its first
-            # group arrives; that promise ends with the mode itself.
-            workspace.retain_when_empty = False
-            removed = session_manager.remove_workspace(workspace_id)
-
-        for session_id in session_ids:
-            _close_ssh_connection(session_id, clear_buffer=True)
-        _broadcast_session_groups_updated(
-            "workspace_closed",
-            workspace_id=workspace_id,
-        )
+        # Same teardown as an explicit Close live workspace, snapshot included:
+        # leaving the mode keeps every saved slot on offer.
+        result = _close_workspace_contents(workspace_id)
+        if result is None:
+            continue
         logger.debug(
             "Closed workspace %s leaving multi-workspace mode "
             "(groups=%d sessions=%d removed=%s)",
             workspace_id,
-            len(group_ids),
-            len(session_ids),
-            bool(removed),
+            result["group_count"],
+            result["session_count"],
+            result["removed"],
         )
         closed.append({
             "workspace_id": workspace_id,
-            "label": str(workspace.label or "").strip(),
-            "group_count": len(group_ids),
-            "session_count": len(session_ids),
+            "label": result["label"],
+            "group_count": result["group_count"],
+            "session_count": result["session_count"],
         })
 
     return {

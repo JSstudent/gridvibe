@@ -2,10 +2,10 @@
 
 Date: 2026-08-06
 
-Status: findings and remediation plan. **MW-01, MW-02, MW-04, MW-10, and the
-persistence half of MW-16 are fixed** (see the "Resolution" blocks under each) —
-that is Phases 0 and 1 complete. Every other finding is still open and describes
-current behavior.
+Status: findings and remediation plan. **MW-01, MW-02, MW-04, MW-05, MW-06,
+MW-10, MW-12, MW-15, and the persistence half of MW-16 are fixed** (see the
+"Resolution" blocks under each) — that is Phases 0, 1 and 2 complete. Every
+other finding is still open and describes current behavior.
 
 ## Executive summary
 
@@ -291,6 +291,49 @@ Recommended correction:
 - Keep “New workspace” as the launch action when no populated/deliberately-created destination exists.
 - Define one shared predicate for “user-visible live workspace” and use it in the API, card, menu, cycle shortcut, and native-window reconciliation.
 
+**Resolution (fixed).** Re-verified as reported before the fix:
+`list_live_workspaces` built a summary for every record from
+`get_all_workspaces()`, `toggleLaunchDestinationMenu` mapped the complete
+`liveWorkspaceCache` while the Workspaces card filtered it to `group_count > 0`,
+and `SessionManager.remove_workspace` still refuses `default`.
+
+- `workspace_is_user_visible(workspace, group_count)` in `web/workspaces.py` is
+  the one predicate: a record is a workspace when it holds at least one group,
+  or when the user created it deliberately empty (`retain_when_empty`, which
+  always came with a window). That covers both halves of the ghost — the empty
+  permanent `default` **and** a non-default record between
+  `resolve_launch_destination` creating it and its first group arriving, which
+  was briefly advertised as a destination too.
+- `list_live_workspaces()` filters by it, so `GET /api/workspaces` is filtered
+  at the source. `include_hidden=True` returns the raw record set for
+  diagnostics and for the tests that assert what the filter removed; nothing
+  user-facing uses it.
+- `isUserVisibleWorkspace(workspace)` in `web/static/js/workspaces.js` is the
+  client half, applied to cached summaries by the Workspaces card, the launch
+  destination menu and its default answer, the Alt+W cycle, and the
+  turn-off-the-mode confirm. Native-window reconciliation needed no change: a
+  window already closes itself the moment its own workspace holds no groups
+  (`_closeWindowAfterLastSession`), which is the same rule.
+- Existence stayed a separate question. Routes still resolve a hidden record by
+  id, so every single-workspace-mode launch still targets `default`, restore
+  still targets a slot by id, and `workspace_missing` still means the record
+  itself is gone.
+
+One deliberate consequence, worth naming: with multiple workspaces **on**, an
+emptied `default` is not offered as a launch or move destination any more, so
+"move this tab back to Main workspace" becomes "move it to a new workspace"
+until something is launched into `default` again. That is what the finding asks
+for ("exclude … from user-visible live-workspace summaries and destination
+choices"), and the alternative — showing it only when nothing else is live — is
+exactly the reported ghost.
+
+Coverage: `WorkspaceVisibilityTestCase` (test_multi_workspace.py) asserts that
+an emptied `default` disappears from `/api/workspaces` while the record itself
+survives and still accepts a launch, that a launch in flight is not listed, that
+a deliberately empty workspace *is* listed, and — by running the shipped
+`isUserVisibleWorkspace` under node against the same fixtures the Python
+predicate sees — that the two halves of the predicate agree.
+
 ### MW-06 — High: immediate last-pane close can leave an empty group forever
 
 `DELETE /api/sessions/<session_id>` calls `clear_disconnected_sessions()` without forcing the owning group (`web/api.py:2515`). Empty groups younger than `EMPTY_GROUP_GRACE_SECONDS` are protected because group creation and pane creation are not atomic (`sessions/manager.py:1013`). There is no periodic cleanup that returns after the five-second window.
@@ -301,6 +344,41 @@ Recommended correction:
 
 - An explicit last-pane close should force cleanup of its owning group, just as explicit group close already does.
 - Retain launch protection through an explicit `initializing` state or an atomic create operation, not a time-based exemption with no follow-up sweep.
+
+**Resolution (close half fixed; the initialization half is Phase 3, as
+planned).** Re-verified as reported: `DELETE /api/sessions/<session_id>` called
+`clear_disconnected_sessions()` with no `force_group_ids` (the line had drifted
+from `web/api.py:2515` to `2580`), and `test_a_group_still_inside_its_grace_
+window_keeps_the_default_slot` codified the stale outcome.
+
+- The route now passes `force_group_ids={group_id}` for the closed pane's own
+  group. Closing a pane is exactly as explicit as closing a tab, so its group is
+  swept immediately instead of riding the five-second exemption. Forcing a group
+  that still holds panes is a no-op — it is not empty, so it is never a
+  candidate — so this only ever affects the last pane.
+- With that change **every** caller of `clear_disconnected_sessions` now forces
+  the group it is acting on (both session-close routes, and the workspace
+  teardown below), so no explicitly closed group depends on the grace period any
+  more and none can outlive its last pane.
+- Two tests that aged their group by hand "the way real use does" no longer need
+  to; the aging was removed rather than kept as decoration.
+
+Not implemented here, by the plan's own division of labour: the grace period
+itself remains for the *non-explicit* path, because what makes it unnecessary is
+Phase 3's atomic group-install transaction (`initializing`/reservation records
+are listed under Phase 3's implementation order, and Phase 3's Findings line
+claims "the initialization part of MW-06"). Nothing is left immortal in the
+meantime — an empty group that was not explicitly closed is swept by the next
+cleanup once it is older than the window.
+
+Coverage: `…an immediate last pane close forgets the default slot` closes the
+last pane immediately after launch — no aging — and asserts the group, the
+workspace's group list, the saved slot, and the now-empty user-visible list;
+`…an immediate pane close keeps a group that still has panes` pins that forcing
+the owning group cannot sweep a group that is still live; and the non-default
+twin `test_closing_the_last_session_of_the_last_group_forgets_it_too` lost its
+manual aging. The grace-window assertion that protected the stale outcome is
+gone.
 
 ### MW-07 — High: launch/replacement is not an atomic live-shape transaction
 
@@ -406,6 +484,33 @@ Recommended correction:
 
 Recommended correction: provide an explicit “Delete empty workspace” lifecycle, or give never-populated records a bounded reservation that is released when their window closes or a launch fails.
 
+**Resolution (fixed).** Re-verified as reported: `POST /api/workspaces` created
+the record with `retain_when_empty=True`, `clear_disconnected_sessions` skipped
+it for exactly that reason, and no route could remove it.
+
+Both halves of the recommendation are implemented, because they answer different
+user actions:
+
+- **Explicit deletion.** `DELETE /api/workspaces/<workspace_id>` (see MW-15) is
+  the terminal lifecycle. With no groups to close it simply releases the
+  reservation and answers `{"closed": true, "removed": true, "group_count": 0}`.
+  The launcher's Workspaces card exposes it as **Close** on the row.
+- **Released with its window.** `closeThisWorkspaceWindow()` in `terminals.js`
+  now releases a non-default workspace that holds no session tabs before closing
+  the window. Closing the window of a **New Workspace** you never used is the
+  user saying the tab is not coming; nothing is live, so nothing is confirmed.
+  A window with tabs is untouched — closing it still leaves the workspace
+  running, which is the whole point of that verb.
+- **Failed launch.** Already correct and left alone: `resolve_launch_destination`
+  hands back a `created_id` and every failure path in `launch_session_group`
+  calls `rollback_created_workspace`. A regression test now pins it.
+
+Coverage: `WorkspaceCloseActionMatrixTestCase` (test_multi_workspace.py) covers
+creation → survives cleanup → explicit deletion (asserting it leaves no visible
+workspace), a repeated delete answering `404 workspace_missing` rather than a
+half-state, a failed launch leaving no record behind, and the restart terminus
+(live records are in-memory, so a restart is the other end of the lifecycle).
+
 ### MW-13 — Medium: retained slots and global preset ownership conflict
 
 Closed workspace slots are intentionally retained in several flows, including disabling multi-workspace mode. Over time, two slots can reference the same preset even though a preset is allowed live in only one workspace. Restoring both makes the first selected slot win and causes a partial restore of the second. The snapshot is therefore not independently restorable.
@@ -426,6 +531,53 @@ Recommended correction: never evict a workspace captured in the current live set
 Closing the last group or last pane clears that workspace's snapshot. `DELETE /api/sessions` without a group closes everything but deliberately preserves all snapshots (`web/api.py:2607`; also documented in `CHANGELOG.md:14`). “Close this workspace window” closes no sessions. These may be defensible individual choices, but the UI verbs do not make the persistence outcome obvious.
 
 Recommended correction: define and expose separate actions for **Close window**, **Close live workspace**, and **Close and forget saved workspace**. Apply the same rule to one group, one workspace, and all workspaces.
+
+**Resolution (fixed).** Re-verified as reported: the three outcomes were as
+described (the bulk-close line had drifted from `web/api.py:2607` to `2612`),
+and the UI offered no verb between "close a tab" and "close a window".
+
+The matrix is written down once, in `web/workspaces.py` above the close
+service, and every close path implements exactly it:
+
+| Verb | Where | Live effect | Snapshot |
+| --- | --- | --- | --- |
+| Close window | Workspace ▸ Close Workspace Window | nothing closed | kept |
+| Close group / last pane | tab ✕, pane ✕ | group gone; workspace gone when it was the last | **cleared** — the workspace emptied itself |
+| Close live workspace | Workspace ▸ Close Workspace, **Close** on the launcher card | every group and session closed; record removed | **kept** — the restorable close |
+| Close and forget | **Close and forget** in the restore chooser | as above | removed |
+| Close all sessions | Sessions ▸ Close All | every shell ends | kept everywhere (this is what makes restore-after-restart work) |
+
+- `DELETE /api/workspaces/<workspace_id>` is the new verb; `?forget=true` is the
+  *and forget* variant. Both go through `close_live_workspace()`.
+- `_close_workspace_contents()` is the single teardown, shared with
+  `close_extra_workspaces()` (leaving multi-workspace mode is *Close live
+  workspace* applied to every workspace but `default`), so the two cannot drift.
+  It closes sessions, force-sweeps the groups, clears `retain_when_empty`, and
+  drops the record — under one `SessionManager.lock` hold, with the SSH teardown
+  and the room broadcast after every lock is released (guardrail 2).
+- Closing `default` empties it rather than removing its permanent record; with
+  MW-05 an empty `default` is not a user-visible workspace, so the outcome the
+  user sees is the same.
+- The live half never rolls back for the persisted half: a forget that cannot
+  reach the disk answers `503 {"closed": true, "forgotten": false, "retryable":
+  true}` and says the close already happened, so the retry is the forget alone.
+- Destructive variants confirm through the shared in-page modal
+  (`openGenericConfirmModal`, never `window.confirm` — guardrail 4), busy state
+  is a class, and the failure message keeps the "— try again" retry wording
+  (guardrail 8). An empty workspace has nothing to lose and is released without
+  a prompt.
+- The restore chooser's **Forget** was a disabled button reading "Close this
+  workspace first" whenever the slot was live. It now offers **Close and
+  forget** on that row, which is what turned the fourth verb from a parameter
+  nothing calls into a reachable action.
+
+Coverage: `WorkspaceCloseActionMatrixTestCase` (test_multi_workspace.py) asserts
+each row of the table by its two effects — sessions/record *and* slot — for
+close-live (keeps the slot), close-and-forget (removes it), closing `default`
+(empties without removing the container, no ghost left), closing the last group
+(still forgets), and bulk close-all (keeps every snapshot); plus `404
+workspace_missing` / `400` for an unknown and a malformed id, and the failed
+forget reporting `503` with the close done and the slot intact for the retry.
 
 ### MW-16 — Medium: validation and diagnostics are too weak for recovery
 
@@ -480,8 +632,8 @@ Several tests are valuable but encode contracts that conflict with the desired m
 | --- | --- | --- |
 | `test_r2_existing_preset_wins_over_the_snapshot` | Edited preset replaces saved shape | Snapshot shape wins; preset supplies credentials only |
 | `test_r3_layout_is_discarded_when_the_preset_pane_count_changed` | Current preset pane count controls restore | Snapshot pane count/layout remains unchanged |
-| `test_a_group_still_inside_its_grace_window_keeps_the_default_slot` | Immediate last-pane close leaves slot/group | Explicit last-pane close removes group and clears slot |
-| Per-pane close tests that manually age groups | Cleanup works after five seconds | Cleanup works immediately after explicit close |
+| ~~`test_a_group_still_inside_its_grace_window_keeps_the_default_slot`~~ | ~~Immediate last-pane close leaves slot/group~~ | **Replaced in Phase 2** by `…an immediate last pane close forgets the default slot` |
+| ~~Per-pane close tests that manually age groups~~ | ~~Cleanup works after five seconds~~ | **Done in Phase 2** — the two tests lost their manual aging |
 | Sequential second-restore test | Later request sees live groups | Simultaneous requests produce exactly one restore |
 
 ## Regression matrix to add
@@ -491,15 +643,15 @@ All of these should be behavioral tests against routes or public manager/store o
 1. **Test isolation:** start with a sentinel production state file, run every API test that saves/captures, and prove the sentinel is unchanged while a temporary state file receives the writes. *(Added with MW-01, non-destructively: the test reads the production file's current bytes rather than planting a sentinel in it, and the test-mode guard covers the rest.)*
 2. **Exact snapshot:** save a three-pane preset-backed workspace, edit the preset into one `Files` pane, restore, and assert the original three-pane snapshot.
 3. **Two writers:** rename while the timer/manual writer is mocked; assert no shape capture occurs and the next actual capture persists the label.
-4. **Default close/listing:** restore one group into `default`, close it, then assert no user-visible live workspace/destination remains and no saved slot remains.
-5. **Immediate pane close:** close the last pane immediately after launch in default and non-default workspaces; assert group, workspace visibility, native close signal, and slot cleanup.
+4. **Default close/listing:** restore one group into `default`, close it, then assert no user-visible live workspace/destination remains and no saved slot remains. *(Added with MW-05/MW-06.)*
+5. **Immediate pane close:** close the last pane immediately after launch in default and non-default workspaces; assert group, workspace visibility, native close signal, and slot cleanup. *(Added with MW-06; the native close signal stays a frontend rule — a window already closes itself when its own workspace holds no groups.)*
 6. **Close versus autosave:** pause autosave after its manager snapshot, close/forget the workspace, resume autosave, and assert the slot stays deleted. *(Added with MW-02.)*
 7. **Manual versus timer ordering:** pause an older timer capture, perform a newer manual capture, release the timer, and assert the manual/newer revision remains. *(Added with MW-02.)*
 8. **Atomic launch snapshot:** pause a multi-pane launch at every installation boundary while autosave runs; every stored slot must equal either the complete old shape or complete new shape.
 9. **Concurrent restore:** release two restore requests through a barrier; assert one successful group set and one deterministic conflict response.
 10. **Single-mode live restore:** with default already populated, invoke the single-mode restore route and assert no duplicate or replacement.
 11. **ID collision:** create presets `a/b` and `a-b`, launch them in the same and different workspaces, and assert independent groups with no destructive teardown.
-12. **Write failure:** force the atomic replace to fail and assert manual save/forget returns failure without a success payload.
+12. **Write failure:** force the atomic replace to fail and assert manual save/forget returns failure without a success payload. *(Added with MW-10; extended in Phase 2 to the close-and-forget verb, which reports the close as done and the forget as retryable.)*
 13. **Duplicate preset references:** restore two retained slots referencing one preset and assert the chosen product policy without partial silent success.
 14. **Capacity:** autosave 13 live workspaces and assert every live workspace remains restorable.
 15. **Malformed state:** offer a zero-pane/corrupt group and assert it is quarantined rather than listed as restorable.
@@ -600,7 +752,7 @@ labour: the snapshot does not record a `SessionManager` live-shape generation
 (meaningful only once Phase 3 makes launch atomic), and per-field slot
 validation stays in Phase 5 where the final identity schema is known.
 
-### Phase 2 — Make workspace lifecycle and visibility consistent
+### Phase 2 — Make workspace lifecycle and visibility consistent (complete)
 
 **Findings:** MW-05, MW-06, MW-12, and MW-15.
 
@@ -644,6 +796,38 @@ Verification:
 **Exit gate:** no ghost destination remains after a final close, no explicit
 last-pane close can leave an immortal group, and every close label predicts its
 live-state and persisted-state result.
+
+**Outcome (all five steps done; exit gate met).**
+
+All four findings were re-verified against the code before anything changed —
+each one still reproduced exactly as written, with only line numbers drifted
+(`web/api.py:2515`→`2580` in MW-06, `2607`→`2612` in MW-15). See the Resolution
+block under each finding for the detail.
+
+| Step | Result |
+| --- | --- |
+| 1. Close-action matrix, written first | The table above `close_live_workspace` in `web/workspaces.py`, mirrored in `README.md` ("What each 'close' does") and pointed at from the two session-close route docstrings. The audit's last-group expectation is preserved: closing the final group/pane still removes the workspace *and* its slot; the restorable close is a separate verb. |
+| 2. One user-visible predicate | `workspace_is_user_visible` (server) + `isUserVisibleWorkspace` (client), consumed by `/api/workspaces`, the Workspaces card, the launch destination menu and its default answer, the Open/Move menus, the Alt+W cycle, and the mode-off confirm. A node-driven test asserts the two halves agree. |
+| 3. Explicit last-pane close forces its group | `DELETE /api/sessions/<id>` passes `force_group_ids={group_id}`; every caller of `clear_disconnected_sessions` now forces the group it is acting on. The grace period survives only for the non-explicit path, and Phase 3 is what removes the need for it. |
+| 4. Terminal lifecycle for empty workspaces | `DELETE /api/workspaces/<id>` (`?forget=true` for the fourth verb); the launcher card's **Close**; and `closeThisWorkspaceWindow()` releasing a workspace that never held a tab. Failed-launch rollback was already correct and is now pinned by a test. |
+| 5. In-page confirms and retry affordances | `openGenericConfirmModal` for every destructive variant (guardrail 4), busy-as-a-class, "— try again" wording preserved, and the restore chooser's dead-end disabled **Forget** replaced by a working **Close and forget**. |
+
+Two consequences worth naming rather than burying:
+
+- With multiple workspaces **on**, an emptied `default` stops being a launch or
+  move destination, so "move this tab back to Main workspace" becomes "move it
+  to a new workspace" until something is launched into `default` again. This is
+  what MW-05 asks for; the alternative reintroduces the reported ghost.
+- The empty-group grace period still exists for groups that were not explicitly
+  closed. That is the `initializing`/atomic-launch half of MW-06, which the plan
+  assigns to Phase 3 — nothing is immortal in the meantime, because such a group
+  is swept by the next cleanup once it is past the window.
+
+Verified with `python tests/run_tests.py` (1151 tests, 7 skipped) and
+`python -m ruff check .`. Two failures remain and are unrelated to this work:
+`ApiRoutes: voice status endpoint …` ×2 fail on this machine because the
+optional `websocket-client` voice dependency is not installed, and they fail
+identically on the unmodified tree.
 
 ### Phase 3 — Make live-shape mutation atomic and runtime identity collision-free
 
