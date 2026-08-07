@@ -10,7 +10,6 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from sessions.manager import EMPTY_GROUP_GRACE_SECONDS
 from web import api
 from web import runtime_state as web_runtime_state
 from web import saved_sessions as web_saved_sessions
@@ -299,9 +298,6 @@ class MultiWorkspaceApiTestCase(WorkspaceSocketClientMixin, unittest.TestCase):
 
     def test_cleanup_prune_event_is_emitted_after_a_single_session_close(self):
         _group, session = self._group("group-a", self.WORKSPACE_A)
-        api.session_manager.get_workspace(self.WORKSPACE_B).created_at = (
-            time.time() - EMPTY_GROUP_GRACE_SECONDS - 1
-        )
         client_b = self._socket_client(self.WORKSPACE_B)
         original_broadcast = api._broadcast_session_groups_updated
         broadcast_lock_states = []
@@ -1426,9 +1422,6 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
         self.assertTrue(payload["retain_when_empty"])
         self.assertEqual(payload["group_count"], 0)
         workspace_id = payload["workspace_id"]
-        api.session_manager.get_workspace(workspace_id).created_at = (
-            time.time() - EMPTY_GROUP_GRACE_SECONDS - 1
-        )
 
         api.session_manager.clear_disconnected_sessions()
 
@@ -3651,6 +3644,461 @@ class ScratchSessionLaunchTestCase(unittest.TestCase):
             web_saved_sessions.build_unique_session_name("Repo", []),
             "Repo",
         )
+
+
+class AtomicGroupInstallTestCase(unittest.TestCase):
+    """MW-07: a group and all of its panes are published in one lock hold.
+
+    Launch used to create the group, then insert each pane under its own lock
+    hold, and a stable group's old panes were torn down before any of that. An
+    autosave tick landing between those steps persisted whatever it found — an
+    empty group, one pane of three, or a stable group stripped of its old panes
+    and not yet given its new ones — as though that were the workspace.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+
+    def _launch(self, pane_count=2, **overrides):
+        body = {
+            "connection_mode": "wsl",
+            "session_name": overrides.pop("session_name", "Files"),
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": f"Pane {index}",
+                    "startup_mode": "explorer",
+                }
+                for index in range(pane_count)
+            ],
+        }
+        body.update(overrides)
+        return self.client.post("/api/sessions", json=body)
+
+    def _observe_during_install(self, launch):
+        """Run `launch` with a concurrent snapshot taken mid-install.
+
+        The observer is released after the launch has built its *first* pane —
+        the instant at which the group record exists and the rest of its panes
+        do not — and then competes for `SessionManager.lock` exactly as the
+        autosave timer does. Under the previous implementation that lock was
+        released between every pane, so the observer read a group with one pane
+        of three. Returns ``(response, observed_snapshot)``.
+        """
+        manager_type = type(api.session_manager)
+        original = manager_type._build_session
+        observations = []
+        threads = []
+
+        def hooked(manager_self, group_id, **fields):
+            session = original(manager_self, group_id, **fields)
+            if not threads:
+                thread = threading.Thread(
+                    target=lambda: observations.append(
+                        manager_self.snapshot_live_workspaces()
+                    )
+                )
+                thread.start()
+                threads.append(thread)
+                # Give the observer every chance to read: it can only be kept
+                # out by a lock hold that spans the whole install.
+                thread.join(timeout=0.2)
+            return session
+
+        with patch.object(manager_type, "_build_session", hooked):
+            response = launch()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertEqual(len(observations), 1)
+        return response, observations[0]
+
+    @staticmethod
+    def _pane_counts(snapshot, group_id):
+        for workspace in snapshot.values():
+            for group in workspace["groups"]:
+                if group["group_id"] == group_id:
+                    return len(group["sessions"])
+        return None
+
+    def test_a_new_group_is_never_snapshotted_without_its_panes(self):
+        response, observed = self._observe_during_install(lambda: self._launch(3))
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        group_id = response.get_json()["group_id"]
+        # Complete new shape, or not yet there at all. Never an empty group and
+        # never a partial one.
+        self.assertIn(self._pane_counts(observed, group_id), (None, 3))
+        self.assertEqual(
+            len(api.session_manager.get_group_sessions(group_id)), 3
+        )
+
+    def test_a_replacement_is_seen_as_the_old_shape_or_the_new_one(self):
+        first = self._launch(2, saved_session_id="grid")
+        self.assertEqual(first.status_code, 201, first.get_json())
+        group_id = first.get_json()["group_id"]
+        old_session_ids = {
+            session["session_id"] for session in first.get_json()["sessions"]
+        }
+
+        response, observed = self._observe_during_install(
+            lambda: self._launch(3, saved_session_id="grid")
+        )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(response.get_json()["group_id"], group_id)
+        self.assertIn(self._pane_counts(observed, group_id), (2, 3))
+        live_session_ids = {
+            session.session_id
+            for session in api.session_manager.get_group_sessions(group_id)
+        }
+        self.assertEqual(len(live_session_ids), 3)
+        self.assertEqual(live_session_ids & old_session_ids, set())
+
+    def test_a_relaunch_with_no_usable_pane_keeps_the_live_panes(self):
+        first = self._launch(2, saved_session_id="grid")
+        self.assertEqual(first.status_code, 201, first.get_json())
+        group_id = first.get_json()["group_id"]
+        live_before = {
+            session.session_id
+            for session in api.session_manager.get_group_sessions(group_id)
+        }
+
+        broken = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "ssh",
+                "session_name": "Files",
+                "saved_session_id": "grid",
+                "sessions": [
+                    {
+                        "host": "10.0.0.1",
+                        "directory": "/srv",
+                        "browser_active_tab": "not-a-number",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(broken.status_code, 400)
+        self.assertEqual(
+            broken.get_json()["error"], "No valid sessions were created"
+        )
+        # The old code tore the group's panes down before it discovered it had
+        # nothing to put back, leaving an empty group where a working one was.
+        self.assertEqual(
+            {
+                session.session_id
+                for session in api.session_manager.get_group_sessions(group_id)
+            },
+            live_before,
+        )
+
+    def test_a_workspace_that_vanished_mid_launch_installs_nothing(self):
+        workspace_id = self.client.post(
+            "/api/workspaces", json={"label": "Doomed"}
+        ).get_json()["workspace_id"]
+
+        original = web_workspaces._prepare_launch_sessions
+
+        def drop_workspace(sessions_config, connection_mode):
+            api.session_manager.workspaces.pop(workspace_id, None)
+            return original(sessions_config, connection_mode)
+
+        with patch.object(
+            web_workspaces, "_prepare_launch_sessions", drop_workspace
+        ):
+            response = self._launch(2, workspace_id=workspace_id)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(api.session_manager.get_all_groups(), [])
+        self.assertEqual(api.session_manager.get_session_count(), 0)
+
+
+class LaunchGroupIdentityTestCase(unittest.TestCase):
+    """MW-11: a preset id maps to exactly one live group id, injectively.
+
+    `_build_launch_group_id` used to collapse every run of non-`[A-Za-z0-9._-]`
+    characters to a single `-`, so `a/b` and `a-b` produced one group id. In one
+    workspace the second launch destructively replaced the first; across
+    workspaces the teardown ran before `create_group` discovered the group
+    belonged elsewhere, so the other workspace lost its live sessions to an
+    error response.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        self.saved_sessions_path = Path(self.temp_dir.name) / "saved_sessions.json"
+        for target, attribute, value in (
+            (web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)),
+            (web_saved_sessions, "SAVED_SESSIONS_PATH", str(self.saved_sessions_path)),
+        ):
+            patcher = patch.object(target, attribute, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _launch(self, saved_session_id, **overrides):
+        body = {
+            "connection_mode": "wsl",
+            "session_name": f"Preset {saved_session_id}",
+            "saved_session_id": saved_session_id,
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+        body.update(overrides)
+        return self.client.post("/api/sessions", json=body)
+
+    def test_the_group_id_encoding_is_injective(self):
+        candidates = [
+            "a/b",
+            "a-b",
+            "a_b",
+            "a b",
+            "a.b",
+            "a:b",
+            "a//b",
+            "a---b",
+            "---",
+            "session-20260806-094325-19b823",
+            "présets/α",
+        ]
+        group_ids = [
+            web_saved_sessions._build_launch_group_id(candidate)
+            for candidate in candidates
+        ]
+
+        self.assertEqual(len(set(group_ids)), len(candidates))
+        self.assertNotIn("", group_ids)
+
+    def test_ids_that_need_no_escaping_keep_the_group_id_they_had(self):
+        # Every id `_generate_saved_session_id` mints is in this alphabet, so
+        # live groups and saved snapshots from earlier builds are unaffected.
+        for saved_session_id in (
+            "session-20260806-094325-19b823",
+            "alpha",
+            "session-dev-grid",
+            "v1.2-beta",
+        ):
+            with self.subTest(saved_session_id=saved_session_id):
+                self.assertEqual(
+                    web_saved_sessions._build_launch_group_id(saved_session_id),
+                    f"saved-session-{saved_session_id}",
+                )
+
+    def test_two_presets_that_once_collided_launch_as_two_groups(self):
+        first = self._launch("a/b")
+        second = self._launch("a-b")
+
+        self.assertEqual(first.status_code, 201, first.get_json())
+        self.assertEqual(second.status_code, 201, second.get_json())
+        self.assertNotEqual(first.get_json()["group_id"], second.get_json()["group_id"])
+        self.assertEqual(len(api.session_manager.get_all_groups()), 2)
+        for payload in (first.get_json(), second.get_json()):
+            self.assertEqual(
+                len(api.session_manager.get_group_sessions(payload["group_id"])), 1
+            )
+
+    def test_a_colliding_preset_in_another_workspace_tears_nothing_down(self):
+        first = self._launch("a/b")
+        self.assertEqual(first.status_code, 201, first.get_json())
+        first_group_id = first.get_json()["group_id"]
+        first_session_id = first.get_json()["sessions"][0]["session_id"]
+
+        second = self._launch("a-b", new_workspace=True, workspace_label="Second")
+
+        self.assertEqual(second.status_code, 201, second.get_json())
+        self.assertNotEqual(
+            second.get_json()["workspace_id"], first.get_json()["workspace_id"]
+        )
+        self.assertIsNotNone(api.session_manager.get_session(first_session_id))
+        self.assertEqual(
+            len(api.session_manager.get_group_sessions(first_group_id)), 1
+        )
+
+    def test_a_group_id_owned_by_another_preset_is_refused_before_teardown(self):
+        launched = self._launch("a/b")
+        group_id = launched.get_json()["group_id"]
+        session_id = launched.get_json()["sessions"][0]["session_id"]
+
+        with self.assertRaises(ValueError) as raised:
+            api.session_manager.install_session_group(
+                [{"host": "10.0.0.9", "directory": "/srv"}],
+                name="Impostor",
+                connection_mode="ssh",
+                layout="single",
+                group_id=group_id,
+                saved_session_id="somebody-else",
+            )
+
+        self.assertIn("already in use", str(raised.exception))
+        self.assertIsNotNone(api.session_manager.get_session(session_id))
+        self.assertEqual(
+            api.session_manager.get_group(group_id).saved_session_id, "a/b"
+        )
+
+    def test_a_snapshot_holding_a_legacy_group_id_restores_its_own_shape(self):
+        """A slot written before the encoding change restores unchanged.
+
+        Its stored group id is the old lossy form. Restore derives the live id
+        from the preset id as always, so the workspace comes back with the
+        current id and the *snapshot's* name, pane count, and layout — the
+        legacy id is never a reason to rewrite what the user saved.
+        """
+        launched = self._launch("a/b")
+        self.assertEqual(launched.status_code, 201, launched.get_json())
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id="default", origin="manual"
+        )
+
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        slot = state["workspaces"]["default"]
+        slot["groups"][0]["group_id"] = "saved-session-a-b"
+        slot["active_group_id"] = "saved-session-a-b"
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        api.session_manager.reset_sessions()
+
+        response = self.client.post(
+            "/api/runtime-state/restore", json={"workspace_ids": ["default"]}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        restored = response.get_json()["workspaces"][0]
+        self.assertTrue(restored["restored"])
+        self.assertEqual(restored["groups"][0]["snapshot_group_id"], "saved-session-a-b")
+        self.assertEqual(restored["groups"][0]["name"], "Preset a/b")
+        self.assertEqual(restored["groups"][0]["pane_count"], 1)
+        live_group_id = restored["groups"][0]["group_id"]
+        self.assertEqual(
+            live_group_id, web_saved_sessions._build_launch_group_id("a/b")
+        )
+        # The saved front-group hint still resolves through the snapshot id.
+        self.assertEqual(restored["active_group_id"], live_group_id)
+        self.assertEqual(
+            api.session_manager.get_group(live_group_id).saved_session_id, "a/b"
+        )
+
+
+class LaunchDestinationReservationTestCase(unittest.TestCase):
+    """MW-06: a launch destination is held by a reservation, not by the clock.
+
+    `resolve_launch_destination` creates the workspace before the launch has a
+    group to put in it. That window used to be covered by a five-second
+    wall-clock exemption inside cleanup — the same exemption that let an
+    explicitly emptied group outlive its last pane forever.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+
+    def _launch(self, **overrides):
+        body = {
+            "connection_mode": "wsl",
+            "session_name": "Files",
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+        body.update(overrides)
+        return self.client.post("/api/sessions", json=body)
+
+    def _cleanup_mid_launch(self, age_destination_by=0.0):
+        """Run a cleanup sweep from inside the launch, after the reservation."""
+        original = web_workspaces._prepare_launch_sessions
+
+        def hooked(sessions_config, connection_mode):
+            for workspace in api.session_manager.get_all_workspaces():
+                if workspace.workspace_id != "default":
+                    workspace.created_at -= age_destination_by
+            api.session_manager.clear_disconnected_sessions()
+            return original(sessions_config, connection_mode)
+
+        return patch.object(web_workspaces, "_prepare_launch_sessions", hooked)
+
+    def test_a_new_destination_survives_a_cleanup_whatever_its_age(self):
+        with self._cleanup_mid_launch(age_destination_by=3600):
+            response = self._launch(new_workspace=True, workspace_label="Fresh")
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        workspace_id = response.get_json()["workspace_id"]
+        self.assertIsNotNone(api.session_manager.get_workspace(workspace_id))
+        self.assertEqual(
+            len(api.session_manager.get_workspace_groups(workspace_id)), 1
+        )
+
+    def test_a_failed_launch_leaves_no_reservation_behind(self):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "ssh",
+                "new_workspace": True,
+                "sessions": [
+                    {
+                        "host": "10.0.0.1",
+                        "directory": "/srv",
+                        "browser_active_tab": "not-a-number",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        # Rolled back, and a released reservation cannot keep a later empty
+        # workspace immortal either.
+        self.assertEqual(
+            [
+                workspace.workspace_id
+                for workspace in api.session_manager.get_all_workspaces()
+            ],
+            ["default"],
+        )
+        stray = api.session_manager.create_workspace("Stray")
+        self.assertEqual(
+            api.session_manager.clear_disconnected_sessions(),
+            [stray.workspace_id],
+        )
+
+    def test_an_immediate_last_pane_close_sweeps_its_group_without_aging(self):
+        launched = self._launch(new_workspace=True, workspace_label="Quick")
+        self.assertEqual(launched.status_code, 201, launched.get_json())
+        payload = launched.get_json()
+
+        closed = self.client.delete(
+            f"/api/sessions/{payload['sessions'][0]['session_id']}"
+        )
+
+        self.assertEqual(closed.status_code, 200)
+        self.assertIsNone(api.session_manager.get_group(payload["group_id"]))
+        self.assertIsNone(api.session_manager.get_workspace(payload["workspace_id"]))
 
 
 class ConnectionTargetProposalTestCase(unittest.TestCase):

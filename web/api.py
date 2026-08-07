@@ -219,6 +219,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _clear_client_joined_sessions,
     _clear_terminal_output_buffer,
     _close_all_ssh_connections,
+    _close_displaced_sessions,
     _close_ssh_connection,
     _connect_local_session,
     _connect_session,
@@ -233,7 +234,6 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _normalize_local_directory,
     _normalize_local_shell_kind,
     _normalize_probed_local_cwd,
-    _replace_group_sessions,
     _resize_connection,
     _resolve_live_terminal_cwd,
     _resolve_local_launch_cwd,
@@ -2612,16 +2612,13 @@ def close_session(session_id: str):
         success = session_manager.close_session(session_id)
         if success:
             group_id = existing_session.group_id
-            # Closing a pane is as explicit as closing a tab, so its group is
-            # forced through cleanup rather than left to the empty-group grace
-            # period (MW-06). Without this, closing the last pane within five
-            # seconds of launch removed the session but left the group behind
-            # forever — nothing sweeps it afterwards — which kept a workspace
-            # alive with no panes in it and its snapshot unforgettable. Forcing
-            # a group that still has panes is a no-op.
-            pruned_workspace_ids = session_manager.clear_disconnected_sessions(
-                force_group_ids={group_id}
-            )
+            # Closing a pane empties its group, and an empty group is swept at
+            # once — there is no grace period left to ride (MW-06). Closing the
+            # last pane within five seconds of launch used to remove the
+            # session but leave the group behind forever, which kept a
+            # workspace alive with no panes in it and its snapshot
+            # unforgettable.
+            pruned_workspace_ids = session_manager.clear_disconnected_sessions()
             workspace_id = (
                 group.workspace_id if group else DEFAULT_WORKSPACE_ID
             )
@@ -2686,11 +2683,9 @@ def close_all_sessions():
             if not close_error:
                 for session in sessions:
                     session_manager.close_session(session.session_id)
-                # The user explicitly closed this group, so it must not survive
-                # on the empty-group grace period.
-                pruned_workspace_ids = session_manager.clear_disconnected_sessions(
-                    force_group_ids={group_id}
-                )
+                # Its panes are closed, so the group is empty and the sweep
+                # takes it immediately (MW-06).
+                pruned_workspace_ids = session_manager.clear_disconnected_sessions()
                 closed_workspace_id = (
                     group.workspace_id if group else workspace_id
                 )

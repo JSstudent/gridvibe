@@ -501,12 +501,13 @@ def launch_session_group(
     from web.terminal_io import (
         _broadcast_session_groups_updated,
         _broadcast_session_status,
+        _close_displaced_sessions,
         _connect_session,
-        _replace_group_sessions,
     )
 
     session_manager = _manager()
     created_workspace_id = ""
+    reserved_workspace_id = ""
     try:
         if not isinstance(data, dict) or "sessions" not in data:
             logger.warning("Missing 'sessions' in request body")
@@ -544,11 +545,16 @@ def launch_session_group(
             saved_session_id = ""
         stable_group_id = _build_launch_group_id(saved_session_id) or None
 
-        # Destination and the uniqueness guard are settled first, because
-        # `_replace_group_sessions()` below is destructive: replacing before
-        # resolving ownership would tear down the *source* workspace's live
-        # sessions and only then discover the conflict.
+        # Destination and the uniqueness guard are settled first: the install
+        # below replaces a stable group's panes, and replacing before resolving
+        # ownership would tear down the *source* workspace's live sessions and
+        # only then discover the conflict.
         workspace_id, created_workspace_id = resolve_launch_destination(data)
+        # Everything between here and the install — pane normalization, the
+        # agent preflight, an SSH ping — can take seconds, and a destination
+        # this call just created holds no groups yet. Reserve it so a
+        # concurrent cleanup cannot prune it out from under the launch (MW-06).
+        reserved_workspace_id = session_manager.reserve_workspace_launch(workspace_id)
         conflict = saved_session_conflict(saved_session_id, workspace_id)
         if conflict is not None:
             rollback_created_workspace(created_workspace_id)
@@ -577,9 +583,6 @@ def launch_session_group(
                 }
             )
 
-        if stable_group_id:
-            _replace_group_sessions(stable_group_id)
-
         # A restore replays a stored workspace shape: its group name (or a
         # neutral fallback) wins — it must never mint a fresh "Session
         # HH:MM:SS" timestamp name (10.5 hardening). The timestamp fallback is
@@ -594,16 +597,27 @@ def launch_session_group(
         # replays a stored shape, so neither is renumbered.
         if not saved_session_id and not is_restore:
             group_name = build_unique_session_name(group_name, _taken_session_names())
-        group = session_manager.create_group(
+        # One transaction: the group and every one of its panes are published
+        # together, and a stable group's old panes are displaced in the same
+        # lock hold (MW-07). Autosave can only ever see the complete old shape
+        # or the complete new one. A launch that turns out to be unusable —
+        # no valid panes, a group id owned by another preset — raises before
+        # anything live is touched, so a failed relaunch no longer leaves the
+        # previous panes destroyed.
+        installation = session_manager.install_session_group(
+            prepared_sessions,
             name=group_name,
             connection_mode=connection_mode,
             layout=layout,
-            terminal_count=len(prepared_sessions),
             group_id=stable_group_id,
             saved_session_id=saved_session_id,
             workspace_layout=workspace_layout,
             workspace_id=workspace_id,
         )
+        group = installation.group
+        created_sessions = installation.sessions
+        # Slow teardown, outside every shared lock (guardrail 2).
+        _close_displaced_sessions(group.group_id, installation.displaced_session_ids)
         logger.info(
             "Created session group group_id=%s workspace_id=%s saved_session_id=%r "
             "name=%r mode=%s layout=%s terminal_count=%d",
@@ -613,19 +627,8 @@ def launch_session_group(
             group.name,
             connection_mode,
             layout,
-            len(prepared_sessions),
+            len(created_sessions),
         )
-
-        created_sessions = session_manager.create_sessions(
-            prepared_sessions,
-            group_id=group.group_id,
-        )
-        logger.info("Created %d sessions", len(created_sessions))
-        if not created_sessions:
-            logger.error("No valid sessions were created")
-            session_manager.remove_group(group.group_id)
-            rollback_created_workspace(created_workspace_id)
-            return {"error": "No valid sessions were created"}, 400
 
         logger.info(
             "Launch summary group_id=%s sessions=%s",
@@ -692,6 +695,11 @@ def launch_session_group(
         rollback_created_workspace(created_workspace_id)
         logger.error("Error creating sessions: %s", exc)
         return {"error": str(exc)}, 500
+    finally:
+        # Always, on every path: the destination is either populated by now or
+        # rolled back, and a leaked reservation would make an empty workspace
+        # immortal.
+        session_manager.release_workspace_launch(reserved_workspace_id)
 
 
 # ==================== Group moves ====================
@@ -725,23 +733,29 @@ def move_group_to_workspace(group_id: str, data: Dict[str, Any]) -> Tuple[Dict[s
     except WorkspaceRequestError as exc:
         return {"error": str(exc), **exc.payload}, exc.status
 
-    if target_workspace_id == source_workspace_id:
-        rollback_created_workspace(created_workspace_id)
-        return {
-            "moved": False,
-            "group_id": normalized_group_id,
-            "workspace_id": source_workspace_id,
-            "source_workspace_id": source_workspace_id,
-        }, 200
-
+    # Same window as a launch: the destination holds no groups until the move
+    # lands, so reserve it against a concurrent cleanup (MW-06).
+    reserved_workspace_id = session_manager.reserve_workspace_launch(target_workspace_id)
     try:
-        moved_group = session_manager.move_group(normalized_group_id, target_workspace_id)
-    except ValueError as exc:
-        rollback_created_workspace(created_workspace_id)
-        return {"error": str(exc)}, 400
-    if moved_group is None:
-        rollback_created_workspace(created_workspace_id)
-        return {"error": "Session group not found"}, 404
+        if target_workspace_id == source_workspace_id:
+            rollback_created_workspace(created_workspace_id)
+            return {
+                "moved": False,
+                "group_id": normalized_group_id,
+                "workspace_id": source_workspace_id,
+                "source_workspace_id": source_workspace_id,
+            }, 200
+
+        try:
+            moved_group = session_manager.move_group(normalized_group_id, target_workspace_id)
+        except ValueError as exc:
+            rollback_created_workspace(created_workspace_id)
+            return {"error": str(exc)}, 400
+        if moved_group is None:
+            rollback_created_workspace(created_workspace_id)
+            return {"error": "Session group not found"}, 404
+    finally:
+        session_manager.release_workspace_launch(reserved_workspace_id)
 
     # Snapshot both sides and make the prune decision atomically. The manager
     # uses an RLock, so its helpers may safely re-enter it here. Broadcasts and
@@ -1228,20 +1242,15 @@ def _close_workspace_contents(workspace_id: str) -> Optional[Dict[str, Any]]:
             session.session_id
             for session in session_manager.get_workspace_sessions(workspace_id)
         ]
-        group_ids = [
-            group.group_id
-            for group in session_manager.get_workspace_groups(workspace_id)
-        ]
+        group_count = len(session_manager.get_workspace_groups(workspace_id))
         for session_id in session_ids:
             session_manager.close_session(session_id)
         # A workspace created deliberately empty is retained until its first
         # group arrives; closing it deliberately ends that promise. Cleared
         # first, so the sweep below is allowed to take it.
         workspace.retain_when_empty = False
-        # This close is explicit, so these groups must not survive on the
-        # empty-group grace period the way a transient empty one does.
-        session_manager.clear_disconnected_sessions(force_group_ids=set(group_ids))
-        # The sweep prunes the workspace of a forced group itself, so this is
+        session_manager.clear_disconnected_sessions()
+        # The sweep prunes the emptied workspace itself, so this is
         # the fallback for the empty-workspace case rather than the only path —
         # the manager, not either return value, is asked what actually remains.
         session_manager.remove_workspace(workspace_id)
@@ -1253,7 +1262,7 @@ def _close_workspace_contents(workspace_id: str) -> Optional[Dict[str, Any]]:
     return {
         "workspace_id": workspace_id,
         "label": label,
-        "group_count": len(group_ids),
+        "group_count": group_count,
         "session_count": len(session_ids),
         "removed": bool(removed),
     }

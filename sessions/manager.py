@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
@@ -19,10 +19,6 @@ from web.workspaces import (
 )
 
 logger = logging.getLogger(__name__)
-
-# How long a group with no sessions is protected from cleanup after creation,
-# covering the window between create_group and create_session during a launch.
-EMPTY_GROUP_GRACE_SECONDS = 5.0
 
 # Pane presentation restored when an already-live workspace window is reopened.
 # Connection/process metadata deliberately stays untouched: saving a view must
@@ -189,6 +185,19 @@ class SessionGroup:
         }
 
 
+@dataclass
+class GroupInstallation:
+    """The published result of one atomic group install.
+
+    ``displaced_session_ids`` are panes the install replaced. Their records are
+    already gone from the manager; their transports are the caller's to close,
+    *after* every shared lock is released.
+    """
+    group: SessionGroup
+    sessions: List[TerminalSession] = field(default_factory=list)
+    displaced_session_ids: List[str] = field(default_factory=list)
+
+
 class SessionManager:
     """
     Manages terminal sessions for the web frontend.
@@ -202,6 +211,10 @@ class SessionManager:
         self.workspaces: Dict[str, Workspace] = {
             DEFAULT_WORKSPACE_ID: Workspace(workspace_id=DEFAULT_WORKSPACE_ID)
         }
+        # Workspace ids currently reserved by a launch in flight, by depth.
+        # See reserve_workspace_launch: this replaced the empty-workspace grace
+        # period, so cleanup no longer decides by wall clock.
+        self._launch_reservations: Dict[str, int] = {}
         # Lock ordering: web/api.py's connection_lock may be held while taking
         # this lock; code holding this lock must never take connection_lock.
         self.lock = threading.RLock()
@@ -227,48 +240,80 @@ class SessionManager:
         resolved_workspace_id = normalize_workspace_id(workspace_id)
 
         with self.lock:
-            if resolved_workspace_id not in self.workspaces:
-                raise ValueError("Workspace not found")
-            existing_group = self.groups.get(resolved_group_id)
-            if (
-                existing_group is not None
-                and existing_group.workspace_id != resolved_workspace_id
-            ):
-                raise ValueError("Session group belongs to another workspace")
-            next_display_order = (
-                existing_group.display_order
-                if existing_group is not None
-                else max(
-                    (
-                        group.display_order
-                        for group in self.groups.values()
-                        if group.workspace_id == resolved_workspace_id
-                    ),
-                    default=-1,
-                )
-                + 1
-            )
-
-            group = SessionGroup(
+            return self._create_group_locked(
                 group_id=resolved_group_id,
-                name=name or resolved_group_id,
+                name=name,
                 connection_mode=connection_mode,
                 layout=layout,
                 terminal_count=terminal_count,
-                display_order=next_display_order,
-                workspace_id=resolved_workspace_id,
-                saved_session_id=str(saved_session_id or "").strip(),
+                saved_session_id=saved_session_id,
                 workspace_layout=workspace_layout,
+                workspace_id=resolved_workspace_id,
             )
-            self.groups[resolved_group_id] = group
-            # The session window switches to a newly launched group, so mirror
-            # that here: the hint is then right even before a window reports.
-            workspace = self.workspaces[resolved_workspace_id]
-            workspace.active_group_id = resolved_group_id
-            # The workspace now holds content, so normal empty-workspace
-            # pruning applies again from here on.
-            workspace.retain_when_empty = False
 
+    def _create_group_locked(
+        self,
+        *,
+        group_id: str,
+        name: str,
+        connection_mode: str,
+        layout: str,
+        terminal_count: int,
+        saved_session_id: str = "",
+        workspace_layout: Optional[Dict[str, Any]] = None,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+    ) -> SessionGroup:
+        """Publish one group record.
+
+        Caller holds ``self.lock`` and has already normalized ``group_id`` and
+        ``workspace_id``. Split out of :meth:`create_group` so
+        :meth:`install_session_group` can publish a group and all of its panes
+        inside one lock hold.
+        """
+        resolved_group_id = group_id
+        resolved_workspace_id = workspace_id
+
+        if resolved_workspace_id not in self.workspaces:
+            raise ValueError("Workspace not found")
+        existing_group = self.groups.get(resolved_group_id)
+        if (
+            existing_group is not None
+            and existing_group.workspace_id != resolved_workspace_id
+        ):
+            raise ValueError("Session group belongs to another workspace")
+        next_display_order = (
+            existing_group.display_order
+            if existing_group is not None
+            else max(
+                (
+                    group.display_order
+                    for group in self.groups.values()
+                    if group.workspace_id == resolved_workspace_id
+                ),
+                default=-1,
+            )
+            + 1
+        )
+
+        group = SessionGroup(
+            group_id=resolved_group_id,
+            name=name or resolved_group_id,
+            connection_mode=connection_mode,
+            layout=layout,
+            terminal_count=terminal_count,
+            display_order=next_display_order,
+            workspace_id=resolved_workspace_id,
+            saved_session_id=str(saved_session_id or "").strip(),
+            workspace_layout=workspace_layout,
+        )
+        self.groups[resolved_group_id] = group
+        # The session window switches to a newly launched group, so mirror
+        # that here: the hint is then right even before a window reports.
+        workspace = self.workspaces[resolved_workspace_id]
+        workspace.active_group_id = resolved_group_id
+        # The workspace now holds content, so normal empty-workspace
+        # pruning applies again from here on.
+        workspace.retain_when_empty = False
         return group
 
     def create_workspace(
@@ -299,6 +344,43 @@ class SessionManager:
             )
             self.workspaces[resolved_workspace_id] = workspace
             return workspace
+
+    def reserve_workspace_launch(self, workspace_id: str) -> str:
+        """Reserve an existing workspace for a launch that is still in flight.
+
+        A launch resolves its destination before it has a group to put in it,
+        so the record is briefly empty and a concurrent cleanup would prune it
+        out from under the launch. That window used to be covered by a
+        five-second wall-clock exemption with no follow-up sweep (MW-06); it is
+        now this explicit reservation, taken here and released in the caller's
+        ``finally`` through :meth:`release_workspace_launch`.
+
+        A reservation protects the record from cleanup and nothing else: the
+        workspace still holds no groups, so it stays out of autosave and out of
+        every user-visible workspace list until its first group is installed.
+
+        Returns the reserved workspace id, or ``""`` when it does not exist.
+        """
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            if resolved_workspace_id not in self.workspaces:
+                return ""
+            self._launch_reservations[resolved_workspace_id] = (
+                self._launch_reservations.get(resolved_workspace_id, 0) + 1
+            )
+            return resolved_workspace_id
+
+    def release_workspace_launch(self, workspace_id: str) -> None:
+        """Release one reservation taken by :meth:`reserve_workspace_launch`."""
+        if not workspace_id:
+            return
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            remaining = self._launch_reservations.get(resolved_workspace_id, 0) - 1
+            if remaining > 0:
+                self._launch_reservations[resolved_workspace_id] = remaining
+            else:
+                self._launch_reservations.pop(resolved_workspace_id, None)
 
     def rename_workspace(self, workspace_id: str, label: str) -> Optional[Workspace]:
         """Set one live workspace's display label; ``None`` when unknown."""
@@ -462,44 +544,9 @@ class SessionManager:
 
         for config in sessions_config:
             try:
-                mode = config.get("mode", "ssh")
                 session = self.create_session(
                     group_id=group_id,
-                    host=(
-                        config.get("host")
-                        or config.get("ip")
-                        or config.get("hostname")
-                        or config.get("distribution")
-                        or "WSL"
-                    ),
-                    directory=config.get("directory", ""),
-                    username=config.get("username", "root" if mode == "ssh" else ""),
-                    port=config.get("port", 22),
-                    password=config.get("password"),
-                    initial_command=config.get("initial_command"),
-                    initial_command_mode=str(config.get("initial_command_mode") or "command"),
-                    agent_selection=str(config.get("agent_selection") or ""),
-                    custom_agent=str(config.get("custom_agent") or ""),
-                    agent_auto_mode=bool(config.get("agent_auto_mode")),
-                    title=config.get("title"),
-                    mode=mode,
-                    distribution=config.get("distribution"),
-                    use_wsl=bool(config.get("use_wsl")),
-                    use_powershell=bool(config.get("use_powershell")),
-                    startup_mode=str(config.get("startup_mode") or "terminal"),
-                    explorer_root_directory=config.get("explorer_root_directory"),
-                    explorer_tree_open=bool(config.get("explorer_tree_open")),
-                    explorer_git_open=bool(config.get("explorer_git_open")),
-                    explorer_search_open=bool(config.get("explorer_search_open")),
-                    explorer_open_tabs=list(config.get("explorer_open_tabs") or []),
-                    explorer_active_tab=str(config.get("explorer_active_tab") or ""),
-                    explorer_tab_views=dict(config.get("explorer_tab_views") or {}),
-                    explorer_md_preset=str(config.get("explorer_md_preset") or ""),
-                    explorer_md_font=str(config.get("explorer_md_font") or ""),
-                    explorer_source_font=str(config.get("explorer_source_font") or ""),
-                    explorer_theme="light" if config.get("explorer_theme") == "light" else "dark",
-                    browser_tabs=list(config.get("browser_tabs") or []),
-                    browser_active_tab=int(config.get("browser_active_tab") or 0),
+                    **self._session_launch_fields(config),
                 )
                 created.append(session)
             except Exception as e:
@@ -507,6 +554,142 @@ class SessionManager:
                 continue
 
         return created
+
+    @staticmethod
+    def _session_launch_fields(config: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize one requested pane into TerminalSession keyword fields.
+
+        Pure: it touches no shared state, so a launch can stage every pane of a
+        group before it takes the lock that publishes them together.
+        """
+        mode = config.get("mode", "ssh")
+        return {
+            "host": (
+                config.get("host")
+                or config.get("ip")
+                or config.get("hostname")
+                or config.get("distribution")
+                or "WSL"
+            ),
+            "directory": config.get("directory", ""),
+            "username": config.get("username", "root" if mode == "ssh" else ""),
+            "port": config.get("port", 22),
+            "password": config.get("password"),
+            "initial_command": config.get("initial_command"),
+            "initial_command_mode": str(config.get("initial_command_mode") or "command"),
+            "agent_selection": str(config.get("agent_selection") or ""),
+            "custom_agent": str(config.get("custom_agent") or ""),
+            "agent_auto_mode": bool(config.get("agent_auto_mode")),
+            "title": config.get("title"),
+            "mode": mode,
+            "distribution": config.get("distribution"),
+            "use_wsl": bool(config.get("use_wsl")),
+            "use_powershell": bool(config.get("use_powershell")),
+            "startup_mode": str(config.get("startup_mode") or "terminal"),
+            "explorer_root_directory": config.get("explorer_root_directory"),
+            "explorer_tree_open": bool(config.get("explorer_tree_open")),
+            "explorer_git_open": bool(config.get("explorer_git_open")),
+            "explorer_search_open": bool(config.get("explorer_search_open")),
+            "explorer_open_tabs": list(config.get("explorer_open_tabs") or []),
+            "explorer_active_tab": str(config.get("explorer_active_tab") or ""),
+            "explorer_tab_views": dict(config.get("explorer_tab_views") or {}),
+            "explorer_md_preset": str(config.get("explorer_md_preset") or ""),
+            "explorer_md_font": str(config.get("explorer_md_font") or ""),
+            "explorer_source_font": str(config.get("explorer_source_font") or ""),
+            "explorer_theme": "light" if config.get("explorer_theme") == "light" else "dark",
+            "browser_tabs": list(config.get("browser_tabs") or []),
+            "browser_active_tab": int(config.get("browser_active_tab") or 0),
+        }
+
+    def install_session_group(
+        self,
+        sessions_config: List[Dict[str, Any]],
+        name: str,
+        connection_mode: str,
+        layout: str,
+        group_id: Optional[str] = None,
+        saved_session_id: str = "",
+        workspace_layout: Optional[Dict[str, Any]] = None,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+    ) -> GroupInstallation:
+        """Install one complete group and every one of its panes atomically.
+
+        The one group-publication path (MW-07). Launch, stable-group
+        replacement, and restore all come through here, and every observer of
+        the manager — autosave above all — sees either the complete old shape
+        or the complete new one, never a group mid-assembly. Previously the
+        group was created, then its panes inserted one at a time, each under
+        its own lock hold, so a snapshot taken in between could persist an
+        empty or half-populated group as if that were the workspace.
+
+        Staging (normalizing each requested pane) happens before the lock
+        because it is pure; validation, replacement, and publication all happen
+        inside a single ``self.lock`` hold. Nothing slow runs under the lock:
+        the transports of replaced panes are returned as
+        ``displaced_session_ids`` for the caller to close afterwards.
+
+        Raises ``ValueError`` — before touching anything — when the workspace
+        is gone, when the group id is owned by another workspace or by another
+        preset, or when no requested pane is usable.
+        """
+        resolved_group_id = str(group_id or uuid.uuid4().hex[:12])
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        resolved_saved_session_id = str(saved_session_id or "").strip()
+
+        staged_fields: List[Dict[str, Any]] = []
+        for config in sessions_config:
+            try:
+                staged_fields.append(self._session_launch_fields(config))
+            except Exception as exc:
+                logger.error(f"Failed to create session: {exc}")
+        if not staged_fields:
+            raise ValueError("No valid sessions were created")
+
+        with self.lock:
+            if resolved_workspace_id not in self.workspaces:
+                raise ValueError("Workspace not found")
+            existing_group = self.groups.get(resolved_group_id)
+            if existing_group is not None:
+                if existing_group.workspace_id != resolved_workspace_id:
+                    raise ValueError("Session group belongs to another workspace")
+                # Runtime ownership, checked before any teardown (MW-11): a
+                # group id derived from a preset id must only ever replace the
+                # *same* preset's group. Two preset ids that once sanitized to
+                # one group id used to make the second launch silently tear
+                # down the first preset's live panes.
+                if existing_group.saved_session_id != resolved_saved_session_id:
+                    raise ValueError("Session group id is already in use")
+
+            displaced_session_ids = self._remove_group_sessions_locked(resolved_group_id)
+            group = self._create_group_locked(
+                group_id=resolved_group_id,
+                name=name,
+                connection_mode=connection_mode,
+                layout=layout,
+                terminal_count=len(staged_fields),
+                saved_session_id=resolved_saved_session_id,
+                workspace_layout=workspace_layout,
+                workspace_id=resolved_workspace_id,
+            )
+            sessions = []
+            for fields in staged_fields:
+                session = self._build_session(resolved_group_id, **fields)
+                self.sessions[session.session_id] = session
+                sessions.append(session)
+            group.terminal_count = len(sessions)
+
+        logger.info(
+            "Installed session group group_id=%s workspace_id=%s panes=%d displaced=%d",
+            group.group_id,
+            group.workspace_id,
+            len(sessions),
+            len(displaced_session_ids),
+        )
+        return GroupInstallation(
+            group=group,
+            sessions=sessions,
+            displaced_session_ids=displaced_session_ids,
+        )
 
     def get_session(self, session_id: str) -> Optional[TerminalSession]:
         """Get a session by ID."""
@@ -1001,6 +1184,7 @@ class SessionManager:
             self.sessions.clear()
             self.groups.clear()
             self.workspaces.clear()
+            self._launch_reservations.clear()
             self.workspaces[DEFAULT_WORKSPACE_ID] = Workspace(
                 workspace_id=DEFAULT_WORKSPACE_ID
             )
@@ -1010,17 +1194,20 @@ class SessionManager:
         with self.lock:
             return len(self.sessions)
 
-    def clear_disconnected_sessions(
-        self,
-        force_group_ids: Optional[Iterable[str]] = None,
-    ) -> List[str]:
-        """Remove disconnected sessions from the manager.
+    def clear_disconnected_sessions(self) -> List[str]:
+        """Remove disconnected sessions, then whatever they emptied.
 
-        Groups in `force_group_ids` (e.g. a group the user explicitly closed)
-        are removed when empty regardless of the grace period.
+        There is no wall-clock exemption any more (MW-06). A group is published
+        together with all of its panes by :meth:`install_session_group`, so an
+        empty group is always a group whose panes have gone and is swept at
+        once — an explicitly closed group can no longer outlive its last pane
+        by riding a grace period that nothing sweeps afterwards. A workspace
+        resolved as a launch destination before its first group exists is
+        protected by :meth:`reserve_workspace_launch` instead, and a workspace
+        the user created deliberately empty by ``retain_when_empty``.
+
         Returns non-default workspace ids pruned after their last group left.
         """
-        forced_groups = set(force_group_ids or ())
         with self.lock:
             disconnected = [
                 sid for sid, s in self.sessions.items()
@@ -1032,27 +1219,14 @@ class SessionManager:
             active_group_counts: Dict[str, int] = {}
             for session in self.sessions.values():
                 active_group_counts[session.group_id] = active_group_counts.get(session.group_id, 0) + 1
-            # Grace period: a launch creates its group before its sessions in
-            # separate lock holds, so a brand-new group is briefly empty and
-            # must not be swept by a concurrent cleanup.
-            now = time.time()
             disconnected_groups = [
-                group_id for group_id, group in self.groups.items()
+                group_id for group_id in self.groups
                 if group_id not in active_group_counts
-                and (
-                    group_id in forced_groups
-                    or now - group.created_at > EMPTY_GROUP_GRACE_SECONDS
-                )
             ]
             affected_workspace_ids = {
                 self.groups[group_id].workspace_id
                 for group_id in disconnected_groups
                 if group_id in self.groups
-            }
-            forced_workspace_ids = {
-                self.groups[group_id].workspace_id
-                for group_id in disconnected_groups
-                if group_id in forced_groups and group_id in self.groups
             }
             for group_id in disconnected_groups:
                 del self.groups[group_id]
@@ -1078,10 +1252,9 @@ class SessionManager:
                 # normal empty-workspace pruning apply to it.
                 if workspace.retain_when_empty:
                     continue
-                if (
-                    workspace_id not in forced_workspace_ids
-                    and now - workspace.created_at <= EMPTY_GROUP_GRACE_SECONDS
-                ):
+                # A launch that has resolved this destination but not yet
+                # installed its group holds a reservation over it.
+                if self._launch_reservations.get(workspace_id, 0) > 0:
                     continue
                 del self.workspaces[workspace_id]
                 pruned_workspace_ids.append(workspace_id)

@@ -977,14 +977,40 @@ def _normalize_launch_session_id(value: Any) -> str:
     return str(value or "").strip()
 
 
+# Characters a launched-group key carries literally. Everything else is
+# escaped as `_<hex>_`, which makes the encoding reversible and therefore
+# collision-free. `_` is not in the set precisely so it can be the escape
+# marker without ever being ambiguous.
+_GROUP_ID_LITERAL_CHAR = re.compile(r"[A-Za-z0-9.-]")
+
+
+def _encode_group_id_component(value: str) -> str:
+    """Escape one string into the launched-group id alphabet, injectively."""
+    return "".join(
+        char if _GROUP_ID_LITERAL_CHAR.fullmatch(char) else f"_{ord(char):x}_"
+        for char in value
+    )
+
+
 def _build_launch_group_id(saved_session_id: Any) -> str:
-    """Return a stable launched-group key for one saved-session identifier."""
+    """Return the stable launched-group key for one saved-session identifier.
+
+    The mapping is injective (MW-11). It used to replace every run of
+    non-`[A-Za-z0-9._-]` characters with a single `-`, so two distinct preset
+    ids such as ``a/b`` and ``a-b`` produced the *same* live group id: the
+    second launch replaced the first preset's group in place, and across
+    workspaces it tore down the other workspace's sessions before
+    ``create_group`` noticed the group belonged elsewhere.
+
+    Ids made only of ``[A-Za-z0-9.-]`` — every id ``_generate_saved_session_id``
+    mints — encode to themselves, so live groups and saved workspace snapshots
+    written by earlier builds keep the ids they already have.
+    """
     normalized = _normalize_launch_session_id(saved_session_id)
     if not normalized:
         return ""
 
-    safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", normalized).strip("-")
-    return f"saved-session-{safe_id or DEFAULT_SAVED_SESSION_ID}"
+    return f"saved-session-{_encode_group_id_component(normalized)}"
 
 
 def upsert_saved_session(

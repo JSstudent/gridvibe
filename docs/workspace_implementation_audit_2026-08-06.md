@@ -3,9 +3,9 @@
 Date: 2026-08-06
 
 Status: findings and remediation plan. **MW-01, MW-02, MW-04, MW-05, MW-06,
-MW-10, MW-12, MW-15, and the persistence half of MW-16 are fixed** (see the
-"Resolution" blocks under each) — that is Phases 0, 1 and 2 complete. Every
-other finding is still open and describes current behavior.
+MW-07, MW-10, MW-11, MW-12, MW-15, and the persistence half of MW-16 are
+fixed** (see the "Resolution" blocks under each) — that is Phases 0, 1, 2 and 3
+complete. Every other finding is still open and describes current behavior.
 
 ## Executive summary
 
@@ -204,7 +204,10 @@ backed by a **durable** per-workspace revision, not only in-process tickets:
 
 Not implemented: the snapshot still does not record a live-shape *generation*
 from `SessionManager` (that belongs with the Phase 3 atomic-launch work, which
-is what makes such a generation meaningful).
+is what makes such a generation meaningful). **Resolved as not needed in Phase
+3:** the atomic install leaves no partial shape for a generation to detect, and
+commit ordering is already enforced by the durable per-workspace revision. See
+MW-07's resolution.
 
 Coverage: `RuntimeStateCrossProcessOrderingTestCase` (test_multi_workspace.py)
 drives two `RuntimeStateStore` instances over one file — each with its own
@@ -371,6 +374,43 @@ claims "the initialization part of MW-06"). Nothing is left immortal in the
 meantime — an empty group that was not explicitly closed is swept by the next
 cleanup once it is older than the window.
 
+**Closed in Phase 3.** The initialization half is done and
+`EMPTY_GROUP_GRACE_SECONDS` is gone from the codebase. Its two jobs were split
+and each given an explicit owner:
+
+- **Groups need no protection at all now.** `install_session_group` publishes a
+  group together with every one of its panes in one lock hold (MW-07), so the
+  window it was covering — `create_group` returning before `create_sessions`
+  ran — no longer exists. `clear_disconnected_sessions` therefore sweeps *any*
+  empty group immediately, and with that the `force_group_ids` parameter became
+  dead: every caller was already forcing the group it was acting on, and the
+  unforced case now behaves identically. It was removed rather than left as a
+  no-op (guardrail 5), which simplified all three call sites.
+- **Workspaces are held by an explicit reservation.**
+  `resolve_launch_destination` still creates the destination before the launch
+  has a group for it, and the work in between (pane normalization, the agent
+  preflight, an SSH ping) can take seconds. `reserve_workspace_launch` /
+  `release_workspace_launch` bracket exactly that span, released in
+  `launch_session_group`'s `finally` on every path — success, rollback, and
+  the 500 — and `move_group_to_workspace` takes the same reservation over its
+  destination. Reservations nest, so overlapping launches into one workspace
+  cannot free each other's hold.
+
+A reservation is not a group: the workspace still owns nothing, so
+`snapshot_live_workspaces` skips it and `workspace_is_user_visible` says no. A
+launch in flight is still not a workspace, which is the MW-05 rule unchanged.
+
+Coverage: `EmptyGroupCleanupTestCase` and `WorkspaceLaunchReservationTestCase`
+(test_session_manager.py) replace `EmptyGroupGracePeriodTestCase` — an emptied
+group goes without aging, a group holding a pane stays, an installed group is
+never visible without its panes, a reserved workspace survives a sweep and is
+taken by the next one after release, and reservations nest.
+`LaunchDestinationReservationTestCase` (test_multi_workspace.py) drives it
+through the route: a cleanup run from *inside* a launch cannot prune the new
+destination however old the record is (the previous wall-clock rule fails this),
+a failed launch leaves neither a record nor a reservation behind, and an
+immediate last-pane close sweeps its group and workspace with no aging.
+
 Coverage: `…an immediate last pane close forgets the default slot` closes the
 last pane immediately after launch — no aging — and asserts the group, the
 workspace's group list, the saved slot, and the now-empty user-visible list;
@@ -396,6 +436,60 @@ Recommended correction:
 - Validate and build all session objects first, then install the group and all panes in one manager lock hold.
 - Stage stable-group replacement and swap it atomically; close old transports after the live ownership swap.
 - If an initializing state is retained, autosave must keep the prior complete slot for that workspace rather than persist a partial workspace.
+
+**Resolution (fixed).** Re-verified as reported before the fix: the launch
+called `_replace_group_sessions`, then `create_group`, then `create_sessions`,
+each taking `SessionManager.lock` separately, and `create_sessions` inserted
+panes one at a time through `create_session` — a lock hold per pane. A
+concurrent `snapshot_live_workspaces` could land in any of those gaps.
+
+`SessionManager.install_session_group` is now the single group-publication
+path, and `launch_session_group` is its only production caller — so new launch,
+stable-group replacement, and server-side restore (which goes through
+`launch_session_group`) all get the same transaction:
+
+- **Stage, then publish.** `_session_launch_fields` was split out of
+  `create_sessions`; it is pure, so every requested pane is normalized *before*
+  the lock. Inside one `self.lock` hold the transaction validates the
+  workspace and group ownership, removes the displaced panes, publishes the
+  group through `_create_group_locked`, and inserts every session. There is no
+  moment at which the group exists with the wrong number of panes.
+- **Replacement is a swap, not a teardown-then-rebuild.** The displaced session
+  records go in the same hold that installs their replacements;
+  `_replace_group_sessions` — which closed transports first and left the group
+  empty for as long as that took — is gone, replaced by
+  `_close_displaced_sessions(group_id, session_ids)`. That runs *after* the
+  lock is released and only closes connections whose records the manager has
+  already dropped (guardrail 2: no `_close_ssh_connection` under a shared
+  lock).
+- **A launch that cannot succeed touches nothing.** The transaction raises
+  before it displaces anything when the workspace is gone, when the group id is
+  owned by another workspace or another preset, or when no requested pane is
+  usable. The old code discovered "no valid sessions were created" *after*
+  `_replace_group_sessions` had already destroyed the live panes, so a bad
+  relaunch emptied a working tab.
+- **No initializing group state was needed**, which is why the third
+  recommendation does not apply: there is no partial group for autosave to skip
+  over. The launch *destination* is the only thing that exists before its
+  content, and that is the workspace reservation under MW-06 — invisible to
+  autosave because it owns no groups.
+
+Not implemented, deliberately: the snapshot still does not carry a
+`SessionManager` live-shape generation (raised as unfinished under MW-02). With
+one atomic install path there is no partial shape for a generation to detect,
+so it would record ordering the durable per-workspace revision already
+enforces. If it is wanted for diagnostics it belongs with the Phase 5 logging
+work, not here.
+
+Coverage: `AtomicGroupInstallTestCase` (test_multi_workspace.py) releases a
+concurrent `snapshot_live_workspaces` from inside the launch, immediately after
+the *first* pane is built — the exact instant the old code exposed a partial
+group — and asserts the observed snapshot holds the complete new shape or
+nothing (and, for a replacement, the complete old shape or the complete new
+one). Both cases fail against the previous sequence, the first reporting
+literally "1 not found in (None, 3)". Two more pin the failure paths: a
+relaunch with no usable pane returns `400` with the live panes untouched, and a
+workspace deleted mid-launch installs no group and no session.
 
 ### MW-08 — High: restore idempotency is check-then-act, not a reservation
 
@@ -477,6 +571,62 @@ Recommended correction:
 - Use a collision-free encoding or append a cryptographic hash of the complete raw ID.
 - Check actual stable group ownership before any destructive replacement.
 - Prefer a separate opaque group-instance identity over deriving runtime identity from an external preset ID.
+
+**Resolution (fixed).** Re-verified as reported: `_normalize_saved_session_entry`
+accepts any nonblank string as an id, `POST /api/sessions` takes
+`saved_session_id` straight from the request body through
+`_normalize_launch_session_id`, and `_build_launch_group_id` collapsed every run
+of non-`[A-Za-z0-9._-]` characters to a single `-`, so `a/b` and `a-b` both
+produced `saved-session-a-b`. Also confirmed reachable across workspaces:
+`saved_session_conflict` compares the *raw* preset ids, which differ, so the
+launch proceeded to `_replace_group_sessions` and destroyed the other
+workspace's sessions before `create_group` raised "Session group belongs to
+another workspace".
+
+Both halves are closed, and the compatibility bridge the finding allows turned
+out to be unnecessary:
+
+- **The encoding is injective, and no hash was needed.**
+  `_encode_group_id_component` keeps `[A-Za-z0-9.-]` literally and escapes
+  every other character as `_<hex>_`; `_` is excluded from the literal set
+  precisely so it can be an unambiguous escape marker. The result is decodable,
+  therefore collision-free, and unlike a hash suffix it leaves ordinary ids
+  alone: every id `_generate_saved_session_id` mints is already inside that
+  alphabet, so `saved-session-session-20260806-094325-19b823` is still exactly
+  that. No live group, saved preset, or stored snapshot changes id on upgrade.
+- **Ownership is checked before any teardown.**
+  `install_session_group` refuses a group id whose live group belongs to
+  another workspace *or* carries a different `saved_session_id`, and it does so
+  in the same lock hold, before it displaces a single pane. With the injective
+  encoding a collision can no longer arise; the check is what makes that a
+  guarantee rather than an assumption, and it is the same hold that publishes
+  the replacement, so nothing can slip in between.
+- **A separate opaque group-instance identity was not adopted.** The stable id
+  *is* the feature: it is what makes relaunching a saved preset replace its tab
+  in place instead of opening a second one, and what lets
+  `find_saved_session_group` answer the one-workspace-per-preset rule. An
+  opaque instance id would need a parallel preset→instance map to do the same
+  job. The finding's first option — a collision-free encoding — buys the same
+  safety with no new state, so that is what shipped. The raw preset id stays on
+  the group as `saved_session_id`, which is what ownership is actually checked
+  against.
+- **Legacy snapshots need no migration.** Restore never reuses a snapshot's
+  stored `group_id` to create anything — it derives the live id from the preset
+  id as any launch does, and uses the stored id only to report the group and to
+  match the saved front-group hint. A slot written before this change therefore
+  restores its own name, pane count, and layout unchanged, which is exactly the
+  "without rewriting their user-visible shape merely because they were loaded"
+  requirement.
+
+Coverage: `LaunchGroupIdentityTestCase` (test_multi_workspace.py) asserts the
+encoding is injective over a set including `a/b`, `a-b`, `a_b`, `a b`, `---`
+and a non-ASCII id; that ids needing no escaping keep the group id they had;
+that the two once-colliding presets launch as two independent groups in one
+workspace; that launching the colliding twin into another workspace leaves the
+first workspace's session and group untouched (both of these fail against the
+previous encoding); that a group id owned by another preset is refused before
+teardown; and that a snapshot carrying a legacy collapsed group id restores its
+own shape under the current id.
 
 ### MW-12 — Medium: retained empty workspaces have no terminal lifecycle
 
@@ -647,10 +797,10 @@ All of these should be behavioral tests against routes or public manager/store o
 5. **Immediate pane close:** close the last pane immediately after launch in default and non-default workspaces; assert group, workspace visibility, native close signal, and slot cleanup. *(Added with MW-06; the native close signal stays a frontend rule — a window already closes itself when its own workspace holds no groups.)*
 6. **Close versus autosave:** pause autosave after its manager snapshot, close/forget the workspace, resume autosave, and assert the slot stays deleted. *(Added with MW-02.)*
 7. **Manual versus timer ordering:** pause an older timer capture, perform a newer manual capture, release the timer, and assert the manual/newer revision remains. *(Added with MW-02.)*
-8. **Atomic launch snapshot:** pause a multi-pane launch at every installation boundary while autosave runs; every stored slot must equal either the complete old shape or complete new shape.
+8. **Atomic launch snapshot:** pause a multi-pane launch at every installation boundary while autosave runs; every stored slot must equal either the complete old shape or complete new shape. *(Added with MW-07: the observer is released after the first pane is built — the only boundary the transaction leaves — and asserted for both a new launch and a replacement.)*
 9. **Concurrent restore:** release two restore requests through a barrier; assert one successful group set and one deterministic conflict response.
 10. **Single-mode live restore:** with default already populated, invoke the single-mode restore route and assert no duplicate or replacement.
-11. **ID collision:** create presets `a/b` and `a-b`, launch them in the same and different workspaces, and assert independent groups with no destructive teardown.
+11. **ID collision:** create presets `a/b` and `a-b`, launch them in the same and different workspaces, and assert independent groups with no destructive teardown. *(Added with MW-11, plus an injectivity check over the encoding and a legacy-snapshot restore.)*
 12. **Write failure:** force the atomic replace to fail and assert manual save/forget returns failure without a success payload. *(Added with MW-10; extended in Phase 2 to the close-and-forget verb, which reports the close as done and the forget as retryable.)*
 13. **Duplicate preset references:** restore two retained slots referencing one preset and assert the chosen product policy without partial silent success.
 14. **Capacity:** autosave 13 live workspaces and assert every live workspace remains restorable.
@@ -808,7 +958,7 @@ block under each finding for the detail.
 | --- | --- |
 | 1. Close-action matrix, written first | The table above `close_live_workspace` in `web/workspaces.py`, mirrored in `README.md` ("What each 'close' does") and pointed at from the two session-close route docstrings. The audit's last-group expectation is preserved: closing the final group/pane still removes the workspace *and* its slot; the restorable close is a separate verb. |
 | 2. One user-visible predicate | `workspace_is_user_visible` (server) + `isUserVisibleWorkspace` (client), consumed by `/api/workspaces`, the Workspaces card, the launch destination menu and its default answer, the Open/Move menus, the Alt+W cycle, and the mode-off confirm. A node-driven test asserts the two halves agree. |
-| 3. Explicit last-pane close forces its group | `DELETE /api/sessions/<id>` passes `force_group_ids={group_id}`; every caller of `clear_disconnected_sessions` now forces the group it is acting on. The grace period survives only for the non-explicit path, and Phase 3 is what removes the need for it. |
+| 3. Explicit last-pane close forces its group | `DELETE /api/sessions/<id>` passed `force_group_ids={group_id}`; every caller of `clear_disconnected_sessions` forced the group it was acting on. The grace period survived only for the non-explicit path, and Phase 3 is what removed the need for it — **superseded there**: `EMPTY_GROUP_GRACE_SECONDS` and `force_group_ids` are both gone, and every empty group is swept. |
 | 4. Terminal lifecycle for empty workspaces | `DELETE /api/workspaces/<id>` (`?forget=true` for the fourth verb); the launcher card's **Close**; and `closeThisWorkspaceWindow()` releasing a workspace that never held a tab. Failed-launch rollback was already correct and is now pinned by a test. |
 | 5. In-page confirms and retry affordances | `openGenericConfirmModal` for every destructive variant (guardrail 4), busy-as-a-class, "— try again" wording preserved, and the restore chooser's dead-end disabled **Forget** replaced by a working **Close and forget**. |
 
@@ -829,7 +979,7 @@ Verified with `python tests/run_tests.py` (1151 tests, 7 skipped) and
 optional `websocket-client` voice dependency is not installed, and they fail
 identically on the unmodified tree.
 
-### Phase 3 — Make live-shape mutation atomic and runtime identity collision-free
+### Phase 3 — Make live-shape mutation atomic and runtime identity collision-free (complete)
 
 **Findings:** MW-07, MW-11, and the initialization part of MW-06.
 
@@ -868,6 +1018,35 @@ Verification:
 **Exit gate:** there is one atomic group-install path, snapshots cannot contain
 partial launches/replacements, and runtime identity is independent of lossy
 display-safe transformations.
+
+**Outcome (all four steps done; exit gate met).**
+
+All three findings were re-verified against the code before anything changed —
+each still reproduced exactly as written. See the Resolution block under each
+for the detail.
+
+| Step | Result |
+| --- | --- |
+| 1. One staged, single-lock-hold transaction | `SessionManager.install_session_group`: pure staging through `_session_launch_fields` outside the lock; workspace check, ownership check, displacement, `_create_group_locked`, and every pane insert inside one `self.lock` hold. Displaced transports are closed afterwards by `_close_displaced_sessions`, with no shared lock held. |
+| 2. The same transaction for launch, replacement, restore, and rollback | `launch_session_group` is its only production caller, and restore reaches it through the same function, so all four share one path. No `initializing` *group* state was needed — there is no partial group to hide. The launch *destination* reservation (`reserve_workspace_launch`) is the ownership record the step allows for; it owns no groups, so autosave and every user-visible list already exclude it, and it is released in `finally`. |
+| 3. Collision-free runtime identity | `_encode_group_id_component` escapes anything outside `[A-Za-z0-9.-]` as `_<hex>_` — reversible, therefore injective, and a no-op on every id the app generates. The raw preset id stays on the group as `saved_session_id`, the template/credential reference. No hash bridge was needed; no opaque instance id was introduced (see MW-11 for why). |
+| 4. Ownership before teardown, legacy ids compatible | The transaction refuses a group id held by another workspace or another preset before it displaces anything. Restore never recreates a group from a snapshot's stored id, so a slot written before the encoding change restores its own shape under the current id — pinned by a test. |
+
+The initialization half of MW-06 rides on step 1: with the install atomic,
+`EMPTY_GROUP_GRACE_SECONDS` had nothing left to protect and is gone, along with
+the now-dead `force_group_ids` parameter that only existed to override it
+(guardrail 5). Every empty group is swept immediately.
+
+One consequence worth naming: `clear_disconnected_sessions()` now takes no
+arguments, and three call sites (`DELETE /api/sessions/<id>`,
+`DELETE /api/sessions?group=`, and `_close_workspace_contents`) lost their
+`force_group_ids=` argument. Their behaviour is unchanged — each was forcing
+the group it had just emptied, which is now the default for every empty group.
+
+Verified with `python tests/run_tests.py` (1167 tests, 7 skipped) and
+`python -m ruff check .`. The same two failures noted in Phase 2 remain and are
+unrelated: `ApiRoutes: voice status endpoint …` ×2 fail on this machine because
+the optional `websocket-client` voice dependency is not installed.
 
 ### Phase 4 — Make restore one server-owned, exact-snapshot operation
 
