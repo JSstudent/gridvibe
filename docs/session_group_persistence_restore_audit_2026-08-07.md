@@ -24,7 +24,7 @@ The highest-priority conclusions are:
 3. Extend the explorer snapshot contract. The current schema keeps open tabs, the active tab, a selected file-view mode, one vertical scroll fraction, zoom, wrapping, folds, appearance, and sidebar open flags, but it does not keep all scrollbar positions or several structural explorer states.
 4. Preserve `explorer_root_directory` on restart restore. The field is captured today and then overwritten during launch preparation.
 5. Give `saved_sessions.json` the same basic durability properties as runtime state: one read-modify-write lock, unique temporary file, atomic replace, last-good backup/quarantine, and surfaced write failures.
-6. Decouple persistence normalization from the mutable `terminal.max_sessions` setting. Lowering that setting currently truncates or mutates saved preset data on load/save and makes exact workspace restore fail.
+6. Decouple persistence normalization from the mutable `terminal.max_sessions` setting. Lowering that setting currently truncates or mutates saved preset data on load/save, silently rewrites stored split geometry on the runtime-state read path, and makes exact workspace restore fail. This decoupling must land before any lifecycle action that mass-writes presets, or that action becomes a one-click truncation of every live group's preset.
 7. Replace the asymmetric restart/close paths with one explicit lifecycle decision. The current **Save & Restart** saves only the default workspace, does not save reusable sessions, and restarts even after a failed save; ordinary application close saves nothing new.
 
 No change is recommended to the established terminal/agent/browser content rules: do not snapshot terminal scrollback or process state, do not persist runtime status, and do not put passwords in `runtime_state.json`. The proposal changes how the existing launch/presentation fields are synchronized and validated, then adds the explorer UI fields explicitly requested for a true snapshot.
@@ -251,12 +251,14 @@ Evidence:
 - the local `pane._session` update occurs inside `push()`, immediately before an asynchronous fetch, but Save Workspace does not serialize that local object.
 - the timer map tracks only pending timers, not an in-flight request. A newer request can be sent while an older one is still in flight.
 - `update_browser_tab_strip()` has no client revision or compare-and-swap check (`sessions/manager.py:777`). Last arrival wins, even if it is older.
+- the response handler assigns the server payload back over the local object (`web/static/js/browser-pane.js:215`), so a late older response regresses the browser's own state as well as the server's.
 
 Impact:
 
 - navigating, opening, closing, or switching a browser tab and immediately clicking Save Workspace can save the previous strip;
 - a slow older request can overwrite a newer strip on the server and later autosave the regression;
-- the comment that the local session update protects Save Workspace is true for Save Session serialization, but not for the runtime save path.
+- the same late response also overwrites `pane._session`, which is the object `browserSerializeTabs()` falls back to and the object Save Session serializes. The comment at `web/static/js/browser-pane.js:193` — that keeping the local session in step protects a following Save Workspace — is therefore defeated by the handler directly below it: out-of-order completion regresses client state, not only server state;
+- the comment's claim is true for Save Session serialization only while no stale response lands, and is never true for the runtime save path.
 
 Low-risk direction:
 
@@ -326,7 +328,8 @@ Impact:
 - concurrent Save Session / Save All / delete / last-session selection can lose presets;
 - interruption can corrupt the whole preset store;
 - callers can receive success for a deletion that did not reach disk;
-- encrypted passwords and all non-secret preset data share the same failure domain.
+- encrypted passwords and all non-secret preset data share the same failure domain;
+- the encryption-key race can stop the application from starting at all, not merely make stored passwords unreadable (see below).
 
 Low-risk direction:
 
@@ -339,7 +342,11 @@ Introduce a small `SavedSessionStore` in `web/saved_sessions.py` (or a focused n
 - a dedicated persistence exception mapped to retryable non-2xx API responses;
 - no plaintext password in logs, exceptions, backup metadata, or diagnostics.
 
-Also make first-run Fernet-key creation exclusive. `_get_encryption_key()` currently checks existence and then writes, so two first-start processes can generate different keys; the process that loses the file race may keep a cipher built from a key no longer on disk (`web/secrets.py:15`). Use exclusive create, then let the loser read the winner's complete key.
+Also make first-run Fernet-key creation exclusive. `_get_encryption_key()` currently checks existence and then writes, so two first-start processes can generate different keys; the process that loses the file race may keep a cipher built from a key no longer on disk (`web/secrets.py:15`).
+
+There is a second, more damaging variant of the same race. `_get_encryption_key()` is called at *module import* (`web/secrets.py:27`), and its read path is a bare exists-then-read with no atomicity (`web/secrets.py:17`). A process that reads while another is mid-write observes a zero-byte or partially written key, `Fernet(...)` raises, module import fails, and GridVibe does not start. The failure is therefore a startup crash, not only an unreadable password.
+
+Use exclusive create plus a unique same-directory temp file and `os.replace`, so the key file is only ever observed complete; then let the loser read the winner's whole key. Cover both variants in tests: two first-run processes converge on one key, and no importer can observe a partial key file.
 
 ### SGP-06 — High: persistence normalization is coupled to the mutable launch cap
 
@@ -353,10 +360,13 @@ Evidence:
 
 Example: save an eight-pane preset while `max_sessions=8`, lower the setting to four, then update or delete another preset. The eight-pane entry is loaded as four panes and the next store rewrite makes that truncation durable. Raising the setting later cannot recover the removed panes. A captured eight-pane workspace remains listed but its group restore fails.
 
+The coupling is not confined to the saved-preset store. `_validate_group()` calls the same capacity-coupled `_normalize_workspace_layout()` on the runtime-state *read* path (`web/runtime_state.py:312`), so a lowered setting also reshapes workspace snapshots. The consequence there is worse than truncation because it is a silent value rewrite rather than a rejection: `originSlot` is clamped to `runtime_config.max_sessions - 1` (`web/saved_sessions.py:442`), so with the setting at four, every stored origin slot from four upward collapses to three. The grid-line bound survives only because `max_grid_line` has a floor of 64 (`web/saved_sessions.py:422`). A group still inside the current cap therefore restores with corrupted geometry instead of failing visibly, and the next autosave commits the corrupted values over the good ones.
+
 Impact:
 
 - a runtime preference can destroy stored data unrelated to the preference change;
 - import/load is not a faithful read of the file;
+- a lowered cap silently rewrites custom split geometry on restore and then makes the rewrite durable through autosave;
 - README's exact-snapshot restore promise conflicts with current behavior.
 
 Low-risk direction:
@@ -367,7 +377,7 @@ Separate constants and responsibilities:
 - current launch cap: `runtime_config.max_sessions`;
 - corruption cap: the runtime-state defensive ceiling.
 
-Normalize stored presets against the storage cap, never the current preference. Enforce the current launch cap only at a launch/split boundary and return an actionable error without mutating the stored config. The exact restore behavior when the current cap is lower is an open product question below.
+Normalize stored presets against the storage cap, never the current preference. Enforce the current launch cap only at a launch/split boundary and return an actionable error without mutating the stored config. Fix both callers: the saved-preset path and the runtime-state read path (`web/runtime_state.py:312`) share one normalizer, so scoping the change to `web/saved_sessions.py` alone would leave snapshot geometry still coupled to the preference. Geometry that cannot be represented must be rejected as geometry, never clamped into different valid-looking values. The exact restore behavior when the current cap is lower is an open product question below.
 
 ### SGP-07 — Medium: runtime nested-field validation is shallower than its contract claims
 
@@ -379,15 +389,26 @@ Evidence:
 
 Real snapshots produced by this build normally carry valid types, but backups, older versions, hand edits, partial external writes, or a future live-presentation endpoint can reach this path. The restore chooser's count can then disagree with the successful restore result—the exact class of disagreement the runtime-state validation gate is meant to prevent.
 
+Malformed nested state has two distinct outcomes, and only one of them is the dropped pane above. `_session_launch_fields()` coerces defensively (`sessions/manager.py:620`), so the behavior depends on whether the coercion happens to raise:
+
+| Bad value | Constructor | Outcome |
+|---|---|---|
+| `explorer_tab_views: "x"` | `dict("x")` raises | pane dropped, group launches smaller |
+| `browser_active_tab: "abc"` | `int("abc")` raises | pane dropped, group launches smaller |
+| `explorer_open_tabs: "abc"` | `list("abc")` succeeds | pane kept, tab list silently becomes `['a','b','c']` |
+
+The third row is the more dangerous one: nothing raises, nothing is logged, and the corrupted value is installed as live state and re-captured by the next autosave. A fix that only converts dropped panes into group-level failures does not address it.
+
 Impact:
 
 - a corrupt group can restore partially rather than fail visibly;
+- a corrupt group can also restore *complete* but with silently coerced garbage in a pane's presentation fields, which autosave then makes durable;
 - invalid nested state can be passed farther into the client than intended;
 - four normalization sites can drift.
 
 Low-risk direction:
 
-Extract presentation-field normalizers from `web/saved_sessions.py` into one import-cycle-safe module and use them for saved presets, runtime-state read validation, live presentation updates, and launch preparation. For restore, reject the whole group if any captured pane is not launchable after validation; report a per-group error and leave the snapshot available for retry/recovery.
+Extract presentation-field normalizers from `web/saved_sessions.py` into one import-cycle-safe module and use them for saved presets, runtime-state read validation, live presentation updates, and launch preparation. The canonical normalizer must type-*check* and reject, not coerce: a value of the wrong type is a validation failure, never an input to `list()`/`dict()`/`int()`. For restore, reject the whole group if any captured pane is not launchable after validation; report a per-group error and leave the snapshot available for retry/recovery.
 
 ### SGP-08 — Medium: Markdown/source appearance is modeled per pane but implemented page-globally
 
@@ -408,6 +429,8 @@ Impact:
 Low-risk direction:
 
 Choose one scope explicitly. If appearance is workspace/global, store it once at that scope and let pane fields remain backward-compatible read aliases during migration. If it is per pane, remove the shared localStorage authority and apply appearance to the pane root only. Do not add another duplicate source.
+
+Either resolution requires moving the authority off localStorage, which is why the product decision below cannot be implemented by keeping the current store. `localStorage` is scoped per origin, so every workspace window open in the same browser profile shares one value; a "workspace-global" setting held there would be silently global across *all* workspaces. The workspace record on the server must become the authority, with localStorage demoted to a cache or removed. Native mode does not change this: whether two workspace windows share a webview data directory is a platform detail the contract must not depend on.
 
 ### SGP-09 — Low: explorer theme localStorage accumulates dead session IDs
 
@@ -468,14 +491,16 @@ Do not make `beforeunload`, a late `closed` callback, or a blind teardown captur
 
 Each stage is independently reviewable and preserves backward compatibility. New optional fields should be ignored by old readers; new readers must accept old files.
 
+The stages are otherwise in dependency order, with one exception recorded in Stage 4: its **Save open sessions + workspaces** action depends on the capacity decoupling in Stage 6 items 1–3, which must therefore be scheduled earlier. Every other stage may ship in the order written.
+
 ### Stage 0 — Freeze the snapshot contract with failing behavioral tests
 
 Connected findings: SGP-01, SGP-02, SGP-03, SGP-04, SGP-06, SGP-07, SGP-08, SGP-10, SGP-11.
 
-Add tests before production changes:
+Add tests before production changes. Write every one of them as an assertion of the *target* behavior, marked `unittest.expectedFailure` until its stage lands, and remove the decorator as part of that stage. Do not write tests that assert the current defect: a green suite encoding the bug has to be inverted later, which destroys its value as a stable contract and misleads anyone bisecting through these stages.
 
-1. Build a live explorer pane whose manager state is old and whose client snapshot is new; assert the current Save Workspace path demonstrates the mismatch.
-2. Model browser persistence A then B with A completing last; assert the old implementation regresses and the replacement queue does not.
+1. Build a live explorer pane whose manager state is old and whose client snapshot is new; assert Save Workspace captures the client snapshot.
+2. Model browser persistence A then B with A completing last; assert neither server nor client state regresses to A.
 3. Save/restore a group after pane reorder and split-track resize.
 4. Save/restore an explorer rooted at a parent while viewing a child directory.
 5. Define an explorer fixture with Preview plus pinned tabs, active Diff, per-panel scrolls, zoom, wrap, folds, theme/fonts, sidebars, width, and tree expansion.
@@ -542,14 +567,22 @@ Rules:
 
 The client queue should maintain one in-flight request and one coalesced latest snapshot per group. A response cannot overwrite newer local state. Socket notifications should carry only group/revision metadata and remain workspace-room scoped.
 
-Exit gate: the manager is the canonical acknowledged presentation source, update order is deterministic, and autosave sees either a complete old group presentation or a complete new one.
+Three rules the schema above does not settle, each of which must be decided before this stage starts:
+
+**Stale-writer recovery.** Rejecting a stale update with `409` protects the server, but it does not say what the losing window does with the presentation the user actually arranged there. Discarding it silently trades a lost-update bug for a lost-work bug. The rule for this stage is: on `409` the client refetches the current group revision, reapplies its own structural intent (pane order, open tabs, active tab, view mode, sidebar state) on top of it, and surfaces the reconciliation rather than dropping it. Product decision 7 establishes authority; it does not by itself close this. If reconciliation proves too costly for a first implementation, the acceptable fallback is narrower rather than lossier: let the revision guard ordering *within* one client and accept last-writer-wins per field between clients, which is no worse than today's behavior and still removes the out-of-order regression.
+
+**Write amplification.** Presentation updates must never themselves trigger a runtime-state capture. Autosave keeps its existing timer and simply reads the most recently acknowledged manager state. Coalescing is tiered: structural changes (tab open/close/reorder, pane reorder, mode switch, layout settle) enqueue immediately; continuous changes (scroll, zoom drag) coalesce on a floor of at least one second. Guardrail 3 forbids sub-second polling, and an uncoalesced scroll-driven queue would approach exactly that.
+
+**No orphan events.** Guardrail 5 requires every server event to have a client listener. Name the consumer of the presentation notification in the same change that introduces the emit, or do not emit at all — a revision broadcast with no subscriber is dead code on arrival.
+
+Exit gate: the manager is the canonical acknowledged presentation source, update order is deterministic, autosave sees either a complete old group presentation or a complete new one, scroll activity alone produces no disk write, and every emitted event has a named consumer.
 
 ### Stage 3 — Wire exact Save Workspace and existing browser/explorer state into the canonical source
 
 Connected findings: SGP-01, SGP-02, SGP-09, SGP-10, SGP-11.
 
 1. Route existing explorer tab/view/sidebar/theme changes through the Stage 2 queue.
-2. Route browser tab changes through the same ordered queue; stop using fire-and-forget tab updates on the mode endpoint.
+2. Route browser tab changes through the same ordered queue; stop using fire-and-forget tab updates on the mode endpoint. Before removing that writer, enumerate every remaining caller of `update_browser_tab_strip()` — real mode switches and restore also reach it — and confirm which of them still need to deliver a tab strip through the mode route. Removing the last caller of a still-needed path, or leaving a second writer behind, are both failure modes here.
 3. Capture pane order and custom layout/weights whenever drag/resize settles.
 4. Capture visible group state before caching/detaching it, as today, then enqueue that snapshot.
 5. On **Save Workspace**, synchronously capture all visible/cached groups, await queue flush/ack, and only then call `/api/runtime-state/save`.
@@ -564,7 +597,9 @@ Exit gate: change tabs/view/layout, immediately click Save Workspace, restart, a
 
 ### Stage 4 — Unify explicit close and restart as one save-or-exit transaction
 
-Connected findings: SGP-01, SGP-02, SGP-05, SGP-10, SGP-11.
+Connected findings: SGP-01, SGP-02, SGP-05, SGP-06, SGP-10, SGP-11.
+
+**Hard prerequisite: Stage 6 items 1–3 must land before this stage ships.** The **Save open sessions + workspaces** action writes a reusable preset for every live group, which runs through `upsert_saved_session()` → `_normalize_session_config()` → the SGP-06 capacity clamp. A user who has lowered `max_sessions` and then chooses that action at close would durably truncate every live group's preset in a single click — a destructive path this stage would *introduce*, guarded only two stages later. Land the capacity decoupling first (as a "Stage 3.5" if the numbering is kept), or ship this stage with the sessions-plus-workspaces choice disabled until it lands. The workspace-only choice has no such dependency and can ship on the original ordering.
 
 Add a shared, in-page lifecycle modal with action-specific labels:
 
@@ -600,7 +635,7 @@ Connected findings: SGP-03, SGP-04, SGP-08, SGP-10.
 5. Restore intent even when content changed; restore scroll/folds only when the relevant revision matches.
 6. For Diff, use an identity that changes with the rendered diff (commit hash or Git/index/worktree revision), not only working-file content plus mode.
 7. Re-fetch directory, tree, Git, and search data. Persist only normalized navigation/expansion intent.
-8. Resolve Markdown/source appearance scope before migrating its fields.
+8. Move Markdown/source appearance authority to the workspace record, keep the per-pane fields as backward-compatible read aliases during migration, and retire the shared `localStorage` keys as an authority. Product decision 5 chose workspace-global scope, and that scope cannot be expressed in `localStorage`, which is per origin and therefore shared by every workspace window in one browser profile.
 
 Suggested backward-compatible record shape:
 
@@ -628,15 +663,17 @@ Exit gate: the agreed explorer fixture round-trips through Save Session/import, 
 
 Connected findings: SGP-06, SGP-07, SGP-10.
 
+**Items 1–3 are a prerequisite of Stage 4 and should be scheduled ahead of it** (see the hard prerequisite in that stage). Items 4–7 keep their position here.
+
 1. Normalize saved data against an immutable schema/product maximum, not `runtime_config.max_sessions`.
 2. Preserve extra stored terminal entries even when the current launch cap is lower.
-3. Make workspace-layout normalization use schema-safe bounds and the actual stored pane count; apply current-cap checks only at launch/split.
-4. Validate every nested pane field through the canonical presentation normalizer.
-5. Make a malformed restored group fail as a group rather than silently dropping panes.
+3. Make workspace-layout normalization use schema-safe bounds and the actual stored pane count; apply current-cap checks only at launch/split. Fix the normalizer for **both** callers — the saved-preset path and the runtime-state read path (`web/runtime_state.py:312`) — and make unrepresentable geometry fail as geometry instead of clamping `originSlot` into a different valid-looking value.
+4. Validate every nested pane field through the canonical presentation normalizer, which rejects wrong types rather than coercing them.
+5. Make a malformed restored group fail as a group rather than silently dropping panes, and make a silently coercible malformed value (`explorer_open_tabs: "abc"`) fail the same way instead of installing garbage.
 6. Return an actionable capacity error and keep the snapshot/preset untouched.
 7. Apply the chosen capacity policy from the open questions.
 
-Exit gate: lowering and raising the setting is nondestructive, restore chooser counts match validated launchable shape, and no partial success is reported as exact restore.
+Exit gate: lowering and raising the setting is nondestructive for both stored shape and stored geometry values, restore chooser counts match validated launchable shape, no wrong-typed nested value survives as coerced live state, and no partial success is reported as exact restore.
 
 ### Stage 7 — Documentation, diagnostics, and cleanup
 
@@ -665,23 +702,27 @@ The implementation should include at least these behavioral cases:
 9. explorer root is wider than current directory and remains so after restore, locally and through mocked SFTP;
 10. pane reorder and custom split geometry/weights survive both persistence products;
 11. Save Workspace immediately after a browser/explorer change waits for the acknowledged revision;
-12. response A arriving after newer response B cannot regress server state;
+12. response A arriving after newer response B cannot regress server state **or** client state — the late response must not overwrite `pane._session` with the older strip;
 13. a stale second window receives `409` and cannot overwrite a newer presentation silently;
-14. closing/moving a group during presentation sync cannot update another group or resurrect a closed one;
-15. saved-session concurrent create/update/delete preserves unrelated entries;
-16. failed replace/delete returns retryable failure and keeps the last-good file;
-17. corrupt primary plus valid backup recovers without overwriting the corrupt evidence;
-18. two first-run processes converge on one Fernet key;
-19. lowering `max_sessions` does not change stored shape; capacity failure is actionable and nondestructive;
-20. malformed nested explorer/browser state rejects the group rather than producing a smaller successful restore;
-21. runtime-state snapshots and logs contain no passwords;
-22. Socket.IO presentation notifications remain workspace-room scoped and no emit occurs under manager/connection locks.
-23. restore after manual save followed by acknowledged autosave uses the newer autosave shape while retaining manual-slot protection;
-24. restart/close without saving current changes writes neither persistence file and preserves the previous restore point;
-25. save-open-workspaces restart/close flushes and captures every live workspace, not only `default` or the invoking window;
-26. save-open-sessions-plus-workspaces saves every live group first, captures matching preset identities second, and keeps passwords out of runtime state;
-27. a flush, preset write, or runtime-state write failure leaves the app running with retry and explicit no-save continuation affordances;
-28. manual restart, update restart, browser shutdown, and native launcher close use the same lifecycle action contract.
+14. that same `409`'d window reconciles and surfaces the outcome rather than silently discarding the arrangement its user made;
+15. closing/moving a group during presentation sync cannot update another group or resurrect a closed one;
+16. saved-session concurrent create/update/delete preserves unrelated entries;
+17. failed replace/delete returns retryable failure and keeps the last-good file;
+18. corrupt primary plus valid backup recovers without overwriting the corrupt evidence;
+19. two first-run processes converge on one Fernet key, and no importer can observe a partial or zero-byte key file;
+20. lowering `max_sessions` does not change stored shape; capacity failure is actionable and nondestructive;
+21. lowering `max_sessions` leaves stored `originSlot` and geometry *values* unchanged on the runtime-state read path, not merely refusing an oversized restore;
+22. malformed nested explorer/browser state rejects the group rather than producing a smaller successful restore;
+23. malformed-but-coercible nested state (`explorer_open_tabs: "abc"`) is rejected rather than silently coerced into live state and re-captured by autosave;
+24. runtime-state snapshots and logs contain no passwords;
+25. Socket.IO presentation notifications remain workspace-room scoped and no emit occurs under manager/connection locks;
+26. continuous presentation activity (scrolling, zoom dragging) produces no runtime-state disk write on its own and leaves the autosave cadence unchanged;
+27. restore after manual save followed by acknowledged autosave uses the newer autosave shape while retaining manual-slot protection;
+28. restart/close without saving current changes writes neither persistence file and preserves the previous restore point;
+29. save-open-workspaces restart/close flushes and captures every live workspace, not only `default` or the invoking window;
+30. save-open-sessions-plus-workspaces saves every live group first, captures matching preset identities second, and keeps passwords out of runtime state;
+31. a flush, preset write, or runtime-state write failure leaves the app running with retry and explicit no-save continuation affordances;
+32. manual restart, update restart, browser shutdown, and native launcher close use the same lifecycle action contract.
 
 ## Product decisions
 
@@ -691,7 +732,7 @@ The schema and lifecycle choices previously left open for Stages 4 and 5 are res
 2. **Dirty editor buffers:** do not include them. They contain unsaved file contents, complicate revision conflict handling, and would put filesystem content in workspace state. Keep the existing confirm/discard behavior and persist only successfully saved files.
 3. **Git commit-message drafts and destructive-action form state:** do not include them. Persist Git view/expansion intent only, never mutation drafts or busy state.
 4. **File-find and repository-search queries/results:** do not restore them. Omit query text, results, result-group expansion, selected-result state, and result scroll. Persist only the structural Search sidebar state already inside the explorer snapshot boundary, such as open state, width, and sidebar scroll.
-5. **Markdown preset/font/source-font scope:** make these settings workspace-global. Use the simplest, most efficient, lowest-risk implementation that keeps one canonical appearance value per workspace rather than per explorer pane.
+5. **Markdown preset/font/source-font scope:** make these settings workspace-global. Use the simplest, most efficient, lowest-risk implementation that keeps one canonical appearance value per workspace rather than per explorer pane. Note that this choice forces the authority off `localStorage`: that store is per origin, so one value there is shared by every workspace window in a browser profile and would be application-global, not workspace-global. The workspace record is the authority; `localStorage` may remain only as a non-authoritative cache.
 6. **Stored groups larger than `max_sessions`:** preserve the stored data and refuse restore with an actionable “increase to N and retry” path. Do not silently truncate, mutate the global setting, or bypass the preference.
 7. **Multiple browser windows controlling one live workspace:** treat one accepted group revision as authoritative and reject stale updates with compare-and-swap. Collaborative merge rules and ownership are outside this design.
 8. **Explorer root on Save Session:** keep the current documented and tested behavior. Preserve the launcher's original directory contract while saving presentation; runtime Save Workspace must preserve the live `explorer_root_directory` exactly.
@@ -702,13 +743,17 @@ The schema and lifecycle choices previously left open for Stages 4 and 5 are res
 
 ## Audit verification
 
-The documentation change was checked with the repository's Windows gates:
+Every finding was re-verified against the source before the corrections above were folded in. The confirmations behind the amended text are: `web/static/js/browser-pane.js:215` (client-state regression on a late response), `web/runtime_state.py:312` calling the capacity-coupled `_normalize_workspace_layout` with the `originSlot` clamp at `web/saved_sessions.py:442`, `sessions/manager.py:620` coercing `list("abc")` without raising while `dict()`/`int()` raise, `web/secrets.py:17` and `:27` making the key race an import-time failure, and `web/static/js/explorer-viewer.js:4096`/`:4148` holding appearance in per-origin `localStorage`.
+
+This revision changed only this Markdown document; no Python, JavaScript, CSS, or template file was touched, so the gate results below are unchanged and were not re-run for the documentation edit:
 
 - `python -m ruff check .`: passed.
 - `python tests/run_tests.py`: 1,204 tests ran; 1,195 passed, 7 skipped, and 2 unrelated voice-environment tests failed because this environment does not have `websocket-client`/an available external Vosk service. No persistence, workspace, saved-session, explorer, browser, session-manager, or restore test failed.
 
 ## Final recommendation
 
-Do not start by adding more fields directly to `runtime_state.py`. The durable store already records whatever the manager gives it. First make the manager the canonical acknowledged source for group presentation, make explicit save a flush barrier, and make the saved-session store durable. Then put close/restart behind the shared lifecycle transaction before expanding the explorer schema through one normalizer and one synchronization path.
+Do not start by adding more fields directly to `runtime_state.py`. The durable store already records whatever the manager gives it. First make the manager the canonical acknowledged source for group presentation, make explicit save a flush barrier, and make the saved-session store durable. Then decouple stored shape from the mutable launch cap, put close/restart behind the shared lifecycle transaction, and only then expand the explorer schema through one normalizer and one synchronization path.
 
 That order has the lowest blast radius: it fixes data authority and write safety before increasing the amount of state being persisted, keeps all slow work outside shared locks, avoids polling, preserves the server-owned restore model, and prevents another round of duplicate client/server persistence logic.
+
+Two ordering rules carry the most weight and should not be relaxed for convenience. Capacity decoupling precedes any lifecycle action that mass-writes presets, because that action would otherwise turn a lowered preference into one-click preset truncation. And no stage may introduce a coercing normalizer, a silent stale-writer discard, or an emit without a consumer — each of those trades a visible defect for an invisible one, which is the failure mode this whole audit exists to remove.
