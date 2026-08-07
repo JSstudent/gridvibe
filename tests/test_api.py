@@ -30,6 +30,7 @@ from web import saved_sessions as web_saved_sessions
 from web import selfupdate
 from web import terminal_io as web_terminal_io
 from web import voice as web_voice
+from web import workspaces as web_workspaces
 
 
 class FakeSftp:
@@ -2605,22 +2606,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("native_zoom_factor: nativeZoomFactor", terminals_html)
         self.assertIn("notifyWorkspacesChanged('workspace_saved');", terminals_html)
 
+        # Restored groups get fresh ids. Resolving the saved front group to the
+        # one the replay actually created is the *server's* job now (MW-09):
+        # `restore_workspace` returns the live id and the zoom, and the launcher
+        # opens the window on what it was handed. Behavioral coverage:
+        # `…front_group_hint…` / `…a_started_front_group_is_honoured` and
+        # `SingleWorkspaceRestoreRoutingTestCase` in test_multi_workspace.py.
         launcher_html = self._page_html(self.client.get("/"))
-        self.assertIn(
-            "restorableActiveGroupId = String(data.active_group_id || '');",
-            launcher_html,
-        )
-        # Restored groups get fresh ids, so the saved one is resolved to the
-        # group the replay actually created before opening the workspace on it.
-        self.assertIn(
-            "if (restorableActiveGroupId && group.group_id === restorableActiveGroupId) {",
-            launcher_html,
-        )
-        self.assertIn(
-            "restorableNativeZoomFactor = normalizeNativeZoomFactor(data.native_zoom_factor);",
-            launcher_html,
-        )
-        self.assertIn("activeGroupId,\n                    nativeZoomFactor", launcher_html)
         # Window dispatch now lives in the shared workspaces.js module, so the
         # launcher only names the workspace and the group to open on.
         self.assertIn(
@@ -16091,28 +16083,45 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertNotIn("fetch(", body)
         self.assertNotIn("DELETE", body)
 
-    def test_restore_replays_current_saved_preset(self):
-        """"Latest preset wins": a preset-backed group is restored from the
-        saved session's *current* config (so Save All Sessions then Save
-        Workspace restores the edited state), while an ad-hoc group replays the
-        snapshot verbatim. Launch and restore share buildSessionsFromConfig so
-        both build panes identically."""
-        launcher_js = self._static("js/launcher.js")
-        # One shared expansion, reused by launch and restore (no copy-paste).
-        self.assertIn("function buildSessionsFromConfig(config, count)", launcher_js)
-        self.assertIn("sessions = buildSessionsFromConfig(config, selectedCount)", launcher_js)
-        # Restore resolves a group's current preset before replaying it.
-        self.assertIn("async function buildRestoreGroupBody(group)", launcher_js)
-        self.assertIn("await buildRestoreGroupBody(group)", launcher_js)
-        self.assertIn("buildSessionsFromConfig(config, config.terminal_count)", launcher_js)
-        self.assertIn("/api/saved-sessions/${encodeURIComponent(savedId)}", launcher_js)
-        # The blank built-in default is never treated as a real preset, and a
-        # missing/deleted preset falls back to the verbatim snapshot body.
-        self.assertIn("savedId === DEFAULT_SESSION_ID", launcher_js)
-        start = launcher_js.index("async function buildRestoreGroupBody(group)")
-        end = launcher_js.index("function dismissRestoreBanner()", start)
-        body = launcher_js[start:end]
-        self.assertIn("return snapshotBody", body)
+    def test_restore_replays_the_captured_shape_not_a_preset(self):
+        """MW-03: the snapshot is the only source of a restored group's shape.
+
+        Restore used to replay a still-existing preset's *current* config, so
+        editing a saved session rewrote a workspace nobody had saved since.
+        (The client half of this — the browser no longer orchestrating restore
+        at all — is `SingleWorkspaceRestoreRoutingTestCase` in
+        tests/test_multi_workspace.py.)
+        """
+        self._launch_explorer_group("Two panes")
+        group_id = api.session_manager.get_workspace_groups("default")[0].group_id
+        api.session_manager.get_group(group_id).saved_session_id = "preset-1"
+        web_runtime_state.capture_workspace(api.session_manager, origin="manual")
+        self.client.delete("/api/sessions")
+        api.session_manager.reset_sessions()
+
+        with patch.object(
+            web_workspaces, "_find_saved_preset",
+            return_value={
+                "id": "preset-1",
+                "name": "Renamed since",
+                "config": {
+                    "connection_mode": "wsl",
+                    "terminal_count": 1,
+                    "terminals": [{"title": "Something else", "directory": "/elsewhere"}],
+                },
+            },
+        ):
+            response = self.client.post(
+                "/api/runtime-state/restore", json={"workspace_ids": ["default"]}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["workspaces"][0]["restored"])
+        restored = api.session_manager.get_workspace_groups("default")[0]
+        self.assertEqual(restored.name, "Two panes")
+        sessions = api.session_manager.get_group_sessions(restored.group_id)
+        self.assertEqual([session.title for session in sessions], ["Files"])
+        self.assertEqual([session.directory for session in sessions], [str(self.repo_dir)])
 
     def test_terminals_page_ships_workspace_save_menu(self):
         """The Workspace... dropdown's Save Workspace item posts to

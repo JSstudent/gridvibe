@@ -118,9 +118,9 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 | **Broadcast typing** | One keystroke, every pane in the group. |
 | **Self-update** | **Check for updates** does a git fast-forward, or save the workspace and restart in one action. |
 
-Preset-backed groups restore from the preset's *current* config, so edits to a saved session survive the round trip. Restore runs entirely on the server: a saved session's password is resolved in-process and never sent to the browser or written to the log.
+A restore replays exactly what was captured — the same tab names, pane count, modes, directories, commands, and layout — whether or not the preset a tab came from has been edited since. Editing a saved session changes the next *launch*, never a workspace you already saved. The preset contributes one thing a snapshot deliberately never holds: the SSH password, and only to a pane that still names that preset's host, user, and port; a pane whose credential cannot be matched comes back with its own shape and its usual Retry. Restore runs entirely on the server in both modes: the password is resolved in-process and never sent to the browser or written to the log, and asking twice reopens a workspace once.
 
-With multiple workspaces enabled, a saved preset is live in **at most one workspace at a time** — launching it elsewhere explains the conflict and offers to open that workspace or move the tab, instead of silently stealing it or opening a duplicate. Each saved workspace can be restored, left for later, or permanently **forgotten** (the snapshot only — saved sessions are never touched).
+With multiple workspaces enabled, a saved preset is live in **at most one workspace at a time** — launching it elsewhere explains the conflict and offers to open that workspace or move the tab, instead of silently stealing it or opening a duplicate. For the same reason, restoring two saved workspaces that both use one preset is refused as a whole and names the clash, rather than reopening one of them quietly short a tab; restore them one at a time. Each saved workspace can be restored, left for later, or permanently **forgotten** (the snapshot only — saved sessions are never touched).
 
 ### What each "close" does
 

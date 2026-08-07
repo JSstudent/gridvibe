@@ -824,128 +824,6 @@ def move_group_to_workspace(group_id: str, data: Dict[str, Any]) -> Tuple[Dict[s
 # its credential in-process and relaunches through `launch_session_group()`.
 
 
-def _directory_is_absolute(path: str, mode: str) -> bool:
-    """Mirror of ``isAbsoluteDirectory`` in web/static/js/shared.js."""
-    trimmed = str(path or "").strip()
-    if not trimmed:
-        return False
-    if re.match(r"^[A-Za-z]:[\\/]", trimmed):
-        return True
-    if trimmed.startswith("\\\\") or trimmed.startswith("/") or trimmed.startswith("~"):
-        return True
-    return mode == "wsl" and trimmed.startswith("\\")
-
-
-def _join_directories(base_dir: str, child_dir: str, mode: str) -> str:
-    """Mirror of ``joinDirectories`` in web/static/js/shared.js."""
-    raw_base = str(base_dir or "").strip()
-    base = raw_base if raw_base == "/" else raw_base.rstrip("\\/")
-    child = str(child_dir or "").strip().lstrip("\\/")
-    if not base:
-        return child
-    if not child:
-        return base
-    separator = "\\" if mode == "wsl" and "\\" in base and "/" not in base else "/"
-    normalized_child = re.sub(r"[\\/]+", separator, child)
-    return f"{base}{separator}{normalized_child}"
-
-
-def _launch_directory(default_dir: str, terminal_dir: str, mode: str) -> str:
-    """Mirror of ``buildLaunchDirectory`` in web/static/js/shared.js.
-
-    A restore must resolve pane directories exactly the way the launcher does,
-    or the same preset would land in different directories depending on which
-    path opened it.
-    """
-    base_directory = str(default_dir or "").strip()
-    raw_directory = str(terminal_dir or "").strip()
-    if not raw_directory:
-        return base_directory
-    if not base_directory:
-        return raw_directory
-    if not _directory_is_absolute(raw_directory, mode):
-        return _join_directories(base_directory, raw_directory, mode)
-    return raw_directory
-
-
-def build_sessions_from_saved_config(
-    config: Dict[str, Any],
-    count: int,
-) -> List[Dict[str, Any]]:
-    """Expand one saved preset config into `POST /api/sessions` pane entries.
-
-    The server-side twin of ``buildSessionsFromConfig()`` in launcher.js, used
-    only by restore. Both feed the same launch service, so a restored pane and
-    a launched pane are built from the same fields.
-    """
-    connection_mode = str(config.get("connection_mode") or "ssh")
-    ssh_config = config.get("ssh") if isinstance(config.get("ssh"), dict) else {}
-    wsl_config = config.get("wsl") if isinstance(config.get("wsl"), dict) else {}
-    configured_default_dir = str(
-        (wsl_config if connection_mode == "wsl" else ssh_config).get("default_dir") or ""
-    ).strip()
-    launch_default_dir = configured_default_dir or ("/" if connection_mode == "ssh" else "")
-
-    sessions: List[Dict[str, Any]] = []
-    terminals = config.get("terminals") if isinstance(config.get("terminals"), list) else []
-    for index, terminal in enumerate(terminals[: max(0, int(count or 0))]):
-        if not isinstance(terminal, dict):
-            continue
-        startup_mode = str(terminal.get("startup_mode") or "terminal")
-        shell_flags_allowed = startup_mode not in {"explorer", "browser"}
-        directory = _launch_directory(
-            configured_default_dir,
-            terminal.get("directory"),
-            connection_mode,
-        ) or launch_default_dir
-        common = {
-            "title": terminal.get("title") or f"Terminal {index + 1}",
-            "directory": directory,
-            "initial_command": None if startup_mode == "explorer" else (terminal.get("initial_command") or None),
-            "initial_command_mode": terminal.get("initial_command_mode") or "command",
-            "startup_mode": startup_mode,
-            "agent_selection": terminal.get("agent_selection") or "",
-            "custom_agent": terminal.get("custom_agent") or "",
-            "agent_auto_mode": bool(terminal.get("agent_auto_mode")),
-            "explorer_tree_open": bool(terminal.get("explorer_tree_open")),
-            "explorer_git_open": bool(terminal.get("explorer_git_open")),
-            "explorer_search_open": bool(terminal.get("explorer_search_open")),
-            "explorer_open_tabs": list(terminal.get("explorer_open_tabs") or []),
-            "explorer_active_tab": terminal.get("explorer_active_tab") or "",
-            "explorer_tab_views": dict(terminal.get("explorer_tab_views") or {}),
-            "explorer_md_preset": terminal.get("explorer_md_preset") or "",
-            "explorer_md_font": terminal.get("explorer_md_font") or "",
-            "explorer_source_font": terminal.get("explorer_source_font") or "",
-            "explorer_theme": terminal.get("explorer_theme") or "dark",
-            "browser_tabs": list(terminal.get("browser_tabs") or []),
-            "browser_active_tab": int(terminal.get("browser_active_tab") or 0),
-        }
-        if connection_mode == "ssh":
-            sessions.append(
-                {
-                    **common,
-                    "host": ssh_config.get("host") or "",
-                    "username": ssh_config.get("username") or "ubuntu",
-                    # Resolved in-process: the decrypted credential goes
-                    # straight into the launch service and never into a
-                    # response body, a snapshot, or the log.
-                    "password": ssh_config.get("password") or None,
-                    "port": ssh_config.get("port") or 22,
-                }
-            )
-            continue
-        sessions.append(
-            {
-                **common,
-                "distribution": terminal.get("distribution") or wsl_config.get("distribution") or "",
-                "username": wsl_config.get("username") or "",
-                "use_wsl": shell_flags_allowed and bool(terminal.get("use_wsl")),
-                "use_powershell": shell_flags_allowed and bool(terminal.get("use_powershell")),
-            }
-        )
-    return sessions
-
-
 def _find_saved_preset(saved_session_id: str) -> Optional[Dict[str, Any]]:
     """Return one saved preset (credentials decrypted in-process) or ``None``."""
     from web.saved_sessions import load_saved_sessions
@@ -959,19 +837,77 @@ def _find_saved_preset(saved_session_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _preset_ssh_credential(preset: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return one preset's SSH credential plus the target it belongs to.
+
+    The "credential reference" of MW-03: a password is only meaningful together
+    with the host, username, and port it authenticates against. Capture drops
+    the password and nothing else, so restore may put it back only onto a pane
+    that still names this exact target. ``None`` when the preset holds no SSH
+    password to contribute.
+    """
+    config = preset.get("config") if isinstance(preset.get("config"), dict) else None
+    if not config or str(config.get("connection_mode") or "ssh") != "ssh":
+        return None
+    ssh_config = config.get("ssh") if isinstance(config.get("ssh"), dict) else {}
+    password = ssh_config.get("password") or None
+    host = str(ssh_config.get("host") or "").strip()
+    if not password or not host:
+        return None
+    try:
+        port = int(ssh_config.get("port") or 22)
+    except (TypeError, ValueError):
+        port = 22
+    return {
+        "host": host,
+        # Mirrors the launcher's own default for a preset that names no user.
+        "username": str(ssh_config.get("username") or "ubuntu"),
+        "port": port,
+        "password": password,
+    }
+
+
+def _pane_matches_credential(
+    session: Dict[str, Any],
+    credential: Dict[str, Any],
+) -> bool:
+    """True when a captured pane still names the credential's connection target."""
+    try:
+        port = int(session.get("port") or 22)
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(session.get("host") or "").strip() == credential["host"]
+        and str(session.get("username") or "") == credential["username"]
+        and port == credential["port"]
+    )
+
+
 def _restore_group_request(
     snapshot_group: Dict[str, Any],
     workspace_id: str,
 ) -> Tuple[Dict[str, Any], str]:
-    """Build one group's launch body; returns ``(body, warning)``.
+    """Build one group's launch body from the captured snapshot alone (MW-03).
 
-    Latest preset wins (R2): a still-existing named preset is replayed from its
-    *current* config, so Save All Sessions followed by Save Workspace restores
-    the edited state. A deleted preset (R1) degrades to the password-free
-    snapshot with a `preset_missing` warning rather than failing the workspace.
+    The snapshot is the only source of shape: the group name, pane count, per
+    pane modes, directories, commands, the pane layout, and the split geometry
+    are replayed exactly as they were captured. Restore used to prefer a still
+    existing preset's *current* config ("latest preset wins"), which meant
+    editing a launcher preset silently rewrote a workspace nobody had saved
+    since — a three-pane workspace could come back as a single ``Files`` pane
+    because the preset had been edited in between.
+
+    A preset now contributes exactly one thing: the SSH password that capture
+    deliberately leaves out, and only onto panes that still name that preset's
+    connection target (:func:`_preset_ssh_credential`). A pane whose credential
+    cannot be mapped keeps its captured shape and fails into the existing
+    per-pane authentication error and its Retry button — the shape is never
+    substituted or collapsed to make a credential fit.
+
+    Returns ``(body, warning)``.
     """
     snapshot_sessions = [
-        session
+        dict(session)
         for session in (snapshot_group.get("sessions") or [])
         if isinstance(session, dict)
     ]
@@ -991,45 +927,55 @@ def _restore_group_request(
     from web.saved_sessions import DEFAULT_SAVED_SESSION_ID
 
     saved_session_id = str(snapshot_group.get("saved_session_id") or "").strip()
-    # The blank built-in default holds no real host/directory, so it is never
-    # treated as a preset a restore should prefer — nor as one that went
+    # The blank built-in default holds no real host/credential, so it is never
+    # treated as a preset a restore should consult — nor as one that went
     # missing when it is not in saved_sessions.json.
     if not saved_session_id or saved_session_id == DEFAULT_SAVED_SESSION_ID:
         return body, ""
 
     preset = _find_saved_preset(saved_session_id)
     if preset is None:
+        # Reported, not fatal: the shape is captured, so only the credential is
+        # gone and the panes relaunch into their own retry state.
         return body, "preset_missing"
 
-    config = preset.get("config") if isinstance(preset.get("config"), dict) else None
-    if not config or not isinstance(config.get("terminals"), list):
-        return body, "preset_missing"
+    credential = _preset_ssh_credential(preset)
+    if credential is None:
+        return body, ""
 
-    preset_sessions = build_sessions_from_saved_config(
-        config, config.get("terminal_count") or len(snapshot_sessions)
-    )
-    if not preset_sessions:
-        return body, "preset_missing"
+    ssh_panes = 0
+    matched_panes = 0
+    for session in snapshot_sessions:
+        mode = str(session.get("mode") or snapshot_group.get("connection_mode") or "")
+        if mode != "ssh":
+            continue
+        ssh_panes += 1
+        if _pane_matches_credential(session, credential):
+            # Resolved in-process: the decrypted credential goes straight into
+            # the launch service and never into a response body, a snapshot, or
+            # the log.
+            session["password"] = credential["password"]
+            matched_panes += 1
 
-    body["sessions"] = preset_sessions
-    body["connection_mode"] = config.get("connection_mode")
-    body["layout"] = config.get("layout")
-    body["session_name"] = preset.get("name") or snapshot_group.get("name")
-    # R3: a stored layout array is sized for the pane count it was captured
-    # with. Reusing it against a preset that has since gained or lost a pane is
-    # the classic source of a broken grid, so it is dropped rather than scaled.
-    body["workspace_layout"] = (
-        config.get("workspace_layout")
-        if len(preset_sessions) != len(snapshot_sessions)
-        else (snapshot_group.get("workspace_layout") or config.get("workspace_layout"))
-    )
+    if ssh_panes and matched_panes < ssh_panes:
+        # The preset now points at a different machine or account. Handing its
+        # password to a pane that names another target is exactly what matching
+        # by position used to do; the pane keeps its shape and authenticates on
+        # its own instead.
+        return body, "credentials_unmatched"
     return body, ""
 
 
 def restore_workspace(workspace_id: Any) -> Dict[str, Any]:
-    """Restore one saved workspace slot in place; returns a per-group report."""
-    from web.runtime_state import load_restorable_workspace
+    """Restore one saved workspace slot in place; returns a per-group report.
 
+    Idempotent by workspace id under concurrency, not only in sequence (MW-08):
+    the workspace is claimed atomically for the duration, so a second request
+    that arrives while this one is still launching is told ``already_restoring``
+    rather than passing the same "does it have groups yet?" check and
+    duplicating every tab. The claim is held across the launches and released
+    on every path; no manager lock is held while connections are made.
+    """
     session_manager = _manager()
     try:
         resolved_workspace_id = normalize_workspace_id(workspace_id)
@@ -1041,6 +987,25 @@ def restore_workspace(workspace_id: Any) -> Dict[str, Any]:
             "groups": [],
         }
 
+    if not session_manager.claim_workspace_restore(resolved_workspace_id):
+        return {
+            "workspace_id": resolved_workspace_id,
+            "label": workspace_label(resolved_workspace_id),
+            "restored": False,
+            "reason": "already_restoring",
+            "groups": [],
+        }
+    try:
+        return _restore_claimed_workspace(resolved_workspace_id)
+    finally:
+        session_manager.release_workspace_restore(resolved_workspace_id)
+
+
+def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
+    """Restore one slot; the caller holds this workspace's restore claim."""
+    from web.runtime_state import load_restorable_workspace
+
+    session_manager = _manager()
     slot = load_restorable_workspace(resolved_workspace_id)
     if not slot:
         return {
@@ -1051,9 +1016,9 @@ def restore_workspace(workspace_id: Any) -> Dict[str, Any]:
         }
 
     label = str(slot.get("label") or "").strip()
-    # R5/R12: idempotent by workspace id. A second restore (double click, two
-    # launcher windows) sees the workspace live and refuses instead of
-    # duplicating every tab.
+    # R5/R12: a restore that has already happened is refused rather than
+    # duplicating every tab. A restore still *running* is refused one step
+    # earlier, by the claim in `restore_workspace`.
     if workspace_has_groups(resolved_workspace_id):
         return {
             "workspace_id": resolved_workspace_id,
@@ -1157,24 +1122,102 @@ def restore_workspace(workspace_id: Any) -> Dict[str, Any]:
     }
 
 
+def _preflight_restore_set(workspace_ids: List[str]) -> List[Dict[str, Any]]:
+    """Report every saved preset two selected slots would both claim (MW-13).
+
+    A saved preset is live in at most one workspace at a time — that rule is
+    what makes relaunching a preset replace its own tab instead of opening a
+    second one, and it is enforced by the group id the preset derives. Slots
+    are deliberately retained by several close paths, so two of them can end up
+    referencing the same preset, and restoring both used to mean "whichever the
+    request happened to list first wins": the second workspace came back
+    missing that tab, or — for two references inside one slot — silently
+    collapsed into a single group.
+
+    There is no defensible arbitrary winner between two workspaces the user
+    asked for in the same breath, so the whole request is refused before any
+    live state changes and every collision is reported at once. Deselecting one
+    side is the explicit choice that resolves it.
+
+    A preset that is already live in a workspace *outside* the selected set is
+    a different case and is not reported here: that incumbent is visible to the
+    user, cannot be affected by this request, and is reported per group as
+    ``skipped: already_live`` while the rest of its workspace still restores.
+    """
+    from web.runtime_state import load_restorable_workspace
+    from web.saved_sessions import DEFAULT_SAVED_SESSION_ID
+
+    references: Dict[str, List[str]] = {}
+    for workspace_id in workspace_ids:
+        try:
+            # An unusable id has nothing to collide with; `restore_workspace`
+            # is what reports it, one result row at a time.
+            slot = load_restorable_workspace(workspace_id)
+        except ValueError:
+            continue
+        if not slot:
+            continue
+        for snapshot_group in slot.get("groups") or []:
+            if not isinstance(snapshot_group, dict):
+                continue
+            saved_session_id = str(snapshot_group.get("saved_session_id") or "").strip()
+            # A launch clears the blank built-in default and mints a fresh group
+            # id for an unattached group, so neither can collide with anything.
+            if not saved_session_id or saved_session_id == DEFAULT_SAVED_SESSION_ID:
+                continue
+            references.setdefault(saved_session_id, []).append(workspace_id)
+
+    conflicts = []
+    for saved_session_id, holders in references.items():
+        if len(holders) < 2:
+            continue
+        preset = _find_saved_preset(saved_session_id)
+        conflicts.append({
+            "conflict": "duplicate_preset_reference",
+            "saved_session_id": saved_session_id,
+            "saved_session_name": str((preset or {}).get("name") or ""),
+            "workspace_ids": holders,
+        })
+    return conflicts
+
+
 def restore_workspaces(workspace_ids: Any) -> Tuple[Dict[str, Any], int]:
     """Restore a subset of saved workspaces; returns ``(payload, status)``.
 
     Unselected slots are untouched and stay on offer. The response reports that
     a relaunch *started* — SSH authentication is asynchronous and keeps
     arriving through the existing room-scoped `session_status` events.
+
+    The selected set is preflighted first (MW-13): a collision inside the
+    request is answered with `409` and every conflict listed, before a single
+    workspace has been touched.
     """
     if not isinstance(workspace_ids, list) or not workspace_ids:
         return {"error": "A non-empty 'workspace_ids' list is required"}, 400
 
     seen = set()
-    results = []
+    requested: List[str] = []
     for raw_id in workspace_ids:
         key = str(raw_id or "")
         if key in seen:
             continue
         seen.add(key)
-        results.append(restore_workspace(raw_id))
+        requested.append(key)
+
+    conflicts = _preflight_restore_set(requested)
+    if conflicts:
+        return {
+            "error": (
+                "Two of the selected workspaces use the same saved session, "
+                "which can only be open in one workspace at a time"
+            ),
+            "conflict": "duplicate_preset_reference",
+            "conflicts": conflicts,
+            "workspaces": [],
+            "restored_count": 0,
+        }, 409
+
+    results = [restore_workspace(raw_id) for raw_id in requested]
 
     return {
         "message": "Relaunch started",

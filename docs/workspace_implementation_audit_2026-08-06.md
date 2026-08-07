@@ -2,10 +2,10 @@
 
 Date: 2026-08-06
 
-Status: findings and remediation plan. **MW-01, MW-02, MW-04, MW-05, MW-06,
-MW-07, MW-10, MW-11, MW-12, MW-15, and the persistence half of MW-16 are
-fixed** (see the "Resolution" blocks under each) — that is Phases 0, 1, 2 and 3
-complete. Every other finding is still open and describes current behavior.
+Status: findings and remediation plan. **MW-01 through MW-13, MW-15, and the
+persistence half of MW-16 are fixed** (see the "Resolution" blocks under each)
+— that is Phases 0, 1, 2, 3 and 4 complete. **MW-14 and the field-validation
+half of MW-16 are still open** and describe current behavior; both are Phase 5.
 
 ## Executive summary
 
@@ -23,6 +23,10 @@ This is not the only flaky path. Snapshot capture and snapshot deletion are not 
 
 The requested source-of-truth rule is not true today. Workspace shape can be persisted by the timer, manual save, and rename; restore can then replace the saved shape with the current saved-preset configuration. The target contract should be: **only timer autosave and the user's manual Save Workspace action capture workspace shape, and restore replays that captured shape exactly**. A saved preset may supply a secret that is intentionally absent from the snapshot, but it must not replace names, pane count, modes, directories, commands, or layout.
 
+> **Now true.** The write half closed in Phase 1 (MW-04) and the read half in
+> Phase 4 (MW-03): two writers, and a restore that replays the captured shape
+> with the preset contributing only a target-matched SSH password.
+
 ## Current model
 
 | Layer | Current responsibility | Important identity |
@@ -34,7 +38,7 @@ The requested source-of-truth rule is not true today. Workspace shape can be per
 | Launcher/workspace JavaScript | Destination lists, restore UI, and window dispatch | Cached live/saved summaries |
 | Native launcher | One registered native window per workspace | `workspace_id` |
 
-The current persistence/restore path has more authority edges than intended:
+The persistence/restore path had more authority edges than intended:
 
 ```text
                          +----------------------+
@@ -49,7 +53,7 @@ saved_sessions.json --------------------------> "latest preset wins"
                                              live SessionManager
 ```
 
-The desired path is:
+The desired path — **implemented as of Phase 4** — is:
 
 ```text
 timer or user manual save -> one ordered snapshot commit -> exact restore
@@ -230,6 +234,54 @@ Recommended correction:
 - Resolve only credentials or other deliberately excluded secrets from a matching preset.
 - If credentials cannot be mapped safely to the captured panes, restore the shape and surface the existing retry/authentication state instead of substituting a different shape.
 - Replace the “preset wins” regression tests and update README/CHANGELOG wording when implementation changes.
+
+**Resolution (fixed).** Re-verified as reported before the fix:
+`_restore_group_request` replaced the snapshot's sessions, connection mode,
+layout and name with the preset's current config whenever the preset still
+existed, `buildRestoreGroupBody` repeated the same policy in the browser, and
+`tests/test_multi_workspace.py` asserted both behaviours by name
+(`test_r2_existing_preset_wins_over_the_snapshot`,
+`test_r3_layout_is_discarded_when_the_preset_pane_count_changed`).
+
+- **The snapshot is the only shape source.** `_restore_group_request` now
+  builds the launch body from the captured group and nothing else: name, pane
+  count, per-pane modes, directories, commands, `layout` and `workspace_layout`
+  are replayed as captured. The pane count can no longer change under a stored
+  layout array, so R3's "drop the geometry because the preset resized" rule had
+  nothing left to protect and is gone with it.
+- **A preset supplies one credential, matched by target.**
+  `_preset_ssh_credential` returns a preset's SSH password *together with the
+  host, username and port it authenticates against* — the finding's "credential
+  reference". `_pane_matches_credential` applies it only to a captured pane that
+  still names that exact target. Matching by pane position (what the old
+  wholesale substitution amounted to) is what would hand one machine's password
+  to a pane pointing at another the moment the preset is edited.
+- **An unmappable credential costs the credential, not the shape.** A preset
+  that has been re-pointed leaves its password behind and the group is reported
+  with `warning: "credentials_unmatched"`; a deleted preset keeps the existing
+  `preset_missing`. Either way the panes relaunch with their captured shape and
+  fail into the per-pane authentication error and its existing Retry button —
+  the shape is never substituted or collapsed to make a credential fit.
+- **The secret still never leaves the process.** The password is injected into
+  the in-process launch body only; `TerminalSession.to_dict` omits it, so it
+  reaches neither a response body, nor `runtime_state.json`, nor the log.
+- **Dead code removed with the policy.** `build_sessions_from_saved_config` and
+  its three directory-resolution mirrors (`_launch_directory`,
+  `_join_directories`, `_directory_is_absolute`) existed only to expand a preset
+  for restore. Nothing else called them, so they went rather than lingering as a
+  second way to build panes (guardrail 5).
+
+Coverage: `test_r2_the_captured_shape_wins_over_an_edited_preset` is regression
+matrix row 2 — a three-pane preset-backed workspace is captured, the preset is
+edited down to one `Files` pane with a new name and host, and the restore is
+asserted to hold three panes, the captured name, the captured layout, and the
+captured hosts. `test_r3_the_captured_layout_survives_a_preset_pane_count_change`
+pins the geometry. `test_restore_never_returns_or_logs_a_credential` (rewritten
+around a real SSH fixture) pins the matched credential reaching the session and
+nothing else; `test_a_preset_pointing_elsewhere_never_lends_its_password` and
+`test_a_deleted_preset_costs_the_credential_not_the_shape` pin the two unmapped
+cases. `ApiRoutes: restore replays the captured shape not a preset` covers the
+route. All of these fail against the previous implementation.
 
 ### MW-04 — High: rename is an undocumented third shape writer
 
@@ -503,6 +555,35 @@ Recommended correction:
 - Release it in `finally`; do not hold the manager lock during connection work or Socket.IO emits.
 - Return `already_restoring`/`already_live` deterministically to the losing request.
 
+**Resolution (fixed).** Re-verified as reported: `restore_workspace` called
+`workspace_has_groups`, then `create_workspace`, then `launch_session_group` per
+group, with nothing holding the workspace in between; the existing idempotency
+tests were sequential despite their comments about two launcher windows.
+
+- `SessionManager.claim_workspace_restore` / `release_workspace_restore` are the
+  reservation, taken and released under `self.lock` and held across the whole
+  restore. Unlike `reserve_workspace_launch`, which *counts* overlapping
+  launches into one destination, this claim is **exclusive**: two restores of
+  one workspace are not something to run concurrently, so the loser is answered
+  rather than serialized behind the winner.
+- `restore_workspace` is now a thin claim/`finally`-release wrapper around
+  `_restore_claimed_workspace`, so every exit — invalid id, `not_found`,
+  `no_groups_started`, success, or an exception — releases it. The claim is a
+  set membership test under the manager lock and nothing else; no manager lock
+  is held while groups launch or connections are made (guardrail 2).
+- The losing request gets `already_restoring` with an empty group list;
+  `already_live` still means "this workspace already has tabs", which is the
+  sequential answer and is unchanged. The two are deliberately distinct: one
+  says *wait*, the other says *it is already open*.
+
+Coverage: `RestoreReservationTestCase` (test_multi_workspace.py) pauses a
+restore inside its first group launch and issues a second one while it is held —
+for `default` (where both used to proceed and duplicate every tab) and for a
+named workspace (where the loser used to raise "Workspace already exists"). Both
+fail against the previous implementation. Three more pin the release: after a
+restore that started nothing, after `not_found`, and that a sequential second
+restore still answers `already_live` rather than being masked by the claim.
+
 ### MW-09 — High: single- and multi-workspace restore orchestration have drifted
 
 Multi-workspace mode uses the server `POST /api/runtime-state/restore`. Single-workspace mode fetches the raw default slot and loops over `POST /api/sessions` in the browser (`web/static/js/launcher.js:2677`, `web/static/js/launcher.js:2765`). The client path:
@@ -514,6 +595,46 @@ Multi-workspace mode uses the server `POST /api/runtime-state/restore`. Single-w
 - does not apply the saved workspace label through the same path.
 
 Recommended correction: route both modes through the server restore service, with `default` simply being one requested workspace ID.
+
+**Resolution (fixed).** Re-verified as reported: `restorePreviousWorkspace()`
+looped over `POST /api/sessions` per snapshot group, built each body with
+`buildRestoreGroupBody()` (its own copy of the preset-substitution policy),
+ignored `active_group_count`, resolved the front group by matching snapshot ids
+in the browser, and never applied the saved workspace label.
+
+- `restorePreviousWorkspace()` now calls `restoreSavedWorkspaces(['default'])`
+  — the same `POST /api/runtime-state/restore` the multi-workspace chooser
+  calls. `default` is simply one requested workspace id, exactly as the finding
+  asks. The browser decides nothing about a restore any more.
+- `buildRestoreGroupBody()` is deleted. With MW-03 there is no preset
+  substitution left to duplicate, and the shape the endpoint replays is the one
+  the server captured.
+- The five listed defects close together: one transaction instead of a loop that
+  can stop half way; the server's per-workspace claim and `already_live`;
+  the per-group report (`started` / `warning` / `error`), which the banner now
+  summarises as "N could not be relaunched"; the saved label applied through
+  `restore_workspace`'s own rename; and `active_group_count` respected —
+  `checkRestorableWorkspace()` does not offer the banner when the workspace
+  already holds groups, because restore would only ever refuse it.
+- The front group and the desktop zoom come back **resolved** in the response
+  (`active_group_id` is the live id of the group that actually started), so the
+  launcher opens the window on what the server hands it instead of mapping a
+  snapshot id itself.
+
+Coverage: `SingleWorkspaceRestoreRoutingTestCase` (test_multi_workspace.py)
+covers both halves. Server side: `default` restores through the shared endpoint
+and its saved label reaches the live record, and restoring into an already-live
+`default` is refused rather than duplicated (regression matrix row 10). Client
+side, behaviorally rather than by source text: the shipped
+`checkRestorableWorkspace` and `restorePreviousWorkspace` are extracted and run
+under node against stubbed collaborators, asserting that a live workspace is
+never offered, that the offer makes exactly one call to the server restore with
+`['default']`, that `/api/sessions` and `/api/saved-sessions` are never
+requested, and that the window opens on the server-resolved group id and zoom.
+The obsolete source-text test `ApiRoutes: restore replays current saved preset`
+was replaced by a behavioral route test, and the launcher-side assertions in
+`ApiRoutes: pages carry the active session group through workspace restore` were
+dropped in favour of that behavioral coverage.
 
 ### MW-10 — High: persistence failures are returned as successful saves
 
@@ -670,6 +791,49 @@ Recommended correction:
 - Treat `saved_session_id` as a template/credential reference, not the restored group's global runtime identity; or
 - preflight the complete selected restore set, report every collision before launching anything, and require an explicit choice.
 
+**Resolution (fixed, by the second option).** Re-verified as reported:
+`restore_workspace` evaluated `saved_session_conflict` per group *during* the
+restore, so restoring two slots that reference one preset reopened the first and
+handed the second one back silently short a tab; two references inside one slot
+were worse still, because a same-workspace group id is not a conflict at all and
+the second simply replaced the first in place.
+
+The first option was considered and rejected. The preset id *is* the restored
+group's runtime identity on purpose: it is what makes relaunching a saved
+session replace its own tab instead of opening a second one, and what lets
+`find_saved_session_group` answer the one-workspace-per-preset rule. Dropping it
+from restored groups would mean a restored tab and a freshly launched one could
+both be that preset. So the collision is real, and the honest answer is the
+second option.
+
+- `_preflight_restore_set` runs before any workspace is touched. It walks the
+  complete selected set — every slot, every group — and reports every preset
+  referenced more than once, whether the duplicates are in two slots or twice in
+  one. `restore_workspaces` answers `409` with `conflict:
+  "duplicate_preset_reference"`, the full `conflicts` list (each with the preset
+  id, its current name, and the workspaces holding it), `workspaces: []` and
+  `restored_count: 0`. Nothing is launched, and both slots stay on offer.
+  Deselecting one side is the explicit choice; restoring them one at a time
+  works and each comes back whole.
+- **The incumbent case is deliberately left partial and is not a preflight
+  failure.** A preset already live in a workspace the request does *not* name
+  is visible to the user, cannot be changed by this request, and is already
+  reported per group as `skipped: already_live` while the rest of that workspace
+  restores. Refusing the whole reopen because one tab is open elsewhere would be
+  worse than the reported problem; the audit's bar is "never a partial *silent*
+  success", and this one is neither silent nor arbitrary.
+- The client half is one line of honesty: `restoreSavedWorkspaces` marks a
+  conflict on the thrown error and both callers drop the "— try again" wording
+  for it, because nothing was tried and the same selection fails identically.
+
+Coverage: `DuplicatePresetRestoreTestCase` (test_multi_workspace.py) asserts the
+`409` with its conflict report and that *nothing* launched — not the shared tab
+and not the other workspace's unattached one — with both slots still restorable;
+that restoring one of them alone comes back complete; that one slot naming a
+preset twice is refused the same way; and that a preset live outside the
+selection still skips only its own group. The first and third fail against the
+previous implementation.
+
 ### MW-14 — Medium: the auto-slot cap can evict live workspaces arbitrarily
 
 `capture_live_workspaces` assigns one `saved_at` value to every workspace in a timer tick, then limits automatic slots to 12. If more than 12 auto workspaces are live, their timestamps tie and workspace ID becomes the retention tie-breaker (`web/runtime_state.py:400`). Some currently live workspaces are silently omitted based on an opaque random ID.
@@ -778,31 +942,34 @@ carries shape metadata but no host or directory.
 
 Several tests are valuable but encode contracts that conflict with the desired model:
 
+Every row is now closed.
+
 | Existing test | Current assertion | Required replacement |
 | --- | --- | --- |
-| `test_r2_existing_preset_wins_over_the_snapshot` | Edited preset replaces saved shape | Snapshot shape wins; preset supplies credentials only |
-| `test_r3_layout_is_discarded_when_the_preset_pane_count_changed` | Current preset pane count controls restore | Snapshot pane count/layout remains unchanged |
+| ~~`test_r2_existing_preset_wins_over_the_snapshot`~~ | ~~Edited preset replaces saved shape~~ | **Replaced in Phase 4** by `test_r2_the_captured_shape_wins_over_an_edited_preset` |
+| ~~`test_r3_layout_is_discarded_when_the_preset_pane_count_changed`~~ | ~~Current preset pane count controls restore~~ | **Replaced in Phase 4** by `test_r3_the_captured_layout_survives_a_preset_pane_count_change` |
 | ~~`test_a_group_still_inside_its_grace_window_keeps_the_default_slot`~~ | ~~Immediate last-pane close leaves slot/group~~ | **Replaced in Phase 2** by `…an immediate last pane close forgets the default slot` |
 | ~~Per-pane close tests that manually age groups~~ | ~~Cleanup works after five seconds~~ | **Done in Phase 2** — the two tests lost their manual aging |
-| Sequential second-restore test | Later request sees live groups | Simultaneous requests produce exactly one restore |
+| ~~Sequential second-restore test~~ | ~~Later request sees live groups~~ | **Kept and joined in Phase 4** — `test_r12_…` still pins the sequential `already_live`; `RestoreReservationTestCase` adds the simultaneous case |
+| ~~`ApiRoutes: restore replays current saved preset`~~ | ~~Launcher source text for the client restore orchestrator~~ | **Replaced in Phase 4** by `ApiRoutes: restore replays the captured shape not a preset` (behavioral) and `SingleWorkspaceRestoreRoutingTestCase` |
 
 ## Regression matrix to add
 
 All of these should be behavioral tests against routes or public manager/store operations, not source-text assertions.
 
 1. **Test isolation:** start with a sentinel production state file, run every API test that saves/captures, and prove the sentinel is unchanged while a temporary state file receives the writes. *(Added with MW-01, non-destructively: the test reads the production file's current bytes rather than planting a sentinel in it, and the test-mode guard covers the rest.)*
-2. **Exact snapshot:** save a three-pane preset-backed workspace, edit the preset into one `Files` pane, restore, and assert the original three-pane snapshot.
+2. **Exact snapshot:** save a three-pane preset-backed workspace, edit the preset into one `Files` pane, restore, and assert the original three-pane snapshot. *(Added with MW-03 as `test_r2_the_captured_shape_wins_over_an_edited_preset`, plus the layout twin and the three credential-mapping cases.)*
 3. **Two writers:** rename while the timer/manual writer is mocked; assert no shape capture occurs and the next actual capture persists the label.
 4. **Default close/listing:** restore one group into `default`, close it, then assert no user-visible live workspace/destination remains and no saved slot remains. *(Added with MW-05/MW-06.)*
 5. **Immediate pane close:** close the last pane immediately after launch in default and non-default workspaces; assert group, workspace visibility, native close signal, and slot cleanup. *(Added with MW-06; the native close signal stays a frontend rule — a window already closes itself when its own workspace holds no groups.)*
 6. **Close versus autosave:** pause autosave after its manager snapshot, close/forget the workspace, resume autosave, and assert the slot stays deleted. *(Added with MW-02.)*
 7. **Manual versus timer ordering:** pause an older timer capture, perform a newer manual capture, release the timer, and assert the manual/newer revision remains. *(Added with MW-02.)*
 8. **Atomic launch snapshot:** pause a multi-pane launch at every installation boundary while autosave runs; every stored slot must equal either the complete old shape or complete new shape. *(Added with MW-07: the observer is released after the first pane is built — the only boundary the transaction leaves — and asserted for both a new launch and a replacement.)*
-9. **Concurrent restore:** release two restore requests through a barrier; assert one successful group set and one deterministic conflict response.
-10. **Single-mode live restore:** with default already populated, invoke the single-mode restore route and assert no duplicate or replacement.
+9. **Concurrent restore:** release two restore requests through a barrier; assert one successful group set and one deterministic conflict response. *(Added with MW-08: the second request is issued while the first is paused inside a group launch, for `default` and for a named workspace.)*
+10. **Single-mode live restore:** with default already populated, invoke the single-mode restore route and assert no duplicate or replacement. *(Added with MW-09; single mode now calls the same route, so this is one endpoint test plus the node-driven client-contract test.)*
 11. **ID collision:** create presets `a/b` and `a-b`, launch them in the same and different workspaces, and assert independent groups with no destructive teardown. *(Added with MW-11, plus an injectivity check over the encoding and a legacy-snapshot restore.)*
 12. **Write failure:** force the atomic replace to fail and assert manual save/forget returns failure without a success payload. *(Added with MW-10; extended in Phase 2 to the close-and-forget verb, which reports the close as done and the forget as retryable.)*
-13. **Duplicate preset references:** restore two retained slots referencing one preset and assert the chosen product policy without partial silent success.
+13. **Duplicate preset references:** restore two retained slots referencing one preset and assert the chosen product policy without partial silent success. *(Added with MW-13: the chosen policy is a complete preflight refusal, and the test asserts nothing launched and both slots survive.)*
 14. **Capacity:** autosave 13 live workspaces and assert every live workspace remains restorable.
 15. **Malformed state:** offer a zero-pane/corrupt group and assert it is quarantined rather than listed as restorable.
 
@@ -1048,7 +1215,7 @@ Verified with `python tests/run_tests.py` (1167 tests, 7 skipped) and
 unrelated: `ApiRoutes: voice status endpoint …` ×2 fail on this machine because
 the optional `websocket-client` voice dependency is not installed.
 
-### Phase 4 — Make restore one server-owned, exact-snapshot operation
+### Phase 4 — Make restore one server-owned, exact-snapshot operation (complete)
 
 **Findings:** MW-03, MW-08, MW-09, and MW-13.
 
@@ -1095,6 +1262,45 @@ Verification:
 **Exit gate:** there is no client-side restore orchestrator, every restore is
 reserved/idempotent, preset edits cannot alter captured shape, and duplicate
 preset references have an explicit non-partial result.
+
+**Outcome (all five steps done; exit gate met).**
+
+All four findings were re-verified against the code before anything changed —
+each still reproduced exactly as written. See the Resolution block under each
+for the detail.
+
+| Step | Result |
+| --- | --- |
+| 1. The snapshot is the only shape source | `_restore_group_request` builds the body from the captured group alone. A preset contributes only its SSH password, and only to a pane still naming that preset's host/username/port (`_preset_ssh_credential` + `_pane_matches_credential`) — never matched by position, never persisted into runtime state. `build_sessions_from_saved_config` and its three directory-resolution mirrors went with the policy they served. |
+| 2. Unmappable credential keeps the shape | A re-pointed preset reports `credentials_unmatched`, a deleted one `preset_missing`; either way the captured panes launch and surface the existing per-pane authentication error with its Retry. No substitution, no collapse. |
+| 3. Atomic restore reservation | `SessionManager.claim_workspace_restore` / `release_workspace_restore` — exclusive, taken under the manager lock, held across the whole restore, released in `finally` on every path, with no manager lock held during connection work. The loser gets `already_restoring`; `already_live` keeps its distinct sequential meaning. |
+| 4. Preflight the complete selected set | `_preflight_restore_set` reports every preset referenced twice across the selection (or twice inside one slot) and `restore_workspaces` answers `409` with the full conflict list before anything launches. The already-live-elsewhere case stays a per-group `skipped: already_live`, which is explicit and leaves the incumbent alone. |
+| 5. One restore path for both modes | The launcher banner calls `POST /api/runtime-state/restore` with `['default']`; `buildRestoreGroupBody` is deleted. Both surfaces consume the same per-group report, the same retry states, and the server-resolved front group and zoom. `active_group_count` is now honoured, so a live workspace is not offered a restore it would refuse. |
+
+Two product decisions worth naming rather than burying:
+
+- **The preset id stays the restored group's runtime identity.** Phase 4's step
+  3 offered "two slots may safely reference the same preset" as an alternative
+  to preflight. That would require dropping the derived group id from restored
+  groups, and the derived id is the feature: it is what makes relaunching a
+  saved session replace its own tab instead of opening a second one. So the
+  collision is real and gets the finding's other answer — a complete preflight
+  refusal with an explicit choice.
+- **"Complete preflight" is scoped to the request.** A preset already live in a
+  workspace the request did not select is not a preflight failure. It is an
+  incumbent the user can see, it cannot be affected by this restore, and it is
+  already reported per group while the rest of that workspace comes back.
+  Refusing the whole reopen for it would be worse than the reported problem.
+
+Verified with `python tests/run_tests.py` (1181 tests, 7 skipped) and
+`python -m ruff check .`. The same two failures noted in Phases 2 and 3 remain
+and are unrelated: `ApiRoutes: voice status endpoint …` ×2 fail on this machine
+because the optional `websocket-client` voice dependency is not installed; they
+fail identically on the unmodified tree.
+
+`README.md` and `CHANGELOG.md` were updated for the exact-snapshot rule, the
+credential-only preset contribution, the idempotent restore, and the duplicate
+preset refusal.
 
 ### Phase 5 — Finish retention, validation, and operational recovery
 

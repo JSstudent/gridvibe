@@ -2663,16 +2663,21 @@
     /* ── Restore previous workspace (feature 10.5) ──
        The backend snapshots the workspace shape on an autosave timer and on
        Workspace ▸ Save Workspace; after a restart the launcher offers to replay
-       the last saved snapshot through the normal launch path. The offer is
-       permanent — Dismiss only hides it for this launcher session.
-       Passwords are never persisted — restored SSH panes use key auth or fail
-       into the error placeholder (which has a Retry button). */
-    let restorableWorkspaceGroups = [];
-    /* Snapshot id of the group that was in front when the workspace was saved.
-       Restored groups are minted with fresh ids, so it is resolved to the newly
-       created group by position during the replay below. */
-    let restorableActiveGroupId = '';
-    let restorableNativeZoomFactor = null;
+       the last saved snapshot. The offer is permanent — Dismiss only hides it
+       for this launcher session.
+
+       Both modes replay through the one server-owned restore transaction
+       (MW-09): this banner and the multi-workspace chooser call
+       POST /api/runtime-state/restore, and `default` is simply one requested
+       workspace id. The browser used to loop over POST /api/sessions itself and
+       re-resolve presets on the way, which duplicated the restore policy, could
+       stop half way through a network failure, and skipped the server's
+       idempotency and its per-group report.
+
+       Passwords are never persisted — a restored SSH pane is credentialed from
+       its preset in-process where that is still safe, and otherwise uses key
+       auth or fails into the error placeholder (which has a Retry button). */
+    let restorableWorkspaceIsOffered = false;
 
     async function checkRestorableWorkspace() {
         /* With N workspaces a single banner stops being coherent — dismissing
@@ -2690,9 +2695,13 @@
         if (!response.ok || !data.restorable || !Array.isArray(data.groups) || !data.groups.length) {
             return;
         }
-        restorableWorkspaceGroups = data.groups;
-        restorableActiveGroupId = String(data.active_group_id || '');
-        restorableNativeZoomFactor = normalizeNativeZoomFactor(data.native_zoom_factor);
+        /* The endpoint reports what is already live in this workspace. Restore
+           is idempotent by workspace id and would answer `already_live`, so
+           offering it here would only ever produce a refusal. */
+        if (Number(data.active_group_count || 0) > 0) {
+            return;
+        }
+        restorableWorkspaceIsOffered = true;
         const groupCount = data.groups.length;
         const paneCount = data.groups.reduce(
             (total, group) => total + (Array.isArray(group.sessions) ? group.sessions.length : 0),
@@ -2709,102 +2718,58 @@
         banner.hidden = false;
     }
 
-    /* Build the POST /api/sessions body for one restored group. When the group
-       was launched from a still-existing *named* saved session, replay that
-       preset's current config ("latest preset wins" — Save All Sessions then
-       Save Workspace restores the edited state without re-importing). Otherwise
-       replay the workspace snapshot verbatim. The blank built-in default is
-       never treated as a preset — its config holds no real host/directory. */
-    async function buildRestoreGroupBody(group) {
-        const snapshotBody = {
-            sessions: Array.isArray(group.sessions) ? group.sessions : [],
-            connection_mode: group.connection_mode,
-            layout: group.layout,
-            workspace_layout: group.workspace_layout,
-            session_name: group.name,
-            saved_session_id: group.saved_session_id || '',
-            // Replay the workspace verbatim: a cold post-restart agent probe
-            // must not silently clear a command that was working.
-            restore: true
-        };
-
-        const savedId = String(group.saved_session_id || '').trim();
-        if (!savedId || savedId === DEFAULT_SESSION_ID) {
-            return snapshotBody;
-        }
-
-        try {
-            const response = await fetch(`/api/saved-sessions/${encodeURIComponent(savedId)}`);
-            if (!response.ok) return snapshotBody;
-            const preset = await response.json();
-            const config = preset?.config;
-            if (!config || !Array.isArray(config.terminals)) return snapshotBody;
-            return {
-                ...snapshotBody,
-                sessions: buildSessionsFromConfig(config, config.terminal_count),
-                connection_mode: config.connection_mode,
-                layout: config.layout,
-                workspace_layout: config.workspace_layout || null,
-                session_name: preset.name || group.name
-            };
-        } catch (_error) {
-            return snapshotBody;
-        }
-    }
-
     function dismissRestoreBanner() {
         /* Hide-only: the saved slot is preserved (single-workspace mode has no
            Delete); the next autosave or manual save overwrites it. */
         const banner = document.getElementById('restoreWorkspaceBanner');
         if (banner) banner.hidden = true;
-        restorableWorkspaceGroups = [];
-        restorableActiveGroupId = '';
-        restorableNativeZoomFactor = null;
+        restorableWorkspaceIsOffered = false;
     }
 
     async function restorePreviousWorkspace() {
-        if (!restorableWorkspaceGroups.length) return;
+        if (!restorableWorkspaceIsOffered) return;
         const button = document.getElementById('restoreWorkspaceBtn');
         if (button) {
             button.disabled = true;
             button.textContent = 'Restoring…';
         }
-        let restored = 0;
-        /* Live id of the group that was in front when the workspace was saved,
-           resolved as the replay creates it — the restore opens the workspace
-           on this group instead of on whichever one ends up newest. */
-        let activeGroupId = '';
-        const nativeZoomFactor = restorableNativeZoomFactor;
         try {
-            for (const group of restorableWorkspaceGroups) {
-                const response = await fetch('/api/sessions', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(await buildRestoreGroupBody(group))
-                });
-                if (!response.ok) continue;
-                restored += 1;
-                if (restorableActiveGroupId && group.group_id === restorableActiveGroupId) {
-                    const created = await response.json().catch(() => ({}));
-                    activeGroupId = String(created.group_id || '');
-                }
-            }
-            document.getElementById('restoreWorkspaceBanner')?.setAttribute('hidden', '');
-            restorableWorkspaceGroups = [];
-            restorableActiveGroupId = '';
-            restorableNativeZoomFactor = null;
-            if (restored > 0) {
-                showMessage(`Restored ${restored} session${restored === 1 ? '' : 's'} from the previous workspace.`, 'success');
+            /* The same call the chooser makes, with `default` as the one
+               requested workspace: one transaction, the snapshot's exact shape,
+               the saved label applied, and a per-group report. */
+            const result = await restoreSavedWorkspaces([WORKSPACE_DEFAULT_ID]);
+            const restored = (result.workspaces || []).find(entry => entry.restored);
+            if (restored) {
+                /* Only a restore that started something retires the offer: a
+                   refusal leaves the banner and its button in place so the
+                   retry is still in front of the user (guardrail 8). */
+                document.getElementById('restoreWorkspaceBanner')?.setAttribute('hidden', '');
+                restorableWorkspaceIsOffered = false;
+                const groupCount = Number(restored.group_count || 0);
+                const failed = (restored.groups || []).filter(group => !group.started);
+                showMessage(
+                    `Restored ${groupCount} session${groupCount === 1 ? '' : 's'} from the previous workspace.`
+                    + (failed.length ? ` ${failed.length} could not be relaunched.` : ''),
+                    failed.length ? 'warning' : 'success'
+                );
                 await viewActiveTerminals(
                     { preventDefault: () => {} },
-                    activeGroupId,
-                    nativeZoomFactor
+                    String(restored.active_group_id || ''),
+                    normalizeNativeZoomFactor(restored.native_zoom_factor)
                 );
             } else {
-                showMessage('Could not restore the previous workspace.', 'error');
+                showMessage(
+                    'Could not restore the previous workspace — try again.',
+                    'error'
+                );
             }
         } catch (error) {
-            showMessage(`Workspace restore failed: ${error.message}`, 'error');
+            showMessage(
+                error.conflict
+                    ? error.message
+                    : `Workspace restore failed: ${error.message} — try again.`,
+                'error'
+            );
         } finally {
             if (button) {
                 button.disabled = false;
@@ -3293,7 +3258,14 @@
                 showMessage('Could not restore the selected workspaces.', 'error');
             }
         } catch (error) {
-            showMessage(`Workspace restore failed: ${error.message} — try again.`, 'error');
+            /* A preflight conflict is not a transient failure: nothing was
+               restored and retrying the same selection fails the same way. */
+            showMessage(
+                error.conflict
+                    ? error.message
+                    : `Workspace restore failed: ${error.message} — try again.`,
+                'error'
+            );
         } finally {
             workspaceRestoreInFlight = false;
             panel.classList.remove('busy');

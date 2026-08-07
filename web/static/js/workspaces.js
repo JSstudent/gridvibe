@@ -448,6 +448,9 @@
         return ok && Array.isArray(data.workspaces) ? data.workspaces : [];
     }
 
+    /* One server-owned restore transaction for both pages and both modes: the
+       chooser passes the selected ids, the single-workspace banner passes
+       ['default']. Nothing about a restore is decided in the browser. */
     async function restoreSavedWorkspaces(workspaceIds) {
         const { ok, data } = await workspaceApiRequest('/api/runtime-state/restore', {
             method: 'POST',
@@ -455,7 +458,12 @@
             body: JSON.stringify({ workspace_ids: workspaceIds })
         });
         if (!ok) {
-            throw new Error(data.error || 'Could not restore the selected workspaces');
+            const error = new Error(data.error || 'Could not restore the selected workspaces');
+            /* A preflight conflict changed nothing and will fail identically on
+               a retry — the fix is to deselect one side, so the caller must not
+               offer "try again" for it. */
+            error.conflict = String(data.conflict || '');
+            throw error;
         }
         return data;
     }

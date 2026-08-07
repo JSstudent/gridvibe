@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
@@ -215,6 +215,10 @@ class SessionManager:
         # See reserve_workspace_launch: this replaced the empty-workspace grace
         # period, so cleanup no longer decides by wall clock.
         self._launch_reservations: Dict[str, int] = {}
+        # Workspace ids currently being restored, one holder each. See
+        # claim_workspace_restore: this is what makes a restore idempotent
+        # against a concurrent second request rather than only a later one.
+        self._restore_claims: Set[str] = set()
         # Lock ordering: web/api.py's connection_lock may be held while taking
         # this lock; code holding this lock must never take connection_lock.
         self.lock = threading.RLock()
@@ -381,6 +385,37 @@ class SessionManager:
                 self._launch_reservations[resolved_workspace_id] = remaining
             else:
                 self._launch_reservations.pop(resolved_workspace_id, None)
+
+    def claim_workspace_restore(self, workspace_id: str) -> bool:
+        """Claim one workspace for a restore, exclusively; False if already held.
+
+        Restore used to be check-then-act (MW-08): it asked whether the
+        workspace had groups, then created the record and launched every group
+        in separate steps. Two requests — a double click, two launcher windows,
+        a native window and a browser tab — could both pass that check, and
+        then either duplicate the workspace's tabs or collide on
+        "Workspace already exists".
+
+        Unlike :meth:`reserve_workspace_launch`, which counts overlapping
+        launches into one destination, this claim is exclusive: a restore of a
+        given workspace is not something to run twice concurrently, so the
+        loser is told ``already_restoring`` instead of racing. Released in the
+        caller's ``finally`` through :meth:`release_workspace_restore`.
+        """
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            if resolved_workspace_id in self._restore_claims:
+                return False
+            self._restore_claims.add(resolved_workspace_id)
+            return True
+
+    def release_workspace_restore(self, workspace_id: str) -> None:
+        """Release one claim taken by :meth:`claim_workspace_restore`."""
+        if not workspace_id:
+            return
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            self._restore_claims.discard(resolved_workspace_id)
 
     def rename_workspace(self, workspace_id: str, label: str) -> Optional[Workspace]:
         """Set one live workspace's display label; ``None`` when unknown."""
@@ -1185,6 +1220,7 @@ class SessionManager:
             self.groups.clear()
             self.workspaces.clear()
             self._launch_reservations.clear()
+            self._restore_claims.clear()
             self.workspaces[DEFAULT_WORKSPACE_ID] = Workspace(
                 workspace_id=DEFAULT_WORKSPACE_ID
             )

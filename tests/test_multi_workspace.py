@@ -26,6 +26,10 @@ def _js_function_source(script, name):
     but the file around them touches `document` at load time.
     """
     start = script.index(f"function {name}(")
+    # Keep an `async` qualifier: without it the extracted body's `await`s are a
+    # syntax error the moment the harness runs them.
+    if script[max(0, start - 6):start] == "async ":
+        start -= 6
     depth = 0
     for index in range(script.index("{", start), len(script)):
         if script[index] == "{":
@@ -1914,6 +1918,36 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.get_json())
         return response.get_json()
 
+    def _launch_ssh(self, workspace_id="default", terminal_count=1, **overrides):
+        """Launch a group that really names the seeded preset's SSH target.
+
+        The credential half of restore only applies to panes that still name
+        the preset's host/username/port, so a fixture that exercises it has to
+        be launched the way the preset would launch it.
+        """
+        body = {
+            "connection_mode": "ssh",
+            "layout": "single" if terminal_count == 1 else "grid",
+            "session_name": overrides.pop("session_name", "Alpha"),
+            "workspace_id": workspace_id,
+            "sessions": [
+                {
+                    "host": "preset.example",
+                    "username": "ubuntu",
+                    "port": 22,
+                    "password": "preset-secret",
+                    "directory": "/srv",
+                    "title": f"Pane {index + 1}",
+                }
+                for index in range(terminal_count)
+            ],
+        }
+        body.update(overrides)
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post("/api/sessions", json=body)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return response.get_json()
+
     def _save_slot(self, workspace_id="default", origin="auto", label=None):
         slot = web_runtime_state.capture_workspace(
             api.session_manager,
@@ -2030,15 +2064,29 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
         self.assertTrue(group["started"])
         self.assertEqual(group["warning"], "preset_missing")
 
-    def test_r2_existing_preset_wins_over_the_snapshot(self):
-        preset = self._seed_preset(name="Alpha")
-        self._launch(session_name="Old name", saved_session_id=preset["id"])
+    def test_r2_the_captured_shape_wins_over_an_edited_preset(self):
+        """MW-03, regression matrix row 2 — the snapshot is the only shape source.
+
+        Restore used to replay a still-existing preset's *current* config
+        ("latest preset wins"), so editing a launcher preset rewrote a workspace
+        nobody had saved since: the three-pane workspace captured here came back
+        as the single `Files` pane the preset had been edited down to.
+        """
+        preset = self._seed_preset(name="Alpha", terminal_count=3)
+        launched = self._launch_ssh(
+            session_name="Old name",
+            saved_session_id=preset["id"],
+            terminal_count=3,
+        )
         self._save_slot()
         self._close_everything()
         web_saved_sessions.upsert_saved_session(
             config={
                 **preset["config"],
+                "terminal_count": 1,
+                "layout": "single",
                 "ssh": {**preset["config"]["ssh"], "host": "edited.example"},
+                "terminals": [{"title": "Files", "directory": ""}],
             },
             name="Edited",
             session_id=preset["id"],
@@ -2049,21 +2097,31 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
 
         self.assertTrue(payload["workspaces"][0]["groups"][0]["started"])
         group = api.session_manager.get_group(f"saved-session-{preset['id']}")
-        self.assertEqual(group.name, "Edited")
+        self.assertEqual(group.name, "Old name")
+        self.assertEqual(group.terminal_count, 3)
+        self.assertEqual(group.layout, launched["layout"])
+        sessions = api.session_manager.get_group_sessions(group.group_id)
+        self.assertEqual([session.host for session in sessions], ["preset.example"] * 3)
         self.assertEqual(
-            api.session_manager.get_group_sessions(group.group_id)[0].host,
-            "edited.example",
+            [session.title for session in sessions],
+            ["Pane 1", "Pane 2", "Pane 3"],
         )
 
-    def test_r3_layout_is_discarded_when_the_preset_pane_count_changed(self):
+    def test_r3_the_captured_layout_survives_a_preset_pane_count_change(self):
+        """The stored split geometry belongs to the stored pane count.
+
+        It used to be dropped (or replaced by the preset's) whenever the preset
+        had since gained or lost a pane. With the snapshot authoritative, the
+        pane count cannot change under it, so the geometry is simply replayed.
+        """
+        rects = [{"originSlot": 0, "x": 1, "y": 1, "w": 2, "h": 1}]
         preset = self._seed_preset(name="Alpha", terminal_count=1)
-        self._launch(
+        launched = self._launch_ssh(
             session_name="Alpha",
             saved_session_id=preset["id"],
-            workspace_layout={
-                "split_slot_rects": [{"originSlot": 0, "x": 1, "y": 1, "w": 2, "h": 1}]
-            },
+            workspace_layout={"split_slot_rects": rects},
         )
+        self.assertEqual(launched["workspace_layout"]["split_slot_rects"], rects)
         self._save_slot()
         self._close_everything()
         web_saved_sessions.upsert_saved_session(
@@ -2085,9 +2143,8 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
 
         self.assertTrue(payload["workspaces"][0]["groups"][0]["started"])
         group = api.session_manager.get_group(f"saved-session-{preset['id']}")
-        self.assertEqual(group.terminal_count, 2)
-        # A layout array sized for one pane must not be replayed against two.
-        self.assertIsNone(group.workspace_layout)
+        self.assertEqual(group.terminal_count, 1)
+        self.assertEqual(group.workspace_layout, launched["workspace_layout"])
 
     def test_r4_missing_directory_still_restores_the_group(self):
         self._launch(session_name="Main")
@@ -2483,8 +2540,9 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
     # ── Credentials and the shared launch path ──
 
     def test_restore_never_returns_or_logs_a_credential(self):
+        """The password is the one thing a preset still contributes (MW-03)."""
         preset = self._seed_preset(name="Alpha", password="super-secret-pw")
-        self._launch(session_name="Alpha", saved_session_id=preset["id"])
+        self._launch_ssh(session_name="Alpha", saved_session_id=preset["id"])
         self._save_slot()
         self._close_everything()
 
@@ -2497,13 +2555,65 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
         self.assertNotIn("super-secret-pw", body)
         self.assertNotIn("super-secret-pw", "\n".join(logs.output))
         self.assertNotIn("super-secret-pw", self.state_path.read_text(encoding="utf-8"))
-        self.assertTrue(payload["workspaces"][0]["groups"][0]["started"])
+        group_result = payload["workspaces"][0]["groups"][0]
+        self.assertTrue(group_result["started"])
+        self.assertEqual(group_result["warning"], "")
         # The credential still reached the session in-process.
         group_id = f"saved-session-{preset['id']}"
         self.assertEqual(
             api.session_manager.get_group_sessions(group_id)[0].password,
             "super-secret-pw",
         )
+
+    def test_a_preset_pointing_elsewhere_never_lends_its_password(self):
+        """MW-03: a credential is matched by target, never by pane position.
+
+        The captured pane keeps the host it was captured with, and the password
+        for a machine it no longer names is withheld rather than sent there.
+        """
+        preset = self._seed_preset(name="Alpha", password="super-secret-pw")
+        self._launch_ssh(session_name="Alpha", saved_session_id=preset["id"])
+        self._save_slot()
+        self._close_everything()
+        web_saved_sessions.upsert_saved_session(
+            config={
+                **preset["config"],
+                "ssh": {**preset["config"]["ssh"], "host": "somewhere.else"},
+            },
+            name="Alpha",
+            session_id=preset["id"],
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            _response, payload = self._restore(["default"])
+
+        group_result = payload["workspaces"][0]["groups"][0]
+        self.assertTrue(group_result["started"])
+        self.assertEqual(group_result["warning"], "credentials_unmatched")
+        session = api.session_manager.get_group_sessions(
+            f"saved-session-{preset['id']}"
+        )[0]
+        self.assertEqual(session.host, "preset.example")
+        self.assertIsNone(session.password)
+
+    def test_a_deleted_preset_costs_the_credential_not_the_shape(self):
+        preset = self._seed_preset(name="Alpha", password="super-secret-pw")
+        self._launch_ssh(session_name="Alpha", saved_session_id=preset["id"])
+        self._save_slot()
+        self._close_everything()
+        web_saved_sessions.delete_saved_sessions([preset["id"]])
+
+        with patch.object(api.socketio, "start_background_task"):
+            _response, payload = self._restore(["default"])
+
+        group_result = payload["workspaces"][0]["groups"][0]
+        self.assertTrue(group_result["started"])
+        self.assertEqual(group_result["warning"], "preset_missing")
+        session = api.session_manager.get_group_sessions(
+            f"saved-session-{preset['id']}"
+        )[0]
+        self.assertEqual(session.host, "preset.example")
+        self.assertIsNone(session.password)
 
     def test_launch_request_logging_is_redacted(self):
         with self.assertLogs("web.api", level="INFO") as logs:
@@ -2574,6 +2684,584 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
         self.assertIn("danger: true", launcher_js)
         for blocked in ("window.confirm(", "window.prompt(", "window.alert("):
             self.assertNotIn(blocked, launcher_js)
+
+
+class RestoreReservationTestCase(unittest.TestCase):
+    """MW-08: restore is idempotent under concurrency, not only in sequence.
+
+    `restore_workspace` asked whether the workspace had groups, then separately
+    created the record and launched every group. Two requests — a double click,
+    two launcher windows, a native window and a browser tab — could both pass
+    that check: for a non-default slot the loser hit an uncaught "Workspace
+    already exists", and for `default` both proceeded and duplicated the tabs.
+    """
+
+    WORKSPACE_B = "bbbbbbbbbbbb"
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _launch(self, workspace_id="default", session_name="Files"):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": session_name,
+                "workspace_id": workspace_id,
+                "sessions": [
+                    {
+                        "directory": str(self.repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return response.get_json()
+
+    def _saved_workspace(self, workspace_id="default"):
+        """Launch two groups, capture them, then close everything."""
+        if workspace_id != "default":
+            api.session_manager.create_workspace("Beta", workspace_id)
+        self._launch(workspace_id, "First")
+        self._launch(workspace_id, "Second")
+        slot = web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=workspace_id
+        )
+        self.assertIsNotNone(slot)
+        self.client.delete("/api/sessions")
+        api.session_manager.reset_sessions()
+
+    def _restore_while_paused(self, workspace_id):
+        """Run one restore in a thread, paused inside its first group launch.
+
+        Returns ``(thread, result_box, entered, release)``. The caller races a
+        second restore against the paused one and then releases it.
+        """
+        entered = threading.Event()
+        release = threading.Event()
+        real_launch = web_workspaces.launch_session_group
+        result_box = {}
+
+        def paused_launch(body, *args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(5), "the paused launch was never released")
+            return real_launch(body, *args, **kwargs)
+
+        def run():
+            with patch.object(
+                web_workspaces, "launch_session_group", paused_launch
+            ):
+                result_box["result"] = web_workspaces.restore_workspace(workspace_id)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        self.addCleanup(release.set)
+        self.addCleanup(thread.join)
+        self.assertTrue(entered.wait(5), "the restore never reached a launch")
+        return thread, result_box, release
+
+    def test_a_concurrent_second_restore_of_default_is_refused(self):
+        self._saved_workspace("default")
+        _thread, first, release = self._restore_while_paused("default")
+
+        # The first restore is mid-flight: its record exists, its groups do
+        # not. This is exactly the window the old check-then-act let through.
+        second = web_workspaces.restore_workspace("default")
+
+        release.set()
+        _thread.join(5)
+        self.assertFalse(second["restored"])
+        self.assertEqual(second["reason"], "already_restoring")
+        self.assertEqual(second["groups"], [])
+        self.assertTrue(first["result"]["restored"])
+        self.assertEqual(first["result"]["group_count"], 2)
+        # One restore, one set of tabs — not two of each.
+        self.assertEqual(len(api.session_manager.get_workspace_groups("default")), 2)
+
+    def test_a_concurrent_second_restore_of_a_named_workspace_is_refused(self):
+        """The non-default half: the loser used to raise "Workspace already exists"."""
+        self._saved_workspace(self.WORKSPACE_B)
+        _thread, first, release = self._restore_while_paused(self.WORKSPACE_B)
+
+        second = web_workspaces.restore_workspace(self.WORKSPACE_B)
+
+        release.set()
+        _thread.join(5)
+        self.assertEqual(second["reason"], "already_restoring")
+        self.assertTrue(first["result"]["restored"])
+        self.assertEqual(
+            len(api.session_manager.get_workspace_groups(self.WORKSPACE_B)), 2
+        )
+
+    def test_the_claim_is_released_after_a_restore_that_started_nothing(self):
+        """A failed restore must not leave the workspace permanently claimed."""
+        self._saved_workspace("default")
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        for group in state["workspaces"]["default"]["groups"]:
+            group["sessions"] = []
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        failed = web_workspaces.restore_workspace("default")
+        retried = web_workspaces.restore_workspace("default")
+
+        self.assertEqual(failed["reason"], "no_groups_started")
+        # Not `already_restoring`: the claim was released on the failure path.
+        self.assertEqual(retried["reason"], "no_groups_started")
+
+    def test_the_claim_is_released_when_there_is_no_slot(self):
+        self.assertEqual(web_workspaces.restore_workspace("default")["reason"], "not_found")
+        self.assertEqual(web_workspaces.restore_workspace("default")["reason"], "not_found")
+
+    def test_a_sequential_second_restore_still_reports_already_live(self):
+        """The claim must not mask the plain already-restored answer."""
+        self._saved_workspace("default")
+
+        first = web_workspaces.restore_workspace("default")
+        second = web_workspaces.restore_workspace("default")
+
+        self.assertTrue(first["restored"])
+        self.assertEqual(second["reason"], "already_live")
+
+
+class SingleWorkspaceRestoreRoutingTestCase(unittest.TestCase):
+    """MW-09: one server-owned restore, with `default` as just another id.
+
+    Single-workspace mode used to fetch the raw default slot and loop over
+    POST /api/sessions in the browser, re-resolving presets on the way. That
+    duplicated the restore policy, could stop half way through a failure, and
+    skipped the endpoint's idempotency, its per-group report, and its saved
+    label.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _launch(self, session_name="Files"):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": session_name,
+                "sessions": [
+                    {
+                        "directory": str(self.repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return response.get_json()
+
+    def test_the_default_slot_restores_through_the_same_endpoint(self):
+        self._launch("Main")
+        web_runtime_state.capture_workspace(
+            api.session_manager, origin="manual", label="Saved name"
+        )
+        self.client.delete("/api/sessions")
+        api.session_manager.reset_sessions()
+
+        response = self.client.post(
+            "/api/runtime-state/restore", json={"workspace_ids": ["default"]}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        workspace_result = response.get_json()["workspaces"][0]
+        self.assertEqual(workspace_result["workspace_id"], "default")
+        self.assertTrue(workspace_result["restored"])
+        # The saved label is applied by the same path in both modes.
+        self.assertEqual(workspace_result["label"], "Saved name")
+        self.assertEqual(
+            api.session_manager.get_workspace("default").label, "Saved name"
+        )
+        self.assertEqual(len(api.session_manager.get_workspace_groups("default")), 1)
+
+    def test_restoring_into_a_live_default_is_refused_not_duplicated(self):
+        """Regression matrix row 10 — the browser loop had no such check."""
+        self._launch("Main")
+        web_runtime_state.capture_workspace(api.session_manager)
+
+        response = self.client.post(
+            "/api/runtime-state/restore", json={"workspace_ids": ["default"]}
+        )
+
+        workspace_result = response.get_json()["workspaces"][0]
+        self.assertFalse(workspace_result["restored"])
+        self.assertEqual(workspace_result["reason"], "already_live")
+        self.assertEqual(len(api.session_manager.get_workspace_groups("default")), 1)
+
+    def test_the_banner_restores_through_the_endpoint_and_respects_live_groups(self):
+        """Run the shipped banner code and watch what it actually calls.
+
+        The point of MW-09 is that no restore decision is left in the browser,
+        so the check is what the client requests: one call to the server restore
+        transaction, and never `/api/sessions` or `/api/saved-sessions`.
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        response = self.client.get("/static/js/launcher.js")
+        self.assertEqual(response.status_code, 200)
+        launcher_js = response.get_data(as_text=True)
+        response.close()
+        source = "\n".join(
+            _js_function_source(launcher_js, name)
+            for name in (
+                "checkRestorableWorkspace",
+                "restorePreviousWorkspace",
+                "dismissRestoreBanner",
+            )
+        )
+        script = source + """
+let restorableWorkspaceIsOffered = false;
+const WORKSPACE_DEFAULT_ID = 'default';
+const fetched = [];
+const restoreCalls = [];
+const opened = [];
+let slot = {};
+
+function makeElement() {
+    return {
+        hidden: true,
+        textContent: '',
+        disabled: false,
+        setAttribute(name, value) { if (name === 'hidden') this.hidden = true; }
+    };
+}
+let elements = {};
+const document = { getElementById: id => elements[id] || null };
+async function fetch(url) {
+    fetched.push(url);
+    return { ok: true, json: async () => slot };
+}
+function isMultiWorkspaceEnabled() { return false; }
+async function loadWorkspaceRestoreChooser() { throw new Error('multi-mode chooser'); }
+function formatWorkspaceSavedAgo() { return 'just now'; }
+const messages = [];
+function showMessage(text, kind) { messages.push([text, kind]); }
+function normalizeNativeZoomFactor(value) { return value == null ? null : Number(value); }
+async function viewActiveTerminals(_event, groupId, zoomFactor) {
+    opened.push([groupId, zoomFactor]);
+}
+let restoreOutcome = {
+    workspaces: [{
+        workspace_id: 'default',
+        restored: true,
+        group_count: 2,
+        active_group_id: 'live-group-2',
+        native_zoom_factor: 1.25,
+        groups: [{ started: true }, { started: true }]
+    }]
+};
+async function restoreSavedWorkspaces(workspaceIds) {
+    restoreCalls.push(workspaceIds);
+    return restoreOutcome;
+}
+
+(async () => {
+    // A workspace that is already live: restore would only ever be refused,
+    // so the banner must not offer it and the action must stay inert.
+    elements = { restoreWorkspaceBanner: makeElement(), restoreWorkspaceText: makeElement() };
+    slot = { restorable: true, groups: [{ sessions: [{}] }], active_group_count: 2 };
+    await checkRestorableWorkspace();
+    const liveBannerHidden = elements.restoreWorkspaceBanner.hidden;
+    await restorePreviousWorkspace();
+    const callsWhileLive = restoreCalls.length;
+
+    // A refused restore keeps the offer and its Retry in front of the user.
+    elements = {
+        restoreWorkspaceBanner: makeElement(),
+        restoreWorkspaceText: makeElement(),
+        restoreWorkspaceBtn: makeElement()
+    };
+    slot = { restorable: true, groups: [{ sessions: [{}] }], active_group_count: 0 };
+    restoreOutcome = { workspaces: [{ restored: false, reason: 'already_live' }] };
+    await checkRestorableWorkspace();
+    await restorePreviousWorkspace();
+    const refusedBannerHidden = elements.restoreWorkspaceBanner.hidden;
+    const refusedButtonDisabled = elements.restoreWorkspaceBtn.disabled;
+    const refusedMessage = messages[messages.length - 1];
+
+    // Nothing live: the banner is offered and replays through the endpoint.
+    restoreOutcome = {
+        workspaces: [{
+            workspace_id: 'default',
+            restored: true,
+            group_count: 2,
+            active_group_id: 'live-group-2',
+            native_zoom_factor: 1.25,
+            groups: [{ started: true }, { started: true }]
+        }]
+    };
+    elements = {
+        restoreWorkspaceBanner: makeElement(),
+        restoreWorkspaceText: makeElement(),
+        restoreWorkspaceBtn: makeElement()
+    };
+    slot = {
+        restorable: true,
+        label: 'Yesterday',
+        saved_at: 1,
+        active_group_count: 0,
+        active_group_id: 'snapshot-group',
+        native_zoom_factor: 2,
+        groups: [{ sessions: [{}, {}] }, { sessions: [{}] }]
+    };
+    await checkRestorableWorkspace();
+    const offeredBannerHidden = elements.restoreWorkspaceBanner.hidden;
+    const bannerText = elements.restoreWorkspaceText.textContent;
+    await restorePreviousWorkspace();
+
+    process.stdout.write(JSON.stringify({
+        liveBannerHidden,
+        callsWhileLive,
+        refusedBannerHidden,
+        refusedButtonDisabled,
+        refusedMessage,
+        offeredBannerHidden,
+        bannerText,
+        fetched,
+        restoreCalls,
+        opened
+    }));
+})();
+"""
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "restore.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path)], capture_output=True, text=True, check=True
+            )
+        result = json.loads(completed.stdout)
+
+        # Already live: no offer, no request.
+        self.assertTrue(result["liveBannerHidden"])
+        self.assertEqual(result["callsWhileLive"], 0)
+        # Refused: the offer and its re-enabled button stay put, with retry
+        # wording on the message (guardrail 8).
+        self.assertFalse(result["refusedBannerHidden"])
+        self.assertFalse(result["refusedButtonDisabled"])
+        self.assertIn("try again", result["refusedMessage"][0])
+        self.assertEqual(result["refusedMessage"][1], "error")
+        # Offered: the banner names the saved workspace and its shape.
+        self.assertFalse(result["offeredBannerHidden"])
+        self.assertIn("Yesterday", result["bannerText"])
+        self.assertIn("2 sessions (3 panes)", result["bannerText"])
+        # One server restore of `default` per attempt, and no client-side
+        # orchestration on any of them.
+        self.assertEqual(result["restoreCalls"], [["default"], ["default"]])
+        self.assertEqual(result["fetched"], ["/api/runtime-state"] * 3)
+        for url in result["fetched"]:
+            self.assertNotIn("/api/sessions", url)
+            self.assertNotIn("/api/saved-sessions", url)
+        # The window opens on the group and zoom the *server* resolved, not on
+        # a snapshot id the browser tried to map itself.
+        self.assertEqual(result["opened"], [["live-group-2", 1.25]])
+
+
+class DuplicatePresetRestoreTestCase(unittest.TestCase):
+    """MW-13: two retained slots referencing one preset get one honest answer.
+
+    A saved preset is live in at most one workspace at a time — that rule is
+    what makes relaunching a preset replace its own tab instead of opening a
+    second one. Slots are deliberately retained by several close paths, so two
+    of them can end up referencing the same preset, and restoring both used to
+    mean "whichever the request listed first wins": the second workspace came
+    back silently missing that tab.
+    """
+
+    WORKSPACE_A = "aaaaaaaaaaaa"
+    WORKSPACE_B = "bbbbbbbbbbbb"
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        self.saved_sessions_path = Path(self.temp_dir.name) / "saved_sessions.json"
+        for target, attribute, value in (
+            (web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)),
+            (web_saved_sessions, "SAVED_SESSIONS_PATH", str(self.saved_sessions_path)),
+        ):
+            patcher = patch.object(target, attribute, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _preset(self, name):
+        return web_saved_sessions.upsert_saved_session(
+            config={
+                "connection_mode": "wsl",
+                "terminal_count": 1,
+                "layout": "single",
+                "wsl": {"default_dir": str(self.repo_dir)},
+                "terminals": [{"title": "Files", "startup_mode": "explorer"}],
+            },
+            name=name,
+        )
+
+    def _launch(self, workspace_id, saved_session_id="", session_name="Files"):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": session_name,
+                "workspace_id": workspace_id,
+                "saved_session_id": saved_session_id,
+                "sessions": [
+                    {
+                        "directory": str(self.repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return response.get_json()
+
+    def _capture_and_close(self, workspace_id):
+        slot = web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=workspace_id
+        )
+        self.assertIsNotNone(slot)
+        self.client.delete("/api/sessions")
+        api.session_manager.reset_sessions()
+
+    def _two_slots_sharing_one_preset(self):
+        preset = self._preset("Alpha")
+        api.session_manager.create_workspace("A", self.WORKSPACE_A)
+        self._launch(self.WORKSPACE_A, preset["id"], "Alpha")
+        self._capture_and_close(self.WORKSPACE_A)
+        api.session_manager.create_workspace("B", self.WORKSPACE_B)
+        self._launch(self.WORKSPACE_B, preset["id"], "Alpha")
+        # A second, unattached tab so workspace B is not *only* the shared one.
+        self._launch(self.WORKSPACE_B, session_name="Plain")
+        self._capture_and_close(self.WORKSPACE_B)
+        return preset
+
+    def _restore(self, workspace_ids):
+        response = self.client.post(
+            "/api/runtime-state/restore", json={"workspace_ids": workspace_ids}
+        )
+        return response, response.get_json()
+
+    def test_restoring_both_slots_is_refused_before_anything_launches(self):
+        preset = self._two_slots_sharing_one_preset()
+
+        response, payload = self._restore([self.WORKSPACE_A, self.WORKSPACE_B])
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(payload["conflict"], "duplicate_preset_reference")
+        self.assertEqual(payload["restored_count"], 0)
+        self.assertEqual(payload["workspaces"], [])
+        conflict = payload["conflicts"][0]
+        self.assertEqual(conflict["saved_session_id"], preset["id"])
+        self.assertEqual(conflict["saved_session_name"], "Alpha")
+        self.assertEqual(
+            sorted(conflict["workspace_ids"]),
+            sorted([self.WORKSPACE_A, self.WORKSPACE_B]),
+        )
+        # Nothing was launched: not the shared tab, and not workspace B's
+        # unattached one either. A partial restore is what this replaces.
+        self.assertEqual(api.session_manager.get_session_count(), 0)
+        self.assertEqual(web_workspaces.list_live_workspaces(), [])
+        # Both slots are intact and still on offer.
+        for workspace_id in (self.WORKSPACE_A, self.WORKSPACE_B):
+            self.assertIsNotNone(
+                web_runtime_state.load_restorable_workspace(workspace_id)
+            )
+
+    def test_choosing_one_of_them_restores_it_completely(self):
+        """Deselecting one side is the explicit choice the 409 asks for."""
+        self._two_slots_sharing_one_preset()
+
+        _response, payload = self._restore([self.WORKSPACE_B])
+
+        workspace_result = payload["workspaces"][0]
+        self.assertTrue(workspace_result["restored"])
+        self.assertEqual(workspace_result["group_count"], 2)
+        self.assertEqual(
+            len(api.session_manager.get_workspace_groups(self.WORKSPACE_B)), 2
+        )
+        # The other slot is untouched and still restorable later.
+        self.assertIsNotNone(
+            web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+        )
+
+    def test_one_slot_naming_a_preset_twice_is_refused_too(self):
+        """Hand-edited state: two groups in one slot would collapse into one."""
+        preset = self._preset("Alpha")
+        self._launch("default", preset["id"], "Alpha")
+        self._launch("default", session_name="Plain")
+        self._capture_and_close("default")
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        groups = state["workspaces"]["default"]["groups"]
+        groups[1]["saved_session_id"] = preset["id"]
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        response, payload = self._restore(["default"])
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(payload["conflicts"][0]["workspace_ids"], ["default", "default"])
+        self.assertEqual(api.session_manager.get_session_count(), 0)
+
+    def test_a_preset_live_outside_the_selection_still_skips_only_its_group(self):
+        """The incumbent case is different and deliberately stays partial.
+
+        A preset already open in a workspace the request does not name is
+        visible to the user and cannot be affected by this restore, so its one
+        group is reported as skipped and the rest of the workspace comes back.
+        """
+        preset = self._preset("Alpha")
+        api.session_manager.create_workspace("B", self.WORKSPACE_B)
+        self._launch(self.WORKSPACE_B, preset["id"], "Alpha")
+        self._launch(self.WORKSPACE_B, session_name="Plain")
+        self._capture_and_close(self.WORKSPACE_B)
+        self._launch("default", preset["id"], "Alpha")
+
+        _response, payload = self._restore([self.WORKSPACE_B])
+
+        workspace_result = payload["workspaces"][0]
+        self.assertTrue(workspace_result["restored"])
+        skipped = [group for group in workspace_result["groups"] if group.get("skipped")]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["skipped"], "already_live")
+        self.assertEqual(skipped[0]["workspace_id"], "default")
+        self.assertEqual(workspace_result["group_count"], 1)
 
 
 class MultiWorkspaceModeToggleTestCase(unittest.TestCase):
