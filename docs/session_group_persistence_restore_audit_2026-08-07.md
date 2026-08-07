@@ -2,7 +2,7 @@
 
 Date: 2026-08-07
 
-Status: findings and implementation proposal; no production changes are included in this audit.
+Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stages 1-7 are not started; no production Python, JavaScript, CSS, or template file has been changed by this audit.
 
 ## Executive summary
 
@@ -493,7 +493,9 @@ Each stage is independently reviewable and preserves backward compatibility. New
 
 The stages are otherwise in dependency order, with one exception recorded in Stage 4: its **Save open sessions + workspaces** action depends on the capacity decoupling in Stage 6 items 1–3, which must therefore be scheduled earlier. Every other stage may ship in the order written.
 
-### Stage 0 — Freeze the snapshot contract with failing behavioral tests
+### Stage 0 — Freeze the snapshot contract with failing behavioral tests — **done**
+
+Outcome recorded in [Stage 0 results](#stage-0-results).
 
 Connected findings: SGP-01, SGP-02, SGP-03, SGP-04, SGP-06, SGP-07, SGP-08, SGP-10, SGP-11.
 
@@ -511,6 +513,53 @@ Add tests before production changes. Write every one of them as an assertion of 
 Use backend behavioral tests for storage/manager transactions. Put pure browser snapshot normalization and queue logic in a small standalone JS module so Node-based tests can execute it without a DOM. Avoid adding new raw source-text assertions.
 
 Exit gate: the desired field matrix and the deliberate exclusions are executable contracts, and the open questions below have answers for any field included in Stage 5.
+
+#### Stage 0 results
+
+Completed 2026-08-07. Everything landed in one new file, `tests/test_session_persistence_contract.py` (27 tests). No production module was touched, so Stage 0 carries no rollback surface and no behavior change.
+
+**Gate results (re-run for this change):**
+
+- `python -m ruff check .` — passed, "All checks passed!".
+- `python tests/run_tests.py` — 1,231 tests ran; `OK (skipped=7, expected failures=26)`. The suite is green, and the 26 expected failures are the frozen contract. The two voice-environment failures noted in the earlier revision of this document no longer occur in this environment.
+
+**Coverage — all eight Stage 0 items are executable:**
+
+| Stage 0 item | Test case | Tests | Currently failing on |
+|---|---|---|---|
+| 1. Save Workspace captures the client snapshot | `SaveWorkspaceFlushBarrierTestCase` | 4 | no presentation route (`404`) |
+| 2. Out-of-order browser writes | `BrowserPresentationOrderingTestCase` | 2 | no presentation route; no `session-persistence.js` |
+| 3. Pane reorder + split-track resize | `PaneOrderAndSplitGeometryTestCase` | 1 | no presentation route |
+| 4. Explorer rooted at a parent | `ExplorerRootRestoreTestCase` | 2 (1 passing) | root narrowed to the child directory |
+| 5. Full explorer presentation fixture | `ExplorerPresentationFixtureTestCase` | 5 | no `web/session_presentation.py`; no presentation route; no workspace appearance route |
+| 6. Lowering `max_sessions` is non-destructive | `LaunchCapacityNondestructiveTestCase` | 3 | preset truncated `8 → 4`; `originSlot` clamped `7 → 3`; capacity error not actionable |
+| 7. Malformed nested presentation state | `MalformedPresentationValidationTestCase` | 3 | corrupt group offered as restorable; chooser counts `2` groups where a restore keeps `1` |
+| 8. Close/restart action matrix | `LifecycleActionMatrixTestCase` | 7 | no lifecycle route; browser shutdown tears down without a lifecycle decision |
+
+Every failing test was verified to fail on its *intended* assertion, not on incidental setup. Three were rewritten during Stage 0 after they failed for the wrong reason: `load_saved_sessions()` returns a list rather than a payload dict; two lifecycle tests indexed a `None` JSON body from the 404; and the browser-shutdown test was reaching the "shutdown unavailable" `404` because the test process has no shutdown token, which said nothing about the contract.
+
+**Names frozen by Stage 0.** The tests necessarily commit to the surfaces later stages must build. They are declared once as module constants at the top of the test file, so a stage may rename one — but only by editing that constant in the same commit, never by adding a second parallel surface:
+
+| Constant | Value | Owed by |
+|---|---|---|
+| `PRESENTATION_ROUTE` | `POST /api/session-presentation` | Stage 2 |
+| `PRESENTATION_MODULE` | `web/session_presentation.py` | Stage 2 (normalizers), Stage 6 (reuse) |
+| `PRESENTATION_JS` | `web/static/js/session-persistence.js` | Stage 2 |
+| `LIFECYCLE_ROUTE` | `POST /api/lifecycle/prepare` | Stage 4 |
+| `LIFECYCLE_SAVE_*` | `none`, `workspaces`, `sessions+workspaces` | Stage 4 |
+| `EXPLORER_PRESENTATION_FIXTURE` | the item 5 fixture | Stage 5 |
+
+The presentation request body is the one printed in Stage 2. Three response fields are also now fixed by tests: the route returns `presentation_revision`, answers a stale writer with `409` carrying the current revision, and the lifecycle route returns `action`, `save`, `saved_workspaces`, `saved_sessions`, `ready_to_exit`, `retryable`, and `errors`.
+
+The item 5 fixture is the concrete answer to product decision 1. It carries Preview plus two pinned tabs, an active staged Diff, per-panel horizontal *and* vertical scroll ratios, a directory-list scroll, per-tab zoom, per-view wrap opt-outs, Markdown folds, theme/fonts, all three sidebar open flags, sidebar width, and Files-tree expansion — and deliberately carries no dirty buffer, Git commit draft, or search query/result, per product decisions 2-4.
+
+**Three deviations from the stage text, and why:**
+
+1. **One test ships without `expectedFailure`.** `test_a_missing_root_still_falls_back_to_the_captured_directory` already passes: when no root was captured, falling back to `directory` is correct today and must stay correct after Stage 5. It pins the half of SGP-04 that is *not* a defect, so decorating it would have been the "test that asserts the current behavior and must be inverted later" the stage forbids. It is the only undecorated test in the file.
+2. **Item 8's involuntary-termination row is not executable and was reframed.** Ctrl+C, a task-manager kill, and a disappearing browser tab have no request surface to assert against, and the "writes nothing" half is already covered by the `save: "none"` test. The slot was spent instead on the genuinely missing contract next to it: the explicit browser close button is a *voluntary* exit, so `POST /api/browser-shutdown` must refuse to tear down before a lifecycle decision. Stage 4 item 8 therefore remains a design constraint reviewers must uphold by reading, not a test.
+3. **The client-half queue test skips without Node.** `test_the_client_queue_keeps_one_write_in_flight_and_ignores_late_replies` runs the queue for real in Node (existing precedent in `tests/test_multi_workspace.py`) and skips when `node` is absent, so it cannot be the only guard for SGP-02. Its server half is a plain backend test that always runs.
+
+**Note for whoever ships Stage 2 and Stage 4.** `expectedFailure` is not inert: an unexpected success fails the run. A decorator left behind after its stage lands will break `make check` rather than pass quietly, which is the intended forcing function — removing it is part of the stage, not a follow-up.
 
 ### Stage 1 — Make saved-session and encryption-key persistence durable
 
@@ -745,10 +794,12 @@ The schema and lifecycle choices previously left open for Stages 4 and 5 are res
 
 Every finding was re-verified against the source before the corrections above were folded in. The confirmations behind the amended text are: `web/static/js/browser-pane.js:215` (client-state regression on a late response), `web/runtime_state.py:312` calling the capacity-coupled `_normalize_workspace_layout` with the `originSlot` clamp at `web/saved_sessions.py:442`, `sessions/manager.py:620` coercing `list("abc")` without raising while `dict()`/`int()` raise, `web/secrets.py:17` and `:27` making the key race an import-time failure, and `web/static/js/explorer-viewer.js:4096`/`:4148` holding appearance in per-origin `localStorage`.
 
-This revision changed only this Markdown document; no Python, JavaScript, CSS, or template file was touched, so the gate results below are unchanged and were not re-run for the documentation edit:
+The findings revision changed only this Markdown document, and its gate results were:
 
 - `python -m ruff check .`: passed.
 - `python tests/run_tests.py`: 1,204 tests ran; 1,195 passed, 7 skipped, and 2 unrelated voice-environment tests failed because this environment does not have `websocket-client`/an available external Vosk service. No persistence, workspace, saved-session, explorer, browser, session-manager, or restore test failed.
+
+Stage 0 then added `tests/test_session_persistence_contract.py` and touched no production file. Its own gate results are recorded in [Stage 0 results](#stage-0-results): ruff passed, and the suite reported `OK (skipped=7, expected failures=26)` across 1,231 tests.
 
 ## Final recommendation
 
