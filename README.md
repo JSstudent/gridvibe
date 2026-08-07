@@ -110,32 +110,13 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 
 | | |
 | --- | --- |
-| **Session groups** | Numbered, draggable, closable tabs. `Alt+1`–`Alt+9` to switch, middle-click to close. |
-| **Presets** | `Save Session`, `Save Session as…`, `Save All Sessions`, `Import Session`. SSH passwords are Fernet-encrypted in `saved_sessions.json`. |
-| **Scratch sessions** | **New Session** in step 02 clears the form back to the built-in empty preset in one click — the same load as **Import Session → Default session**, without the picker. The caret beside **SSH Remote** / **Local Repo** fills the form from an address a saved session already uses — pick the host or repository and launch, no retyping. The launch stays unattached to any preset, so the same target opens as many times as you like: `10.0.0.5`, `10.0.0.5 (1)`, `10.0.0.5 (2)`. Save one and the next launch skips its number. |
-| **Workspace snapshot** | Background autosave (1–15 min) plus explicit **Save Workspace** writes `runtime_state.json` — never passwords, and these two are the *only* actions that capture workspace shape (renaming a workspace changes its label; the next capture persists it). A save or **Forget** that cannot reach the disk reports a retryable failure rather than a false success, and an unreadable state file is quarantined with its last-good backup loaded in its place. After a restart the launcher offers the workspace back by name and reopens on the group you left. |
-| **Multiple workspaces** | Opt-in — the switch in the launcher's **Workspaces** card (step 04), stored as `workspace.multi_workspace_enabled`. Launch into a chosen workspace or a new one, each in its own window with its own tabs; move a tab between workspaces without restarting a single terminal; rename a workspace; close one; restore any subset of saved workspaces after a restart. `Alt+W` walks the open workspaces (`Alt+Shift+W` walks back). Whichever way you swap — the shortcut, **Workspace ▸ Open Workspace**, or **Open** in the launcher's Workspaces card — the window that takes focus pulses a ring around its edge once, so two identical-looking windows can be told apart at the moment of the switch. Only workspaces that hold a tab — or that you created deliberately empty — are listed anywhere; an emptied workspace stops being a destination rather than lingering as a "0 sessions" entry. |
-| **Broadcast typing** | One keystroke, every pane in the group. |
-| **Self-update** | **Check for updates** does a git fast-forward, or save the workspace and restart in one action. |
+| **Session tabs** | Keep related panes together in draggable tabs. Use `Alt+1`–`Alt+9` to switch, middle-click to close, or broadcast typing to every pane in the active tab. |
+| **Saved sessions** | Save a setup as a reusable preset, import one later, or choose **New Session** for a clean start. Stored SSH passwords are encrypted. |
+| **Save & restore** | GridVibe autosaves your workspace and also offers **Save Workspace**. After a restart, restore the same tabs, pane layouts, directories, commands, and active group; passwords are never written to the workspace snapshot. |
+| **Multiple workspaces** | Optionally keep separate projects in separate windows, move tabs between them without restarting terminals, and switch with `Alt+W` / `Alt+Shift+W`. |
+| **Updates** | **Check for updates** fast-forwards a Git clone, with an option to save the workspace and restart. |
 
-A restore replays exactly what was captured — the same tab names, pane count, modes, directories, commands, and layout — whether or not the preset a tab came from has been edited since. Editing a saved session changes the next *launch*, never a workspace you already saved. The preset contributes one thing a snapshot deliberately never holds: the SSH password, and only to a pane that still names that preset's host, user, and port; a pane whose credential cannot be matched comes back with its own shape and its usual Retry. Restore runs entirely on the server in both modes: the password is resolved in-process and never sent to the browser or written to the log, and asking twice reopens a workspace once.
-
-With multiple workspaces enabled, a saved preset is live in **at most one workspace at a time** — launching it elsewhere explains the conflict and offers to open that workspace or move the tab, instead of silently stealing it or opening a duplicate. For the same reason, restoring two saved workspaces that both use one preset is refused as a whole and names the clash, rather than reopening one of them quietly short a tab; restore them one at a time. Each saved workspace can be restored, left for later, or permanently **forgotten** (the snapshot only — saved sessions are never touched).
-
-The restore offer never expires, so automatic snapshots are capped to keep `runtime_state.json` from growing one slot per workspace ever autosaved. The cap only ever collects **closed** workspaces, oldest first: a workspace that is open right now keeps its snapshot however many you have, and so does one you saved by hand. A slot is offered only if it can actually be relaunched — a group left with no panes by a truncated write is dropped from the count instead of being advertised and then quietly relaunching nothing.
-
-### What each "close" does
-
-Four verbs, four outcomes — the label tells you what you keep:
-
-| Action | Live sessions | Saved snapshot |
-| --- | --- | --- |
-| **Workspace ▸ Close Workspace Window** | keep running | kept |
-| Close the last tab (or its last pane) | that tab ends; the workspace empties | **removed** — the workspace emptied itself |
-| **Workspace ▸ Close Workspace** (or **Close** in the launcher's Workspaces card) | all end | **kept** — this is the restorable close |
-| **Close and forget** (from the restore chooser, on a workspace that is open) | all end | removed |
-
-`Close All Sessions` is the process-wide version of closing a window: shells end everywhere and every snapshot stays on offer, which is what makes restore-after-restart work. Closing the window of a workspace you created empty and never used releases it, so an abandoned **New Workspace** does not sit in the destination list.
+Closing a workspace ends its terminals but keeps it available to restore. **Close and forget** removes both the live workspace and its snapshot, while closing only the window leaves its terminals running. Closing the last tab removes an empty workspace.
 
 ## File Explorer
 
@@ -143,14 +124,13 @@ Swap any pane between a terminal and a file explorer with one button — same di
 
 | | |
 | --- | --- |
-| **Read** | Tabbed viewer with pinned file tabs (drag to reorder, middle-click to close), each remembering its view mode, scroll, zoom, and wrap. Breadcrumbs, lazy file tree, directory search, `Ctrl+F` in-file find (seeded from the selection, opening on the match under the caret), download (100 MB cap) from the viewer toolbar or by right-clicking any file row or tab — so a format the viewer can't render still comes down. Double-clicking a word in the Source view tints its other occurrences without disturbing folds or scroll. In a Git worktree the Source view marks lines added or modified against `HEAD` with a coloured gutter bar (deletions get a wedge on the boundary), a slim overview column beside the source acts as a change-marked scrollbar, and clicking any marker opens an inline peek of just that block's diff — old lines above new — without leaving your place. |
-| **Preview** | Syntax coloring, Markdown render with Mermaid (`Ctrl+Shift+V`), heading folds, reading-surface presets, a font family for the Markdown preview *and* one for the Source view, inline image viewer (25 MB cap). Text caps at 10 MiB. |
-| **Edit** | In-place editing of complete UTF-8 text files. `Ctrl+S` saves atomically, preserving line-ending style, BOM, and permission bits. Changed on disk since you opened it? You get a conflict prompt, not a silent overwrite. |
-| **Git** | Branch/dirty status, per-file badges, colour-coded commit graph, historical diffs. Stage · unstage · commit · publish · discard — plus per-line **and** per-block undo right in the diff view. |
-| **Search** | `Ctrl+Shift+F` toggles repo-wide search across the pane's root. Runs on the backend (`git grep`, with a bounded walk / `grep -rIn` fallback), results grouped per file. Case/word/regex toggles, include-glob, scope switch, `.gitignore` on/off. |
-| **Create, copy, move, rename & delete** | Right-click an entry or blank directory space to create an exact-name empty file/folder. Copy/paste allocates collision-safe `-Copy` names; Cut/paste moves inside the same root and refuses collisions; **Rename…** changes an entry's name in place through the same dialog and the same no-overwrite rule; permanent delete stays confirmed. |
+| **Browse & preview** | Use breadcrumbs, a lazy file tree, draggable file tabs, syntax-coloured source, rendered Markdown and Mermaid, inline images, downloads, and `Ctrl+F` find. |
+| **Edit** | Edit complete UTF-8 text files in place and save with `Ctrl+S`. Saves are atomic, and a conflict prompt protects files changed on disk. |
+| **Git** | See branch and file status, inspect current or historical diffs, and stage, unstage, commit, publish, or discard changes. Diff views also support line and block undo. |
+| **Search** | Press `Ctrl+Shift+F` for repository-wide search with case, whole-word, regex, file-pattern, scope, and `.gitignore` controls. |
+| **Manage files** | Create, copy, move, rename, and delete from the context menu. Every write stays inside the explorer root; collisions never overwrite existing files, and deletion requires confirmation. |
 
-**Read-only by default.** The six guarded mutation families above are the whole exception list. Uploading, overwriting on paste/move/rename, cross-session/root transfer, and `git checkout`/`pull`/`merge` remain deliberately out of scope.
+Uploading, cross-root transfers, and Git checkout, pull, or merge are intentionally left to the terminal.
 
 ## Switching a Local Repo Pane's Shell
 
@@ -191,7 +171,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | 🔄 | Refresh the explorer (`F5`) |
 | ⬆️ | Go to the parent directory (or mouse Back) |
 | 🗂️ | Files tree sidebar |
-| 🌿 | Git changes and history sidebar |
+| ⎇ | Git changes and history sidebar |
 | 🔍 | Repository search sidebar (`Ctrl+Shift+F`) |
 | 🖥️ | Reveal the current location in the system file manager (local panes only) |
 
