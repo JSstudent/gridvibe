@@ -609,6 +609,7 @@ class MultiWorkspaceSessionManagerTestCase(unittest.TestCase):
     def test_saved_session_lookup_and_consistent_snapshot_are_global(self):
         self._group("a-1", self.WORKSPACE_A, saved_session_id="preset-a")
         self._group("b-1", self.WORKSPACE_B, saved_session_id="preset-b")
+        self.manager.set_topbar_visible(self.WORKSPACE_A, False)
 
         snapshots = self.manager.snapshot_live_workspaces()
 
@@ -621,6 +622,10 @@ class MultiWorkspaceSessionManagerTestCase(unittest.TestCase):
             "password",
             snapshots[self.WORKSPACE_A]["groups"][0]["sessions"][0],
         )
+        self.assertFalse(snapshots[self.WORKSPACE_A]["topbar_visible"])
+        self.assertTrue(snapshots[self.WORKSPACE_B]["topbar_visible"])
+        self.assertFalse(self.manager.get_topbar_visible(self.WORKSPACE_A))
+        self.assertTrue(self.manager.get_topbar_visible(self.WORKSPACE_B))
         self.assertEqual(
             self.manager.find_saved_session_group("preset-b").workspace_id,
             self.WORKSPACE_B,

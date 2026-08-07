@@ -20,6 +20,29 @@
     const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';
     const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';
     const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';
+    const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';
+
+    function workspaceTopbarVisibilityStorageKey(workspaceId) {
+        return `${TOPBAR_VISIBILITY_STORAGE_KEY}.${String(workspaceId || 'default')}`;
+    }
+
+    function getStoredWorkspaceTopbarVisible(workspaceId) {
+        try {
+            const stored = localStorage.getItem(workspaceTopbarVisibilityStorageKey(workspaceId));
+            return stored === null ? null : stored !== 'hidden';
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function storeWorkspaceTopbarVisible(workspaceId, visible) {
+        try {
+            localStorage.setItem(
+                workspaceTopbarVisibilityStorageKey(workspaceId),
+                visible ? 'visible' : 'hidden'
+            );
+        } catch (_) {}
+    }
 
     /* One confirmation controller serves both pages. The shared template puts
        each page's button classes on the modal as data attributes, so the

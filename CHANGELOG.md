@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **Save & Restart now saves the workspaces that are actually open.** The launcher used to post one save without a workspace id, which resolved to the internal `default` container; in multi-workspace mode that container is commonly empty, so the save returned `409` while the real named workspaces were skipped, and the launcher still closed every live shell. The launcher now discovers every live workspace, captures each one by its real id (including its native window zoom), and only hands off to the restart bridge after all requested saves succeed. A persistence failure leaves GridVibe running and restores the button as a retry affordance.
+
 ## 1.8.0 - 2026-08-07
 
 - **The back-to-launcher button moved to the head of the session tab line, and `` Alt+` `` now opens the launcher.** It used to sit last in the top bar, which meant it disappeared along with everything else whenever the bar was collapsed — the one control whose whole job is *leave this window* was hidden behind first restoring the bar. It now sits at the start of the session tab line, ahead of the first tab, next to the tabs it creates and visible whether the top bar is shown or not. The keybind is the key immediately left of `1`, matched by physical key position rather than by the character it types, so a layout where that key is a dead accent reaches the launcher just the same; a focused terminal hands the combination up to the window instead of sending `` ESC ` `` to the shell, exactly as `Alt+W` already does. Nothing about what the button does changed — same handler, same native-window-then-browser-tab fallback.

@@ -1109,6 +1109,10 @@ def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
     if not active_group_id:
         active_group_id = started_group_ids[0]
     session_manager.set_active_group(resolved_workspace_id, active_group_id)
+    session_manager.set_topbar_visible(
+        resolved_workspace_id,
+        slot.get("topbar_visible", True),
+    )
 
     # Shape-only diagnostics (MW-16): enough to reconstruct what a restore did
     # and why a tab is missing, with no host, directory, command, or credential.
@@ -1133,6 +1137,7 @@ def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
         "reason": "",
         "active_group_id": active_group_id,
         "native_zoom_factor": slot.get("native_zoom_factor"),
+        "topbar_visible": slot.get("topbar_visible", True),
         "group_count": len(started_group_ids),
         "groups": group_results,
     }

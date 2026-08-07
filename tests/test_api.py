@@ -3502,8 +3502,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="topbarToggleBtn"', html)
         self.assertIn('aria-controls="terminalTopbar"', html)
         self.assertIn("const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';", html)
+        self.assertIn("function workspaceTopbarVisibilityStorageKey(workspaceId)", html)
+        self.assertIn("getStoredWorkspaceTopbarVisible(currentWorkspaceId) ?? true", html)
+        self.assertIn("/ui-state`, {", html)
         self.assertIn("document.body.classList.toggle('topbar-collapsed', !shouldShow);", html)
         self.assertIn("path.setAttribute('d', visible ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6');", html)
+        self.assertIn("typeof data.topbar_visible === 'boolean'", html)
         self.assertIn("applyTopbarVisibility(getStoredTopbarVisible());", html)
 
     def test_terminals_page_centers_topbar_actions_without_custom_window_controls(self):
@@ -15820,6 +15824,77 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         payload = self.client.get("/api/runtime-state").get_json()
         self.assertEqual(payload["native_zoom_factor"], 1.25)
 
+    def test_reported_topbar_visibility_is_captured_by_autosave(self):
+        self._launch_explorer_group()
+
+        response = self.client.patch(
+            "/api/workspaces/default/ui-state",
+            json={"topbar_visible": False},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["topbar_visible"])
+        groups = self.client.get("/api/session-groups").get_json()
+        self.assertFalse(groups["topbar_visible"])
+
+        api._run_workspace_autosave_tick()
+
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertFalse(slot["topbar_visible"])
+        self.assertFalse(self.client.get("/api/runtime-state").get_json()["topbar_visible"])
+
+    def test_manual_save_captures_topbar_visibility_and_the_next_autosave_agrees(self):
+        self._launch_explorer_group()
+
+        response = self.client.post(
+            "/api/runtime-state/save",
+            json={"topbar_visible": False},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["topbar_visible"])
+        self.assertFalse(api.session_manager.get_topbar_visible())
+        self.assertFalse(web_runtime_state.load_restorable_workspace()["topbar_visible"])
+
+        api._run_workspace_autosave_tick()
+
+        self.assertFalse(web_runtime_state.load_restorable_workspace()["topbar_visible"])
+
+    def test_launcher_style_save_captures_cached_live_topbar_visibility(self):
+        self._launch_explorer_group()
+        hint = self.client.patch(
+            "/api/workspaces/default/ui-state",
+            json={"topbar_visible": False},
+        )
+        self.assertEqual(hint.status_code, 200)
+
+        response = self.client.post(
+            "/api/runtime-state/save",
+            json={"native_zoom_factor": 1.1},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["topbar_visible"])
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertFalse(slot["topbar_visible"])
+        self.assertEqual(slot["native_zoom_factor"], 1.1)
+
+    def test_topbar_visibility_routes_reject_non_boolean_values(self):
+        self._launch_explorer_group()
+
+        hint = self.client.patch(
+            "/api/workspaces/default/ui-state",
+            json={"topbar_visible": "hidden"},
+        )
+        save = self.client.post(
+            "/api/runtime-state/save",
+            json={"topbar_visible": 0},
+        )
+
+        self.assertEqual(hint.status_code, 400)
+        self.assertEqual(save.status_code, 400)
+        self.assertTrue(api.session_manager.get_topbar_visible())
+
     def test_invalid_stored_native_zoom_degrades_to_no_preference(self):
         self._launch_explorer_group()
         web_runtime_state.capture_workspace(api.session_manager)
@@ -15831,6 +15906,18 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertIsNone(slot["native_zoom_factor"])
         payload = self.client.get("/api/runtime-state").get_json()
         self.assertIsNone(payload["native_zoom_factor"])
+
+    def test_missing_or_invalid_stored_topbar_visibility_defaults_visible(self):
+        self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        data["workspaces"]["default"]["topbar_visible"] = "hidden"
+        self.state_path.write_text(json.dumps(data), encoding="utf-8")
+
+        slot = web_runtime_state.load_restorable_workspace()
+
+        self.assertTrue(slot["topbar_visible"])
+        self.assertTrue(self.client.get("/api/runtime-state").get_json()["topbar_visible"])
 
     def test_save_endpoint_captures_a_manual_slot_immediately_restorable(self):
         self._launch_explorer_group()
@@ -16197,12 +16284,16 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertIn("async function saveWorkspace(", terminals_js)
         self.assertIn("/api/runtime-state/save", terminals_js)
         self.assertIn("native_zoom_factor: nativeZoomFactor", terminals_js)
+        self.assertIn("topbar_visible: !document.body.classList.contains('topbar-collapsed')", terminals_js)
         self.assertIn("item.disabled = !sessionGroups.length;", terminals_js)
         shared_js = self._static("js/shared.js")
         self.assertIn("function normalizeNativeZoomFactor(value)", shared_js)
         self.assertIn("async function getNativeSessionZoomFactor()", shared_js)
         launcher_js = self._static("js/launcher.js")
-        self.assertIn("body: JSON.stringify({ native_zoom_factor: nativeZoomFactor })", launcher_js)
+        self.assertIn("getStoredWorkspaceTopbarVisible(workspaceId)", launcher_js)
+        self.assertIn("const snapshotState = { workspace_id: workspaceId }", launcher_js)
+        self.assertIn("snapshotState.topbar_visible = topbarVisible", launcher_js)
+        self.assertIn("body: JSON.stringify(snapshotState)", launcher_js)
         workspaces_js = self._static("js/workspaces.js")
         self.assertIn("api.open_workspace_window(", workspaces_js)
         self.assertIn("resolvedWorkspaceId,\n                    groupId,", workspaces_js)

@@ -142,6 +142,11 @@ def normalize_native_zoom_factor(value: Any) -> Optional[float]:
     return round(factor, 3)
 
 
+def normalize_topbar_visible(value: Any) -> Optional[bool]:
+    """Normalize optional workspace top-bar visibility without truthy coercion."""
+    return value if isinstance(value, bool) else None
+
+
 # TerminalSession launch fields worth replaying through POST /api/sessions.
 # `password` is deliberately absent; ids/status/timestamps are per-run state.
 _SESSION_SNAPSHOT_FIELDS = (
@@ -380,6 +385,10 @@ def _validate_slot(workspace_id: Any, slot: Any) -> Optional[Dict[str, Any]]:
     # Hand-edited or older local state degrades to "no zoom preference".
     validated["native_zoom_factor"] = normalize_native_zoom_factor(
         slot.get("native_zoom_factor")
+    )
+    normalized_topbar_visible = normalize_topbar_visible(slot.get("topbar_visible"))
+    validated["topbar_visible"] = (
+        normalized_topbar_visible if normalized_topbar_visible is not None else True
     )
     return validated
 
@@ -809,6 +818,7 @@ class RuntimeStateStore:
         active_group_id: str,
         saved_at: float,
         native_zoom_factor: Optional[float],
+        topbar_visible: bool,
     ) -> Dict[str, Any]:
         """Assemble one stored slot from a captured shape."""
         captured_group_ids = {group["group_id"] for group in groups}
@@ -828,6 +838,7 @@ class RuntimeStateStore:
             "active_group_id": (
                 active_group_id if active_group_id in captured_group_ids else ""
             ),
+            "topbar_visible": topbar_visible,
             "groups": groups,
         }
         manually_saved_at = (
@@ -854,6 +865,7 @@ class RuntimeStateStore:
         label: Optional[str] = None,
         active_group_id: Optional[str] = None,
         native_zoom_factor: Any = None,
+        topbar_visible: Any = None,
     ) -> Optional[Dict[str, Any]]:
         """Capture one workspace's shape and persist its slot. See module docs."""
         workspace_id = normalize_workspace_id(workspace_id)
@@ -877,6 +889,13 @@ class RuntimeStateStore:
             active_group_id = live_snapshot.get("active_group_id")
         active_group_id = str(active_group_id or "").strip()
         normalized_zoom = normalize_native_zoom_factor(native_zoom_factor)
+        normalized_topbar_visible = normalize_topbar_visible(topbar_visible)
+        if normalized_topbar_visible is None:
+            normalized_topbar_visible = normalize_topbar_visible(
+                live_snapshot.get("topbar_visible")
+            )
+        if normalized_topbar_visible is None:
+            normalized_topbar_visible = True
         workspace_label = str(live_snapshot.get("label") or "").strip()
 
         state_path = self.state_path()
@@ -901,6 +920,7 @@ class RuntimeStateStore:
                 active_group_id=active_group_id,
                 saved_at=time.time(),
                 native_zoom_factor=normalized_zoom,
+                topbar_visible=normalized_topbar_visible,
             )
             slot["revision"] = self._bump_revision(
                 revisions, workspace_id, "commit", observed
@@ -971,6 +991,11 @@ class RuntimeStateStore:
                     active_group_id=str(snapshot.get("active_group_id") or "").strip(),
                     saved_at=saved_at,
                     native_zoom_factor=None,
+                    topbar_visible=(
+                        snapshot.get("topbar_visible")
+                        if isinstance(snapshot.get("topbar_visible"), bool)
+                        else True
+                    ),
                 )
                 slot["revision"] = self._bump_revision(
                     revisions, workspace_id, "commit", observed_revision
@@ -1198,6 +1223,7 @@ def capture_workspace(
     label: Optional[str] = None,
     active_group_id: Optional[str] = None,
     native_zoom_factor: Any = None,
+    topbar_visible: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """Capture one workspace's shape from the live manager and persist its slot.
 
@@ -1226,6 +1252,7 @@ def capture_workspace(
         label=label,
         active_group_id=active_group_id,
         native_zoom_factor=native_zoom_factor,
+        topbar_visible=topbar_visible,
     )
 
 

@@ -2496,21 +2496,54 @@
     }
 
     async function saveWorkspaceForRestart() {
-        /* Best-effort workspace capture before a restart. A 409 means the
-           workspace is empty (nothing live to save), which is not an error —
-           the restart still proceeds. */
+        /* The launcher is outside every workspace window, so it must discover
+           and capture the process-wide live set explicitly. Falling back to
+           the default workspace loses named/multi-workspace state because the
+           default record can be only an empty internal container. */
         try {
-            const nativeZoomFactor = await getNativeSessionZoomFactor();
-            const response = await fetch('/api/runtime-state/save', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ native_zoom_factor: nativeZoomFactor })
-            });
-            if (response.ok || response.status === 409) {
-                return true;
+            const workspacesResponse = await fetch('/api/workspaces');
+            const workspacesData = await workspacesResponse.json().catch(() => ({}));
+            if (!workspacesResponse.ok || !Array.isArray(workspacesData.workspaces)) {
+                throw new Error(workspacesData.error || 'Could not list open workspaces');
             }
-            const data = await response.json().catch(() => ({}));
-            throw new Error(data.error || `Save failed with status ${response.status}`);
+
+            const liveWorkspaces = workspacesData.workspaces.filter(
+                workspace => Number(workspace?.group_count) > 0
+            );
+            for (const workspace of liveWorkspaces) {
+                const workspaceId = normalizeWorkspaceId(workspace.workspace_id);
+                const snapshotState = { workspace_id: workspaceId };
+                const topbarVisible = getStoredWorkspaceTopbarVisible(workspaceId);
+                if (typeof topbarVisible === 'boolean') {
+                    snapshotState.topbar_visible = topbarVisible;
+                }
+                const bridge = window.pywebview?.api;
+                if (bridge?.get_workspace_native_zoom) {
+                    const zoomResult = await bridge.get_workspace_native_zoom(workspaceId);
+                    const nativeZoomFactor = zoomResult?.ok
+                        ? normalizeNativeZoomFactor(zoomResult.zoom_factor)
+                        : null;
+                    if (nativeZoomFactor !== null) {
+                        snapshotState.native_zoom_factor = nativeZoomFactor;
+                    }
+                }
+
+                const response = await fetch('/api/runtime-state/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(snapshotState)
+                });
+                // A workspace may become empty while the user confirms the
+                // restart. Its previous restore point is deliberately kept.
+                if (response.ok || response.status === 409) {
+                    continue;
+                }
+                const data = await response.json().catch(() => ({}));
+                throw new Error(
+                    data.error || `Could not save ${workspace.label || workspaceId}`
+                );
+            }
+            return true;
         } catch (error) {
             console.error('[GridVibe Launcher] workspace save before restart failed:', error);
             return false;
@@ -2539,7 +2572,14 @@
         setUpdateStatus('Saving workspace...');
 
         const saved = await saveWorkspaceForRestart();
-        const savePrefix = saved ? 'Workspace saved.' : 'Workspace save failed.';
+        if (!saved) {
+            button.disabled = false;
+            button.classList.remove('loading');
+            setUpdateStatus('Workspace save failed. Retry before restarting GridVibe.', 'error');
+            showMessage('Workspace save failed. Retry before restarting GridVibe.', 'error');
+            return;
+        }
+        const savePrefix = 'Workspace saved.';
 
         if (!window.pywebview?.api?.restart_application) {
             // Browser mode (or no native bridge): there is nothing to relaunch.

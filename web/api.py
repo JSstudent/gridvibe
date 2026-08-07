@@ -1666,6 +1666,30 @@ def close_workspace(workspace_id: str):
     return jsonify(payload), status
 
 
+@app.route('/api/workspaces/<workspace_id>/ui-state', methods=['PATCH'])
+def update_workspace_ui_state(workspace_id: str):
+    """Update live workspace-window state for the next snapshot capture."""
+    data = request.get_json(silent=True) or {}
+    try:
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not isinstance(data.get("topbar_visible"), bool):
+        return jsonify({"error": "'topbar_visible' must be a boolean"}), 400
+    try:
+        topbar_visible = session_manager.set_topbar_visible(
+            resolved_workspace_id,
+            data["topbar_visible"],
+            require_owned=True,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    return jsonify({
+        "workspace_id": resolved_workspace_id,
+        "topbar_visible": topbar_visible,
+    })
+
+
 @app.route('/api/session-groups/<group_id>/move', methods=['POST'])
 def move_session_group(group_id: str):
     """Move one live session tab to another workspace without restarting it."""
@@ -1691,6 +1715,7 @@ def get_session_groups():
         "workspace_id": workspace_id,
         "groups": groups,
         "count": len(groups),
+        "topbar_visible": session_manager.get_topbar_visible(workspace_id),
     })
 
 
@@ -1777,6 +1802,7 @@ def get_runtime_state():
         "active_group_id": slot.get("active_group_id", "") if slot else "",
         # Optional desktop session-window zoom; null means no preference.
         "native_zoom_factor": slot.get("native_zoom_factor") if slot else None,
+        "topbar_visible": slot.get("topbar_visible", True) if slot else True,
         "active_group_count": len(active_groups),
     })
 
@@ -1795,11 +1821,19 @@ def save_runtime_state():
         return jsonify({"error": str(exc)}), 400
     if not _workspace_exists(workspace_id):
         return jsonify(workspace_missing_payload()), 400
+    if "topbar_visible" in data and not isinstance(data["topbar_visible"], bool):
+        return jsonify({"error": "'topbar_visible' must be a boolean"}), 400
     label = str(data.get("label") or "").strip() or None
     active_group_id = session_manager.set_active_group(
         workspace_id,
         data.get("active_group_id"),
     )
+    topbar_visible = session_manager.get_topbar_visible(workspace_id)
+    if "topbar_visible" in data:
+        topbar_visible = session_manager.set_topbar_visible(
+            workspace_id,
+            data["topbar_visible"],
+        )
     try:
         slot = capture_workspace(
             session_manager,
@@ -1808,6 +1842,7 @@ def save_runtime_state():
             label=label,
             active_group_id=active_group_id,
             native_zoom_factor=data.get("native_zoom_factor"),
+            topbar_visible=topbar_visible,
         )
     except RuntimeStatePersistenceError as exc:
         # The revision never reached the disk. Never answer 200/"saved": a
@@ -1831,6 +1866,7 @@ def save_runtime_state():
         "saved_at": slot["saved_at"],
         "active_group_id": slot["active_group_id"],
         "native_zoom_factor": slot.get("native_zoom_factor"),
+        "topbar_visible": slot["topbar_visible"],
         "groups": slot["groups"],
     })
 

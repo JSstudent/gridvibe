@@ -2767,6 +2767,24 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
             "Second",
         )
 
+    def test_restore_reapplies_the_saved_workspace_topbar_visibility(self):
+        self._launch(session_name="Hidden chrome")
+        api.session_manager.set_topbar_visible("default", False)
+        slot = self._save_slot()
+        self.assertFalse(slot["topbar_visible"])
+        self._close_everything()
+        self.assertTrue(api.session_manager.get_topbar_visible("default"))
+
+        response, payload = self._restore(["default"])
+
+        self.assertEqual(response.status_code, 200)
+        workspace_result = payload["workspaces"][0]
+        self.assertTrue(workspace_result["restored"])
+        self.assertFalse(workspace_result["topbar_visible"])
+        self.assertFalse(api.session_manager.get_topbar_visible("default"))
+        groups = self.client.get("/api/session-groups").get_json()
+        self.assertFalse(groups["topbar_visible"])
+
     def test_r9_a_blank_label_is_derived_never_a_bare_timestamp(self):
         self._launch(session_name="Session 12:34:56")
         self._save_slot()

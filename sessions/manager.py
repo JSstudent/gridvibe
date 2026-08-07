@@ -138,6 +138,7 @@ class Workspace:
     label: str = ""
     created_at: float = field(default_factory=time.time)
     active_group_id: str = ""
+    topbar_visible: bool = True
     # Live-only lifecycle hint: a workspace the user deliberately created empty
     # must survive the empty-workspace pruning that closes a workspace emptied
     # by a close or a move. Absence of groups alone cannot tell the two apart.
@@ -151,6 +152,7 @@ class Workspace:
             "label": self.label,
             "created_at": self.created_at,
             "active_group_id": self.active_group_id,
+            "topbar_visible": self.topbar_visible,
             "retain_when_empty": self.retain_when_empty,
         }
 
@@ -511,6 +513,31 @@ class SessionManager:
             if group is None or group.workspace_id != resolved_workspace_id:
                 workspace.active_group_id = ""
             return workspace.active_group_id
+
+    def set_topbar_visible(
+        self,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        visible: bool = True,
+        *,
+        require_owned: bool = False,
+    ) -> Optional[bool]:
+        """Record one workspace window's live top-bar visibility hint."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            if workspace is None:
+                if require_owned:
+                    raise ValueError("Workspace not found")
+                return None
+            workspace.topbar_visible = bool(visible)
+            return workspace.topbar_visible
+
+    def get_topbar_visible(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> bool:
+        """Return one live workspace's top-bar visibility, visible by default."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            return workspace.topbar_visible if workspace is not None else True
 
     def _generate_session_id(self) -> str:
         """Return a short session id that is not already in use.
@@ -1099,6 +1126,7 @@ class SessionManager:
                     "workspace_id": workspace.workspace_id,
                     "label": workspace.label,
                     "created_at": workspace.created_at,
+                    "topbar_visible": workspace.topbar_visible,
                     "active_group_id": (
                         workspace.active_group_id
                         if workspace.active_group_id in captured_group_ids

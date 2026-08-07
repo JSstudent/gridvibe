@@ -1,6 +1,5 @@
     /* ── Theme management ── */
     const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';
-    const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';
     const DEFAULT_SAVED_SESSION_ID = 'default-session';
 
 
@@ -340,11 +339,7 @@
     }
 
     function getStoredTopbarVisible() {
-        try {
-            return localStorage.getItem(TOPBAR_VISIBILITY_STORAGE_KEY) !== 'hidden';
-        } catch (_) {
-            return true;
-        }
+        return getStoredWorkspaceTopbarVisible(currentWorkspaceId) ?? true;
     }
 
     function updateTopbarToggleButton(visible) {
@@ -362,17 +357,39 @@
         }
     }
 
-    function applyTopbarVisibility(visible, { persist = false, refit = false } = {}) {
+    let reportedTopbarVisible = null;
+
+    function reportTopbarVisibility(visible) {
+        const normalized = Boolean(visible);
+        if (reportedTopbarVisible === normalized) {
+            return;
+        }
+        reportedTopbarVisible = normalized;
+        fetch(`/api/workspaces/${encodeURIComponent(currentWorkspaceId)}/ui-state`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ topbar_visible: normalized })
+        }).then(response => {
+            if (!response.ok) {
+                throw new Error(`Top-bar state update failed with status ${response.status}`);
+            }
+        }).catch(() => {
+            reportedTopbarVisible = null;
+        });
+    }
+
+    function applyTopbarVisibility(
+        visible,
+        { persist = false, refit = false, report = false } = {}
+    ) {
         const shouldShow = Boolean(visible);
         document.body.classList.toggle('topbar-collapsed', !shouldShow);
         updateTopbarToggleButton(shouldShow);
         if (persist) {
-            try {
-                localStorage.setItem(
-                    TOPBAR_VISIBILITY_STORAGE_KEY,
-                    shouldShow ? 'visible' : 'hidden'
-                );
-            } catch (_) {}
+            storeWorkspaceTopbarVisible(currentWorkspaceId, shouldShow);
+        }
+        if (report) {
+            reportTopbarVisibility(shouldShow);
         }
         if (refit) {
             refitAttachedTerminalsForSurfaceMode();
@@ -382,7 +399,8 @@
     function toggleTopbarVisibility() {
         applyTopbarVisibility(document.body.classList.contains('topbar-collapsed'), {
             persist: true,
-            refit: true
+            refit: true,
+            report: true
         });
     }
 
@@ -2371,7 +2389,8 @@
                 body: JSON.stringify({
                     workspace_id: currentWorkspaceId,
                     active_group_id: activeGroupId,
-                    native_zoom_factor: nativeZoomFactor
+                    native_zoom_factor: nativeZoomFactor,
+                    topbar_visible: !document.body.classList.contains('topbar-collapsed')
                 })
             });
             const data = await response.json().catch(() => ({}));
@@ -7065,6 +7084,14 @@
 
         const previousActiveGroupId = activeGroupId;
         const previousGroupIds = knownGroupIds.slice();
+        if (typeof data.topbar_visible === 'boolean') {
+            const currentTopbarVisible = !document.body.classList.contains('topbar-collapsed');
+            reportedTopbarVisible = data.topbar_visible;
+            applyTopbarVisibility(data.topbar_visible, {
+                persist: true,
+                refit: gridBuilt && currentTopbarVisible !== data.topbar_visible
+            });
+        }
         sessionGroups = Array.isArray(data.groups) ? data.groups : [];
         knownGroupIds = sessionGroups.map(group => group.group_id);
         previousGroupIds
