@@ -6432,7 +6432,11 @@
         preview.path = '';
         preview.name = '';
         preview.git = null;
-        preview.dirPath = '';
+        /* Absence means no directory has been loaded yet; an own dirPath of
+           '' means the explorer root is the Preview tab's directory. Keeping
+           those states distinct is what lets root-directory previews survive
+           a workspace restore. */
+        delete preview.dirPath;
         pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
         pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;
         pane._explorerMode = 'viewer';
@@ -6477,7 +6481,10 @@
             renderExplorerTabStrip(index);
             return;
         }
-        if (tab.id === EXPLORER_PREVIEW_TAB_ID && tab.dirPath) {
+        if (
+            tab.id === EXPLORER_PREVIEW_TAB_ID
+            && Object.prototype.hasOwnProperty.call(tab, 'dirPath')
+        ) {
             /* The viewer last rendered another tab, so the pane-global
                directory state no longer describes the Preview tab — re-browse
                the tab's own directory instead of falling through to empty. */
@@ -6910,10 +6917,11 @@
         const previewRecord = explorerPersistableTabView(preview) || {};
         const previewPath = explorerNormalizeTabPath(preview.path);
         const previewDir = explorerNormalizeTabPath(preview.dirPath);
+        const hasPreviewDir = Object.prototype.hasOwnProperty.call(preview, 'dirPath');
         if (previewPath) {
             previewRecord.path = previewPath;
         }
-        if (previewDir) {
+        if (hasPreviewDir) {
             previewRecord.dir = previewDir;
         }
         if (Object.keys(previewRecord).length) {
@@ -6997,7 +7005,12 @@
         const savedPreviewDir = explorerNormalizeTabPath(
             rawPreviewView && typeof rawPreviewView === 'object' ? rawPreviewView.dir : ''
         );
-        if (savedPreviewDir) {
+        const hasSavedPreviewDir = Boolean(
+            rawPreviewView
+            && typeof rawPreviewView === 'object'
+            && Object.prototype.hasOwnProperty.call(rawPreviewView, 'dir')
+        );
+        if (hasSavedPreviewDir) {
             previewTab.dirPath = savedPreviewDir;
         }
         /* Reopen the Preview tab's own content only when no pinned tab was
@@ -7019,7 +7032,7 @@
                     previewTab.git = null;
                 }
                 await restoreExplorerDirectoryFallback(index, savedPreviewDir);
-            } else if (savedPreviewDir) {
+            } else if (hasSavedPreviewDir) {
                 await restoreExplorerDirectoryFallback(index, savedPreviewDir);
             } else {
                 renderExplorerTabStrip(index);

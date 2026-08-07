@@ -2250,15 +2250,18 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Returning to the Preview tab after a pinned tab was active re-browses
         # the tab's own directory instead of falling through to the empty viewer.
         self.assertIn("loadExplorerPane(index, tab.dirPath);", html)
-        # The empty viewer clears the tab's separated path too.
-        self.assertIn("preview.dirPath = '';", html)
+        # The empty viewer removes the separated path: absence means no loaded
+        # directory, while an own empty value identifies the explorer root.
+        self.assertIn("delete preview.dirPath;", html)
         # Serialize: the reserved Preview record carries its own path + dir
         # alongside the zoom, so workspace saves keep the Preview content.
         self.assertIn("previewRecord.path = previewPath;", html)
         self.assertIn("previewRecord.dir = previewDir;", html)
+        self.assertIn("const hasPreviewDir = Object.prototype.hasOwnProperty.call(preview, 'dirPath');", html)
         # Restore: the saved Preview path/dir seed the tab record and reopen
         # when no pinned tab was saved as active.
         self.assertIn("previewTab.dirPath = savedPreviewDir;", html)
+        self.assertIn("} else if (hasSavedPreviewDir) {", html)
         self.assertIn("openExplorerFile(index, savedPreviewPath, {", html)
         self.assertIn("...explorerTabPersistedDiffTarget(previewTab)", html)
         # Re-browsing the saved dir goes through the fallback so a dir that no
@@ -2266,8 +2269,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         # bare error with an inert breadcrumb.
         self.assertIn("restoreExplorerDirectoryFallback(index, savedPreviewDir);", html)
         # The terminal-close snapshot carries dirPath through the rebuild.
-        self.assertIn("dirPath: tab.dirPath || ''", html)
-        self.assertIn("tab.dirPath = saved.dirPath;", html)
+        self.assertIn("hasDirPath: Object.prototype.hasOwnProperty.call(tab, 'dirPath')", html)
+        self.assertIn("if (saved.hasDirPath) {", html)
         # First show goes through the viewer entry point — a bare root load
         # racing the restore could resolve last and clobber the Preview path.
         self.assertNotIn("loadExplorerPane(i);", html)
@@ -8793,6 +8796,29 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Values outside the appearance allowlists fall back to unset.
         self.assertEqual(normalized[1]["explorer_md_preset"], "")
         self.assertEqual(normalized[1]["explorer_md_font"], "")
+
+    def test_normalize_terminal_entries_preserves_preview_root_directory(self):
+        """An explicit empty Preview directory is the explorer root, not unset."""
+        normalized = web_saved_sessions._normalize_terminal_entries(
+            [
+                {
+                    "startup_mode": "explorer",
+                    "explorer_tab_views": {"__preview__": {"dir": ""}},
+                },
+                {
+                    "startup_mode": "explorer",
+                    "explorer_tab_views": {"__preview__": {"dir": "../escape"}},
+                },
+                {"startup_mode": "explorer"},
+            ]
+        )
+
+        self.assertEqual(
+            normalized[0]["explorer_tab_views"],
+            {"__preview__": {"dir": ""}},
+        )
+        self.assertEqual(normalized[1]["explorer_tab_views"], {})
+        self.assertEqual(normalized[2]["explorer_tab_views"], {})
 
     def test_normalize_terminal_entries_accepts_terminal_markdown_fonts(self):
         expected = {

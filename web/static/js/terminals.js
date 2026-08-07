@@ -5972,7 +5972,8 @@
                         view: tab.view || null,
                         fontSize: tab.fontSize || 0,
                         preferredMode: tab.preferredMode || '',
-                        dirPath: tab.dirPath || ''
+                        dirPath: tab.dirPath || '',
+                        hasDirPath: Object.prototype.hasOwnProperty.call(tab, 'dirPath')
                     })),
                     /* Only the dynamic Preview tab needs an explicit reopen; pinned
                        tabs come back through the persisted-tab path. */
@@ -6013,7 +6014,7 @@
                 if (saved.preferredMode) {
                     tab.preferredMode = saved.preferredMode;
                 }
-                if (saved.dirPath) {
+                if (saved.hasDirPath) {
                     tab.dirPath = saved.dirPath;
                 }
             });

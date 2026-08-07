@@ -245,8 +245,12 @@ def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str,
             preview_path = _normalize_explorer_tab_path(raw_view.get("path"))
             if preview_path:
                 record["path"] = preview_path
-            preview_dir = _normalize_explorer_tab_path(raw_view.get("dir"))
-            if preview_dir:
+            raw_preview_dir = raw_view.get("dir")
+            preview_dir = _normalize_explorer_tab_path(raw_preview_dir)
+            # The explorer root is the intentionally empty relative path. Its
+            # presence is distinct from a missing ``dir`` field; unsafe values
+            # that merely normalize to empty must still be dropped.
+            if preview_dir or ("dir" in raw_view and raw_preview_dir == ""):
                 record["dir"] = preview_dir
             folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
             fold_identity = _normalize_explorer_view_identity(raw_view.get("fold_identity"))
