@@ -1,6 +1,6 @@
 [project]
 name = "gridvibe"
-version = "1.7.0"
+version = "1.8.0"
 description = "Browser-first multi-session terminal workspace"
 readme = "README.md"
 requires-python = ">=3.10"
