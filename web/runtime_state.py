@@ -39,6 +39,12 @@ A file that cannot be parsed, or that carries a schema version this build does
 not understand, is **quarantined** (moved aside with a timestamp) and the
 last-good ``<state>.bak`` written before the previous commit is used instead —
 never silently converted into an empty state that the next capture overwrites.
+
+Within a readable file, every slot is re-validated on read (:func:`_validate_slot`)
+before it is offered: the file is local state a user may edit, and a slot that
+cannot actually be relaunched must not be advertised as restorable. Both read
+paths share that one gate, so the restore chooser's group and pane counts
+always describe what a restore of that slot would really start.
 """
 
 import json
@@ -52,7 +58,11 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from web.paths import BASE_DIR
-from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id
+from web.workspaces import (
+    DEFAULT_WORKSPACE_ID,
+    normalize_workspace_id,
+    normalize_workspace_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,13 +91,23 @@ RESTORABLE_ORIGINS = ("auto", "manual")
 # The restore offer is deliberately permanent (no maximum age), so with N
 # workspaces "one slot" would grow into "one slot per workspace ever autosaved"
 # and only Forget would ever shrink it. Bound the automatic ones at the single
-# write point; a slot the user explicitly saved is pinned, so it keeps its
-# permanent-offer promise.
+# write point. Two kinds of slot are exempt: one the user explicitly saved (it
+# is pinned, so it keeps its permanent-offer promise) and one whose workspace
+# is live right now (MW-14 — a workspace on screen is never evicted from
+# restore state, so the cap only ever collects *stale closed* slots).
 MAX_AUTO_WORKSPACE_SLOTS = 12
 # Durable ordering entries for workspaces that no longer have a slot are
 # tombstones. They only matter while a pre-clear capture may still be in
 # flight, so the newest few are enough and the map stays bounded.
 MAX_TOMBSTONES = 64
+# The most panes one *stored* group may claim before it is read as corrupt
+# rather than as a workspace. Deliberately not `runtime_config.max_sessions`:
+# a launch already refuses more panes than that and reports it per group with
+# a Retry, which is the right answer to a *configuration* change — lowering
+# max_sessions must not make a saved workspace vanish from the restore
+# chooser with no way to learn why. This ceiling only catches a file that is
+# not describing a workspace at all.
+MAX_STORED_GROUP_PANES = 64
 # How long one process waits for another to finish its read-modify-replace.
 STATE_LOCK_TIMEOUT_SECONDS = 10.0
 NATIVE_ZOOM_FACTOR_MIN = 0.25
@@ -233,6 +253,137 @@ def _pane_count(groups: List[Dict[str, Any]]) -> int:
     return sum(len(group.get("sessions") or []) for group in groups)
 
 
+# ==================== Slot validation (read side) ====================
+
+
+def _validate_session(session: Any) -> Optional[Dict[str, Any]]:
+    """Return one replayable pane, restricted to the captured launch fields.
+
+    The allowlist is the same tuple capture writes, so it round-trips a real
+    slot untouched while dropping anything a hand-edited (or older, or
+    truncated) file added. It is also where the module's "the snapshot never
+    contains passwords" promise is enforced on *read*: ``password`` is not a
+    captured field, so it cannot re-enter a launch body through the state file.
+    """
+    if not isinstance(session, dict):
+        return None
+    return {key: session.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+
+
+def _validate_group(group: Any) -> Optional[Dict[str, Any]]:
+    """Return one restorable group, or ``None`` when it is not one.
+
+    A group is unrestorable when it is not an object, when it carries no usable
+    pane, or when it claims more panes than :data:`MAX_STORED_GROUP_PANES`. The
+    zero-pane case is the one MW-16 names: such a group used to be counted in
+    the restore chooser's summary ("1 group, 0 panes") and then relaunch
+    nothing, so the offer promised a tab it could never deliver.
+
+    Layout and connection mode are normalized through the same helpers the
+    launch uses, so a stored geometry that no longer matches its pane count is
+    dropped rather than replayed. Capture stores post-launch values, so this is
+    a no-op for a real slot and only bites a corrupted one.
+    """
+    if not isinstance(group, dict):
+        return None
+
+    raw_sessions = group.get("sessions")
+    if not isinstance(raw_sessions, list):
+        return None
+    sessions: List[Dict[str, Any]] = []
+    for raw_session in raw_sessions:
+        pane = _validate_session(raw_session)
+        if pane is not None:
+            sessions.append(pane)
+    if not sessions or len(sessions) > MAX_STORED_GROUP_PANES:
+        return None
+
+    from web.saved_sessions import (
+        _normalize_connection_mode,
+        _normalize_layout,
+        _normalize_workspace_layout,
+    )
+
+    return {
+        "group_id": str(group.get("group_id") or ""),
+        "name": str(group.get("name") or ""),
+        "connection_mode": _normalize_connection_mode(group.get("connection_mode")),
+        "layout": _normalize_layout(group.get("layout"), len(sessions)),
+        "workspace_layout": _normalize_workspace_layout(
+            group.get("workspace_layout"), len(sessions)
+        ),
+        # The credential reference (MW-03): a lookup key into
+        # saved_sessions.json, never a shape source. Coerced, never bounded —
+        # a saved-session id is any nonblank string the preset store accepted.
+        "saved_session_id": str(group.get("saved_session_id") or ""),
+        "sessions": sessions,
+    }
+
+
+def _validate_slot(workspace_id: Any, slot: Any) -> Optional[Dict[str, Any]]:
+    """Return a normalized, restorable copy of one stored slot, or ``None``.
+
+    The single read-side gate (MW-16), shared by
+    :meth:`RuntimeStateStore.load_restorable_workspace` and
+    :meth:`RuntimeStateStore.list_restorable_workspaces` so the chooser's
+    counts and the restore's shape can no longer disagree — a slot whose only
+    group had zero panes used to be advertised as "1 group, 0 panes" and then
+    relaunch nothing.
+
+    Unrestorable *groups* are dropped and logged; a slot left with none is
+    unrestorable and is omitted from both read paths. Nothing is rewritten on
+    disk: the stored bytes stay put for diagnosis, and the last-good file is
+    never destroyed by a read.
+    """
+    if not isinstance(slot, dict):
+        return None
+    try:
+        normalized_id = normalize_workspace_id(workspace_id)
+    except ValueError:
+        return None
+    if slot.get("origin") not in RESTORABLE_ORIGINS:
+        return None
+    raw_groups = slot.get("groups")
+    if not isinstance(raw_groups, list) or not raw_groups:
+        return None
+
+    groups: List[Dict[str, Any]] = []
+    for raw_group in raw_groups:
+        group = _validate_group(raw_group)
+        if group is not None:
+            groups.append(group)
+    dropped = len(raw_groups) - len(groups)
+    if dropped:
+        logger.warning(
+            "Runtime-state slot workspace=%s dropped %d of %d unrestorable groups",
+            normalized_id,
+            dropped,
+            len(raw_groups),
+        )
+    if not groups:
+        return None
+
+    validated = dict(slot)
+    validated["workspace_id"] = normalized_id
+    validated["groups"] = groups
+    validated["label"] = (
+        normalize_workspace_label(slot.get("label")) or _derive_workspace_label(groups)
+    )
+    # Re-validate the front-group hint against what actually survived: an id
+    # naming no restorable group must degrade to "no preference", never send
+    # the restore looking for a group it will not create.
+    stored_group_ids = {group["group_id"] for group in groups}
+    active_group_id = str(slot.get("active_group_id") or "").strip()
+    validated["active_group_id"] = (
+        active_group_id if active_group_id in stored_group_ids else ""
+    )
+    # Hand-edited or older local state degrades to "no zoom preference".
+    validated["native_zoom_factor"] = normalize_native_zoom_factor(
+        slot.get("native_zoom_factor")
+    )
+    return validated
+
+
 # ==================== File primitives ====================
 
 
@@ -360,6 +511,14 @@ def _parse_state(data: Any) -> Optional[Dict[str, Any]]:
             for slot in workspaces.values():
                 if isinstance(slot, dict) and slot.get("origin") == "manual":
                     slot.setdefault("manually_saved_at", slot.get("saved_at"))
+            # DEBUG, not INFO: a v1/v2 file is re-migrated on every read until
+            # the next capture rewrites it at the current version, so this can
+            # fire several times per user action (guardrail 9).
+            logger.debug(
+                "Migrated runtime state v2 -> v%d (%d workspace slots)",
+                SCHEMA_VERSION,
+                len(workspaces),
+            )
         return state
 
     # One-time v1 → v3 migration: a legacy single blob wraps into the
@@ -384,6 +543,11 @@ def _parse_state(data: Any) -> Optional[Dict[str, Any]]:
         "active_group_id": "",
         "groups": groups,
     }
+    logger.debug(
+        "Migrated runtime state v1 -> v%d (1 workspace slot, %d groups)",
+        SCHEMA_VERSION,
+        len(groups),
+    )
     return state
 
 
@@ -695,7 +859,10 @@ class RuntimeStateStore:
         workspace_id = normalize_workspace_id(workspace_id)
         ticket = self._next_ticket()
         observed = self.observed_revisions().get(workspace_id, 0)
-        live_snapshot = session_manager.snapshot_live_workspaces().get(workspace_id)
+        # The complete live set, not just this workspace: it is what the
+        # auto-slot cap must never evict (MW-14).
+        live_snapshots = session_manager.snapshot_live_workspaces()
+        live_snapshot = live_snapshots.get(workspace_id)
         if not live_snapshot:
             return None
         groups = [
@@ -739,7 +906,7 @@ class RuntimeStateStore:
                 revisions, workspace_id, "commit", observed
             )
             workspaces[workspace_id] = slot
-            _evict_excess_auto_slots(workspaces)
+            _evict_excess_auto_slots(workspaces, set(live_snapshots))
             self._prune_revisions(state)
             _write_state_locked(state, state_path)
             self._record_commit_locked(workspace_id, ticket, "commit")
@@ -811,7 +978,7 @@ class RuntimeStateStore:
                 workspaces[workspace_id] = slot
                 stored_slots[workspace_id] = slot
             if stored_slots:
-                _evict_excess_auto_slots(workspaces)
+                _evict_excess_auto_slots(workspaces, set(live_snapshots))
                 self._prune_revisions(state)
                 _write_state_locked(state, state_path)
                 for workspace_id in stored_slots:
@@ -825,39 +992,18 @@ class RuntimeStateStore:
     def load_restorable_workspace(
         self, workspace_id: str = DEFAULT_WORKSPACE_ID
     ) -> Optional[Dict[str, Any]]:
-        """Return the saved slot iff it has groups and a restorable origin.
+        """Return the saved slot iff it validates as restorable (MW-16).
 
-        The offer is permanent — there is deliberately no maximum age.
+        The offer is permanent — there is deliberately no maximum age. The file
+        is local state a user may edit, so every field is re-validated on read
+        through :func:`_validate_slot`, the same gate the restore chooser's
+        summaries pass through.
         """
         workspace_id = normalize_workspace_id(workspace_id)
         state_path = self.state_path()
         with self._lock, _CrossProcessStateLock(state_path):
             state = _read_state_locked(state_path)
-        slot = state.get("workspaces", {}).get(workspace_id)
-        if not isinstance(slot, dict):
-            return None
-        groups = slot.get("groups")
-        if not isinstance(groups, list) or not groups:
-            return None
-        if slot.get("origin") not in RESTORABLE_ORIGINS:
-            return None
-        # Re-validate the hint on read: the file is local state a user may edit,
-        # and an id naming no stored group must degrade to "no preference",
-        # never send the restore looking for a group it will not create.
-        active_group_id = str(slot.get("active_group_id") or "").strip()
-        stored_group_ids = {
-            str(group.get("group_id") or "")
-            for group in groups
-            if isinstance(group, dict)
-        }
-        slot["active_group_id"] = (
-            active_group_id if active_group_id in stored_group_ids else ""
-        )
-        # Hand-edited or older local state degrades to "no zoom preference".
-        slot["native_zoom_factor"] = normalize_native_zoom_factor(
-            slot.get("native_zoom_factor")
-        )
-        return slot
+        return _validate_slot(workspace_id, state.get("workspaces", {}).get(workspace_id))
 
     def clear_workspace(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> bool:
         """Remove one workspace slot, preserving siblings.
@@ -888,50 +1034,44 @@ class RuntimeStateStore:
             had_state_file = os.path.exists(state_path)
             state = _read_state_locked(state_path)
             revisions = state.setdefault("revisions", {})
-            self._bump_revision(revisions, workspace_id, "clear")
+            revision = self._bump_revision(revisions, workspace_id, "clear")
             existed = workspace_id in state.get("workspaces", {})
             if existed:
                 del state["workspaces"][workspace_id]
             self._prune_revisions(state)
-            if existed or had_state_file:
+            persisted = existed or had_state_file
+            if persisted:
                 _write_state_locked(state, state_path)
             self._record_commit_locked(workspace_id, ticket, "clear")
         logger.debug(
-            "Runtime-state clear workspace=%s existed=%s", workspace_id, existed
+            "Runtime-state clear workspace=%s existed=%s revision=%s persisted=%s",
+            workspace_id,
+            existed,
+            revision,
+            persisted,
         )
         return existed
 
     def list_restorable_workspaces(self) -> List[Dict[str, Any]]:
-        """Return credential-free summaries for all valid restorable slots."""
+        """Return credential-free summaries for all valid restorable slots.
+
+        Counts come from the *validated* shape (MW-16), so a summary promises
+        exactly what a restore of that slot would relaunch.
+        """
         state_path = self.state_path()
         with self._lock, _CrossProcessStateLock(state_path):
             state = _read_state_locked(state_path)
 
         summaries = []
-        for workspace_id, slot in state.get("workspaces", {}).items():
-            if not isinstance(slot, dict):
+        for workspace_id, raw_slot in state.get("workspaces", {}).items():
+            slot = _validate_slot(workspace_id, raw_slot)
+            if slot is None:
                 continue
-            try:
-                normalized_id = normalize_workspace_id(workspace_id)
-            except ValueError:
-                continue
-            groups = slot.get("groups")
-            if (
-                not isinstance(groups, list)
-                or not groups
-                or slot.get("origin") not in RESTORABLE_ORIGINS
-            ):
-                continue
-            valid_groups = [group for group in groups if isinstance(group, dict)]
-            if not valid_groups:
-                continue
+            valid_groups = slot["groups"]
             summaries.append(
                 {
-                    "workspace_id": normalized_id,
-                    "label": (
-                        str(slot.get("label") or "").strip()
-                        or _derive_workspace_label(valid_groups)
-                    ),
+                    "workspace_id": slot["workspace_id"],
+                    "label": slot["label"],
                     "origin": slot.get("origin"),
                     # When the user last saved this workspace by hand; None for
                     # a slot only ever written by the timer.
@@ -981,32 +1121,61 @@ def _log_commit(workspace_id: str, origin: str, slot: Dict[str, Any]) -> None:
     )
 
 
-def _evict_excess_auto_slots(workspaces: Dict[str, Any]) -> None:
-    """Keep only the newest ``MAX_AUTO_WORKSPACE_SLOTS`` unpinned slots.
+def _evict_excess_auto_slots(
+    workspaces: Dict[str, Any],
+    live_workspace_ids: set,
+) -> None:
+    """Bound the unpinned slots without ever evicting a *live* workspace.
 
-    Applied at the single write point, oldest-first, and only to slots the user
-    never explicitly saved — an explicit Save Workspace pins its slot for good,
-    whichever writer refreshed its shape last. Caller holds both state locks.
+    The cap exists because the restore offer is permanent: without it, "one
+    slot" would grow into "one slot per workspace ever autosaved" and only
+    Forget would shrink it. It applies to **stale closed** slots only (MW-14).
+
+    Eviction used to run over every unpinned slot, and one autosave tick stamps
+    each workspace it captured with the same ``saved_at`` — so past twelve live
+    workspaces the timestamps tied and the opaque workspace id became the
+    retention tie-breaker, silently dropping workspaces the user still had open
+    from restore state. A workspace that is live right now therefore keeps its
+    slot even when that pushes the file past the cap; losing the shape of a
+    workspace the user is looking at is the worse outcome, and the excess
+    resolves itself as those workspaces close.
+
+    ``live_workspace_ids`` is the set the manager just reported as capturable
+    (:meth:`SessionManager.snapshot_live_workspaces` only returns workspaces
+    that hold at least one non-empty group). Caller holds both state locks.
     """
-    auto_slots = [
-        (workspace_id, slot)
-        for workspace_id, slot in workspaces.items()
-        if isinstance(slot, dict) and not _slot_is_pinned(slot)
-    ]
-    if len(auto_slots) <= MAX_AUTO_WORKSPACE_SLOTS:
+    live_unpinned = 0
+    evictable: List[Tuple[str, Dict[str, Any]]] = []
+    for workspace_id, slot in workspaces.items():
+        if not isinstance(slot, dict) or _slot_is_pinned(slot):
+            continue
+        if workspace_id in live_workspace_ids:
+            live_unpinned += 1
+        else:
+            evictable.append((workspace_id, slot))
+
+    allowance = max(0, MAX_AUTO_WORKSPACE_SLOTS - live_unpinned)
+    if live_unpinned > MAX_AUTO_WORKSPACE_SLOTS:
+        logger.debug(
+            "Runtime-state auto slots exceed the cap: %d live workspaces > %d; "
+            "no live workspace is evicted",
+            live_unpinned,
+            MAX_AUTO_WORKSPACE_SLOTS,
+        )
+    if len(evictable) <= allowance:
         return
 
-    auto_slots.sort(
+    evictable.sort(
         key=lambda item: (
             item[1].get("saved_at") if isinstance(item[1].get("saved_at"), (int, float)) else 0,
             item[0],
         ),
         reverse=True,
     )
-    evicted = [workspace_id for workspace_id, _ in auto_slots[MAX_AUTO_WORKSPACE_SLOTS:]]
+    evicted = [workspace_id for workspace_id, _ in evictable[allowance:]]
     for workspace_id in evicted:
         del workspaces[workspace_id]
-    logger.debug("Evicted %d oldest auto workspace slots", len(evicted))
+    logger.debug("Evicted %d oldest closed auto workspace slots", len(evicted))
 
 
 # ==================== Process-wide store + module API ====================

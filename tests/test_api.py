@@ -15652,7 +15652,15 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
                 {
                     "version": 1,
                     "saved_at": time.time(),
-                    "groups": [{"group_id": "g1", "name": "buildserver-01"}],
+                    "groups": [
+                        {
+                            "group_id": "g1",
+                            "name": "buildserver-01",
+                            # A group needs a pane to be restorable (MW-16); a
+                            # real v1 file always carried them.
+                            "sessions": [{"host": "buildserver-01"}],
+                        }
+                    ],
                 }
             ),
             encoding="utf-8",

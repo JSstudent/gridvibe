@@ -1214,6 +1214,473 @@ class RuntimeStateSchemaRecoveryTestCase(unittest.TestCase):
         self.assertNotIn("/srv/app", commits[0])
 
 
+class RuntimeStateRetentionTestCase(unittest.TestCase):
+    """MW-14: the auto-slot cap collects stale closed slots, never live ones.
+
+    One autosave tick stamps every workspace it captured with the same
+    ``saved_at``, so past twelve live workspaces the timestamps tied and the
+    opaque workspace id decided which of the user's open workspaces silently
+    lost its restore slot.
+    """
+
+    def setUp(self):
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _live_workspace(self, index):
+        """Create one live workspace holding one one-pane group."""
+        workspace_id = f"w{index:011d}"
+        api.session_manager.create_workspace(f"WS {index}", workspace_id)
+        api.session_manager.create_group(
+            name=f"g{index}",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id=f"g{index}",
+            workspace_id=workspace_id,
+        )
+        api.session_manager.create_session(
+            group_id=f"g{index}", host=f"h{index}.example", directory="/srv"
+        )
+        return workspace_id
+
+    def _seed_closed_slots(self, count, first_saved_at=1000.0):
+        """Write `count` auto slots for workspaces that are not live."""
+        state = (
+            json.loads(self.state_path.read_text(encoding="utf-8"))
+            if self.state_path.exists()
+            else {"version": web_runtime_state.SCHEMA_VERSION, "workspaces": {}}
+        )
+        for index in range(count):
+            workspace_id = f"c{index:011d}"
+            state["workspaces"][workspace_id] = {
+                "workspace_id": workspace_id,
+                "label": f"Closed {index}",
+                "origin": "auto",
+                "saved_at": first_saved_at + index,
+                "groups": [{"group_id": f"cg{index}", "sessions": [{"host": "h"}]}],
+            }
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    def _stored(self):
+        return json.loads(self.state_path.read_text(encoding="utf-8"))["workspaces"]
+
+    def test_every_live_workspace_survives_one_autosave_over_the_cap(self):
+        """Regression matrix row 14 — thirteen live workspaces, all restorable."""
+        live_ids = [
+            self._live_workspace(index)
+            for index in range(web_runtime_state.MAX_AUTO_WORKSPACE_SLOTS + 1)
+        ]
+
+        stored_slots = web_runtime_state.capture_live_workspaces(api.session_manager)
+
+        self.assertEqual(sorted(stored_slots), sorted(live_ids))
+        self.assertEqual(sorted(self._stored()), sorted(live_ids))
+        offered = {
+            row["workspace_id"] for row in web_runtime_state.list_restorable_workspaces()
+        }
+        self.assertEqual(offered, set(live_ids))
+        for workspace_id in live_ids:
+            self.assertIsNotNone(
+                web_runtime_state.load_restorable_workspace(workspace_id),
+                f"{workspace_id} is live but was evicted from restore state",
+            )
+
+    def test_a_single_manual_save_never_evicts_a_live_sibling(self):
+        """The one-workspace writer sees the whole live set, not just its own."""
+        live_ids = [
+            self._live_workspace(index)
+            for index in range(web_runtime_state.MAX_AUTO_WORKSPACE_SLOTS + 2)
+        ]
+        web_runtime_state.capture_live_workspaces(api.session_manager)
+
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=live_ids[0], origin="manual"
+        )
+
+        self.assertEqual(sorted(self._stored()), sorted(live_ids))
+
+    def test_stale_closed_slots_are_still_evicted_down_to_the_cap(self):
+        """The cap still does its job — it just only collects closed slots."""
+        live_id = self._live_workspace(0)
+        self._seed_closed_slots(web_runtime_state.MAX_AUTO_WORKSPACE_SLOTS + 5)
+
+        web_runtime_state.capture_workspace(api.session_manager, workspace_id=live_id)
+
+        stored = self._stored()
+        self.assertIn(live_id, stored)
+        self.assertEqual(len(stored), web_runtime_state.MAX_AUTO_WORKSPACE_SLOTS)
+        # Oldest closed slots go first; the newest closed ones stay.
+        self.assertNotIn("c00000000000", stored)
+        self.assertIn("c00000000016", stored)
+
+    def test_live_workspaces_take_the_whole_allowance_from_closed_slots(self):
+        """A live workspace does not merely survive — it costs a closed slot."""
+        live_ids = [self._live_workspace(index) for index in range(3)]
+        self._seed_closed_slots(web_runtime_state.MAX_AUTO_WORKSPACE_SLOTS)
+
+        web_runtime_state.capture_live_workspaces(api.session_manager)
+
+        stored = self._stored()
+        for workspace_id in live_ids:
+            self.assertIn(workspace_id, stored)
+        closed_kept = [key for key in stored if key.startswith("c")]
+        self.assertEqual(
+            len(closed_kept), web_runtime_state.MAX_AUTO_WORKSPACE_SLOTS - len(live_ids)
+        )
+
+    def test_a_pinned_closed_slot_is_still_exempt_from_the_cap(self):
+        live_id = self._live_workspace(0)
+        self._seed_closed_slots(web_runtime_state.MAX_AUTO_WORKSPACE_SLOTS + 5)
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state["workspaces"]["c00000000000"]["manually_saved_at"] = 1.0
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        web_runtime_state.capture_workspace(api.session_manager, workspace_id=live_id)
+
+        # The oldest slot of all, and the only one the user saved by hand.
+        self.assertIn("c00000000000", self._stored())
+
+
+class RuntimeStateSlotValidationTestCase(unittest.TestCase):
+    """MW-16 (field-validation half): an offer must be one a restore can keep.
+
+    ``runtime_state.json`` is local state a user may edit, and truncation or a
+    stale writer can leave a group nothing can launch. Such a group used to be
+    counted in the restore chooser ("1 group, 0 panes") and then relaunch
+    nothing.
+    """
+
+    WORKSPACE_A = "aaaaaaaaaaaa"
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_slot(self, groups, workspace_id=None, **slot_overrides):
+        workspace_id = workspace_id or self.WORKSPACE_A
+        state = (
+            json.loads(self.state_path.read_text(encoding="utf-8"))
+            if self.state_path.exists()
+            else {"version": web_runtime_state.SCHEMA_VERSION, "workspaces": {}}
+        )
+        state["workspaces"][workspace_id] = {
+            "workspace_id": workspace_id,
+            "label": "Alpha",
+            "origin": "auto",
+            "saved_at": 1000.0,
+            "groups": groups,
+            **slot_overrides,
+        }
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        return workspace_id
+
+    @staticmethod
+    def _group(group_id="g1", panes=1, **overrides):
+        return {
+            "group_id": group_id,
+            "name": "Group",
+            "connection_mode": "wsl",
+            "layout": "single" if panes == 1 else "vertical",
+            "sessions": [{"directory": "/srv", "title": f"Pane {i}"} for i in range(panes)],
+            **overrides,
+        }
+
+    def _summaries(self):
+        return {
+            row["workspace_id"]: row
+            for row in web_runtime_state.list_restorable_workspaces()
+        }
+
+    # ── the zero-pane group the finding names ──
+
+    def test_a_zero_pane_group_is_neither_offered_nor_counted(self):
+        """Regression matrix row 15."""
+        self._write_slot([self._group(panes=0)])
+
+        self.assertEqual(self._summaries(), {})
+        self.assertIsNone(web_runtime_state.load_restorable_workspace(self.WORKSPACE_A))
+
+    def test_a_zero_pane_group_beside_a_real_one_costs_only_itself(self):
+        self._write_slot([self._group("good"), self._group("empty", panes=0)])
+
+        summary = self._summaries()[self.WORKSPACE_A]
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        # The summary now promises exactly what a restore of this slot starts.
+        self.assertEqual(summary["group_count"], 1)
+        self.assertEqual(summary["pane_count"], 1)
+        self.assertEqual([group["group_id"] for group in slot["groups"]], ["good"])
+
+    def test_the_summary_count_matches_what_a_restore_actually_starts(self):
+        """The chooser and the restore read through one validation gate."""
+        self._write_slot(
+            [self._group("good", panes=2), self._group("junk", sessions="not-a-list")]
+        )
+
+        summary = self._summaries()[self.WORKSPACE_A]
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        self.assertEqual(summary["group_count"], len(slot["groups"]))
+        self.assertEqual(
+            summary["pane_count"],
+            sum(len(group["sessions"]) for group in slot["groups"]),
+        )
+
+    def test_a_slot_whose_every_group_is_unrestorable_is_dropped_whole(self):
+        self._write_slot([self._group("a", panes=0), {"not": "a group"}])
+
+        self.assertEqual(self._summaries(), {})
+        self.assertIsNone(web_runtime_state.load_restorable_workspace(self.WORKSPACE_A))
+
+    def test_an_absurd_pane_count_is_read_as_corruption(self):
+        self._write_slot(
+            [self._group(panes=web_runtime_state.MAX_STORED_GROUP_PANES + 1)]
+        )
+
+        self.assertIsNone(web_runtime_state.load_restorable_workspace(self.WORKSPACE_A))
+
+    def test_a_pane_count_over_max_sessions_stays_an_offer_with_a_retryable_error(self):
+        """Lowering max_sessions must not make a saved workspace vanish.
+
+        That is a configuration change, and the launch already answers it per
+        group with "Maximum N sessions allowed" and a Retry — an answer the
+        user can act on. Hiding the slot instead would lose the workspace with
+        no way to learn why.
+        """
+        self._write_slot([self._group(panes=4)])
+
+        with patch.object(api.runtime_config, "max_sessions", 2):
+            self.assertIsNotNone(
+                web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+            )
+            self.assertIn(self.WORKSPACE_A, self._summaries())
+
+    # ── field-level shape ──
+
+    def test_a_password_in_the_state_file_never_reaches_a_launch_body(self):
+        """The no-secrets promise is enforced on read, not only on write."""
+        self._write_slot(
+            [self._group(sessions=[{"host": "h.example", "password": "leaked"}])]
+        )
+
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        self.assertNotIn("password", slot["groups"][0]["sessions"][0])
+        self.assertNotIn(
+            "leaked",
+            json.dumps(
+                self.client.get(
+                    "/api/runtime-state", query_string={"workspace_id": self.WORKSPACE_A}
+                ).get_json()
+            ),
+        )
+
+    def test_an_unknown_session_field_is_dropped_rather_than_replayed(self):
+        self._write_slot(
+            [self._group(sessions=[{"host": "h.example", "invented_field": "x"}])]
+        )
+
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        pane = slot["groups"][0]["sessions"][0]
+        self.assertEqual(pane["host"], "h.example")
+        self.assertNotIn("invented_field", pane)
+
+    def test_a_layout_that_no_longer_matches_the_pane_count_is_normalized(self):
+        self._write_slot(
+            [
+                self._group(
+                    panes=1,
+                    layout="grid",
+                    workspace_layout={"split_slot_rects": [{"x": 1, "y": 1, "w": 1, "h": 1}] * 3},
+                )
+            ]
+        )
+
+        group = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)["groups"][0]
+
+        self.assertEqual(group["layout"], "single")
+        self.assertIsNone(group["workspace_layout"])
+
+    def test_a_real_captured_slot_round_trips_through_validation_unchanged(self):
+        """Validation must be a no-op on a slot GridVibe itself wrote."""
+        api.session_manager.create_workspace("Alpha", self.WORKSPACE_A)
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": "Files",
+                "workspace_id": self.WORKSPACE_A,
+                "sessions": [
+                    {"directory": str(self.temp_dir.name), "startup_mode": "explorer"}
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.get_json())
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A, origin="manual"
+        )
+        stored = json.loads(self.state_path.read_text(encoding="utf-8"))
+
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        self.assertEqual(slot["groups"], stored["workspaces"][self.WORKSPACE_A]["groups"])
+
+    def test_a_front_group_hint_naming_a_dropped_group_degrades_to_no_preference(self):
+        self._write_slot(
+            [self._group("good"), self._group("empty", panes=0)],
+            active_group_id="empty",
+        )
+
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        self.assertEqual(slot["active_group_id"], "")
+
+    def test_an_unrestorable_group_is_logged_without_connection_details(self):
+        self._write_slot(
+            [
+                self._group("good"),
+                self._group("empty", panes=0, sessions=[], name="secret-host"),
+            ]
+        )
+
+        with self.assertLogs(web_runtime_state.logger, level="WARNING") as captured:
+            web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        dropped = [line for line in captured.output if "unrestorable groups" in line]
+        self.assertEqual(len(dropped), 1)
+        self.assertIn(f"workspace={self.WORKSPACE_A}", dropped[0])
+        self.assertIn("dropped 1 of 2", dropped[0])
+        self.assertNotIn("secret-host", dropped[0])
+
+    def test_a_read_never_rewrites_the_state_file(self):
+        """Validation must not destroy the evidence, or the last-good file."""
+        self._write_slot([self._group("good"), self._group("empty", panes=0)])
+        before = self.state_path.read_bytes()
+
+        web_runtime_state.list_restorable_workspaces()
+        web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+
+class WorkspaceDiagnosticsTestCase(unittest.TestCase):
+    """MW-16 (diagnostics half): safe metadata for every state transition.
+
+    The log has to be enough to reconstruct *who wrote what, in which order,
+    and what a restore actually did* — and to contain nothing about where the
+    user connects. Capture is covered by
+    `RuntimeStateSchemaRecoveryTestCase.test_capture_logs_shape_metadata…`;
+    this covers the other two transitions.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "top-secret-repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _launch(self, session_name):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": session_name,
+                "sessions": [
+                    {
+                        "directory": str(self.repo_dir),
+                        "initial_command": "",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return response.get_json()
+
+    def test_restore_logs_its_outcome_without_connection_or_command_data(self):
+        self._launch("First")
+        self._launch("Second")
+        web_runtime_state.capture_workspace(api.session_manager, origin="manual")
+        self.client.delete("/api/sessions")
+        api.session_manager.reset_sessions()
+
+        with self.assertLogs(web_workspaces.logger, level="INFO") as captured:
+            result = web_workspaces.restore_workspace("default")
+
+        self.assertTrue(result["restored"])
+        restored = [line for line in captured.output if "Restored workspace=" in line]
+        self.assertEqual(len(restored), 1)
+        self.assertIn("workspace=default", restored[0])
+        self.assertIn("groups=2/2", restored[0])
+        self.assertIn("panes=2", restored[0])
+        self.assertNotIn("top-secret-repo", restored[0])
+
+    def test_a_restore_that_started_nothing_never_logs_a_success(self):
+        self._launch("First")
+        web_runtime_state.capture_workspace(api.session_manager, origin="manual")
+        self.client.delete("/api/sessions")
+        api.session_manager.reset_sessions()
+
+        with patch.object(api.runtime_config, "max_sessions", 0):
+            with self.assertLogs(web_workspaces.logger, level="INFO") as captured:
+                web_workspaces.restore_workspace("default")
+
+        # Nothing started, so the outcome line is not emitted — the failure is
+        # reported per group instead. What must not happen is a claim of
+        # success, which this asserts by its absence.
+        self.assertEqual(
+            [line for line in captured.output if "Restored workspace=" in line], []
+        )
+
+    def test_forget_logs_the_ordering_revision_it_committed(self):
+        self._launch("First")
+        web_runtime_state.capture_workspace(api.session_manager, origin="manual")
+
+        with self.assertLogs(web_runtime_state.logger, level="DEBUG") as captured:
+            self.assertTrue(web_runtime_state.clear_workspace("default"))
+
+        clears = [line for line in captured.output if "Runtime-state clear" in line]
+        self.assertEqual(len(clears), 1)
+        self.assertIn("workspace=default", clears[0])
+        self.assertIn("existed=True", clears[0])
+        self.assertIn("persisted=True", clears[0])
+        # The durable revision is what orders this clear against an in-flight
+        # capture, in this process or another; without it the log cannot
+        # explain why a later capture was rejected.
+        self.assertRegex(clears[0], r"revision=[1-9]\d*")
+        self.assertNotIn("top-secret-repo", clears[0])
+
+
 class RuntimeStateProductionPathGuardTestCase(unittest.TestCase):
     """MW-01: the suite must never own the developer's runtime_state.json."""
 
@@ -1918,6 +2385,17 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.get_json())
         return response.get_json()
 
+    def _panes(self, count):
+        """Return `count` explorer panes for a wider-than-default launch body."""
+        return [
+            {
+                "directory": str(self.repo_dir),
+                "title": f"Files {index + 1}",
+                "startup_mode": "explorer",
+            }
+            for index in range(count)
+        ]
+
     def _launch_ssh(self, workspace_id="default", terminal_count=1, **overrides):
         """Launch a group that really names the seeded preset's SSH target.
 
@@ -2216,33 +2694,42 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
         self.assertEqual(len(started), 1)
 
     def test_r7_partial_success_reports_the_failed_group_and_keeps_the_rest(self):
+        """One group that cannot relaunch is reported, not fatal to the rest.
+
+        The failure is injected the way it really happens — ``max_sessions``
+        lowered since the workspace was captured, so the wider group no longer
+        fits. It used to be injected by emptying a stored group's ``sessions``,
+        which MW-16 now rejects at read: a zero-pane group is corruption, and
+        the restore never sees it.
+        """
         self._launch(session_name="Good")
-        self._launch(session_name="Bad")
+        self._launch(session_name="Bad", layout="vertical", sessions=self._panes(2))
         self._save_slot()
         self._close_everything()
-        state = json.loads(self.state_path.read_text(encoding="utf-8"))
-        state["workspaces"]["default"]["groups"][1]["sessions"] = []
-        self.state_path.write_text(json.dumps(state), encoding="utf-8")
 
-        _response, payload = self._restore(["default"])
+        with patch.object(api.runtime_config, "max_sessions", 1):
+            _response, payload = self._restore(["default"])
 
         workspace_result = payload["workspaces"][0]
         self.assertTrue(workspace_result["restored"])
         self.assertEqual([group["started"] for group in workspace_result["groups"]], [True, False])
-        self.assertTrue(workspace_result["groups"][1]["error"])
+        self.assertIn("Maximum", workspace_result["groups"][1]["error"])
 
     def test_r8_front_group_hint_falls_back_to_the_first_started_group(self):
         first = self._launch(session_name="First")
-        second = self._launch(session_name="Second")
+        second = self._launch(
+            session_name="Second", layout="vertical", sessions=self._panes(2)
+        )
         api.session_manager.set_active_group("default", second["group_id"])
         self._save_slot()
         self._close_everything()
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         self.assertEqual(state["workspaces"]["default"]["active_group_id"], second["group_id"])
-        state["workspaces"]["default"]["groups"][1]["sessions"] = []
-        self.state_path.write_text(json.dumps(state), encoding="utf-8")
 
-        _response, payload = self._restore(["default"])
+        # The hinted group is stored intact and simply fails to relaunch, which
+        # is what "falls back to the first *started* group" is about.
+        with patch.object(api.runtime_config, "max_sessions", 1):
+            _response, payload = self._restore(["default"])
 
         workspace_result = payload["workspaces"][0]
         started = workspace_result["groups"][0]
@@ -2294,7 +2781,13 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
                         "cccccccccccc": {"groups": [], "origin": "auto"},
                         "dddddddddddd": {"groups": [{"group_id": "y"}], "origin": "unknown"},
                         "eeeeeeeeeeee": {
-                            "groups": [{"group_id": "z", "name": "Real", "sessions": []}],
+                            "groups": [
+                                {
+                                    "group_id": "z",
+                                    "name": "Real",
+                                    "sessions": [{"host": "h"}],
+                                }
+                            ],
                             "origin": "auto",
                             "native_zoom_factor": 99,
                             "unknown_key": "ignored",
@@ -2314,14 +2807,17 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
 
     def test_a_slot_that_starts_nothing_is_rolled_back(self):
         api.session_manager.create_workspace("Beta", self.WORKSPACE_B)
-        self._launch(workspace_id=self.WORKSPACE_B, session_name="Beta work")
+        self._launch(
+            workspace_id=self.WORKSPACE_B,
+            session_name="Beta work",
+            layout="vertical",
+            sessions=self._panes(2),
+        )
         self._save_slot(self.WORKSPACE_B)
         self._close_everything()
-        state = json.loads(self.state_path.read_text(encoding="utf-8"))
-        state["workspaces"][self.WORKSPACE_B]["groups"][0]["sessions"] = []
-        self.state_path.write_text(json.dumps(state), encoding="utf-8")
 
-        _response, payload = self._restore([self.WORKSPACE_B])
+        with patch.object(api.runtime_config, "max_sessions", 1):
+            _response, payload = self._restore([self.WORKSPACE_B])
 
         self.assertFalse(payload["workspaces"][0]["restored"])
         self.assertEqual(payload["workspaces"][0]["reason"], "no_groups_started")
@@ -2809,15 +3305,17 @@ class RestoreReservationTestCase(unittest.TestCase):
         )
 
     def test_the_claim_is_released_after_a_restore_that_started_nothing(self):
-        """A failed restore must not leave the workspace permanently claimed."""
-        self._saved_workspace("default")
-        state = json.loads(self.state_path.read_text(encoding="utf-8"))
-        for group in state["workspaces"]["default"]["groups"]:
-            group["sessions"] = []
-        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        """A failed restore must not leave the workspace permanently claimed.
 
-        failed = web_workspaces.restore_workspace("default")
-        retried = web_workspaces.restore_workspace("default")
+        Every stored group is intact and simply cannot relaunch under the
+        current ``max_sessions``; emptying their ``sessions`` would now make
+        the slot unrestorable at read instead (MW-16), which is `not_found`.
+        """
+        self._saved_workspace("default")
+
+        with patch.object(api.runtime_config, "max_sessions", 0):
+            failed = web_workspaces.restore_workspace("default")
+            retried = web_workspaces.restore_workspace("default")
 
         self.assertEqual(failed["reason"], "no_groups_started")
         # Not `already_restoring`: the claim was released on the failure path.

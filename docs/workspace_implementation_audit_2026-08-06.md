@@ -2,10 +2,12 @@
 
 Date: 2026-08-06
 
-Status: findings and remediation plan. **MW-01 through MW-13, MW-15, and the
-persistence half of MW-16 are fixed** (see the "Resolution" blocks under each)
-— that is Phases 0, 1, 2, 3 and 4 complete. **MW-14 and the field-validation
-half of MW-16 are still open** and describe current behavior; both are Phase 5.
+Status: **closed.** All sixteen findings (MW-01 through MW-16) are fixed — see
+the "Resolution" blocks under each — and Phases 0 through 5 are complete. Every
+required invariant and every regression-matrix row is covered by a behavioral
+test; the three points where the recommended correction was deliberately not
+taken are argued in place and listed in the Phase 5 outcome. The findings below
+describe the behavior **as it was**, and each is followed by what replaced it.
 
 ## Executive summary
 
@@ -840,6 +842,47 @@ previous implementation.
 
 Recommended correction: never evict a workspace captured in the current live set. Apply the cap only to stale closed auto slots, or surface an explicit capacity error/limit before a thirteenth workspace can be created.
 
+**Resolution (fixed, by the first option).** Re-verified as reported before the
+fix, by running it: fifteen live workspaces through one
+`capture_live_workspaces` tick returned fifteen stored slots while only twelve
+reached the file, and the three that were dropped —
+`w00000000000`/`1`/`2` — were chosen purely by the `saved_at` tie breaking on
+workspace id. The return value therefore also lied about what had been
+persisted.
+
+- `_evict_excess_auto_slots(workspaces, live_workspace_ids)` takes the live set
+  and partitions the unpinned slots by it. The cap becomes an *allowance* for
+  closed slots — `max(0, MAX_AUTO_WORKSPACE_SLOTS - live_unpinned)` — so a live
+  workspace is never a candidate, and the closed slots are still evicted
+  oldest-first down to whatever is left. With more live workspaces than the cap
+  the file exceeds it, which is stated in the function's docstring and logged at
+  DEBUG: losing the shape of a workspace the user is looking at is the worse
+  outcome, and the excess resolves itself as those workspaces close.
+- Both writers supply the same set. `capture_live_workspaces` already had it;
+  `capture_workspace` was reading `snapshot_live_workspaces().get(workspace_id)`
+  and discarding the rest, so it now keeps the whole dict. That matters — a
+  single **Save Workspace** used to be able to evict a *sibling* the saving
+  workspace knew nothing about.
+- `snapshot_live_workspaces()` returns only workspaces holding at least one
+  non-empty group, so its keys are exactly "capturable right now" — the correct
+  protected set, and the same one autosave would store.
+- The return-value lie closed as a consequence: everything in `stored_slots` is
+  live, therefore protected, so a returned slot is always a slot on disk.
+- **The second option was not taken.** A hard capacity limit refusing a
+  thirteenth *workspace* would trade a silent snapshot loss for a hard product
+  restriction on how many workspaces a user may open, to protect a file-size
+  bound that closed-slot eviction already keeps. The finding offers them as
+  alternatives; the first is strictly better here.
+
+Coverage: `RuntimeStateRetentionTestCase` (test_multi_workspace.py) is
+regression matrix row 14 — thirteen live workspaces through one autosave tick,
+asserting every one is on disk, in the summaries, and individually loadable
+(this fails against the previous implementation, naming the evicted ids). Four
+more pin the rest: a single manual save cannot evict a live sibling, stale
+closed slots are still evicted down to the cap, live workspaces consume the
+allowance closed slots would otherwise have had, and a pinned closed slot is
+still exempt.
+
 ### MW-15 — Medium: close semantics are inconsistent
 
 Closing the last group or last pane clears that workspace's snapshot. `DELETE /api/sessions` without a group closes everything but deliberately preserves all snapshots (`web/api.py:2607`; also documented in `CHANGELOG.md:14`). “Close this workspace window” closes no sessions. These may be defensible individual choices, but the UI verbs do not make the persistence outcome obvious.
@@ -930,6 +973,67 @@ and then overwritten, and no capture was logged at all.
   allowed mode/shape fields, layout consistency). A zero-pane group is still
   countable in a summary; only the file-level integrity work is closed here.
 
+**Closed in Phase 5 (field validation and the remaining diagnostics).**
+Re-verified as reported before the fix, by running it: a slot holding one group
+with `sessions: []` was listed as "1 group, 0 panes" and loaded as restorable,
+and so was one whose `sessions` was the string `"not-a-list"`. The summary and
+the restore were computed by two different pieces of code that could disagree
+about the same slot.
+
+- `_validate_slot()` is the one read-side gate, consumed by **both**
+  `load_restorable_workspace` and `list_restorable_workspaces`. The chooser's
+  `group_count`/`pane_count` and the shape a restore replays now come from the
+  same validated structure by construction, so they cannot drift again.
+- `_validate_group()` rejects a non-object, a group with no usable pane (the
+  case the finding names), and a pane count over `MAX_STORED_GROUP_PANES`. It
+  normalizes `connection_mode`, `layout`, and `workspace_layout` through the
+  **same helpers the launch uses** (`web/saved_sessions.py`) rather than a
+  second copy of those rules (guardrail 6), so a stored geometry that no longer
+  matches its pane count is dropped instead of replayed. Capture stores
+  post-launch values, so this is a no-op on a real slot — pinned by a test that
+  captures through the route and asserts the loaded groups equal the stored
+  bytes verbatim.
+- `_validate_session()` restricts each pane to `_SESSION_SNAPSHOT_FIELDS`, the
+  tuple capture writes. That is where "the snapshot never contains passwords"
+  becomes a *read*-side guarantee too: a `password` hand-added to the file
+  cannot re-enter a launch body or `GET /api/runtime-state`.
+- Unrestorable groups are dropped and logged (workspace id, how many of how
+  many — no names, hosts, or directories); a slot left with none is omitted
+  from both read paths. Slot-level trouble is deliberately **not** file-level
+  quarantine: moving the file aside would destroy the *other* slots in it, and
+  the finding's requirement is "omitted from restorable summaries without
+  destroying the last-good file". A test asserts a read leaves the file's bytes
+  untouched.
+- **One deliberate exclusion from the recommended list.** "Bounded pane counts"
+  is bounded by `MAX_STORED_GROUP_PANES` (a structural ceiling), *not* by
+  `runtime_config.max_sessions`. A user lowering `max_sessions` is a
+  configuration change, not corruption: the launch already answers it per group
+  with "Maximum N sessions allowed" and the existing Retry, which is actionable,
+  whereas hiding the slot would make a saved workspace vanish from the chooser
+  with no way to learn why. Pinned by
+  `…a pane count over max sessions stays an offer with a retryable error`.
+- Diagnostics completed alongside: `clear_workspace` now logs the durable
+  revision it committed and whether it reached the disk (the finding asks for
+  "the persisted revision"), the v1→v3 and v2→v3 migrations log their slot
+  counts at DEBUG (they re-run on every read until the next capture rewrites the
+  file, so INFO would violate guardrail 9), and `_restore_claimed_workspace`
+  logs one INFO outcome line — workspace, groups started of requested, skipped,
+  failed, panes — with no host, directory, or command. Capture and quarantine
+  were already logged in Phase 1.
+
+Coverage: `RuntimeStateSlotValidationTestCase` (test_multi_workspace.py) is
+regression matrix row 15 — a zero-pane group is neither offered nor counted —
+plus twelve more: a bad group beside a good one costs only itself, the summary
+count equals what the restore starts, a slot with nothing valid is dropped
+whole, an absurd pane count is corruption while a `max_sessions` overflow is
+not, a stored password never reaches a launch body or the API response, an
+unknown session field is dropped, a mismatched layout is normalized, a real
+captured slot round-trips unchanged, a front-group hint naming a dropped group
+degrades to "no preference", the drop is logged without connection details, and
+a read never rewrites the file. `WorkspaceDiagnosticsTestCase` covers the
+restore and forget log lines. The first four fail against the previous
+implementation.
+
 Coverage: `RuntimeStateSchemaRecoveryTestCase` (test_multi_workspace.py) asserts
 that a corrupt file is quarantined and the last-good backup's shape recovered,
 that a `version: 99` file is quarantined rather than reinterpreted, that a
@@ -952,6 +1056,7 @@ Every row is now closed.
 | ~~Per-pane close tests that manually age groups~~ | ~~Cleanup works after five seconds~~ | **Done in Phase 2** — the two tests lost their manual aging |
 | ~~Sequential second-restore test~~ | ~~Later request sees live groups~~ | **Kept and joined in Phase 4** — `test_r12_…` still pins the sequential `already_live`; `RestoreReservationTestCase` adds the simultaneous case |
 | ~~`ApiRoutes: restore replays current saved preset`~~ | ~~Launcher source text for the client restore orchestrator~~ | **Replaced in Phase 4** by `ApiRoutes: restore replays the captured shape not a preset` (behavioral) and `SingleWorkspaceRestoreRoutingTestCase` |
+| ~~Five tests injecting a launch failure by emptying a stored group's `sessions`~~ | ~~A zero-pane group is offered, then fails at relaunch~~ | **Re-mechanised in Phase 5** — MW-16 rejects such a group at read, so `r7`, `r8` (front-group fallback), `…a slot that starts nothing is rolled back`, and `…the claim is released after a restore that started nothing` now inject the failure the way it really happens (`max_sessions` lowered since capture), and `test_v1_file_migrates_to_a_restorable_default_slot`'s fixture gained the pane a real v1 file always had |
 
 ## Regression matrix to add
 
@@ -959,7 +1064,7 @@ All of these should be behavioral tests against routes or public manager/store o
 
 1. **Test isolation:** start with a sentinel production state file, run every API test that saves/captures, and prove the sentinel is unchanged while a temporary state file receives the writes. *(Added with MW-01, non-destructively: the test reads the production file's current bytes rather than planting a sentinel in it, and the test-mode guard covers the rest.)*
 2. **Exact snapshot:** save a three-pane preset-backed workspace, edit the preset into one `Files` pane, restore, and assert the original three-pane snapshot. *(Added with MW-03 as `test_r2_the_captured_shape_wins_over_an_edited_preset`, plus the layout twin and the three credential-mapping cases.)*
-3. **Two writers:** rename while the timer/manual writer is mocked; assert no shape capture occurs and the next actual capture persists the label.
+3. **Two writers:** rename while the timer/manual writer is mocked; assert no shape capture occurs and the next actual capture persists the label. *(Added with MW-04 as `MultiWorkspaceStage3: rename changes the live label without writing the snapshot` and `…the next real capture persists a renamed label`.)*
 4. **Default close/listing:** restore one group into `default`, close it, then assert no user-visible live workspace/destination remains and no saved slot remains. *(Added with MW-05/MW-06.)*
 5. **Immediate pane close:** close the last pane immediately after launch in default and non-default workspaces; assert group, workspace visibility, native close signal, and slot cleanup. *(Added with MW-06; the native close signal stays a frontend rule — a window already closes itself when its own workspace holds no groups.)*
 6. **Close versus autosave:** pause autosave after its manager snapshot, close/forget the workspace, resume autosave, and assert the slot stays deleted. *(Added with MW-02.)*
@@ -970,8 +1075,8 @@ All of these should be behavioral tests against routes or public manager/store o
 11. **ID collision:** create presets `a/b` and `a-b`, launch them in the same and different workspaces, and assert independent groups with no destructive teardown. *(Added with MW-11, plus an injectivity check over the encoding and a legacy-snapshot restore.)*
 12. **Write failure:** force the atomic replace to fail and assert manual save/forget returns failure without a success payload. *(Added with MW-10; extended in Phase 2 to the close-and-forget verb, which reports the close as done and the forget as retryable.)*
 13. **Duplicate preset references:** restore two retained slots referencing one preset and assert the chosen product policy without partial silent success. *(Added with MW-13: the chosen policy is a complete preflight refusal, and the test asserts nothing launched and both slots survive.)*
-14. **Capacity:** autosave 13 live workspaces and assert every live workspace remains restorable.
-15. **Malformed state:** offer a zero-pane/corrupt group and assert it is quarantined rather than listed as restorable.
+14. **Capacity:** autosave 13 live workspaces and assert every live workspace remains restorable. *(Added with MW-14 as `RuntimeStateRetentionTestCase`, plus the manual-save sibling case and the closed-slot eviction that still happens.)*
+15. **Malformed state:** offer a zero-pane/corrupt group and assert it is quarantined rather than listed as restorable. *(Added with MW-16 as `RuntimeStateSlotValidationTestCase`. "Quarantined" is scoped to the file level, where it already was in Phase 1; a bad **slot** inside a readable file is omitted from both read paths and logged, because moving the file aside would destroy the sibling slots the finding wants preserved.)*
 
 ## Recommended remediation order
 
@@ -1302,7 +1407,7 @@ fail identically on the unmodified tree.
 credential-only preset contribution, the idempotent restore, and the duplicate
 preset refusal.
 
-### Phase 5 — Finish retention, validation, and operational recovery
+### Phase 5 — Finish retention, validation, and operational recovery (complete)
 
 **Findings:** MW-14 and the remaining schema/diagnostic work in MW-16, followed
 by a final cross-check of all findings.
@@ -1345,6 +1450,54 @@ Verification:
 **Exit gate:** every required invariant and regression-matrix row is covered by
 a behavioral test, maintained documentation matches the implementation, and no
 remaining audit finding is left open without an explicit product decision.
+
+**Outcome (all four steps done; exit gate met).**
+
+Both findings were re-verified against the code before anything changed — by
+*running* them, not only reading them. Fifteen live workspaces through one
+autosave tick returned fifteen slots while twelve reached the file (MW-14), and
+a slot whose only group had `sessions: []` was listed as "1 group, 0 panes" and
+loaded as restorable (MW-16). See the Resolution block under each for detail.
+
+| Step | Result |
+| --- | --- |
+| 1. The cap protects the live set | `_evict_excess_auto_slots(workspaces, live_workspace_ids)`: the cap becomes an allowance for *closed* slots only, so no live workspace is ever a candidate and a single manual save can no longer evict a sibling. With more live workspaces than the cap the file exceeds it deliberately, documented and logged. The alternative the finding offers — a hard limit on creating a thirteenth workspace — was rejected as a worse trade (see MW-14). |
+| 2. Validation against the final schema | `_validate_slot` / `_validate_group` / `_validate_session`, the one gate both read paths pass through, so the chooser's counts and the restore's shape are the same structure. Layout and connection mode reuse the launch's own normalizers rather than a second copy. Invalid groups are dropped and logged; a slot with none left is not offered; the file is never rewritten by a read. Pane counts are bounded structurally, *not* by `max_sessions` — one explicit product decision, recorded under MW-16. |
+| 3. Safe diagnostics for every transition | Capture (`_log_commit`) and quarantine landed in Phase 1. Phase 5 adds the durable revision and persistence outcome to the forget log, DEBUG lines for the v1→v3 and v2→v3 migrations, one INFO restore-outcome line (`groups=n/m skipped= failed= panes=`), and the validation drop warning. Every one carries ids and counts and no host, directory, command, or credential — asserted, not assumed. |
+| 4. Full matrix + docs | Rows 14 and 15 added (`RuntimeStateRetentionTestCase`, `RuntimeStateSlotValidationTestCase`, `WorkspaceDiagnosticsTestCase` — 21 tests). Every earlier row re-checked as still present and passing. `README.md` and `CHANGELOG.md` updated for the retention policy and the validated offer. |
+
+**Final cross-check of all sixteen findings.** Each was re-checked against the
+current tree, not against its own Resolution block: MW-01 (`tests/__init__.py`
+sets both env vars; the test-mode guard raises), MW-02 (durable `revisions` map
++ `_is_stale_locked`), MW-03 (`_restore_group_request` builds from the snapshot;
+`_preset_ssh_credential` is the only preset contribution), MW-04 (the sole
+`capture_workspace` call in `web/api.py` is the manual-save route; the rename
+route touches the label only), MW-05 (`workspace_is_user_visible` +
+`isUserVisibleWorkspace`, six call sites), MW-06 (`EMPTY_GROUP_GRACE_SECONDS`
+and `force_group_ids` are absent from the codebase), MW-07
+(`install_session_group` is the only publication path; `_replace_group_sessions`
+is gone), MW-08 (`claim_workspace_restore` / `release_workspace_restore`), MW-09
+(`buildRestoreGroupBody` is gone; `restorePreviousWorkspace` calls
+`restoreSavedWorkspaces([WORKSPACE_DEFAULT_ID])`), MW-10 (two `503`
+`retryable` payloads), MW-11 (`_encode_group_id_component`), MW-12/MW-15
+(`DELETE /api/workspaces/<id>` with `?forget=true`), MW-13
+(`_preflight_restore_set`), MW-14 and MW-16 above. The nine required invariants
+each map to a finding that is closed and behaviorally tested. **No finding is
+left open.**
+
+Three things are recorded as decisions rather than gaps, each argued where it
+belongs: no hard workspace-capacity limit (MW-14), the pane bound is structural
+rather than the live `max_sessions` (MW-16), and slot-level trouble is omission
+plus a log rather than file quarantine (MW-16). Two earlier "not implemented"
+notes were already resolved in place: the `SessionManager` live-shape generation
+(MW-02/MW-07 — unnecessary once the install is atomic and the durable revision
+orders commits) and the initialization half of MW-06 (closed in Phase 3).
+
+Verified with `python tests/run_tests.py` (1203 tests, 7 skipped) and
+`python -m ruff check .`. The same two failures noted in Phases 2, 3 and 4
+remain and are unrelated: `ApiRoutes: voice status endpoint …` ×2 fail on this
+machine because the optional `websocket-client` voice dependency is not
+installed — confirmed again here by importing it.
 
 This order first makes persistence outcomes reliable, then fixes the lifecycle
 surface users interact with, then provides the atomic manager and identity

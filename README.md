@@ -122,6 +122,8 @@ A restore replays exactly what was captured — the same tab names, pane count, 
 
 With multiple workspaces enabled, a saved preset is live in **at most one workspace at a time** — launching it elsewhere explains the conflict and offers to open that workspace or move the tab, instead of silently stealing it or opening a duplicate. For the same reason, restoring two saved workspaces that both use one preset is refused as a whole and names the clash, rather than reopening one of them quietly short a tab; restore them one at a time. Each saved workspace can be restored, left for later, or permanently **forgotten** (the snapshot only — saved sessions are never touched).
 
+The restore offer never expires, so automatic snapshots are capped to keep `runtime_state.json` from growing one slot per workspace ever autosaved. The cap only ever collects **closed** workspaces, oldest first: a workspace that is open right now keeps its snapshot however many you have, and so does one you saved by hand. A slot is offered only if it can actually be relaunched — a group left with no panes by a truncated write is dropped from the count instead of being advertised and then quietly relaunching nothing.
+
 ### What each "close" does
 
 Four verbs, four outcomes — the label tells you what you keep:

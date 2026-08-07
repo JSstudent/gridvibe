@@ -1110,6 +1110,22 @@ def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
         active_group_id = started_group_ids[0]
     session_manager.set_active_group(resolved_workspace_id, active_group_id)
 
+    # Shape-only diagnostics (MW-16): enough to reconstruct what a restore did
+    # and why a tab is missing, with no host, directory, command, or credential.
+    logger.info(
+        "Restored workspace=%s groups=%d/%d skipped=%d failed=%d panes=%d",
+        resolved_workspace_id,
+        len(started_group_ids),
+        len(group_results),
+        sum(1 for result in group_results if result.get("skipped")),
+        sum(
+            1
+            for result in group_results
+            if not result.get("started") and not result.get("skipped")
+        ),
+        sum(int(result.get("pane_count") or 0) for result in group_results),
+    )
+
     return {
         "workspace_id": resolved_workspace_id,
         "label": label,
