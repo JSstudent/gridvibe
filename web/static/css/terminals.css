@@ -895,6 +895,18 @@
             border-color: var(--t-accent);
             background: var(--t-btn-hover-bg);
         }
+        /* Launcher button seated at the head of the session tab line: it keeps
+           its own size, so it only needs centring and the leading gutter the
+           tab strip would otherwise own. */
+        .session-bar-launcher-btn {
+            flex: 0 0 auto;
+            align-self: center;
+            justify-content: center;
+            margin: 8px 0 8px 12px;
+        }
+        .session-bar-launcher-btn + .session-tabs {
+            padding-left: 10px;
+        }
         .topbar-toggle-btn {
             width: 38px;
             min-width: 38px;
@@ -1659,6 +1671,14 @@
         body.surface-max .session-tabs {
             gap: 5px;
             padding: 5px 8px 4px;
+        }
+
+        body.surface-max .session-bar-launcher-btn {
+            margin: 4px 0 4px 8px;
+        }
+
+        body.surface-max .session-bar-launcher-btn + .session-tabs {
+            padding-left: 6px;
         }
 
         body.surface-max .topbar-toggle-btn {

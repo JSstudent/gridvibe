@@ -194,24 +194,27 @@
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-.51A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.81-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
             </svg>
         </button>
-        <a
-            href="/"
-            class="btn btn-neutral btn-icon settings-window-btn"
-            onclick="return goToSettings(event)"
-            title="Open launcher"
-            aria-label="Open launcher"
-        >
-            <svg class="vibe-flow-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-                <rect x="5" y="7" width="22" height="18" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
-                <path d="M9 11.5h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
-                <path d="M12 15l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-                <path d="M18 22h5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
-            </svg>
-        </a>
     </div>
 </div>
 
 <div class="session-bar">
+    <!-- The launcher button heads the session tab line so it sits with the tabs
+         it opens and stays reachable while the top bar is hidden. -->
+    <a
+        href="/"
+        class="btn btn-neutral btn-icon settings-window-btn session-bar-launcher-btn"
+        onclick="return goToSettings(event)"
+        title="Open launcher (Alt+`)"
+        aria-label="Open launcher"
+        aria-keyshortcuts="Alt+`"
+    >
+        <svg class="vibe-flow-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+            <rect x="5" y="7" width="22" height="18" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M9 11.5h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            <path d="M12 15l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M18 22h5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+        </svg>
+    </a>
     <div class="session-tabs" id="sessionTabs"></div>
     <button
         type="button"

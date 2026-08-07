@@ -3962,6 +3962,15 @@
                 && event.code === 'KeyW') {
                 return false;
             }
+            /* And for Alt+` (open launcher), which xterm would otherwise send
+               on to the shell as ESC `. */
+            if (event.altKey
+                && !event.ctrlKey
+                && !event.metaKey
+                && !event.shiftKey
+                && event.code === 'Backquote') {
+                return false;
+            }
 
             /* Ctrl+Shift+C → copy selection */
             if (event.ctrlKey && event.shiftKey && event.code === 'KeyC') {
@@ -6543,13 +6552,14 @@
         }
     }
 
-    /* A focused terminal must not block the cycle: xterm's helper textarea is
-       the keyboard target of every focused pane, so the plain editable-target
-       guard would swallow Alt+W in exactly the case makeTerminal already
-       declines the key for (it returns false so this handler can act, and the
-       shell never sees an ESC w) — leaving the user stuck in the pane. Real
-       inputs (search boxes, name fields, explorer controls) still block it. */
-    function isWorkspaceCycleBlockingTarget(target) {
+    /* A focused terminal must not block a window-level Alt shortcut: xterm's
+       helper textarea is the keyboard target of every focused pane, so the
+       plain editable-target guard would swallow the key in exactly the case
+       makeTerminal already declines it for (it returns false so these handlers
+       can act, and the shell never sees the ESC sequence) — leaving the user
+       stuck in the pane. Real inputs (search boxes, name fields, explorer
+       controls) still block it. */
+    function isPaneShortcutBlockingTarget(target) {
         if (target instanceof Element && target.closest('.xterm-helper-textarea')) {
             return false;
         }
@@ -6560,7 +6570,7 @@
         if (!event.altKey || event.ctrlKey || event.metaKey || event.repeat) {
             return;
         }
-        if (event.code !== 'KeyW' || isWorkspaceCycleBlockingTarget(event.target)) {
+        if (event.code !== 'KeyW' || isPaneShortcutBlockingTarget(event.target)) {
             return;
         }
         if (!isMultiWorkspaceEnabled()) {
@@ -6569,6 +6579,22 @@
 
         event.preventDefault();
         cycleWorkspaceWindow(event.shiftKey ? -1 : 1);
+    });
+
+    /* Alt+` (the key left of 1) opens the launcher — the same action as the
+       button at the head of the session tab line. Matching on event.code keeps
+       the shortcut on that physical key on layouts where it produces a dead
+       key rather than a backtick. */
+    document.addEventListener('keydown', event => {
+        if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat) {
+            return;
+        }
+        if (event.code !== 'Backquote' || isPaneShortcutBlockingTarget(event.target)) {
+            return;
+        }
+
+        event.preventDefault();
+        goToSettings();
     });
 
     document.addEventListener('keydown', async event => {

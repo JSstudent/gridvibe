@@ -2209,7 +2209,7 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
         # It is gated on the mode and never fires while typing in a real input.
         self.assertIn("if (!isMultiWorkspaceEnabled()) {", terminals_js)
         self.assertIn(
-            "if (event.code !== 'KeyW' || isWorkspaceCycleBlockingTarget(event.target)) {",
+            "if (event.code !== 'KeyW' || isPaneShortcutBlockingTarget(event.target)) {",
             terminals_js,
         )
         # xterm must not send Alt+W on to the shell as ESC w.
@@ -2300,8 +2300,18 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
         # xterm's helper textarea is the keyboard target of every focused pane,
         # so the plain editable-target guard would swallow the shortcut exactly
         # when a terminal is highlighted and leave the user stuck in the pane.
-        self.assertIn("function isWorkspaceCycleBlockingTarget(target)", terminals_js)
+        # One guard now serves every window-level Alt shortcut (Alt+W and the
+        # Alt+` launcher key), so the exemption cannot drift between them.
+        self.assertIn("function isPaneShortcutBlockingTarget(target)", terminals_js)
         self.assertIn("target.closest('.xterm-helper-textarea')", terminals_js)
+        self.assertIn(
+            "event.code !== 'KeyW' || isPaneShortcutBlockingTarget(event.target)",
+            terminals_js,
+        )
+        self.assertIn(
+            "event.code !== 'Backquote' || isPaneShortcutBlockingTarget(event.target)",
+            terminals_js,
+        )
 
     def test_one_custom_key_event_handler_per_terminal(self):
         terminals_js = self._static("js/terminals.js")
