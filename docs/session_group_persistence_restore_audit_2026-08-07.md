@@ -25,6 +25,7 @@ The highest-priority conclusions are:
 4. Preserve `explorer_root_directory` on restart restore. The field is captured today and then overwritten during launch preparation.
 5. Give `saved_sessions.json` the same basic durability properties as runtime state: one read-modify-write lock, unique temporary file, atomic replace, last-good backup/quarantine, and surfaced write failures.
 6. Decouple persistence normalization from the mutable `terminal.max_sessions` setting. Lowering that setting currently truncates or mutates saved preset data on load/save and makes exact workspace restore fail.
+7. Replace the asymmetric restart/close paths with one explicit lifecycle decision. The current **Save & Restart** saves only the default workspace, does not save reusable sessions, and restarts even after a failed save; ordinary application close saves nothing new.
 
 No change is recommended to the established terminal/agent/browser content rules: do not snapshot terminal scrollback or process state, do not persist runtime status, and do not put passwords in `runtime_state.json`. The proposal changes how the existing launch/presentation fields are synchronized and validated, then adds the explorer UI fields explicitly requested for a true snapshot.
 
@@ -40,6 +41,7 @@ The audit traced these paths end to end:
 - explorer tab/view serialization and restore in `web/static/js/explorer-viewer.js` and related explorer modules;
 - browser tab synchronization in `web/static/js/browser-pane.js`;
 - launcher import/edit/relaunch in `web/static/js/launcher.js` and shared launch-field construction in `web/static/js/shared.js`;
+- restart, browser shutdown, and native-window teardown in `web/static/js/launcher.js`, `web/api.py`, and `web/webview_launcher.py`;
 - maintained contracts in `README.md`, `CLAUDE.md`, and `docs/workspace_implementation_audit_2026-08-06.md`;
 - persistence and restore coverage in `tests/test_api.py`, `tests/test_multi_workspace.py`, and `tests/test_session_manager.py`.
 
@@ -59,6 +61,7 @@ The implementation should preserve these invariants throughout the proposed work
 8. Every state-file commit uses a unique same-directory temporary path and atomic replacement. Concurrent writers cannot lose an unrelated preset or workspace.
 9. New explorer state is bounded, root-relative where it contains paths, version-tolerant, and contains no file contents, editor buffers, passwords, search results, or Git credentials.
 10. The normalizer used by Save Session, runtime-state validation, the live presentation endpoint, and restore has one definition for each field.
+11. A close/restart action never claims a save succeeded and never tears down after a failed requested save without a second explicit user decision. Plain close/restart does not rewrite or clear previously committed snapshots or presets.
 
 ## Current state-authority map
 
@@ -85,6 +88,21 @@ The current model has three different meanings of “current”:
 
 This split is the reason field allowlists alone do not prove persistence correctness. `web/runtime_state.py` includes explorer fields in `_SESSION_SNAPSHOT_FIELDS`, but that only copies the values currently in `TerminalSession`; it does not make the browser send its newer values.
 
+### Two stored versions of a session group
+
+A live session group can have two independent persisted representations. They are intentionally not kept synchronized by ordinary autosave:
+
+| Representation | Stored in | Written by | Read by | Meaning |
+|---|---|---|---|---|
+| reusable session preset | `saved_sessions.json` | **Save Session**, **Save Session As**, **Save All Sessions**, and launcher preset editing/import | **Import Session** and normal saved-session launch | The most recent version the user explicitly saved as a reusable session. |
+| group inside a workspace snapshot | `runtime_state.json` | workspace autosave and **Save Workspace** | **Restore Workspace** after restart | The group state captured as part of that workspace's latest successfully committed snapshot. |
+
+Therefore **Import Session** loads the latest manually saved preset version; it does not load a newer workspace-autosave snapshot. Conversely, **Restore Workspace** loads the group stored in the workspace snapshot; it does not replace that shape with a newer version from the saved-session library. A matching saved preset may supply its encrypted SSH password during workspace restore, but its layout, panes, modes, browser/explorer tabs, and presentation fields remain non-authoritative.
+
+The two versions can legitimately differ. For example, saving a session, changing its explorer tabs, and allowing workspace autosave to run produces an older reusable import preset and a newer restorable workspace group. Saving the session again updates the reusable preset, but an already committed workspace snapshot remains unchanged until the next workspace capture.
+
+The proposed **Save open sessions + workspaces** lifecycle action deliberately aligns them at that point in time: save/update every reusable session preset first, attach the resulting preset identities to the live groups, then capture the workspaces. This does not merge the two products or change restore authority; it only makes their separately stored versions start from the same state when the application closes or restarts.
+
 ## Current flow review
 
 ### Save Session and Save All Sessions
@@ -107,6 +125,17 @@ Autosave calls `capture_live_workspaces(session_manager)`. Explicit Save Workspa
 
 Neither path asks the browser for pane order, current split geometry, or explorer presentation. Explicit Save Workspace therefore is not currently a snapshot barrier. The durable file records a coherent server snapshot, but not necessarily the current screen.
 
+There is one current slot per workspace, not separate “last manual” and “latest auto” restore versions. Every successful non-empty capture replaces that slot's `groups`, `active_group_id`, label, and save time. A manual save records `manually_saved_at`; a later autosave retains that manual-retention marker but replaces the slot's shape with the newer live manager snapshot. Restore therefore uses:
+
+| Capture history before restart | Shape restored |
+|---|---|
+| manual save, then no later successful capture | the manual-save shape |
+| manual save, then a later successful autosave | the later autosave shape |
+| restored workspace changed, then autosave commits | the current acknowledged live shape after those changes |
+| UI changed but its browser-owned state was not acknowledged before capture/exit | the last server-known shape, which may be older than the screen |
+
+The manual marker pins/protects the workspace's retention; it is not a pointer to a frozen manual generation. A matching saved-session preset may contribute an SSH password during restore, but it never replaces the slot's shape.
+
 ### Restart restore
 
 The restore path is server-owned and shape-authoritative:
@@ -120,6 +149,20 @@ The restore path is server-owned and shape-authoritative:
 - errors are reported per group and the workspace is removed if no group starts.
 
 The remaining restore defects are field-level normalization/capacity behavior and the explorer-root overwrite, not the orchestration model.
+
+### Restart and application close
+
+The current lifecycle paths do not share one persistence contract:
+
+- The launcher's **Save & Restart** calls `/api/runtime-state/save` without a `workspace_id`. The route therefore resolves the default workspace and manually captures that workspace only. It does not call **Save All Sessions**, so `saved_sessions.json` is unchanged.
+- That launcher save sends no client presentation payload or revision barrier. It captures the manager's current default-workspace state, with the stale explorer/browser limitations described above.
+- A failed save only changes the status text. The code still calls the native restart bridge and terminates all live sessions.
+- An update-triggered automatic restart calls the native restart bridge directly and does not run the launcher's workspace-save helper.
+- The explicit browser-mode close button confirms, calls `/api/browser-shutdown`, closes all sessions, and exits without a new snapshot.
+- Closing the native launcher window is application shutdown: its `closed` handler closes all sessions and exits without a new snapshot. Closing an individual workspace window while the launcher remains open is different; it hides that window without ending its sessions.
+- Keyboard interrupt and external process termination also have no teardown snapshot, by design.
+
+All of these no-save paths preserve whatever `runtime_state.json` and `saved_sessions.json` already contain; they do not clear those files. The problem is loss of changes newer than the last successful capture, not deletion of the older restore point.
 
 ## Mode-by-mode field review
 
@@ -396,13 +439,38 @@ Important gaps:
 
 The implementation stages below replace touched source-text assertions with API/manager contract tests and small executable JavaScript tests where practical. The repository already has precedent for invoking Node from unittest when available.
 
+### SGP-11 — High: restart and application close have incomplete, asymmetric save semantics
+
+The lifecycle controls currently expose three materially different behaviors behind similar language:
+
+- **Save & Restart** manually captures only the default workspace because its request omits `workspace_id` (`web/static/js/launcher.js:2498`). It does not save reusable session presets.
+- The restart continues after that capture fails (`web/static/js/launcher.js:2541`). The status says the save failed, but the bridge is still invoked and teardown proceeds.
+- Update-triggered restart bypasses even that helper and calls `restart_application()` directly (`web/static/js/launcher.js:2453`).
+- Browser shutdown and the native launcher `closed` event close live sessions and exit without capturing current state (`web/api.py:688`, `web/webview_launcher.py:1466`).
+
+The existing “no teardown snapshot” rule is valuable for involuntary shutdown: a late server-only capture can overwrite a better committed snapshot with stale browser-owned presentation. It should not, however, prevent a deliberate, user-selected save barrier before close or restart.
+
+Impact:
+
+- in multi-workspace mode the restart button can truthfully say “Workspace saved” while sibling workspaces were not manually captured;
+- unsynchronized explorer/browser changes may be absent even from the default snapshot;
+- requested save failures still lead to irreversible live-shell teardown;
+- users cannot choose whether to update reusable sessions as well as workspace snapshots;
+- close, manual restart, and update restart have different persistence effects.
+
+Low-risk direction:
+
+Use one shared lifecycle-choice controller for explicit close, manual restart, and update restart. Offer **Without saving current changes**, **Save open workspaces**, and **Save open sessions + workspaces**, plus **Cancel**. “Open” must mean every live workspace/group in the process, not only the window invoking the action. The workspace-only choice flushes acknowledged client presentation and captures password-free runtime slots. The sessions-plus-workspaces choice first saves/updates reusable presets, then captures workspace slots that reference the resulting preset identities. Any requested-save failure keeps GridVibe open with retry and explicit continue-without-saving actions.
+
+Do not make `beforeunload`, a late `closed` callback, or a blind teardown capture the correctness path. The native launcher X needs a cancellable pre-close event that opens the in-page choice UI; the explicit browser close button can use the same UI. Console interrupts, task-manager kills, and browser-tab closure cannot reliably complete an asynchronous save and should retain the documented last-good-snapshot behavior.
+
 ## Risk-ranked implementation proposal
 
 Each stage is independently reviewable and preserves backward compatibility. New optional fields should be ignored by old readers; new readers must accept old files.
 
 ### Stage 0 — Freeze the snapshot contract with failing behavioral tests
 
-Connected findings: SGP-01, SGP-02, SGP-03, SGP-04, SGP-06, SGP-07, SGP-08, SGP-10.
+Connected findings: SGP-01, SGP-02, SGP-03, SGP-04, SGP-06, SGP-07, SGP-08, SGP-10, SGP-11.
 
 Add tests before production changes:
 
@@ -413,14 +481,15 @@ Add tests before production changes:
 5. Define an explorer fixture with Preview plus pinned tabs, active Diff, per-panel scrolls, zoom, wrap, folds, theme/fonts, sidebars, width, and tree expansion.
 6. Lower `max_sessions` after saving a larger preset and prove load plus an unrelated write does not alter its stored shape.
 7. Feed invalid nested presentation data through runtime validation and prove no partial group is advertised as exact.
+8. Freeze the close/restart action matrix: all-live-workspace scope, save ordering, failure behavior, and preservation of the previous committed snapshot when no new save is requested.
 
 Use backend behavioral tests for storage/manager transactions. Put pure browser snapshot normalization and queue logic in a small standalone JS module so Node-based tests can execute it without a DOM. Avoid adding new raw source-text assertions.
 
-Exit gate: the desired field matrix and the deliberate exclusions are executable contracts, and the open questions below have answers for any field included in Stage 4.
+Exit gate: the desired field matrix and the deliberate exclusions are executable contracts, and the open questions below have answers for any field included in Stage 5.
 
 ### Stage 1 — Make saved-session and encryption-key persistence durable
 
-Connected findings: SGP-05, SGP-10.
+Connected findings: SGP-05, SGP-10, SGP-11.
 
 1. Wrap upsert, delete, and last-session changes in one locked read-modify-write transaction.
 2. Use a unique sibling temp file and atomic replace; retain and recover a last-good backup.
@@ -477,7 +546,7 @@ Exit gate: the manager is the canonical acknowledged presentation source, update
 
 ### Stage 3 — Wire exact Save Workspace and existing browser/explorer state into the canonical source
 
-Connected findings: SGP-01, SGP-02, SGP-09, SGP-10.
+Connected findings: SGP-01, SGP-02, SGP-09, SGP-10, SGP-11.
 
 1. Route existing explorer tab/view/sidebar/theme changes through the Stage 2 queue.
 2. Route browser tab changes through the same ordered queue; stop using fire-and-forget tab updates on the mode endpoint.
@@ -487,12 +556,40 @@ Connected findings: SGP-01, SGP-02, SGP-09, SGP-10.
 6. If the flush fails, show the existing retryable failure affordance and do not claim the workspace was saved.
 7. Leave autosave non-blocking. It snapshots the most recently acknowledged manager state; normal debounce bounds the lag, while explicit save remains exact.
 8. Migrate/prune legacy explorer-theme localStorage entries only after acknowledgement is reliable.
+9. Expose the exact flush barrier as a reusable lifecycle operation; close/restart must not duplicate mode-specific capture logic.
 
 Do not use `beforeunload` as the correctness mechanism; browsers may cancel asynchronous work. State-change events plus the explicit save barrier are the reliable paths.
 
 Exit gate: change tabs/view/layout, immediately click Save Workspace, restart, and restore the exact acknowledged state. A forced failed sync produces no success toast.
 
-### Stage 4 — Complete explorer snapshot semantics and preserve explorer root
+### Stage 4 — Unify explicit close and restart as one save-or-exit transaction
+
+Connected findings: SGP-01, SGP-02, SGP-05, SGP-10, SGP-11.
+
+Add a shared, in-page lifecycle modal with action-specific labels:
+
+| Restart action | Close action | Persistence effect |
+|---|---|---|
+| **Restart without saving current changes** | **Close without saving current changes** | Write nothing; keep older committed snapshots and presets unchanged. |
+| **Save open workspaces & restart** | **Save open workspaces & close** | Flush every live workspace's acknowledged presentation, then manually capture every non-empty live workspace into `runtime_state.json`; do not change reusable presets. |
+| **Save open sessions + workspaces & restart** | **Save open sessions + workspaces & close** | Save/update a reusable preset for every live group, then capture every live workspace so its groups reference the saved preset identities. |
+| **Cancel** | **Cancel** | Make no change and do not terminate. |
+
+Implementation rules:
+
+1. Put reusable lifecycle UI/controller code in a focused frontend module and shared partial, not in `terminals.js` or duplicated between launcher and terminal pages. Do not use `window.confirm` or native browser prompts.
+2. Use one server-side lifecycle preparation service. Snapshot/check manager membership under one `SessionManager.lock` hold, release it, perform file I/O, then emit room-scoped updates. Never hold manager or connection locks across client waits, encryption, or disk writes.
+3. Treat “open” as process-wide. Ask every live workspace window to flush its Stage 3 presentation queue and acknowledge a target revision. Use a bounded wait and report missing/stale windows; do not guess that a debounce has completed.
+4. For workspace-only save, extend the existing all-live capture transaction to accept validated per-workspace active-group/native-zoom metadata. Keep the unique-temp, file-lock, durable-revision, and manual-retention rules.
+5. For sessions-plus-workspaces, persist session presets first and update group preset identities, then capture runtime state. This order lets restart restore obtain an encrypted SSH password only from the matching saved preset while keeping `runtime_state.json` password-free.
+6. Do not claim cross-file atomicity. If session presets commit and the later workspace capture fails, keep the app open, report the partial result, and offer **Retry** or an explicit **Continue without saving current changes**. Never silently roll back unrelated user presets.
+7. Route the manual restart button, update-triggered restart, explicit browser shutdown, and native launcher close request through this controller. For the native X, cancel/defer the pre-close event once, show the in-page modal, and use a guarded approved-close flag to avoid re-entry.
+8. Leave involuntary termination semantics unchanged. Ctrl+C, process kill, power loss, or a browser tab disappearing restore the last successfully committed snapshot; they do not attempt an unsafe teardown write.
+9. Add behavioral tests for all actions, all-live scope, client timeout, save failure, partial cross-file failure, retry, update restart, native close re-entry, no emits under locks, and secret absence from runtime state/logs.
+
+Exit gate: close and restart expose the same choices and effects, every requested save covers all live workspaces, no failed requested save tears down without a second explicit choice, and old snapshots survive the no-save path untouched.
+
+### Stage 5 — Complete explorer snapshot semantics and preserve explorer root
 
 Connected findings: SGP-03, SGP-04, SGP-08, SGP-10.
 
@@ -527,7 +624,7 @@ The exact keys are less important than one canonical normalizer and separate ide
 
 Exit gate: the agreed explorer fixture round-trips through Save Session/import, manual workspace save/restart restore, and autosave/restart restore on both local and mocked SSH/SFTP explorers.
 
-### Stage 5 — Decouple stored shape from current capacity and harden restore validation
+### Stage 6 — Decouple stored shape from current capacity and harden restore validation
 
 Connected findings: SGP-06, SGP-07, SGP-10.
 
@@ -541,7 +638,7 @@ Connected findings: SGP-06, SGP-07, SGP-10.
 
 Exit gate: lowering and raising the setting is nondestructive, restore chooser counts match validated launchable shape, and no partial success is reported as exact restore.
 
-### Stage 6 — Documentation, diagnostics, and cleanup
+### Stage 7 — Documentation, diagnostics, and cleanup
 
 Connected findings: all, especially SGP-09 and SGP-10.
 
@@ -579,10 +676,16 @@ The implementation should include at least these behavioral cases:
 20. malformed nested explorer/browser state rejects the group rather than producing a smaller successful restore;
 21. runtime-state snapshots and logs contain no passwords;
 22. Socket.IO presentation notifications remain workspace-room scoped and no emit occurs under manager/connection locks.
+23. restore after manual save followed by acknowledged autosave uses the newer autosave shape while retaining manual-slot protection;
+24. restart/close without saving current changes writes neither persistence file and preserves the previous restore point;
+25. save-open-workspaces restart/close flushes and captures every live workspace, not only `default` or the invoking window;
+26. save-open-sessions-plus-workspaces saves every live group first, captures matching preset identities second, and keeps passwords out of runtime state;
+27. a flush, preset write, or runtime-state write failure leaves the app running with retry and explicit no-save continuation affordances;
+28. manual restart, update restart, browser shutdown, and native launcher close use the same lifecycle action contract.
 
 ## Open questions
 
-These choices affect schema and should be answered before Stage 4. Recommended defaults are included.
+These choices affect schema or lifecycle semantics and should be answered before Stages 4 and 5. Recommended defaults are included.
 
 1. **What is the explorer snapshot boundary?** Recommended: persist structural navigation and view intent (tabs/order/active tab, Preview path/directory, Source/Preview/Diff, diff target, zoom/wrap/folds, theme/appearance, sidebar open/width/scroll, tree expansion, panel/directory scroll). Do not persist selections, hover, transient errors/loading, fetched results, or clipboard state.
 2. **Should dirty editor buffers be included?** Recommended: no. They contain unsaved file contents, complicate revision conflict handling, and would put filesystem content in workspace state. Keep the existing confirm/discard behavior and persist only successfully saved files.
@@ -593,6 +696,9 @@ These choices affect schema and should be answered before Stage 4. Recommended d
 7. **Can two browser windows intentionally control the same live workspace at once?** Recommended: treat one accepted group revision as authoritative and reject stale updates with compare-and-swap. If collaborative multi-view control is desired, merge rules and an ownership model need a separate design.
 8. **Should Save Session update an explorer preset's root to the pane's current root, or preserve the launcher's original directory contract?** Current documented/tested behavior preserves launcher directories while saving presentation. Recommended: keep that rule unless “snapshot” is intended to retarget future launches; runtime Save Workspace should always preserve the live `explorer_root_directory` exactly.
 9. **When a persisted file or diff target no longer exists, should the tab be dropped or shown as a retryable missing tab?** Current behavior drops/falls back. Recommended: retain that low-friction behavior unless missing tabs need to remain visible as historical intent.
+10. **Which close surfaces should show the lifecycle choices?** Recommended: the explicit browser close button and the native launcher's close button/X use the shared modal. Closing only a workspace window keeps its current “hide window, leave sessions live” contract. Browser tab/window closure, Ctrl+C, task-manager kill, and power loss cannot reliably await a save and should keep last-good behavior.
+11. **What should “Save open sessions” do with an unsaved SSH group and its live password?** Recommended: because this is an explicit session-save choice, create a uniquely named preset and encrypt the live password server-side without returning it to the browser. Updating an already attached preset preserves its existing credential rules. The modal should state that session passwords are encrypted while workspace snapshots remain password-free. If that secret behavior is not desired, the safe alternative is to save unsaved SSH groups as passwordless presets and warn that they will require credentials on relaunch.
+12. **What should happen when the combined save partially succeeds?** Recommended: save presets first, workspace snapshots second, keep GridVibe open on any failure, show per-group/workspace results, and offer Retry or a separately confirmed Continue without saving current changes. Do not promise atomic rollback across two files, do not delete successful unrelated writes, and do not terminate immediately after a failure.
 
 ## Audit verification
 
@@ -603,6 +709,6 @@ The documentation change was checked with the repository's Windows gates:
 
 ## Final recommendation
 
-Do not start by adding more fields directly to `runtime_state.py`. The durable store already records whatever the manager gives it. First make the manager the canonical acknowledged source for group presentation, make explicit save a flush barrier, and make the saved-session store durable. Then expand the explorer schema through one normalizer and one synchronization path.
+Do not start by adding more fields directly to `runtime_state.py`. The durable store already records whatever the manager gives it. First make the manager the canonical acknowledged source for group presentation, make explicit save a flush barrier, and make the saved-session store durable. Then put close/restart behind the shared lifecycle transaction before expanding the explorer schema through one normalizer and one synchronization path.
 
 That order has the lowest blast radius: it fixes data authority and write safety before increasing the amount of state being persisted, keeps all slow work outside shared locks, avoids polling, preserves the server-owned restore model, and prevents another round of duplicate client/server persistence logic.
