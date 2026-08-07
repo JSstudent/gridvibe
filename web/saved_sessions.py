@@ -12,7 +12,7 @@ import os
 import re
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
 from web.config import runtime_config
@@ -24,6 +24,19 @@ logger = logging.getLogger(__name__)
 SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
 DEFAULT_SAVED_SESSION_ID = "default-session"
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
+
+# Scratch launches: a launch that carries no saved-preset identity (the
+# built-in "Default Session", or any hand-filled form) is disposable, is named
+# after its connection target, and may be repeated. `build_unique_session_name`
+# gives the second and later launches a " (n)" suffix so the session tabs stay
+# tellable apart, and skips any name a saved preset already owns so a scratch
+# session never impersonates a saved one.
+SCRATCH_NAME_MAX_SUFFIX = 999
+
+# How many distinct connection targets the launcher's per-mode dropdown offers.
+# It is a shortcut list, not a session browser — Import Session is still the way
+# to reach an old preset in full.
+CONNECTION_TARGET_LIMIT = 20
 
 # Explorer tabbed viewer persistence bounds (ISSUE-2026-015).
 EXPLORER_MAX_OPEN_TABS = 12
@@ -49,11 +62,20 @@ EXPLORER_MD_PRESETS = ("default", "paper", "contrast", "vscode")
 EXPLORER_MD_FONTS = (
     "system",
     "serif",
-    "consolas",
     "cascadia-code",
     "jetbrains-mono",
     "courier-new",
 )
+EXPLORER_SOURCE_FONTS = (
+    "default",
+    "cascadia-code",
+    "jetbrains-mono",
+    "courier-new",
+)
+# Retired options mapped onto their nearest survivor so an older saved session
+# keeps its intent: "consolas" was dropped when it rendered identically to
+# JetBrains Mono, whose stack fell back to it before the faces were vendored.
+EXPLORER_FONT_ALIASES = {"consolas": "jetbrains-mono"}
 
 
 def _normalize_explorer_tab_path(value: Any) -> str:
@@ -99,9 +121,10 @@ def _normalize_explorer_active_tab(value: Any, open_tabs: List[str]) -> str:
     return path if path in open_tabs else ""
 
 
-def _normalize_explorer_md_choice(value: Any, allowed: tuple) -> str:
-    """Return an allowlisted Markdown appearance value, or "" for unset."""
+def _normalize_explorer_md_choice(value: Any, allowed: tuple, aliases: dict = None) -> str:
+    """Return an allowlisted viewer appearance value, or "" for unset."""
     text = str(value or "").strip()
+    text = (aliases or {}).get(text, text)
     return text if text in allowed else ""
 
 
@@ -222,8 +245,12 @@ def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str,
             preview_path = _normalize_explorer_tab_path(raw_view.get("path"))
             if preview_path:
                 record["path"] = preview_path
-            preview_dir = _normalize_explorer_tab_path(raw_view.get("dir"))
-            if preview_dir:
+            raw_preview_dir = raw_view.get("dir")
+            preview_dir = _normalize_explorer_tab_path(raw_preview_dir)
+            # The explorer root is the intentionally empty relative path. Its
+            # presence is distinct from a missing ``dir`` field; unsafe values
+            # that merely normalize to empty must still be dropped.
+            if preview_dir or ("dir" in raw_view and raw_preview_dir == ""):
                 record["dir"] = preview_dir
             folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
             fold_identity = _normalize_explorer_view_identity(raw_view.get("fold_identity"))
@@ -271,6 +298,7 @@ def _default_terminal_entries():
             "explorer_tab_views": {},
             "explorer_md_preset": "",
             "explorer_md_font": "",
+            "explorer_source_font": "",
             "explorer_theme": "dark",
             "browser_tabs": [],
             "browser_active_tab": 0,
@@ -527,7 +555,12 @@ def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> L
                 "explorer_active_tab": _normalize_explorer_active_tab(entry.get("explorer_active_tab"), open_tabs),
                 "explorer_tab_views": _normalize_explorer_tab_views(entry.get("explorer_tab_views"), open_tabs),
                 "explorer_md_preset": _normalize_explorer_md_choice(entry.get("explorer_md_preset"), EXPLORER_MD_PRESETS),
-                "explorer_md_font": _normalize_explorer_md_choice(entry.get("explorer_md_font"), EXPLORER_MD_FONTS),
+                "explorer_md_font": _normalize_explorer_md_choice(
+                    entry.get("explorer_md_font"), EXPLORER_MD_FONTS, EXPLORER_FONT_ALIASES
+                ),
+                "explorer_source_font": _normalize_explorer_md_choice(
+                    entry.get("explorer_source_font"), EXPLORER_SOURCE_FONTS, EXPLORER_FONT_ALIASES
+                ),
                 "explorer_theme": _normalize_explorer_theme(entry.get("explorer_theme")),
                 "browser_tabs": browser_tabs,
                 "browser_active_tab": browser_active_tab,
@@ -549,6 +582,7 @@ _LIVE_SESSION_VIEW_FIELDS = (
     "explorer_tab_views",
     "explorer_md_preset",
     "explorer_md_font",
+    "explorer_source_font",
     "explorer_theme",
     "browser_tabs",
     "browser_active_tab",
@@ -702,6 +736,9 @@ def _merge_workspace_session_config(
         )
         saved_terminal["explorer_md_font"] = (
             workspace_terminal["explorer_md_font"] if startup_mode == "explorer" else ""
+        )
+        saved_terminal["explorer_source_font"] = (
+            workspace_terminal["explorer_source_font"] if startup_mode == "explorer" else ""
         )
         saved_terminal["explorer_theme"] = (
             workspace_terminal["explorer_theme"] if startup_mode == "explorer" else "dark"
@@ -944,14 +981,40 @@ def _normalize_launch_session_id(value: Any) -> str:
     return str(value or "").strip()
 
 
+# Characters a launched-group key carries literally. Everything else is
+# escaped as `_<hex>_`, which makes the encoding reversible and therefore
+# collision-free. `_` is not in the set precisely so it can be the escape
+# marker without ever being ambiguous.
+_GROUP_ID_LITERAL_CHAR = re.compile(r"[A-Za-z0-9.-]")
+
+
+def _encode_group_id_component(value: str) -> str:
+    """Escape one string into the launched-group id alphabet, injectively."""
+    return "".join(
+        char if _GROUP_ID_LITERAL_CHAR.fullmatch(char) else f"_{ord(char):x}_"
+        for char in value
+    )
+
+
 def _build_launch_group_id(saved_session_id: Any) -> str:
-    """Return a stable launched-group key for one saved-session identifier."""
+    """Return the stable launched-group key for one saved-session identifier.
+
+    The mapping is injective (MW-11). It used to replace every run of
+    non-`[A-Za-z0-9._-]` characters with a single `-`, so two distinct preset
+    ids such as ``a/b`` and ``a-b`` produced the *same* live group id: the
+    second launch replaced the first preset's group in place, and across
+    workspaces it tore down the other workspace's sessions before
+    ``create_group`` noticed the group belonged elsewhere.
+
+    Ids made only of ``[A-Za-z0-9.-]`` — every id ``_generate_saved_session_id``
+    mints — encode to themselves, so live groups and saved workspace snapshots
+    written by earlier builds keep the ids they already have.
+    """
     normalized = _normalize_launch_session_id(saved_session_id)
     if not normalized:
         return ""
 
-    safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", normalized).strip("-")
-    return f"saved-session-{safe_id or DEFAULT_SAVED_SESSION_ID}"
+    return f"saved-session-{_encode_group_id_component(normalized)}"
 
 
 def upsert_saved_session(
@@ -1020,3 +1083,111 @@ def delete_saved_sessions(session_ids: List[str]) -> Dict[str, Any]:
         next_last_session = remaining_entries[0]["id"]
 
     return save_saved_sessions(remaining_entries, last_session=next_last_session)
+
+
+def build_unique_session_name(base_name: str, taken_names: Iterable[Any]) -> str:
+    """Return ``base_name``, or ``base_name (n)`` when that name is already used.
+
+    The launcher names a scratch session after its connection target, so the
+    same SSH host or local repository launched twice would otherwise produce two
+    identically named session tabs. ``taken_names`` is every name a new scratch
+    session must not collide with: the live session groups *and* the saved
+    presets, so promoting one scratch session to a saved one ("10.0.0.5 (1)")
+    makes the next scratch launch skip past that number rather than reuse it.
+
+    Comparison is case-insensitive because the names are hostnames and folder
+    names, where case is not a meaningful distinction to read a tab strip by.
+    """
+    base = str(base_name or "").strip()
+    if not base:
+        return base
+
+    taken = {
+        str(name or "").strip().casefold()
+        for name in taken_names
+        if str(name or "").strip()
+    }
+    if base.casefold() not in taken:
+        return base
+
+    for suffix in range(1, SCRATCH_NAME_MAX_SUFFIX + 1):
+        candidate = f"{base} ({suffix})"
+        if candidate.casefold() not in taken:
+            return candidate
+
+    # Pathological: a thousand live-or-saved sessions on one target. Stay unique
+    # rather than silently handing back a colliding name.
+    return f"{base} ({uuid.uuid4().hex[:6]})"
+
+
+def build_connection_target_proposals() -> Dict[str, List[Dict[str, Any]]]:
+    """Return the distinct SSH and local-repo targets the saved presets use.
+
+    Feeds the launcher's per-mode target dropdown, so a scratch session can be
+    started against an address the user has already saved without retyping the
+    host, port, or repository path.
+
+    Deliberately secret-free: a saved SSH password stays behind
+    ``GET /api/saved-sessions/<id>`` and is fetched only for the one target the
+    user actually picks, so listing the targets never ships every stored
+    password at once. ``has_password`` says whether that follow-up fetch is
+    worth making.
+
+    A preset contributes whichever blocks it has filled in rather than only the
+    one matching its ``connection_mode``, so a preset that carries both an SSH
+    host and a local repository path is offered under both modes.
+    """
+    ssh_targets: List[Dict[str, Any]] = []
+    wsl_targets: List[Dict[str, Any]] = []
+    seen_ssh = set()
+    seen_wsl = set()
+
+    # `load_saved_sessions` is already sorted most-recently-updated first, so
+    # the freshest target wins both the de-duplication and the list order.
+    for entry in load_saved_sessions():
+        config = entry.get("config") or {}
+        ssh_config = config.get("ssh") or {}
+        wsl_config = config.get("wsl") or {}
+
+        host = str(ssh_config.get("host") or "").strip()
+        if host and len(ssh_targets) < CONNECTION_TARGET_LIMIT:
+            username = str(ssh_config.get("username") or "").strip() or "ubuntu"
+            try:
+                port = int(ssh_config.get("port") or 22)
+            except (TypeError, ValueError):
+                port = 22
+            port = max(1, min(65535, port))
+            default_dir = str(ssh_config.get("default_dir") or "").strip()
+            signature = (host.casefold(), username, port, default_dir)
+            if signature not in seen_ssh:
+                seen_ssh.add(signature)
+                ssh_targets.append(
+                    {
+                        "session_id": entry["id"],
+                        "session_name": entry["name"],
+                        "host": host,
+                        "username": username,
+                        "port": port,
+                        "default_dir": default_dir,
+                        "has_password": bool(ssh_config.get("password")),
+                    }
+                )
+
+        repo_dir = str(wsl_config.get("default_dir") or "").strip()
+        if repo_dir and len(wsl_targets) < CONNECTION_TARGET_LIMIT:
+            distribution = str(wsl_config.get("distribution") or "").strip()
+            username = str(wsl_config.get("username") or "").strip()
+            signature = (repo_dir.replace("\\", "/").casefold(), distribution, username)
+            if signature not in seen_wsl:
+                seen_wsl.add(signature)
+                wsl_targets.append(
+                    {
+                        "session_id": entry["id"],
+                        "session_name": entry["name"],
+                        "default_dir": repo_dir,
+                        "distribution": distribution,
+                        "username": username,
+                    }
+                )
+
+    return {"ssh": ssh_targets, "wsl": wsl_targets}

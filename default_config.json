@@ -5,7 +5,6 @@
     "debug": false
   },
   "ssh": {
-    "default_port": 22,
     "connection_timeout": 30,
     "keepalive_interval": 60,
     "host_key_policy": "auto-add"

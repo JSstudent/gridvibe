@@ -1,8 +1,6 @@
 # Voice Guideline
 
-This document is the canonical reference for GridVibe voice input as it exists in the current codebase.
-
-It replaces the older working notes that previously lived in `docs/audio/`. Those documents are still useful as historical research, but they should now be treated as archived background material, not the source of truth.
+This document is the canonical reference for GridVibe voice input as it exists in the current codebase. It is the source of truth; the older working notes it replaced are not in this repository.
 
 ## Purpose
 
@@ -28,16 +26,20 @@ In GridVibe, "voice" means speech-to-text for terminal input.
 
 Primary implementation files:
 
-- `templates/terminals.html`
-- `web/static/voice-capture-worklet.js`
-- `web/api.py`
-- `services/vosk_service.py`
-- `web/webview_launcher.py`
+- `web/voice.py` — both STT backends, the Vosk proxy and its locks, voice preference persistence. This is where the voice logic lives; `web/api.py` re-exports its names for backwards compatibility and owns only the REST routes and Socket.IO handlers.
+- `web/static/js/voice-input.js` — browser mic capture, the recording overlay, hold/push-to-talk.
+- `web/static/voice-capture-worklet.js` — the audio format boundary (resample, frame, Float32 → PCM int16).
+- `web/static/js/app-settings.js` and `templates/partials/app_settings_modal.html` — the voice/mic settings UI, shared by both pages.
+- `services/vosk_service.py` — the standalone local recognizer service.
+- `web/api.py` — the voice REST routes and Socket.IO handlers, plus `/api/app-config` normalization of the `voice_input` block.
+- `web/config.py` — `RuntimeConfig` reads `voice_input` from `config.json` / `default_config.json`.
+- `web/webview_launcher.py` — WebView2 media flags and microphone permission patching.
 - `default_config.json`
 
 Verification coverage lives primarily in:
 
 - `tests/test_api.py`
+- `tests/test_vosk_service.py`
 
 ## Architecture Summary
 
@@ -75,7 +77,7 @@ Current committed defaults in `default_config.json` are:
 ```json
 {
   "voice_input": {
-    "enabled": true,
+    "enabled": false,
     "engine": "whisper",
     "vosk_service_url": "ws://localhost:2700",
     "vosk_model": "vosk-model-en-us-0.22",
@@ -87,13 +89,13 @@ Current committed defaults in `default_config.json` are:
 }
 ```
 
-Important implication: the repo default is currently `whisper`, not `vosk`.
+Two implications of the committed defaults: voice input ships **disabled** and has to be turned on in App Settings, and the engine default is `whisper`, not `vosk`.
 
 `vosk_service_url` is the single source of truth for the Vosk service address: both the
 API and `services/vosk_service.py` derive the port from it. The former `vosk_service_port`
 key is deprecated — it is only honoured (with a warning) when the URL carries no port.
 
-Machine-level voice config is surfaced in the launcher app settings modal and normalized in `web/api.py`.
+Machine-level voice config is surfaced in the App Settings dialog — one shared implementation (`templates/partials/app_settings_modal.html` + `web/static/js/app-settings.js`) included by both the launcher and the terminals page — and normalized in `web/api.py` behind `/api/app-config`.
 
 Launcher-editable fields:
 
@@ -127,14 +129,14 @@ These values are not scoped per terminal. They are shared across the terminal wo
 
 ## UI Contract
 
-Voice recording controls live in each terminal header. Voice capture preferences live in the launcher's App Settings modal under the backend/model settings.
+Voice recording controls live in each terminal header. Voice capture preferences live in the App Settings dialog under the backend/model settings — the dialog is shared, so the same controls are reachable from the launcher and from a terminals workspace.
 
 Per terminal, the UI includes:
 
 - mic toggle button
 - live partial preview above the mic button
 
-Launcher App Settings exposes:
+App Settings exposes:
 
 - capture profile selector
 - microphone device selector
@@ -150,7 +152,7 @@ clickable while the backend is unavailable so the click can explain itself.
 
 ## Frontend Capture Pipeline
 
-The browser capture path is implemented entirely in `templates/terminals.html` plus `web/static/voice-capture-worklet.js`.
+The browser capture path is implemented in `web/static/js/voice-input.js` plus `web/static/voice-capture-worklet.js`. (It was extracted out of `templates/terminals.html` and later out of `web/static/js/terminals.js`; the terminals page now only retains the top-level push-to-talk key listeners and the shared terminal state the capture code reads.)
 
 ### Capture profiles
 
@@ -249,7 +251,7 @@ The resampler behavior is:
 - weighted averaging when downsampling
 - linear interpolation when upsampling
 
-This is materially better than the older script-processor approach described in the archived notes.
+This is materially better than the older script-processor approach it replaced.
 
 ## Backend Voice API Contract
 
@@ -311,7 +313,7 @@ Expected statuses today:
 
 ## Whisper Engine Guideline
 
-The `whisper` path is implemented inside `web/api.py`.
+The `whisper` path is implemented inside `web/voice.py`.
 
 Behavior:
 
@@ -334,7 +336,7 @@ If live partials become a requirement, this engine path will need architectural 
 
 The `vosk` path uses two pieces:
 
-1. Flask-side session/proxy logic in `web/api.py`
+1. Flask-side session/proxy logic in `web/voice.py`
 2. standalone WebSocket recognizer service in `services/vosk_service.py`
 
 ### Flask-side Vosk behavior
@@ -366,7 +368,7 @@ The Vosk service:
 
 ## Concurrency And Safety Rules
 
-There are a few important implementation details here that should not be casually removed:
+There are a few important implementation details here — all in `web/voice.py` — that should not be casually removed:
 
 - `_vosk_lock` guards the session WebSocket registry.
 - `_vosk_session_locks` serialize `send` and `recv` per Vosk voice session.
@@ -412,7 +414,7 @@ The existing test suite already covers key voice behavior. That coverage should 
 Notable verified areas:
 
 - terminals page exposes the voice toggle and worklet wiring
-- launcher settings expose global microphone and push-to-talk controls
+- App Settings exposes the global microphone and push-to-talk controls
 - `voice-status` reports engine, model, and language correctly
 - `voice-prefs` defaults and persistence behavior
 - Whisper flow buffers audio and emits a final transcript on stop
@@ -436,7 +438,7 @@ These are current design constraints, not necessarily bugs:
 
 If you modify voice behavior, keep these rules in mind:
 
-- Treat `templates/terminals.html`, `web/static/voice-capture-worklet.js`, and `web/api.py` as one coordinated system.
+- Treat `web/static/js/voice-input.js`, `web/static/voice-capture-worklet.js`, and `web/voice.py` as one coordinated system.
 - Any change to audio format must preserve or intentionally update the 16 kHz PCM contract for both engines.
 - If you change UI wording around mic reliability, verify it still matches real `pywebview` behavior.
 - If you change engine semantics, update both `/api/voice-status` and the terminal panel summary text.

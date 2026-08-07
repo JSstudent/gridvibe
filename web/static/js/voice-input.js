@@ -1,6 +1,6 @@
     /* ─────────────────────────────────────────────
-       Voice input — extracted from terminals.js per
-       docs/terminals_js_split_plan_2026-07-23.md (Phase 2, move-only).
+       Voice input — extracted from terminals.js by the move-only third
+       phase of the terminals.js split.
        Mic capture → Socket.IO → STT, recording overlay, hold/push-to-talk.
        Loaded before terminals.js; the top-level PTT key listeners and all
        shared terminal state remain in terminals.js.
@@ -243,8 +243,7 @@
     /* One entry point for "voice settings changed somewhere else": an open
        workspace re-reads availability and prefs instead of needing a restart.
        Prefs matter because the push-to-talk handlers read _voicePrefs at event
-       time but the object itself was only loaded at boot
-       (docs/stage_j_issues_analysis_2026-07-26.md, issues 2 and 3). */
+       time but the object itself was only loaded at boot. */
     function _refreshVoiceRuntimeState() {
         _loadVoiceServiceStatus();
         _loadVoicePrefsFromServer();

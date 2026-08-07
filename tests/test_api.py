@@ -1,4 +1,5 @@
 import base64
+import errno
 import io
 import json
 import os
@@ -29,6 +30,7 @@ from web import saved_sessions as web_saved_sessions
 from web import selfupdate
 from web import terminal_io as web_terminal_io
 from web import voice as web_voice
+from web import workspaces as web_workspaces
 
 
 class FakeSftp:
@@ -85,6 +87,21 @@ class FakeSftp:
         self.closed = True
 
 
+class RealpathFakeSftp(FakeSftp):
+    """FakeSftp whose normalize fails on a missing path, like a real server.
+
+    OpenSSH answers SSH_FXP_REALPATH with realpath(3), so paramiko raises
+    "[Errno 2] No such file" before any stat happens. Plain FakeSftp normalizes
+    anything, which hid the raw-errno 500 a dangling explorer path produced.
+    """
+
+    def normalize(self, path):
+        normalized = super().normalize(path)
+        if normalized not in self.entries:
+            raise FileNotFoundError(errno.ENOENT, "No such file")
+        return normalized
+
+
 class FakeSshStream:
     def __init__(self, data=b"", returncode=0):
         self._data = data
@@ -133,6 +150,17 @@ class ApiRoutesTestCase(unittest.TestCase):
             str(self.saved_sessions_path),
         )
         self.saved_sessions_patch.start()
+        # Workspace snapshots are process-wide state like the two above: tests
+        # in this class save and capture workspaces, and an unpatched path
+        # would read-modify-replace the developer's real runtime_state.json.
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        self.state_path_patch = patch.object(
+            web_runtime_state,
+            "RUNTIME_STATE_PATH",
+            str(self.state_path),
+        )
+        self.state_path_patch.start()
+        self.addCleanup(self.state_path_patch.stop)
         api._refresh_runtime_config()
         api.app.config["TESTING"] = True
         api.configure_browser_shutdown(False)
@@ -197,6 +225,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/explorer-search.js",
             "js/explorer-fs.js",
             "js/explorer-git-watch.js",
+            "js/explorer-overview.js",
             "js/browser-pane.js",
             "js/terminal-shell.js",
             "js/terminals.js",
@@ -394,7 +423,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const AGENT_OPTIONS = [", html)
         self.assertIn('class="startup-mode-select"', html)
         self.assertIn('<option value="terminal"', html)
-        self.assertIn('<option value="agent"', html)
+        # The agent choice rides inline in the startup-mode select as an
+        # optgroup of "agent:<name>" values; there is no separate agent select.
+        self.assertIn('<optgroup label="Agent">', html)
+        self.assertIn('value="agent:${escHtml(option.value)}"', html)
         self.assertIn('aria-label="Terminal ${index + 1} title"', html)
         self.assertIn("function normalizeTerminalCommandUi(terminal)", html)
         self.assertIn("Custom Agent", html)
@@ -494,6 +526,84 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('<span>Session</span>', html)
         self.assertIn('<span>Mode</span>', html)
         self.assertNotIn("Configure your terminal workspace before launch.", html)
+
+    def test_launcher_page_ships_the_connection_target_dropdown(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # The caret half of each mode button: one per mode, both aimed at the
+        # single menu entry point.
+        self.assertIn('class="mode-choice"', html)
+        self.assertIn('id="sshTargetBtn"', html)
+        self.assertIn('id="wslTargetBtn"', html)
+        self.assertIn('data-target-mode="ssh"', html)
+        self.assertIn('data-target-mode="wsl"', html)
+        self.assertIn('title="Start from a saved SSH target"', html)
+        self.assertIn('title="Start from a saved local repository"', html)
+        self.assertIn("toggleConnectionTargetMenu(event, 'ssh')", html)
+        self.assertIn("toggleConnectionTargetMenu(event, 'wsl')", html)
+        self.assertIn("/api/session-targets", html)
+        self.assertIn("const CONNECTION_TARGET_ICONS = {", html)
+        self.assertIn("const BLANK_CONNECTION_TARGETS = {", html)
+
+    def test_launcher_prefill_leaves_the_launch_a_scratch_session(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Borrowing an address must not adopt the preset it came from: the
+        # active saved session is dropped, so the launch stays repeatable.
+        self.assertIn("setActiveSavedSession(null);", html)
+        # The built-in default is never sent as a preset identity.
+        self.assertIn("activeSavedSessionId === DEFAULT_SESSION_ID", html)
+
+    def test_launcher_session_source_stacks_its_actions_under_the_title(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn('class="section-head section-head-stacked"', html)
+        self.assertIn(".section-head-stacked {", html)
+
+    def test_launcher_offers_a_one_click_scratch_session(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn('onclick="startScratchSession()"', html)
+        self.assertIn(">New Session</button>", html)
+        # The scratch button leads the Session Source toolbar, ahead of Save.
+        self.assertLess(
+            html.index('onclick="startScratchSession()"'),
+            html.index('onclick="saveCurrentConfig()"'),
+        )
+
+    def test_default_session_loads_without_touching_saved_presets(self):
+        """The scratch button's backing load: the virtual default preset."""
+        self.client.post(
+            "/api/saved-sessions",
+            json={"name": "Keeper", "config": {"connection_mode": "ssh", "terminal_count": 2}},
+        )
+
+        response = self.client.get(f"/api/saved-sessions/{api.DEFAULT_SAVED_SESSION_ID}")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data["is_default"])
+        self.assertEqual(data["config"]["ssh"]["host"], "")
+
+        listed = self.client.get("/api/saved-sessions").get_json()
+        self.assertEqual([entry["name"] for entry in listed["sessions"]], ["Keeper"])
+
+    def test_launcher_target_menu_reports_its_open_state_on_the_caret(self):
+        launcher_js = self.client.get("/static/js/launcher.js").get_data(as_text=True)
+        workspaces_js = self.client.get("/static/js/workspaces.js").get_data(as_text=True)
+
+        # The shared menu owns aria-expanded for whichever control opened it —
+        # the opener never hears the outside click or Escape that closes it.
+        self.assertIn("function releaseWorkspaceContextMenuAnchor()", workspaces_js)
+        self.assertIn("anchor.setAttribute('aria-expanded', 'true');", workspaces_js)
+        self.assertIn("openWorkspaceContextMenu(event, entries, { anchor });", launcher_js)
 
     def test_launcher_page_resets_terminal_setup_when_connection_target_changes(self):
         response = self.client.get("/")
@@ -665,11 +775,37 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        self.assertIn('class="btn btn-neutral btn-icon settings-window-btn"', html)
+        self.assertIn("settings-window-btn", html)
         # Settings themselves now open in-page, so this button only opens the
         # launcher window and says so.
         self.assertIn('aria-label="Open launcher"', html)
         self.assertIn('class="vibe-flow-icon"', html)
+
+    def test_terminals_page_launcher_button_heads_the_session_tab_line(self):
+        """The launcher button sits at the head of the session tab line — ahead
+        of the first tab and out of the top bar, so hiding the top bar no longer
+        hides it. Alt+` reaches the same action."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+
+        session_bar_start = html.index('<div class="session-bar">')
+        session_tabs_start = html.index('id="sessionTabs"')
+        launcher_start = html.index('aria-label="Open launcher"')
+        topbar_actions_start = html.index('<div class="topbar-actions">')
+
+        self.assertLess(session_bar_start, launcher_start)
+        self.assertLess(launcher_start, session_tabs_start)
+        self.assertLess(topbar_actions_start, session_bar_start)
+        self.assertIn('aria-keyshortcuts="Alt+`"', html)
+
+        terminals_js = self._static("js/terminals.js")
+        # The physical key left of "1" — matched by code so a layout that types
+        # a dead key there still reaches the launcher, and a focused terminal
+        # hands the key up instead of sending ESC ` to the shell.
+        self.assertIn("event.code !== 'Backquote'", terminals_js)
+        self.assertIn("event.code === 'Backquote'", terminals_js)
 
     def test_terminals_page_opens_app_settings_without_the_launcher(self):
         """The session window carries its own App Settings dialog (todo 1) —
@@ -762,6 +898,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('title="Refresh explorer (F5)"', html)
         self.assertIn('title="Go to parent directory (Mouse Back)"', html)
         self.assertIn("function findExplorerShortcutTargetIndex(", html)
+        shortcut_target = html[
+            html.index("function findExplorerShortcutTargetIndex("):
+            html.index("function navigateExplorerToParent(index)")
+        ]
+        self.assertLess(
+            shortcut_target.index("if (_activeExplorerIndex !== -1"),
+            shortcut_target.index("const targetCard = target?.closest?.('.terminal-container');")
+        )
         self.assertIn("function navigateExplorerToParent(index)", html)
         self.assertIn("event.key !== 'F5'", html)
         self.assertIn("refreshTerminalDisplay(index);", html)
@@ -851,6 +995,28 @@ class ApiRoutesTestCase(unittest.TestCase):
             "splitRowWeights = cloneSplitTrackWeights(pendingRestore.splitRowWeights);",
             html,
         )
+
+    def test_terminals_page_offers_split_controls_on_every_pane_kind(self):
+        """Explorer and browser panes split off a terminal, so they carry the
+        same two axis controls a terminal pane does."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("data-terminal-split-v", html)
+        self.assertIn("data-terminal-split-h", html)
+        # The labels say what a split of these panes actually produces.
+        self.assertIn("Split off a terminal beside this pane", html)
+        self.assertIn("Split off a terminal below this pane", html)
+        # Nothing hides the controls per pane kind any more.
+        self.assertNotIn("setTerminalOnlyControlsVisible", html)
+
+        split_start = html.index("async function splitTerminalPane(index")
+        split_end = html.index("function _copyText(text)", split_start)
+        split_body = html[split_start:split_end]
+        # The split terminal opens where the explorer is actually browsing,
+        # not where the pane was originally launched.
+        self.assertIn("getExplorerSelectedDirectory(index)", split_body)
 
     def test_terminals_page_close_preserves_sibling_pane_state(self):
         response = self.client.get("/terminals")
@@ -1250,7 +1416,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
         self.assertIn(".explorer-source-line-number", html)
-        self.assertIn("function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set())", html)
+        self.assertIn("function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines)", html)
         self.assertIn("function highlightExplorerCode(content, language, searchRanges = [])", html)
         self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
         self.assertIn("const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({", html)
@@ -1308,6 +1474,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("node.replaceWith(fragment);", html)
         self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
         self.assertIn("function findExplorerSearchTargetIndex()", html)
+        target = html[
+            html.index("function findExplorerSearchTargetIndex()"):
+            html.index("function explorerSelectionQuery(index)")
+        ]
+        self.assertIn("const index = findExplorerShortcutTargetIndex();", target)
         self.assertIn("event.code !== 'KeyF'", html)
         self.assertNotIn("/api/explorer-search", html)
 
@@ -1357,8 +1528,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         self.assertIn("function isExplorerSearchablePane(pane)", html)
         self.assertIn("pane?._explorerMode === 'file' || pane?._explorerMode === 'directory'", html)
-        self.assertIn("isExplorerSearchablePane(terminals[activeSlot])", html)
-        self.assertIn("isExplorerSearchablePane(terminals[_focusedTerminalIndex])", html)
+        target = html[
+            html.index("function findExplorerSearchTargetIndex()"):
+            html.index("function explorerSelectionQuery(index)")
+        ]
+        self.assertIn("const index = findExplorerShortcutTargetIndex();", target)
+        self.assertIn("isExplorerSearchablePane(terminals[index])", target)
         self.assertIn("!pane || !isExplorerSearchablePane(pane)", html)
         self.assertNotIn("!pane || pane._explorerMode !== 'file'", html)
 
@@ -1463,7 +1638,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("Staged Changes", html)
 
     def test_terminals_page_vendors_highlightjs_source_highlighting(self):
-        """Phase 1 (docs/source_diff_analysis.md): the Source viewer highlights
+        """The Source viewer highlights
         the whole document once with the pinned Highlight.js build and keeps the
         handwritten lexer as a fallback."""
         response = self.client.get("/terminals")
@@ -1479,8 +1654,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerRenderHighlightedRuns(runs, searchRanges = [])", html)
         self.assertIn("engine.highlight(source, { language: grammar, ignoreIllegal: true })", html)
         # Source rendering prefers the whole-document pass, falling back per line.
-        self.assertIn("const highlightedLines = explorerHighlightDocumentLines(content, normalizedLanguage);", html)
-        self.assertIn("? explorerRenderHighlightedRuns(highlightedLines.get(record.number), searchRanges)", html)
+        self.assertIn(": explorerHighlightDocumentLines(content, normalizedLanguage);", html)
+        self.assertIn("? explorerRenderHighlightedRuns(runs.get(record.number), searchRanges)", html)
         self.assertIn(": highlightExplorerCode(record.text, language, searchRanges, record.start);", html)
         # The oversized-file guard is preserved for the highlighter.
         self.assertIn("if (source.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD) {", html)
@@ -1497,7 +1672,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
     def test_terminals_page_vendors_diff2html_precise_diffs(self):
-        """Phase 2 (docs/source_diff_analysis.md): diffs render through the
+        """Diffs render through the
         pinned Diff2Html build with intraline emphasis, surface truncation, and
         keep the tolerant side-by-side renderer as a fallback."""
         response = self.client.get("/terminals")
@@ -1512,11 +1687,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("diffStyle: 'char',", html)
         self.assertIn("synchronisedScroll: false,", html)
         self.assertIn("matchingMaxComparisons: 1500,", html)
-        self.assertIn("maxLineLengthHighlight: 2000", html)
+        # Lines past this length lose intraline emphasis entirely, so the cap
+        # tracks Diff2Html's own default rather than sitting below it.
+        self.assertIn("maxLineLengthHighlight: 10000", html)
         self.assertIn(
             "new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs)",
             html,
         )
+        # draw() highlights on its own because the config sets `highlight: true`.
+        # A second highlightCode() pass nests a duplicate hljs span inside every
+        # span the first pass produced, so there must be exactly one draw call
+        # and no explicit re-highlight.
+        self.assertIn("ui.draw();", html)
+        self.assertNotIn("ui.highlightCode();", html)
         # Both wrapped and unwrapped paths prefer Diff2Html; only unavailable
         # vendor assets use the handwritten renderer.
         self.assertIn("function renderExplorerDiffWithDiff2Html(index, code, diff, banner)", html)
@@ -1636,6 +1819,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function activateExplorerSearchHit(index, path, line,", html)
         self.assertIn("function focusExplorerRepoSearch(index, seedQuery = '')", html)
         self.assertIn("function findExplorerRepoSearchTargetIndex()", html)
+        target = html[
+            html.index("function findExplorerRepoSearchTargetIndex()"):
+            html.index("document.addEventListener('keydown'", html.index("function findExplorerRepoSearchTargetIndex()"))
+        ]
+        self.assertIn("const index = findExplorerShortcutTargetIndex();", target)
         self.assertIn("data-explorer-repo-search-input", html)
         self.assertIn("/api/explorer/${encodeURIComponent(sessionId)}/search?", html)
         self.assertIn(
@@ -1699,7 +1887,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="explorer-viewer-${index}"', html)
         self.assertIn("data-explorer-tab-open", html)
         self.assertIn("data-explorer-tab-close", html)
-        # A `↗` control on each tree file row opens a pinned tab (event-isolated)
+        # An open-in-new-tab control on each tree file row opens a pinned tab (event-isolated)
         # in the background — see the focus contract test below.
         self.assertIn("data-explorer-tree-open-tab", html)
         self.assertIn("openExplorerFileInBackgroundTab(index, path, {", html)
@@ -1710,7 +1898,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".explorer-empty-viewer {", html)
 
     def test_terminals_page_explorer_editor_controls_and_wiring(self):
-        """docs/text_editor_2026-07-20.md §5: Edit/Save/Cancel wiring + textarea."""
+        """In-app editor: Edit/Save/Cancel wiring + textarea."""
         editor = self._static("js/explorer-editor.js")
         viewer = self._static("js/explorer-viewer.js")
 
@@ -1767,8 +1955,10 @@ class ApiRoutesTestCase(unittest.TestCase):
             enter.index("textarea.focus({ preventScroll: true });"),
         )
         # Save captures the textarea (the real edit-mode scroller), allowing
-        # the highlighted Source view to return to the same location.
-        self.assertIn("panel.querySelector('.explorer-source-editor')", viewer)
+        # the highlighted Source view to return to the same location. The
+        # scroll target sees through the fixed source frame to the inner view.
+        self.assertIn("panel.querySelector('.explorer-source-view')", viewer)
+        self.assertIn("view.querySelector('.explorer-source-editor')", viewer)
         exit_mode = editor[
             editor.index("function exitExplorerEditMode(index)"):
             editor.index("async function cancelExplorerEdit(index)")
@@ -2005,6 +2195,33 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Bounded pinned-tab count shared with the backend cap.
         self.assertIn("const EXPLORER_MAX_PINNED_TABS = 12;", html)
 
+    def test_terminals_page_restore_recovers_from_dangling_explorer_tabs(self):
+        """A tab saved under another root must not strand the pane on an error.
+
+        Restoring a session whose explorer root changed reopens paths that are
+        no longer there. Before, the failed open left the pane unattached: the
+        viewer showed the raw backend error and the breadcrumb stayed inert
+        until the user clicked the tree.
+        """
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # The restore opens the active tab itself so it can see the outcome.
+        self.assertIn("const opened = await openExplorerFile(index, activeTab.path, {", html)
+        # Only a backend not_found prunes the tab — a transient failure keeps it.
+        self.assertIn("function explorerRestoredPathIsGone(index)", html)
+        self.assertIn("_explorerOpenErrorCode === 'not_found'", html)
+        self.assertIn("pane._explorerOpenErrorCode = String(data.code || '');", html)
+        self.assertIn(
+            "pane._explorerTabs = pane._explorerTabs.filter(tab => tab.id !== activeTab.id);",
+            html,
+        )
+        # Either way the pane lands on a directory listing, so the breadcrumb
+        # is live; a saved directory that is gone too falls back to the root.
+        self.assertIn("async function restoreExplorerDirectoryFallback(index, dirPath)", html)
+        self.assertIn("return loadExplorerPane(index, '');", html)
+
     def test_terminals_page_persists_tab_views_and_markdown_appearance(self):
         """2.f: per-tab mode/scroll and the Markdown appearance round-trip sessions."""
         response = self.client.get("/terminals")
@@ -2018,6 +2235,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorer_tab_views: explorerTabs.tab_views,", html)
         self.assertIn("explorer_md_preset: mdAppearance ? mdAppearance.preset : '',", html)
         self.assertIn("explorer_md_font: mdAppearance ? mdAppearance.font : '',", html)
+        self.assertIn("explorer_source_font: mdAppearance ? mdAppearance.sourceFont : '',", html)
         # Restore: persisted views seed the rebuilt tab records; the OD-4
         # identity check decides at render time whether they still apply.
         self.assertIn("function explorerInflatePersistedTabView(raw)", html)
@@ -2043,7 +2261,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Markdown appearance re-applies once per session id (ISSUE-2026-033) so
         # a close rebuild cannot clobber an appearance changed since launch.
         self.assertIn("function applyExplorerSessionMarkdownAppearance(index)", html)
-        self.assertIn("setExplorerMarkdownAppearance({ preset, font });", html)
+        self.assertIn("setExplorerMarkdownAppearance({ preset, font, sourceFont });", html)
         self.assertIn("applyExplorerSessionMarkdownAppearance(index);", html)
 
     def test_terminals_page_preview_tab_keeps_separated_path(self):
@@ -2058,21 +2276,27 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Returning to the Preview tab after a pinned tab was active re-browses
         # the tab's own directory instead of falling through to the empty viewer.
         self.assertIn("loadExplorerPane(index, tab.dirPath);", html)
-        # The empty viewer clears the tab's separated path too.
-        self.assertIn("preview.dirPath = '';", html)
+        # The empty viewer removes the separated path: absence means no loaded
+        # directory, while an own empty value identifies the explorer root.
+        self.assertIn("delete preview.dirPath;", html)
         # Serialize: the reserved Preview record carries its own path + dir
         # alongside the zoom, so workspace saves keep the Preview content.
         self.assertIn("previewRecord.path = previewPath;", html)
         self.assertIn("previewRecord.dir = previewDir;", html)
+        self.assertIn("const hasPreviewDir = Object.prototype.hasOwnProperty.call(preview, 'dirPath');", html)
         # Restore: the saved Preview path/dir seed the tab record and reopen
         # when no pinned tab was saved as active.
         self.assertIn("previewTab.dirPath = savedPreviewDir;", html)
+        self.assertIn("} else if (hasSavedPreviewDir) {", html)
         self.assertIn("openExplorerFile(index, savedPreviewPath, {", html)
         self.assertIn("...explorerTabPersistedDiffTarget(previewTab)", html)
-        self.assertIn("loadExplorerPane(index, savedPreviewDir);", html)
+        # Re-browsing the saved dir goes through the fallback so a dir that no
+        # longer exists under this root lands on the root listing, not on a
+        # bare error with an inert breadcrumb.
+        self.assertIn("restoreExplorerDirectoryFallback(index, savedPreviewDir);", html)
         # The terminal-close snapshot carries dirPath through the rebuild.
-        self.assertIn("dirPath: tab.dirPath || ''", html)
-        self.assertIn("tab.dirPath = saved.dirPath;", html)
+        self.assertIn("hasDirPath: Object.prototype.hasOwnProperty.call(tab, 'dirPath')", html)
+        self.assertIn("if (saved.hasDirPath) {", html)
         # First show goes through the viewer entry point — a bare root load
         # racing the restore could resolve last and clobber the Preview path.
         self.assertNotIn("loadExplorerPane(i);", html)
@@ -2370,6 +2594,29 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorer_open_tabs: commandMode === 'explorer'", html)
         self.assertIn("explorer_open_tabs: resolvedStartupMode === 'explorer'", html)
 
+    def test_launcher_drops_explorer_tabs_when_the_row_directory_changes(self):
+        """Retargeting the root invalidates paths captured under the old one.
+
+        Editing the directory of an imported explorer row relaunches the pane on
+        a different root, where the carried tab paths resolve to nothing.
+        """
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # The row records the directory its carried tabs belong to...
+        self.assertIn("data-explorer-tabs-dir=", html)
+        # ...and the collected draft keeps them only while it still matches.
+        self.assertIn(
+            "const explorerTabsMatchRoot = directory === (row.dataset.explorerTabsDir || '');",
+            html,
+        )
+        for field in ("explorer_open_tabs", "explorer_active_tab", "explorer_tab_views"):
+            self.assertIn(
+                f"{field}: commandMode === 'explorer' && explorerTabsMatchRoot",
+                html,
+            )
+
     def test_pages_carry_the_active_session_group_through_workspace_restore(self):
         """Both save paths record the front group; the restore reopens on it."""
         terminals_html = self._page_html(self.client.get("/terminals"))
@@ -2388,22 +2635,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("native_zoom_factor: nativeZoomFactor", terminals_html)
         self.assertIn("notifyWorkspacesChanged('workspace_saved');", terminals_html)
 
+        # Restored groups get fresh ids. Resolving the saved front group to the
+        # one the replay actually created is the *server's* job now (MW-09):
+        # `restore_workspace` returns the live id and the zoom, and the launcher
+        # opens the window on what it was handed. Behavioral coverage:
+        # `…front_group_hint…` / `…a_started_front_group_is_honoured` and
+        # `SingleWorkspaceRestoreRoutingTestCase` in test_multi_workspace.py.
         launcher_html = self._page_html(self.client.get("/"))
-        self.assertIn(
-            "restorableActiveGroupId = String(data.active_group_id || '');",
-            launcher_html,
-        )
-        # Restored groups get fresh ids, so the saved one is resolved to the
-        # group the replay actually created before opening the workspace on it.
-        self.assertIn(
-            "if (restorableActiveGroupId && group.group_id === restorableActiveGroupId) {",
-            launcher_html,
-        )
-        self.assertIn(
-            "restorableNativeZoomFactor = normalizeNativeZoomFactor(data.native_zoom_factor);",
-            launcher_html,
-        )
-        self.assertIn("activeGroupId,\n                    nativeZoomFactor", launcher_html)
         # Window dispatch now lives in the shared workspaces.js module, so the
         # launcher only names the workspace and the group to open on.
         self.assertIn(
@@ -2433,10 +2671,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("data-explorer-tab-views=", html)
         self.assertIn("data-explorer-md-preset=", html)
         self.assertIn("data-explorer-md-font=", html)
+        self.assertIn("data-explorer-source-font=", html)
         self.assertIn("data-explorer-theme=", html)
         self.assertIn("explorer_tab_views: commandMode === 'explorer'", html)
         self.assertIn("explorer_tab_views: resolvedStartupMode === 'explorer'", html)
         self.assertIn("explorer_md_preset: resolvedStartupMode === 'explorer'", html)
+        self.assertIn("explorer_source_font: commandMode === 'explorer'", html)
         self.assertIn("explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : ''", html)
         self.assertIn("explorer_theme: resolvedStartupMode === 'explorer'", html)
 
@@ -2547,6 +2787,15 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
         self.assertIn("max-width: 4em;", html)
+        # Both sides must wrap inside the pane. Each side is its own table, so
+        # the left-only `@@ ... @@` block header has to wrap as well — an
+        # unwrappable header set the left table's width and clipped that column
+        # with no scrollbar left to recover it.
+        self.assertIn(".d2h-info .d2h-code-side-line {", html)
+        # ...but not by pinning the tables: fixed layout gives the number
+        # column an equal half of the side while its own max-width holds the
+        # cell at 4em, leaving a blank gap in front of every code line.
+        self.assertNotIn(".explorer-diff2html .d2h-diff-table {\n            table-layout", html)
         self.assertIn(".explorer-markdown-preview.wrap-lines > * {", html)
         self.assertIn(".explorer-markdown-preview p,", html)
         self.assertIn("text-align: justify;", html)
@@ -2610,16 +2859,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerMarkdownAppearance()", html)
         self.assertIn("function setExplorerMarkdownAppearance(patch)", html)
         self.assertIn("function applyExplorerMarkdownAppearanceToElement(preview, appearance)", html)
-        self.assertIn("function showExplorerMarkdownAppearanceMenu(anchor)", html)
+        self.assertIn("function showExplorerMarkdownAppearanceMenu(anchor, options = {})", html)
         # Bounded allowlists and persisted preference keys.
         self.assertIn("const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast', 'vscode'];", html)
         self.assertIn(
-            "'system', 'serif', 'consolas', 'cascadia-code', 'jetbrains-mono', 'courier-new'",
+            "'system', 'serif', 'cascadia-code', 'jetbrains-mono', 'courier-new'",
             html,
         )
         self.assertIn("const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';", html)
         self.assertIn("const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';", html)
-        # Header control is present and gated to previewable files.
+        # Header control is present.
         self.assertIn('data-explorer-md-appearance="${index}"', html)
         # Appearance is applied idempotently on both preview render paths.
         self.assertEqual(
@@ -2641,6 +2890,116 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn(".explorer-markdown-preview.md-font-menlo {", html)
         self.assertIn("--md-preview-surface: var(--md-preset-paper-bg);", html)
         self.assertIn("--md-preset-paper-bg: #f4ecd8;", html)
+        # Consolas is retired: the JetBrains Mono stack falls back to it, so the
+        # two entries rendered identically. Stored values alias onto the survivor.
+        self.assertNotIn(".explorer-markdown-preview.md-font-consolas {", html)
+        self.assertNotIn("consolas: 'Consolas',", html)
+        self.assertIn("const EXPLORER_FONT_ALIASES = { consolas: 'jetbrains-mono' };", html)
+
+    def test_terminals_page_source_view_font_setting(self):
+        """The Source view carries its own persisted font, same rules as preview."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # Monospace-only allowlist, own localStorage key, same read/normalize path.
+        self.assertIn(
+            "'default', 'cascadia-code', 'jetbrains-mono', 'courier-new'",
+            html,
+        )
+        self.assertIn("const EXPLORER_SOURCE_FONT_KEY = 'gridvibe.sourceViewFont';", html)
+        self.assertIn("const EXPLORER_SOURCE_FONT_DEFAULT = 'default';", html)
+        self.assertIn("function applyExplorerSourceFontToElement(view, appearance)", html)
+        self.assertIn("window.localStorage.setItem(EXPLORER_SOURCE_FONT_KEY, next.sourceFont);", html)
+        # Applied to every open source panel and diff panel, and to a freshly
+        # rendered file.
+        self.assertIn(
+            "document.querySelectorAll('.explorer-source-view, .explorer-diff-content')"
+            ".forEach(view => {",
+            html,
+        )
+        self.assertIn("applyExplorerSourceFontToElement(", html)
+        # Its own menu group, alongside the preview groups.
+        self.assertIn("'Source font',", html)
+        self.assertIn("value => setExplorerMarkdownAppearance({ sourceFont: value })", html)
+        # The appearance button is no longer gated to previewable files; the
+        # preview-only groups are dropped instead.
+        self.assertIn("showExplorerMarkdownAppearanceMenu(appearanceButton, { includeMarkdown: hasPreview });", html)
+        # Token-driven CSS: one custom property the rows and the edit textarea
+        # inherit. The diff panel is a sibling of the source view, so it hosts
+        # the property itself and carries the same source-font-* class.
+        self.assertIn("--source-view-font: Consolas, Monaco, 'Courier New', monospace;", html)
+        self.assertIn(".explorer-source-view,\n        .explorer-diff-content {", html)
+        self.assertIn(
+            ":is(.explorer-source-view, .explorer-diff-content).source-font-cascadia-code {", html
+        )
+        self.assertIn(
+            ":is(.explorer-source-view, .explorer-diff-content).source-font-jetbrains-mono {", html
+        )
+        self.assertIn(
+            ":is(.explorer-source-view, .explorer-diff-content).source-font-courier-new {", html
+        )
+        # Every surface names the property rather than relying on inheritance:
+        # the panel, the edit textarea, and — crucially — the per-row <code>
+        # cell, which the UA stylesheet's `code { font-family: monospace }`
+        # matches directly and so beats the inherited value (until it was
+        # restated there, only the line-number gutter followed the setting).
+        # The two diff renderers restate it for the same reason: the handwritten
+        # side-by-side table and Diff2Html's own table both pin a stack of their
+        # own that would otherwise win. The change peek's code cell is a <code>
+        # inside the same panel, so it restates it too.
+        self.assertEqual(html.count("font-family: var(--source-view-font);"), 6)
+        for block in (
+            ".explorer-source-line-code {",
+            ".explorer-change-peek-code {",
+            ".explorer-side-by-side-diff {",
+            ".explorer-diff2html .d2h-diff-table {",
+        ):
+            with self.subTest(block=block):
+                self.assertIn(
+                    "font-family: var(--source-view-font);", html[html.index(block):][:400]
+                )
+
+    def test_coding_fonts_are_vendored_and_declared_once(self):
+        """The picker's fonts ship with the app — they are not on a stock Windows
+        box, and both stacks fall back to Consolas, so an unvendored entry is a
+        control that visibly does nothing."""
+        tokens = self._static("css/tokens.css")
+
+        # Declared in the one stylesheet both pages load, so the explorer picker
+        # and the App Settings terminal-font list resolve the same faces.
+        self.assertEqual(tokens.count("@font-face"), 4)
+        for family in ("'JetBrains Mono'", "'Cascadia Code'"):
+            self.assertIn(f"font-family: {family};", tokens)
+        for weight in (400, 700):
+            self.assertIn(
+                f"url('../vendor/fonts/jetbrains-mono-latin-{weight}-normal.woff2') format('woff2')",
+                tokens,
+            )
+            self.assertIn(
+                f"url('../vendor/fonts/cascadia-code-latin-{weight}-normal.woff2') format('woff2')",
+                tokens,
+            )
+        # Text stays visible while the face loads.
+        self.assertEqual(tokens.count("font-display: swap;"), 4)
+
+        # The files themselves are served locally (offline-capable, no CDN).
+        for name in (
+            "jetbrains-mono-latin-400-normal.woff2",
+            "jetbrains-mono-latin-700-normal.woff2",
+            "cascadia-code-latin-400-normal.woff2",
+            "cascadia-code-latin-700-normal.woff2",
+        ):
+            with self.subTest(font=name):
+                asset = self.client.get(f"/static/vendor/fonts/{name}")
+                self.assertEqual(asset.status_code, 200)
+                self.assertGreater(len(asset.data), 10_000)
+                self.assertEqual(asset.data[:4], b"wOF2")
+                asset.close()
+
+        # A pane measured against the fallback face re-fits once the real one
+        # has loaded, so a terminal on a vendored font is not left off-grid.
+        self.assertIn("document.fonts.ready.then(() => {", self._static("js/terminals.js"))
 
     def test_terminals_page_renders_mermaid_and_exposes_preview_shortcut(self):
         response = self.client.get("/terminals")
@@ -2687,11 +3046,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         # The control still reuses the search-btn markup in the tree row.
         self.assertIn('class="explorer-search-btn explorer-open-tab-btn"', html)
-        # ...but carries a distinct ↗ glyph so it never reads as the git stage "+".
-        self.assertIn(
-            'aria-label="Open ${escHtml(entry.name || path)} in a new tab">↗</button>',
-            html,
-        )
+        # ...but carries its own icon so it never reads as the git stage "+" or
+        # as its open-folder sibling.
+        self.assertIn("const EXPLORER_OPEN_TAB_ICON = ", html)
+        self.assertIn("${EXPLORER_OPEN_TAB_ICON}</button>", html)
         # ...but now has its own rule drawing from the theme-aware explorer tokens.
         self.assertIn(".explorer-open-tab-btn {", html)
         self.assertIn(".explorer-open-tab-btn:hover,", html)
@@ -2702,7 +3060,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("background: var(--explorer-open-folder-hover-bg);", html)
 
     def test_tree_open_tab_button_opens_the_tab_in_the_background(self):
-        """The tree row ↗ queues a tab without stealing the viewer's focus.
+        """The tree row open-in-new-tab control queues a tab without stealing the viewer's focus.
 
         Opening three files in a row must leave the reader on the file they
         were already looking at, so the opener only touches the tab strip.
@@ -2722,14 +3080,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorerEnsurePinnedTab(pane, path)", opener)
         self.assertIn("renderExplorerTabStrip(index);", opener)
         self.assertIn("persistExplorerTabsToSession(index);", opener)
-        # The ↗ handler routes there and carries the row's Git badge along.
+        # The open-in-new-tab handler routes there and carries the row's Git badge along.
         self.assertIn(
             "git: explorerTreeEntryForPath(terminals[index], path)?.git || null",
             viewer,
         )
 
     def test_reopening_an_already_open_tab_flashes_it_instead_of_focusing(self):
-        """↗ on a file that already has a tab answers without moving the viewer."""
+        """Open-in-new-tab on a file that already has a tab answers without moving the viewer."""
         viewer = self._static("js/explorer-viewer.js")
         opener = viewer[
             viewer.index("function openExplorerFileInBackgroundTab(index, path,"):
@@ -5581,6 +5939,91 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["mode"], "commit")
         self.assertIn("+second", payload["diff"])
 
+    def test_explorer_git_diff_head_hunk_lines_match_worktree(self):
+        # The contract the source-view change model stands on: new-side line
+        # numbers in a mode=head diff address the current worktree file.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        original = [f"line {number}" for number in range(1, 11)]
+        readme.write_text("\n".join(original) + "\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        self._run_git(repo_dir, "commit", "-m", "ten lines")
+        worktree = original[:]
+        worktree.remove("line 2")  # one deleted block
+        worktree[7:7] = ["added a", "added b"]  # one added block after "line 8"
+        readme.write_text("\n".join(worktree) + "\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "head"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload["truncated"])
+        diff = payload["diff"]
+        self.assertIn("-line 2", diff)
+        # Walk the patch the way explorerDiffChangeBlocks() does and check
+        # every added line against the worktree line its new-side number
+        # points at.
+        new_line = 0
+        added = []
+        for row in diff.splitlines():
+            hunk = re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", row)
+            if hunk:
+                new_line = int(hunk.group(2))
+                continue
+            if not new_line:
+                continue
+            if row.startswith("+") and not row.startswith("+++"):
+                added.append((new_line, row[1:]))
+                new_line += 1
+            elif row.startswith(" "):
+                new_line += 1
+        self.assertEqual([text for _, text in added], ["added a", "added b"])
+        for number, text in added:
+            self.assertEqual(worktree[number - 1], text)
+        # The deleted line is gone from the worktree the numbers address.
+        self.assertNotIn("line 2", worktree)
+
+    def test_explorer_git_diff_head_is_empty_for_untracked_file(self):
+        # No HEAD blob means `git diff HEAD -- path` is legitimately empty, so
+        # an untracked file gets no change markers (same as VS Code).
+        repo_dir = self._init_committed_repo()
+        (repo_dir / "notes.txt").write_text("new\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "notes.txt", "mode": "head"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["diff"], "")
+        self.assertFalse(payload["truncated"])
+
+    def test_explorer_git_diff_head_reports_truncation(self):
+        # A diff beyond the 4,000-line bound must say so; the overview has to
+        # surface that instead of silently under-reporting changes.
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("".join(f"old {number}\n" for number in range(2100)), encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        self._run_git(repo_dir, "commit", "-m", "long file")
+        readme.write_text("".join(f"new {number}\n" for number in range(2100)), encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/git/diff",
+            query_string={"path": "README.md", "mode": "head"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["truncated"])
+
     def test_explorer_git_repo_returns_changes_and_graph(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -6203,6 +6646,35 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".explorer-git-section-title", html)
         self.assertIn(".explorer-git-section-actions", html)
 
+    def test_terminals_page_git_change_rows_lead_with_the_file_name(self):
+        # Change rows read "name — muted directory" with the status badge on the
+        # right, so the narrow sidebar truncates the directory rather than the
+        # file name the row exists to identify.
+        response = self.client.get("/terminals")
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("function explorerGitFileLabelHtml(path, fallbackName)", html)
+        self.assertIn('class="explorer-diff-commit-file-name"', html)
+        self.assertIn('class="explorer-diff-commit-file-dir"', html)
+        # The badge trails the name and leads the inline actions; the full path
+        # stays on the row.
+        row = html[
+            html.index('<div class="explorer-diff-commit-file" title='):
+            html.index("</div>\n            `;")
+        ]
+        self.assertIn("data-explorer-copy-path", row)
+        self.assertLess(
+            row.index('class="explorer-diff-commit-file-path"'),
+            row.index("${explorerDiffSidebarStatusHtml(file.git)}"),
+        )
+        self.assertLess(
+            row.index("${explorerDiffSidebarStatusHtml(file.git)}"),
+            row.index('class="explorer-diff-commit-file-actions"'),
+        )
+        # Only the top-level Staged/Changes lists drop the commit-graph indent.
+        self.assertIn('class="explorer-diff-commit-files explorer-git-change-list"', html)
+        self.assertIn(".explorer-diff-commit-files.explorer-git-change-list", html)
+
     def test_terminals_page_git_actions_refresh_tree_and_open_file(self):
         # Wave 3 / 1.a (ISSUE-2026-034): every worktree-mutating Git action
         # routes through the shared refresh; publish (remote-only) does not.
@@ -6494,6 +6966,100 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("inside the configured root", response.get_json()["error"])
 
+    def test_explorer_file_reports_missing_local_path_as_not_found(self):
+        """A dangling path answers 404/not_found, not a generic rejection.
+
+        A pane restored under a different root (an imported session whose
+        directory was edited) reopens tab paths that were relative to the old
+        one. The frontend prunes such a tab only on this code, so a transient
+        failure cannot be mistaken for a file that is genuinely absent.
+        """
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "documentation/triggers.md"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.get_json()
+        self.assertEqual(payload["code"], "not_found")
+        self.assertIn("documentation/triggers.md", payload["error"])
+        self.assertNotIn("Errno", payload["error"])
+
+    def test_explorer_entries_report_missing_local_directory_as_not_found(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/entries",
+            query_string={"path": "documentation"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["code"], "not_found")
+
+    def test_explorer_file_reports_missing_ssh_path_as_not_found(self):
+        """SFTP normalize fails outright on a missing path; map it, don't leak it."""
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = RealpathFakeSftp({"/srv/app": {"type": "directory"}})
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "documentation/triggers.md"},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.get_json()
+        self.assertEqual(payload["code"], "not_found")
+        self.assertNotIn("Errno", payload["error"])
+
+    def test_explorer_file_keeps_containment_error_for_missing_ssh_path_outside_root(self):
+        """A path that never was inside the root must not become an existence probe."""
+        group = api.session_manager.create_group(
+            name="SSH",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = RealpathFakeSftp({"/srv/app": {"type": "directory"}})
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "/etc/missing.conf"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("inside the configured root", response.get_json()["error"])
+
     def test_explorer_file_returns_text_content_inside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -6518,7 +7084,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("<h1>Project</h1>", payload["preview_html"])
         self.assertEqual(payload["language"], "markdown")
 
-    # ── In-app editor: read metadata (docs/text_editor_2026-07-20.md) ──
+    # ── In-app editor: read metadata ──
     def test_explorer_file_returns_editor_metadata_for_complete_file(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -6692,13 +7258,23 @@ class ApiRoutesTestCase(unittest.TestCase):
         (repo_dir / "data.bin").write_bytes(b"\x00\x01")
         session_id = self._create_explorer_session(repo_dir)
 
-        for path in ("../escape.py", "app.py/../..", "missing.py", "data.bin"):
+        for path in ("../escape.py", "app.py/../..", "data.bin"):
             with self.subTest(path=path):
                 response = self.client.put(
                     f"/api/explorer/{session_id}/file",
                     json={"path": path, "content": "x\n", "base_revision": "sha256:x"},
                 )
                 self.assertEqual(response.status_code, 400)
+
+        # A path that is simply gone is a distinct outcome from a rejected one:
+        # it answers 404/not_found so a caller holding a dangling path can tell
+        # "this file is not here" from "this request was invalid".
+        missing = self.client.put(
+            f"/api/explorer/{session_id}/file",
+            json={"path": "missing.py", "content": "x\n", "base_revision": "sha256:x"},
+        )
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.get_json()["code"], "not_found")
 
     def test_explorer_save_rejects_oversized_replacement(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -8133,6 +8709,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(normalized[0]["explorer_tab_views"], {})
         self.assertEqual(normalized[0]["explorer_md_preset"], "")
         self.assertEqual(normalized[0]["explorer_md_font"], "")
+        self.assertEqual(normalized[0]["explorer_source_font"], "")
 
     def test_normalize_terminal_entries_validates_tab_views_and_md_appearance(self):
         """2.f: per-tab view snapshots and Markdown appearance are allowlist-validated."""
@@ -8246,9 +8823,31 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(normalized[1]["explorer_md_preset"], "")
         self.assertEqual(normalized[1]["explorer_md_font"], "")
 
+    def test_normalize_terminal_entries_preserves_preview_root_directory(self):
+        """An explicit empty Preview directory is the explorer root, not unset."""
+        normalized = web_saved_sessions._normalize_terminal_entries(
+            [
+                {
+                    "startup_mode": "explorer",
+                    "explorer_tab_views": {"__preview__": {"dir": ""}},
+                },
+                {
+                    "startup_mode": "explorer",
+                    "explorer_tab_views": {"__preview__": {"dir": "../escape"}},
+                },
+                {"startup_mode": "explorer"},
+            ]
+        )
+
+        self.assertEqual(
+            normalized[0]["explorer_tab_views"],
+            {"__preview__": {"dir": ""}},
+        )
+        self.assertEqual(normalized[1]["explorer_tab_views"], {})
+        self.assertEqual(normalized[2]["explorer_tab_views"], {})
+
     def test_normalize_terminal_entries_accepts_terminal_markdown_fonts(self):
         expected = {
-            "consolas",
             "cascadia-code",
             "jetbrains-mono",
             "courier-new",
@@ -8260,6 +8859,30 @@ class ApiRoutesTestCase(unittest.TestCase):
                     [{"startup_mode": "explorer", "explorer_md_font": font}]
                 )
                 self.assertEqual(normalized[0]["explorer_md_font"], font)
+
+    def test_normalize_terminal_entries_source_font_and_retired_consolas(self):
+        """Source font normalizes like the preview font; "consolas" aliases over."""
+        for font in ("default", "cascadia-code", "jetbrains-mono", "courier-new"):
+            with self.subTest(font=font):
+                normalized = web_saved_sessions._normalize_terminal_entries(
+                    [{"startup_mode": "explorer", "explorer_source_font": font}]
+                )
+                self.assertEqual(normalized[0]["explorer_source_font"], font)
+
+        # Unset and out-of-allowlist values fall back to "".
+        normalized = web_saved_sessions._normalize_terminal_entries(
+            [
+                {"startup_mode": "explorer"},
+                {"startup_mode": "explorer", "explorer_source_font": "comic-sans"},
+                # Retired option: kept as its nearest survivor rather than dropped.
+                {"startup_mode": "explorer", "explorer_source_font": "consolas"},
+                {"startup_mode": "explorer", "explorer_md_font": "consolas"},
+            ]
+        )
+        self.assertEqual(normalized[0]["explorer_source_font"], "")
+        self.assertEqual(normalized[1]["explorer_source_font"], "")
+        self.assertEqual(normalized[2]["explorer_source_font"], "jetbrains-mono")
+        self.assertEqual(normalized[3]["explorer_md_font"], "jetbrains-mono")
 
     def test_workspace_save_round_trips_tab_views_and_md_appearance(self):
         """2.f / ISSUE-2026-033: view snapshots + appearance persist, gated to explorer panes."""
@@ -8307,7 +8930,8 @@ class ApiRoutesTestCase(unittest.TestCase):
                                 }
                             },
                             "explorer_md_preset": "paper",
-                            "explorer_md_font": "consolas",
+                            "explorer_md_font": "serif",
+                            "explorer_source_font": "jetbrains-mono",
                             "explorer_theme": "light",
                         },
                         {
@@ -8318,7 +8942,8 @@ class ApiRoutesTestCase(unittest.TestCase):
                                 "x.md": {"mode": "source", "scroll": 0.1, "identity": "id2"}
                             },
                             "explorer_md_preset": "paper",
-                            "explorer_md_font": "consolas",
+                            "explorer_md_font": "serif",
+                            "explorer_source_font": "jetbrains-mono",
                             "explorer_theme": "light",
                         },
                     ],
@@ -8341,12 +8966,14 @@ class ApiRoutesTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(config["terminals"][0]["explorer_md_preset"], "paper")
-        self.assertEqual(config["terminals"][0]["explorer_md_font"], "consolas")
+        self.assertEqual(config["terminals"][0]["explorer_md_font"], "serif")
+        self.assertEqual(config["terminals"][0]["explorer_source_font"], "jetbrains-mono")
         self.assertEqual(config["terminals"][0]["explorer_theme"], "light")
-        # Non-explorer panes never carry tab views or a Markdown appearance.
+        # Non-explorer panes never carry tab views or a viewer appearance.
         self.assertEqual(config["terminals"][1]["explorer_tab_views"], {})
         self.assertEqual(config["terminals"][1]["explorer_md_preset"], "")
         self.assertEqual(config["terminals"][1]["explorer_md_font"], "")
+        self.assertEqual(config["terminals"][1]["explorer_source_font"], "")
         # Theme is gated to explorer panes; a terminal pane falls back to dark.
         self.assertEqual(config["terminals"][1]["explorer_theme"], "dark")
 
@@ -8827,6 +9454,39 @@ class ApiRoutesTestCase(unittest.TestCase):
         snapshot_session = saved_workspace.get_json()["groups"][0]["sessions"][0]
         self.assertEqual(snapshot_session["explorer_open_tabs"], ["README.md"])
         self.assertEqual(snapshot_session["explorer_tab_views"]["README.md"]["mode"], "preview")
+
+    def test_saving_a_workspace_never_touches_the_production_state_file(self):
+        """MW-01: this class saves and captures workspaces for real.
+
+        Its ``config.json`` and ``saved_sessions.json`` were redirected but
+        ``runtime_state.json`` was not, so a test fixture used to land in the
+        developer's real restore slot and reappear as a phantom workspace after
+        the next restart.
+        """
+        production = Path(web_runtime_state.PRODUCTION_STATE_PATH)
+        before = production.read_bytes() if production.exists() else None
+        api.session_manager.create_group(
+            name="Files",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+            group_id="group-isolation",
+        )
+        api.session_manager.create_sessions(
+            [{"directory": "C:\\repo", "title": "Files", "startup_mode": "explorer"}],
+            group_id="group-isolation",
+        )
+
+        response = self.client.post(
+            "/api/runtime-state/save", json={"workspace_id": "default"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["saved"])
+        stored = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertIn("default", stored["workspaces"])
+        after = production.read_bytes() if production.exists() else None
+        self.assertEqual(after, before)
 
     def test_save_as_without_activation_preserves_live_group_and_launcher_selection(self):
         active_payload = {
@@ -9984,38 +10644,151 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIsNone(stored.initial_command)
         start_task.assert_called_once_with(api._connect_session, created["session_id"])
 
-    def test_split_session_rejects_explorer_and_browser_panes(self):
+    def test_split_local_explorer_pane_appends_terminal_at_browsed_directory(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        nested_dir = repo_dir / "src"
+        nested_dir.mkdir(parents=True)
         api.session_manager.create_group(
             name="Explorer",
             connection_mode="wsl",
             layout="single",
-            terminal_count=2,
+            terminal_count=1,
             group_id="group-explorer",
         )
         explorer = api.session_manager.create_session(
             group_id="group-explorer",
             host="File Explorer",
-            directory="/tmp/project",
+            directory=str(repo_dir),
             mode="wsl",
             startup_mode="explorer",
+            explorer_root_directory=str(repo_dir),
+            use_wsl=True,
+            distribution="Ubuntu",
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                f"/api/sessions/{explorer.session_id}/split",
+                json={"axis": "vertical", "directory": str(nested_dir)},
+            )
+
+        self.assertEqual(response.status_code, 201)
+        created = response.get_json()["session"]
+        self.assertEqual(created["startup_mode"], "terminal")
+        self.assertEqual(Path(created["directory"]), nested_dir.resolve())
+        self.assertEqual(created["host"], "WSL (Ubuntu)")
+        self.assertIsNone(created["initial_command"])
+        # The source pane keeps being an explorer — a split adds a pane, it does
+        # not convert the one it was launched from.
+        self.assertEqual(
+            api.session_manager.get_session(explorer.session_id).startup_mode,
+            "explorer",
+        )
+
+    def test_split_local_explorer_pane_rejects_directory_outside_root(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        outside_dir = Path(self.temp_dir.name) / "outside"
+        outside_dir.mkdir()
+        api.session_manager.create_group(
+            name="Explorer",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+            group_id="group-explorer",
+        )
+        explorer = api.session_manager.create_session(
+            group_id="group-explorer",
+            host="File Explorer",
+            directory=str(repo_dir),
+            mode="wsl",
+            startup_mode="explorer",
+            explorer_root_directory=str(repo_dir),
+        )
+
+        response = self.client.post(
+            f"/api/sessions/{explorer.session_id}/split",
+            json={"axis": "vertical", "directory": str(outside_dir)},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(len(api.session_manager.get_group_sessions("group-explorer")), 1)
+
+    def test_split_browser_pane_appends_terminal_at_pane_directory(self):
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        api.session_manager.create_group(
+            name="Browser",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+            group_id="group-browser",
         )
         browser = api.session_manager.create_session(
-            group_id="group-explorer",
+            group_id="group-browser",
             host="Browser",
-            directory="/tmp/project",
+            directory=str(repo_dir),
             mode="wsl",
             startup_mode="browser",
             initial_command="http://127.0.0.1:3000",
             initial_command_mode="browser",
+            use_powershell=True,
         )
 
-        response = self.client.post(f"/api/sessions/{explorer.session_id}/split")
-        browser_response = self.client.post(f"/api/sessions/{browser.session_id}/split")
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                f"/api/sessions/{browser.session_id}/split",
+                json={"axis": "horizontal"},
+            )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(browser_response.status_code, 400)
-        self.assertEqual(response.get_json(), {"error": "Explorer and browser panes cannot be split"})
-        self.assertEqual(browser_response.get_json(), {"error": "Explorer and browser panes cannot be split"})
+        self.assertEqual(response.status_code, 201)
+        created = response.get_json()["session"]
+        self.assertEqual(created["startup_mode"], "terminal")
+        self.assertEqual(created["directory"], str(repo_dir))
+        self.assertEqual(created["host"], "PowerShell")
+        # The browser pane's URL must not ride along as the shell's first command.
+        self.assertIsNone(created["initial_command"])
+
+    def test_split_ssh_explorer_pane_appends_remote_terminal(self):
+        api.session_manager.create_group(
+            name="SSH Explorer",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-ssh-explorer",
+        )
+        explorer = api.session_manager.create_session(
+            group_id="group-ssh-explorer",
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            port=2222,
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/src": {"type": "directory"},
+            }
+        )
+
+        with patch("web.explorer._acquire_ssh_sftp", return_value=(object(), sftp)), patch(
+            "web.explorer._release_ssh_sftp"
+        ), patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                f"/api/sessions/{explorer.session_id}/split",
+                json={"axis": "vertical", "directory": "/srv/app/src"},
+            )
+
+        self.assertEqual(response.status_code, 201)
+        created = response.get_json()["session"]
+        self.assertEqual(created["startup_mode"], "terminal")
+        self.assertEqual(created["directory"], "/srv/app/src")
+        self.assertEqual(created["host"], "example.com")
+        self.assertEqual(created["username"], "ubuntu")
+        self.assertEqual(created["port"], 2222)
 
     def test_split_session_rejects_group_at_max_sessions(self):
         api.session_manager.create_group(
@@ -10417,7 +11190,6 @@ class ApiRoutesTestCase(unittest.TestCase):
             '[data-theme="light"] .count-btn',
             '[data-theme="light"] .field input',
             '[data-theme="light"] .t-row',
-            '[data-theme="light"] .t-agent-select',
             '[data-theme="light"] .startup-mode-select',
             '[data-theme="light"] .check-field',
             '[data-theme="light"] .modal-card',
@@ -11028,12 +11800,13 @@ class ExplorerFileStateTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
-    def test_file_state_missing_file_returns_400(self):
+    def test_file_state_missing_file_returns_404(self):
         session_id = self._create_explorer_session(self.root)
 
         response = self._file_state(session_id, "gone.txt")
 
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["code"], "not_found")
 
     def test_file_state_refuses_paths_outside_the_root(self):
         (Path(self.temp_dir.name) / "outside.txt").write_text("secret\n", encoding="utf-8")
@@ -11407,15 +12180,12 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
     def test_seeded_find_opens_on_the_match_under_the_caret(self):
         viewer = self._static("js/explorer-viewer.js")
         self.assertIn(
-            "function focusExplorerSearch(index, seedQuery = '', { seekLine = 0 } = {})", viewer
+            "function focusExplorerSearch(index, seedQuery = '')", viewer
         )
         # Only the Source view can seek — it is the only view a content offset
         # means anything in.
         self.assertIn("state.seekOffset = activeExplorerFileView(index) === 'source'", viewer)
-        self.assertIn(
-            "seekLine ? explorerLineStartOffset(pane, seekLine) : explorerSelectionContentOffset(pane)",
-            viewer,
-        )
+        self.assertIn("? explorerSelectionContentOffset(pane)", viewer)
         resolve = viewer[
             viewer.index("function explorerResolveSearchActiveIndex(state, ranges)"):
             viewer.index("function explorerLineStartOffset(pane, line)")
@@ -11424,9 +12194,61 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
         # Consumed once, so paging through matches is not dragged back.
         self.assertIn("state.seekOffset = null;", resolve)
         self.assertIn("state.activeIndex = explorerResolveSearchActiveIndex(state, ranges);", viewer)
-        # A repo-search hit anchors on the line that was clicked.
+
+    def test_repo_search_hit_uses_exact_source_line_without_local_find(self):
         search = self._static("js/explorer-search.js")
-        self.assertIn("focusExplorerSearch(index, state.query, { seekLine: line });", search)
+        activation = search[
+            search.index("async function activateExplorerSearchHit("):
+            search.index("function scrollExplorerSourceToLine(")
+        ]
+        self.assertIn("restoreTabView: false", activation)
+        self.assertIn("clearExplorerSearch(index, { focus: false });", activation)
+        self.assertIn("setExplorerFileView(index, 'source');", activation)
+        self.assertIn("scrollExplorerSourceToLine(index, line);", activation)
+        self.assertNotIn("focusExplorerSearch(", activation)
+        self.assertLess(
+            activation.index("clearExplorerSearch(index, { focus: false });"),
+            activation.index("scrollExplorerSourceToLine(index, line);")
+        )
+        viewer = self._static("js/explorer-viewer.js")
+        self.assertIn("const restoredTabView = !restoreTabView || scrollState", viewer)
+        self.assertIn("restoreTabView\n            });", viewer)
+
+    def test_repo_search_hit_paints_the_matched_string_on_the_opened_line(self):
+        search = self._static("js/explorer-search.js")
+        self.assertIn("const EXPLORER_SEARCH_HIT_HIGHLIGHT = 'explorer-search-hit';", search)
+        activation = search[
+            search.index("async function activateExplorerSearchHit("):
+            search.index("function scrollExplorerSourceToLine(")
+        ]
+        # The row flash locates the line; the paint locates the string on it,
+        # so the reader has something to double-click and take into Ctrl+F.
+        self.assertIn("paintExplorerSearchHitMatches(index, line, match);", activation)
+        paint = search[
+            search.index("function paintExplorerSearchHitMatches(index, line, match)"):
+            search.index("function clearExplorerSearchHitMatches()")
+        ]
+        # Painted through the Custom Highlight API: the Source DOM stays as
+        # rendered, so folds and scroll position survive the jump.
+        self.assertIn("highlight.add(range)", paint)
+        for banned in ("innerHTML", "replaceWith(", "createElement("):
+            with self.subTest(banned=banned):
+                self.assertNotIn(banned, paint)
+        # Server offsets count code points; a mismatch re-finds the string.
+        self.assertIn("text.indexOf(span.text)", paint)
+        # Both activation paths carry the match record the ranges come from.
+        self.assertIn("match: explorerRepoSearchMatchAt(state, path, line)", search)
+        self.assertIn("{ pinned: false, match: hit.match }", search)
+
+    def test_repo_search_hit_paint_has_a_style_and_degrades_without_the_api(self):
+        css = self._static("css/terminals.css")
+        self.assertIn("::highlight(explorer-search-hit)", css)
+        # No palette literals for the hue — same token as the find mark.
+        self.assertIn("background-color: rgb(var(--gv-match-rgb));", css)
+        viewer = self._static("js/explorer-viewer.js")
+        # One guarded registry helper for both named highlights.
+        self.assertIn("function explorerNamedHighlight(name)", viewer)
+        self.assertIn("typeof window.Highlight !== 'function' || !window.CSS?.highlights", viewer)
 
     def test_find_only_unfolds_the_markdown_sections_holding_matches(self):
         viewer = self._static("js/explorer-viewer.js")
@@ -12542,6 +13364,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/explorer-search.js",
             "js/explorer-fs.js",
             "js/explorer-git-watch.js",
+            "js/explorer-overview.js",
             "js/browser-pane.js",
             "js/terminal-shell.js",
             "js/terminals.js",
@@ -13387,8 +14210,8 @@ class FinalModuleSplitTestCase(unittest.TestCase):
             "_cache_terminal_output",
             "_close_ssh_connection",
             "_close_all_ssh_connections",
+            "_close_displaced_sessions",
             "_connect_session",
-            "_replace_group_sessions",
             "_run_startup_sequence",
             "_send_connection_input",
             "_stream_ssh_output",
@@ -14326,11 +15149,40 @@ class ExplorerDownloadTestCase(unittest.TestCase):
     def test_file_viewer_ships_download_button(self):
         # Explorer viewer moved to explorer-viewer.js (2026-07-23 split).
         terminals_js = self._static("js/explorer-viewer.js")
-        self.assertIn("function downloadExplorerFile(index)", terminals_js)
+        self.assertIn("function downloadExplorerFile(index, options = {})", terminals_js)
         self.assertIn("data-explorer-download", terminals_js)
         self.assertIn("/download?path=", terminals_js)
         terminals_css = self._static("css/terminals.css")
         self.assertIn(".explorer-download-btn", terminals_css)
+
+    def test_context_menu_downloads_a_row_without_opening_it(self):
+        # A format the viewer cannot render never reaches editor mode, so its
+        # toolbar download button is unreachable: the right-click path section
+        # downloads the row directly instead.
+        viewer_js = self._static("js/explorer-viewer.js")
+        self.assertIn("label: 'Download file'", viewer_js)
+        self.assertIn(
+            "action: () => downloadExplorerFile(index, { path: downloadPath })",
+            viewer_js,
+        )
+        self.assertIn(
+            "const downloadPath = row?.dataset.explorerDownloadPath || '';",
+            viewer_js,
+        )
+        # Offered next to the copy entries, and only for file rows.
+        self.assertLess(
+            viewer_js.index("label: 'Copy relative path'"),
+            viewer_js.index("label: 'Download file'"),
+        )
+        self.assertIn(
+            "${isDirectory ? '' : `data-explorer-download-path=",
+            viewer_js,
+        )
+        # Worktree-only: never for deleted files or historic commit rows.
+        self.assertIn(
+            "const downloadPath = (path && !commitHash && status !== 'deleted')",
+            viewer_js,
+        )
 
     def test_native_window_downloads_route_through_the_bridge(self):
         # WebView2 drops anchor downloads, so the native window must use the
@@ -14801,12 +15653,12 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json()["group_id"]
 
-    def test_capture_persists_a_password_free_v2_slot(self):
+    def test_capture_persists_a_password_free_slot(self):
         self._launch_explorer_group()
         slot = web_runtime_state.capture_workspace(api.session_manager)
         self.assertIsNotNone(slot)
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["version"], web_runtime_state.SCHEMA_VERSION)
         stored = data["workspaces"]["default"]
         self.assertEqual(stored["workspace_id"], "default")
         self.assertEqual(stored["origin"], "auto")
@@ -14826,7 +15678,15 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
                 {
                     "version": 1,
                     "saved_at": time.time(),
-                    "groups": [{"group_id": "g1", "name": "buildserver-01"}],
+                    "groups": [
+                        {
+                            "group_id": "g1",
+                            "name": "buildserver-01",
+                            # A group needs a pane to be restorable (MW-16); a
+                            # real v1 file always carried them.
+                            "sessions": [{"host": "buildserver-01"}],
+                        }
+                    ],
                 }
             ),
             encoding="utf-8",
@@ -14906,10 +15766,11 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(set(data["workspaces"]), {workspace_a, workspace_b})
         self.assertEqual(data["workspaces"][workspace_a]["origin"], "manual")
         self.assertEqual(data["workspaces"][workspace_b], sibling_before)
-        # Clearing slot A must leave slot B intact, and the file stays v2.
+        # Clearing slot A must leave slot B intact, and the file keeps its
+        # schema skeleton.
         web_runtime_state.clear_workspace(workspace_a)
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["version"], web_runtime_state.SCHEMA_VERSION)
         self.assertEqual(set(data["workspaces"]), {workspace_b})
 
     def test_autosave_tick_captures_a_live_workspace(self):
@@ -15068,11 +15929,30 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         # Closing the group must not write (or clear) the snapshot either.
         self.assertFalse(self.state_path.exists())
 
-    def test_group_close_preserves_the_previously_saved_slot(self):
+    def test_group_close_forgets_the_slot_of_the_workspace_it_emptied(self):
+        """Closing the last group is the user saying they are done with it.
+
+        Leaving the snapshot behind made the restore chooser keep offering a
+        workspace that had just been emptied — it came back on the next
+        restore. A restart still restores: only an explicit close forgets.
+        """
         group_id = self._launch_explorer_group()
         web_runtime_state.capture_workspace(api.session_manager)
-        before = self.state_path.read_text(encoding="utf-8")
+        self.assertIsNotNone(web_runtime_state.load_restorable_workspace())
+
         response = self.client.delete(f"/api/sessions?group={group_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(web_runtime_state.load_restorable_workspace())
+
+    def test_closing_one_of_two_groups_preserves_the_saved_slot(self):
+        first = self._launch_explorer_group()
+        self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager)
+        before = self.state_path.read_text(encoding="utf-8")
+
+        response = self.client.delete(f"/api/sessions?group={first}")
+
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
         self.assertIsNotNone(web_runtime_state.load_restorable_workspace())
@@ -15212,9 +16092,9 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["forgotten"])
         self.assertIsNone(web_runtime_state.load_restorable_workspace())
-        # The file itself stays (v2 skeleton); only the slot is removed.
+        # The file itself stays (schema skeleton); only the slot is removed.
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["version"], web_runtime_state.SCHEMA_VERSION)
         self.assertEqual(data["workspaces"], {})
         payload = self.client.get("/api/runtime-state").get_json()
         self.assertFalse(payload["restorable"])
@@ -15263,28 +16143,45 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertNotIn("fetch(", body)
         self.assertNotIn("DELETE", body)
 
-    def test_restore_replays_current_saved_preset(self):
-        """"Latest preset wins": a preset-backed group is restored from the
-        saved session's *current* config (so Save All Sessions then Save
-        Workspace restores the edited state), while an ad-hoc group replays the
-        snapshot verbatim. Launch and restore share buildSessionsFromConfig so
-        both build panes identically."""
-        launcher_js = self._static("js/launcher.js")
-        # One shared expansion, reused by launch and restore (no copy-paste).
-        self.assertIn("function buildSessionsFromConfig(config, count)", launcher_js)
-        self.assertIn("sessions = buildSessionsFromConfig(config, selectedCount)", launcher_js)
-        # Restore resolves a group's current preset before replaying it.
-        self.assertIn("async function buildRestoreGroupBody(group)", launcher_js)
-        self.assertIn("await buildRestoreGroupBody(group)", launcher_js)
-        self.assertIn("buildSessionsFromConfig(config, config.terminal_count)", launcher_js)
-        self.assertIn("/api/saved-sessions/${encodeURIComponent(savedId)}", launcher_js)
-        # The blank built-in default is never treated as a real preset, and a
-        # missing/deleted preset falls back to the verbatim snapshot body.
-        self.assertIn("savedId === DEFAULT_SESSION_ID", launcher_js)
-        start = launcher_js.index("async function buildRestoreGroupBody(group)")
-        end = launcher_js.index("function dismissRestoreBanner()", start)
-        body = launcher_js[start:end]
-        self.assertIn("return snapshotBody", body)
+    def test_restore_replays_the_captured_shape_not_a_preset(self):
+        """MW-03: the snapshot is the only source of a restored group's shape.
+
+        Restore used to replay a still-existing preset's *current* config, so
+        editing a saved session rewrote a workspace nobody had saved since.
+        (The client half of this — the browser no longer orchestrating restore
+        at all — is `SingleWorkspaceRestoreRoutingTestCase` in
+        tests/test_multi_workspace.py.)
+        """
+        self._launch_explorer_group("Two panes")
+        group_id = api.session_manager.get_workspace_groups("default")[0].group_id
+        api.session_manager.get_group(group_id).saved_session_id = "preset-1"
+        web_runtime_state.capture_workspace(api.session_manager, origin="manual")
+        self.client.delete("/api/sessions")
+        api.session_manager.reset_sessions()
+
+        with patch.object(
+            web_workspaces, "_find_saved_preset",
+            return_value={
+                "id": "preset-1",
+                "name": "Renamed since",
+                "config": {
+                    "connection_mode": "wsl",
+                    "terminal_count": 1,
+                    "terminals": [{"title": "Something else", "directory": "/elsewhere"}],
+                },
+            },
+        ):
+            response = self.client.post(
+                "/api/runtime-state/restore", json={"workspace_ids": ["default"]}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["workspaces"][0]["restored"])
+        restored = api.session_manager.get_workspace_groups("default")[0]
+        self.assertEqual(restored.name, "Two panes")
+        sessions = api.session_manager.get_group_sessions(restored.group_id)
+        self.assertEqual([session.title for session in sessions], ["Files"])
+        self.assertEqual([session.directory for session in sessions], [str(self.repo_dir)])
 
     def test_terminals_page_ships_workspace_save_menu(self):
         """The Workspace... dropdown's Save Workspace item posts to
@@ -15969,6 +16866,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertIn("explorer_tab_views", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_md_preset", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_md_font", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
+        self.assertIn("explorer_source_font", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_theme", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
 
     def test_launcher_wires_the_auto_mode_toggle(self):

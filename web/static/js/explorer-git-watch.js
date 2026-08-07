@@ -1,9 +1,6 @@
     /* ─────────────────────────────────────────────
-       Explorer change listener
-       (docs/r&d/planed/done/explorer_git_change_listener_plan_2026-07-30.md,
-       and its §14 amendment, which supersedes that plan's invariant 2 and its
-       "no file-changed notice for an open file" non-goal for the *viewer*
-       only — the editor buffer stays untouchable).
+       Explorer change listener. A file changed outside GridVibe refreshes in
+       the *viewer* only — the editor buffer stays untouchable.
 
        One page-level scheduler runs two independent per-pane requests while
        the page is visible, feeding three surfaces:
@@ -164,6 +161,23 @@
         return pane._explorerMode === 'directory' || Boolean(pane._explorerTreeSidebarOpen);
     }
 
+    /* Overview consumer (source-view change marks): the gutter marks for the
+       open file are HEAD-relative, so a commit made in a terminal invalidates
+       them without ever touching the open-file watcher. Same shape as the
+       filesystem consumer — bootstrapped silently by the tick, because the
+       marks were loaded from the same revision the baseline then records.
+       Commit-diff tabs and the in-place editor opt out exactly as
+       loadExplorerChangeMarks() does. */
+    function explorerOverviewWatchConsumer(pane) {
+        if (!pane._explorerGitContext?.available) {
+            return false;
+        }
+        if (pane._explorerEdit || pane._explorerDiffCommit) {
+            return false;
+        }
+        return pane._explorerMode === 'file' && Boolean(pane._explorerFilePath);
+    }
+
     /* Eligibility gates (plan §5.3) — no request is made unless all hold.
        Closing every consumer surface, switching session-group tabs (the pane
        leaves `terminals`), or a non-Git root therefore stops all polling with
@@ -173,7 +187,7 @@
         if (!pane || !isExplorerPaneInstance(pane) || !sessionIds[index]) {
             return false;
         }
-        if (!explorerGitWatchSidebarConsumer(pane) && !explorerFsWatchConsumer(pane)) {
+        if (!explorerGitWatchSidebarConsumer(pane) && !explorerFsWatchConsumer(pane) && !explorerOverviewWatchConsumer(pane)) {
             return false;
         }
         // A GridVibe Git action is authoritative, and a filesystem
@@ -398,9 +412,10 @@
     }
 
     function explorerFileWatchOnFailure(pane, status) {
-        // A 404 means the session is gone; a 400 means the open file no longer
-        // resolves (deleted or moved outside GridVibe). Neither recovers by
-        // retrying, so stop immediately — silently, keeping the last good view.
+        // A 404 means the session is gone or the open file no longer exists
+        // (deleted or moved outside GridVibe); a 400 means it no longer
+        // resolves. None recovers by retrying, so stop immediately — silently,
+        // keeping the last good view.
         if (status === 404 || status === 400) {
             pane._explorerFileWatchFailures = EXPLORER_GIT_WATCH_MAX_FAILURES;
         } else {
@@ -542,6 +557,7 @@
         let delay = explorerGitWatchNextDelay(pane);
         const sidebarConsumer = explorerGitWatchSidebarConsumer(pane);
         const fsConsumer = explorerFsWatchConsumer(pane);
+        const overviewConsumer = explorerOverviewWatchConsumer(pane);
         try {
             /* `known` is informational only now that one poll serves two
                baselines — the response's `revision` is compared against each
@@ -583,7 +599,16 @@
                 pane._explorerFsWatchRevision = revision;
                 fsStale = false;
             }
-            if (!sidebarStale && !fsStale) {
+            let overviewStale = Boolean(
+                revision && overviewConsumer && revision !== pane._explorerOverviewWatchRevision
+            );
+            if (overviewStale && !pane._explorerOverviewWatchRevision) {
+                // Same silent bootstrap: the marks were fetched against this
+                // revision when the file opened, so nothing is stale yet.
+                pane._explorerOverviewWatchRevision = revision;
+                overviewStale = false;
+            }
+            if (!sidebarStale && !fsStale && !overviewStale) {
                 // Unchanged (or a GridVibe action already applied it): zero DOM
                 // writes, and any deferred payload is now stale.
                 pane._explorerGitWatchChanges = 0;
@@ -597,6 +622,13 @@
                 if (fsStale && explorerWatchPaneCurrent(index, pane, sessionId)) {
                     pane._explorerFsWatchPending = revision;
                     await explorerFsWatchFlushPending(index);
+                }
+                if (overviewStale && explorerWatchPaneCurrent(index, pane, sessionId)) {
+                    // HEAD moved (a commit from a terminal): reload the gutter
+                    // marks. The refetch is force-refreshed inside, so a same-
+                    // path cache entry cannot short-circuit it.
+                    pane._explorerOverviewWatchRevision = revision;
+                    await refreshExplorerOverview(index, 'git-revision');
                 }
             }
             if (terminals[index] === pane && sessionIds[index] === sessionId) {

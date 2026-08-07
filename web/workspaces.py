@@ -91,17 +91,58 @@ def _manager():
     return session_manager
 
 
-def list_live_workspaces() -> List[Dict[str, Any]]:
-    """Return public summaries for every live workspace, default first."""
+def workspace_is_user_visible(workspace: Any, group_count: int = 0) -> bool:
+    """True when a live workspace record is one the user can see and choose.
+
+    The one predicate for "user-visible live workspace" (MW-05). Every surface
+    that lists workspaces — the API, the launcher's Workspaces card and launch
+    destination menu, the Open/Move menus, the Alt+W cycle — answers this same
+    question, so they can no longer disagree about what is open.
+
+    A record qualifies when it holds at least one group, or when the user
+    deliberately created it empty (``retain_when_empty``, which always comes
+    with a window opened for it). Everything else is bookkeeping:
+
+    * ``default`` is a permanent internal container that
+      :meth:`SessionManager.remove_workspace` refuses to remove, so once its
+      last group closes it would otherwise linger as a "Main workspace — 0
+      sessions" destination that the Workspaces card had already dropped.
+    * a non-default record between :func:`resolve_launch_destination` creating
+      it and its first group arriving is a launch in flight, not a workspace.
+
+    Existence is a separate question: routes still resolve and act on a hidden
+    record by id (single-workspace mode always targets ``default``), and
+    ``workspace_missing`` still means the record itself is gone.
+    """
+    if max(0, int(group_count or 0)) > 0:
+        return True
+    return bool(getattr(workspace, "retain_when_empty", False))
+
+
+def list_live_workspaces(include_hidden: bool = False) -> List[Dict[str, Any]]:
+    """Return public summaries for every user-visible workspace, default first.
+
+    ``include_hidden`` returns the raw record set instead; it exists for
+    diagnostics and tests that assert what the filter removed, never for a
+    user-facing list.
+    """
     session_manager = _manager()
     with session_manager.lock:
-        return [
-            public_workspace_payload(
+        summaries = [
+            (
                 workspace,
-                len(session_manager.get_workspace_groups(workspace.workspace_id)),
+                public_workspace_payload(
+                    workspace,
+                    len(session_manager.get_workspace_groups(workspace.workspace_id)),
+                ),
             )
             for workspace in session_manager.get_all_workspaces()
         ]
+    return [
+        payload
+        for workspace, payload in summaries
+        if include_hidden or workspace_is_user_visible(workspace, payload["group_count"])
+    ]
 
 
 def workspace_has_groups(workspace_id: Any) -> bool:
@@ -141,8 +182,9 @@ def forget_pruned_workspaces(workspace_ids: Any) -> List[str]:
 
     Two deliberate exclusions:
 
-    * ``default`` is permanent and never reaches this path, so single-workspace
-      restore-after-restart keeps working exactly as before.
+    * ``default`` never reaches this path — its live record is permanent, so it
+      is never *pruned* and has no id to pass here. Emptying it is handled by
+      :func:`forget_emptied_default_workspace`, which the same callers invoke.
     * Leaving multi-workspace mode (``close_extra_workspaces``) removes its
       workspaces without pruning them here, so everything autosave or
       Workspace ▸ Save Workspace already wrote stays restorable.
@@ -169,6 +211,49 @@ def forget_pruned_workspaces(workspace_ids: Any) -> List[str]:
             )
     if forgotten:
         logger.debug("Forgot saved snapshots for pruned workspaces: %s", forgotten)
+    return forgotten
+
+
+def forget_emptied_default_workspace(closed_workspace_id: Any) -> bool:
+    """Drop ``default``'s snapshot when an explicit close just emptied it.
+
+    ``default``'s live record is permanent, so it never reaches
+    :func:`forget_pruned_workspaces` and its snapshot used to be immortal: every
+    other workspace forgets its shape on losing its last group, while a group
+    once run in ``default`` stayed on offer in the restore chooser forever, only
+    removable by hand. It came back on every restore — including as a workspace
+    the user had already closed minutes earlier.
+
+    The narrow condition is what keeps restore-after-restart intact:
+
+    * ``closed_workspace_id`` must be ``default`` itself. A close in a sibling
+      workspace leaves an *unrelated* empty ``default`` behind (it may simply
+      never have been used this run) and must not touch its snapshot.
+    * ``default`` must own no groups afterwards, so closing one of several tabs
+      keeps the workspace — and its slot — alive.
+    * Only explicit user closes and moves call this. A process exit does not, so
+      the snapshot still survives a restart and is still offered, which is the
+      whole point of the feature.
+
+    Returns ``True`` only when a snapshot actually existed and was removed. The
+    caller must not hold ``SessionManager.lock`` — this writes the state file.
+    """
+    from web.runtime_state import clear_workspace
+
+    try:
+        if normalize_workspace_id(closed_workspace_id) != DEFAULT_WORKSPACE_ID:
+            return False
+    except ValueError:
+        return False
+    if _manager().get_workspace_groups(DEFAULT_WORKSPACE_ID):
+        return False
+    try:
+        forgotten = clear_workspace(DEFAULT_WORKSPACE_ID)
+    except Exception:
+        logger.exception("Could not clear the saved snapshot for the default workspace")
+        return False
+    if forgotten:
+        logger.debug("Forgot the saved snapshot of the emptied default workspace")
     return forgotten
 
 
@@ -242,6 +327,20 @@ def saved_session_conflict(saved_session_id: str, target_workspace_id: str) -> O
         "workspace_id": group.workspace_id,
         "workspace_label": workspace_label(group.workspace_id),
     }
+
+
+def _taken_session_names() -> List[str]:
+    """Every session name a new scratch launch has to stay clear of.
+
+    Live groups *and* saved presets: saving a scratch session under the name it
+    was given ("10.0.0.5 (1)") has to make the next scratch launch skip that
+    number rather than mint a second session with the same name.
+    """
+    from web.saved_sessions import load_saved_sessions
+
+    names = [group.name for group in _manager().get_all_groups()]
+    names.extend(entry["name"] for entry in load_saved_sessions())
+    return names
 
 
 # ==================== Shared launch service ====================
@@ -391,21 +490,24 @@ def launch_session_group(
     from web.config import runtime_config
     from web.explorer import _is_browser_session, _is_explorer_session
     from web.saved_sessions import (
+        DEFAULT_SAVED_SESSION_ID,
         _build_launch_group_id,
         _normalize_connection_mode,
         _normalize_launch_session_id,
         _normalize_layout,
         _normalize_workspace_layout,
+        build_unique_session_name,
     )
     from web.terminal_io import (
         _broadcast_session_groups_updated,
         _broadcast_session_status,
+        _close_displaced_sessions,
         _connect_session,
-        _replace_group_sessions,
     )
 
     session_manager = _manager()
     created_workspace_id = ""
+    reserved_workspace_id = ""
     try:
         if not isinstance(data, dict) or "sessions" not in data:
             logger.warning("Missing 'sessions' in request body")
@@ -433,13 +535,26 @@ def launch_session_group(
         )
         session_name = str(data.get("session_name") or "").strip()
         saved_session_id = _normalize_launch_session_id(data.get("saved_session_id"))
+        # The built-in "Default Session" is a blank *form*, not a stored preset,
+        # so it carries no launch identity. Treating it as one gave every
+        # scratch launch the same stable group id, which made a second launch
+        # replace the first in place (and 409 across workspaces) — the user
+        # could only ever have one session per host or repository open. Scratch
+        # launches now always mint a fresh group.
+        if saved_session_id == DEFAULT_SAVED_SESSION_ID:
+            saved_session_id = ""
         stable_group_id = _build_launch_group_id(saved_session_id) or None
 
-        # Destination and the uniqueness guard are settled first, because
-        # `_replace_group_sessions()` below is destructive: replacing before
-        # resolving ownership would tear down the *source* workspace's live
-        # sessions and only then discover the conflict.
+        # Destination and the uniqueness guard are settled first: the install
+        # below replaces a stable group's panes, and replacing before resolving
+        # ownership would tear down the *source* workspace's live sessions and
+        # only then discover the conflict.
         workspace_id, created_workspace_id = resolve_launch_destination(data)
+        # Everything between here and the install — pane normalization, the
+        # agent preflight, an SSH ping — can take seconds, and a destination
+        # this call just created holds no groups yet. Reserve it so a
+        # concurrent cleanup cannot prune it out from under the launch (MW-06).
+        reserved_workspace_id = session_manager.reserve_workspace_launch(workspace_id)
         conflict = saved_session_conflict(saved_session_id, workspace_id)
         if conflict is not None:
             rollback_created_workspace(created_workspace_id)
@@ -468,9 +583,6 @@ def launch_session_group(
                 }
             )
 
-        if stable_group_id:
-            _replace_group_sessions(stable_group_id)
-
         # A restore replays a stored workspace shape: its group name (or a
         # neutral fallback) wins — it must never mint a fresh "Session
         # HH:MM:SS" timestamp name (10.5 hardening). The timestamp fallback is
@@ -478,16 +590,34 @@ def launch_session_group(
         group_name = session_name or (
             "Workspace" if is_restore else f"Session {time.strftime('%H:%M:%S')}"
         )
-        group = session_manager.create_group(
+        # A scratch launch is named after its connection target, so launching
+        # the same host or repository twice would produce two identically named
+        # tabs. Suffix the repeats instead. A saved preset keeps its own name
+        # verbatim (it is live in at most one workspace anyway), and a restore
+        # replays a stored shape, so neither is renumbered.
+        if not saved_session_id and not is_restore:
+            group_name = build_unique_session_name(group_name, _taken_session_names())
+        # One transaction: the group and every one of its panes are published
+        # together, and a stable group's old panes are displaced in the same
+        # lock hold (MW-07). Autosave can only ever see the complete old shape
+        # or the complete new one. A launch that turns out to be unusable —
+        # no valid panes, a group id owned by another preset — raises before
+        # anything live is touched, so a failed relaunch no longer leaves the
+        # previous panes destroyed.
+        installation = session_manager.install_session_group(
+            prepared_sessions,
             name=group_name,
             connection_mode=connection_mode,
             layout=layout,
-            terminal_count=len(prepared_sessions),
             group_id=stable_group_id,
             saved_session_id=saved_session_id,
             workspace_layout=workspace_layout,
             workspace_id=workspace_id,
         )
+        group = installation.group
+        created_sessions = installation.sessions
+        # Slow teardown, outside every shared lock (guardrail 2).
+        _close_displaced_sessions(group.group_id, installation.displaced_session_ids)
         logger.info(
             "Created session group group_id=%s workspace_id=%s saved_session_id=%r "
             "name=%r mode=%s layout=%s terminal_count=%d",
@@ -497,19 +627,8 @@ def launch_session_group(
             group.name,
             connection_mode,
             layout,
-            len(prepared_sessions),
+            len(created_sessions),
         )
-
-        created_sessions = session_manager.create_sessions(
-            prepared_sessions,
-            group_id=group.group_id,
-        )
-        logger.info("Created %d sessions", len(created_sessions))
-        if not created_sessions:
-            logger.error("No valid sessions were created")
-            session_manager.remove_group(group.group_id)
-            rollback_created_workspace(created_workspace_id)
-            return {"error": "No valid sessions were created"}, 400
 
         logger.info(
             "Launch summary group_id=%s sessions=%s",
@@ -576,6 +695,11 @@ def launch_session_group(
         rollback_created_workspace(created_workspace_id)
         logger.error("Error creating sessions: %s", exc)
         return {"error": str(exc)}, 500
+    finally:
+        # Always, on every path: the destination is either populated by now or
+        # rolled back, and a leaked reservation would make an empty workspace
+        # immortal.
+        session_manager.release_workspace_launch(reserved_workspace_id)
 
 
 # ==================== Group moves ====================
@@ -609,23 +733,29 @@ def move_group_to_workspace(group_id: str, data: Dict[str, Any]) -> Tuple[Dict[s
     except WorkspaceRequestError as exc:
         return {"error": str(exc), **exc.payload}, exc.status
 
-    if target_workspace_id == source_workspace_id:
-        rollback_created_workspace(created_workspace_id)
-        return {
-            "moved": False,
-            "group_id": normalized_group_id,
-            "workspace_id": source_workspace_id,
-            "source_workspace_id": source_workspace_id,
-        }, 200
-
+    # Same window as a launch: the destination holds no groups until the move
+    # lands, so reserve it against a concurrent cleanup (MW-06).
+    reserved_workspace_id = session_manager.reserve_workspace_launch(target_workspace_id)
     try:
-        moved_group = session_manager.move_group(normalized_group_id, target_workspace_id)
-    except ValueError as exc:
-        rollback_created_workspace(created_workspace_id)
-        return {"error": str(exc)}, 400
-    if moved_group is None:
-        rollback_created_workspace(created_workspace_id)
-        return {"error": "Session group not found"}, 404
+        if target_workspace_id == source_workspace_id:
+            rollback_created_workspace(created_workspace_id)
+            return {
+                "moved": False,
+                "group_id": normalized_group_id,
+                "workspace_id": source_workspace_id,
+                "source_workspace_id": source_workspace_id,
+            }, 200
+
+        try:
+            moved_group = session_manager.move_group(normalized_group_id, target_workspace_id)
+        except ValueError as exc:
+            rollback_created_workspace(created_workspace_id)
+            return {"error": str(exc)}, 400
+        if moved_group is None:
+            rollback_created_workspace(created_workspace_id)
+            return {"error": "Session group not found"}, 404
+    finally:
+        session_manager.release_workspace_launch(reserved_workspace_id)
 
     # Snapshot both sides and make the prune decision atomically. The manager
     # uses an RLock, so its helpers may safely re-enter it here. Broadcasts and
@@ -649,6 +779,10 @@ def move_group_to_workspace(group_id: str, data: Dict[str, Any]) -> Tuple[Dict[s
         # so the restore chooser cannot offer a workspace the launcher no longer
         # lists.
         forget_pruned_workspaces([source_workspace_id])
+    else:
+        # `default` is never pruned, but moving its last group out leaves its
+        # snapshot describing a workspace that is now empty.
+        forget_emptied_default_workspace(source_workspace_id)
 
     _broadcast_session_groups_updated(
         "moved",
@@ -690,127 +824,6 @@ def move_group_to_workspace(group_id: str, data: Dict[str, Any]) -> Tuple[Dict[s
 # its credential in-process and relaunches through `launch_session_group()`.
 
 
-def _directory_is_absolute(path: str, mode: str) -> bool:
-    """Mirror of ``isAbsoluteDirectory`` in web/static/js/shared.js."""
-    trimmed = str(path or "").strip()
-    if not trimmed:
-        return False
-    if re.match(r"^[A-Za-z]:[\\/]", trimmed):
-        return True
-    if trimmed.startswith("\\\\") or trimmed.startswith("/") or trimmed.startswith("~"):
-        return True
-    return mode == "wsl" and trimmed.startswith("\\")
-
-
-def _join_directories(base_dir: str, child_dir: str, mode: str) -> str:
-    """Mirror of ``joinDirectories`` in web/static/js/shared.js."""
-    raw_base = str(base_dir or "").strip()
-    base = raw_base if raw_base == "/" else raw_base.rstrip("\\/")
-    child = str(child_dir or "").strip().lstrip("\\/")
-    if not base:
-        return child
-    if not child:
-        return base
-    separator = "\\" if mode == "wsl" and "\\" in base and "/" not in base else "/"
-    normalized_child = re.sub(r"[\\/]+", separator, child)
-    return f"{base}{separator}{normalized_child}"
-
-
-def _launch_directory(default_dir: str, terminal_dir: str, mode: str) -> str:
-    """Mirror of ``buildLaunchDirectory`` in web/static/js/shared.js.
-
-    A restore must resolve pane directories exactly the way the launcher does,
-    or the same preset would land in different directories depending on which
-    path opened it.
-    """
-    base_directory = str(default_dir or "").strip()
-    raw_directory = str(terminal_dir or "").strip()
-    if not raw_directory:
-        return base_directory
-    if not base_directory:
-        return raw_directory
-    if not _directory_is_absolute(raw_directory, mode):
-        return _join_directories(base_directory, raw_directory, mode)
-    return raw_directory
-
-
-def build_sessions_from_saved_config(
-    config: Dict[str, Any],
-    count: int,
-) -> List[Dict[str, Any]]:
-    """Expand one saved preset config into `POST /api/sessions` pane entries.
-
-    The server-side twin of ``buildSessionsFromConfig()`` in launcher.js, used
-    only by restore. Both feed the same launch service, so a restored pane and
-    a launched pane are built from the same fields.
-    """
-    connection_mode = str(config.get("connection_mode") or "ssh")
-    ssh_config = config.get("ssh") if isinstance(config.get("ssh"), dict) else {}
-    wsl_config = config.get("wsl") if isinstance(config.get("wsl"), dict) else {}
-    configured_default_dir = str(
-        (wsl_config if connection_mode == "wsl" else ssh_config).get("default_dir") or ""
-    ).strip()
-    launch_default_dir = configured_default_dir or ("/" if connection_mode == "ssh" else "")
-
-    sessions: List[Dict[str, Any]] = []
-    terminals = config.get("terminals") if isinstance(config.get("terminals"), list) else []
-    for index, terminal in enumerate(terminals[: max(0, int(count or 0))]):
-        if not isinstance(terminal, dict):
-            continue
-        startup_mode = str(terminal.get("startup_mode") or "terminal")
-        shell_flags_allowed = startup_mode not in {"explorer", "browser"}
-        directory = _launch_directory(
-            configured_default_dir,
-            terminal.get("directory"),
-            connection_mode,
-        ) or launch_default_dir
-        common = {
-            "title": terminal.get("title") or f"Terminal {index + 1}",
-            "directory": directory,
-            "initial_command": None if startup_mode == "explorer" else (terminal.get("initial_command") or None),
-            "initial_command_mode": terminal.get("initial_command_mode") or "command",
-            "startup_mode": startup_mode,
-            "agent_selection": terminal.get("agent_selection") or "",
-            "custom_agent": terminal.get("custom_agent") or "",
-            "agent_auto_mode": bool(terminal.get("agent_auto_mode")),
-            "explorer_tree_open": bool(terminal.get("explorer_tree_open")),
-            "explorer_git_open": bool(terminal.get("explorer_git_open")),
-            "explorer_search_open": bool(terminal.get("explorer_search_open")),
-            "explorer_open_tabs": list(terminal.get("explorer_open_tabs") or []),
-            "explorer_active_tab": terminal.get("explorer_active_tab") or "",
-            "explorer_tab_views": dict(terminal.get("explorer_tab_views") or {}),
-            "explorer_md_preset": terminal.get("explorer_md_preset") or "",
-            "explorer_md_font": terminal.get("explorer_md_font") or "",
-            "explorer_theme": terminal.get("explorer_theme") or "dark",
-            "browser_tabs": list(terminal.get("browser_tabs") or []),
-            "browser_active_tab": int(terminal.get("browser_active_tab") or 0),
-        }
-        if connection_mode == "ssh":
-            sessions.append(
-                {
-                    **common,
-                    "host": ssh_config.get("host") or "",
-                    "username": ssh_config.get("username") or "ubuntu",
-                    # Resolved in-process: the decrypted credential goes
-                    # straight into the launch service and never into a
-                    # response body, a snapshot, or the log.
-                    "password": ssh_config.get("password") or None,
-                    "port": ssh_config.get("port") or 22,
-                }
-            )
-            continue
-        sessions.append(
-            {
-                **common,
-                "distribution": terminal.get("distribution") or wsl_config.get("distribution") or "",
-                "username": wsl_config.get("username") or "",
-                "use_wsl": shell_flags_allowed and bool(terminal.get("use_wsl")),
-                "use_powershell": shell_flags_allowed and bool(terminal.get("use_powershell")),
-            }
-        )
-    return sessions
-
-
 def _find_saved_preset(saved_session_id: str) -> Optional[Dict[str, Any]]:
     """Return one saved preset (credentials decrypted in-process) or ``None``."""
     from web.saved_sessions import load_saved_sessions
@@ -824,19 +837,77 @@ def _find_saved_preset(saved_session_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _preset_ssh_credential(preset: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return one preset's SSH credential plus the target it belongs to.
+
+    The "credential reference" of MW-03: a password is only meaningful together
+    with the host, username, and port it authenticates against. Capture drops
+    the password and nothing else, so restore may put it back only onto a pane
+    that still names this exact target. ``None`` when the preset holds no SSH
+    password to contribute.
+    """
+    config = preset.get("config") if isinstance(preset.get("config"), dict) else None
+    if not config or str(config.get("connection_mode") or "ssh") != "ssh":
+        return None
+    ssh_config = config.get("ssh") if isinstance(config.get("ssh"), dict) else {}
+    password = ssh_config.get("password") or None
+    host = str(ssh_config.get("host") or "").strip()
+    if not password or not host:
+        return None
+    try:
+        port = int(ssh_config.get("port") or 22)
+    except (TypeError, ValueError):
+        port = 22
+    return {
+        "host": host,
+        # Mirrors the launcher's own default for a preset that names no user.
+        "username": str(ssh_config.get("username") or "ubuntu"),
+        "port": port,
+        "password": password,
+    }
+
+
+def _pane_matches_credential(
+    session: Dict[str, Any],
+    credential: Dict[str, Any],
+) -> bool:
+    """True when a captured pane still names the credential's connection target."""
+    try:
+        port = int(session.get("port") or 22)
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(session.get("host") or "").strip() == credential["host"]
+        and str(session.get("username") or "") == credential["username"]
+        and port == credential["port"]
+    )
+
+
 def _restore_group_request(
     snapshot_group: Dict[str, Any],
     workspace_id: str,
 ) -> Tuple[Dict[str, Any], str]:
-    """Build one group's launch body; returns ``(body, warning)``.
+    """Build one group's launch body from the captured snapshot alone (MW-03).
 
-    Latest preset wins (R2): a still-existing named preset is replayed from its
-    *current* config, so Save All Sessions followed by Save Workspace restores
-    the edited state. A deleted preset (R1) degrades to the password-free
-    snapshot with a `preset_missing` warning rather than failing the workspace.
+    The snapshot is the only source of shape: the group name, pane count, per
+    pane modes, directories, commands, the pane layout, and the split geometry
+    are replayed exactly as they were captured. Restore used to prefer a still
+    existing preset's *current* config ("latest preset wins"), which meant
+    editing a launcher preset silently rewrote a workspace nobody had saved
+    since — a three-pane workspace could come back as a single ``Files`` pane
+    because the preset had been edited in between.
+
+    A preset now contributes exactly one thing: the SSH password that capture
+    deliberately leaves out, and only onto panes that still name that preset's
+    connection target (:func:`_preset_ssh_credential`). A pane whose credential
+    cannot be mapped keeps its captured shape and fails into the existing
+    per-pane authentication error and its Retry button — the shape is never
+    substituted or collapsed to make a credential fit.
+
+    Returns ``(body, warning)``.
     """
     snapshot_sessions = [
-        session
+        dict(session)
         for session in (snapshot_group.get("sessions") or [])
         if isinstance(session, dict)
     ]
@@ -856,45 +927,55 @@ def _restore_group_request(
     from web.saved_sessions import DEFAULT_SAVED_SESSION_ID
 
     saved_session_id = str(snapshot_group.get("saved_session_id") or "").strip()
-    # The blank built-in default holds no real host/directory, so it is never
-    # treated as a preset a restore should prefer — nor as one that went
+    # The blank built-in default holds no real host/credential, so it is never
+    # treated as a preset a restore should consult — nor as one that went
     # missing when it is not in saved_sessions.json.
     if not saved_session_id or saved_session_id == DEFAULT_SAVED_SESSION_ID:
         return body, ""
 
     preset = _find_saved_preset(saved_session_id)
     if preset is None:
+        # Reported, not fatal: the shape is captured, so only the credential is
+        # gone and the panes relaunch into their own retry state.
         return body, "preset_missing"
 
-    config = preset.get("config") if isinstance(preset.get("config"), dict) else None
-    if not config or not isinstance(config.get("terminals"), list):
-        return body, "preset_missing"
+    credential = _preset_ssh_credential(preset)
+    if credential is None:
+        return body, ""
 
-    preset_sessions = build_sessions_from_saved_config(
-        config, config.get("terminal_count") or len(snapshot_sessions)
-    )
-    if not preset_sessions:
-        return body, "preset_missing"
+    ssh_panes = 0
+    matched_panes = 0
+    for session in snapshot_sessions:
+        mode = str(session.get("mode") or snapshot_group.get("connection_mode") or "")
+        if mode != "ssh":
+            continue
+        ssh_panes += 1
+        if _pane_matches_credential(session, credential):
+            # Resolved in-process: the decrypted credential goes straight into
+            # the launch service and never into a response body, a snapshot, or
+            # the log.
+            session["password"] = credential["password"]
+            matched_panes += 1
 
-    body["sessions"] = preset_sessions
-    body["connection_mode"] = config.get("connection_mode")
-    body["layout"] = config.get("layout")
-    body["session_name"] = preset.get("name") or snapshot_group.get("name")
-    # R3: a stored layout array is sized for the pane count it was captured
-    # with. Reusing it against a preset that has since gained or lost a pane is
-    # the classic source of a broken grid, so it is dropped rather than scaled.
-    body["workspace_layout"] = (
-        config.get("workspace_layout")
-        if len(preset_sessions) != len(snapshot_sessions)
-        else (snapshot_group.get("workspace_layout") or config.get("workspace_layout"))
-    )
+    if ssh_panes and matched_panes < ssh_panes:
+        # The preset now points at a different machine or account. Handing its
+        # password to a pane that names another target is exactly what matching
+        # by position used to do; the pane keeps its shape and authenticates on
+        # its own instead.
+        return body, "credentials_unmatched"
     return body, ""
 
 
 def restore_workspace(workspace_id: Any) -> Dict[str, Any]:
-    """Restore one saved workspace slot in place; returns a per-group report."""
-    from web.runtime_state import load_restorable_workspace
+    """Restore one saved workspace slot in place; returns a per-group report.
 
+    Idempotent by workspace id under concurrency, not only in sequence (MW-08):
+    the workspace is claimed atomically for the duration, so a second request
+    that arrives while this one is still launching is told ``already_restoring``
+    rather than passing the same "does it have groups yet?" check and
+    duplicating every tab. The claim is held across the launches and released
+    on every path; no manager lock is held while connections are made.
+    """
     session_manager = _manager()
     try:
         resolved_workspace_id = normalize_workspace_id(workspace_id)
@@ -906,6 +987,25 @@ def restore_workspace(workspace_id: Any) -> Dict[str, Any]:
             "groups": [],
         }
 
+    if not session_manager.claim_workspace_restore(resolved_workspace_id):
+        return {
+            "workspace_id": resolved_workspace_id,
+            "label": workspace_label(resolved_workspace_id),
+            "restored": False,
+            "reason": "already_restoring",
+            "groups": [],
+        }
+    try:
+        return _restore_claimed_workspace(resolved_workspace_id)
+    finally:
+        session_manager.release_workspace_restore(resolved_workspace_id)
+
+
+def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
+    """Restore one slot; the caller holds this workspace's restore claim."""
+    from web.runtime_state import load_restorable_workspace
+
+    session_manager = _manager()
     slot = load_restorable_workspace(resolved_workspace_id)
     if not slot:
         return {
@@ -916,9 +1016,9 @@ def restore_workspace(workspace_id: Any) -> Dict[str, Any]:
         }
 
     label = str(slot.get("label") or "").strip()
-    # R5/R12: idempotent by workspace id. A second restore (double click, two
-    # launcher windows) sees the workspace live and refuses instead of
-    # duplicating every tab.
+    # R5/R12: a restore that has already happened is refused rather than
+    # duplicating every tab. A restore still *running* is refused one step
+    # earlier, by the claim in `restore_workspace`.
     if workspace_has_groups(resolved_workspace_id):
         return {
             "workspace_id": resolved_workspace_id,
@@ -1010,6 +1110,22 @@ def restore_workspace(workspace_id: Any) -> Dict[str, Any]:
         active_group_id = started_group_ids[0]
     session_manager.set_active_group(resolved_workspace_id, active_group_id)
 
+    # Shape-only diagnostics (MW-16): enough to reconstruct what a restore did
+    # and why a tab is missing, with no host, directory, command, or credential.
+    logger.info(
+        "Restored workspace=%s groups=%d/%d skipped=%d failed=%d panes=%d",
+        resolved_workspace_id,
+        len(started_group_ids),
+        len(group_results),
+        sum(1 for result in group_results if result.get("skipped")),
+        sum(
+            1
+            for result in group_results
+            if not result.get("started") and not result.get("skipped")
+        ),
+        sum(int(result.get("pane_count") or 0) for result in group_results),
+    )
+
     return {
         "workspace_id": resolved_workspace_id,
         "label": label,
@@ -1022,24 +1138,102 @@ def restore_workspace(workspace_id: Any) -> Dict[str, Any]:
     }
 
 
+def _preflight_restore_set(workspace_ids: List[str]) -> List[Dict[str, Any]]:
+    """Report every saved preset two selected slots would both claim (MW-13).
+
+    A saved preset is live in at most one workspace at a time — that rule is
+    what makes relaunching a preset replace its own tab instead of opening a
+    second one, and it is enforced by the group id the preset derives. Slots
+    are deliberately retained by several close paths, so two of them can end up
+    referencing the same preset, and restoring both used to mean "whichever the
+    request happened to list first wins": the second workspace came back
+    missing that tab, or — for two references inside one slot — silently
+    collapsed into a single group.
+
+    There is no defensible arbitrary winner between two workspaces the user
+    asked for in the same breath, so the whole request is refused before any
+    live state changes and every collision is reported at once. Deselecting one
+    side is the explicit choice that resolves it.
+
+    A preset that is already live in a workspace *outside* the selected set is
+    a different case and is not reported here: that incumbent is visible to the
+    user, cannot be affected by this request, and is reported per group as
+    ``skipped: already_live`` while the rest of its workspace still restores.
+    """
+    from web.runtime_state import load_restorable_workspace
+    from web.saved_sessions import DEFAULT_SAVED_SESSION_ID
+
+    references: Dict[str, List[str]] = {}
+    for workspace_id in workspace_ids:
+        try:
+            # An unusable id has nothing to collide with; `restore_workspace`
+            # is what reports it, one result row at a time.
+            slot = load_restorable_workspace(workspace_id)
+        except ValueError:
+            continue
+        if not slot:
+            continue
+        for snapshot_group in slot.get("groups") or []:
+            if not isinstance(snapshot_group, dict):
+                continue
+            saved_session_id = str(snapshot_group.get("saved_session_id") or "").strip()
+            # A launch clears the blank built-in default and mints a fresh group
+            # id for an unattached group, so neither can collide with anything.
+            if not saved_session_id or saved_session_id == DEFAULT_SAVED_SESSION_ID:
+                continue
+            references.setdefault(saved_session_id, []).append(workspace_id)
+
+    conflicts = []
+    for saved_session_id, holders in references.items():
+        if len(holders) < 2:
+            continue
+        preset = _find_saved_preset(saved_session_id)
+        conflicts.append({
+            "conflict": "duplicate_preset_reference",
+            "saved_session_id": saved_session_id,
+            "saved_session_name": str((preset or {}).get("name") or ""),
+            "workspace_ids": holders,
+        })
+    return conflicts
+
+
 def restore_workspaces(workspace_ids: Any) -> Tuple[Dict[str, Any], int]:
     """Restore a subset of saved workspaces; returns ``(payload, status)``.
 
     Unselected slots are untouched and stay on offer. The response reports that
     a relaunch *started* — SSH authentication is asynchronous and keeps
     arriving through the existing room-scoped `session_status` events.
+
+    The selected set is preflighted first (MW-13): a collision inside the
+    request is answered with `409` and every conflict listed, before a single
+    workspace has been touched.
     """
     if not isinstance(workspace_ids, list) or not workspace_ids:
         return {"error": "A non-empty 'workspace_ids' list is required"}, 400
 
     seen = set()
-    results = []
+    requested: List[str] = []
     for raw_id in workspace_ids:
         key = str(raw_id or "")
         if key in seen:
             continue
         seen.add(key)
-        results.append(restore_workspace(raw_id))
+        requested.append(key)
+
+    conflicts = _preflight_restore_set(requested)
+    if conflicts:
+        return {
+            "error": (
+                "Two of the selected workspaces use the same saved session, "
+                "which can only be open in one workspace at a time"
+            ),
+            "conflict": "duplicate_preset_reference",
+            "conflicts": conflicts,
+            "workspaces": [],
+            "restored_count": 0,
+        }, 409
+
+    results = [restore_workspace(raw_id) for raw_id in requested]
 
     return {
         "message": "Relaunch started",
@@ -1059,6 +1253,138 @@ def list_restorable_workspace_summaries() -> List[Dict[str, Any]]:
     return summaries
 
 
+# ==================== Closing a live workspace ====================
+#
+# The close-action matrix (MW-15). Four verbs, one documented persistence
+# effect each; all three code paths below and the two session-close routes in
+# `web/api.py` implement exactly this table:
+#
+#   Close window            no live change              snapshot untouched
+#   Close group / last pane group gone; workspace gone   snapshot cleared when
+#                           when it was the last one     the workspace emptied
+#   Close live workspace    every group and session      snapshot KEPT — this is
+#                           closed; record removed       the restorable verb
+#   Close and forget        as above                     snapshot removed
+#
+# Bulk "close all sessions" (`DELETE /api/sessions` with no group) is the
+# process-wide variant of *Close window*: it ends live shells and deliberately
+# leaves every snapshot on offer, which is what makes restore-after-restart
+# work. `close_extra_workspaces` (leaving multi-workspace mode) is *Close live
+# workspace* applied to every workspace but `default`.
+
+
+def _close_workspace_contents(workspace_id: str) -> Optional[Dict[str, Any]]:
+    """Close every session and group of one live workspace; drop the record.
+
+    The single teardown path behind *Close live workspace* and leaving
+    multi-workspace mode, so both verbs can only ever have the same live
+    effect. Returns ``None`` when the workspace is not live.
+
+    Nothing is captured or cleared here — the caller owns the snapshot half of
+    the matrix. The caller must not hold ``SessionManager.lock``: the SSH
+    teardown and the broadcast below run after every shared lock is released
+    (guardrail 2).
+    """
+    from web.terminal_io import (
+        _broadcast_session_groups_updated,
+        _close_ssh_connection,
+    )
+
+    session_manager = _manager()
+    # Check-then-act in one hold; the slow work happens after it is released.
+    with session_manager.lock:
+        workspace = session_manager.get_workspace(workspace_id)
+        if workspace is None:
+            return None
+        label = str(workspace.label or "").strip()
+        session_ids = [
+            session.session_id
+            for session in session_manager.get_workspace_sessions(workspace_id)
+        ]
+        group_count = len(session_manager.get_workspace_groups(workspace_id))
+        for session_id in session_ids:
+            session_manager.close_session(session_id)
+        # A workspace created deliberately empty is retained until its first
+        # group arrives; closing it deliberately ends that promise. Cleared
+        # first, so the sweep below is allowed to take it.
+        workspace.retain_when_empty = False
+        session_manager.clear_disconnected_sessions()
+        # The sweep prunes the emptied workspace itself, so this is
+        # the fallback for the empty-workspace case rather than the only path —
+        # the manager, not either return value, is asked what actually remains.
+        session_manager.remove_workspace(workspace_id)
+        removed = session_manager.get_workspace(workspace_id) is None
+
+    for session_id in session_ids:
+        _close_ssh_connection(session_id, clear_buffer=True)
+    _broadcast_session_groups_updated("workspace_closed", workspace_id=workspace_id)
+    return {
+        "workspace_id": workspace_id,
+        "label": label,
+        "group_count": group_count,
+        "session_count": len(session_ids),
+        "removed": bool(removed),
+    }
+
+
+def close_live_workspace(workspace_id: Any, forget: bool = False) -> Tuple[Dict[str, Any], int]:
+    """Close one live workspace; returns ``(payload, status)``.
+
+    *Close live workspace* by default: the sessions end and the record goes,
+    while whatever autosave or **Save Workspace** captured stays on offer in
+    the restore chooser. ``forget=True`` is the *Close and forget* variant and
+    also removes the saved slot.
+
+    This is also the terminal lifecycle of a deliberately empty workspace
+    (MW-12): with no groups to close it simply releases the reservation, so an
+    abandoned **New Workspace** can no longer sit in the destination list until
+    the process restarts.
+
+    ``default``'s record is permanent, so it is emptied rather than removed —
+    and an empty ``default`` is not a user-visible workspace, so it disappears
+    from every list either way.
+    """
+    from web.runtime_state import clear_workspace
+
+    try:
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+    closed = _close_workspace_contents(resolved_workspace_id)
+    if closed is None:
+        return workspace_missing_payload(), 404
+
+    payload = {**closed, "closed": True, "forgotten": False}
+    logger.debug(
+        "Closed live workspace %s (groups=%d sessions=%d removed=%s forget=%s)",
+        resolved_workspace_id,
+        closed["group_count"],
+        closed["session_count"],
+        closed["removed"],
+        bool(forget),
+    )
+    if not forget:
+        return payload, 200
+
+    # The live half already happened, so a failed forget reports honestly
+    # rather than rolling anything back: the user retries the forget alone.
+    try:
+        payload["forgotten"] = bool(clear_workspace(resolved_workspace_id))
+    except Exception as exc:
+        logger.error(
+            "Could not forget the saved snapshot of closed workspace %s: %s",
+            resolved_workspace_id,
+            exc,
+        )
+        return {
+            **payload,
+            "retryable": True,
+            "error": "The workspace closed, but its saved snapshot could not be removed",
+        }, 503
+    return payload, 200
+
+
 # ==================== Leaving multi-workspace mode ====================
 
 
@@ -1074,11 +1400,6 @@ def close_extra_workspaces() -> Dict[str, Any]:
     whatever the autosave timer or an explicit Workspace ▸ Save Workspace has
     already written, and those slots survive this untouched.
     """
-    from web.terminal_io import (
-        _broadcast_session_groups_updated,
-        _close_ssh_connection,
-    )
-
     session_manager = _manager()
     closed: List[Dict[str, Any]] = []
 
@@ -1087,46 +1408,24 @@ def close_extra_workspaces() -> Dict[str, Any]:
         if workspace_id == DEFAULT_WORKSPACE_ID:
             continue
 
-        # Check-then-act in one hold; the slow work (SSH teardown) and the emit
-        # both happen after the lock is released (guardrail 2).
-        with session_manager.lock:
-            session_ids = [
-                session.session_id
-                for session in session_manager.get_workspace_sessions(workspace_id)
-            ]
-            group_ids = [
-                group.group_id
-                for group in session_manager.get_workspace_groups(workspace_id)
-            ]
-            for session_id in session_ids:
-                session_manager.close_session(session_id)
-            # Leaving the mode is explicit, so these groups must not survive on
-            # the empty-group grace period the way a transient empty one does.
-            session_manager.clear_disconnected_sessions(force_group_ids=set(group_ids))
-            # A workspace created deliberately empty is retained until its first
-            # group arrives; that promise ends with the mode itself.
-            workspace.retain_when_empty = False
-            removed = session_manager.remove_workspace(workspace_id)
-
-        for session_id in session_ids:
-            _close_ssh_connection(session_id, clear_buffer=True)
-        _broadcast_session_groups_updated(
-            "workspace_closed",
-            workspace_id=workspace_id,
-        )
+        # Same teardown as an explicit Close live workspace, snapshot included:
+        # leaving the mode keeps every saved slot on offer.
+        result = _close_workspace_contents(workspace_id)
+        if result is None:
+            continue
         logger.debug(
             "Closed workspace %s leaving multi-workspace mode "
             "(groups=%d sessions=%d removed=%s)",
             workspace_id,
-            len(group_ids),
-            len(session_ids),
-            bool(removed),
+            result["group_count"],
+            result["session_count"],
+            result["removed"],
         )
         closed.append({
             "workspace_id": workspace_id,
-            "label": str(workspace.label or "").strip(),
-            "group_count": len(group_ids),
-            "session_count": len(session_ids),
+            "label": result["label"],
+            "group_count": result["group_count"],
+            "session_count": result["session_count"],
         })
 
     return {

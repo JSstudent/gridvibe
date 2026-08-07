@@ -23,8 +23,25 @@
         move: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 12h12"></path><path d="M13 8l4 4-4 4"></path><rect x="18" y="4" width="3" height="16" rx="1"></rect></svg>',
         add: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>',
         check: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 6 9 17l-5-5"></path></svg>',
-        forget: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 7h16"></path><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"></path></svg>'
+        forget: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 7h16"></path><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"></path></svg>',
+        close: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9.5 10.5l5 5"></path><path d="M14.5 10.5l-5 5"></path></svg>'
     };
+
+    /* The client half of the one "user-visible live workspace" predicate
+       (MW-05); `workspace_is_user_visible` in web/workspaces.py is the server
+       half and already filters `/api/workspaces`. Kept here so every list this
+       file feeds — the Workspaces card, the launch destination menu, the
+       Open/Move menus, the Alt+W cycle — asks the identical question of a
+       cached summary, and none of them can drift back into showing an internal
+       container as though it were a workspace.
+
+       A record counts when it holds a session tab, or when the user created it
+       deliberately empty (which always opened a window for it). An empty
+       `default` is the permanent backend container, not a workspace. */
+    function isUserVisibleWorkspace(workspace) {
+        return (Number(workspace?.group_count) || 0) > 0
+            || Boolean(workspace?.retain_when_empty);
+    }
 
     function isMultiWorkspaceEnabled() {
         return typeof MULTI_WORKSPACE_ENABLED !== 'undefined' && MULTI_WORKSPACE_ENABLED === true;
@@ -79,9 +96,20 @@
        shortcut and the menu can never disagree about what "the next workspace"
        is. Returns null when there is nowhere else to go — a window whose own
        workspace is not in the list (it was just pruned) still walks from the
-       front rather than getting stuck. */
+       front rather than getting stuck.
+
+       Only user-visible workspaces are walked, through the shared predicate. A
+       live workspace record is not the same thing as an open window: the
+       `default` record is permanent, so an empty one routinely outlives — or
+       never had — a window, and without the filter a single-window session
+       cycles onto it and *opens* a blank second window instead of switching.
+       The current workspace stays in the list either way so the walk keeps its
+       place in the order. */
     function nextWorkspaceInCycle(workspaces, currentWorkspaceId, step = 1) {
-        const list = Array.isArray(workspaces) ? workspaces : [];
+        const list = (Array.isArray(workspaces) ? workspaces : []).filter(
+            workspace => isUserVisibleWorkspace(workspace)
+                || workspace?.workspace_id === currentWorkspaceId
+        );
         if (list.length < 2) {
             return null;
         }
@@ -154,6 +182,104 @@
         });
     }
 
+    /* ── Arrival pulse ──
+       Swapping workspaces moves the *OS window*, and two GridVibe windows look
+       alike: same chrome, same grid, only the content differs. Alt+W, the Open
+       Workspace menu and the launcher's Open button can therefore all land the
+       user somewhere without anything saying so. The window being handed focus
+       flashes a ring around its viewport once, so the eye lands on the
+       workspace it actually arrived in.
+
+       The request is stored, not broadcast: a workspace that had no window yet
+       still finds it waiting when its fresh page boots, which a
+       BroadcastChannel message sent before that page existed could never do.
+       The claim is one-shot and time-boxed — a request nobody arrives on (the
+       open failed, the window was closed again) expires instead of pulsing at
+       some unrelated moment later. */
+    const WORKSPACE_ARRIVAL_STORAGE_KEY = 'gridvibe.workspaceArrival';
+    const WORKSPACE_ARRIVAL_TTL_MS = 12000;
+    const WORKSPACE_ARRIVAL_PULSE_MS = 1100;
+
+    function requestWorkspaceArrivalPulse(workspaceId) {
+        try {
+            localStorage.setItem(WORKSPACE_ARRIVAL_STORAGE_KEY, JSON.stringify({
+                workspaceId: normalizeWorkspaceId(workspaceId),
+                timestamp: Date.now(),
+                source: GRIDVIBE_WINDOW_ID
+            }));
+        } catch (_error) {}
+    }
+
+    /* True at most once per request, and only in the window the request names.
+       A payload for another workspace is left alone — that window has not been
+       given focus yet and the request is still its to claim. */
+    function claimWorkspaceArrivalPulse(workspaceId) {
+        let payload = null;
+        try {
+            payload = JSON.parse(localStorage.getItem(WORKSPACE_ARRIVAL_STORAGE_KEY) || 'null');
+        } catch (_error) {
+            payload = null;
+        }
+        if (!payload || normalizeWorkspaceId(payload.workspaceId) !== normalizeWorkspaceId(workspaceId)) {
+            return false;
+        }
+        try {
+            localStorage.removeItem(WORKSPACE_ARRIVAL_STORAGE_KEY);
+        } catch (_error) {}
+        const age = Date.now() - Number(payload.timestamp || 0);
+        return !isOwnBroadcast(payload) && age >= 0 && age <= WORKSPACE_ARRIVAL_TTL_MS;
+    }
+
+    let workspaceArrivalPulseTimer = null;
+
+    /* Decoration only: a fixed, pointer-transparent overlay above everything,
+       driven by a class rather than rewritten markup (guardrail 8). Removing
+       the class and forcing a reflow restarts the animation, so cycling
+       through three workspaces pulses three times instead of once. */
+    function pulseWorkspaceWindow() {
+        /* A window can be given focus before its body is parsed. The claim has
+           already been spent by then, so the pulse waits for the body rather
+           than being dropped. */
+        if (!document.body) {
+            document.addEventListener('DOMContentLoaded', pulseWorkspaceWindow, { once: true });
+            return;
+        }
+        let ring = document.getElementById('workspaceArrivalPulse');
+        if (!ring) {
+            ring = document.createElement('div');
+            ring.id = 'workspaceArrivalPulse';
+            ring.className = 'workspace-arrival-pulse';
+            ring.setAttribute('aria-hidden', 'true');
+            document.body.appendChild(ring);
+        }
+        ring.classList.remove('is-pulsing');
+        void ring.offsetWidth;
+        ring.classList.add('is-pulsing');
+        clearTimeout(workspaceArrivalPulseTimer);
+        workspaceArrivalPulseTimer = setTimeout(
+            () => ring.classList.remove('is-pulsing'),
+            WORKSPACE_ARRIVAL_PULSE_MS
+        );
+    }
+
+    /* Called once by the workspace page with its own id. Boot covers the window
+       that was opened for the switch; `focus` covers the one that already
+       existed and was raised — which is also why a request is never claimed
+       from a background window, where the pulse would play unseen. */
+    function watchWorkspaceArrivals(workspaceId) {
+        const claim = () => {
+            if (claimWorkspaceArrivalPulse(workspaceId)) {
+                pulseWorkspaceWindow();
+            }
+        };
+        window.addEventListener('focus', claim);
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', claim);
+        } else {
+            claim();
+        }
+    }
+
     async function createWorkspaceRecord(label = '') {
         const { ok, data } = await workspaceApiRequest('/api/workspaces', {
             method: 'POST',
@@ -209,8 +335,14 @@
         return window.pywebview?.api || null;
     }
 
+    /* Both dispatchers arm the arrival pulse before they hand focus over: every
+       path that swaps workspaces — Alt+W, the Open Workspace menu, the
+       launcher's Open button, a restore — goes through one of these two
+       (guardrail 6), so the pulse is armed in one place and cannot be forgotten
+       by a surface added later. */
     async function focusWorkspaceWindow(workspaceId) {
         const resolvedWorkspaceId = normalizeWorkspaceId(workspaceId);
+        requestWorkspaceArrivalPulse(resolvedWorkspaceId);
         const api = nativeWorkspaceApi();
         if (api?.focus_workspace_window) {
             try {
@@ -229,6 +361,7 @@
         const resolvedWorkspaceId = normalizeWorkspaceId(workspaceId);
         const groupId = String(options.groupId || '');
         const nativeZoomFactor = normalizeNativeZoomFactor(options.nativeZoomFactor);
+        requestWorkspaceArrivalPulse(resolvedWorkspaceId);
         const api = nativeWorkspaceApi();
         if (api?.open_workspace_window) {
             try {
@@ -264,6 +397,57 @@
         return false;
     }
 
+    /* ── Closing a live workspace ──
+       The close-action matrix in web/workspaces.py, client side. Closing a
+       *window* (above) changes nothing live; this ends the workspace's sessions
+       and removes it. `forget` additionally drops the saved snapshot — without
+       it the workspace stays in the restore chooser, which is the whole point
+       of having a verb separate from closing its last tab. */
+
+    async function closeLiveWorkspace(workspaceId, { forget = false } = {}) {
+        const resolvedWorkspaceId = normalizeWorkspaceId(workspaceId);
+        const query = forget ? '?forget=true' : '';
+        const { ok, status, data } = await workspaceApiRequest(
+            `/api/workspaces/${encodeURIComponent(resolvedWorkspaceId)}${query}`,
+            { method: 'DELETE' }
+        );
+        if (!ok) {
+            const error = new Error(data.error || 'Could not close this workspace');
+            error.status = status;
+            /* A failed forget still closed the workspace, so the caller can
+               tell "nothing happened" from "retry the forget alone". */
+            error.closed = Boolean(data.closed);
+            error.retryable = Boolean(data.retryable);
+            throw error;
+        }
+        notifyWorkspacesChanged('workspace_closed');
+        return data;
+    }
+
+    /* Ending live shells is irreversible, so it confirms in page (guardrail 8,
+       never window.confirm). An empty workspace has nothing to lose and is
+       released without a prompt. */
+    async function confirmCloseLiveWorkspace(workspace, { forget = false } = {}) {
+        const sessionCount = Number(workspace?.group_count) || 0;
+        if (!sessionCount && !forget) {
+            return true;
+        }
+        const name = workspaceDisplayLabel(workspace);
+        return openGenericConfirmModal({
+            title: forget ? `Close and forget "${name}"?` : `Close "${name}"?`,
+            copy: sessionCount
+                ? `${sessionCount} session${sessionCount === 1 ? '' : 's'} in this workspace`
+                    + ' will be closed.'
+                : 'This workspace has no sessions open.',
+            note: forget
+                ? 'Its saved snapshot is removed too, so it will not be offered after a restart.'
+                : 'Whatever auto-save or Workspace ▸ Save Workspace captured stays'
+                    + ' on offer in the restore chooser.',
+            confirmLabel: forget ? 'Close and forget' : 'Close workspace',
+            danger: true
+        });
+    }
+
     /* ── Turning the multi-workspace mode on and off ──
        The launcher's Workspaces card owns the switch but not this policy; it
        lives here so a second surface can only ever call it (guardrail 6). */
@@ -286,7 +470,7 @@
     async function confirmMultiWorkspaceDisable() {
         const extras = (await fetchLiveWorkspaces())
             .filter(workspace => workspace.workspace_id !== WORKSPACE_DEFAULT_ID
-                && (Number(workspace.group_count) || 0) > 0);
+                && isUserVisibleWorkspace(workspace));
         if (!extras.length) {
             return true;
         }
@@ -369,6 +553,9 @@
         return ok && Array.isArray(data.workspaces) ? data.workspaces : [];
     }
 
+    /* One server-owned restore transaction for both pages and both modes: the
+       chooser passes the selected ids, the single-workspace banner passes
+       ['default']. Nothing about a restore is decided in the browser. */
     async function restoreSavedWorkspaces(workspaceIds) {
         const { ok, data } = await workspaceApiRequest('/api/runtime-state/restore', {
             method: 'POST',
@@ -376,7 +563,12 @@
             body: JSON.stringify({ workspace_ids: workspaceIds })
         });
         if (!ok) {
-            throw new Error(data.error || 'Could not restore the selected workspaces');
+            const error = new Error(data.error || 'Could not restore the selected workspaces');
+            /* A preflight conflict changed nothing and will fail identically on
+               a retry — the fix is to deselect one side, so the caller must not
+               offer "try again" for it. */
+            error.conflict = String(data.conflict || '');
+            throw error;
         }
         return data;
     }
@@ -431,7 +623,11 @@
         if (savedAgo) {
             parts.push(`saved ${savedAgo}`);
         }
-        if (summary?.origin === 'manual') {
+        /* "Saved manually" is durable pinning metadata, not the writer of the
+           current shape: a workspace the user saved by hand keeps the note
+           after the autosave timer has refreshed it (which sets origin back to
+           'auto'). Older slots only carry the conflated origin. */
+        if (summary?.manually_saved_at || summary?.origin === 'manual') {
             parts.push('saved manually');
         }
         return parts.join(' • ');
@@ -533,19 +729,33 @@
 
     /* ── Session tab context menu ── */
 
+    /* The control that opened the menu, so its aria-expanded can be told when
+       the menu goes away — the menu closes on an outside click or Escape,
+       neither of which the opener hears. */
+    let workspaceContextMenuAnchor = null;
+
+    function releaseWorkspaceContextMenuAnchor() {
+        if (workspaceContextMenuAnchor) {
+            workspaceContextMenuAnchor.setAttribute('aria-expanded', 'false');
+            workspaceContextMenuAnchor = null;
+        }
+    }
+
     function closeWorkspaceContextMenu() {
         const menu = document.getElementById('workspaceContextMenu');
         if (menu) {
             menu.hidden = true;
             menu.innerHTML = '';
         }
+        releaseWorkspaceContextMenuAnchor();
     }
 
-    function openWorkspaceContextMenu(event, entries) {
+    function openWorkspaceContextMenu(event, entries, { anchor = null } = {}) {
         const menu = document.getElementById('workspaceContextMenu');
         if (!menu || !entries.length) {
             return;
         }
+        releaseWorkspaceContextMenuAnchor();
         menu.innerHTML = '';
         entries.forEach(entry => {
             menu.appendChild(
@@ -563,6 +773,10 @@
         const rect = menu.getBoundingClientRect();
         menu.style.left = `${Math.max(4, Math.min(event.clientX, innerWidth - rect.width - 8))}px`;
         menu.style.top = `${Math.max(4, Math.min(event.clientY, innerHeight - rect.height - 8))}px`;
+        if (anchor?.hasAttribute?.('aria-expanded')) {
+            workspaceContextMenuAnchor = anchor;
+            anchor.setAttribute('aria-expanded', 'true');
+        }
     }
 
     document.addEventListener('pointerdown', event => {

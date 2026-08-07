@@ -1,5 +1,5 @@
     /* ─────────────────────────────────────────────
-       Explorer in-app text editor — docs/text_editor_2026-07-20.md.
+       Explorer in-app text editor.
        Owns edit state, the Source-view textarea, save/conflict flows, and the
        unsaved-work discard guards. Loaded after explorer-viewer.js and before
        terminals.js so it can reuse both files' render/navigation hooks and the
@@ -131,8 +131,10 @@
     }
 
     /* While editing, the non-editor file chrome is disabled so a stray click
-       cannot swap views, search, download the old disk copy, or restyle the
-       preview. Zoom stays live (it only sets the shared font-size variable). */
+       cannot swap views, search, or download the old disk copy. Zoom, line
+       wrapping and the appearance menu stay live — like the wrap toggle they
+       only restyle the surface (CSS custom properties on panels that are not
+       rebuilt), and the Source font they set is the one being typed into. */
     function setExplorerEditChromeDisabled(index, disabled) {
         const list = document.getElementById(`explorer-list-${index}`);
         if (!list) {
@@ -145,7 +147,6 @@
         const selectors = [
             '[data-explorer-file-view]',
             `[data-explorer-download="${index}"]`,
-            `[data-explorer-md-appearance="${index}"]`,
             `[data-explorer-search-input="${index}"]`,
             `[data-explorer-search-prev="${index}"]`,
             `[data-explorer-search-next="${index}"]`,
@@ -230,6 +231,13 @@
         textarea.value = state.draft;
         textarea.addEventListener('input', () => handleExplorerEditInput(index));
         textarea.addEventListener('keydown', event => handleExplorerEditKeydown(index, event));
+        /* The panel now holds a textarea instead of numbered rows, so the
+           change marks have nothing to sit on and the overview has nothing to
+           survey. Re-applying them is what stands the overview column down
+           (and exitExplorerEditMode's renderExplorerSource brings it back);
+           the cached model itself is kept, so leaving the editor costs no
+           refetch. */
+        applyExplorerChangeMarks(index);
     }
 
     function handleExplorerEditInput(index) {

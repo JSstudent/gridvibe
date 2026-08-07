@@ -15,6 +15,18 @@ served locally so GridVibe works fully offline (see deep-dive finding 3.6).
 | `highlight.min.js` | Highlight.js | 11.9.0 | https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js (common build) + `languages/{dos,powershell,dockerfile}.min.js` | BSD-3-Clause |
 | `diff2html-ui-base.min.js` | diff2html | 3.4.48 | https://cdn.jsdelivr.net/npm/diff2html@3.4.48/bundles/js/diff2html-ui-base.min.js | MIT |
 | `diff2html.min.css` | diff2html | 3.4.48 | https://cdn.jsdelivr.net/npm/diff2html@3.4.48/bundles/css/diff2html.min.css | MIT |
+| `fonts/jetbrains-mono-latin-{400,700}-normal.woff2` | @fontsource/jetbrains-mono | 5.3.0 | https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.3.0/files/ | OFL-1.1 |
+| `fonts/cascadia-code-latin-{400,700}-normal.woff2` | @fontsource/cascadia-code | 5.3.0 | https://cdn.jsdelivr.net/npm/@fontsource/cascadia-code@5.3.0/files/ | OFL-1.1 |
+
+The two coding fonts back the explorer's font picker and the App Settings
+terminal-font list, which otherwise named families that are not present on a
+stock Windows box — both stacks end in Consolas, so picking either one changed
+nothing. `@font-face` declarations live in `web/static/css/tokens.css` (the one
+stylesheet both pages load), with `url()`s relative to `web/static/css/`. Latin
+subset, regular + bold only: missing glyphs fall through to the next family in
+the stack and italics are synthesized. Upstream copyrights — JetBrains Mono ©
+2020 The JetBrains Mono Project Authors, Cascadia Code © Microsoft Corporation —
+ship beside the files as `fonts/LICENSE-{jetbrains-mono,cascadia-code}.txt`.
 
 `highlight.min.js` is the stock Highlight.js "common" build with three extra
 language grammars (`dos`, `powershell`, `dockerfile`) appended so the explorer

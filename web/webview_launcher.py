@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 
 _NATIVE_FRAME_COLORS = {"caption": "#111827", "text": "#f8fafc", "border": "#1f2937"}
 
+# The launcher window opens slightly zoomed out so the whole setup form fits
+# without inner scrolling; paired with the 10%-larger frame in main().
+LAUNCHER_NATIVE_ZOOM_FACTOR = 0.9
+
 
 def _apply_windows_dark_frame_attributes(hwnd: int) -> bool:
     """Apply the complete dark DWM frame attribute set to a Windows HWND."""
@@ -1501,11 +1505,13 @@ def main():
         _set_webview2_media_env()
         _patch_webview2_permissions()
     _patch_winforms_dark_title_bar()
+    # 10% larger frame at 90% content zoom (applied on load below): the same
+    # launcher UI gets ~20% more usable area without shrinking the text much.
     window = webview.create_window(
         "GridVibe",
         base_url,
-        width=1280,
-        height=840,
+        width=1408,
+        height=924,
         min_size=(1024, 700),
         resizable=True,
         frameless=False,
@@ -1524,6 +1530,11 @@ def main():
         return
     api_bridge._attach_window(window)
     register_window(window, "launcher")
+    launcher_loaded_event = getattr(getattr(window, "events", None), "loaded", None)
+    if launcher_loaded_event is not None:
+        launcher_loaded_event += lambda *_args: _set_native_window_zoom(
+            window, LAUNCHER_NATIVE_ZOOM_FACTOR
+        )
     if preferred_gui:
         logger.info("Starting pywebview with preferred GUI backend: %s", preferred_gui)
     try:

@@ -50,6 +50,7 @@
         [data-theme="light"] .count-btn,
         [data-theme="light"] .layout-btn,
         [data-theme="light"] .mode-btn,
+        [data-theme="light"] .mode-target-btn,
         [data-theme="light"] .ghost-btn {
             background: rgba(255, 255, 255, 0.98);
             border-color: rgba(75, 85, 99, 0.28);
@@ -58,6 +59,7 @@
         [data-theme="light"] .count-btn:hover,
         [data-theme="light"] .layout-btn:hover,
         [data-theme="light"] .mode-btn:hover,
+        [data-theme="light"] .mode-target-btn:hover,
         [data-theme="light"] .ghost-btn:hover {
             border-color: rgba(8, 145, 178, 0.56);
         }
@@ -440,19 +442,27 @@
         }
 
         /* Three rows, not two: the Workspaces card sits between the Terminal
-           Setup card and the action bar when multi-workspace is on. Leaving the
-           third row implicit was survivable, but `.card { min-height: 0 }`
-           removes each item's automatic minimum, so the `1fr` row could be
-           squeezed to nothing and Terminal Setup collapsed to a clipped header
-           strip. The floors below keep the content cards readable and let the
-           column scroll instead. */
+           Setup card and the action bar when multi-workspace is on, and leaving
+           the third row implicit put the action bar in whatever the browser
+           improvised.
+
+           Every row is content-sized and the column stacks from the top. No row
+           claims the column's leftover space, which is the whole point: a `1fr`
+           first row made Terminal Setup grow into all of it and squeeze the
+           Workspaces card below, while a floor on that card meant the card
+           could end up taller than its own track — and a grid item taller than
+           its track *overflows* it rather than pushing the next row down, so
+           Workspaces painted its background straight over the bottom terminal
+           cards. With `auto` rows, Terminal Setup wraps exactly what it holds
+           (see its cap below), Workspaces takes the space that leaves, and the
+           column scrolls (`.column { overflow: auto }`) only when the two of
+           them genuinely do not fit. */
         .column-right {
-            grid-template-rows: minmax(0, 1fr) auto auto;
+            grid-template-rows: auto auto auto;
             align-content: start;
         }
 
-        .column-left > .card:not(.terminal-layout-card),
-        .column-right > .terminal-card {
+        .column-left > .card:not(.terminal-layout-card) {
             min-height: 220px;
         }
 
@@ -479,17 +489,32 @@
 
         .section-head {
             display: flex;
-            justify-content: space-between;
+            justify-content: flex-start;
             align-items: center;
             gap: 8px;
             margin-bottom: 10px;
             flex-wrap: wrap;
         }
 
+        /* Session Source carries four actions — too many to share the title's
+           row without wrapping mid-group — so its head stacks the toolbar
+           under the step title instead. */
+        .section-head-stacked {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        .section-head-stacked .section-title {
+            margin-right: 0;
+        }
+
         .section-title {
             display: flex;
             align-items: center;
             gap: 10px;
+            /* Actions group on the right edge; with three head children,
+               space-between would strand the middle button mid-card. */
+            margin-right: auto;
             color: var(--text);
             text-transform: uppercase;
             letter-spacing: 1.8px;
@@ -539,6 +564,7 @@
         .count-btn,
         .layout-btn,
         .mode-btn,
+        .mode-target-btn,
         .ghost-btn,
         .action-btn {
             border: 1px solid var(--border-muted);
@@ -552,6 +578,7 @@
         .count-btn:hover,
         .layout-btn:hover,
         .mode-btn:hover,
+        .mode-target-btn:hover,
         .ghost-btn:hover,
         .action-btn:hover {
             border-color: rgba(0, 217, 255, 0.5);
@@ -931,6 +958,54 @@
             margin-bottom: 10px;
         }
 
+        /* The mode button and its target caret read as one control, so the
+           hover lift belongs to the pair rather than to either half — lifting
+           only the half under the pointer split the seam open. */
+        .mode-choice {
+            display: flex;
+            align-items: stretch;
+            min-width: 0;
+            transition: transform 0.15s ease;
+        }
+
+        .mode-choice:hover {
+            transform: translateY(-1px);
+        }
+
+        .mode-choice .mode-btn:hover,
+        .mode-choice .mode-target-btn:hover {
+            transform: none;
+        }
+
+        .mode-choice .mode-btn {
+            flex: 1;
+            min-width: 0;
+            border-top-right-radius: 0;
+            border-bottom-right-radius: 0;
+        }
+
+        .mode-target-btn {
+            flex: 0 0 auto;
+            width: 30px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-left-width: 0;
+            border-top-left-radius: 0;
+            border-bottom-left-radius: 0;
+            color: var(--muted);
+        }
+
+        .mode-target-btn:hover {
+            color: var(--text);
+        }
+
+        .mode-target-btn svg {
+            width: 14px;
+            height: 14px;
+        }
+
         .mode-btn {
             padding: 10px 14px;
             display: flex;
@@ -1122,7 +1197,6 @@
             word-break: break-word;
         }
 
-        .t-agent-select,
         .startup-mode-select {
             padding-right: 36px;
             color-scheme: dark;
@@ -1136,7 +1210,6 @@
             background-repeat: no-repeat;
         }
 
-        [data-theme="light"] .t-agent-select,
         [data-theme="light"] .startup-mode-select {
             color-scheme: light;
             background-color: #ffffff;
@@ -1145,64 +1218,40 @@
             font-weight: 600;
         }
 
-        [data-theme="light"] .t-agent-select option,
         [data-theme="light"] .startup-mode-select option {
             background: #ffffff;
             color: #111827;
         }
 
-        .t-agent-select.status-installed {
-            border-color: rgba(57, 212, 166, 0.52);
-            background-color: #0c2520;
-            color: var(--success);
+        /* Agent preflight status paints the control's frame only. A native
+           select hands its own background-color and color down to the popup
+           list, so tinting the closed control repainted every Startup Mode
+           option — Terminal, File Explorer, Browser — in the agent's status
+           colour. The frame carries the signal; the status word itself lives
+           in the selected option's " · Installed" suffix, the preflight
+           summary chip, and the select's title tooltip. Theme-aware tokens
+           replace this block's old per-theme literals. */
+        .startup-mode-select.status-installed {
+            border-color: var(--gv-success);
+            box-shadow: inset 0 0 0 1px var(--gv-success);
         }
 
-        .t-agent-select.status-missing,
-        .t-agent-select.status-needs_manual_install {
-            border-color: rgba(255, 189, 89, 0.48);
-            background-color: #231a06;
-            color: #ffd084;
+        .startup-mode-select.status-missing,
+        .startup-mode-select.status-needs_manual_install {
+            border-color: var(--gv-warning);
+            box-shadow: inset 0 0 0 1px var(--gv-warning);
         }
 
-        .t-agent-select.status-missing_prerequisite,
-        .t-agent-select.status-check_failed,
-        .t-agent-select.status-unsupported_here {
-            border-color: rgba(255, 111, 125, 0.48);
-            background-color: #22090e;
-            color: #ff8b96;
+        .startup-mode-select.status-missing_prerequisite,
+        .startup-mode-select.status-check_failed,
+        .startup-mode-select.status-unsupported_here {
+            border-color: var(--gv-danger);
+            box-shadow: inset 0 0 0 1px var(--gv-danger);
         }
 
-        .t-agent-select.status-target_incomplete {
-            border-color: rgba(0, 217, 255, 0.48);
-            background-color: #061921;
-            color: var(--accent);
-        }
-
-        [data-theme="light"] .t-agent-select.status-installed {
-            border-color: rgba(4, 120, 87, 0.54);
-            background-color: #ecfdf5;
-            color: #047857;
-        }
-
-        [data-theme="light"] .t-agent-select.status-missing,
-        [data-theme="light"] .t-agent-select.status-needs_manual_install {
-            border-color: rgba(180, 83, 9, 0.54);
-            background-color: #fffbeb;
-            color: #92400e;
-        }
-
-        [data-theme="light"] .t-agent-select.status-missing_prerequisite,
-        [data-theme="light"] .t-agent-select.status-check_failed,
-        [data-theme="light"] .t-agent-select.status-unsupported_here {
-            border-color: rgba(220, 38, 38, 0.54);
-            background-color: #fef2f2;
-            color: #b91c1c;
-        }
-
-        [data-theme="light"] .t-agent-select.status-target_incomplete {
-            border-color: rgba(8, 145, 178, 0.54);
-            background-color: #ecfeff;
-            color: #0e7490;
+        .startup-mode-select.status-target_incomplete {
+            border-color: var(--gv-accent);
+            box-shadow: inset 0 0 0 1px var(--gv-accent);
         }
 
         .agent-preflight-disclosure {
@@ -1421,11 +1470,17 @@
             line-height: 1.35;
         }
 
+        /* The card wraps its terminal tiles rather than filling the column, so
+           a set of folded tiles takes only the height it needs. The cap is one
+           fully expanded tile (agent mode is the tallest, ~400px) plus the card
+           chrome: expanding a tile grows the card up to that and `.rows-wrap`
+           scrolls past it, so a second expanded tile never pushes into the
+           Workspaces card below. */
         .terminal-card {
             display: flex;
             flex-direction: column;
             padding: 18px 20px;
-            max-height: calc(100vh - 200px);
+            max-height: min(520px, 58vh);
             min-height: 0;
         }
 
@@ -1447,8 +1502,13 @@
 
         .t-row {
             min-height: 0;
+            min-width: 0;
             display: grid;
             grid-template-rows: auto 1fr;
+            /* Without an explicit column, the implicit `auto` track grows to
+               the content's max-content width and the card's overflow:hidden
+               clips the right edge — fold chevron, status dot, inputs. */
+            grid-template-columns: minmax(0, 1fr);
             border-radius: 14px;
             background: var(--bg-card);
             border: 1px solid var(--border-muted);
@@ -1468,6 +1528,13 @@
             padding: 10px 14px;
             background: rgba(22, 32, 58, 0.6);
             border-bottom: 1px solid var(--border-soft);
+            /* The whole head folds the row — the chevron alone is a small
+               target. The title input opts back out below. */
+            cursor: pointer;
+        }
+
+        .t-row-head .t-title {
+            cursor: text;
         }
 
         .t-badge {
@@ -1511,9 +1578,108 @@
             background: var(--success);
         }
 
+        /* Per-card fold: the chevron tucks a row down to its head so three
+           or more cards stay scannable at narrow widths. */
+        .t-row-fold-btn {
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            padding: 0;
+            border: 1px solid var(--border-muted);
+            border-radius: 6px;
+            background: transparent;
+            color: var(--muted);
+            cursor: pointer;
+        }
+
+        .t-row-fold-btn:hover {
+            color: var(--accent);
+            border-color: rgba(0, 217, 255, 0.3);
+        }
+
+        .t-row-fold-btn svg {
+            width: 14px;
+            height: 14px;
+            transition: transform 0.2s ease;
+        }
+
+        .t-row-collapsed .t-row-fold-btn svg {
+            transform: rotate(-90deg);
+        }
+
+        .t-row-collapsed .t-fields {
+            display: none;
+        }
+
+        /* A collapsed card hugs its head instead of stretching to the height
+           of an expanded neighbour in the same grid row. */
+        .t-row-collapsed {
+            align-self: start;
+        }
+
+        .t-row-collapsed .t-row-head {
+            border-bottom: none;
+            padding: 8px 14px;
+        }
+
+        /* Panel fold (Terminal Setup / Workspaces): body hides, head stays. */
+        .card-fold-btn {
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 28px;
+            height: 28px;
+            padding: 0;
+            border: 1px solid var(--border-muted);
+            border-radius: 8px;
+            background: transparent;
+            color: var(--muted);
+            cursor: pointer;
+        }
+
+        .card-fold-btn:hover {
+            color: var(--accent);
+            border-color: rgba(0, 217, 255, 0.3);
+        }
+
+        .card-fold-btn svg {
+            width: 15px;
+            height: 15px;
+            transition: transform 0.2s ease;
+        }
+
+        .card-folded .card-fold-btn svg {
+            transform: rotate(-90deg);
+        }
+
+        .terminal-card.card-folded {
+            max-height: none;
+        }
+
+        .terminal-card.card-folded .rows-wrap,
+        .terminal-card.card-folded > .message {
+            display: none;
+        }
+
+        .workspace-destination-card.card-folded .workspace-mode-switch,
+        .workspace-destination-card.card-folded .workspace-destination {
+            display: none;
+        }
+
+        /* The live-workspace list scrolls rather than growing without bound, so
+           a long list still leaves the action bar below it on screen. */
+        .workspace-destination {
+            max-height: min(30vh, 280px);
+            overflow: auto;
+        }
+
         .t-fields {
             display: grid;
-            grid-template-columns: 1fr;
+            grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
             gap: 10px;
             padding: 12px 14px 14px;
             align-content: start;
@@ -1521,6 +1687,7 @@
 
         .t-fields .field {
             gap: 5px;
+            min-width: 0;
         }
 
         .t-fields .field label {
@@ -1531,14 +1698,35 @@
             font-weight: 700;
         }
 
+        /* The caps treatment above is for the small field captions only; a
+           check-field is itself a <label>, so without this reset its whole
+           copy — checkbox names and help sentences — inherits the caps. */
+        .field label.check-field {
+            text-transform: none;
+            letter-spacing: normal;
+        }
+
+        /* Wide cards lay Subdirectory and Startup Mode side by side; the
+           taller conditional blocks always take a full row of their own. */
+        .t-fields .t-command-field,
+        .t-fields .t-browser-field,
+        .t-fields .t-agent-field,
+        .t-fields .t-agent-custom-field,
+        .t-fields .t-shell-field,
+        .t-fields .t-distribution-field {
+            grid-column: 1 / -1;
+        }
+
         .t-fields .field input {
             padding: 8px 11px;
             font-size: 0.84rem;
+            min-width: 0;
         }
 
         .t-fields .field select {
             padding: 8px 11px;
             font-size: 0.84rem;
+            min-width: 0;
         }
 
         .startup-mode-select {
@@ -1556,6 +1744,11 @@
 
         .t-fields .check-copy span {
             font-size: 0.66rem;
+        }
+
+        /* The auto-mode ? sits on the check-field's right edge. */
+        .t-agent-auto-field .tip-btn {
+            margin-left: auto;
         }
 
         .t-shell-field .check-stack {

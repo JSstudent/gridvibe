@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 from sessions.manager import SessionStatus
 from web.agents import (
@@ -241,17 +241,22 @@ def _shutdown_connection(connection: Optional[Dict[str, Any]]):
                 pass
 
 
-def _replace_group_sessions(group_id: str) -> List[str]:
-    """Close and remove the tracked sessions for one launched group."""
-    existing_sessions = session_manager.get_group_sessions(group_id)
-    if not existing_sessions:
+def _close_displaced_sessions(group_id: str, session_ids: Iterable[str]) -> List[str]:
+    """Close the transports of panes an atomic relaunch already displaced.
+
+    ``SessionManager.install_session_group`` removes the displaced records and
+    publishes the replacements inside one lock hold (MW-07); their connections
+    are closed here afterwards, with no shared lock held (guardrail 2). This
+    replaced ``_replace_group_sessions``, which tore the old panes down first
+    and left the group empty for as long as the teardown took.
+    """
+    removed_session_ids = [str(session_id) for session_id in session_ids]
+    if not removed_session_ids:
         return []
 
-    for session in existing_sessions:
-        session_manager.close_session(session.session_id)
-        _close_ssh_connection(session.session_id, clear_buffer=True)
+    for session_id in removed_session_ids:
+        _close_ssh_connection(session_id, clear_buffer=True)
 
-    removed_session_ids = session_manager.remove_group_sessions(group_id)
     logger.info(
         "Replaced session group group_id=%s removed_sessions=%s",
         group_id,

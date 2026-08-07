@@ -124,6 +124,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _remote_path_inside,
     _render_markdown_preview,
     _resolve_explorer_candidate_path,
+    _resolve_pane_terminal_directory,
     _resolve_remote_explorer_candidate_path,
     _sftp_request_error_types,
     get_explorer_file_payload,
@@ -148,6 +149,7 @@ from web.hostkeys import (  # noqa: F401 - re-exported for backwards compatibili
 )
 from web.paths import BASE_DIR, install_kind
 from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
+    RuntimeStatePersistenceError,
     capture_live_workspaces,
     capture_workspace,
     clear_workspace,
@@ -183,7 +185,9 @@ from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compa
     _saved_session_meta,
     _saved_session_response,
     _utc_timestamp,
+    build_connection_target_proposals,
     build_live_session_view_updates,
+    build_unique_session_name,
     delete_saved_sessions,
     load_saved_sessions,
     load_session_config,
@@ -215,6 +219,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _clear_client_joined_sessions,
     _clear_terminal_output_buffer,
     _close_all_ssh_connections,
+    _close_displaced_sessions,
     _close_ssh_connection,
     _connect_local_session,
     _connect_session,
@@ -229,7 +234,6 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _normalize_local_directory,
     _normalize_local_shell_kind,
     _normalize_probed_local_cwd,
-    _replace_group_sessions,
     _resize_connection,
     _resolve_live_terminal_cwd,
     _resolve_local_launch_cwd,
@@ -289,6 +293,8 @@ from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     _redacted_launch_summary,
     close_extra_workspaces,
+    close_live_workspace,
+    forget_emptied_default_workspace,
     forget_pruned_workspaces,
     launch_session_group,
     list_live_workspaces,
@@ -1569,7 +1575,13 @@ def search_explorer(session_id: str):
 
 @app.route('/api/workspaces', methods=['GET'])
 def get_workspaces():
-    """Return live workspace summaries with their group counts."""
+    """Return user-visible live workspace summaries with their group counts.
+
+    Filtered through the one ``workspace_is_user_visible`` predicate, so every
+    consumer — the Workspaces card, the launch destination menu, the Open/Move
+    menus, the Alt+W cycle — sees the same set. An internal container (an empty
+    ``default``) and a launch still in flight are not workspaces.
+    """
     workspaces = list_live_workspaces()
     return jsonify({"workspaces": workspaces, "count": len(workspaces)})
 
@@ -1607,7 +1619,16 @@ def close_extra_live_workspaces():
 
 @app.route('/api/workspaces/<workspace_id>', methods=['PATCH'])
 def rename_workspace(workspace_id: str):
-    """Rename one live workspace (label only) and its saved slot."""
+    """Rename one live workspace — the live label only.
+
+    Deliberately **not** a snapshot writer. Only the autosave timer and the
+    user's explicit Save Workspace capture workspace shape; a rename that
+    recaptured would persist whatever transient shape happened to be live at
+    the moment a cosmetic label changed (a half-launched group, a tab the user
+    was about to close). The next capture by either real writer picks the new
+    label up from the live workspace record, so the saved slot catches up
+    within one autosave interval — or immediately, if the user saves.
+    """
     data = request.get_json(silent=True) or {}
     try:
         resolved_workspace_id = normalize_workspace_id(workspace_id)
@@ -1621,16 +1642,28 @@ def rename_workspace(workspace_id: str):
     if workspace is None:
         return jsonify({"error": "Workspace not found"}), 404
 
-    # Keep the saved slot's label in step so the restore chooser does not keep
-    # offering the old name; an empty workspace has no slot and is skipped.
-    capture_workspace(
-        session_manager,
-        workspace_id=resolved_workspace_id,
-        origin="auto",
-        label=label or None,
-    )
     groups = session_manager.get_workspace_groups(resolved_workspace_id)
     return jsonify(public_workspace_payload(workspace, len(groups)))
+
+
+@app.route('/api/workspaces/<workspace_id>', methods=['DELETE'])
+def close_workspace(workspace_id: str):
+    """Close one live workspace — the *Close live workspace* verb.
+
+    Ends every session in the workspace and removes its record, while leaving
+    whatever autosave or **Save Workspace** captured on offer in the restore
+    chooser. ``?forget=true`` is the *Close and forget* variant and removes the
+    saved slot too; a failed forget answers a retryable 503 and says plainly
+    that the close itself already happened.
+
+    This is deliberately a different verb from closing the last group (which
+    forgets the slot, because the workspace emptied itself) and from closing a
+    window (which changes nothing live). It is also how a deliberately empty
+    workspace ends: with nothing to close it just releases the reservation.
+    """
+    forget = str(request.args.get("forget", "")).strip().lower() in {"1", "true", "yes"}
+    payload, status = close_live_workspace(workspace_id, forget=forget)
+    return jsonify(payload), status
 
 
 @app.route('/api/session-groups/<group_id>/move', methods=['POST'])
@@ -1767,14 +1800,25 @@ def save_runtime_state():
         workspace_id,
         data.get("active_group_id"),
     )
-    slot = capture_workspace(
-        session_manager,
-        workspace_id=workspace_id,
-        origin="manual",
-        label=label,
-        active_group_id=active_group_id,
-        native_zoom_factor=data.get("native_zoom_factor"),
-    )
+    try:
+        slot = capture_workspace(
+            session_manager,
+            workspace_id=workspace_id,
+            origin="manual",
+            label=label,
+            active_group_id=active_group_id,
+            native_zoom_factor=data.get("native_zoom_factor"),
+        )
+    except RuntimeStatePersistenceError as exc:
+        # The revision never reached the disk. Never answer 200/"saved": a
+        # success toast for data that was not stored is worse than an error.
+        logger.error("Workspace save failed for %s: %s", workspace_id, exc)
+        return jsonify({
+            "saved": False,
+            "workspace_id": workspace_id,
+            "error": "The workspace snapshot could not be written to disk",
+            "retryable": True,
+        }), 503
     if slot is None:
         # An empty workspace is never captured, so it never overwrites (or
         # clears) the previously saved slot.
@@ -1840,7 +1884,17 @@ def dismiss_runtime_state():
             "workspace_id": workspace_id,
             "live_conflict": True,
         }), 409
-    forgotten = clear_workspace(workspace_id)
+    try:
+        forgotten = clear_workspace(workspace_id)
+    except RuntimeStatePersistenceError as exc:
+        # The slot may still be on disk, so the Forget did not happen.
+        logger.error("Workspace forget failed for %s: %s", workspace_id, exc)
+        return jsonify({
+            "error": "The workspace snapshot could not be removed from disk",
+            "forgotten": False,
+            "workspace_id": workspace_id,
+            "retryable": True,
+        }), 503
     return jsonify({
         "message": "Workspace snapshot cleared" if forgotten else "No saved snapshot to clear",
         "forgotten": forgotten,
@@ -1852,6 +1906,30 @@ def dismiss_runtime_state():
 
 _workspace_autosave_started = False
 _workspace_autosave_lock = threading.Lock()
+# One structured error per failure streak, not one per tick: a full disk or a
+# locked file fails every minute, and a log the user cannot read is no help.
+WORKSPACE_AUTOSAVE_ERROR_INTERVAL_SECONDS = 15 * 60
+_workspace_autosave_last_error_at = 0.0
+
+
+def _report_autosave_failure(exc: BaseException) -> None:
+    """Log one rate-limited, structured autosave failure.
+
+    Nothing was committed and the previous file is still the last good one, so
+    the failure is reported rather than retried: the next tick tries again.
+    """
+    global _workspace_autosave_last_error_at
+    now = time.time()
+    if now - _workspace_autosave_last_error_at < WORKSPACE_AUTOSAVE_ERROR_INTERVAL_SECONDS:
+        logger.debug("Workspace autosave still failing: %s", exc)
+        return
+    _workspace_autosave_last_error_at = now
+    logger.error(
+        "Workspace autosave could not commit (kind=%s): %s — the last good "
+        "snapshot is unchanged and the next tick will retry",
+        type(exc).__name__,
+        exc,
+    )
 
 
 def _run_workspace_autosave_tick() -> None:
@@ -1861,10 +1939,17 @@ def _run_workspace_autosave_tick() -> None:
     just-restarted process can never wipe the restorable slot — a slot is only
     ever overwritten by the next non-empty capture.
     """
+    global _workspace_autosave_last_error_at
     try:
         capture_live_workspaces(session_manager, origin="auto")
-    except Exception:
-        logger.exception("Workspace autosave failed")
+    except RuntimeStatePersistenceError as exc:
+        _report_autosave_failure(exc)
+        return
+    except Exception as exc:
+        _report_autosave_failure(exc)
+        logger.debug("Workspace autosave traceback", exc_info=True)
+        return
+    _workspace_autosave_last_error_at = 0.0
 
 
 def _workspace_autosave_loop(stop_event: threading.Event) -> None:
@@ -1963,6 +2048,19 @@ def agent_preflight():
         return jsonify(_agent_preflight_payload(agent_key, data))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@app.route('/api/session-targets', methods=['GET'])
+def get_session_targets():
+    """Return the distinct connection targets the saved presets already use.
+
+    The launcher's SSH Remote / Local Repo dropdowns prefill Step 2 from this so
+    a throwaway session can reuse a known host or repository path without
+    loading (and then being tied to) the whole preset. Secret-free by design —
+    the picked target's saved password, if any, comes from
+    ``GET /api/saved-sessions/<id>``.
+    """
+    return jsonify(build_connection_target_proposals())
 
 
 @app.route('/api/saved-sessions', methods=['GET'])
@@ -2128,13 +2226,15 @@ def get_session(session_id: str):
 
 @app.route('/api/sessions/<session_id>/split', methods=['POST'])
 def split_session(session_id: str):
-    """Append one cloned terminal session to the source session's group."""
+    """Append one cloned terminal session to the source session's group.
+
+    A terminal pane clones itself. An explorer or browser pane instead splits
+    into a plain terminal rooted at the directory it is currently showing, for
+    both SSH and Local Repo panes — the pane kind is deliberately not cloned.
+    """
     source = session_manager.get_session(session_id)
     if not source:
         return jsonify({"error": "Session not found"}), 404
-
-    if _is_explorer_session(source) or _is_browser_session(source):
-        return jsonify({"error": "Explorer and browser panes cannot be split"}), 400
 
     group = session_manager.get_group(source.group_id)
     if not group:
@@ -2144,11 +2244,37 @@ def split_session(session_id: str):
     if len(group_sessions) >= runtime_config.max_sessions:
         return jsonify({"error": f"Maximum {runtime_config.max_sessions} sessions allowed"}), 400
 
+    host = source.host
+    directory = source.directory
+    root_directory = source.explorer_root_directory
+    startup_mode = source.startup_mode
+
+    if _is_explorer_session(source) or _is_browser_session(source):
+        data = request.get_json(silent=True) or {}
+        try:
+            directory, root_directory = _resolve_pane_terminal_directory(
+                source,
+                data.get("directory", ""),
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": str(exc)}), 500
+        startup_mode = "terminal"
+        if source.mode == "wsl":
+            # The pane's host label reads "File Explorer"/browser chrome; the new
+            # terminal needs the shell name it is actually going to run.
+            host = _local_shell_display_name(
+                use_wsl=source.use_wsl,
+                use_powershell=source.use_powershell,
+                distribution=source.distribution,
+            )
+
     title = f"Terminal {len(group_sessions) + 1}"
     new_session = session_manager.append_session_to_group(
         group_id=group.group_id,
-        host=source.host,
-        directory=source.directory,
+        host=host,
+        directory=directory,
         username=source.username,
         port=source.port,
         password=source.password,
@@ -2161,8 +2287,8 @@ def split_session(session_id: str):
         distribution=source.distribution,
         use_wsl=source.use_wsl,
         use_powershell=source.use_powershell,
-        startup_mode=source.startup_mode,
-        explorer_root_directory=source.explorer_root_directory,
+        startup_mode=startup_mode,
+        explorer_root_directory=root_directory,
     )
     if not new_session:
         return jsonify({"error": "Session group not found"}), 404
@@ -2432,38 +2558,15 @@ def change_session_mode(session_id: str):
     if not (_is_explorer_session(session) or _is_browser_session(session)):
         return jsonify(session.to_dict())
 
-    next_directory = session.directory
-    root_path = _explorer_root_directory(session)
-    if _is_browser_session(session):
-        next_directory = session.directory
-    elif _is_remote_explorer_session(session):
-        client = None
-        sftp = None
-        try:
-            client, sftp = _acquire_ssh_sftp(session)
-            root_path, selected_directory = _resolve_remote_explorer_candidate_path(
-                sftp,
-                session,
-                data.get("directory", ""),
-            )
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except _sftp_request_error_types() as exc:
-            return jsonify({"error": str(exc)}), 500
-        finally:
-            _release_ssh_sftp(session, client, sftp)
-        next_directory = selected_directory
-    else:
-        try:
-            root_path, selected_directory = _resolve_explorer_candidate_path(
-                session,
-                data.get("directory", ""),
-            )
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        if not os.path.isdir(selected_directory):
-            return jsonify({"error": "Selected explorer path is not a directory"}), 400
-        next_directory = selected_directory
+    try:
+        next_directory, root_path = _resolve_pane_terminal_directory(
+            session,
+            data.get("directory", ""),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except _sftp_request_error_types() as exc:
+        return jsonify({"error": str(exc)}), 500
 
     updates = {
         "directory": next_directory,
@@ -2491,7 +2594,14 @@ def change_session_mode(session_id: str):
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 def close_session(session_id: str):
-    """Close a specific session."""
+    """Close one pane — the last-pane half of the *Close group* verb.
+
+    Closing the last pane empties its group, and an emptied last group empties
+    its workspace: the record goes and its saved snapshot goes with it, exactly
+    as closing that tab would. See the close-action matrix in
+    ``web/workspaces.py``. Use ``DELETE /api/workspaces/<id>`` for the variant
+    that keeps the snapshot restorable.
+    """
     with session_manager.lock:
         existing_session = session_manager.sessions.get(session_id)
         group = (
@@ -2501,8 +2611,14 @@ def close_session(session_id: str):
         )
         success = session_manager.close_session(session_id)
         if success:
-            pruned_workspace_ids = session_manager.clear_disconnected_sessions()
             group_id = existing_session.group_id
+            # Closing a pane empties its group, and an empty group is swept at
+            # once — there is no grace period left to ride (MW-06). Closing the
+            # last pane within five seconds of launch used to remove the
+            # session but leave the group behind forever, which kept a
+            # workspace alive with no panes in it and its snapshot
+            # unforgettable.
+            pruned_workspace_ids = session_manager.clear_disconnected_sessions()
             workspace_id = (
                 group.workspace_id if group else DEFAULT_WORKSPACE_ID
             )
@@ -2515,6 +2631,9 @@ def close_session(session_id: str):
 
     _close_ssh_connection(session_id, clear_buffer=True)
     forget_pruned_workspaces(pruned_workspace_ids)
+    # Closing the last pane of the last group in `default` empties it just as
+    # surely as a prune empties a sibling; its snapshot goes the same way.
+    forget_emptied_default_workspace(workspace_id)
     _broadcast_session_groups_updated(
         "session_closed",
         group_id=group_id,
@@ -2532,7 +2651,16 @@ def close_session(session_id: str):
 
 @app.route('/api/sessions', methods=['DELETE'])
 def close_all_sessions():
-    """Close all sessions."""
+    """Close one group, or every session in the process.
+
+    With ``?group=`` this is the *Close group* verb: the group goes, and if it
+    was its workspace's last one the workspace and its snapshot go too.
+
+    Without one it is the process-wide variant of *Close window*: live shells
+    end everywhere and **every snapshot is deliberately left on offer**, which
+    is what makes restore-after-restart work. See the close-action matrix in
+    ``web/workspaces.py``.
+    """
     workspace_named = "workspace_id" in request.args
     try:
         workspace_id = _resolve_workspace_id()
@@ -2555,11 +2683,9 @@ def close_all_sessions():
             if not close_error:
                 for session in sessions:
                     session_manager.close_session(session.session_id)
-                # The user explicitly closed this group, so it must not survive
-                # on the empty-group grace period.
-                pruned_workspace_ids = session_manager.clear_disconnected_sessions(
-                    force_group_ids={group_id}
-                )
+                # Its panes are closed, so the group is empty and the sweep
+                # takes it immediately (MW-06).
+                pruned_workspace_ids = session_manager.clear_disconnected_sessions()
                 closed_workspace_id = (
                     group.workspace_id if group else workspace_id
                 )
@@ -2578,6 +2704,7 @@ def close_all_sessions():
         # is already gone, so its saved snapshot must go too or the restore
         # chooser keeps offering a workspace the launcher no longer lists.
         forget_pruned_workspaces(pruned_workspace_ids)
+        forget_emptied_default_workspace(closed_workspace_id)
         _broadcast_session_groups_updated(
             "group_closed",
             group_id=group_id,
@@ -2760,7 +2887,11 @@ def handle_terminal_input(data):
         connection = ssh_connections.get(session_id)
 
     if not connection:
-        logger.warning(f"terminal_input: session {session_id} is not connected")
+        # DEBUG, not WARNING: xterm's onData has no connection guard, so a
+        # disconnected pane produces one of these per keystroke (and per TUI
+        # mouse-tracking sequence). The condition already surfaces to the user
+        # through session_status; here it is diagnostic only.
+        logger.debug(f"terminal_input: session {session_id} is not connected")
         return
 
     try:
@@ -2861,8 +2992,7 @@ def start_voice_deps_install():
 
     The recovery path for a machine where the launcher's optional voice
     packages were skipped: without it, enabling voice input in App Settings
-    is a silent no-op until GridVibe is closed and re-launched
-    (docs/stage_j_issues_analysis_2026-07-26.md, issue 2). Same-origin only
+    is a silent no-op until GridVibe is closed and re-launched. Same-origin only
     (the cross-origin write guard covers every state-changing request) and it
     installs nothing but the repository's own pinned requirements file.
     """
@@ -2889,8 +3019,7 @@ def set_voice_prefs():
             current[key] = data[key]
     _save_voice_prefs(current)
     # Open workspaces read _voicePrefs at event time but only loaded it at boot,
-    # so a changed push-to-talk keybind used to need a full restart
-    # (docs/stage_j_issues_analysis_2026-07-26.md, issue 3).
+    # so a changed push-to-talk keybind used to need a full restart.
     socketio.emit('voice_prefs_updated', {
         'prefs': current,
         'timestamp': int(time.time() * 1000),

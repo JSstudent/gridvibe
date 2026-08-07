@@ -1,10 +1,9 @@
-import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import session_manager as manager_module
-from session_manager import EMPTY_GROUP_GRACE_SECONDS, SessionManager, SessionStatus
+from session_manager import SessionManager, SessionStatus
 
 
 class SessionManagerTestCase(unittest.TestCase):
@@ -186,6 +185,7 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(sessions[0].explorer_tab_views, {})
         self.assertEqual(sessions[0].explorer_md_preset, "")
         self.assertEqual(sessions[0].explorer_md_font, "")
+        self.assertEqual(sessions[0].explorer_source_font, "")
         self.assertEqual(sessions[0].explorer_theme, "dark")
 
     def test_create_sessions_carries_explorer_theme(self):
@@ -220,6 +220,7 @@ class SessionManagerTestCase(unittest.TestCase):
                     "explorer_tab_views": tab_views,
                     "explorer_md_preset": "vscode",
                     "explorer_md_font": "serif",
+                    "explorer_source_font": "jetbrains-mono",
                 }
             ],
             group_id="group-tab-views",
@@ -228,10 +229,12 @@ class SessionManagerTestCase(unittest.TestCase):
         self.assertEqual(sessions[0].explorer_tab_views, tab_views)
         self.assertEqual(sessions[0].explorer_md_preset, "vscode")
         self.assertEqual(sessions[0].explorer_md_font, "serif")
+        self.assertEqual(sessions[0].explorer_source_font, "jetbrains-mono")
         data = sessions[0].to_dict()
         self.assertEqual(data["explorer_tab_views"], tab_views)
         self.assertEqual(data["explorer_md_preset"], "vscode")
         self.assertEqual(data["explorer_md_font"], "serif")
+        self.assertEqual(data["explorer_source_font"], "jetbrains-mono")
 
     def test_create_sessions_supports_agent_metadata(self):
         sessions = self.manager.create_sessions(
@@ -350,8 +353,6 @@ class SessionManagerTestCase(unittest.TestCase):
         )
         self.manager.close_session(session.session_id)
 
-        # Age the group past the empty-group grace period so cleanup sweeps it.
-        self.manager.get_group("group-c").created_at -= EMPTY_GROUP_GRACE_SECONDS + 1
         self.manager.clear_disconnected_sessions()
 
         self.assertIsNone(self.manager.get_session(session.session_id))
@@ -625,14 +626,7 @@ class MultiWorkspaceSessionManagerTestCase(unittest.TestCase):
             self.WORKSPACE_B,
         )
 
-    def test_cleanup_prunes_old_empty_nondefault_workspace_but_not_default(self):
-        self.manager.get_workspace(self.WORKSPACE_A).created_at -= (
-            EMPTY_GROUP_GRACE_SECONDS + 1
-        )
-        self.manager.get_workspace(self.WORKSPACE_B).created_at -= (
-            EMPTY_GROUP_GRACE_SECONDS + 1
-        )
-
+    def test_cleanup_prunes_empty_nondefault_workspaces_but_not_default(self):
         pruned = self.manager.clear_disconnected_sessions()
 
         self.assertEqual(pruned, [self.WORKSPACE_A, self.WORKSPACE_B])
@@ -665,7 +659,6 @@ class WorkspaceLifetimeTestCase(unittest.TestCase):
 
     def test_retained_workspace_survives_pruning_until_its_first_group(self):
         workspace = self.manager.create_workspace("Scratch", retain_when_empty=True)
-        workspace.created_at = time.time() - EMPTY_GROUP_GRACE_SECONDS - 1
 
         self.assertEqual(self.manager.clear_disconnected_sessions(), [])
         self.assertIsNotNone(self.manager.get_workspace(workspace.workspace_id))
@@ -675,7 +668,7 @@ class WorkspaceLifetimeTestCase(unittest.TestCase):
         self.assertFalse(self.manager.get_workspace(workspace.workspace_id).retain_when_empty)
         self.manager.remove_group("g1")
         self.assertEqual(
-            self.manager.clear_disconnected_sessions(force_group_ids=["g1"]),
+            self.manager.clear_disconnected_sessions(),
             [workspace.workspace_id],
         )
 
@@ -710,8 +703,14 @@ class WorkspaceLifetimeTestCase(unittest.TestCase):
         self.assertIsNotNone(self.manager.get_workspace("default"))
 
 
-class EmptyGroupGracePeriodTestCase(unittest.TestCase):
-    """Finding 2.2 — cleanup must not delete a freshly created (mid-launch) group."""
+class EmptyGroupCleanupTestCase(unittest.TestCase):
+    """MW-06 — an empty group is swept at once; no wall-clock exemption remains.
+
+    Replaces the empty-group grace period, which protected the window between
+    ``create_group`` and its first session. ``install_session_group`` closed
+    that window, so the exemption only ever kept explicitly emptied groups
+    alive with nothing scheduled to sweep them afterwards.
+    """
 
     def setUp(self):
         self.manager = SessionManager()
@@ -725,27 +724,87 @@ class EmptyGroupGracePeriodTestCase(unittest.TestCase):
             group_id=group_id,
         )
 
-    def test_young_empty_group_survives_cleanup(self):
+    def test_a_freshly_emptied_group_is_removed_without_aging(self):
         self._create_group("group-young")
 
         self.manager.clear_disconnected_sessions()
 
-        self.assertIsNotNone(self.manager.get_group("group-young"))
+        self.assertIsNone(self.manager.get_group("group-young"))
 
-    def test_old_empty_group_is_removed(self):
-        group = self._create_group("group-old")
-        group.created_at -= EMPTY_GROUP_GRACE_SECONDS + 1
+    def test_a_group_that_still_holds_a_pane_survives_cleanup(self):
+        self._create_group("group-live")
+        self.manager.create_session(
+            group_id="group-live", host="10.0.0.1", directory="/srv"
+        )
 
         self.manager.clear_disconnected_sessions()
 
-        self.assertIsNone(self.manager.get_group("group-old"))
+        self.assertIsNotNone(self.manager.get_group("group-live"))
 
-    def test_forced_group_is_removed_despite_grace_period(self):
-        self._create_group("group-forced")
+    def test_an_installed_group_is_never_visible_without_its_panes(self):
+        self.manager.install_session_group(
+            [
+                {"host": "10.0.0.1", "directory": "/srv/one"},
+                {"host": "10.0.0.2", "directory": "/srv/two"},
+            ],
+            name="Atomic",
+            connection_mode="ssh",
+            layout="vertical",
+            group_id="group-atomic",
+        )
 
-        self.manager.clear_disconnected_sessions(force_group_ids={"group-forced"})
+        # No moment exists in which the group is installed and empty, so a
+        # cleanup that runs immediately after the launch cannot sweep it.
+        self.manager.clear_disconnected_sessions()
 
-        self.assertIsNone(self.manager.get_group("group-forced"))
+        self.assertIsNotNone(self.manager.get_group("group-atomic"))
+        self.assertEqual(len(self.manager.get_group_sessions("group-atomic")), 2)
+
+
+class WorkspaceLaunchReservationTestCase(unittest.TestCase):
+    """MW-06 — a launch destination is held by a reservation, not by the clock."""
+
+    def setUp(self):
+        self.manager = SessionManager()
+
+    def test_a_reserved_empty_workspace_is_not_pruned(self):
+        workspace = self.manager.create_workspace("Destination")
+
+        self.assertEqual(
+            self.manager.reserve_workspace_launch(workspace.workspace_id),
+            workspace.workspace_id,
+        )
+        self.assertEqual(self.manager.clear_disconnected_sessions(), [])
+        self.assertIsNotNone(self.manager.get_workspace(workspace.workspace_id))
+
+        self.manager.release_workspace_launch(workspace.workspace_id)
+
+        self.assertEqual(
+            self.manager.clear_disconnected_sessions(), [workspace.workspace_id]
+        )
+        self.assertIsNone(self.manager.get_workspace(workspace.workspace_id))
+
+    def test_reservations_nest_so_one_release_does_not_free_the_other(self):
+        workspace = self.manager.create_workspace("Destination")
+        self.manager.reserve_workspace_launch(workspace.workspace_id)
+        self.manager.reserve_workspace_launch(workspace.workspace_id)
+
+        self.manager.release_workspace_launch(workspace.workspace_id)
+
+        self.assertEqual(self.manager.clear_disconnected_sessions(), [])
+
+        self.manager.release_workspace_launch(workspace.workspace_id)
+
+        self.assertEqual(
+            self.manager.clear_disconnected_sessions(), [workspace.workspace_id]
+        )
+
+    def test_reserving_an_unknown_workspace_reports_no_reservation(self):
+        self.assertEqual(self.manager.reserve_workspace_launch("aaaaaaaaaaaa"), "")
+        # Releasing "" (the caller's `finally` after a failed reservation) and
+        # releasing a workspace that was rolled back are both no-ops.
+        self.manager.release_workspace_launch("")
+        self.manager.release_workspace_launch("aaaaaaaaaaaa")
 
 
 class SessionIdCollisionTestCase(unittest.TestCase):

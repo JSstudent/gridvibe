@@ -531,6 +531,10 @@
     const initialRouteParams = new URLSearchParams(window.location.search);
     const currentWorkspaceId = String(CURRENT_WORKSPACE_ID || 'default');
     const workspaceWasExplicit = initialRouteParams.has('workspace');
+    /* This window is the arrival end of every workspace swap (workspaces.js
+       arms the pulse at the departing end). Wired here, at the one place that
+       knows which workspace this page is. */
+    watchWorkspaceArrivals(currentWorkspaceId);
     let activeGroupId = initialRouteParams.get('group') || '';
     let sessionGroups = [];
     let activeLoadToken = 0;
@@ -1047,6 +1051,8 @@
         }
 
         (cached.sessionIds || []).forEach(cancelExplorerFilesystemUiForSession);
+        (cached.sessionIds || []).forEach(forgetExplorerSessionMarkdownAppearance);
+        workspaceSaveTargets.delete(groupId);
         clearFitTimers(cached.terminals || []);
         disconnectObservers(cached.resizeObservers || []);
         if (socket) {
@@ -1392,10 +1398,50 @@
     }
 
     /* Closing the window never closes its sessions: the workspace stays live
-       and can be reopened from the launcher. */
+       and can be reopened from the launcher.
+
+       One exception, and it is a lifecycle rather than a close (MW-12):
+       Workspace ▸ New Workspace reserves a deliberately empty record so
+       cleanup cannot sweep it before its first tab arrives, and closing that
+       window is the user saying the tab is never coming. Without the release
+       an abandoned New Workspace stayed a zero-session launch destination
+       until the process restarted. Nothing is live, so nothing is confirmed. */
     async function closeThisWorkspaceWindow() {
         logSessionWindowAction('Closing this workspace window on request');
+        if (currentWorkspaceId !== WORKSPACE_DEFAULT_ID && sessionGroups.length === 0) {
+            try {
+                await closeLiveWorkspace(currentWorkspaceId);
+            } catch (error) {
+                console.error('[GridVibe Sessions] releasing the empty workspace failed:', error);
+            }
+        }
         await closeWorkspaceWindow(currentWorkspaceId);
+    }
+
+    /* Close live workspace: ends every session here and drops the workspace,
+       while whatever autosave or Save Workspace captured stays on offer — the
+       verb that closing the last tab does not give you, since that forgets the
+       snapshot too. The window has nothing left to show afterwards. */
+    async function closeCurrentWorkspace() {
+        const workspaces = await fetchLiveWorkspaces();
+        const current = workspaces.find(
+            workspace => workspace.workspace_id === currentWorkspaceId
+        ) || {
+            workspace_id: currentWorkspaceId,
+            label: currentWorkspaceLabel,
+            group_count: sessionGroups.length
+        };
+        if (!(await confirmCloseLiveWorkspace(current))) {
+            return;
+        }
+        try {
+            await closeLiveWorkspace(currentWorkspaceId);
+        } catch (error) {
+            setWorkspaceSaveMessage(`Close failed: ${error.message} — try again.`, 'error');
+            return;
+        }
+        workspaceGone = true;
+        await _closeWindowAfterLastSession('Workspace closed');
     }
 
     /* This window can outlive its workspace: the last tab closed here, that
@@ -1499,11 +1545,6 @@
     }
 
 
-    function getStep2DefaultDirectory(config) {
-        return config?.connection_mode === 'wsl'
-            ? String(config?.wsl?.default_dir || '').trim()
-            : String(config?.ssh?.default_dir || '').trim();
-    }
 
 
 
@@ -2088,6 +2129,7 @@
             explorer_tab_views: explorerTabs.tab_views,
             explorer_md_preset: mdAppearance ? mdAppearance.preset : '',
             explorer_md_font: mdAppearance ? mdAppearance.font : '',
+            explorer_source_font: mdAppearance ? mdAppearance.sourceFont : '',
             explorer_theme: explorerTheme,
             /* Save Workspace captures the pane's whole live tab strip, not just
                the URL it launched with, so a saved browser pane reopens every
@@ -2639,19 +2681,6 @@
         }
         if (count >= 4) return 'layout-grid';
         return '';
-    }
-
-    function getGridMetrics(count) {
-        if (count >= 8) {
-            return { columns: 4, rows: 2 };
-        }
-        if (count >= 6) {
-            return { columns: 3, rows: 2 };
-        }
-        if (count >= 4) {
-            return { columns: 2, rows: 2 };
-        }
-        return null;
     }
 
     function cloneSplitSlotRects(rects = splitSlotRects) {
@@ -3433,11 +3462,7 @@
     }
 
     function getSplitCandidates(index, rect) {
-        if (
-            window.innerWidth <= 700
-            || terminals.length >= MAX_SPLIT_TERMINALS
-            || isExplorerSession(terminals[index]?._session)
-        ) {
+        if (window.innerWidth <= 700 || terminals.length >= MAX_SPLIT_TERMINALS) {
             return [];
         }
 
@@ -3792,6 +3817,21 @@
             : `Side-by-side split needs at least ${MIN_SPLIT_COLS} columns in each terminal`;
     }
 
+    /* Explorer and browser panes split into a plain terminal rather than a copy
+       of themselves, so their controls say what they actually produce. */
+    function splitButtonTitles(session) {
+        if (isExplorerSession(session) || isBrowserSession(session)) {
+            return {
+                vertical: 'Split off a terminal beside this pane',
+                horizontal: 'Split off a terminal below this pane'
+            };
+        }
+        return {
+            vertical: 'Split into side-by-side panes',
+            horizontal: 'Split into stacked panes'
+        };
+    }
+
     function updateSplitButtonState(index) {
         const vButton = document.getElementById(`tsplitv-${index}`);
         const hButton = document.getElementById(`tsplith-${index}`);
@@ -3799,16 +3839,7 @@
             return;
         }
 
-        if (isExplorerSession(terminals[index]?._session) || isBrowserSession(terminals[index]?._session)) {
-            [vButton, hButton].forEach(button => {
-                if (button) {
-                    button.hidden = true;
-                    button.disabled = true;
-                }
-            });
-            return;
-        }
-
+        const titles = splitButtonTitles(terminals[index]?._session);
         const grid = document.getElementById('terminalsGrid');
         const card = document.getElementById(`tc-${index}`);
         const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
@@ -3819,13 +3850,13 @@
         applySplitButtonState(
             vButton,
             candidates.includes('vertical'),
-            'Split into side-by-side panes',
+            titles.vertical,
             getSplitDisabledReason('vertical')
         );
         applySplitButtonState(
             hButton,
             candidates.includes('horizontal'),
-            'Split into stacked panes',
+            titles.horizontal,
             getSplitDisabledReason('horizontal')
         );
     }
@@ -3929,6 +3960,15 @@
                 && !event.ctrlKey
                 && !event.metaKey
                 && event.code === 'KeyW') {
+                return false;
+            }
+            /* And for Alt+` (open launcher), which xterm would otherwise send
+               on to the shell as ESC `. */
+            if (event.altKey
+                && !event.ctrlKey
+                && !event.metaKey
+                && !event.shiftKey
+                && event.code === 'Backquote') {
                 return false;
             }
 
@@ -4129,8 +4169,11 @@
     }
 
     async function ensureAttachedTerminalsReady(indices) {
+        /* Explorer and browser panes can be handed in (splitting one produces a
+           terminal beside it); they have no xterm to fit, and without the `term`
+           guard each would burn the full retry budget failing fitTerminal. */
         const uniqueIndices = [...new Set(indices)]
-            .filter(index => Number.isInteger(index) && terminals[index]?._attached);
+            .filter(index => Number.isInteger(index) && terminals[index]?._attached && terminals[index]?.term);
         if (uniqueIndices.length === 0) {
             return;
         }
@@ -4623,16 +4666,19 @@
 
     /* Two explicit split controls — one for a side-by-side (vertical divider)
        split, one for a stacked (horizontal divider) split — so the axis is the
-       user's choice rather than an inferred guess. */
-    function splitButtonsHtml(index) {
+       user's choice rather than an inferred guess. Every pane kind carries them:
+       a terminal splits into a second terminal, and an explorer or browser pane
+       splits off a terminal rooted at the directory it is showing. */
+    function splitButtonsHtml(index, session) {
+        const titles = splitButtonTitles(session);
         return `
             <button
                 type="button"
                 class="terminal-action-btn terminal-split-btn terminal-split-v-btn"
                 id="tsplitv-${index}"
                 data-terminal-split-v="${index}"
-                title="Split into side-by-side panes"
-                aria-label="Split into side-by-side panes"
+                title="${escHtml(titles.vertical)}"
+                aria-label="${escHtml(titles.vertical)}"
             >
                 ${SPLIT_VERTICAL_ICON}
             </button>
@@ -4641,8 +4687,8 @@
                 class="terminal-action-btn terminal-split-btn terminal-split-h-btn"
                 id="tsplith-${index}"
                 data-terminal-split-h="${index}"
-                title="Split into stacked panes"
-                aria-label="Split into stacked panes"
+                title="${escHtml(titles.horizontal)}"
+                aria-label="${escHtml(titles.horizontal)}"
             >
                 ${SPLIT_HORIZONTAL_ICON}
             </button>
@@ -4732,7 +4778,7 @@
                                     ${isBrowser ? TERMINAL_PROMPT_ICON : BROWSER_MODE_GLOBE_ICON}
                                 </button>
                             ` : ''}
-                            ${!isExplorer && !isBrowser ? splitButtonsHtml(i) : ''}
+                            ${splitButtonsHtml(i, session)}
                             ${isExplorer ? `
                                 <button
                                     type="button"
@@ -4965,13 +5011,17 @@
     }
 
     function findExplorerShortcutTargetIndex(target = document.activeElement) {
-        const targetCard = target?.closest?.('.terminal-container');
-        if (targetCard) {
-            return explorerPaneIndexFromTarget(target);
-        }
+        /* Pointer interaction is the source of truth for explorer panes. Many
+           explorer controls deliberately prevent mousedown focus so toolbar
+           clicks do not steal a selection; in that case document.activeElement
+           can still belong to a different pane. */
         if (_activeExplorerIndex !== -1
             && isExplorerSession(terminals[_activeExplorerIndex]?._session)) {
             return _activeExplorerIndex;
+        }
+        const targetCard = target?.closest?.('.terminal-container');
+        if (targetCard) {
+            return explorerPaneIndexFromTarget(target);
         }
         const explorerIndexes = terminals
             .map((pane, index) => isExplorerSession(pane?._session) ? index : -1)
@@ -5243,6 +5293,17 @@
     }
 
     function createSplitTerminalCard(sourceCard, session, sourceIndex, targetIndex) {
+        /* Splitting an explorer or browser pane produces a plain terminal, so
+           cloning the source's chrome would carry over its theme toggle, its
+           explorer surface and its inverted mode-toggle label. Build the new
+           card from the session instead — the same path the initial grid uses. */
+        const sourcePane = terminals[sourceIndex];
+        if (isExplorerPaneInstance(sourcePane) || isBrowserPaneInstance(sourcePane)) {
+            const freshCard = buildPaneCard(session, targetIndex);
+            wirePaneControls(freshCard, targetIndex);
+            return freshCard;
+        }
+
         const card = sourceCard.cloneNode(true);
         card.classList.remove('dragging', 'drag-target', 'explorer-pane', 'browser-pane', 'actions-collapsed', 'actions-open');
         card.id = `tc-${targetIndex}`;
@@ -5337,12 +5398,6 @@
         button.innerHTML = loading ? '...' : (isBrowser ? TERMINAL_PROMPT_ICON : BROWSER_MODE_GLOBE_ICON);
         button.title = label;
         button.setAttribute('aria-label', label);
-    }
-
-    function setTerminalOnlyControlsVisible(card, visible) {
-        card.querySelectorAll('[data-terminal-split-v], [data-terminal-split-h]').forEach(button => {
-            button.hidden = !visible;
-        });
     }
 
     function ensureBrowserModeButton(card, index, session, isBrowser = false) {
@@ -5562,7 +5617,10 @@
         return button;
     }
 
-    function ensureSplitControls(card, index) {
+    /* Every pane kind keeps its split controls, so a mode switch only has to
+       make sure they are present — updateAllSplitButtonStates re-labels them for
+       the pane's new kind afterwards. */
+    function ensureSplitControls(card, index, session) {
         const existing = card.querySelectorAll(`[data-terminal-split-v="${index}"], [data-terminal-split-h="${index}"]`);
         if (existing.length) {
             existing.forEach(button => { button.hidden = false; });
@@ -5574,7 +5632,7 @@
             return;
         }
 
-        modeButton.insertAdjacentHTML('afterend', splitButtonsHtml(index));
+        modeButton.insertAdjacentHTML('afterend', splitButtonsHtml(index, session));
         wireSplitButtons(card, index);
     }
 
@@ -5613,7 +5671,7 @@
         card.dataset.explorerThemeKey = explorerThemeKey;
         card.dataset.explorerThemeSource = resolvedExplorerTheme.source;
         card.dataset.explorerTheme = initialExplorerTheme;
-        setTerminalOnlyControlsVisible(card, false);
+        ensureSplitControls(card, index, session);
         const browserModeButton = card.querySelector(`[data-session-browser-toggle="${index}"]`);
         if (browserModeButton) {
             browserModeButton.remove();
@@ -5708,7 +5766,7 @@
         if (modeButton) {
             modeButton.hidden = true;
         }
-        setTerminalOnlyControlsVisible(card, false);
+        ensureSplitControls(card, index, session);
         const browserButton = ensureBrowserModeButton(card, index, session, true);
         updateBrowserModeToggleButton(browserButton, true);
         const nameLabel = document.getElementById(`tname-${index}`);
@@ -5749,7 +5807,7 @@
             explorerThemeButton.remove();
         }
         ensureModeToggleButton(card, index);
-        ensureSplitControls(card, index);
+        ensureSplitControls(card, index, session);
         const modeButton = card.querySelector(`[data-session-mode-toggle="${index}"]`);
         if (modeButton) {
             modeButton.hidden = false;
@@ -5923,7 +5981,8 @@
                         view: tab.view || null,
                         fontSize: tab.fontSize || 0,
                         preferredMode: tab.preferredMode || '',
-                        dirPath: tab.dirPath || ''
+                        dirPath: tab.dirPath || '',
+                        hasDirPath: Object.prototype.hasOwnProperty.call(tab, 'dirPath')
                     })),
                     /* Only the dynamic Preview tab needs an explicit reopen; pinned
                        tabs come back through the persisted-tab path. */
@@ -5964,7 +6023,7 @@
                 if (saved.preferredMode) {
                     tab.preferredMode = saved.preferredMode;
                 }
-                if (saved.dirPath) {
+                if (saved.hasDirPath) {
                     tab.dirPath = saved.dirPath;
                 }
             });
@@ -6004,6 +6063,8 @@
             return;
         }
         browserCancelPendingPersist(plan.sessionId);
+        // Past the confirm and the layout check: this pane is really closing.
+        forgetExplorerSessionMarkdownAppearance(plan.sessionId);
 
         const button = document.getElementById(`tclose-${index}`);
         if (button) {
@@ -6071,7 +6132,7 @@
             : [];
         closeAllPaneActionMenus();
         closeAllPaneShellMenus();
-        if (!sourceSessionId || !sourceTerminal || !sourceCard || !grid || isExplorerSession(sourceTerminal._session)) {
+        if (!sourceSessionId || !sourceTerminal || !sourceCard || !grid) {
             return;
         }
         if (terminals.length >= MAX_SPLIT_TERMINALS) {
@@ -6094,11 +6155,18 @@
 
         splitButtons.forEach(button => { button.disabled = true; });
 
+        /* An explorer pane splits off a terminal rooted where the user is
+           actually browsing, not where the pane was launched. */
+        const payload = { axis };
+        if (isExplorerSession(sourceTerminal._session)) {
+            payload.directory = getExplorerSelectedDirectory(index);
+        }
+
         try {
             const response = await fetch(`/api/sessions/${encodeURIComponent(sourceSessionId)}/split`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ axis })
+                body: JSON.stringify(payload)
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
@@ -6223,24 +6291,8 @@
 
 
     function findExplorerSearchTargetIndex() {
-        const activeCard = document.activeElement?.closest?.('.explorer-pane');
-        const activeSlot = activeCard ? Number(activeCard.dataset.slot) : -1;
-        if (Number.isInteger(activeSlot)
-            && isExplorerSearchablePane(terminals[activeSlot])) {
-            return activeSlot;
-        }
-
-        if (_focusedTerminalIndex !== -1
-            && isExplorerSearchablePane(terminals[_focusedTerminalIndex])) {
-            return _focusedTerminalIndex;
-        }
-
-        for (let i = 0; i < terminals.length; i++) {
-            if (isExplorerSearchablePane(terminals[i])) {
-                return i;
-            }
-        }
-        return -1;
+        const index = findExplorerShortcutTargetIndex();
+        return index !== -1 && isExplorerSearchablePane(terminals[index]) ? index : -1;
     }
 
     /* The highlighted string, when the current selection sits inside this
@@ -6420,26 +6472,8 @@
     }
 
     function findExplorerRepoSearchTargetIndex() {
-        const activeCard = document.activeElement?.closest?.('.explorer-pane');
-        const activeSlot = activeCard ? Number(activeCard.dataset.slot) : -1;
-        if (Number.isInteger(activeSlot) && isExplorerRepoSearchablePane(activeSlot)) {
-            return activeSlot;
-        }
-        if (_focusedTerminalIndex !== -1 && isExplorerRepoSearchablePane(_focusedTerminalIndex)) {
-            return _focusedTerminalIndex;
-        }
-        /* Only when no terminal-searchable pane exists either does the
-           shortcut fall back to the first explorer pane, so a workspace of
-           explorer panes with focus nowhere still responds. */
-        if (findTerminalSearchTargetIndex() !== -1) {
-            return -1;
-        }
-        for (let i = 0; i < terminals.length; i++) {
-            if (isExplorerRepoSearchablePane(i)) {
-                return i;
-            }
-        }
-        return -1;
+        const index = findExplorerShortcutTargetIndex();
+        return index !== -1 && isExplorerRepoSearchablePane(index) ? index : -1;
     }
 
     document.addEventListener('keydown', event => {
@@ -6518,13 +6552,14 @@
         }
     }
 
-    /* A focused terminal must not block the cycle: xterm's helper textarea is
-       the keyboard target of every focused pane, so the plain editable-target
-       guard would swallow Alt+W in exactly the case makeTerminal already
-       declines the key for (it returns false so this handler can act, and the
-       shell never sees an ESC w) — leaving the user stuck in the pane. Real
-       inputs (search boxes, name fields, explorer controls) still block it. */
-    function isWorkspaceCycleBlockingTarget(target) {
+    /* A focused terminal must not block a window-level Alt shortcut: xterm's
+       helper textarea is the keyboard target of every focused pane, so the
+       plain editable-target guard would swallow the key in exactly the case
+       makeTerminal already declines it for (it returns false so these handlers
+       can act, and the shell never sees the ESC sequence) — leaving the user
+       stuck in the pane. Real inputs (search boxes, name fields, explorer
+       controls) still block it. */
+    function isPaneShortcutBlockingTarget(target) {
         if (target instanceof Element && target.closest('.xterm-helper-textarea')) {
             return false;
         }
@@ -6535,7 +6570,7 @@
         if (!event.altKey || event.ctrlKey || event.metaKey || event.repeat) {
             return;
         }
-        if (event.code !== 'KeyW' || isWorkspaceCycleBlockingTarget(event.target)) {
+        if (event.code !== 'KeyW' || isPaneShortcutBlockingTarget(event.target)) {
             return;
         }
         if (!isMultiWorkspaceEnabled()) {
@@ -6544,6 +6579,22 @@
 
         event.preventDefault();
         cycleWorkspaceWindow(event.shiftKey ? -1 : 1);
+    });
+
+    /* Alt+` (the key left of 1) opens the launcher — the same action as the
+       button at the head of the session tab line. Matching on event.code keeps
+       the shortcut on that physical key on layouts where it produces a dead
+       key rather than a backtick. */
+    document.addEventListener('keydown', event => {
+        if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat) {
+            return;
+        }
+        if (event.code !== 'Backquote' || isPaneShortcutBlockingTarget(event.target)) {
+            return;
+        }
+
+        event.preventDefault();
+        goToSettings();
     });
 
     document.addEventListener('keydown', async event => {
@@ -7320,6 +7371,10 @@
             return;
         }
         closingSessionIds.forEach(browserCancelPendingPersist);
+        // Past both confirmations, so this close is really happening: drop the
+        // per-session/per-group entries that would otherwise outlive it.
+        closingSessionIds.forEach(forgetExplorerSessionMarkdownAppearance);
+        workspaceSaveTargets.delete(groupId);
 
         try {
             const closingGroupId = groupId;
@@ -7381,6 +7436,19 @@
             }
         }
         window.close();
+    }
+
+    /* The coding fonts are vendored web fonts (tokens.css), so a pane whose
+       terminal font is one of them can be measured against the fallback face
+       and then repainted with the real one, leaving the grid a fraction off.
+       One re-fit when the document's fonts have settled corrects it; panes on
+       an installed font measure the same twice and see nothing. */
+    if (document.fonts?.ready) {
+        document.fonts.ready.then(() => {
+            terminals.forEach((terminal, index) => {
+                if (terminal._attached) scheduleFit(index);
+            });
+        });
     }
 
     /* ─────────────────────────────────────────────

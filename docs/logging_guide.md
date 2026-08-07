@@ -38,6 +38,18 @@ When `gridvibe.log` reaches 2 MB it is renamed to `.1`, the previous `.1` become
 
 ---
 
+## ANSI Stripping
+
+`werkzeug` colours its status lines with ANSI escape codes, which make the log file
+awkward to grep and to read in the explorer's log viewer. `_StripAnsiFilter` is attached
+to the **file handler only**, and the console handler is registered first and emits first —
+so `logs/gridvibe.log` is plain text while terminal output keeps its colours.
+
+Keeping ANSI out of the log file is a regression guardrail (`CLAUDE.md` §9); don't attach
+a new file handler without this filter.
+
+---
+
 ## Noise Suppression
 
 The `werkzeug` logger emits an `INFO` line for every HTTP request. A few families of endpoints are polled by the frontend every few seconds and would flood the log with identical entries:
@@ -109,6 +121,22 @@ logger.error("SSH connect failed: %s", exc)
 ```
 
 `__name__` resolves to the module path (e.g. `web.api`, `sessions.manager`), which makes it easy to filter log output by component.
+
+### Choosing a level
+
+The log's value comes from `WARNING` and `ERROR` being rare enough to read every one, so
+be deliberate (`CLAUDE.md` §9):
+
+- **`DEBUG`** — routine teardown, window-management state, reconnect bookkeeping, and
+  anything that can fire more than a few times per user action.
+- **`INFO`** — one-off lifecycle events a reader would want in a bug report: a session
+  created or closed, a shell switched, a workspace restored.
+- **`WARNING`** — a real, actionable anomaly. Before adding one, ask how often the calling
+  code can run. Anything reachable from a keystroke, a mouse move, a render, or a poll does
+  not belong here: a per-event warning turns a 4-line day into a flooded file and buries the
+  warnings that matter. Log the *condition changing*, not every occurrence of it.
+- **`ERROR`** / `logger.exception` — a failure the user will notice or that leaves state
+  inconsistent.
 
 ---
 

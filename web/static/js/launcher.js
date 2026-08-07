@@ -92,6 +92,15 @@
     window.name = 'gridvibe-launcher';
     const MAX_SESSIONS = Number(document.querySelector('.shell').dataset.maxSessions || 4);
     const COUNT_OPTIONS = [1, 2, 3, 4, 6, 8].filter(value => value <= MAX_SESSIONS);
+    /* What the launcher will actually go up to: the count ladder's top, which
+       is 8 unless a lower configured max_sessions trims the ladder. It is
+       usually *below* MAX_SESSIONS, because a count needs a layout preset in
+       LAYOUT_COPY to be offerable at all. */
+    const LAUNCHER_MAX_TERMINALS = COUNT_OPTIONS[COUNT_OPTIONS.length - 1];
+    /* Fallback address for a browser pane that has no saved URL of its own —
+       mirrors BROWSER_DEFAULT_URL in browser-pane.js, which the launcher page
+       does not load. */
+    const DEFAULT_BROWSER_PANE_URL = 'http://127.0.0.1:3000';
     const DEFAULT_TERMINALS = Array.from({ length: MAX_SESSIONS }, (_, index) => ({
         title: `Terminal ${index + 1}`,
         directory: '',
@@ -108,6 +117,7 @@
         explorer_tab_views: {},
         explorer_md_preset: '',
         explorer_md_font: '',
+        explorer_source_font: '',
         explorer_theme: 'dark',
         browser_tabs: [],
         browser_active_tab: 0,
@@ -287,15 +297,6 @@
         return true;
     }
 
-    function getGridMetrics(count) {
-        if (count >= 8) {
-            return { columns: 4, rows: 2 };
-        }
-        if (count >= 6) {
-            return { columns: 3, rows: 2 };
-        }
-        return { columns: 2, rows: 2 };
-    }
 
     function buildDefaultSessionName() {
         const isDefaultSelection = !activeSavedSessionId || activeSavedSessionId === DEFAULT_SESSION_ID;
@@ -332,13 +333,6 @@
     }
 
 
-    function getStep2DefaultDirectory(config, modeOverride = '') {
-        const mode = modeOverride || config?.connection_mode || connectionMode;
-        if (mode === 'wsl') {
-            return String(config?.wsl?.default_dir || '').trim();
-        }
-        return String(config?.ssh?.default_dir || '').trim();
-    }
 
 
 
@@ -521,7 +515,7 @@
         if (mode === 'browser') {
             return {
                 mode,
-                commandValue: initialCommand || 'http://127.0.0.1:3000',
+                commandValue: initialCommand || DEFAULT_BROWSER_PANE_URL,
                 agentSelection: '',
                 customAgent: ''
             };
@@ -553,19 +547,52 @@
         };
     }
 
-    function renderAgentOptions(selectedValue) {
-        const normalizedValue = String(selectedValue || '').trim().toLowerCase();
-        const options = [
-            '<option value="" data-base-label="Select agent">Select agent</option>',
-            ...AGENT_OPTIONS.map(option => `
-                <option
-                    value="${escHtml(option.value)}"
-                    data-base-label="${escHtml(option.label)}"
-                    ${normalizedValue === option.value ? 'selected' : ''}
-                >${escHtml(option.label)}</option>
-            `)
-        ];
-        return options.join('');
+    /* The startup-mode select carries the agent choice inline — plain mode
+       values plus "agent:<name>" entries in an Agent optgroup — so one
+       dropdown answers "what does this pane run" in a single pick. The
+       saved-session payload keeps its separate startup_mode/agent_selection
+       fields; only the control is combined. */
+    function startupSelectValue(mode, agentSelection) {
+        return mode === 'agent'
+            ? `agent:${String(agentSelection || '').trim().toLowerCase()}`
+            : mode;
+    }
+
+    function parseStartupSelection(value) {
+        const raw = String(value || '').trim();
+        if (raw.startsWith('agent:')) {
+            return { mode: 'agent', agent: raw.slice('agent:'.length) };
+        }
+        return { mode: raw, agent: '' };
+    }
+
+    function getRowAgentSelection(row) {
+        return parseStartupSelection(row?.querySelector('.startup-mode-select')?.value).agent;
+    }
+
+    function renderStartupModeOptions(commandUi) {
+        const mode = commandUi.mode;
+        const agent = String(commandUi.agentSelection || '').trim().toLowerCase();
+        const agentOptions = AGENT_OPTIONS.map(option => `
+            <option
+                value="agent:${escHtml(option.value)}"
+                data-base-label="${escHtml(option.label)}"
+                ${mode === 'agent' && agent === option.value ? 'selected' : ''}
+            >${escHtml(option.label)}</option>
+        `).join('');
+        /* The hidden "agent:" placeholder exists so a draft saved in agent
+           mode without a chosen agent still has an option to select; it is
+           not offered in the open dropdown. */
+        return `
+            <option value="terminal" ${mode === 'terminal' ? 'selected' : ''}>Terminal</option>
+            <option value="command" ${mode === 'command' ? 'selected' : ''}>Initial Command</option>
+            <option value="explorer" ${mode === 'explorer' ? 'selected' : ''}>File Explorer</option>
+            <option value="browser" ${mode === 'browser' ? 'selected' : ''} ${connectionMode === 'wsl' ? '' : 'disabled'}>Browser</option>
+            <optgroup label="Agent">
+                <option value="agent:" hidden ${mode === 'agent' && !agent ? 'selected' : ''}>Select agent…</option>
+                ${agentOptions}
+            </optgroup>
+        `;
     }
 
     function getTerminalCommandMode(row) {
@@ -594,7 +621,7 @@
             return normalizeBrowserPaneUrl(row.querySelector('.t-browser-url')?.value || '');
         }
         if (commandMode === 'agent') {
-            const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
+            const selectedAgent = getRowAgentSelection(row);
             if (selectedAgent === 'other') {
                 return row.querySelector('.t-agent-custom')?.value.trim() || '';
             }
@@ -661,6 +688,14 @@
         const drafts = rows.map((row, index) => {
             const commandMode = getTerminalCommandMode(row);
             const initialCommand = buildTerminalInitialCommand(row);
+            const directory = row.querySelector('.t-dir').value.trim();
+            /* Persisted explorer tab paths are relative to the root the pane
+               was saved under, and the row's directory is what selects that
+               root. Editing it after importing a saved session retargets the
+               pane, so paths captured under the old root would reopen as
+               missing files — drop them and let the relaunched pane start on
+               its own root instead. */
+            const explorerTabsMatchRoot = directory === (row.dataset.explorerTabsDir || '');
             /* Browser rows only expose the active URL as an input; the rest of
                the tab strip rides along in the dataset so importing a saved
                multi-tab pane and re-saving it keeps every tab. The visible
@@ -679,7 +714,7 @@
             }
             return {
                 title: row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`,
-                directory: row.querySelector('.t-dir').value.trim(),
+                directory,
                 initial_command: initialCommand,
                 initial_command_mode: commandMode === 'agent'
                     ? 'agent'
@@ -687,23 +722,28 @@
                 startup_mode: commandMode === 'agent'
                     ? 'agent'
                     : (commandMode === 'explorer' || commandMode === 'browser' ? commandMode : 'terminal'),
-                agent_selection: commandMode === 'agent'
-                    ? (row.querySelector('.t-agent-select')?.value.trim() || '')
-                    : '',
+                agent_selection: commandMode === 'agent' ? getRowAgentSelection(row) : '',
                 custom_agent: commandMode === 'agent'
                     ? (row.querySelector('.t-agent-custom')?.value.trim() || '')
                     : '',
                 agent_auto_mode: commandMode === 'agent'
-                    && Boolean(agentAutoModeFlag(row.querySelector('.t-agent-select')?.value.trim() || ''))
+                    && Boolean(agentAutoModeFlag(getRowAgentSelection(row)))
                     && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
                 explorer_search_open: commandMode === 'explorer' && row.dataset.explorerSearchOpen === 'true',
-                explorer_open_tabs: commandMode === 'explorer' ? parseStringArrayDataset(row.dataset.explorerOpenTabs) : [],
-                explorer_active_tab: commandMode === 'explorer' ? (row.dataset.explorerActiveTab || '') : '',
-                explorer_tab_views: commandMode === 'explorer' ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews) : {},
+                explorer_open_tabs: commandMode === 'explorer' && explorerTabsMatchRoot
+                    ? parseStringArrayDataset(row.dataset.explorerOpenTabs)
+                    : [],
+                explorer_active_tab: commandMode === 'explorer' && explorerTabsMatchRoot
+                    ? (row.dataset.explorerActiveTab || '')
+                    : '',
+                explorer_tab_views: commandMode === 'explorer' && explorerTabsMatchRoot
+                    ? parseExplorerTabViewsDataset(row.dataset.explorerTabViews)
+                    : {},
                 explorer_md_preset: commandMode === 'explorer' ? (row.dataset.explorerMdPreset || '') : '',
                 explorer_md_font: commandMode === 'explorer' ? (row.dataset.explorerMdFont || '') : '',
+                explorer_source_font: commandMode === 'explorer' ? (row.dataset.explorerSourceFont || '') : '',
                 explorer_theme: commandMode === 'explorer' ? (row.dataset.explorerTheme || 'dark') : '',
                 /* Browser rows only expose the active URL as an input; the rest
                    of the tab strip rides along in the dataset so importing a
@@ -819,8 +859,10 @@
         container.className = `layout-grid${keys.length === 1 ? ' single' : ''}`;
         container.innerHTML = keys.map(key => {
             const option = options[key];
+            // The preview draws a grid for any count the grid option offers, so
+            // it keeps a 2×2 floor where the shared helper has no grid shape.
             const gridMetrics = option.preview === 'grid'
-                ? getGridMetrics(selectedCount)
+                ? (getGridMetrics(selectedCount) || { columns: 2, rows: 2 })
                 : null;
             const previewStyle = gridMetrics
                 ? ` style="--preview-columns:${gridMetrics.columns}; --preview-rows:${gridMetrics.rows};"`
@@ -993,6 +1035,206 @@
             const field = document.getElementById(fieldId);
             field?.addEventListener('change', () => refreshVisibleAgentPreflights());
         });
+    }
+
+    /* ── Connection target dropdown (the caret beside each mode button) ──
+       Step 2 used to be pure recall: to start anything you had to remember an
+       IP, a username, a port, or a repository path. The caret offers the
+       targets the saved presets already use, so a throwaway session can reuse a
+       known address without loading the preset itself — the launch stays a
+       scratch session (no `activeSavedSessionId`), which is what lets the same
+       host be opened over and over as "host", "host (1)", "host (2)".
+
+       Stroke-style currentColor icons only (guardrail 7); `workspace-icon` is
+       the menu's own sizing class from workspaces.js. */
+    const CONNECTION_TARGET_ICONS = {
+        blank: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>',
+        ssh: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2" y="3" width="20" height="14" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>',
+        wsl: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>'
+    };
+
+    const BLANK_CONNECTION_TARGETS = {
+        ssh: { host: '', username: 'ubuntu', password: '', port: '22', default_dir: '' },
+        wsl: { distribution: '', username: '', default_dir: '' }
+    };
+
+    let connectionTargetCache = { ssh: [], wsl: [] };
+
+    function normalizeConnectionTargetMode(mode) {
+        return mode === 'wsl' ? 'wsl' : 'ssh';
+    }
+
+    async function refreshConnectionTargets() {
+        const response = await fetch('/api/session-targets');
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to load saved targets');
+        }
+        connectionTargetCache = {
+            ssh: Array.isArray(data.ssh) ? data.ssh : [],
+            wsl: Array.isArray(data.wsl) ? data.wsl : []
+        };
+        return connectionTargetCache;
+    }
+
+    function describeConnectionTarget(mode, target) {
+        if (normalizeConnectionTargetMode(mode) === 'wsl') {
+            return String(target?.default_dir || '');
+        }
+
+        const port = Number(target?.port) || 22;
+        const authority = `${String(target?.username || 'ubuntu')}@${String(target?.host || '')}`
+            + (port === 22 ? '' : `:${port}`);
+        const directory = String(target?.default_dir || '').trim();
+        return directory ? `${authority} — ${directory}` : authority;
+    }
+
+    /* Comparable form of one target so the menu can tick the entry Step 2 is
+       already filled with, whether it came from this menu or was typed. */
+    function connectionTargetSignature(mode, target) {
+        if (normalizeConnectionTargetMode(mode) === 'wsl') {
+            return JSON.stringify([
+                String(target?.default_dir || '').trim().replace(/\\/g, '/').toLowerCase(),
+                String(target?.distribution || '').trim(),
+                String(target?.username || '').trim()
+            ]);
+        }
+
+        return JSON.stringify([
+            String(target?.host || '').trim().toLowerCase(),
+            String(target?.username || '').trim() || 'ubuntu',
+            Number(target?.port) || 22,
+            String(target?.default_dir || '').trim()
+        ]);
+    }
+
+    function currentConnectionTargetSignature(mode) {
+        const targetMode = normalizeConnectionTargetMode(mode);
+        if (connectionMode !== targetMode) {
+            return '';
+        }
+        const inputs = collectModeInputs();
+        return connectionTargetSignature(targetMode, inputs[targetMode]);
+    }
+
+    function applyConnectionTargetFields(targetMode, target) {
+        const values = collectModeInputs();
+        values[targetMode] = targetMode === 'ssh'
+            ? {
+                host: String(target?.host || ''),
+                username: String(target?.username || '') || 'ubuntu',
+                /* Never carried over from the form: a password belongs to the
+                   preset it was saved with, and is refetched below only for the
+                   picked target. */
+                password: '',
+                port: String(Number(target?.port) || 22),
+                default_dir: String(target?.default_dir || '')
+            }
+            : {
+                distribution: String(target?.distribution || ''),
+                username: String(target?.username || ''),
+                default_dir: String(target?.default_dir || '')
+            };
+
+        if (connectionMode !== targetMode) {
+            connectionMode = targetMode;
+            document.querySelectorAll('.mode-btn').forEach(button => {
+                button.classList.toggle('active', button.dataset.mode === connectionMode);
+            });
+            renderModeFields();
+        }
+        applyModeInputs(values);
+    }
+
+    async function applyConnectionTarget(mode, target) {
+        const targetMode = normalizeConnectionTargetMode(mode);
+        applyConnectionTargetFields(targetMode, target || BLANK_CONNECTION_TARGETS[targetMode]);
+
+        /* Prefilling an address is not importing a preset. Dropping the active
+           saved session is what keeps this launch a scratch session, so the
+           same target can be launched repeatedly instead of replacing the one
+           group that owns the preset. */
+        setActiveSavedSession(null);
+        resetTerminalSetupIfTargetChanged(connectionMode, collectModeInputs());
+        updateHeaderBadges();
+        refreshVisibleAgentPreflights();
+
+        if (!target) {
+            showMessage(
+                targetMode === 'ssh'
+                    ? 'Cleared the SSH target.'
+                    : 'Cleared the local repository.',
+                'info'
+            );
+            return;
+        }
+
+        if (targetMode === 'ssh' && target.has_password && target.session_id) {
+            /* The target list is secret-free on purpose, so the saved password
+               is fetched only now, for the one preset the user picked. */
+            try {
+                const response = await fetch(
+                    `/api/saved-sessions/${encodeURIComponent(target.session_id)}`
+                );
+                const data = await response.json();
+                const field = document.getElementById('ssh_password');
+                if (response.ok && field && connectionMode === 'ssh') {
+                    field.value = String(data?.config?.ssh?.password || '');
+                }
+            } catch (_error) {
+                // A missing password is recoverable — the field stays empty and
+                // the user can type it or rely on key auth.
+            }
+        }
+
+        showMessage(
+            `Started a new session on ${describeConnectionTarget(targetMode, target)}.`,
+            'success'
+        );
+    }
+
+    async function toggleConnectionTargetMenu(event, mode) {
+        event.preventDefault();
+        const targetMode = normalizeConnectionTargetMode(mode);
+        const anchor = event.currentTarget;
+
+        /* One request on a deliberate click keeps the list honest without any
+           polling (guardrail 3); a failure just falls back to the cache. */
+        try {
+            await refreshConnectionTargets();
+        } catch (_error) {}
+
+        const targets = connectionTargetCache[targetMode] || [];
+        const currentSignature = currentConnectionTargetSignature(targetMode);
+        const blankSignature = connectionTargetSignature(
+            targetMode,
+            BLANK_CONNECTION_TARGETS[targetMode]
+        );
+        const entries = [{
+            label: targetMode === 'ssh' ? 'Blank SSH target' : 'Blank local repository',
+            current: currentSignature === blankSignature,
+            icon: currentSignature === blankSignature ? '' : CONNECTION_TARGET_ICONS.blank,
+            onSelect: () => applyConnectionTarget(targetMode, null)
+        }];
+
+        if (!targets.length) {
+            entries.push({
+                label: 'No saved sessions to borrow a target from yet',
+                disabled: true
+            });
+        }
+
+        targets.forEach(target => {
+            const isCurrent = currentSignature === connectionTargetSignature(targetMode, target);
+            entries.push({
+                label: describeConnectionTarget(targetMode, target),
+                current: isCurrent,
+                icon: isCurrent ? '' : CONNECTION_TARGET_ICONS[targetMode],
+                onSelect: () => applyConnectionTarget(targetMode, target)
+            });
+        });
+
+        openWorkspaceContextMenu(event, entries, { anchor });
     }
 
     async function browseLocalRepo() {
@@ -1172,10 +1414,11 @@
         const customAgentField = row.querySelector('.t-agent-custom-field');
         const browserField = row.querySelector('.t-browser-field');
         const startupModeSelect = row.querySelector('.startup-mode-select');
-        const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
+        const selection = parseStartupSelection(startupModeSelect?.value);
+        const selectedAgent = commandMode === 'agent' ? selection.agent : '';
 
-        if (startupModeSelect && startupModeSelect.value !== commandMode) {
-            startupModeSelect.value = commandMode;
+        if (startupModeSelect && selection.mode !== commandMode) {
+            startupModeSelect.value = startupSelectValue(commandMode, selectedAgent);
         }
 
         commandField?.classList.toggle('hidden', commandMode !== 'command');
@@ -1203,12 +1446,18 @@
         const flag = agentAutoModeFlag(selectedAgent);
         const available = commandMode === 'agent' && Boolean(flag);
         autoField.classList.toggle('hidden', !available);
-        const help = autoField.querySelector('.t-agent-auto-help');
+        /* The explanation hides behind the check-field's ? tip; it updates
+           in place while open, and closes when auto mode goes away. */
+        const help = row.querySelector('.t-agent-auto-help');
         if (help) {
             const description = available ? agentAutoModeDescription(selectedAgent) : '';
             help.textContent = available
                 ? `Launches as "${selectedAgent} ${flag}".${description ? ` ${description}` : ''}`
                 : '';
+            if (!available) {
+                help.classList.remove('visible');
+                autoField.querySelector('.tip-btn')?.setAttribute('aria-expanded', 'false');
+            }
         }
         if (!available) {
             const checkbox = autoField.querySelector('.t-agent-auto-mode');
@@ -1221,15 +1470,15 @@
     function resetTerminalCommandOnModeChange(row, nextMode) {
         const previousMode = getTerminalCommandMode(row);
         const commandInput = row.querySelector('.t-cmd');
-        const agentSelect = row.querySelector('.t-agent-select');
         const customAgentInput = row.querySelector('.t-agent-custom');
 
         if (previousMode === 'command' && nextMode !== 'command' && commandInput) {
             commandInput.value = '';
         }
 
+        /* The agent choice itself needs no clearing: it lives in the same
+           select, so picking a non-agent mode already replaced it. */
         if (previousMode === 'agent' && nextMode !== 'agent') {
-            if (agentSelect) agentSelect.value = '';
             if (customAgentInput) customAgentInput.value = '';
             const autoModeCheckbox = row.querySelector('.t-agent-auto-mode');
             if (autoModeCheckbox) autoModeCheckbox.checked = false;
@@ -1263,7 +1512,7 @@
     }
 
     function clearAgentPreflight(row) {
-        const select = row?.querySelector('.t-agent-select');
+        const select = row?.querySelector('.startup-mode-select');
         const disclosure = row?.querySelector('.agent-preflight-disclosure');
         const summary = row?.querySelector('.agent-preflight-summary');
         const summaryLabel = row?.querySelector('.agent-preflight-summary-label');
@@ -1295,7 +1544,7 @@
     }
 
     function renderAgentPreflight(row, payload) {
-        const select = row?.querySelector('.t-agent-select');
+        const select = row?.querySelector('.startup-mode-select');
         const disclosure = row?.querySelector('.agent-preflight-disclosure');
         const summary = row?.querySelector('.agent-preflight-summary');
         const summaryLabel = row?.querySelector('.agent-preflight-summary-label');
@@ -1341,8 +1590,10 @@
         select.title = [message, targetLabel ? `Target: ${targetLabel}` : '', prerequisite, installCommand ? `${installLabel || 'Install'}: ${installCommand}` : '', warning]
             .filter(Boolean)
             .join('\n');
-        if (selectedOption && selectedOption.value) {
-            selectedOption.textContent = `${selectedOption.dataset.baseLabel || selectedOption.textContent} · ${label}`;
+        /* Only agent entries carry data-base-label; the plain mode options
+           must never grow a status suffix. */
+        if (selectedOption && selectedOption.dataset.baseLabel) {
+            selectedOption.textContent = `${selectedOption.dataset.baseLabel} · ${label}`;
         }
 
         summary.className = `agent-preflight-summary ${escHtml(status)}`.trim();
@@ -1354,7 +1605,7 @@
 
     function buildAgentPreflightPayload(row) {
         return {
-            agent: row?.querySelector('.t-agent-select')?.value.trim() || '',
+            agent: getRowAgentSelection(row),
             connection_mode: connectionMode,
             ssh: {
                 host: document.getElementById('ssh_host')?.value.trim() || '',
@@ -1402,7 +1653,7 @@
             return;
         }
 
-        const selectedAgent = row.querySelector('.t-agent-select')?.value.trim() || '';
+        const selectedAgent = getRowAgentSelection(row);
         if (!selectedAgent || selectedAgent === 'other') {
             clearAgentPreflight(row);
             return;
@@ -1488,18 +1739,13 @@
         document.querySelectorAll('.t-row').forEach(row => {
             const wslCheckbox = row.querySelector('.t-use-wsl');
             const powershellCheckbox = row.querySelector('.t-use-powershell');
-            const agentSelect = row.querySelector('.t-agent-select');
             const distributionInput = row.querySelector('.t-distribution');
             const startupModeSelect = row.querySelector('.startup-mode-select');
 
             startupModeSelect?.addEventListener('change', () => {
-                const nextMode = startupModeSelect.value;
+                const nextMode = parseStartupSelection(startupModeSelect.value).mode;
                 resetTerminalCommandOnModeChange(row, nextMode);
                 row.dataset.commandMode = nextMode;
-                syncTerminalCommandState(row);
-                scheduleAgentPreflight(row, 60);
-            });
-            agentSelect?.addEventListener('change', () => {
                 syncTerminalCommandState(row);
                 scheduleAgentPreflight(row, 60);
             });
@@ -1515,9 +1761,11 @@
     function buildTerminalRows(count, drafts = DEFAULT_TERMINALS) {
         const container = document.getElementById('terminalRows');
         const usableDrafts = drafts.length ? drafts : DEFAULT_TERMINALS;
-        const columns = count >= 3 ? 3 : count;
-
-        container.style.setProperty('--terminal-columns', String(columns));
+        /* Rows are rebuilt from scratch on every count change and import, so
+           the fold state (view-only, never part of the draft payload) has to
+           be snapshotted here and re-applied by index or it would reset. */
+        const previousFoldState = Array.from(container.querySelectorAll('.t-row'))
+            .map(row => row.classList.contains('t-row-collapsed'));
 
         container.innerHTML = Array.from({ length: count }, (_, index) => {
             const terminal = usableDrafts[index] || DEFAULT_TERMINALS[index];
@@ -1526,55 +1774,67 @@
                 commandUi.mode = 'terminal';
                 commandUi.commandValue = '';
             }
+            const rowCollapsed = index < previousFoldState.length
+                ? previousFoldState[index]
+                : count >= 3;
             return `
                 <div
-                    class="t-row"
+                    class="t-row${rowCollapsed ? ' t-row-collapsed' : ''}"
                     data-command-mode="${escHtml(commandUi.mode)}"
                     data-explorer-tree-open="${terminal.explorer_tree_open ? 'true' : 'false'}"
                     data-explorer-git-open="${terminal.explorer_git_open ? 'true' : 'false'}"
                     data-explorer-search-open="${terminal.explorer_search_open ? 'true' : 'false'}"
                     data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
+                    data-explorer-tabs-dir="${escHtml(terminal.directory || '')}"
                     data-explorer-active-tab="${escHtml(terminal.explorer_active_tab || '')}"
                     data-explorer-tab-views="${escHtml(JSON.stringify(terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object' ? terminal.explorer_tab_views : {}))}"
                     data-explorer-md-preset="${escHtml(terminal.explorer_md_preset || '')}"
                     data-explorer-md-font="${escHtml(terminal.explorer_md_font || '')}"
+                    data-explorer-source-font="${escHtml(terminal.explorer_source_font || '')}"
                     data-explorer-theme="${escHtml(terminal.explorer_theme || 'dark')}"
                     data-browser-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.browser_tabs) ? terminal.browser_tabs : []))}"
                     data-browser-active-tab="${escHtml(String(Number(terminal.browser_active_tab) || 0))}"
                 >
-                    <div class="t-row-head">
+                    <div class="t-row-head" onclick="onTerminalRowHeadClick(event)">
                         <span class="t-badge">T${index + 1}</span>
                         <input class="t-title" type="text" value="${escHtml(terminal.title || `Terminal ${index + 1}`)}" placeholder="Terminal ${index + 1}" aria-label="Terminal ${index + 1} title">
+                        <button
+                            type="button"
+                            class="t-row-fold-btn"
+                            onclick="toggleTerminalRowFold(this)"
+                            aria-expanded="${rowCollapsed ? 'false' : 'true'}"
+                            aria-label="Fold Terminal ${index + 1} settings"
+                            title="Fold Terminal ${index + 1} settings"
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"></path></svg>
+                        </button>
                         <span class="t-status-dot"></span>
                     </div>
                     <div class="t-fields">
                         <div class="field">
                             <label>Subdirectory</label>
-                            <input class="t-dir" type="text" value="${escHtml(terminal.directory || '')}" placeholder="Optional path inside Step 2 default">
+                            <input class="t-dir" type="text" value="${escHtml(terminal.directory || '')}" placeholder="Relative to Step 2 folder" title="Optional path inside the Step 2 default folder">
                         </div>
                         <div class="field">
                             <label>Startup Mode</label>
                             <select class="startup-mode-select">
-                                <option value="terminal" ${commandUi.mode === 'terminal' ? 'selected' : ''}>Terminal</option>
-                                <option value="command" ${commandUi.mode === 'command' ? 'selected' : ''}>Initial Command</option>
-                                <option value="agent" ${commandUi.mode === 'agent' ? 'selected' : ''}>Agent</option>
-                                <option value="explorer" ${commandUi.mode === 'explorer' ? 'selected' : ''}>File Explorer</option>
-                                <option value="browser" ${commandUi.mode === 'browser' ? 'selected' : ''} ${connectionMode === 'wsl' ? '' : 'disabled'}>Browser</option>
+                                ${renderStartupModeOptions(commandUi)}
                             </select>
                         </div>
                         <div class="field t-command-field ${commandUi.mode === 'command' ? '' : 'hidden'}">
                             <label>Initial Command</label>
-                            <input class="t-cmd" type="text" value="${escHtml(commandUi.commandValue)}" placeholder="Blank = shell only">
+                            <input class="t-cmd" type="text" value="${escHtml(commandUi.mode === 'command' ? commandUi.commandValue : '')}" placeholder="Blank = shell only">
                         </div>
                         <div class="field t-browser-field ${commandUi.mode === 'browser' ? '' : 'hidden'}">
                             <label>Browser URL</label>
-                            <input class="t-browser-url" type="url" value="${escHtml(commandUi.commandValue || 'http://127.0.0.1:3000')}" placeholder="http://127.0.0.1:3000">
+                            <!-- Each mode seeds only its own input. commandValue is the
+                                 draft's single initial_command, so in agent mode it holds
+                                 the agent name ("claude") — piping it into the hidden URL
+                                 box left the pane pointed at http://claude/ the moment the
+                                 user switched to Browser. -->
+                            <input class="t-browser-url" type="url" value="${escHtml(commandUi.mode === 'browser' ? (commandUi.commandValue || DEFAULT_BROWSER_PANE_URL) : DEFAULT_BROWSER_PANE_URL)}" placeholder="${escHtml(DEFAULT_BROWSER_PANE_URL)}">
                         </div>
                         <div class="field t-agent-field ${commandUi.mode === 'agent' ? '' : 'hidden'}">
-                            <label>Agent</label>
-                            <select class="t-agent-select">
-                                ${renderAgentOptions(commandUi.agentSelection)}
-                            </select>
                             <details class="agent-preflight-disclosure">
                                 <summary class="agent-preflight-summary">
                                     <span class="agent-preflight-summary-label"></span>
@@ -1585,9 +1845,16 @@
                                 <input class="t-agent-auto-mode" type="checkbox" ${commandUi.agentAutoMode ? 'checked' : ''} aria-label="Launch agent in auto mode">
                                 <span class="check-copy">
                                     <strong>Auto mode</strong>
-                                    <span class="t-agent-auto-help"></span>
                                 </span>
+                                <button
+                                    type="button"
+                                    class="tip-btn"
+                                    aria-expanded="false"
+                                    aria-label="Explain auto mode"
+                                    onclick="toggleInlineTip(this)"
+                                >?</button>
                             </label>
+                            <div class="inline-tip t-agent-auto-help"></div>
                         </div>
                         <div class="field t-agent-custom-field ${commandUi.mode === 'agent' && commandUi.agentSelection === 'other' ? '' : 'hidden'}">
                             <label>Custom Agent</label>
@@ -1642,6 +1909,83 @@
         }).join('');
 
         bindTerminalRowInteractions();
+    }
+
+    function toggleTerminalRowFold(button) {
+        const row = button.closest('.t-row');
+        if (!row) {
+            return;
+        }
+        const collapsed = row.classList.toggle('t-row-collapsed');
+        button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        if (!collapsed) {
+            /* Opening a card should show the whole card, not leave it half
+               under the panel fold. Wait a frame so the grid has its final
+               height before measuring; a card taller than the panel viewport
+               pins its top instead. */
+            requestAnimationFrame(() => {
+                const wrap = row.closest('.rows-wrap');
+                const block = wrap && row.offsetHeight >= wrap.clientHeight ? 'start' : 'nearest';
+                row.scrollIntoView({ block, behavior: 'smooth' });
+            });
+        }
+    }
+
+    /* The whole head is a fold target so the chevron isn't the only way in;
+       clicks on the title input (or the chevron itself, which already
+       toggles) fall through to their own handlers. */
+    function onTerminalRowHeadClick(event) {
+        if (event.target.closest('input, button')) {
+            return;
+        }
+        const button = event.currentTarget.querySelector('.t-row-fold-btn');
+        if (button) {
+            toggleTerminalRowFold(button);
+        }
+    }
+
+    /* Panel fold state is a per-browser view preference, so it lives in
+       localStorage (same pattern as the theme key in shared.js) and never in
+       the saved-session payload. */
+    const LAUNCHER_PANEL_FOLD_KEYS = {
+        terminalSetupCard: 'gv_fold_terminal_setup',
+        workspaceDestinationCard: 'gv_fold_workspaces'
+    };
+
+    /* No `terminal-setup-folded` marker on the column any more: its rows are
+       content-sized whether or not a card is folded, so folding one is already
+       just a shorter row. */
+    function syncLauncherPanelFoldChrome(card, folded) {
+        const button = card.querySelector('.card-fold-btn');
+        if (button) {
+            button.setAttribute('aria-expanded', folded ? 'false' : 'true');
+        }
+    }
+
+    function toggleLauncherCardFold(cardId) {
+        const card = document.getElementById(cardId);
+        if (!card) {
+            return;
+        }
+        const folded = card.classList.toggle('card-folded');
+        syncLauncherPanelFoldChrome(card, folded);
+        const storageKey = LAUNCHER_PANEL_FOLD_KEYS[cardId];
+        if (storageKey) {
+            try { localStorage.setItem(storageKey, folded ? '1' : '0'); } catch (_error) {}
+        }
+    }
+
+    function restoreLauncherPanelFolds() {
+        Object.entries(LAUNCHER_PANEL_FOLD_KEYS).forEach(([cardId, storageKey]) => {
+            const card = document.getElementById(cardId);
+            if (!card) {
+                return;
+            }
+            let folded = false;
+            try { folded = localStorage.getItem(storageKey) === '1'; } catch (_error) {}
+            card.classList.toggle('card-folded', folded);
+            syncLauncherPanelFoldChrome(card, folded);
+        });
     }
 
     function collectFormConfig() {
@@ -1972,6 +2316,27 @@
         });
     }
 
+    /* One-click "Import Session → Default session": the same load, minus the
+       picker, so a scratch setup is one click away from an already-imported
+       preset. The default entry is virtual, so nothing is written to
+       saved_sessions.json and no existing preset is touched. */
+    async function startScratchSession() {
+        try {
+            const response = await fetch(`/api/saved-sessions/${encodeURIComponent(DEFAULT_SESSION_ID)}`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load the default session');
+            }
+
+            setActiveSavedSession(data);
+            applySessionConfig(data.config);
+            await persistLastUsedConfig(data.id);
+            showMessage('Started a new session from the default preset.', 'success');
+        } catch (error) {
+            showMessage(`New session failed: ${error.message}`, 'error');
+        }
+    }
+
     async function importSavedSession() {
         try {
             const listResponse = await fetch('/api/saved-sessions');
@@ -2298,16 +2663,21 @@
     /* ── Restore previous workspace (feature 10.5) ──
        The backend snapshots the workspace shape on an autosave timer and on
        Workspace ▸ Save Workspace; after a restart the launcher offers to replay
-       the last saved snapshot through the normal launch path. The offer is
-       permanent — Dismiss only hides it for this launcher session.
-       Passwords are never persisted — restored SSH panes use key auth or fail
-       into the error placeholder (which has a Retry button). */
-    let restorableWorkspaceGroups = [];
-    /* Snapshot id of the group that was in front when the workspace was saved.
-       Restored groups are minted with fresh ids, so it is resolved to the newly
-       created group by position during the replay below. */
-    let restorableActiveGroupId = '';
-    let restorableNativeZoomFactor = null;
+       the last saved snapshot. The offer is permanent — Dismiss only hides it
+       for this launcher session.
+
+       Both modes replay through the one server-owned restore transaction
+       (MW-09): this banner and the multi-workspace chooser call
+       POST /api/runtime-state/restore, and `default` is simply one requested
+       workspace id. The browser used to loop over POST /api/sessions itself and
+       re-resolve presets on the way, which duplicated the restore policy, could
+       stop half way through a network failure, and skipped the server's
+       idempotency and its per-group report.
+
+       Passwords are never persisted — a restored SSH pane is credentialed from
+       its preset in-process where that is still safe, and otherwise uses key
+       auth or fails into the error placeholder (which has a Retry button). */
+    let restorableWorkspaceIsOffered = false;
 
     async function checkRestorableWorkspace() {
         /* With N workspaces a single banner stops being coherent — dismissing
@@ -2325,9 +2695,13 @@
         if (!response.ok || !data.restorable || !Array.isArray(data.groups) || !data.groups.length) {
             return;
         }
-        restorableWorkspaceGroups = data.groups;
-        restorableActiveGroupId = String(data.active_group_id || '');
-        restorableNativeZoomFactor = normalizeNativeZoomFactor(data.native_zoom_factor);
+        /* The endpoint reports what is already live in this workspace. Restore
+           is idempotent by workspace id and would answer `already_live`, so
+           offering it here would only ever produce a refusal. */
+        if (Number(data.active_group_count || 0) > 0) {
+            return;
+        }
+        restorableWorkspaceIsOffered = true;
         const groupCount = data.groups.length;
         const paneCount = data.groups.reduce(
             (total, group) => total + (Array.isArray(group.sessions) ? group.sessions.length : 0),
@@ -2344,102 +2718,58 @@
         banner.hidden = false;
     }
 
-    /* Build the POST /api/sessions body for one restored group. When the group
-       was launched from a still-existing *named* saved session, replay that
-       preset's current config ("latest preset wins" — Save All Sessions then
-       Save Workspace restores the edited state without re-importing). Otherwise
-       replay the workspace snapshot verbatim. The blank built-in default is
-       never treated as a preset — its config holds no real host/directory. */
-    async function buildRestoreGroupBody(group) {
-        const snapshotBody = {
-            sessions: Array.isArray(group.sessions) ? group.sessions : [],
-            connection_mode: group.connection_mode,
-            layout: group.layout,
-            workspace_layout: group.workspace_layout,
-            session_name: group.name,
-            saved_session_id: group.saved_session_id || '',
-            // Replay the workspace verbatim: a cold post-restart agent probe
-            // must not silently clear a command that was working.
-            restore: true
-        };
-
-        const savedId = String(group.saved_session_id || '').trim();
-        if (!savedId || savedId === DEFAULT_SESSION_ID) {
-            return snapshotBody;
-        }
-
-        try {
-            const response = await fetch(`/api/saved-sessions/${encodeURIComponent(savedId)}`);
-            if (!response.ok) return snapshotBody;
-            const preset = await response.json();
-            const config = preset?.config;
-            if (!config || !Array.isArray(config.terminals)) return snapshotBody;
-            return {
-                ...snapshotBody,
-                sessions: buildSessionsFromConfig(config, config.terminal_count),
-                connection_mode: config.connection_mode,
-                layout: config.layout,
-                workspace_layout: config.workspace_layout || null,
-                session_name: preset.name || group.name
-            };
-        } catch (_error) {
-            return snapshotBody;
-        }
-    }
-
     function dismissRestoreBanner() {
         /* Hide-only: the saved slot is preserved (single-workspace mode has no
            Delete); the next autosave or manual save overwrites it. */
         const banner = document.getElementById('restoreWorkspaceBanner');
         if (banner) banner.hidden = true;
-        restorableWorkspaceGroups = [];
-        restorableActiveGroupId = '';
-        restorableNativeZoomFactor = null;
+        restorableWorkspaceIsOffered = false;
     }
 
     async function restorePreviousWorkspace() {
-        if (!restorableWorkspaceGroups.length) return;
+        if (!restorableWorkspaceIsOffered) return;
         const button = document.getElementById('restoreWorkspaceBtn');
         if (button) {
             button.disabled = true;
             button.textContent = 'Restoring…';
         }
-        let restored = 0;
-        /* Live id of the group that was in front when the workspace was saved,
-           resolved as the replay creates it — the restore opens the workspace
-           on this group instead of on whichever one ends up newest. */
-        let activeGroupId = '';
-        const nativeZoomFactor = restorableNativeZoomFactor;
         try {
-            for (const group of restorableWorkspaceGroups) {
-                const response = await fetch('/api/sessions', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(await buildRestoreGroupBody(group))
-                });
-                if (!response.ok) continue;
-                restored += 1;
-                if (restorableActiveGroupId && group.group_id === restorableActiveGroupId) {
-                    const created = await response.json().catch(() => ({}));
-                    activeGroupId = String(created.group_id || '');
-                }
-            }
-            document.getElementById('restoreWorkspaceBanner')?.setAttribute('hidden', '');
-            restorableWorkspaceGroups = [];
-            restorableActiveGroupId = '';
-            restorableNativeZoomFactor = null;
-            if (restored > 0) {
-                showMessage(`Restored ${restored} session${restored === 1 ? '' : 's'} from the previous workspace.`, 'success');
+            /* The same call the chooser makes, with `default` as the one
+               requested workspace: one transaction, the snapshot's exact shape,
+               the saved label applied, and a per-group report. */
+            const result = await restoreSavedWorkspaces([WORKSPACE_DEFAULT_ID]);
+            const restored = (result.workspaces || []).find(entry => entry.restored);
+            if (restored) {
+                /* Only a restore that started something retires the offer: a
+                   refusal leaves the banner and its button in place so the
+                   retry is still in front of the user (guardrail 8). */
+                document.getElementById('restoreWorkspaceBanner')?.setAttribute('hidden', '');
+                restorableWorkspaceIsOffered = false;
+                const groupCount = Number(restored.group_count || 0);
+                const failed = (restored.groups || []).filter(group => !group.started);
+                showMessage(
+                    `Restored ${groupCount} session${groupCount === 1 ? '' : 's'} from the previous workspace.`
+                    + (failed.length ? ` ${failed.length} could not be relaunched.` : ''),
+                    failed.length ? 'warning' : 'success'
+                );
                 await viewActiveTerminals(
                     { preventDefault: () => {} },
-                    activeGroupId,
-                    nativeZoomFactor
+                    String(restored.active_group_id || ''),
+                    normalizeNativeZoomFactor(restored.native_zoom_factor)
                 );
             } else {
-                showMessage('Could not restore the previous workspace.', 'error');
+                showMessage(
+                    'Could not restore the previous workspace — try again.',
+                    'error'
+                );
             }
         } catch (error) {
-            showMessage(`Workspace restore failed: ${error.message}`, 'error');
+            showMessage(
+                error.conflict
+                    ? error.message
+                    : `Workspace restore failed: ${error.message} — try again.`,
+                'error'
+            );
         } finally {
             if (button) {
                 button.disabled = false;
@@ -2484,11 +2814,11 @@
         if (workspaceDestination && findLiveWorkspace(workspaceDestination)) {
             return workspaceDestination;
         }
-        /* Only workspaces that actually have tabs count here: the permanent
-           empty "default" record must not make a single real workspace look
-           like two and push the default answer to "New workspace". */
-        const populated = liveWorkspaceCache
-            .filter(workspace => (Number(workspace.group_count) || 0) > 0);
+        /* Only user-visible workspaces count here (the shared predicate in
+           workspaces.js): an internal container must not make a single real
+           workspace look like two and push the default answer to "New
+           workspace". */
+        const populated = liveWorkspaceCache.filter(isUserVisibleWorkspace);
         if (populated.length === 1) {
             return populated[0].workspace_id;
         }
@@ -2617,7 +2947,7 @@
                 && liveWorkspaceCache.length > 0,
             onSelect: () => chooseNewWorkspaceDestination()
         });
-        openWorkspaceContextMenu(event, entries);
+        openWorkspaceContextMenu(event, entries, { anchor: event.currentTarget });
     }
 
     async function refreshWorkspaceDestinations() {
@@ -2625,9 +2955,9 @@
             return;
         }
 
-        /* A workspace is only "live" for launch purposes once it has tabs — a
-           just-created empty one is still a valid destination, so both are
-           listed and only the default differs. */
+        /* `/api/workspaces` is already filtered to user-visible workspaces
+           server-side; the same predicate is applied here so a stale cache
+           cannot render a row the server would no longer send. */
         liveWorkspaceCache = await fetchLiveWorkspaces();
         syncLaunchDestinationControl();
 
@@ -2636,8 +2966,7 @@
         if (!list) {
             return;
         }
-        const openWorkspaces = liveWorkspaceCache
-            .filter(workspace => (Number(workspace.group_count) || 0) > 0);
+        const openWorkspaces = liveWorkspaceCache.filter(isUserVisibleWorkspace);
         if (empty) {
             empty.hidden = openWorkspaces.length > 0;
         }
@@ -2664,7 +2993,38 @@
                     });
                 }
             });
-            row.append(name, meta, openButton);
+            /* Close live workspace, from the surface that lists them. Distinct
+               from closing its window (which changes nothing) and from closing
+               its last tab (which forgets the snapshot): this ends the sessions
+               and leaves the workspace restorable. */
+            const closeButton = document.createElement('button');
+            closeButton.type = 'button';
+            closeButton.className = 'ghost-btn';
+            closeButton.textContent = 'Close';
+            closeButton.title = 'Close this workspace — its saved snapshot stays on offer';
+            closeButton.addEventListener('click', async () => {
+                if (!(await confirmCloseLiveWorkspace(workspace))) {
+                    return;
+                }
+                /* Busy is a class, never rewritten markup (guardrail 8). */
+                closeButton.classList.add('is-busy');
+                try {
+                    await closeLiveWorkspace(workspace.workspace_id);
+                    showMessage(`Closed ${workspaceDisplayLabel(workspace, index)}.`, 'success');
+                } catch (error) {
+                    showMessage(
+                        `Could not close the workspace: ${error.message} — try again.`,
+                        'error'
+                    );
+                } finally {
+                    closeButton.classList.remove('is-busy');
+                }
+                await refreshWorkspaceDestinations();
+            });
+            const actions = document.createElement('div');
+            actions.className = 'workspace-live-actions';
+            actions.append(openButton, closeButton);
+            row.append(name, meta, actions);
             list.appendChild(row);
         });
     }
@@ -2700,11 +3060,30 @@
         label.textContent = `Reopen saved… (${restorableWorkspaceSummaries.length})`;
     }
 
+    /* Which rows the user has ticked, by workspace id. The list is re-rendered
+       from scratch after a Forget and after a restore, and a blanket "check
+       everything" there silently re-selected rows the user had deliberately
+       unticked — the next Restore then reopened a workspace they had excluded
+       (a stale `default` slot was the usual victim). Selection belongs to the
+       user, so it is carried across renders; only rows this render has not seen
+       before fall back to the default. */
+    function readWorkspaceRestoreSelection() {
+        const list = document.getElementById('workspaceRestoreList');
+        if (!list) {
+            return new Map();
+        }
+        return new Map(
+            [...list.querySelectorAll('.workspace-restore-checkbox')]
+                .map(checkbox => [checkbox.value, checkbox.checked])
+        );
+    }
+
     function renderWorkspaceRestoreRows() {
         const list = document.getElementById('workspaceRestoreList');
         if (!list) {
             return;
         }
+        const previousSelection = readWorkspaceRestoreSelection();
         list.innerHTML = '';
         restorableWorkspaceSummaries.forEach(summary => {
             const row = document.createElement('div');
@@ -2717,7 +3096,13 @@
             checkbox.className = 'workspace-restore-checkbox';
             checkbox.value = summary.workspace_id;
             checkbox.disabled = Boolean(summary.live_conflict);
-            checkbox.checked = !summary.live_conflict;
+            /* A row that is already open can never be restored, so it is
+               unticked regardless of what the user had chosen for it. */
+            checkbox.checked = !summary.live_conflict && (
+                previousSelection.has(summary.workspace_id)
+                    ? previousSelection.get(summary.workspace_id)
+                    : true
+            );
 
             const text = document.createElement('span');
             text.className = 'workspace-restore-text';
@@ -2739,10 +3124,13 @@
             const forget = document.createElement('button');
             forget.type = 'button';
             forget.className = 'ghost-btn danger-btn';
-            forget.textContent = 'Forget';
-            forget.disabled = Boolean(summary.live_conflict);
+            /* An open workspace cannot have its snapshot forgotten out from
+               under it, but "close it yourself first" is a dead end when the
+               row is right here: it offers the *Close and forget* verb instead
+               (the close-action matrix in web/workspaces.py). */
+            forget.textContent = summary.live_conflict ? 'Close and forget' : 'Forget';
             forget.title = summary.live_conflict
-                ? 'Close this workspace first'
+                ? 'Close this open workspace and delete its saved snapshot'
                 : 'Delete this saved workspace snapshot';
             forget.addEventListener('click', () => forgetWorkspaceRow(summary));
 
@@ -2795,20 +3183,34 @@
     }
 
     async function forgetWorkspaceRow(summary) {
+        const live = Boolean(summary.live_conflict);
+        const name = String(summary.label || 'Workspace');
         const confirmed = await openGenericConfirmModal({
-            title: 'Forget this saved workspace?',
-            copy: `"${String(summary.label || 'Workspace')}" will no longer be offered after a restart.`,
-            note: 'Forget removes this saved workspace snapshot. Your saved sessions are not affected.',
-            confirmLabel: 'Forget',
+            title: live ? 'Close and forget this workspace?' : 'Forget this saved workspace?',
+            copy: live
+                ? `"${name}" is open. Its sessions will be closed and it will no longer`
+                    + ' be offered after a restart.'
+                : `"${name}" will no longer be offered after a restart.`,
+            note: 'This removes the saved workspace snapshot. Your saved sessions are not affected.',
+            confirmLabel: live ? 'Close and forget' : 'Forget',
             danger: true
         });
         if (!confirmed) {
             return;
         }
         try {
-            await forgetSavedWorkspace(summary.workspace_id);
+            if (live) {
+                await closeLiveWorkspace(summary.workspace_id, { forget: true });
+            } else {
+                await forgetSavedWorkspace(summary.workspace_id);
+            }
         } catch (error) {
-            showMessage(error.message, 'error');
+            /* A close that succeeded but could not forget says so, and the row
+               stays so the user can retry just the forget. */
+            showMessage(`${error.message}${error.retryable ? ' — try again' : ''}`, 'error');
+        }
+        if (live) {
+            await refreshWorkspaceDestinations();
         }
         await loadWorkspaceRestoreChooser();
         if (!restorableWorkspaceSummaries.length) {
@@ -2856,7 +3258,14 @@
                 showMessage('Could not restore the selected workspaces.', 'error');
             }
         } catch (error) {
-            showMessage(`Workspace restore failed: ${error.message} — try again.`, 'error');
+            /* A preflight conflict is not a transient failure: nothing was
+               restored and retrying the same selection fails the same way. */
+            showMessage(
+                error.conflict
+                    ? error.message
+                    : `Workspace restore failed: ${error.message} — try again.`,
+                'error'
+            );
         } finally {
             workspaceRestoreInFlight = false;
             panel.classList.remove('busy');
@@ -2878,7 +3287,7 @@
        restore reuses it to replay a group's *current* saved preset. */
     function buildSessionsFromConfig(config, count) {
         const sessions = [];
-        const configuredDefaultDir = getStep2DefaultDirectory(config);
+        const configuredDefaultDir = getStep2DefaultDirectory(config, connectionMode);
         const launchDefaultDir = configuredDefaultDir || (config.connection_mode === 'ssh' ? '/' : '');
 
         (Array.isArray(config.terminals) ? config.terminals : []).slice(0, count).forEach((terminal, index) => {
@@ -2956,7 +3365,12 @@
                     connection_mode: config.connection_mode,
                     layout: config.layout,
                     workspace_layout: config.workspace_layout,
-                    saved_session_id: activeSavedSessionId,
+                    /* The built-in default is a blank form, not a preset. Sending
+                       it as a preset identity made every scratch launch claim the
+                       same group, so the second one replaced the first. */
+                    saved_session_id: activeSavedSessionId === DEFAULT_SESSION_ID
+                        ? ''
+                        : activeSavedSessionId,
                     session_name: sessionName,
                     ...collectWorkspaceDestination(),
                     sessions
@@ -2993,9 +3407,15 @@
             const launchWarnings = Array.isArray(data.warnings)
                 ? data.warnings.filter(item => String(item || '').trim())
                 : [];
+            /* The server has the last word on the name: repeat launches of the
+               same scratch target come back suffixed ("10.0.0.5 (2)"), so quote
+               what was actually opened rather than what was requested. */
+            const launchedName = String(data.group?.name || sessionName || '').trim();
+            const launchIntro = `Launching ${data.count} ${getConnectionModeLabel(config.connection_mode)} terminals`
+                + (launchedName ? ` in "${launchedName}".` : '.');
             const launchMessage = launchWarnings.length
-                ? `Launching ${data.count} ${getConnectionModeLabel(config.connection_mode)} terminals. ${launchWarnings.length === 1 ? launchWarnings[0] : `${launchWarnings.length} startup commands were cleared after preflight failed.`}`
-                : `Launching ${data.count} ${getConnectionModeLabel(config.connection_mode)} terminals.`;
+                ? `${launchIntro} ${launchWarnings.length === 1 ? launchWarnings[0] : `${launchWarnings.length} startup commands were cleared after preflight failed.`}`
+                : launchIntro;
             showMessage(launchMessage, launchWarnings.length ? 'warning' : 'success');
             if (data.launch_target === 'web') {
                 setTimeout(async () => {
@@ -3081,8 +3501,12 @@
     renderLayoutOptions();
     renderModeFields();
     buildTerminalRows(selectedCount, DEFAULT_TERMINALS);
+    restoreLauncherPanelFolds();
     updateTerminalTargetSignature(connectionMode, collectModeInputs());
     loadPersistedConfig(true);
+    /* Primed once so the first caret click opens instantly; every later open
+       re-reads it, so a session saved in another window is offered right away. */
+    refreshConnectionTargets().catch(() => {});
     loadAppSettings().catch(() => {});
     loadVoicePrefs().catch(() => {});
     checkRestorableWorkspace().catch(() => {});
@@ -3101,23 +3525,20 @@
     }
 
     function addTerminalFromButton() {
-        if (selectedCount >= MAX_SESSIONS) {
-            showMessage(`Maximum ${MAX_SESSIONS} terminals allowed.`, 'error');
+        /* COUNT_OPTIONS is sorted ascending, so the next offered count is
+           simply the first entry above the current one — and the ceiling is
+           the ladder's top rather than MAX_SESSIONS. The two are not the same
+           number: MAX_SESSIONS is the backend's per-group limit (16 by
+           default) while the launcher only has layout presets up to 8, so
+           quoting it announced "Maximum 16 terminals allowed" from a button
+           that stops adding at 8. */
+        const nextValid = COUNT_OPTIONS.find(count => count > selectedCount);
+        if (!nextValid) {
+            showMessage(`Maximum ${LAUNCHER_MAX_TERMINALS} terminals allowed.`, 'error');
             return;
         }
         const drafts = collectTerminalDrafts();
-        const nextCount = selectedCount + 1;
-        if (COUNT_OPTIONS.includes(nextCount)) {
-            selectedCount = nextCount;
-        } else {
-            const nextValid = COUNT_OPTIONS.find(n => n > selectedCount);
-            if (nextValid) {
-                selectedCount = nextValid;
-            } else {
-                showMessage(`Maximum ${MAX_SESSIONS} terminals allowed.`, 'error');
-                return;
-            }
-        }
+        selectedCount = nextValid;
         selectedLayout = defaultLayoutForCount(selectedCount);
         layoutChooserOpen = false;
         renderCountOptions();

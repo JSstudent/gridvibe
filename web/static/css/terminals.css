@@ -895,6 +895,18 @@
             border-color: var(--t-accent);
             background: var(--t-btn-hover-bg);
         }
+        /* Launcher button seated at the head of the session tab line: it keeps
+           its own size, so it only needs centring and the leading gutter the
+           tab strip would otherwise own. */
+        .session-bar-launcher-btn {
+            flex: 0 0 auto;
+            align-self: center;
+            justify-content: center;
+            margin: 8px 0 8px 12px;
+        }
+        .session-bar-launcher-btn + .session-tabs {
+            padding-left: 10px;
+        }
         .topbar-toggle-btn {
             width: 38px;
             min-width: 38px;
@@ -1659,6 +1671,14 @@
         body.surface-max .session-tabs {
             gap: 5px;
             padding: 5px 8px 4px;
+        }
+
+        body.surface-max .session-bar-launcher-btn {
+            margin: 4px 0 4px 8px;
+        }
+
+        body.surface-max .session-bar-launcher-btn + .session-tabs {
+            padding-left: 6px;
         }
 
         body.surface-max .topbar-toggle-btn {
@@ -2512,6 +2532,12 @@
             line-height: 1;
         }
 
+        .explorer-tree-chevron-btn svg {
+            display: block;
+            width: 12px;
+            height: 12px;
+        }
+
         .explorer-tree-chevron-btn:hover {
             color: var(--t-accent);
         }
@@ -2588,7 +2614,7 @@
             color: var(--explorer-text);
         }
 
-        /* Already-open flash: the tree's ↗ on a file that already has a tab
+        /* Already-open flash: the tree's open-in-new-tab on a file that already has a tab
            deliberately keeps the viewer where it is, so it pulses the tab that
            was already there instead. Same idea as the locate-in-tree flash. */
         .explorer-tab.explorer-tab-located {
@@ -2970,9 +2996,11 @@
         }
 
         .explorer-open-folder-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             width: 22px;
             height: 22px;
-            font-size: .68rem;
             border-color: var(--explorer-open-folder-border);
             background: var(--explorer-open-folder-bg);
             color: var(--explorer-open-folder-text);
@@ -2987,16 +3015,25 @@
         /* The tree row "open in a new tab" control reuses .explorer-search-btn
            markup but, like its open-folder sibling, takes its surface from the
            theme-aware --explorer-open-folder-* tokens so it tracks light/dark
-           correctly. It carries a distinct ↗ glyph (not the git stage "+") so
-           the two controls never read as the same button. */
+           correctly. It carries a distinct external-link icon (not the folder
+           icon, not the git stage "+") so no two controls read as the same
+           button. */
         .explorer-open-tab-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             width: 22px;
             height: 22px;
-            font-size: .9rem;
-            font-weight: 600;
             border-color: var(--explorer-open-folder-border);
             background: var(--explorer-open-folder-bg);
             color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-open-folder-btn .explorer-btn-icon,
+        .explorer-open-tab-btn .explorer-btn-icon {
+            display: block;
+            width: 13px;
+            height: 13px;
         }
 
         .explorer-open-tab-btn:hover,
@@ -3146,7 +3183,7 @@
             height: 14px;
         }
 
-        /* ── In-app editor controls (docs/text_editor_2026-07-20.md) ── */
+        /* ── In-app editor controls ── */
         .explorer-editor-actions {
             display: inline-flex;
             align-items: center;
@@ -3218,7 +3255,7 @@
             overflow: auto;
             color: var(--explorer-text);
             background: var(--explorer-bg);
-            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-family: var(--source-view-font);
             font-size: var(--explorer-editor-font-size, .78rem);
             line-height: 1.45;
             tab-size: 4;
@@ -3235,11 +3272,11 @@
             outline-offset: -2px;
         }
 
-        /* Line wrapping stays live while editing (like zoom, it only restyles the
-           surface), so its button is not dimmed with the disabled chrome. */
+        /* Line wrapping and the appearance menu stay live while editing (like
+           zoom, they only restyle the surface), so their buttons are not dimmed
+           with the disabled chrome. */
         .explorer-editor.is-editing .explorer-editor-tab,
-        .explorer-editor.is-editing .explorer-download-btn,
-        .explorer-editor.is-editing .explorer-md-appearance-btn {
+        .explorer-editor.is-editing .explorer-download-btn {
             opacity: .5;
         }
 
@@ -3357,6 +3394,74 @@
             display: none;
         }
 
+        /* Fixed (non-scrolling) frame around the Source view: the text scrolls
+           inside .explorer-source-view while the frame stays put, so anything
+           docked in the grid's second column never scrolls away and never
+           overlaps the horizontal scrollbar. Must come after the
+           .explorer-editor-panel rule above — it overrides its overflow. */
+        .explorer-source-frame {
+            /* Fixed overview widths (settled decision 2: not draggable, so
+               there is no per-pane width to persist or restore). `map` gets
+               room for glyph bands; `ruler` only has to hold the marker lane
+               and the viewport box. */
+            --explorer-overview-width: 110px;
+            --explorer-overview-ruler-width: 14px;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            overflow: hidden;
+        }
+
+        /* The source-view overview column (explorer-overview.js): a fixed,
+           non-scrolling survey of the whole file docked in the frame's second
+           grid column. It carries the HEAD change markers in a lane on its
+           left edge and the current viewport as a box, and it acts as the
+           Source panel's scrollbar — click, drag and wheel all drive
+           .explorer-source-view. */
+        .explorer-source-overview {
+            position: relative;
+            min-height: 0;
+            width: var(--explorer-overview-width);
+            overflow: hidden;
+            background: var(--explorer-bar-bg);
+            border-left: 1px solid var(--explorer-row-border);
+            cursor: pointer;
+            user-select: none;
+            /* The drag is pointer-captured; without this a touch drag would be
+               eaten by the browser's own panning. */
+            touch-action: none;
+        }
+
+        .explorer-source-overview[hidden] {
+            display: none;
+        }
+
+        .explorer-source-overview[data-explorer-overview-mode="ruler"] {
+            width: var(--explorer-overview-ruler-width);
+        }
+
+        .explorer-source-overview.is-scrubbing {
+            cursor: grabbing;
+        }
+
+        .explorer-overview-canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Decorative (aria-hidden): the scroll position it shows is reported
+           on the aside as aria-valuenow. Moved by transform only, so a scroll
+           costs no layout and no repaint of the lane beneath it. */
+        .explorer-overview-viewport {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            background: var(--explorer-row-active);
+            opacity: .5;
+            pointer-events: none;
+        }
+
         /* Read-only image viewer. A theme-aware checkerboard makes transparent
            images legible in both light and dark explorer themes; the image is
            fit to the pane and scrolls if it overflows. */
@@ -3430,6 +3535,18 @@
             tab-size: 4;
         }
 
+        /* Font-family axis of the viewer appearance menu: the source-font-*
+           class remaps this property, which the edit textarea, the per-row code
+           cells inside the source panel (see the note on
+           .explorer-source-line-code — the cells cannot just inherit), and both
+           diff renderers read. The diff panel is a *sibling* of the source
+           view, not a descendant, so it has to be its own host for the property
+           and carry the source-font-* class itself. */
+        .explorer-source-view,
+        .explorer-diff-content {
+            --source-view-font: Consolas, Monaco, 'Courier New', monospace;
+        }
+
         .explorer-source-view {
             min-height: 0;
             margin: 0;
@@ -3437,10 +3554,34 @@
             overflow: auto;
             color: var(--explorer-text);
             background: var(--explorer-bg);
-            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-family: var(--source-view-font);
             font-size: var(--explorer-editor-font-size, .78rem);
             line-height: 1.45;
             tab-size: 4;
+            /* The scroller's viewport width in px, written by
+               explorer-overview.js's coalesced sync so the inline change peek
+               can be exactly viewport-wide inside a max-content lines block;
+               the 100% fallback only covers the first frame before the sync
+               runs. */
+            --explorer-source-viewport-width: 100%;
+        }
+
+        /* Source view fonts are monospace only; `default` keeps the stack the
+           view has always used. Font names are not palette. */
+        :is(.explorer-source-view, .explorer-diff-content).source-font-default {
+            --source-view-font: Consolas, Monaco, 'Courier New', monospace;
+        }
+
+        :is(.explorer-source-view, .explorer-diff-content).source-font-cascadia-code {
+            --source-view-font: 'Cascadia Code', 'Cascadia Mono', Consolas, monospace;
+        }
+
+        :is(.explorer-source-view, .explorer-diff-content).source-font-jetbrains-mono {
+            --source-view-font: 'JetBrains Mono', Consolas, monospace;
+        }
+
+        :is(.explorer-source-view, .explorer-diff-content).source-font-courier-new {
+            --source-view-font: 'Courier New', Courier, monospace;
         }
 
         /* Unwrapped source keeps every line on one row and scrolls sideways, so
@@ -3495,16 +3636,228 @@
             box-shadow: inset 0 0 0 2px var(--t-accent);
         }
 
+        /* HEAD change markers (explorer-overview.js): the coloured bar / wedge
+           is itself a button — absolute over the gutter's left edge, outside
+           the row's two grid columns, so neither the grid template nor the
+           Markdown fold button in the number cell is disturbed (a button
+           inside that cell would nest illegally on heading rows). The 4 px
+           bar is the button's own inset shadow at full strength; the rest of
+           its 8 px is invisible hit slop, because a 4 px target is not one. */
+        .explorer-source-line[data-explorer-change] {
+            position: relative;
+        }
+
+        .explorer-change-marker {
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 8px;
+            padding: 0;
+            border: 0;
+            border-radius: 0;
+            background: transparent;
+            box-shadow: inset 4px 0 0 currentColor;
+            cursor: pointer;
+        }
+
+        .explorer-source-line[data-explorer-change="added"] .explorer-change-marker {
+            color: var(--gv-diff-add);
+        }
+
+        .explorer-source-line[data-explorer-change="modified"] .explorer-change-marker {
+            color: var(--gv-diff-modified);
+        }
+
+        .explorer-source-line[data-explorer-change="deleted"] .explorer-change-marker {
+            color: var(--gv-diff-delete);
+        }
+
+        /* Hover and keyboard focus tint the hit slop; the 4 px bar itself is
+           always at full strength, so the marking looks exactly as it did
+           until the pointer arrives. */
+        .explorer-change-marker:hover,
+        .explorer-change-marker:focus-visible {
+            background: color-mix(in srgb, currentColor 24%, transparent);
+            outline: none;
+        }
+
+        /* The deletion wedge sits on the boundary where the removed lines
+           used to be: pinned to the top edge of the following row and sized
+           to the triangle, which the button's ::before paints. */
+        .explorer-change-marker[data-explorer-change-marker-kind="deleted"] {
+            top: 0;
+            bottom: auto;
+            height: 10px;
+            margin-top: -5px;
+            box-shadow: none;
+        }
+
+        .explorer-change-marker[data-explorer-change-marker-kind="deleted"]::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 0;
+            height: 0;
+            border-top: 5px solid transparent;
+            border-bottom: 5px solid transparent;
+            border-left: 6px solid currentColor;
+        }
+
+        /* A deletion at end of file has no following row to anchor above, so
+           the wedge hangs off the bottom of the last surviving row instead. */
+        .explorer-source-line[data-explorer-change="deleted"].explorer-source-change-after
+        .explorer-change-marker {
+            top: auto;
+            bottom: 0;
+            margin-top: 0;
+            margin-bottom: -5px;
+        }
+
+        /* The change peek (explorer-overview.js): a compact unified diff of
+           one block, inserted inline directly under the change it describes.
+           Sticky at the scroller's left edge and exactly the viewport's width
+           — never the max-content width of the lines block — so unwrapped
+           source scrolled sideways keeps it pinned in view. */
+        .explorer-change-peek {
+            position: sticky;
+            left: 0;
+            width: var(--explorer-source-viewport-width);
+            background: var(--explorer-bg);
+            border-top: 1px solid var(--explorer-row-border);
+            border-bottom: 1px solid var(--explorer-row-border);
+        }
+
+        .explorer-change-peek-head {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 3px 10px;
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-bottom: 1px solid var(--explorer-row-border);
+        }
+
+        .explorer-change-peek-stat {
+            white-space: nowrap;
+            font-weight: 600;
+        }
+
+        .explorer-change-peek-range {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .explorer-change-peek-close {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px;
+            height: 20px;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            color: var(--explorer-muted);
+            cursor: pointer;
+        }
+
+        .explorer-change-peek-close:hover,
+        .explorer-change-peek-close:focus-visible {
+            color: var(--explorer-text);
+            outline: none;
+        }
+
+        .explorer-change-peek-close svg {
+            width: 12px;
+            height: 12px;
+        }
+
+        .explorer-change-peek-body {
+            padding: 2px 0;
+        }
+
+        /* Old (HEAD) lines stack above new (worktree) lines, tinted from the
+           same two tokens the Diff panel's cells use. */
+        .explorer-change-peek-line {
+            display: grid;
+            grid-template-columns: minmax(42px, auto) minmax(0, 1fr);
+            min-height: 1.45em;
+        }
+
+        .explorer-change-peek-line.old {
+            background: var(--gv-diff-delete-bg);
+        }
+
+        .explorer-change-peek-line.new {
+            background: var(--gv-diff-add-bg);
+        }
+
+        .explorer-change-peek-number {
+            padding: 0 9px;
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-right: 1px solid var(--explorer-row-border);
+            text-align: right;
+            user-select: none;
+        }
+
+        /* Same <code>-vs-UA-stylesheet restatement as
+           .explorer-source-line-code above: the source font must be restated
+           or the browser's generic monospace wins every peek line. */
+        .explorer-change-peek-code {
+            min-width: 0;
+            padding: 0 14px;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            font-family: var(--source-view-font);
+        }
+
+        .explorer-change-peek-more {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 3px 10px;
+            color: var(--explorer-muted);
+            border-top: 1px solid var(--explorer-row-border);
+        }
+
+        .explorer-change-peek-diff {
+            padding: 0;
+            border: 0;
+            background: transparent;
+            color: var(--t-accent);
+            font: inherit;
+            cursor: pointer;
+        }
+
         .explorer-source-chevron {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             width: 10px;
-            text-align: center;
             color: var(--t-accent);
         }
 
+        .explorer-source-chevron svg {
+            display: block;
+            width: 10px;
+            height: 10px;
+        }
+
+        /* Each row's code cell is a <code>, and the UA stylesheet's
+           `code { font-family: monospace }` matches it directly — which beats
+           the value inherited from .explorer-source-view, so the source font
+           has to be restated here or only the number gutter follows it. */
         .explorer-source-line-code {
             min-width: 0;
             padding: 0 14px;
             white-space: pre;
+            font-family: var(--source-view-font);
         }
 
         /* Wrapped rows grow downward; the number gutter is a stretched grid cell
@@ -3640,8 +3993,7 @@
         }
 
         .explorer-diff-file-path,
-        .explorer-diff-commit-subject,
-        .explorer-diff-commit-file-path {
+        .explorer-diff-commit-subject {
             min-width: 0;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -3665,8 +4017,16 @@
         }
 
         .explorer-diff-commit-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             color: var(--explorer-muted);
-            text-align: center;
+        }
+
+        .explorer-diff-commit-toggle svg {
+            display: block;
+            width: 12px;
+            height: 12px;
         }
 
         .explorer-diff-commit-hash {
@@ -3679,9 +4039,16 @@
             padding: 1px 0 4px 28px;
         }
 
+        /* The Staged/Changes lists are top-level sections, not rows nested
+           under a commit, so they drop the graph indent and start flush with
+           their section title. */
+        .explorer-diff-commit-files.explorer-git-change-list {
+            padding-left: 0;
+        }
+
         .explorer-diff-commit-file {
             display: grid;
-            grid-template-columns: 22px 18px minmax(0, 1fr) auto;
+            grid-template-columns: 18px minmax(0, 1fr) auto auto;
             align-items: center;
             gap: 6px;
             padding: 4px 10px 4px 7px;
@@ -3704,6 +4071,12 @@
         }
 
         button.explorer-diff-commit-file-path {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            min-width: 0;
+            overflow: hidden;
+            white-space: nowrap;
             border: 0;
             background: transparent;
             color: inherit;
@@ -3716,6 +4089,27 @@
         button.explorer-diff-commit-file-path:focus {
             color: var(--t-accent);
             outline: none;
+        }
+
+        /* The directory carries the outsized shrink factor so it is what gets
+           cut off first; the file name only truncates once the directory has
+           collapsed entirely. */
+        .explorer-diff-commit-file-name {
+            flex: 0 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .explorer-diff-commit-file-dir {
+            flex: 0 999 auto;
+            min-width: 0;
+            overflow: hidden;
+            color: var(--explorer-muted);
+            font-size: .92em;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .explorer-git-repo-bar {
@@ -3796,7 +4190,7 @@
             display: grid;
             align-content: start;
             color: var(--explorer-text);
-            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-family: var(--source-view-font);
             font-size: var(--explorer-editor-font-size, .78rem);
             line-height: 1.45;
         }
@@ -3839,11 +4233,11 @@
         }
 
         .explorer-diff-cell.add {
-            background: rgba(34, 197, 94, .18);
+            background: var(--gv-diff-add-bg);
         }
 
         .explorer-diff-cell.delete {
-            background: rgba(239, 68, 68, .18);
+            background: var(--gv-diff-delete-bg);
         }
 
         .explorer-diff-cell.empty {
@@ -4028,10 +4422,14 @@
             color: #b91c1c;
         }
 
+        /* One source for the find-match hue (--gv-match-rgb in tokens.css):
+           the search mark paints it solid, the occurrence tint below paints it
+           translucent. Spelling the same colour two ways — hex here, rgba()
+           there — is what let this block drift the last time it was touched. */
         .explorer-search-match {
             border-radius: 2px;
             padding: 0 1px;
-            background: #facc15;
+            background: rgb(var(--gv-match-rgb));
             color: #111827;
         }
 
@@ -4048,11 +4446,21 @@
            signal, and weaker than the native selection so the word the reader
            actually selected stays the anchor. */
         ::highlight(explorer-occurrence) {
-            background-color: rgba(250, 204, 21, .34);
+            background-color: rgba(var(--gv-match-rgb), .34);
         }
 
         .explorer-pane[data-explorer-theme="dark"] ::highlight(explorer-occurrence) {
-            background-color: rgba(250, 204, 21, .24);
+            background-color: rgba(var(--gv-match-rgb), .24);
+        }
+
+        /* The matched string of an opened repository-search hit, painted the
+           same hue as the find mark above so the text the reader searched for
+           reads the same in the results panel and in the file. Solid, unlike
+           the occurrence tint, because this one is the exact spot the click
+           asked for. */
+        ::highlight(explorer-search-hit) {
+            background-color: rgb(var(--gv-match-rgb));
+            color: #111827;
         }
 
         .explorer-pane[data-explorer-theme="dark"] .explorer-code-keyword {
@@ -4089,8 +4497,8 @@
             color: #fca5a5;
         }
 
-        /* ── Highlight.js token palette (Phase 1, docs/source_diff_analysis.md
-           §5.2). Explorer-scoped so the pinned highlighter's classes track the
+        /* ── Highlight.js token palette.
+           Explorer-scoped so the pinned highlighter's classes track the
            explorer light/dark theme without leaking into the rest of the page.
            Reuses the same hues as the handwritten-lexer classes above, plus
            richer categories (function/type/attribute/tag/decorator). The
@@ -4220,7 +4628,7 @@
             color: #fca5a5;
         }
 
-        /* ── Diff2Html host (Phase 2, docs/source_diff_analysis.md §5.3).
+        /* ── Diff2Html host.
            GridVibe overrides live here rather than in the vendored CSS so the
            pinned file can be replaced verbatim on upgrade. Font size tracks the
            per-tab editor zoom. The two sides stay fixed at equal widths while
@@ -4233,11 +4641,13 @@
             width: 100%;
         }
 
-        /* Diff2Html pins its table to 13px. Let the table inherit the host's
-           per-tab zoom so Source, Preview, and Diff respond to the same
-           controls and restored font-size setting. */
+        /* Diff2Html pins its table to 13px and to its own Menlo stack. Let the
+           table inherit the host's per-tab zoom and the viewer's source font so
+           Source, Preview, and Diff respond to the same controls and restored
+           settings. */
         .explorer-diff2html .d2h-diff-table {
             font-size: inherit;
+            font-family: var(--source-view-font);
         }
 
         .explorer-diff2html .d2h-wrapper,
@@ -4296,6 +4706,29 @@
             /* Do not preserve the template's formatting whitespace between the
                prefix/code spans; only the actual code span wraps below. */
             white-space: nowrap;
+        }
+
+        /* Each side is its own table, so a row that cannot wrap sets that
+           side's minimum width and pushes every row below it past the pane,
+           where the overflow rule above clips it with no scrollbar left to
+           recover it. The block-header row was that row: Git puts the
+           enclosing section (function, class, statement) in the `@@ ... @@`
+           header, Diff2Html renders it on the left side only (the right side
+           gets a blank placeholder), and its text sits directly in the line
+           div above with no .d2h-code-line-ctn to wrap inside — so the rule
+           above kept it on one line and long headers cut the left column off
+           while the right one wrapped normally. Letting the header wrap is the
+           whole fix; do NOT reach for `table-layout: fixed` on
+           .d2h-diff-table as a belt-and-braces guard. The number cell's own
+           `max-width: 4em` keeps its box at 4em while fixed layout hands the
+           column an equal half of the side, so the gutter renders 4em wide
+           with the rest of its column left as a blank gap before the code
+           (docs/images/diff_empty_space.png). */
+        .explorer-diff-content.wrap-lines
+        .explorer-diff2html
+        .d2h-info .d2h-code-side-line {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
         }
 
         .explorer-diff-content.wrap-lines .explorer-diff2html .d2h-code-line-ctn {
@@ -4533,10 +4966,6 @@
 
         .explorer-markdown-preview.md-font-serif {
             --md-preview-font: Georgia, 'Times New Roman', 'Iowan Old Style', serif;
-        }
-
-        .explorer-markdown-preview.md-font-consolas {
-            --md-preview-font: Consolas, Monaco, 'Courier New', monospace;
         }
 
         .explorer-markdown-preview.md-font-cascadia-code {
@@ -4810,7 +5239,7 @@
             --md-callout-bg: var(--explorer-callout-caution-bg);
         }
 
-        /* Markdown appearance popover (ISSUE-2026-030). */
+        /* Viewer appearance popover (ISSUE-2026-030). */
         #explorer-md-menu {
             /* Stroke-style check glyph (guardrail 7) tinted via currentColor. */
             --explorer-md-check-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E");

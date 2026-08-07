@@ -4,6 +4,47 @@
    names onto these tokens (--accent: var(--gv-accent),
    --t-accent: var(--gv-accent)) instead of redefining colors locally.
    Loaded before launcher.css / terminals.css on both pages. */
+/* Vendored coding fonts (web/static/vendor/fonts, OFL-1.1), served locally
+   like every other vendored asset so GridVibe works offline. Declared here
+   because both pages load tokens.css: the explorer font picker and the App
+   Settings terminal-font list otherwise offered families that are not
+   installed on a stock Windows box, and both stacks fall back to Consolas —
+   so picking JetBrains Mono or Cascadia Code changed nothing at all. Latin
+   subset only; any glyph a face lacks falls through to the next family in the
+   stack. `swap` keeps text visible while loading, and italics are synthesized
+   from the regular face. */
+@font-face {
+    font-family: 'JetBrains Mono';
+    src: url('../vendor/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'JetBrains Mono';
+    src: url('../vendor/fonts/jetbrains-mono-latin-700-normal.woff2') format('woff2');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'Cascadia Code';
+    src: url('../vendor/fonts/cascadia-code-latin-400-normal.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'Cascadia Code';
+    src: url('../vendor/fonts/cascadia-code-latin-700-normal.woff2') format('woff2');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+
 :root {
     --gv-bg-app: #0d0d0d;
     --gv-accent: #00d9ff;
@@ -30,6 +71,24 @@
     --gv-dialog-placeholder: #64748b;
     --gv-dialog-border: rgba(148, 163, 184, 0.16);
     --gv-dialog-shadow: 0 24px 60px rgba(4, 8, 20, 0.52);
+    /* Find-match hue, as bare channels so the same colour can be painted
+       solid (the Source view's search mark) and translucent (the selected-
+       word occurrence tint). It lives on :root rather than on .explorer-pane
+       because ::highlight() ranges resolve custom properties through the
+       inheritance chain, and only a root-level declaration is reliably
+       visible to an unattached ::highlight() rule. */
+    --gv-match-rgb: 250, 204, 21;
+    /* Change-marker hues (diff gutters, the source-view change marks). Kept
+       opaque so both the gutter bars and the deletion wedge can use them
+       directly; the green/red match the existing diff-cell bases. */
+    --gv-diff-add: #22c55e;
+    --gv-diff-modified: #58a6ff;
+    --gv-diff-delete: #ef4444;
+    /* Translucent washes of the same hues for changed-line backgrounds — the
+       Diff panel's cells and the source-view change peek share one palette
+       by construction. */
+    --gv-diff-add-bg: rgba(34, 197, 94, .18);
+    --gv-diff-delete-bg: rgba(239, 68, 68, .18);
 }
 
 [data-theme="light"] {
@@ -51,4 +110,9 @@
     --gv-dialog-placeholder: #6b7280;
     --gv-dialog-border: rgba(75, 85, 99, 0.28);
     --gv-dialog-shadow: 0 18px 46px rgba(15, 23, 42, 0.13);
+    --gv-diff-add: #047857;
+    --gv-diff-modified: #0969da;
+    --gv-diff-delete: #dc2626;
+    --gv-diff-add-bg: rgba(34, 197, 94, .18);
+    --gv-diff-delete-bg: rgba(239, 68, 68, .18);
 }

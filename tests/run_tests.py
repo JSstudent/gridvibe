@@ -6,6 +6,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Discovery may import the test modules as top-level modules, so the package
+# bootstrap that redirects runtime_state.json away from the developer's real
+# file is imported explicitly here — before any test module imports `web`.
+import tests  # noqa: E402,F401
+
 
 def _pretty_case_name(test_case) -> str:
     class_name = test_case.__class__.__name__

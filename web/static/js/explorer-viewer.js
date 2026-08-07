@@ -1,6 +1,6 @@
     /* ─────────────────────────────────────────────
-       Explorer viewer — extracted from terminals.js per
-       docs/terminals_js_split_plan_2026-07-23.md (Phase 1, move-only).
+       Explorer viewer — extracted from terminals.js by the move-only second
+       phase of the terminals.js split.
        File-type classifier, syntax highlight, Git diff, source/markdown
        render, image/mermaid viewer, tabbed viewer, breadcrumb, per-tab
        view/scroll state and saved-tab persistence.
@@ -185,7 +185,7 @@
         powershell: ['Get-ChildItem', 'Get-Content', 'New-Item', 'Remove-Item', 'Select-Object', 'Set-Content', 'Where-Object', 'Write-Host']
     });
 
-    /* Phase 1 (docs/source_diff_analysis.md): the explorer's own normalized
+    /* The explorer's own normalized
        language name → the Highlight.js grammar name in the pinned custom build
        (web/static/vendor/highlight.min.js). Languages absent here — config,
        dotenv, gitignore, jsonl, log, markdown, text — keep the handwritten
@@ -672,7 +672,7 @@
         return output;
     }
 
-    /* Phase 1 (docs/source_diff_analysis.md §5.2): tokenize the whole document
+    /* Tokenize the whole document
        once with Highlight.js so multiline constructs (block comments, triple-
        quoted / template strings, embedded languages) keep their state across
        newlines — the per-line highlightExplorerCode lexer above cannot. Returns
@@ -759,9 +759,28 @@
         return lines;
     }
 
+    /* Whole-document tokenization is the expensive part of a Source re-render,
+       and re-renders that leave the content untouched are frequent: every
+       search keystroke, wrap toggle and Markdown fold rebuilds the rows. Cache
+       the token map on the pane, keyed by content + normalized language, so
+       those re-renders reuse it; a real content change (file refresh, tab
+       switch, editor save) misses the key and re-tokenizes. Cached `null`
+       (unsupported language, oversized file, Highlight.js failure) is a valid
+       hit — it must not trigger a re-tokenize on every render either. */
+    function explorerHighlightDocumentLinesCached(pane, content, normalizedLanguage) {
+        const cache = pane ? pane._explorerHighlightCache : null;
+        if (cache && cache.content === content && cache.language === normalizedLanguage) {
+            return cache.lines;
+        }
+        const lines = explorerHighlightDocumentLines(content, normalizedLanguage);
+        if (pane) {
+            pane._explorerHighlightCache = { content, language: normalizedLanguage, lines };
+        }
+        return lines;
+    }
+
     /* Render one line's worth of Highlight.js runs, reusing the shared
-       escape+search-mark helpers so search marks coexist with syntax spans
-       (docs/source_diff_analysis.md §5.4). */
+       escape+search-mark helpers so search marks coexist with syntax spans. */
     function explorerRenderHighlightedRuns(runs, searchRanges = []) {
         if (!runs || !runs.length) {
             return '';
@@ -1004,6 +1023,22 @@
         return ['modified', 'deleted', 'renamed'].includes(status || '');
     }
 
+    function explorerGitFileLabelHtml(path, fallbackName) {
+        /* Change rows lead with the file name and trail the muted directory, so
+           the file being changed stays legible at the sidebar's narrow width.
+           The directory is the part allowed to ellipsis away. */
+        const cleaned = String(path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+        const slashIndex = cleaned.lastIndexOf('/');
+        const name = (slashIndex >= 0 ? cleaned.slice(slashIndex + 1) : cleaned)
+            || fallbackName
+            || 'Changed file';
+        const directory = slashIndex > 0 ? cleaned.slice(0, slashIndex) : '';
+        const directoryHtml = directory
+            ? `<span class="explorer-diff-commit-file-dir">${escHtml(directory)}</span>`
+            : '';
+        return `<span class="explorer-diff-commit-file-name">${escHtml(name)}</span>${directoryHtml}`;
+    }
+
     function renderExplorerGitFileRows(index, files, options = {}) {
         const entries = Array.isArray(files) ? files : [];
         if (!entries.length) {
@@ -1032,15 +1067,21 @@
             const revertButton = (action === 'stage' && explorerGitCanRevert(status))
                 ? `<button type="button" class="explorer-search-btn explorer-git-revert-btn" data-explorer-git-revert="${escHtml(path)}" data-explorer-git-revert-status="${escHtml(status)}" title="${discardLabel}" aria-label="${discardLabel}">${EXPLORER_GIT_REVERT_ICON}</button>`
                 : '';
+            /* Download reads the worktree, so it is only offered where the
+               worktree copy is the file the row names: not for deleted files
+               and not for history rows (those show a past commit's version). */
+            const downloadPath = (path && !commitHash && status !== 'deleted')
+                ? ` data-explorer-download-path="${escHtml(path)}"`
+                : '';
             return `
-                <div class="explorer-diff-commit-file" title="${escHtml(path)}" data-explorer-copy-path="${escHtml(path)}">
-                    ${explorerDiffSidebarStatusHtml(file.git)}
+                <div class="explorer-diff-commit-file" title="${escHtml(path)}" data-explorer-copy-path="${escHtml(path)}"${downloadPath}>
                     ${explorerFileTypeIconHtml(path)}
-                    <button type="button" class="explorer-diff-commit-file-path" ${pathAction}>${escHtml(path || file.name || 'Changed file')}</button>
+                    <button type="button" class="explorer-diff-commit-file-path" ${pathAction}>${explorerGitFileLabelHtml(path, file.name)}</button>
+                    ${explorerDiffSidebarStatusHtml(file.git)}
                     <span class="explorer-diff-commit-file-actions">
                         ${revertButton}
                         ${actionButton}
-                        <button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">↪</button>
+                        <button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">${EXPLORER_OPEN_FOLDER_ICON}</button>
                     </span>
                 </div>
             `;
@@ -1248,6 +1289,18 @@
         if (relativePath) {
             pathItems.push({ label: 'Copy relative path', action: () => _copyText(relativePath) });
         }
+        /* Downloading is a read, so it belongs with the copy entries. It is
+           offered per row (not only for the open file) because a format the
+           viewer can't render never reaches editor mode and its toolbar
+           download button. */
+        const downloadPath = row?.dataset.explorerDownloadPath || '';
+        if (downloadPath) {
+            pathItems.push({
+                label: 'Download file',
+                title: `Download ${downloadPath}`,
+                action: () => downloadExplorerFile(index, { path: downloadPath })
+            });
+        }
         if (beforePath.length) {
             pathItems[0].separatorBefore = true;
         }
@@ -1323,7 +1376,7 @@
                 return `
                     <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
                         <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
-                        <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
+                        <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</span>
                         <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${escHtml(commit.subject || commit.line || '')}</span>
                     </button>
                     ${expanded ? `<div class="explorer-diff-commit-files">${renderExplorerGitFileRows(index, commit.files, { emptyText: 'No files recorded for this commit.', commitHash: hash })}</div>` : ''}
@@ -1340,7 +1393,7 @@
             </div>
             <div class="explorer-diff-sidebar-section">
                 <div class="explorer-diff-sidebar-title">Staged Changes</div>
-                <div class="explorer-diff-commit-files">
+                <div class="explorer-diff-commit-files explorer-git-change-list">
                     ${renderExplorerGitFileRows(index, staged, { emptyText: 'No staged changes.', action: 'unstage' })}
                 </div>
                 <div class="explorer-git-commit-box">
@@ -1356,7 +1409,7 @@
                         <button type="button" class="explorer-search-btn explorer-git-stage-btn explorer-git-stage-all-btn" data-explorer-git-stage-all ${(busy || !unstaged.length) ? 'disabled' : ''} title="Stage all changes" aria-label="Stage all changes">+</button>
                     </span>
                 </div>
-                <div class="explorer-diff-commit-files">
+                <div class="explorer-diff-commit-files explorer-git-change-list">
                     ${renderExplorerGitFileRows(index, unstaged, { emptyText: 'No unstaged changes.', action: 'stage' })}
                 </div>
             </div>
@@ -1894,15 +1947,15 @@
                 title="${expanded ? 'Collapse folder' : 'Expand folder'}"
                 aria-label="${expanded ? 'Collapse' : 'Expand'} ${escHtml(entry.name || path)}"
                 ${indent}
-            >${expanded ? '▾' : '▸'}</button>`
+            >${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</button>`
             : `<span class="explorer-tree-chevron" aria-hidden="true" ${indent}></span>`;
         const badge = explorerGitStatusLabel(entry.git) ? explorerGitBadgeHtml(entry.git) : '';
         const openFolder = isDirectory
-            ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">↪</button>`
+            ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">${EXPLORER_OPEN_FOLDER_ICON}</button>`
             : '';
         const openTab = isDirectory
             ? ''
-            : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">↗</button>`;
+            : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">${EXPLORER_OPEN_TAB_ICON}</button>`;
 
         return `
             <div
@@ -1912,6 +1965,7 @@
                 data-explorer-context-kind="${escHtml(entry.entry_kind || '')}"
                 data-explorer-context-revision="${escHtml(entry.revision || '')}"
                 data-explorer-context-surface="tree"
+                ${isDirectory ? '' : `data-explorer-download-path="${escHtml(path)}"`}
             >
                 ${chevron}
                 <button type="button" class="explorer-tree-main" ${action} title="${escHtml(path)}">
@@ -2682,7 +2736,7 @@
         performExplorerGitAction(index, 'publish', {});
     }
 
-    /* Phase 2 (docs/source_diff_analysis.md §5.3): Diff2HtmlUI configuration.
+    /* Diff2HtmlUI configuration.
        `matching: 'words'` + `diffStyle: 'char'` give character-level intraline
        emphasis and LCS-based line matching instead of the fallback renderer's
        FIFO pairing; the comparison limits are explicit so pathological diffs
@@ -2697,7 +2751,14 @@
             highlight: true,
             synchronisedScroll: false,
             matchingMaxComparisons: 1500,
-            maxLineLengthHighlight: 2000
+            /* Diff2Html's own default. A line longer than this gets a plain
+               red/green block and no intraline ins/del at all, so the previous
+               2000 silently dropped emphasis on generated SQL, minified assets,
+               and long single-statement lines. The char diff is O(n·d) in the
+               edit distance, which stays cheap for the usual small edit inside
+               a long line; the bounded diff payload (256 KiB / 4,000 lines)
+               caps how many pairs can reach it. */
+            maxLineLengthHighlight: 10000
         };
     }
 
@@ -3380,8 +3441,11 @@
             const host = document.createElement('div');
             host.className = 'explorer-diff2html';
             const ui = new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs);
+            // draw() already runs highlightCode() because the config sets
+            // `highlight: true`. Calling it a second time re-highlights markup
+            // that is already highlighted, which nests a duplicate hljs span
+            // inside every existing one.
             ui.draw();
-            ui.highlightCode();
             if (!host.querySelector('.d2h-diff-table, .d2h-code-line, .d2h-file-wrapper')) {
                 return false;
             }
@@ -3629,8 +3693,8 @@
             pane._explorerDiffLoaded = true;
             pane._explorerDiffCacheKey = cacheKey;
             pane._explorerDiffContent = data.diff || '';
-            // Phase 2 (docs/source_diff_analysis.md §5.3): the backend already
-            // bounds diffs to 256 KiB / 4,000 lines and reports truncation; keep
+            // The backend already bounds diffs to 256 KiB / 4,000 lines and
+            // reports truncation; keep
             // the flag so the rendered patch is never mistaken for the whole change.
             pane._explorerDiffTruncated = Boolean(data.truncated);
             renderExplorerDiff(index);
@@ -3843,19 +3907,33 @@
         applyExplorerEditorFontSize(index);
     }
 
-    // ── Markdown preview appearance (ISSUE-2026-030) ─────────────────────────
-    // Two orthogonal axes: a reading-surface preset and a font family. Both are
-    // bounded allowlists persisted in localStorage and applied idempotently to
-    // every open preview via preset classes + CSS custom properties (defined
-    // from tokens in terminals.css), so no palette literals live in JS.
+    // ── Viewer appearance (ISSUE-2026-030) ───────────────────────────────────
+    // Three orthogonal axes: the preview's reading-surface preset, the preview
+    // font family, and the Source view's font family. All are bounded
+    // allowlists persisted in localStorage (and carried by saved sessions) and
+    // applied idempotently to every open panel via classes + CSS custom
+    // properties (defined from tokens in terminals.css), so no palette literals
+    // live in JS.
     const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast', 'vscode'];
     const EXPLORER_MD_FONTS = [
-        'system', 'serif', 'consolas', 'cascadia-code', 'jetbrains-mono', 'courier-new'
+        'system', 'serif', 'cascadia-code', 'jetbrains-mono', 'courier-new'
     ];
+    /* Source is code: monospace only, with `default` keeping the stack the view
+       has always used. */
+    const EXPLORER_SOURCE_FONTS = [
+        'default', 'cascadia-code', 'jetbrains-mono', 'courier-new'
+    ];
+    /* Retired options mapped onto their nearest survivor, so a stored (or saved
+       session) value keeps its intent instead of snapping back to the default.
+       `consolas` was dropped when it rendered identically to JetBrains Mono —
+       that stack fell back to it before the faces were vendored (tokens.css). */
+    const EXPLORER_FONT_ALIASES = { consolas: 'jetbrains-mono' };
     const EXPLORER_MD_PRESET_DEFAULT = 'default';
     const EXPLORER_MD_FONT_DEFAULT = 'system';
+    const EXPLORER_SOURCE_FONT_DEFAULT = 'default';
     const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';
     const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';
+    const EXPLORER_SOURCE_FONT_KEY = 'gridvibe.sourceViewFont';
     /* Line wrapping is per explorer tab, like the editor zoom above: each tab
        record carries its own source/preview/diff flags instead of one
        workspace-global preference, so every tab keeps the wrapping it was left
@@ -3873,7 +3951,12 @@
     const EXPLORER_MD_FONT_LABELS = {
         system: 'System',
         serif: 'Serif',
-        consolas: 'Consolas',
+        'cascadia-code': 'Cascadia Code',
+        'jetbrains-mono': 'JetBrains Mono',
+        'courier-new': 'Courier New',
+    };
+    const EXPLORER_SOURCE_FONT_LABELS = {
+        default: 'Default',
         'cascadia-code': 'Cascadia Code',
         'jetbrains-mono': 'JetBrains Mono',
         'courier-new': 'Courier New',
@@ -3994,6 +4077,12 @@
         applyExplorerLineWrapState(index);
     }
 
+    function normalizeExplorerAppearanceChoice(value, allowed, fallback) {
+        const text = String(value || '');
+        const aliased = EXPLORER_FONT_ALIASES[text] || text;
+        return allowed.includes(aliased) ? aliased : fallback;
+    }
+
     function readExplorerMarkdownPref(key, allowed, fallback) {
         let stored = '';
         try {
@@ -4001,7 +4090,7 @@
         } catch (err) {
             stored = '';
         }
-        return allowed.includes(stored) ? stored : fallback;
+        return normalizeExplorerAppearanceChoice(stored, allowed, fallback);
     }
 
     function explorerMarkdownAppearance() {
@@ -4011,6 +4100,9 @@
             ),
             font: readExplorerMarkdownPref(
                 EXPLORER_MD_FONT_KEY, EXPLORER_MD_FONTS, EXPLORER_MD_FONT_DEFAULT
+            ),
+            sourceFont: readExplorerMarkdownPref(
+                EXPLORER_SOURCE_FONT_KEY, EXPLORER_SOURCE_FONTS, EXPLORER_SOURCE_FONT_DEFAULT
             ),
         };
     }
@@ -4028,22 +4120,48 @@
         preview.dataset.mdFont = font;
     }
 
+    /* Same shape as the preview above: the class carries a `--source-view-font`
+       custom property that the edit textarea, the per-row code cells inside the
+       panel, and the diff renderers all read. Applied to the source view and to
+       the diff panel separately — they are siblings, so the diff panel cannot
+       inherit the property from the source view. */
+    function applyExplorerSourceFontToElement(view, appearance) {
+        if (!view) {
+            return;
+        }
+        const { sourceFont } = appearance || explorerMarkdownAppearance();
+        EXPLORER_SOURCE_FONTS.forEach(name => view.classList.remove(`source-font-${name}`));
+        view.classList.add(`source-font-${sourceFont}`);
+        view.dataset.sourceFont = sourceFont;
+    }
+
     function applyExplorerMarkdownAppearanceToAll() {
         const appearance = explorerMarkdownAppearance();
         document.querySelectorAll('.explorer-markdown-preview').forEach(preview => {
             applyExplorerMarkdownAppearanceToElement(preview, appearance);
+        });
+        document.querySelectorAll('.explorer-source-view, .explorer-diff-content').forEach(view => {
+            applyExplorerSourceFontToElement(view, appearance);
         });
     }
 
     function setExplorerMarkdownAppearance(patch) {
         const current = explorerMarkdownAppearance();
         const next = {
-            preset: EXPLORER_MD_PRESETS.includes(patch?.preset) ? patch.preset : current.preset,
-            font: EXPLORER_MD_FONTS.includes(patch?.font) ? patch.font : current.font,
+            preset: normalizeExplorerAppearanceChoice(
+                patch?.preset, EXPLORER_MD_PRESETS, current.preset
+            ),
+            font: normalizeExplorerAppearanceChoice(
+                patch?.font, EXPLORER_MD_FONTS, current.font
+            ),
+            sourceFont: normalizeExplorerAppearanceChoice(
+                patch?.sourceFont, EXPLORER_SOURCE_FONTS, current.sourceFont
+            ),
         };
         try {
             window.localStorage.setItem(EXPLORER_MD_PRESET_KEY, next.preset);
             window.localStorage.setItem(EXPLORER_MD_FONT_KEY, next.font);
+            window.localStorage.setItem(EXPLORER_SOURCE_FONT_KEY, next.sourceFont);
         } catch (err) {
             // Non-fatal: appearance still applies to the live DOM this session.
         }
@@ -4107,6 +4225,12 @@
         menu.querySelectorAll('[data-md-font]').forEach(button => {
             button.setAttribute('aria-checked', button.dataset.mdFont === appearance.font ? 'true' : 'false');
         });
+        menu.querySelectorAll('[data-source-font]').forEach(button => {
+            button.setAttribute(
+                'aria-checked',
+                button.dataset.sourceFont === appearance.sourceFont ? 'true' : 'false'
+            );
+        });
     }
 
     function buildExplorerMarkdownMenuGroup(labelText, options, activeValue, datasetKey, onSelect) {
@@ -4133,29 +4257,42 @@
         return group;
     }
 
-    function showExplorerMarkdownAppearanceMenu(anchor) {
+    function showExplorerMarkdownAppearanceMenu(anchor, options = {}) {
         dismissExplorerMarkdownAppearanceMenu();
         if (!anchor) {
             return;
         }
+        /* The preview groups are dropped for a file with no preview: the
+           settings are workspace-global, so offering them here would be
+           offering controls that change nothing the pane can show. */
+        const includeMarkdown = options.includeMarkdown !== false;
         const appearance = explorerMarkdownAppearance();
         const menu = document.createElement('div');
         menu.id = 'explorer-md-menu';
         menu.setAttribute('role', 'menu');
-        menu.setAttribute('aria-label', 'Markdown preview appearance');
+        menu.setAttribute('aria-label', 'Viewer appearance');
+        if (includeMarkdown) {
+            menu.appendChild(buildExplorerMarkdownMenuGroup(
+                'Preview theme',
+                EXPLORER_MD_PRESETS.map(value => ({ value, label: EXPLORER_MD_PRESET_LABELS[value] })),
+                appearance.preset,
+                'mdPreset',
+                value => setExplorerMarkdownAppearance({ preset: value })
+            ));
+            menu.appendChild(buildExplorerMarkdownMenuGroup(
+                'Preview font',
+                EXPLORER_MD_FONTS.map(value => ({ value, label: EXPLORER_MD_FONT_LABELS[value] })),
+                appearance.font,
+                'mdFont',
+                value => setExplorerMarkdownAppearance({ font: value })
+            ));
+        }
         menu.appendChild(buildExplorerMarkdownMenuGroup(
-            'Theme',
-            EXPLORER_MD_PRESETS.map(value => ({ value, label: EXPLORER_MD_PRESET_LABELS[value] })),
-            appearance.preset,
-            'mdPreset',
-            value => setExplorerMarkdownAppearance({ preset: value })
-        ));
-        menu.appendChild(buildExplorerMarkdownMenuGroup(
-            'Font',
-            EXPLORER_MD_FONTS.map(value => ({ value, label: EXPLORER_MD_FONT_LABELS[value] })),
-            appearance.font,
-            'mdFont',
-            value => setExplorerMarkdownAppearance({ font: value })
+            'Source font',
+            EXPLORER_SOURCE_FONTS.map(value => ({ value, label: EXPLORER_SOURCE_FONT_LABELS[value] })),
+            appearance.sourceFont,
+            'sourceFont',
+            value => setExplorerMarkdownAppearance({ sourceFont: value })
         ));
 
         menu.style.visibility = 'hidden';
@@ -4282,13 +4419,13 @@
                 aria-expanded="${collapsed ? 'false' : 'true'}"
                 title="${collapsed ? 'Expand Markdown section (Alt: expand all at this level)' : 'Collapse Markdown section (Alt: collapse all at this level)'}"
             >
-                <span class="explorer-source-chevron" aria-hidden="true">${collapsed ? '▸' : '▾'}</span>
+                <span class="explorer-source-chevron" aria-hidden="true">${collapsed ? UI_CHEVRON_RIGHT_ICON : UI_CHEVRON_DOWN_ICON}</span>
                 <span>${record.number}</span>
             </button>
         `;
     }
 
-    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set()) {
+    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines) {
         const normalizedLanguage = normalizeExplorerLanguage(language);
         const records = explorerSourceLineRecords(content);
         const languageClass = explorerLanguageClass(language);
@@ -4305,7 +4442,11 @@
         // Whole-document Highlight.js pass (Phase 1); null for unsupported
         // languages, the log/markdown special renderers, oversized files, or any
         // Highlight.js failure, in which case each line uses the fallback lexer.
-        const highlightedLines = explorerHighlightDocumentLines(content, normalizedLanguage);
+        // Callers with a pane pass the pane-cached map in (undefined here means
+        // "tokenize now"); a passed-in null is a legitimate cached miss.
+        const runs = highlightedLines !== undefined
+            ? highlightedLines
+            : explorerHighlightDocumentLines(content, normalizedLanguage);
         const rows = [];
         let hiddenUntilHeadingLevel = 0;
 
@@ -4319,8 +4460,8 @@
             }
 
             const collapsed = allowMarkdownCollapse && headingLevel && collapsedLines.has(record.number);
-            const lineHtml = highlightedLines
-                ? explorerRenderHighlightedRuns(highlightedLines.get(record.number), searchRanges)
+            const lineHtml = runs
+                ? explorerRenderHighlightedRuns(runs.get(record.number), searchRanges)
                 : highlightExplorerCode(record.text, language, searchRanges, record.start);
             // Heading-only Markdown tokeniser (OD-8): the fence-aware heading map
             // already computed for section collapse doubles as the highlighter,
@@ -4465,17 +4606,25 @@
             return;
         }
 
+        const content = pane._explorerFileContent || '';
         const language = pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '');
+        const highlightedLines = explorerHighlightDocumentLinesCached(
+            pane, content, normalizeExplorerLanguage(language)
+        );
         code.innerHTML = renderExplorerSourceLines(
-            pane._explorerFileContent || '',
+            content,
             language,
             searchRanges,
-            ensureExplorerMarkdownCollapsedLines(pane)
+            ensureExplorerMarkdownCollapsedLines(pane),
+            highlightedLines
         );
         wireExplorerMarkdownSectionControls(index);
         // The rebuilt rows dropped the nodes the occurrence tint was anchored
         // to; re-derive it from whatever selection survived the render.
         scheduleExplorerOccurrenceHighlight();
+        // Re-paint the cached HEAD change marks onto the fresh rows (cheap;
+        // no fetch — loads are triggered by the change signals only).
+        applyExplorerChangeMarks(index);
     }
 
     function explorerPreviewBlockLanguage(code) {
@@ -4809,7 +4958,8 @@
                 data-explorer-context-path="${escHtml(entry.path || '')}"
                 data-explorer-context-kind="${escHtml(entry.entry_kind || '')}"
                 data-explorer-context-revision="${escHtml(entry.revision || '')}"
-                data-explorer-context-surface="preview"`;
+                data-explorer-context-surface="preview"
+                ${isDirectory ? '' : `data-explorer-download-path="${escHtml(entry.path || '')}"`}`;
 
         return `
             <button
@@ -5110,7 +5260,7 @@
         applyExplorerSearch(index);
     }
 
-    function clearExplorerSearch(index) {
+    function clearExplorerSearch(index, { focus = true } = {}) {
         const pane = terminals[index];
         if (!pane) {
             return;
@@ -5124,10 +5274,12 @@
         state.resultQuery = '';
         state.seekOffset = null;
         applyExplorerSearch(index);
-        document.querySelector(`[data-explorer-search-input="${index}"]`)?.focus();
+        if (focus) {
+            document.querySelector(`[data-explorer-search-input="${index}"]`)?.focus();
+        }
     }
 
-    function focusExplorerSearch(index, seedQuery = '', { seekLine = 0 } = {}) {
+    function focusExplorerSearch(index, seedQuery = '') {
         const pane = terminals[index];
         if (!pane || !isExplorerSearchablePane(pane)) {
             return false;
@@ -5144,12 +5296,10 @@
             const state = ensureExplorerSearchState(pane);
             state.query = seedQuery;
             state.activeIndex = 0;
-            /* Open on the match the reader is already looking at — the caret's
-               line, or the line a repo-search hit landed on — instead of the
-               file's first match, which used to fling the Source view back to
-               the top of the document. */
+            /* Open on the match the reader is already looking at instead of
+               snapping the Source view back to the file's first match. */
             state.seekOffset = activeExplorerFileView(index) === 'source'
-                ? (seekLine ? explorerLineStartOffset(pane, seekLine) : explorerSelectionContentOffset(pane))
+                ? explorerSelectionContentOffset(pane)
                 : null;
             state.ranges = [];
             state.resultQuery = '';
@@ -5226,16 +5376,23 @@
         return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
     }
 
-    function explorerOccurrenceHighlight() {
+    /* Registry entry for one named Custom Highlight, created on first use.
+       Shared with the repository-search hit paint in explorer-search.js —
+       both need the same "does this browser have the API" guard. */
+    function explorerNamedHighlight(name) {
         if (typeof window.Highlight !== 'function' || !window.CSS?.highlights) {
             return null;
         }
-        let highlight = window.CSS.highlights.get(EXPLORER_OCCURRENCE_HIGHLIGHT);
+        let highlight = window.CSS.highlights.get(name);
         if (!highlight) {
             highlight = new window.Highlight();
-            window.CSS.highlights.set(EXPLORER_OCCURRENCE_HIGHLIGHT, highlight);
+            window.CSS.highlights.set(name, highlight);
         }
         return highlight;
+    }
+
+    function explorerOccurrenceHighlight() {
+        return explorerNamedHighlight(EXPLORER_OCCURRENCE_HIGHLIGHT);
     }
 
     /* The Source view the selection sits in, or null when there is nothing to
@@ -5339,14 +5496,21 @@
         if (!panel) {
             return null;
         }
-        // Edit mode moves Source scrolling into its full-height textarea.
-        // Capture that inner viewport so Save can restore the same location
-        // when the highlighted read-only Source panel is rebuilt.
+        /* The source frame (.explorer-source-frame) is overflow:hidden — a
+           fixed frame has to be, so anything docked beside the text never
+           scrolls away — and the element that actually scrolls is the inner
+           .explorer-source-view, exactly as the diff panel's inner
+           .explorer-diff-content scrolls inside its own fixed wrapper. */
         if (panel.dataset.explorerFilePanel === 'source') {
-            const editor = panel.querySelector('.explorer-source-editor');
-            if (editor) {
-                return editor;
+            const view = panel.querySelector('.explorer-source-view');
+            if (!view) {
+                return panel;
             }
+            // Edit mode moves Source scrolling into its full-height textarea.
+            // Capture that inner viewport so Save can restore the same location
+            // when the highlighted read-only Source panel is rebuilt.
+            const editor = view.querySelector('.explorer-source-editor');
+            return editor || view;
         }
         // The diff panel wrapper (.explorer-diff-split) is overflow:hidden; the
         // element that actually scrolls is the inner .explorer-diff-content.
@@ -5636,14 +5800,23 @@
             <path d="M5.4 13.5a7 7 0 1 0 1.7-6.4L5 10"/>
         </svg>
     `;
-    async function downloadExplorerFile(index) {
+    /* `options.path` downloads a specific file instead of whatever the viewer
+       has open — the context-menu entry point, so files GridVibe can't render
+       (and therefore never open in the editor) are still reachable. */
+    async function downloadExplorerFile(index, options = {}) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
-        if (!pane || !sessionId || pane._explorerMode !== 'file') {
+        if (!pane || !sessionId) {
             return;
         }
-        const path = pane._explorerFilePath || '';
-        const fileName = pane._explorerFileName || 'download';
+        const explicitPath = String(options.path || '');
+        if (!explicitPath && pane._explorerMode !== 'file') {
+            return;
+        }
+        const path = explicitPath || pane._explorerFilePath || '';
+        const fileName = explicitPath
+            ? (getDownloadBaseName(explicitPath) || 'download')
+            : (pane._explorerFileName || 'download');
         const url = `/api/explorer/${encodeURIComponent(sessionId)}/download?path=${encodeURIComponent(path)}`;
 
         /* WebView2 silently ignores programmatic <a download> clicks, so in the
@@ -5887,8 +6060,8 @@
         return preview;
     }
 
-    /* Scroll a tab into view in the strip and pulse it. Clicking ↗ on a file
-       that already has a tab deliberately changes no focus, so without this
+    /* Scroll a tab into view in the strip and pulse it. Clicking open-in-new-tab
+       on a file that already has a tab deliberately changes no focus, so without this
        the click looks like it did nothing; the pulse points at the tab that
        was already there. Mirrors focusExplorerTreeRow's locate flash. */
     function flashExplorerTab(index, id) {
@@ -5909,7 +6082,8 @@
         return true;
     }
 
-    /* The tree row's ↗ opens a file in a *background* tab: the tab joins the
+    /* The tree row's open-in-new-tab control opens a file in a *background*
+       tab: the tab joins the
        strip while the viewer keeps showing whatever the user is reading, so
        several files can be queued without losing the current one. Nothing is
        fetched here — the tab carries only its path, and activateExplorerTab
@@ -6028,9 +6202,10 @@
                 : `<button type="button" class="explorer-tab-close" data-explorer-tab-close="${escHtml(tab.id)}" title="Close tab" aria-label="Close ${escHtml(label)}">×</button>`;
             /* A pinned tab joins the shared copy-path context menu (the tree
                and Git rows carry the same hook). No context kind is exposed,
-               so the tab menu stays copy-only — no filesystem mutations. */
+               so the tab menu stays read-only — copy and download only, no
+               filesystem mutations. */
             const copyPath = (!isPreview && tab.path)
-                ? ` data-explorer-copy-path="${escHtml(tab.path)}"`
+                ? ` data-explorer-copy-path="${escHtml(tab.path)}" data-explorer-download-path="${escHtml(tab.path)}"`
                 : '';
             return `
                 <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}${dirty ? ' is-dirty' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}"${tabStates.length ? ' aria-label="' + escHtml(`${label} (${tabStates.join(', ')})`) + '"' : ''} data-explorer-tab="${escHtml(tab.id)}"${copyPath}${isPreview ? '' : ' draggable="true"'} title="${escHtml(`${dirty ? '● ' : ''}${gitLabel ? `${gitLabel} ` : ''}${tab.path || label}`)}">
@@ -6167,7 +6342,8 @@
 
     /* 2.g: double-clicking the Preview tab keeps its transient file — the
        shown file gains a pinned tab carrying the same view mode, scroll, and
-       zoom. Like the tree's ↗ it opens in the *background*: the viewer stays
+       zoom. Like the tree's open-in-new-tab control it opens in the
+       *background*: the viewer stays
        on Preview showing the same file, so a double-click is a bookmark and
        not a jump. Nothing is fetched — the new tab reloads lazily on its
        first click, restoring the copied view state. An existing pinned tab
@@ -6256,7 +6432,11 @@
         preview.path = '';
         preview.name = '';
         preview.git = null;
-        preview.dirPath = '';
+        /* Absence means no directory has been loaded yet; an own dirPath of
+           '' means the explorer root is the Preview tab's directory. Keeping
+           those states distinct is what lets root-directory previews survive
+           a workspace restore. */
+        delete preview.dirPath;
         pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
         pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;
         pane._explorerMode = 'viewer';
@@ -6301,7 +6481,10 @@
             renderExplorerTabStrip(index);
             return;
         }
-        if (tab.id === EXPLORER_PREVIEW_TAB_ID && tab.dirPath) {
+        if (
+            tab.id === EXPLORER_PREVIEW_TAB_ID
+            && Object.prototype.hasOwnProperty.call(tab, 'dirPath')
+        ) {
             /* The viewer last rendered another tab, so the pane-global
                directory state no longer describes the Preview tab — re-browse
                the tab's own directory instead of falling through to empty. */
@@ -6377,8 +6560,8 @@
         persistExplorerTabsToSession(index);
     }
 
-    /* One-shot per session id: re-apply the Markdown appearance a saved
-       session or restart snapshot carries (ISSUE-2026-033). The set keeps a
+    /* One-shot per session id: re-apply the viewer appearance a saved session
+       or restart snapshot carries (ISSUE-2026-033). The set keeps a
        close-driven rebuild of the same session from clobbering an appearance
        the user changed since launch; setExplorerMarkdownAppearance validates
        the values and syncs the shared localStorage keys. */
@@ -6388,11 +6571,23 @@
         const session = terminals[index]?._session || {};
         const preset = session.explorer_md_preset || '';
         const font = session.explorer_md_font || '';
-        if (!sessionId || appliedExplorerMdSessions.has(sessionId) || (!preset && !font)) {
+        const sourceFont = session.explorer_source_font || '';
+        const hasAny = Boolean(preset || font || sourceFont);
+        if (!sessionId || appliedExplorerMdSessions.has(sessionId) || !hasAny) {
             return;
         }
         appliedExplorerMdSessions.add(sessionId);
-        setExplorerMarkdownAppearance({ preset, font });
+        setExplorerMarkdownAppearance({ preset, font, sourceFont });
+    }
+
+    /* Called only where a session is genuinely gone — a closed pane, a closed
+       session group, or a group this window no longer owns. Switching groups
+       must *not* reach this: the sessions live on in another window or behind a
+       cached view, and forgetting them would re-apply a saved appearance over a
+       change the user made since launch, which is the exact thing the set
+       exists to prevent. */
+    function forgetExplorerSessionMarkdownAppearance(sessionId) {
+        appliedExplorerMdSessions.delete(String(sessionId || ''));
     }
 
     /* Entry point when an explorer pane first shows: empty read-only viewer with
@@ -6722,10 +6917,11 @@
         const previewRecord = explorerPersistableTabView(preview) || {};
         const previewPath = explorerNormalizeTabPath(preview.path);
         const previewDir = explorerNormalizeTabPath(preview.dirPath);
+        const hasPreviewDir = Object.prototype.hasOwnProperty.call(preview, 'dirPath');
         if (previewPath) {
             previewRecord.path = previewPath;
         }
-        if (previewDir) {
+        if (hasPreviewDir) {
             previewRecord.dir = previewDir;
         }
         if (Object.keys(previewRecord).length) {
@@ -6751,7 +6947,32 @@
         pane._session.explorer_tab_views = serialized.tab_views;
     }
 
-    function restoreExplorerPersistedTabs(index) {
+    /* Restore fell through to nothing showable: browse a directory so the pane
+       ends up attached with a live breadcrumb instead of stranded on a bare
+       error message (the state that made the path bar inert until the user
+       clicked the tree). A saved directory that is itself gone falls back to
+       the root, which the session guarantees exists. */
+    async function restoreExplorerDirectoryFallback(index, dirPath) {
+        if (dirPath && await loadExplorerPane(index, dirPath)) {
+            return true;
+        }
+        const pane = terminals[index];
+        if (pane && dirPath) {
+            explorerPreviewTab(pane).dirPath = '';
+        }
+        return loadExplorerPane(index, '');
+    }
+
+    /* Paths persisted with a pane are relative to the root it was saved under.
+       Relaunching under a different root — an imported session whose directory
+       was edited, a moved repo — or deleting the file since makes them dangle,
+       so a restored tab that comes back not-found is dropped rather than left
+       pointing at a file this explorer does not have. */
+    function explorerRestoredPathIsGone(index) {
+        return terminals[index]?._explorerOpenErrorCode === 'not_found';
+    }
+
+    async function restoreExplorerPersistedTabs(index) {
         const pane = terminals[index];
         if (!pane || pane._explorerTabsRestored) {
             return;
@@ -6784,21 +7005,35 @@
         const savedPreviewDir = explorerNormalizeTabPath(
             rawPreviewView && typeof rawPreviewView === 'object' ? rawPreviewView.dir : ''
         );
-        if (savedPreviewDir) {
+        const hasSavedPreviewDir = Boolean(
+            rawPreviewView
+            && typeof rawPreviewView === 'object'
+            && Object.prototype.hasOwnProperty.call(rawPreviewView, 'dir')
+        );
+        if (hasSavedPreviewDir) {
             previewTab.dirPath = savedPreviewDir;
         }
         /* Reopen the Preview tab's own content only when no pinned tab was
            saved as active — an active pinned tab wins the viewer, and the
            seeded path/dirPath above brings the Preview content back whenever
            the user returns to the tab. */
-        const restorePreviewContent = () => {
+        const restorePreviewContent = async () => {
             if (savedPreviewPath) {
-                openExplorerFile(index, savedPreviewPath, {
+                const opened = await openExplorerFile(index, savedPreviewPath, {
                     tab: EXPLORER_PREVIEW_TAB_ID,
                     ...explorerTabPersistedDiffTarget(previewTab)
                 });
-            } else if (savedPreviewDir) {
-                loadExplorerPane(index, savedPreviewDir);
+                if (opened) {
+                    return;
+                }
+                if (explorerRestoredPathIsGone(index)) {
+                    previewTab.path = '';
+                    previewTab.name = '';
+                    previewTab.git = null;
+                }
+                await restoreExplorerDirectoryFallback(index, savedPreviewDir);
+            } else if (hasSavedPreviewDir) {
+                await restoreExplorerDirectoryFallback(index, savedPreviewDir);
             } else {
                 renderExplorerTabStrip(index);
             }
@@ -6808,7 +7043,7 @@
             previewTab.name = explorerBaseName(savedPreviewPath);
         }
         if (!rawTabs.length) {
-            restorePreviewContent();
+            await restorePreviewContent();
             return;
         }
         const seen = new Set();
@@ -6843,11 +7078,26 @@
         const activeTab = activeKey
             ? pane._explorerTabs.find(tab => tab.pinned && explorerNormalizeTabPath(tab.path) === activeKey)
             : null;
-        if (activeTab) {
-            activateExplorerTab(index, activeTab.id);
-        } else {
-            restorePreviewContent();
+        if (!activeTab) {
+            await restorePreviewContent();
+            return;
         }
+        /* Opened here rather than through activateExplorerTab so the restore
+           can see whether the file actually came back. */
+        pane._explorerActiveTabId = activeTab.id;
+        renderExplorerTabStrip(index);
+        const opened = await openExplorerFile(index, activeTab.path, {
+            tab: activeTab.id,
+            ...explorerTabPersistedDiffTarget(activeTab)
+        });
+        if (!opened) {
+            if (explorerRestoredPathIsGone(index)) {
+                pane._explorerTabs = pane._explorerTabs.filter(tab => tab.id !== activeTab.id);
+            }
+            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
+            await restorePreviewContent();
+        }
+        persistExplorerTabsToSession(index);
     }
 
     /* Read-only inline image viewer (ISSUE-2026 image support). The backend
@@ -6900,6 +7150,9 @@
         pane._explorerDiffSplit = false;
         pane._explorerDiffCommit = '';
         pane._explorerDiffMode = '';
+        // No Source rows on the image viewer; drop any marks the pane held
+        // for the previous file.
+        teardownExplorerOverview(index);
         pane._explorerLastFileView = 'source';
         pane._explorerPendingDiffScroll = null;
 
@@ -6968,7 +7221,7 @@
         return true;
     }
 
-    function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '', diffMode = '', tab = '', pinned = false } = {}) {
+    function renderExplorerFile(index, data, { scrollState = null, openDiff = false, diffCommit = '', diffMode = '', tab = '', pinned = false, restoreTabView = true } = {}) {
         const pane = terminals[index];
         const list = document.getElementById(`explorer-list-${index}`);
         const viewer = explorerEnsureViewerShell(index);
@@ -7004,7 +7257,7 @@
         }
         /* 2.e: restore the tab's stored view mode + scroll when the content is
            still what the snapshot was taken from (OD-4 identity check). */
-        const restoredTabView = scrollState
+        const restoredTabView = !restoreTabView || scrollState
             ? null
             : explorerMatchingTabView(
                 assignedTab,
@@ -7073,6 +7326,11 @@
         pane._explorerDiffSplit = keepDiffSplit;
         pane._explorerDiffCommit = requestedDiffCommit;
         pane._explorerDiffMode = requestedDiffMode;
+        // The change-mark cache is keyed by path + HEAD, so a rebuild of the
+        // same file could legitimately hit it — but renderExplorerFile is
+        // also how saves/undos with a changed panel set land, and those move
+        // the diff. Drop the key and let the load below refetch.
+        pane._explorerChangeMarksKey = '';
         pane._explorerLastFileView = initialFileView === 'preview'
             ? 'preview'
             : (pane._explorerLastFileView === 'preview' && hasPreview ? 'preview' : 'source');
@@ -7112,7 +7370,7 @@
                         <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">+</button>
                     </div>
                     ${explorerLineWrapControlHtml(index, initialFileView)}
-                    ${hasPreview ? `<button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Markdown appearance" aria-label="Markdown preview appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>` : ''}
+                    <button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Appearance" aria-label="Viewer appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>
                     ${explorerEditorControlsHtml(index)}
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
                     <div class="explorer-editor-search" data-explorer-search="${index}">
@@ -7133,7 +7391,7 @@
                 </div>
                 <div class="explorer-editor-body${keepDiffSplit ? ' split-diff' : ''}">
                     <div class="explorer-editor-main">
-                        <div class="explorer-source-view explorer-editor-panel" id="explorer-code-${index}" data-explorer-file-panel="source" ${initialFileView === 'source' ? '' : 'hidden'}></div>
+                        <div class="explorer-source-frame explorer-editor-panel" data-explorer-file-panel="source" ${initialFileView === 'source' ? '' : 'hidden'}><div class="explorer-source-view" id="explorer-code-${index}"></div>${explorerOverviewHtml(index)}</div>
                         ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" ${initialFileView === 'preview' ? '' : 'hidden'}></div>` : ''}
                     </div>
                     ${hasGitDiff ? `<aside class="explorer-diff-split" id="explorer-diff-panel-${index}" data-explorer-file-panel="diff" ${keepDiffSplit ? '' : 'hidden'}><div class="explorer-diff-content" id="explorer-diff-code-${index}"></div></aside>` : ''}
@@ -7142,6 +7400,17 @@
         `;
 
         renderExplorerSource(index);
+        // Kick off the HEAD change-mark load for the Source gutter (async;
+        // paints itself when the diff arrives). Gated internally on a Git
+        // worktree, a non-commit view and no active editor.
+        loadExplorerChangeMarks(index);
+        const sourceFontAppearance = explorerMarkdownAppearance();
+        applyExplorerSourceFontToElement(
+            document.getElementById(`explorer-code-${index}`), sourceFontAppearance
+        );
+        applyExplorerSourceFontToElement(
+            document.getElementById(`explorer-diff-code-${index}`), sourceFontAppearance
+        );
         const preview = document.getElementById(`explorer-preview-${index}`);
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
@@ -7159,7 +7428,7 @@
                 if (document.getElementById('explorer-md-menu')) {
                     dismissExplorerMarkdownAppearanceMenu();
                 } else {
-                    showExplorerMarkdownAppearanceMenu(appearanceButton);
+                    showExplorerMarkdownAppearanceMenu(appearanceButton, { includeMarkdown: hasPreview });
                 }
             });
         }
@@ -7251,6 +7520,10 @@
         pane._explorerDiffCacheKey = '';
         pane._explorerDiffContent = '';
         renderExplorerSource(index);
+        // An in-place refresh means the file moved on disk (save, undo,
+        // watcher) while HEAD usually did not, so the path + HEAD cache key
+        // would serve stale marks: force the refetch.
+        loadExplorerChangeMarks(index, { force: true });
         if (preview && hasPreview) {
             preview.innerHTML = pane._explorerPreviewHtml;
             if (!pane._explorerFilePlain) {
@@ -7388,17 +7661,25 @@
         wireExplorerLineWrapControl(index);
         wireExplorerSearchControls(index);
         applyExplorerEditorFontSize(index);
+        applyExplorerSourceFontToElement(
+            document.getElementById(`explorer-diff-code-${index}`), explorerMarkdownAppearance()
+        );
         loadExplorerDiff(index);
         renderExplorerTabStrip(index);
         return true;
     }
 
-    async function openExplorerFile(index, path, { showLoading = true, preserveScroll = false, openDiff = false, diffCommit = '', diffMode = '', pinned = false, tab = '' } = {}) {
+    async function openExplorerFile(index, path, { showLoading = true, preserveScroll = false, openDiff = false, diffCommit = '', diffMode = '', pinned = false, tab = '', restoreTabView = true } = {}) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !isExplorerSession(pane._session) || !sessionId || !path) {
             return false;
         }
+        /* Cleared before any early return and read back by the tab restore,
+           which prunes a tab only when the backend says the path is gone — a
+           connection hiccup, or a caller that never got as far as a request,
+           must not throw away a tab whose file is still there. */
+        pane._explorerOpenErrorCode = '';
         // Replacing the viewer with another file discards any active edit.
         if (!(await confirmDiscardExplorerEdit(index, 'Opening another file'))) {
             return false;
@@ -7417,6 +7698,7 @@
             const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(path)}`);
             const data = await response.json();
             if (!response.ok) {
+                pane._explorerOpenErrorCode = String(data.code || '');
                 throw new Error(data.error || 'Failed to open file');
             }
             if (
@@ -7428,7 +7710,15 @@
             ) {
                 return true;
             }
-            const rendered = renderExplorerFile(index, data, { scrollState, openDiff, diffCommit, diffMode, pinned, tab });
+            const rendered = renderExplorerFile(index, data, {
+                scrollState,
+                openDiff,
+                diffCommit,
+                diffMode,
+                pinned,
+                tab,
+                restoreTabView
+            });
             if (rendered) {
                 revealExplorerTreePath(index);
             }
@@ -7536,6 +7826,7 @@
             pane._explorerGitContext = data.git || null;
             pane._explorerDiffLoaded = false;
             pane._explorerDiffContent = '';
+            teardownExplorerOverview(index);
             pane._explorerPath = data.path || '';
             pane._explorerParentPath = data.parent_path || '';
             pane._explorerEntries = Array.isArray(data.entries) ? data.entries : [];
