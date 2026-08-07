@@ -531,6 +531,10 @@
     const initialRouteParams = new URLSearchParams(window.location.search);
     const currentWorkspaceId = String(CURRENT_WORKSPACE_ID || 'default');
     const workspaceWasExplicit = initialRouteParams.has('workspace');
+    /* This window is the arrival end of every workspace swap (workspaces.js
+       arms the pulse at the departing end). Wired here, at the one place that
+       knows which workspace this page is. */
+    watchWorkspaceArrivals(currentWorkspaceId);
     let activeGroupId = initialRouteParams.get('group') || '';
     let sessionGroups = [];
     let activeLoadToken = 0;

@@ -182,6 +182,104 @@
         });
     }
 
+    /* ── Arrival pulse ──
+       Swapping workspaces moves the *OS window*, and two GridVibe windows look
+       alike: same chrome, same grid, only the content differs. Alt+W, the Open
+       Workspace menu and the launcher's Open button can therefore all land the
+       user somewhere without anything saying so. The window being handed focus
+       flashes a ring around its viewport once, so the eye lands on the
+       workspace it actually arrived in.
+
+       The request is stored, not broadcast: a workspace that had no window yet
+       still finds it waiting when its fresh page boots, which a
+       BroadcastChannel message sent before that page existed could never do.
+       The claim is one-shot and time-boxed — a request nobody arrives on (the
+       open failed, the window was closed again) expires instead of pulsing at
+       some unrelated moment later. */
+    const WORKSPACE_ARRIVAL_STORAGE_KEY = 'gridvibe.workspaceArrival';
+    const WORKSPACE_ARRIVAL_TTL_MS = 12000;
+    const WORKSPACE_ARRIVAL_PULSE_MS = 1100;
+
+    function requestWorkspaceArrivalPulse(workspaceId) {
+        try {
+            localStorage.setItem(WORKSPACE_ARRIVAL_STORAGE_KEY, JSON.stringify({
+                workspaceId: normalizeWorkspaceId(workspaceId),
+                timestamp: Date.now(),
+                source: GRIDVIBE_WINDOW_ID
+            }));
+        } catch (_error) {}
+    }
+
+    /* True at most once per request, and only in the window the request names.
+       A payload for another workspace is left alone — that window has not been
+       given focus yet and the request is still its to claim. */
+    function claimWorkspaceArrivalPulse(workspaceId) {
+        let payload = null;
+        try {
+            payload = JSON.parse(localStorage.getItem(WORKSPACE_ARRIVAL_STORAGE_KEY) || 'null');
+        } catch (_error) {
+            payload = null;
+        }
+        if (!payload || normalizeWorkspaceId(payload.workspaceId) !== normalizeWorkspaceId(workspaceId)) {
+            return false;
+        }
+        try {
+            localStorage.removeItem(WORKSPACE_ARRIVAL_STORAGE_KEY);
+        } catch (_error) {}
+        const age = Date.now() - Number(payload.timestamp || 0);
+        return !isOwnBroadcast(payload) && age >= 0 && age <= WORKSPACE_ARRIVAL_TTL_MS;
+    }
+
+    let workspaceArrivalPulseTimer = null;
+
+    /* Decoration only: a fixed, pointer-transparent overlay above everything,
+       driven by a class rather than rewritten markup (guardrail 8). Removing
+       the class and forcing a reflow restarts the animation, so cycling
+       through three workspaces pulses three times instead of once. */
+    function pulseWorkspaceWindow() {
+        /* A window can be given focus before its body is parsed. The claim has
+           already been spent by then, so the pulse waits for the body rather
+           than being dropped. */
+        if (!document.body) {
+            document.addEventListener('DOMContentLoaded', pulseWorkspaceWindow, { once: true });
+            return;
+        }
+        let ring = document.getElementById('workspaceArrivalPulse');
+        if (!ring) {
+            ring = document.createElement('div');
+            ring.id = 'workspaceArrivalPulse';
+            ring.className = 'workspace-arrival-pulse';
+            ring.setAttribute('aria-hidden', 'true');
+            document.body.appendChild(ring);
+        }
+        ring.classList.remove('is-pulsing');
+        void ring.offsetWidth;
+        ring.classList.add('is-pulsing');
+        clearTimeout(workspaceArrivalPulseTimer);
+        workspaceArrivalPulseTimer = setTimeout(
+            () => ring.classList.remove('is-pulsing'),
+            WORKSPACE_ARRIVAL_PULSE_MS
+        );
+    }
+
+    /* Called once by the workspace page with its own id. Boot covers the window
+       that was opened for the switch; `focus` covers the one that already
+       existed and was raised — which is also why a request is never claimed
+       from a background window, where the pulse would play unseen. */
+    function watchWorkspaceArrivals(workspaceId) {
+        const claim = () => {
+            if (claimWorkspaceArrivalPulse(workspaceId)) {
+                pulseWorkspaceWindow();
+            }
+        };
+        window.addEventListener('focus', claim);
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', claim);
+        } else {
+            claim();
+        }
+    }
+
     async function createWorkspaceRecord(label = '') {
         const { ok, data } = await workspaceApiRequest('/api/workspaces', {
             method: 'POST',
@@ -237,8 +335,14 @@
         return window.pywebview?.api || null;
     }
 
+    /* Both dispatchers arm the arrival pulse before they hand focus over: every
+       path that swaps workspaces — Alt+W, the Open Workspace menu, the
+       launcher's Open button, a restore — goes through one of these two
+       (guardrail 6), so the pulse is armed in one place and cannot be forgotten
+       by a surface added later. */
     async function focusWorkspaceWindow(workspaceId) {
         const resolvedWorkspaceId = normalizeWorkspaceId(workspaceId);
+        requestWorkspaceArrivalPulse(resolvedWorkspaceId);
         const api = nativeWorkspaceApi();
         if (api?.focus_workspace_window) {
             try {
@@ -257,6 +361,7 @@
         const resolvedWorkspaceId = normalizeWorkspaceId(workspaceId);
         const groupId = String(options.groupId || '');
         const nativeZoomFactor = normalizeNativeZoomFactor(options.nativeZoomFactor);
+        requestWorkspaceArrivalPulse(resolvedWorkspaceId);
         const api = nativeWorkspaceApi();
         if (api?.open_workspace_window) {
             try {
