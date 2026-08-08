@@ -30,6 +30,7 @@ from web.api import (
     run_server,
     session_manager,
 )
+from web.lifecycle import lifecycle_coordinator
 from web.runtime_state import normalize_native_zoom_factor
 from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id
 
@@ -464,6 +465,33 @@ def _should_exit_after_window_close(kind: str, open_windows: set[str]) -> bool:
     return kind == "launcher" or not open_windows
 
 
+def _request_native_close_prompt(window, api_bridge):
+    """Open the in-page close dialog after the synchronous closing event returns."""
+
+    def evaluate_prompt():
+        try:
+            opened = window.evaluate_js(
+                "window.gridvibeRequestLifecycleClose && "
+                "window.gridvibeRequestLifecycleClose()"
+            )
+            if not opened:
+                api_bridge._close_prompt_pending = False
+                logger.debug("Native close lifecycle dialog was not ready")
+        except Exception:
+            api_bridge._close_prompt_pending = False
+            logger.exception("Failed to open the native close lifecycle dialog")
+
+    try:
+        threading.Thread(
+            target=evaluate_prompt,
+            name="gridvibe-native-close-prompt",
+            daemon=True,
+        ).start()
+    except Exception:
+        api_bridge._close_prompt_pending = False
+        logger.exception("Failed to schedule the native close lifecycle dialog")
+
+
 def _native_zoom_control(window):
     """Return the backend webview control that owns the page zoom."""
     return getattr(getattr(window, "native", None), "webview", None)
@@ -559,6 +587,8 @@ class GridVibeApi:
         self._window_minimized = False
         self._workspace_window_minimized = {}
         self._restarting = False
+        self._close_approved = False
+        self._close_prompt_pending = False
         self._native_theme = "dark"
         self._pending_workspace_native_zoom_factors = {}
 
@@ -1178,8 +1208,14 @@ class GridVibeApi:
             )
             return {"ok": False, "error": str(exc)}
 
-    def restart_application(self):
+    def restart_application(self, decision_token=None):
         """Relaunch the native app after an update is applied."""
+        if not lifecycle_coordinator.consume_decision(decision_token, "restart"):
+            return {
+                "ok": False,
+                "error": "Choose how to handle current changes before restarting",
+                "lifecycle_decision_required": True,
+            }
         project_root = str(Path(__file__).resolve().parent.parent)
         try:
             self._restarting = True
@@ -1192,6 +1228,31 @@ class GridVibeApi:
             self._restarting = False
             logger.exception("Failed to restart GridVibe")
             return {"ok": False, "error": str(exc)}
+
+    def approve_application_close(self, decision_token=None):
+        """Consume a prepared close decision and re-enter native destruction once."""
+        if not lifecycle_coordinator.consume_decision(decision_token, "close"):
+            return {
+                "ok": False,
+                "error": "Choose how to handle current changes before closing",
+                "lifecycle_decision_required": True,
+            }
+        if self._window is None:
+            return {"ok": False, "error": "Launcher window is not ready"}
+        self._close_prompt_pending = False
+        self._close_approved = True
+        try:
+            self._window.destroy()
+            return {"ok": True}
+        except Exception as exc:
+            self._close_approved = False
+            logger.exception("Failed to close GridVibe after lifecycle approval")
+            return {"ok": False, "error": str(exc)}
+
+    def cancel_application_close_request(self):
+        """Allow a later native X click to open a fresh lifecycle decision."""
+        self._close_prompt_pending = False
+        return {"ok": True}
 
 
 def _resolve_window_host(host: str) -> str:
@@ -1462,6 +1523,7 @@ def main():
             else:
                 api_bridge._window = None
                 api_bridge._is_fullscreen = False
+                api_bridge._close_prompt_pending = False
 
             if api_bridge._restarting:
                 return
@@ -1470,6 +1532,20 @@ def main():
             if _should_exit_after_window_close(kind, open_windows):
                 session_manager.close_all_sessions()
                 os._exit(0)
+
+        def _handle_closing(*_args):
+            if kind != "launcher" or api_bridge._restarting:
+                return True
+            if api_bridge._close_approved:
+                return True
+            if not api_bridge._close_prompt_pending:
+                api_bridge._close_prompt_pending = True
+                # pywebview runs the cancellable closing event synchronously and
+                # evaluate_js is synchronous too. Calling it here can deadlock
+                # WebView2 before this handler gets a chance to cancel the close.
+                _request_native_close_prompt(window, api_bridge)
+            # pywebview cancels a closing event when a handler returns False.
+            return False
 
         minimized_event = getattr(window.events, "minimized", None)
         if minimized_event is not None:
@@ -1492,6 +1568,10 @@ def main():
         shown_event = getattr(window.events, "shown", None)
         if shown_event is not None:
             shown_event += lambda *_args: api_bridge._apply_native_frame_theme(window, kind)
+
+        closing_event = getattr(window.events, "closing", None)
+        if closing_event is not None:
+            closing_event += _handle_closing
 
         window.events.closed += _handle_closed
         api_bridge._apply_native_frame_theme(window, kind)

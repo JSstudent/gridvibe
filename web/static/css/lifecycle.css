@@ -1,0 +1,27 @@
+.lifecycle-card {
+    width: min(620px, calc(100vw - 32px));
+}
+
+.lifecycle-choice-list {
+    display: grid;
+    gap: 10px;
+    padding: 0 20px 20px;
+}
+
+.lifecycle-choice-list button {
+    min-height: 42px;
+    white-space: normal;
+}
+
+.lifecycle-status {
+    min-height: 20px;
+    padding: 12px 20px;
+}
+
+.lifecycle-status.is-error {
+    color: var(--gv-danger);
+}
+
+.lifecycle-card.is-busy button {
+    pointer-events: none;
+}

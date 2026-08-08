@@ -527,6 +527,8 @@
     let _focusedTerminalIndex = -1;
     let _activeExplorerIndex = -1;
     let socket     = null;   // set at the bottom after all defs
+    const lifecycleWindowId = globalThis.crypto?.randomUUID?.()
+        || `workspace-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     let resizeObservers = [];
     let cachedGroupViews = new Map();
     let sessionRouteMap = new Map();
@@ -7794,6 +7796,15 @@
     ───────────────────────────────────────────── */
     try {
         socket = io();
+        GridVibeLifecycle.attachFlushResponder(socket, {
+            workspaceId: currentWorkspaceId,
+            flush: flushLivePresentation,
+            metadata: async () => ({
+                active_group_id: activeGroupId,
+                native_zoom_factor: await getCurrentWorkspaceNativeZoomFactor(),
+                topbar_visible: !document.body.classList.contains('topbar-collapsed')
+            })
+        });
 
         socket.on('terminal_output', ({ session_id, data }) => {
             const target = resolveSessionTarget(session_id);
@@ -7888,7 +7899,10 @@
            Skipped on the first connect — initialLoad() covers boot. */
         let hadSocketConnection = false;
         socket.on('connect', () => {
-            socket.emit('join_workspace', { workspace_id: currentWorkspaceId });
+            socket.emit('join_workspace', {
+                workspace_id: currentWorkspaceId,
+                window_id: lifecycleWindowId
+            });
             if (!hadSocketConnection) {
                 hadSocketConnection = true;
                 return;

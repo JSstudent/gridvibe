@@ -2,7 +2,7 @@
 
 Date: 2026-08-07
 
-Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stage 1 is **done** — the saved-preset store and the encryption key are durable (see [Stage 1 results](#stage-1-results)); SGP-05 is closed. Stage 2 is **done** — the ordered live presentation transactions, canonical normalizer, manager revisions/order, and DOM-free client queue are implemented (see [Stage 2 results](#stage-2-results)). Stage 3 is **done** — the live page is wired to those transactions, Save Workspace is an exact flush barrier, and both superseded writers are gone (see [Stage 3 results](#stage-3-results)); SGP-01 and SGP-02 are closed. Stages 4-7 are not started by this audit.
+Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stage 1 is **done** — the saved-preset store and the encryption key are durable (see [Stage 1 results](#stage-1-results)); SGP-05 is closed. Stage 2 is **done** — the ordered live presentation transactions, canonical normalizer, manager revisions/order, and DOM-free client queue are implemented (see [Stage 2 results](#stage-2-results)). Stage 3 is **done** — the live page is wired to those transactions, Save Workspace is an exact flush barrier, and both superseded writers are gone (see [Stage 3 results](#stage-3-results)); SGP-01 and SGP-02 are closed. Stage 4 is **done** — voluntary close/restart uses one process-wide flush/save/exit transaction, and its Stage 6 items 1–3 prerequisite shipped with it (see [Stage 4 results](#stage-4-results)); SGP-11 is closed and SGP-06 is narrowed to the remaining launch-validation work. Stages 5, the remainder of 6, and 7 are not started by this audit.
 
 One production change has since landed outside the audit's stage sequence: workspace top-bar visibility is now persisted and restored, and the launcher's **Save & Restart** was corrected to capture every live workspace. It touches surfaces Stages 2, 3, 4, 6, and 7 own. Its effect on the plan is recorded in [Out-of-band change: workspace top-bar visibility](#out-of-band-change-workspace-top-bar-visibility), and the affected findings and stages carry amendment notes inline. It did not flip any frozen Stage 0 test.
 
@@ -365,6 +365,8 @@ Use exclusive create plus a unique same-directory temp file and `os.replace`, so
 
 ### SGP-06 — High: persistence normalization is coupled to the mutable launch cap
 
+**Status: partially fixed by the Stage 4 prerequisite** (2026-08-08). Stored preset width and both saved-preset/runtime-state geometry read paths now use the immutable `MAX_STORED_SESSION_PANES` schema ceiling rather than `runtime_config.max_sessions`; valid high `originSlot` values are preserved and an out-of-schema origin rejects the geometry instead of being clamped onto another pane. Reads and unrelated preset writes are therefore nondestructive. The current cap is still enforced at launch, and Stage 6 items 4–7 still own canonical nested restore validation plus the explicitly actionable “increase `max_sessions` to N and retry” response. The evidence below describes the code this prerequisite replaced.
+
 Evidence:
 
 - `_normalize_terminal_entries()` iterates `range(runtime_config.max_sessions)` (`web/saved_sessions.py:514`).
@@ -453,7 +455,9 @@ Explorer light/dark overrides are stored in a JSON object keyed by ephemeral `se
 
 This is not the primary persistence defect, but the common presentation store makes it unnecessary. Once accepted theme state lives in the manager, prune the local override after acknowledgement or bound/migrate the legacy object. Do not remove it before server synchronization is reliable, because it currently protects live UI state from some rebuilds.
 
-*Amended after Stage 3.* Both key families survive deliberately, and both are now *caches* rather than the only copy: the manager holds the acknowledged explorer theme (the pane sends it on every toggle) and the acknowledged top-bar visibility. Item 8 of Stage 3 forbids pruning them yet, and the reason is unchanged — the launcher still reads the top-bar key cross-window, and the explorer-theme object still protects live UI state across a rebuild that has no session id to key on. The unbounded growth of the theme object is therefore still open, and still Stage 7's to close once Stage 4 gives the launcher a flush handshake.
+*Amended after Stage 3.* Both key families survive deliberately, and both are now *caches* rather than the only copy: the manager holds the acknowledged explorer theme (the pane sends it on every toggle) and the acknowledged top-bar visibility. Item 8 of Stage 3 forbids pruning them yet. At that point the launcher still read the top-bar key cross-window, and the explorer-theme object protected live UI state across a rebuild that has no session id to key on.
+
+*Amended after Stage 4.* The launcher no longer reads the top-bar key. Its lifecycle request asks each owning workspace window to flush the ordered workspace queue and return its exact top-bar value with active-group/native-zoom metadata; the one all-live server capture consumes that validated result. The top-bar key is now only a same-window restoration cache. The unbounded explorer-theme object and deletion of legacy cache entries remain Stage 7 cleanup.
 
 A second key family now exists: `gridvibe.terminalTopbarVisibility.<workspace_id>`, written by `storeWorkspaceTopbarVisible()` in `shared.js`. It is materially better than the theme object — one key per workspace rather than one entry per ephemeral session ID, so it does not grow without bound and it survives a restart meaningfully — but it is still a client-side authority for state the server now also holds, and it is read *cross-window*: the launcher page reads the key a workspace window wrote in order to include the field in that workspace's restart capture. That works only because both pages share one origin, which is precisely the coupling SGP-08 identifies as unsound for anything the workspace record should own. Once the server value is reliably acknowledged, the launcher must stop reading it and the key becomes a non-authoritative cache. Deleting a workspace should also drop its key; nothing does that today.
 
@@ -483,7 +487,7 @@ The implementation stages below replace touched source-text assertions with API/
 
 ### SGP-11 — High: restart and application close have incomplete, asymmetric save semantics
 
-**Status: partially addressed out of band.** The first two bullets below were the finding as written; both have since been fixed in `saveWorkspaceForRestart()` (now at `web/static/js/launcher.js:2498`). The remaining bullets are unchanged and still carry the finding. See the amendment under the bullets for what Stage 4 still owes.
+**Status: fixed by Stage 4** (2026-08-08). The historical evidence below is kept because it explains the asymmetry the stage replaced. `saveWorkspaceForRestart()` and the client-side per-workspace loop are gone. Manual restart, update restart, explicit browser shutdown, and the native launcher X now enter the same lifecycle controller; teardown requires a one-use successful server decision, and any requested flush/preset/workspace failure keeps the process and shells running. See [Stage 4 results](#stage-4-results).
 
 The lifecycle controls currently expose three materially different behaviors behind similar language:
 
@@ -512,7 +516,7 @@ Impact:
 
 Low-risk direction:
 
-Use one shared lifecycle-choice controller for explicit close, manual restart, and update restart. Offer **Without saving current changes**, **Save open workspaces**, and **Save open sessions + workspaces**, plus **Cancel**. “Open” must mean every live workspace/group in the process, not only the window invoking the action. The workspace-only choice flushes acknowledged client presentation and captures password-free runtime slots. The sessions-plus-workspaces choice first saves/updates reusable presets, then captures workspace slots that reference the resulting preset identities. Any requested-save failure keeps GridVibe open with retry and explicit continue-without-saving actions.
+Use one shared lifecycle-choice controller for explicit close, manual restart, and update restart. Offer **Without saving current changes**, **Save open workspaces**, and **Save open sessions + workspaces**, plus **Cancel**. “Open” must mean every live workspace/group in the process, not only the window invoking the action. The workspace-only choice flushes acknowledged client presentation and captures password-free runtime slots. The sessions-plus-workspaces choice first saves/updates reusable presets, then captures workspace slots that reference the resulting preset identities. Any requested-save failure keeps GridVibe open with the same three choices available, so the user can select the same save choice to try it again or explicitly continue without saving.
 
 Do not make `beforeunload`, a late `closed` callback, or a blind teardown capture the correctness path. The native launcher X needs a cancellable pre-close event that opens the in-page choice UI; the explicit browser close button can use the same UI. Console interrupts, task-manager kills, and browser-tab closure cannot reliably complete an asynchronous save and should retain the documented last-good-snapshot behavior.
 
@@ -881,12 +885,46 @@ Implementation rules:
 3. Treat “open” as process-wide. Ask every live workspace window to flush its Stage 3 presentation queue and acknowledge a target revision. Use a bounded wait and report missing/stale windows; do not guess that a debounce has completed.
 4. For workspace-only save, extend the existing all-live capture transaction to accept validated per-workspace active-group/native-zoom metadata. Keep the unique-temp, file-lock, durable-revision, and manual-retention rules.
 5. For sessions-plus-workspaces, persist session presets first and update group preset identities, then capture runtime state. This order lets restart restore obtain an encrypted SSH password only from the matching saved preset while keeping `runtime_state.json` password-free.
-6. Do not claim cross-file atomicity. If session presets commit and the later workspace capture fails, keep the app open, report the partial result, and offer **Retry** or an explicit **Continue without saving current changes**. Never silently roll back unrelated user presets.
+6. Do not claim cross-file atomicity. If session presets commit and the later workspace capture fails, keep the app open, report the partial result, and leave the original choices active. Selecting the same save choice retries it; **Continue without saving current changes** remains the first choice. Never silently roll back unrelated user presets.
 7. Route the manual restart button, update-triggered restart, explicit browser shutdown, and native launcher close request through this controller. For the native X, cancel/defer the pre-close event once, show the in-page modal, and use a guarded approved-close flag to avoid re-entry.
 8. Leave involuntary termination semantics unchanged. Ctrl+C, process kill, power loss, or a browser tab disappearing restore the last successfully committed snapshot; they do not attempt an unsafe teardown write.
 9. Add behavioral tests for all actions, all-live scope, client timeout, save failure, partial cross-file failure, retry, update restart, native close re-entry, no emits under locks, and secret absence from runtime state/logs.
 
 Exit gate: close and restart expose the same choices and effects, every requested save covers all live workspaces, no failed requested save tears down without a second explicit choice, and old snapshots survive the no-save path untouched.
+
+#### Stage 4 results
+
+Completed 2026-08-08. The proposal remained valid, with two implementation clarifications: its hard prerequisite was delivered in the same change rather than disabling the sessions-plus-workspaces choice, and “missing window” includes a socket that disconnected without the page's explicit `leave_workspace`. Each workspace page now supplies a stable per-window id, so reconnect replaces that stale registration while a genuinely unreachable window is reported instead of silently ignored.
+
+**What shipped.**
+
+| Surface | Change |
+|---|---|
+| `web/lifecycle.py` | New Flask/Socket.IO-independent lifecycle service and coordinator. It tracks stable workspace windows, performs a bounded process-wide flush handshake, validates/coalesces per-window active-group/native-zoom/top-bar metadata, saves live presets before runtime state, reports partial results without pretending cross-file atomicity, and issues one-use 60-second close/restart decisions only after success. |
+| `POST /api/lifecycle/prepare` | The single server entry point for all three save choices. It snapshots manager membership before client waits, emits `lifecycle_flush_requested` only to workspace rooms, accepts `lifecycle_flush_ack` only from the sending socket id, and never holds `SessionManager.lock` or `connection_lock` across an emit, wait, encryption, or file write. |
+| `SessionManager.snapshot_lifecycle_workspaces()` | The only credential-bearing live snapshot. It captures shape plus an in-memory SSH password under one manager lock hold; only the preset writer consumes it. The ordinary runtime snapshot remains password-free. |
+| `RuntimeStateStore.capture_live_workspaces()` | Accepts validated per-workspace metadata and still commits all non-empty live workspaces through one locked, ordered, atomic file transaction. Native zoom falls back to the previous slot only when the owning window supplied none. |
+| `web/static/js/lifecycle.js` + `templates/partials/lifecycle_modal.html` + `web/static/css/lifecycle.css` | Focused shared controller/modal loaded by both pages. It exposes one ordered list: continue without saving, save workspaces, or save sessions plus workspaces. A failed save leaves that list active, so selecting the same save choice retries naturally. The DOM-free request/flush half runs under Node tests. No browser-native dialog is used. |
+| `terminals.js` | Reuses `gridvibeFlushLivePresentation`; after that barrier resolves it acknowledges with the live window's active group, native zoom, and top-bar value. A stable window id survives Socket.IO reconnects, while `pagehide` explicitly retires a window. |
+| `launcher.js` | `saveWorkspaceForRestart()` and the cross-window `localStorage` read are deleted. Manual restart, update restart, and browser close all open the shared lifecycle controller and pass its decision token to the actual teardown surface. |
+| `webview_launcher.py` / `/api/browser-shutdown` | Native restart, native launcher close, and browser shutdown refuse teardown without the matching one-use lifecycle decision. The native `closing` event is cancelled once, opens the in-page modal, and uses guarded approved-close/cancel flags to prevent re-entry. Involuntary process termination paths are unchanged. |
+
+**Hard prerequisite delivered (Stage 6 items 1–3).** `MAX_STORED_SESSION_PANES = 64` is now the immutable saved-shape ceiling shared by preset terminal normalization and custom geometry. `runtime_config.max_sessions` remains only the current default/launch preference. `_normalize_terminal_entries()` preserves a wider stored list, `_normalize_session_config()` no longer truncates `terminal_count`, and `_normalize_workspace_layout()` uses schema-safe grid/origin/original-count bounds for both saved presets and runtime-state reads. An invalid origin makes the geometry invalid; it is never clamped to a different pane.
+
+**Failure and ordering behavior.** `save: none` performs no flush and writes neither file. Workspace-only save flushes then performs one all-live manual capture without touching presets. Sessions-plus-workspaces takes the dedicated credential snapshot, creates uniquely named presets for unattached groups or updates attached presets under their existing credential rules, links each successful preset identity back to the still-live group, and only then captures runtime state. A preset error stops before workspace capture; a later runtime-state error keeps the successful preset commits and reports them. In either case `ready_to_exit` is false, no exit token exists, and the original three choices remain available without a second Retry/Review group.
+
+**Coverage.** The seven Stage 4 forcing functions and the two prerequisite capacity/geometry forcing functions in `tests/test_session_persistence_contract.py` had their `expectedFailure` decorators removed. `tests/test_lifecycle.py` adds executable coverage for all-window acknowledgement, bounded timeout, stale disconnect/rejoin, conflicting metadata, workspace-room scope, no emit under either shared lock, exact window metadata in the stored slot, retryable preparation, encrypted unsaved-SSH credentials with password-free runtime state, both-page wiring, and the real JavaScript flush responder. `tests/test_webview_launcher.py` covers native-X cancellation/re-entry and one-use close/restart decisions. The touched legacy source-text checks were replaced by page/route or Node behavior.
+
+**Exit gate:** met. All four voluntary exit surfaces share the same choices and service; requested saves cover every non-empty live workspace; a flush or persistence failure cannot tear down; partial cross-file success is explicit; and the no-save path leaves both prior persistence files byte-for-byte unchanged.
+
+**Gate results:**
+
+- `python -m ruff check .` — passed, “All checks passed!”.
+- `python tests/run_tests.py` — 1,290 tests, `OK (skipped=7, expected failures=9)`. The nine remaining forcing functions belong to Stages 5 and the remainder of 6.
+
+**Post-implementation regression correction (2026-08-08).** The first Stage 4 build used an `open` class when showing and hiding the shared lifecycle dialog, but both page shells define modal visibility with the established `visible` class. Lifecycle requests therefore opened an invisible blocking dialog, affecting both Save & Restart and the native window close button. The controller now uses the shared `visible` state, and an executable Node DOM test verifies that opening exposes the dialog and Cancel hides it again while invoking the cancellation callback. Correction gates: `python -m ruff check .` passed; `python tests/run_tests.py` passed 1,291 tests with 7 skips and the 9 expected failures reserved for later audit stages.
+
+**Native-close and menu follow-up (2026-08-08).** Native X initially called pywebview's synchronous `evaluate_js()` from inside its synchronous cancellable `closing` event. On WebView2 that can block the UI callback waiting for JavaScript while the webview is waiting for the callback to return, presenting as a frozen window. The closing callback now records one pending prompt, schedules JavaScript evaluation on a daemon worker, and returns `False` immediately. The worker opens the shared in-page dialog after the callback releases the UI thread. The confusing post-failure Retry/Review group was also removed: Continue without saving is the first of one persistent three-choice list, and a failed save reports its error while leaving that list active. Behavioral tests verify deferred native JavaScript, single-prompt re-entry protection, the exact choice order on both pages, and failure-state reuse of the same list. Follow-up gates: `python -m ruff check .` passed; JavaScript syntax checks passed; `python tests/run_tests.py` passed 1,292 tests with 7 skips and the 9 expected failures reserved for later audit stages.
 
 ### Stage 5 — Complete explorer snapshot semantics and preserve explorer root
 
@@ -927,7 +965,7 @@ Exit gate: the agreed explorer fixture round-trips through Save Session/import, 
 
 Connected findings: SGP-06, SGP-07, SGP-10.
 
-**Items 1–3 are a prerequisite of Stage 4 and should be scheduled ahead of it** (see the hard prerequisite in that stage). Items 4–7 keep their position here.
+**Items 1–3 shipped with Stage 4 as its hard prerequisite** (see [Stage 4 results](#stage-4-results)). Items 4–7 remain here.
 
 1. Normalize saved data against an immutable schema/product maximum, not `runtime_config.max_sessions`.
 2. Preserve extra stored terminal entries even when the current launch cap is lower.
@@ -946,7 +984,7 @@ Connected findings: all, especially SGP-09 and SGP-10.
 1. Update `README.md` and `CHANGELOG.md` with the final snapshot boundary and capacity behavior.
 2. Keep `CLAUDE.md` and `AGENTS.md` field/architecture contracts accurate if a new presentation module or route is added.
 3. Log safe shape diagnostics only: workspace/group/session IDs, revisions, mode names, field counts, and failure category. Never log paths, URLs with secrets, commands, file contents, passwords, or full payloads.
-4. Remove superseded browser-tab and local-only explorer persistence writers after every consumer uses the canonical path; do not leave dual writers. *Stage 3 already removed the browser-tab writer (`update_browser_tab_strip()` and the mode route's `tabs` branch) and `PATCH /api/workspaces/<id>/ui-state`.* What remains here is the launcher's `localStorage` read of another window's top-bar state, and pruning the two legacy key families once Stage 4 item 3 lands.
+4. Remove superseded browser-tab and local-only explorer persistence writers after every consumer uses the canonical path; do not leave dual writers. *Stage 3 removed the browser-tab writer (`update_browser_tab_strip()` and the mode route's `tabs` branch) and `PATCH /api/workspaces/<id>/ui-state`; Stage 4 removed the launcher's cross-window top-bar `localStorage` read.* What remains is pruning/bounding the two legacy cache families.
 5. Remove the JavaScript source-text assertions added with the top-bar change in `tests/test_api.py` — the `workspaceTopbarVisibilityStorageKey`, `data.topbar_visible`, and `snapshotState` string checks. Their behavior is already covered by the backend round-trip tests beside them. *The `/ui-state` one is gone: Stage 3 deleted the route it named.* `CLAUDE.md` forbids adding new ones; do not replace them with equivalents.
 6. Run the full Windows gates: `python tests/run_tests.py` and `python -m ruff check .`.
 
@@ -990,7 +1028,7 @@ The implementation should include at least these behavioral cases:
 32. manual restart, update restart, browser shutdown, and native launcher close use the same lifecycle action contract;
 33. workspace top-bar visibility round-trips through manual Save Workspace, autosave, and restart restore, and an invalid stored value degrades to visible without failing the slot (covered today);
 34. two fast top-bar toggles cannot leave the server holding the older value once the field moves onto the ordered queue, and a failed write is repaired rather than left to be committed by the next autosave (covered by Stage 3 — `PresentationControllerTestCase`);
-35. after `PATCH /api/workspaces/<id>/ui-state` is removed, top-bar visibility still reaches the snapshot from a live window and from a launcher-initiated all-workspace save, with no `localStorage` read in the launcher path (half covered — Stage 3 removed the route and covers the live-window half; the launcher still reads `localStorage` until Stage 4 item 3).
+35. after `PATCH /api/workspaces/<id>/ui-state` is removed, top-bar visibility still reaches the snapshot from a live window and from a launcher-initiated all-workspace save, with no `localStorage` read in the launcher path (covered by Stages 3–4; Stage 4's lifecycle route test acknowledges the owning window's exact value and asserts it in the all-live stored slot).
 
 ## Product decisions
 
@@ -1007,7 +1045,7 @@ The schema and lifecycle choices previously left open for Stages 4 and 5 are res
 9. **Missing persisted file or diff target:** retain the current drop/fallback behavior rather than showing a retryable missing tab.
 10. **Close surfaces using lifecycle choices:** the explicit browser close button and the native launcher's close button/X use the shared modal. Closing only a workspace window retains its current “hide window, leave sessions live” contract. Browser tab/window closure, Ctrl+C, task-manager kill, and power loss retain last-good behavior because they cannot reliably await a save.
 11. **Unsaved SSH groups in “Save open sessions”:** create a uniquely named preset and encrypt the live password server-side without returning it to the browser. Updating an already attached preset preserves its existing credential rules. The modal states that session passwords are encrypted while workspace snapshots remain password-free.
-12. **Partial combined-save success:** save presets first and workspace snapshots second. Keep GridVibe open on any failure, show per-group/workspace results, and offer Retry or a separately confirmed Continue without saving current changes. Do not promise atomic rollback across two files, delete successful unrelated writes, or terminate immediately after a failure.
+12. **Partial combined-save success:** save presets first and workspace snapshots second. Keep GridVibe open on any failure, show per-group/workspace results, and keep the same three choices active; selecting the same save option tries it again, while Continue without saving current changes remains first. Do not promise atomic rollback across two files, delete successful unrelated writes, or terminate immediately after a failure.
 
 ## Audit verification
 

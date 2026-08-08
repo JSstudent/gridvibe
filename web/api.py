@@ -147,6 +147,15 @@ from web.hostkeys import (  # noqa: F401 - re-exported for backwards compatibili
     _apply_host_key_policy,
     _load_persistent_host_keys,
 )
+from web.lifecycle import (
+    LIFECYCLE_ACTIONS,
+    LIFECYCLE_SAVE_CHOICES,
+    LIFECYCLE_SAVE_NONE,
+    LifecycleValidationError,
+    lifecycle_coordinator,
+    normalize_workspace_metadata,
+    prepare_lifecycle_action,
+)
 from web.paths import BASE_DIR, install_kind
 from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
     RuntimeStatePersistenceError,
@@ -723,9 +732,82 @@ def shutdown_browser_application():
     if provided_token != expected_token:
         return jsonify({"error": "Invalid shutdown token"}), 403
 
+    decision_token = request.headers.get("X-GridVibe-Lifecycle-Decision", "")
+    if not lifecycle_coordinator.consume_decision(decision_token, "close"):
+        return jsonify({
+            "error": "Choose how to handle current changes before closing GridVibe",
+            "lifecycle_decision_required": True,
+        }), 409
+
     logger.info("Accepted browser mode shutdown request")
     _schedule_browser_shutdown()
     return jsonify({"message": "GridVibe is shutting down"}), 202
+
+
+@app.route('/api/lifecycle/prepare', methods=['POST'])
+def prepare_application_lifecycle():
+    """Flush and persist the requested process-wide close/restart transaction."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid lifecycle payload"}), 400
+    action = str(data.get("action") or "").strip()
+    save = str(data.get("save") or "").strip()
+    if action not in LIFECYCLE_ACTIONS or save not in LIFECYCLE_SAVE_CHOICES:
+        return jsonify({"error": "Unknown lifecycle action or save choice"}), 400
+
+    workspace_metadata = {}
+    if save != LIFECYCLE_SAVE_NONE:
+        # Snapshot manager membership before any wait, then release its lock.
+        # Socket emits and client acknowledgements happen only after that read.
+        live_snapshot = session_manager.snapshot_live_workspaces()
+        flush_result = lifecycle_coordinator.request_flush(
+            live_snapshot,
+            lambda workspace_id, request_id: socketio.emit(
+                "lifecycle_flush_requested",
+                {"request_id": request_id, "workspace_id": workspace_id},
+                room=workspace_room(workspace_id),
+            ),
+        )
+        if not flush_result["ok"]:
+            return jsonify({
+                "action": action,
+                "save": save,
+                "ready_to_exit": False,
+                "retryable": True,
+                "saved_sessions": [],
+                "saved_workspaces": [],
+                "errors": flush_result["errors"],
+                "missing_workspaces": flush_result["missing_workspaces"],
+            }), 503
+        try:
+            workspace_metadata = normalize_workspace_metadata(
+                flush_result["metadata"],
+                session_manager.snapshot_live_workspaces(),
+            )
+        except LifecycleValidationError as exc:
+            return jsonify({
+                "action": action,
+                "save": save,
+                "ready_to_exit": False,
+                "retryable": True,
+                "saved_sessions": [],
+                "saved_workspaces": [],
+                "errors": [{"category": "client_metadata", "error": str(exc)}],
+            }), 503
+
+    try:
+        result = prepare_lifecycle_action(
+            session_manager,
+            action,
+            save,
+            workspace_metadata=workspace_metadata,
+        )
+    except LifecycleValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if result["ready_to_exit"]:
+        result["decision_token"] = lifecycle_coordinator.issue_decision(action)
+        return jsonify(result)
+    return jsonify(result), 503
 
 
 @app.route('/api/app-update', methods=['POST'])
@@ -2803,6 +2885,7 @@ def handle_disconnect():
     """Handle client disconnection."""
     logger.info(f"Client disconnected: {request.sid}") # type: ignore
     _clear_client_joined_sessions(request.sid) # type: ignore
+    lifecycle_coordinator.disconnect_client(request.sid) # type: ignore
 
 
 @socketio.on('join_workspace')
@@ -2819,6 +2902,11 @@ def handle_join_workspace(data):
         logger.warning(f"join_workspace: workspace not found: {workspace_id}")
         return
     join_room(workspace_room(workspace_id))
+    lifecycle_coordinator.join_workspace(
+        request.sid, # type: ignore
+        workspace_id,
+        data.get("window_id") if isinstance(data, dict) else None,
+    )
 
 
 @socketio.on('leave_workspace')
@@ -2832,6 +2920,13 @@ def handle_leave_workspace(data):
         logger.warning(f"leave_workspace rejected: {exc}")
         return
     leave_room(workspace_room(workspace_id))
+    lifecycle_coordinator.leave_workspace(request.sid, workspace_id) # type: ignore
+
+
+@socketio.on('lifecycle_flush_ack')
+def handle_lifecycle_flush_ack(data):
+    """Accept a room-scoped lifecycle flush result from this socket only."""
+    lifecycle_coordinator.acknowledge_flush(request.sid, data) # type: ignore
 
 
 _TERMINAL_QUERY_RE = re.compile(

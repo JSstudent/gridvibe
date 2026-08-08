@@ -1269,6 +1269,24 @@ class SessionManager:
                 }
             return snapshots
 
+    def snapshot_lifecycle_workspaces(self) -> Dict[str, Dict[str, Any]]:
+        """Take the lifecycle preset snapshot, including in-memory credentials.
+
+        This is the sole credential-bearing snapshot path.  The caller uses it
+        only to encrypt reusable presets and never returns or logs it; runtime
+        workspace capture continues to call :meth:`snapshot_live_workspaces`,
+        whose dictionaries are password-free.  The outer lock spans both shape
+        capture and credential attachment so a close/move cannot mix versions.
+        """
+        with self.lock:
+            snapshots = self.snapshot_live_workspaces()
+            for snapshot in snapshots.values():
+                for group in snapshot.get("groups") or []:
+                    for pane in group.get("sessions") or []:
+                        session = self.sessions.get(pane.get("session_id"))
+                        pane["password"] = session.password if session is not None else None
+            return snapshots
+
     def get_active_sessions(self) -> List[TerminalSession]:
         """Get all active (connected) sessions."""
         with self.lock:

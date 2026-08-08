@@ -1,0 +1,539 @@
+"""Shared close/restart preparation and live-window flush coordination.
+
+Voluntary application close and restart use the same transaction contract:
+flush every connected workspace window, optionally save reusable presets,
+capture all live workspace slots once, and authorize teardown only after every
+requested step succeeded.  This module is Flask- and Socket.IO-independent so
+the route and native bridge share one decision registry without an import
+cycle.
+"""
+
+from __future__ import annotations
+
+import secrets
+import threading
+import time
+import uuid
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+
+from web.runtime_state import capture_live_workspaces, normalize_native_zoom_factor
+from web.saved_sessions import (
+    _find_saved_session_entry,
+    _load_saved_sessions_payload,
+    _merge_workspace_session_config,
+    _normalize_session_config,
+    build_live_session_view_updates,
+    build_unique_session_name,
+    upsert_saved_session,
+)
+
+LIFECYCLE_ACTIONS = frozenset({"close", "restart"})
+LIFECYCLE_SAVE_NONE = "none"
+LIFECYCLE_SAVE_WORKSPACES = "workspaces"
+LIFECYCLE_SAVE_SESSIONS_AND_WORKSPACES = "sessions+workspaces"
+LIFECYCLE_SAVE_CHOICES = frozenset(
+    {
+        LIFECYCLE_SAVE_NONE,
+        LIFECYCLE_SAVE_WORKSPACES,
+        LIFECYCLE_SAVE_SESSIONS_AND_WORKSPACES,
+    }
+)
+LIFECYCLE_FLUSH_TIMEOUT_SECONDS = 5.0
+LIFECYCLE_DECISION_TTL_SECONDS = 60.0
+_MAX_DECISIONS = 128
+_MAX_CLIENT_ERROR_LENGTH = 300
+_MAX_WINDOW_ID_LENGTH = 128
+
+
+class LifecycleValidationError(ValueError):
+    """Raised when a lifecycle action or client metadata is invalid."""
+
+
+class LifecycleCoordinator:
+    """Track workspace-window flushes and one-use teardown decisions."""
+
+    def __init__(self):
+        self._condition = threading.Condition(threading.Lock())
+        self._client_windows: Dict[str, Set[str]] = {}
+        self._windows: Dict[str, Dict[str, Any]] = {}
+        self._flushes: Dict[str, Dict[str, Any]] = {}
+        self._decisions: Dict[str, Tuple[str, float]] = {}
+
+    def reset(self):
+        """Clear transient state. Intended for tests and process reconfiguration."""
+        with self._condition:
+            self._client_windows.clear()
+            self._windows.clear()
+            self._flushes.clear()
+            self._decisions.clear()
+            self._condition.notify_all()
+
+    def join_workspace(
+        self, client_id: Any, workspace_id: Any, window_id: Any = None
+    ):
+        client = str(client_id or "").strip()
+        workspace = str(workspace_id or "").strip()
+        window = str(window_id or client).strip()
+        if len(window) > _MAX_WINDOW_ID_LENGTH:
+            window = client
+        if not client or not workspace or not window:
+            return
+        with self._condition:
+            previous = self._windows.get(window)
+            if previous is not None:
+                previous_client = previous["client_id"]
+                previous_windows = self._client_windows.get(previous_client)
+                if previous_windows is not None:
+                    previous_windows.discard(window)
+                    if not previous_windows:
+                        self._client_windows.pop(previous_client, None)
+            self._windows[window] = {
+                "client_id": client,
+                "workspace_id": workspace,
+                "connected": True,
+            }
+            self._client_windows.setdefault(client, set()).add(window)
+
+    def leave_workspace(self, client_id: Any, workspace_id: Any = None):
+        client = str(client_id or "").strip()
+        workspace = str(workspace_id or "").strip()
+        if not client:
+            return
+        with self._condition:
+            joined = set(self._client_windows.get(client) or set())
+            for window in joined:
+                record = self._windows.get(window)
+                if record is None:
+                    continue
+                if workspace and record["workspace_id"] != workspace:
+                    continue
+                self._windows.pop(window, None)
+                self._client_windows.get(client, set()).discard(window)
+            if not self._client_windows.get(client):
+                self._client_windows.pop(client, None)
+            self._condition.notify_all()
+
+    def disconnect_client(self, client_id: Any):
+        """Keep disconnected windows as stale until pagehide or stable rejoin."""
+        client = str(client_id or "").strip()
+        if not client:
+            return
+        with self._condition:
+            for window in self._client_windows.pop(client, set()):
+                record = self._windows.get(window)
+                if record is not None:
+                    record["connected"] = False
+            self._condition.notify_all()
+
+    def acknowledge_flush(self, client_id: Any, data: Any) -> bool:
+        """Accept one Socket.IO acknowledgement from its authenticated sid."""
+        if not isinstance(data, dict):
+            return False
+        client = str(client_id or "").strip()
+        request_id = str(data.get("request_id") or "").strip()
+        workspace_id = str(data.get("workspace_id") or "").strip()
+        with self._condition:
+            pending = self._flushes.get(request_id)
+            if pending is None:
+                return False
+            matching = {
+                key
+                for key, expected_client in pending["clients"].items()
+                if expected_client == client and key[1] == workspace_id
+            }
+            if not matching:
+                return False
+            if matching.issubset(pending["acknowledged"]):
+                return True
+            pending["acknowledged"].update(matching)
+            if data.get("ok") is True:
+                metadata = data.get("metadata")
+                pending["metadata"].setdefault(workspace_id, []).append(
+                    metadata if isinstance(metadata, dict) else {}
+                )
+            else:
+                error = str(data.get("error") or "Presentation flush failed")
+                pending["errors"].append(
+                    {
+                        "workspace_id": workspace_id,
+                        "category": "client_flush",
+                        "error": error[:_MAX_CLIENT_ERROR_LENGTH],
+                    }
+                )
+            self._condition.notify_all()
+            return True
+
+    def request_flush(
+        self,
+        workspace_ids: Iterable[str],
+        emit_request: Callable[[str, str], None],
+        timeout: float = LIFECYCLE_FLUSH_TIMEOUT_SECONDS,
+    ) -> Dict[str, Any]:
+        """Ask every currently joined window to flush, then wait boundedly."""
+        live_ids = {str(value or "").strip() for value in workspace_ids}
+        live_ids.discard("")
+        request_id = uuid.uuid4().hex
+        with self._condition:
+            expected = {
+                (window_id, record["workspace_id"])
+                for window_id, record in self._windows.items()
+                if record["workspace_id"] in live_ids
+            }
+            if not expected:
+                return {
+                    "ok": True,
+                    "request_id": request_id,
+                    "metadata": {},
+                    "errors": [],
+                    "missing_workspaces": [],
+                }
+            pending = {
+                "expected": expected,
+                "acknowledged": {
+                    key
+                    for key in expected
+                    if not self._windows[key[0]]["connected"]
+                },
+                "clients": {
+                    key: self._windows[key[0]]["client_id"] for key in expected
+                },
+                "metadata": {},
+                "errors": [
+                    {
+                        "workspace_id": workspace_id,
+                        "category": "client_stale",
+                        "error": "A workspace window is disconnected and cannot flush",
+                    }
+                    for window_id, workspace_id in expected
+                    if not self._windows[window_id]["connected"]
+                ],
+            }
+            self._flushes[request_id] = pending
+
+        # Room emits are deliberately outside the coordinator lock and outside
+        # SessionManager.lock. A slow transport must never stall shared state.
+        connected_workspaces = {
+            workspace
+            for window, workspace in expected
+            if self._windows.get(window, {}).get("connected")
+        }
+        for workspace_id in sorted(connected_workspaces):
+            try:
+                emit_request(workspace_id, request_id)
+            except Exception:
+                with self._condition:
+                    current = self._flushes.get(request_id)
+                    if current is not None:
+                        failed = {
+                            key for key in current["expected"] if key[1] == workspace_id
+                        }
+                        current["acknowledged"].update(failed)
+                        current["errors"].append(
+                            {
+                                "workspace_id": workspace_id,
+                                "category": "client_emit",
+                                "error": "Could not request the workspace flush",
+                            }
+                        )
+                        self._condition.notify_all()
+
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._condition:
+            pending = self._flushes.get(request_id)
+            while pending is not None and pending["acknowledged"] != pending["expected"]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._condition.wait(remaining)
+                pending = self._flushes.get(request_id)
+            pending = self._flushes.pop(request_id, pending)
+
+        if pending is None:
+            return {
+                "ok": False,
+                "request_id": request_id,
+                "metadata": {},
+                "errors": [{"category": "client_flush", "error": "Flush was cancelled"}],
+                "missing_workspaces": sorted(live_ids),
+            }
+        missing = pending["expected"] - pending["acknowledged"]
+        missing_workspaces = sorted({workspace for _client, workspace in missing})
+        errors = list(pending["errors"])
+        errors.extend(
+            {
+                "workspace_id": workspace_id,
+                "category": "client_timeout",
+                "error": "The workspace window did not acknowledge its flush in time",
+            }
+            for workspace_id in missing_workspaces
+        )
+        return {
+            "ok": not errors,
+            "request_id": request_id,
+            "metadata": pending["metadata"],
+            "errors": errors,
+            "missing_workspaces": missing_workspaces,
+        }
+
+    def issue_decision(self, action: str) -> str:
+        if action not in LIFECYCLE_ACTIONS:
+            raise LifecycleValidationError("Unknown lifecycle action")
+        now = time.monotonic()
+        token = secrets.token_urlsafe(24)
+        with self._condition:
+            self._prune_decisions_locked(now)
+            self._decisions[token] = (action, now + LIFECYCLE_DECISION_TTL_SECONDS)
+            while len(self._decisions) > _MAX_DECISIONS:
+                oldest = min(self._decisions, key=lambda item: self._decisions[item][1])
+                self._decisions.pop(oldest, None)
+        return token
+
+    def consume_decision(self, token: Any, action: str) -> bool:
+        candidate = str(token or "").strip()
+        now = time.monotonic()
+        with self._condition:
+            self._prune_decisions_locked(now)
+            decision = self._decisions.get(candidate)
+            if decision is None or decision[0] != action:
+                return False
+            self._decisions.pop(candidate, None)
+            return True
+
+    def _prune_decisions_locked(self, now: float):
+        expired = [token for token, (_action, expiry) in self._decisions.items() if expiry <= now]
+        for token in expired:
+            self._decisions.pop(token, None)
+
+
+lifecycle_coordinator = LifecycleCoordinator()
+
+
+def _live_group_config(group: Dict[str, Any]) -> Dict[str, Any]:
+    """Build one server-only reusable-preset candidate from a live group."""
+    panes = [pane for pane in group.get("sessions") or [] if isinstance(pane, dict)]
+    first = panes[0] if panes else {}
+    connection_mode = "wsl" if group.get("connection_mode") == "wsl" else "ssh"
+    terminals = []
+    terminal_fields = (
+        "session_id",
+        "title",
+        "directory",
+        "initial_command",
+        "initial_command_mode",
+        "startup_mode",
+        "agent_selection",
+        "custom_agent",
+        "agent_auto_mode",
+        "explorer_tree_open",
+        "explorer_git_open",
+        "explorer_search_open",
+        "explorer_open_tabs",
+        "explorer_active_tab",
+        "explorer_tab_views",
+        "explorer_md_preset",
+        "explorer_md_font",
+        "explorer_source_font",
+        "explorer_theme",
+        "browser_tabs",
+        "browser_active_tab",
+        "distribution",
+        "use_wsl",
+        "use_powershell",
+    )
+    for pane in panes:
+        terminals.append({field: pane.get(field) for field in terminal_fields})
+    return {
+        "connection_mode": connection_mode,
+        "terminal_count": len(panes),
+        "layout": group.get("layout"),
+        "workspace_layout": group.get("workspace_layout"),
+        "ssh": {
+            "host": first.get("host"),
+            "username": first.get("username"),
+            "password": first.get("password") or "",
+            "port": first.get("port"),
+            "default_dir": first.get("directory"),
+        },
+        "wsl": {
+            "distribution": first.get("distribution"),
+            "username": first.get("username"),
+            "default_dir": first.get("directory"),
+        },
+        "terminals": terminals,
+    }
+
+
+def normalize_workspace_metadata(
+    metadata_by_workspace: Any,
+    live_snapshots: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Validate and coalesce metadata returned by all windows per workspace."""
+    if not isinstance(metadata_by_workspace, dict):
+        return {}
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for workspace_id, raw_records in metadata_by_workspace.items():
+        snapshot = live_snapshots.get(workspace_id)
+        if snapshot is None:
+            continue
+        records = raw_records if isinstance(raw_records, list) else [raw_records]
+        candidates: List[Dict[str, Any]] = []
+        valid_group_ids = {
+            str(group.get("group_id") or "") for group in snapshot.get("groups") or []
+        }
+        for raw in records:
+            if not isinstance(raw, dict):
+                raw = {}
+            candidate: Dict[str, Any] = {}
+            if "active_group_id" in raw:
+                active_group_id = str(raw.get("active_group_id") or "").strip()
+                if active_group_id and active_group_id not in valid_group_ids:
+                    raise LifecycleValidationError(
+                        f"Workspace {workspace_id} reported an unknown active group"
+                    )
+                candidate["active_group_id"] = active_group_id
+            if "topbar_visible" in raw:
+                if not isinstance(raw.get("topbar_visible"), bool):
+                    raise LifecycleValidationError(
+                        f"Workspace {workspace_id} reported invalid top-bar state"
+                    )
+                candidate["topbar_visible"] = raw["topbar_visible"]
+            if "native_zoom_factor" in raw and raw.get("native_zoom_factor") is not None:
+                zoom = normalize_native_zoom_factor(raw.get("native_zoom_factor"))
+                if zoom is None:
+                    raise LifecycleValidationError(
+                        f"Workspace {workspace_id} reported invalid native zoom"
+                    )
+                candidate["native_zoom_factor"] = zoom
+            candidates.append(candidate)
+        nonempty = [candidate for candidate in candidates if candidate]
+        if nonempty and any(candidate != nonempty[0] for candidate in nonempty[1:]):
+            raise LifecycleValidationError(
+                f"Workspace {workspace_id} windows reported conflicting presentation metadata"
+            )
+        if nonempty:
+            normalized[workspace_id] = nonempty[0]
+    return normalized
+
+
+def _save_live_presets(
+    session_manager: Any,
+    snapshots: Dict[str, Dict[str, Any]],
+) -> Tuple[List[str], List[Dict[str, str]]]:
+    stored = _load_saved_sessions_payload()
+    entries = list(stored.get("sessions") or [])
+    taken_names = [entry.get("name") for entry in entries]
+    saved_ids: List[str] = []
+    errors: List[Dict[str, str]] = []
+
+    for workspace_id in sorted(snapshots):
+        for group in snapshots[workspace_id].get("groups") or []:
+            group_id = str(group.get("group_id") or "").strip()
+            attached_id = str(group.get("saved_session_id") or "").strip()
+            existing = _find_saved_session_entry(entries, attached_id)
+            live_config = _live_group_config(group)
+            if existing is not None:
+                config = _merge_workspace_session_config(existing["config"], live_config)
+                preset_name = existing["name"]
+                preset_id = existing["id"]
+            else:
+                config = _normalize_session_config(live_config)
+                base_name = str(group.get("name") or "Open session").strip() or "Open session"
+                preset_name = build_unique_session_name(base_name, taken_names)
+                preset_id = attached_id or None
+            try:
+                saved = upsert_saved_session(
+                    config,
+                    name=preset_name,
+                    session_id=preset_id,
+                    set_last_session=False,
+                )
+                updated = session_manager.update_group_saved_session(
+                    group_id,
+                    saved["id"],
+                    saved["name"],
+                    layout=saved["config"].get("layout"),
+                    workspace_layout=saved["config"].get("workspace_layout"),
+                    session_view_updates=build_live_session_view_updates(
+                        live_config, saved["config"]
+                    ),
+                )
+                saved_ids.append(saved["id"])
+                entries.append(saved)
+                taken_names.append(saved["name"])
+                if updated is None:
+                    errors.append(
+                        {
+                            "scope": "session",
+                            "id": group_id,
+                            "error": "The live group closed before its preset could be linked",
+                        }
+                    )
+            except Exception:
+                # Deliberately omit names, targets, paths, and exception text:
+                # preset errors can contain state-file paths and this response is
+                # a shape diagnostic, not a secret-bearing debug channel.
+                errors.append(
+                    {
+                        "scope": "session",
+                        "id": group_id,
+                        "error": "The reusable session could not be saved",
+                    }
+                )
+    return saved_ids, errors
+
+
+def prepare_lifecycle_action(
+    session_manager: Any,
+    action: str,
+    save: str,
+    workspace_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Perform persistence work and report whether teardown is now allowed."""
+    if action not in LIFECYCLE_ACTIONS:
+        raise LifecycleValidationError("Unknown lifecycle action")
+    if save not in LIFECYCLE_SAVE_CHOICES:
+        raise LifecycleValidationError("Unknown lifecycle save choice")
+
+    result: Dict[str, Any] = {
+        "action": action,
+        "save": save,
+        "ready_to_exit": False,
+        "retryable": False,
+        "saved_sessions": [],
+        "saved_workspaces": [],
+        "errors": [],
+    }
+    if save == LIFECYCLE_SAVE_NONE:
+        result["ready_to_exit"] = True
+        return result
+
+    if save == LIFECYCLE_SAVE_SESSIONS_AND_WORKSPACES:
+        credential_snapshot = session_manager.snapshot_lifecycle_workspaces()
+        saved_ids, preset_errors = _save_live_presets(
+            session_manager, credential_snapshot
+        )
+        result["saved_sessions"] = saved_ids
+        result["errors"].extend(preset_errors)
+        if preset_errors:
+            result["retryable"] = True
+            return result
+
+    try:
+        stored = capture_live_workspaces(
+            session_manager,
+            origin="manual",
+            workspace_metadata=workspace_metadata,
+        )
+        result["saved_workspaces"] = sorted(stored)
+    except Exception:
+        result["errors"].append(
+            {
+                "scope": "workspace",
+                "error": "The open workspaces could not be saved",
+            }
+        )
+        result["retryable"] = True
+        return result
+
+    result["ready_to_exit"] = True
+    return result

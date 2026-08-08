@@ -136,7 +136,9 @@ class _PersistencePathsMixin:
         api.app.config["TESTING"] = True
         self.client = api.app.test_client()
         api.session_manager.reset_sessions()
+        api.lifecycle_coordinator.reset()
         self.addCleanup(api.session_manager.reset_sessions)
+        self.addCleanup(api.lifecycle_coordinator.reset)
 
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -809,7 +811,6 @@ class LaunchCapacityNondestructiveTestCase(_PersistencePathsMixin, unittest.Test
             },
         }
 
-    @unittest.expectedFailure
     def test_lowering_max_sessions_leaves_a_wider_preset_byte_for_byte(self):
         """Stage 6 items 1-2. Matrix row 20."""
         with patch.object(api.runtime_config, "max_sessions", 8):
@@ -848,7 +849,6 @@ class LaunchCapacityNondestructiveTestCase(_PersistencePathsMixin, unittest.Test
         self.assertIn("Pane 8", before)
         self.assertIn("Pane 8", json.dumps(after))
 
-    @unittest.expectedFailure
     def test_lowering_max_sessions_does_not_rewrite_snapshot_geometry(self):
         """Stage 6 item 3, runtime-state read path. Matrix row 21.
 
@@ -1090,7 +1090,6 @@ class LifecycleActionMatrixTestCase(_PersistencePathsMixin, unittest.TestCase):
     def _prepare(self, action, save):
         return self.client.post(LIFECYCLE_ROUTE, json={"action": action, "save": save})
 
-    @unittest.expectedFailure
     def test_without_saving_writes_neither_file_and_keeps_the_restore_point(self):
         """Stage 4 row 1. Matrix row 28."""
         self._two_live_workspaces()
@@ -1114,7 +1113,6 @@ class LifecycleActionMatrixTestCase(_PersistencePathsMixin, unittest.TestCase):
                     self.saved_sessions_path.read_text(encoding="utf-8"), presets_before
                 )
 
-    @unittest.expectedFailure
     def test_save_open_workspaces_covers_every_live_workspace(self):
         """Stage 4 row 2, item 3. Matrix row 29.
 
@@ -1146,7 +1144,6 @@ class LifecycleActionMatrixTestCase(_PersistencePathsMixin, unittest.TestCase):
             presets_before,
         )
 
-    @unittest.expectedFailure
     def test_sessions_plus_workspaces_saves_presets_first_and_links_them(self):
         """Stage 4 rows 3, item 5 / product decisions 11-12. Matrix row 30."""
         first, second = self._two_live_workspaces()
@@ -1170,7 +1167,6 @@ class LifecycleActionMatrixTestCase(_PersistencePathsMixin, unittest.TestCase):
         # …while the workspace snapshot stays password-free.
         self.assertNotIn("password", self.state_path.read_text(encoding="utf-8"))
 
-    @unittest.expectedFailure
     def test_a_failed_requested_save_never_reports_ready_to_exit(self):
         """Stage 4 item 6 / SGP-11. Matrix row 31.
 
@@ -1194,7 +1190,6 @@ class LifecycleActionMatrixTestCase(_PersistencePathsMixin, unittest.TestCase):
         # Nothing was torn down while the user still has a decision to make.
         self.assertEqual(len(api.session_manager.get_all_workspaces()), 2)
 
-    @unittest.expectedFailure
     def test_partial_combined_failure_keeps_the_successful_preset_writes(self):
         """Product decision 12: no promised atomicity across two files."""
         self._two_live_workspaces()
@@ -1218,7 +1213,6 @@ class LifecycleActionMatrixTestCase(_PersistencePathsMixin, unittest.TestCase):
         self.assertTrue(payload["errors"])
         self.assertEqual(payload["saved_workspaces"], [])
 
-    @unittest.expectedFailure
     def test_every_exit_surface_uses_the_same_lifecycle_contract(self):
         """Stage 4 item 7 / product decision 10. Matrix row 32.
 
@@ -1245,7 +1239,6 @@ class LifecycleActionMatrixTestCase(_PersistencePathsMixin, unittest.TestCase):
         unknown = self._prepare("restart", "everything")
         self.assertEqual(unknown.status_code, 400, unknown.get_json())
 
-    @unittest.expectedFailure
     def test_browser_shutdown_refuses_to_tear_down_before_a_lifecycle_decision(self):
         """Stage 4 item 7 / product decision 10. Matrix row 32.
 

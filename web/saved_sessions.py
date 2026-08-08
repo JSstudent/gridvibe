@@ -37,6 +37,7 @@ from web.session_presentation import (  # noqa: F401 - compatibility re-exports
     EXPLORER_PREVIEW_TAB_KEY,
     EXPLORER_SOURCE_FONTS,
     EXPLORER_TAB_VIEW_MODES,
+    MAX_STORED_SESSION_PANES,
     _normalize_browser_active_tab,
     _normalize_browser_tabs,
     _normalize_browser_url,
@@ -170,12 +171,26 @@ def _default_saved_session_entry() -> Dict[str, Any]:
     }
 
 
-def _normalize_terminal_entries(entries: Any, connection_mode: str = "ssh") -> List[Dict[str, Any]]:
-    """Ensure the saved terminal list is bounded and complete."""
+def _normalize_terminal_entries(
+    entries: Any,
+    connection_mode: str = "ssh",
+    minimum_count: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Ensure the stored pane list is schema-bounded and complete.
+
+    ``runtime_config.max_sessions`` is a launch preference, not a persistence
+    bound.  Existing extra entries therefore remain readable and survive an
+    unrelated preset write after that preference is lowered.
+    """
     normalized = []
     entries = entries if isinstance(entries, list) else []
+    requested_count = runtime_config.max_sessions if minimum_count is None else minimum_count
+    target_count = min(
+        MAX_STORED_SESSION_PANES,
+        max(1, int(requested_count), len(entries)),
+    )
 
-    for index in range(runtime_config.max_sessions):
+    for index in range(target_count):
         entry = entries[index] if index < len(entries) and isinstance(entries[index], dict) else {}
         use_powershell = bool(entry.get("use_powershell"))
         raw_startup_mode = entry.get("startup_mode")
@@ -292,7 +307,7 @@ def _normalize_session_config(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         terminal_count = default_config["terminal_count"]
 
-    terminal_count = max(1, min(runtime_config.max_sessions, terminal_count))
+    terminal_count = max(1, min(MAX_STORED_SESSION_PANES, terminal_count))
     ssh_data = data.get("ssh") if isinstance(data.get("ssh"), dict) else {}
     wsl_data = data.get("wsl") if isinstance(data.get("wsl"), dict) else {}
 
@@ -319,7 +334,11 @@ def _normalize_session_config(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "username": str(wsl_data.get("username") or ""),# type: ignore
             "default_dir": str(wsl_data.get("default_dir") or default_config["wsl"]["default_dir"]),# type: ignore
         },
-        "terminals": _normalize_terminal_entries(data.get("terminals"), connection_mode),
+        "terminals": _normalize_terminal_entries(
+            data.get("terminals"),
+            connection_mode,
+            minimum_count=max(terminal_count, len(default_config["terminals"])),
+        ),
         "workspace_layout": _normalize_workspace_layout(data.get("workspace_layout"), terminal_count),
     }
 

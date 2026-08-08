@@ -164,6 +164,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         api._refresh_runtime_config()
         api.app.config["TESTING"] = True
         api.configure_browser_shutdown(False)
+        api.lifecycle_coordinator.reset()
         self.client = api.app.test_client()
         api.session_manager.reset_sessions()
         api.active_launch_options.update(
@@ -255,6 +256,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def tearDown(self):
         api.configure_browser_shutdown(False)
+        api.lifecycle_coordinator.reset()
         api.session_manager.reset_sessions()
         api.active_launch_options.update(
             {"connection_mode": "ssh", "layout": "grid", "terminal_count": 4}
@@ -333,11 +335,15 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_browser_shutdown_endpoint_schedules_process_exit(self):
         token = api.configure_browser_shutdown(True)
+        decision = api.lifecycle_coordinator.issue_decision("close")
 
         with patch.object(api, "_schedule_browser_shutdown") as schedule_shutdown:
             response = self.client.post(
                 "/api/browser-shutdown",
-                headers={"X-GridVibe-Shutdown-Token": token},
+                headers={
+                    "X-GridVibe-Shutdown-Token": token,
+                    "X-GridVibe-Lifecycle-Decision": decision,
+                },
             )
 
         self.assertEqual(response.status_code, 202)
@@ -13209,6 +13215,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/shared.js",
         "js/workspaces.js",
         "js/app-settings.js",
+        "js/lifecycle.js",
         "js/launcher.js",
         "js/terminals.js",
         "js/explorer-viewer.js",
@@ -13240,16 +13247,14 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
                 with self.subTest(filename=filename, call=call):
                     self.assertNotIn(call, body)
 
-    def test_launcher_page_ships_generic_confirm_shell(self):
-        """N1 — restart/close confirmations go through the in-page shell."""
+    def test_launcher_page_ships_in_page_confirmation_shells(self):
+        """N1 — ordinary confirms and lifecycle choices are in-page dialogs."""
         launcher_html = self._get_text("/")
         self.assertIn('id="genericConfirmModal"', launcher_html)
-        launcher_js = self._get_text("/static/js/launcher.js")
-        for caller in ("shutdownBrowserApp", "restartApplication", "checkForUpdates"):
-            with self.subTest(caller=caller):
-                body = launcher_js[launcher_js.index(f"async function {caller}"):]
-                body = body[:body.index("\n    }")]
-                self.assertIn("await openGenericConfirmModal", body)
+        self.assertIn('id="lifecycleModal"', launcher_html)
+        self.assertIn('data-lifecycle-save="none"', launcher_html)
+        self.assertIn('data-lifecycle-save="workspaces"', launcher_html)
+        self.assertIn('data-lifecycle-save="sessions+workspaces"', launcher_html)
 
     def test_static_js_uses_no_emoji_glyph_icons(self):
         """N3 — guardrail 7: stroke-style SVG icons, not emoji glyphs."""
@@ -16335,11 +16340,9 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         shared_js = self._static("js/shared.js")
         self.assertIn("function normalizeNativeZoomFactor(value)", shared_js)
         self.assertIn("async function getNativeSessionZoomFactor()", shared_js)
-        launcher_js = self._static("js/launcher.js")
-        self.assertIn("getStoredWorkspaceTopbarVisible(workspaceId)", launcher_js)
-        self.assertIn("const snapshotState = { workspace_id: workspaceId }", launcher_js)
-        self.assertIn("snapshotState.topbar_visible = topbarVisible", launcher_js)
-        self.assertIn("body: JSON.stringify(snapshotState)", launcher_js)
+        launcher_html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="lifecycleModal"', launcher_html)
+        self.assertIn("js/lifecycle.js", launcher_html)
         workspaces_js = self._static("js/workspaces.js")
         self.assertIn("api.open_workspace_window(", workspaces_js)
         self.assertIn("resolvedWorkspaceId,\n                    groupId,", workspaces_js)

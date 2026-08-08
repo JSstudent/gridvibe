@@ -12,8 +12,6 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from web.config import runtime_config
-
 
 class PresentationValidationError(ValueError):
     """Raised when a presentation payload is not a bounded snapshot."""
@@ -51,6 +49,10 @@ EXPLORER_FONT_ALIASES = {"consolas": "jetbrains-mono"}
 DEFAULT_BROWSER_URL = "http://127.0.0.1:3000"
 BROWSER_MAX_TABS = 8
 BROWSER_MAX_URL_LENGTH = 2048
+# Persisted shape is normalized against an immutable product/schema ceiling,
+# never the user's current launch preference.  The preference is enforced when
+# a group is launched; lowering it must not rewrite a wider preset or snapshot.
+MAX_STORED_SESSION_PANES = 64
 
 PANE_PRESENTATION_FIELDS = frozenset(
     {
@@ -337,14 +339,14 @@ def _normalize_workspace_layout(
     data: Any,
     terminal_count: int,
 ) -> Optional[Dict[str, Any]]:
-    """Normalize current live geometry; storage-cap decoupling is Stage 6."""
+    """Normalize bounded geometry without consulting the current launch cap."""
     if not isinstance(data, dict):
         return None
     raw_rects = data.get("split_slot_rects")
     if not isinstance(raw_rects, list) or len(raw_rects) != terminal_count:
         return None
     rects = []
-    max_grid_line = max(64, runtime_config.max_sessions * 8)
+    max_grid_line = MAX_STORED_SESSION_PANES * 8
     for index, raw_rect in enumerate(raw_rects):
         if not isinstance(raw_rect, dict):
             return None
@@ -360,11 +362,13 @@ def _normalize_workspace_layout(
             return None
         if x + w - 1 > max_grid_line or y + h - 1 > max_grid_line:
             return None
+        if origin_slot < 0 or origin_slot >= MAX_STORED_SESSION_PANES:
+            # A geometry record is all-or-nothing.  Clamping an unrepresentable
+            # origin silently assigns the rectangle to a different pane.
+            return None
         rects.append(
             {
-                "originSlot": max(
-                    0, min(runtime_config.max_sessions - 1, origin_slot)
-                ),
+                "originSlot": origin_slot,
                 "x": x,
                 "y": y,
                 "w": w,
@@ -400,7 +404,7 @@ def _normalize_workspace_layout(
             data.get("split_row_weights"), row_count
         ),
         "original_split_slot_count": max(
-            1, min(runtime_config.max_sessions, original_count)
+            1, min(MAX_STORED_SESSION_PANES, original_count)
         ),
     }
 

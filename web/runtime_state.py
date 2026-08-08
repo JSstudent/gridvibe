@@ -3,10 +3,12 @@
 Deep-dive feature 10.5: live shells cannot survive a backend restart by
 design, but the workspace *shape* (groups + per-session launch config) can.
 Schema v3 stores one slot per workspace id (``workspaces`` dict); with
-multi-workspace there is one slot per captured workspace. **Exactly two
-writers** capture shape: the autosave timer (``capture_live_workspaces``) and
-the user's explicit Save Workspace action (``capture_workspace`` with origin
-``"manual"``). Renaming a workspace deliberately does *not* capture — it
+multi-workspace there is one slot per captured workspace. **Exactly three
+user/runtime intents** capture shape: the autosave timer
+(``capture_live_workspaces``), the user's explicit Save Workspace action
+(``capture_workspace`` with origin ``"manual"``), and a successful voluntary
+close/restart lifecycle save (one all-live manual ``capture_live_workspaces``).
+Renaming a workspace deliberately does *not* capture — it
 changes the live label, and the next capture by either real writer persists it.
 A slot also records which group was in front (``active_group_id``) so the
 restore reopens the workspace on it rather than on whichever group happens to
@@ -56,7 +58,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from web.paths import BASE_DIR
-from web.session_presentation import normalize_topbar_visible
+from web.session_presentation import MAX_STORED_SESSION_PANES, normalize_topbar_visible
 from web.state_files import (
     CrossProcessFileLock,
     StateFilePersistenceError,
@@ -103,7 +105,7 @@ MAX_TOMBSTONES = 64
 # max_sessions must not make a saved workspace vanish from the restore
 # chooser with no way to learn why. This ceiling only catches a file that is
 # not describing a workspace at all.
-MAX_STORED_GROUP_PANES = 64
+MAX_STORED_GROUP_PANES = MAX_STORED_SESSION_PANES
 # How long one process waits for another to finish its read-modify-replace.
 STATE_LOCK_TIMEOUT_SECONDS = 10.0
 NATIVE_ZOOM_FACTOR_MIN = 0.25
@@ -822,6 +824,7 @@ class RuntimeStateStore:
         self,
         session_manager: Any,
         origin: str = "auto",
+        workspace_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Capture every non-empty live workspace with one consistent file write.
 
@@ -834,6 +837,9 @@ class RuntimeStateStore:
         workspace nor undo a newer capture.
         """
         ticket = self._next_ticket()
+        workspace_metadata = (
+            workspace_metadata if isinstance(workspace_metadata, dict) else {}
+        )
         observed = self.observed_revisions()
         live_snapshots = session_manager.snapshot_live_workspaces()
         if not live_snapshots:
@@ -847,6 +853,8 @@ class RuntimeStateStore:
             revisions = state.setdefault("revisions", {})
             stored_slots: Dict[str, Dict[str, Any]] = {}
             for workspace_id, snapshot in live_snapshots.items():
+                metadata = workspace_metadata.get(workspace_id)
+                metadata = metadata if isinstance(metadata, dict) else {}
                 observed_revision = observed.get(workspace_id, 0)
                 if self._is_stale_locked(
                     workspace_id, ticket, origin, observed_revision, revisions
@@ -866,6 +874,16 @@ class RuntimeStateStore:
                     continue
                 previous_slot = workspaces.get(workspace_id)
                 previous_slot = previous_slot if isinstance(previous_slot, dict) else {}
+                active_group_id = (
+                    str(metadata.get("active_group_id") or "").strip()
+                    if "active_group_id" in metadata
+                    else str(snapshot.get("active_group_id") or "").strip()
+                )
+                topbar_visible = (
+                    metadata.get("topbar_visible")
+                    if isinstance(metadata.get("topbar_visible"), bool)
+                    else snapshot.get("topbar_visible")
+                )
                 slot = self._build_slot(
                     workspace_id=workspace_id,
                     groups=groups,
@@ -873,12 +891,14 @@ class RuntimeStateStore:
                     origin=origin,
                     label=None,
                     workspace_label=str(snapshot.get("label") or "").strip(),
-                    active_group_id=str(snapshot.get("active_group_id") or "").strip(),
+                    active_group_id=active_group_id,
                     saved_at=saved_at,
-                    native_zoom_factor=None,
+                    native_zoom_factor=normalize_native_zoom_factor(
+                        metadata.get("native_zoom_factor")
+                    ),
                     topbar_visible=(
-                        snapshot.get("topbar_visible")
-                        if isinstance(snapshot.get("topbar_visible"), bool)
+                        topbar_visible
+                        if isinstance(topbar_visible, bool)
                         else True
                     ),
                 )
@@ -1144,9 +1164,14 @@ def capture_workspace(
 def capture_live_workspaces(
     session_manager: Any,
     origin: str = "auto",
+    workspace_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Capture every non-empty live workspace with one consistent file write."""
-    return _default_store.capture_live_workspaces(session_manager, origin=origin)
+    return _default_store.capture_live_workspaces(
+        session_manager,
+        origin=origin,
+        workspace_metadata=workspace_metadata,
+    )
 
 
 def load_restorable_workspace(
