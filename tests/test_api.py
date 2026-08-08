@@ -2573,7 +2573,28 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertIn("return setExplorerSidebarPanelOpen(index, 'tree', open);", html)
         self.assertIn("function focusExplorerTreeRow(index, path)", html)
-        self.assertIn("row.scrollIntoView({ block: 'nearest' });", html)
+        # Flashing is layered on the shared scroll helper, which every reveal
+        # (opening a file, browsing a directory) also runs so the `.active`
+        # row is never highlighted off screen.
+        focus = html[
+            html.index("function focusExplorerTreeRow(index, path)"):
+            html.index("async function loadExplorerTree(index)")
+        ]
+        self.assertIn("scrollExplorerTreeRowIntoView(index, path)", focus)
+        self.assertIn("explorer-tree-located", focus)
+        reveal_path = html[
+            html.index("async function revealExplorerTreePath(index, targetPath = '')"):
+            html.index("function explorerTreeRowElement(panel, path)")
+        ]
+        self.assertIn("scrollExplorerTreeRowIntoView(index, target);", reveal_path)
+        # The helper scrolls the tree panel itself rather than every ancestor
+        # of the row, so revealing a file cannot move the pane around it.
+        scroller = html[
+            html.index("function scrollExplorerTreeRowIntoView(index, path = '')"):
+            html.index("function focusExplorerTreeRow(index, path)")
+        ]
+        self.assertIn("panel.scrollTop", scroller)
+        self.assertNotIn("scrollIntoView(", scroller)
         # Token-driven flash styling only (Regression Guardrail 7).
         located_css = html[html.index(".explorer-tree-row.explorer-tree-located {"):]
         located_css = located_css[:located_css.index("}")]

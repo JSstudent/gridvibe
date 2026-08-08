@@ -4,6 +4,7 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **The Files tree now scrolls the highlighted file into view.** Opening a file already marked its row in the Files sidebar and expanded the folders above it, but the panel kept whatever scroll position it had — in a long tree the highlight was frequently off screen, so the one cue that says *this is the file you are looking at* could not be seen without hunting for it. Every reveal (opening a file, browsing to a directory, opening the sidebar with a file already open) now scrolls the tree panel by the minimum needed to show that row, with one row of margin so it never lands flush against an edge. A row already in view is left alone, so clicking around inside the tree does not jump, and only the tree panel scrolls — the pane around it stays put.
 - **Save & Restart now saves the workspaces that are actually open.** The launcher used to post one save without a workspace id, which resolved to the internal `default` container; in multi-workspace mode that container is commonly empty, so the save returned `409` while the real named workspaces were skipped, and the launcher still closed every live shell. The launcher now discovers every live workspace, captures each one by its real id (including its native window zoom), and only hands off to the restart bridge after all requested saves succeed. A persistence failure leaves GridVibe running and restores the button as a retry affordance.
 
 ## 1.8.0 - 2026-08-07

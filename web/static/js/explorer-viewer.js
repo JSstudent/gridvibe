@@ -2127,6 +2127,51 @@
             await loadExplorerTreeChildren(index, current);
         }
         renderExplorerTreePanel(index);
+        /* Expanding the ancestors is only half the reveal: in a long tree the
+           target's row can still sit outside the panel's scrolled viewport,
+           which leaves its `.active` highlight off screen. */
+        scrollExplorerTreeRowIntoView(index, target);
+    }
+
+    /* The tree row for a path (file or directory), or the row marked `.active`
+       when no path is given. Matched by iterating the rendered buttons rather
+       than with an attribute selector, because paths carry quotes and
+       brackets. Null whenever the row is not rendered — a collapsed or still
+       loading branch. */
+    function explorerTreeRowElement(panel, path) {
+        if (!panel) {
+            return null;
+        }
+        if (!path) {
+            return panel.querySelector('.explorer-tree-row.active');
+        }
+        const button = Array
+            .from(panel.querySelectorAll('[data-explorer-tree-file], [data-explorer-tree-dir]'))
+            .find(entry => (entry.dataset.explorerTreeFile ?? entry.dataset.explorerTreeDir) === path);
+        return button?.closest('.explorer-tree-row') || null;
+    }
+
+    /* Scroll the tree panel — and only it, which is why this does the maths
+       instead of calling `scrollIntoView`, whose `nearest` also scrolls every
+       other ancestor — by the minimum needed to show a row, leaving one row of
+       margin so the target never lands flush against an edge. A row already in
+       view is left alone, so clicking around inside the tree never jumps.
+       Returns the row so callers can decorate it. */
+    function scrollExplorerTreeRowIntoView(index, path = '') {
+        const panel = document.getElementById(`explorer-tree-panel-${index}`);
+        const row = panel && !panel.hidden ? explorerTreeRowElement(panel, path) : null;
+        if (!row) {
+            return null;
+        }
+        const panelBox = panel.getBoundingClientRect();
+        const rowBox = row.getBoundingClientRect();
+        const margin = Math.min(rowBox.height, Math.max(0, (panelBox.height - rowBox.height) / 2));
+        if (rowBox.top < panelBox.top + margin) {
+            panel.scrollTop -= (panelBox.top + margin) - rowBox.top;
+        } else if (rowBox.bottom > panelBox.bottom - margin) {
+            panel.scrollTop += rowBox.bottom - (panelBox.bottom - margin);
+        }
+        return row;
     }
 
     /* Scroll a file's tree row into view and flash it. The row's own `.active`
@@ -2135,17 +2180,10 @@
        loading branch) is left alone — the expansion above is the visible
        part of the reveal. */
     function focusExplorerTreeRow(index, path) {
-        const panel = document.getElementById(`explorer-tree-panel-${index}`);
-        if (!panel || !path) {
-            return false;
-        }
-        const button = Array.from(panel.querySelectorAll('[data-explorer-tree-file]'))
-            .find(entry => (entry.dataset.explorerTreeFile || '') === path);
-        const row = button?.closest('.explorer-tree-row');
+        const row = path ? scrollExplorerTreeRowIntoView(index, path) : null;
         if (!row) {
             return false;
         }
-        row.scrollIntoView({ block: 'nearest' });
         row.classList.add('explorer-tree-located');
         window.setTimeout(() => row.classList.remove('explorer-tree-located'), 1200);
         return true;
