@@ -2,7 +2,9 @@
 
 Date: 2026-08-07
 
-Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stage 1 is **done** — the saved-preset store and the encryption key are durable (see [Stage 1 results](#stage-1-results)); SGP-05 is closed. Stage 2 is **done** — the ordered live presentation transactions, canonical normalizer, manager revisions/order, and DOM-free client queue are implemented (see [Stage 2 results](#stage-2-results)). Stage 3 is **done** — the live page is wired to those transactions, Save Workspace is an exact flush barrier, and both superseded writers are gone (see [Stage 3 results](#stage-3-results)); SGP-01 and SGP-02 are closed. Stage 4 is **done** — voluntary close/restart uses one process-wide flush/save/exit transaction, and its Stage 6 items 1–3 prerequisite shipped with it (see [Stage 4 results](#stage-4-results)); SGP-11 is closed and SGP-06 is narrowed to the remaining launch-validation work. Stages 5, the remainder of 6, and 7 are not started by this audit.
+Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stage 1 is **done** — the saved-preset store and the encryption key are durable (see [Stage 1 results](#stage-1-results)); SGP-05 is closed. Stage 2 is **done** — the ordered live presentation transactions, canonical normalizer, manager revisions/order, and DOM-free client queue are implemented (see [Stage 2 results](#stage-2-results)). Stage 3 is **done** — the live page is wired to those transactions, Save Workspace is an exact flush barrier, and both superseded writers are gone (see [Stage 3 results](#stage-3-results)); SGP-01 and SGP-02 are closed. Stage 4 is **done** — voluntary close/restart uses one process-wide flush/save/exit transaction, and its Stage 6 items 1–3 prerequisite shipped with it (see [Stage 4 results](#stage-4-results)); SGP-11 is closed and SGP-06 is narrowed to the remaining launch-validation work.
+
+Stages 0–4 were then re-reviewed end to end against the source and the guardrails; the result is in [Stages 0–4 verification review](#stages-04-verification-review-2026-08-08). The shipped work holds — gates are green and non-flaky, and no `## Regression Guardrails` rule is breached — with one defect found in Stage 4's own code (SGP-12) that must be fixed before Stage 7 closes. Stage 4.5 is **new and not started**: it collects SGP-12 plus the two `docs/r&d/todos.txt` items that no existing stage covered (SGP-13, SGP-14). Stage 5, the remainder of 6, and 7 are not started by this audit.
 
 One production change has since landed outside the audit's stage sequence: workspace top-bar visibility is now persisted and restored, and the launcher's **Save & Restart** was corrected to capture every live workspace. It touches surfaces Stages 2, 3, 4, 6, and 7 own. Its effect on the plan is recorded in [Out-of-band change: workspace top-bar visibility](#out-of-band-change-workspace-top-bar-visibility), and the affected findings and stages carry amendment notes inline. It did not flip any frozen Stage 0 test.
 
@@ -520,6 +522,93 @@ Use one shared lifecycle-choice controller for explicit close, manual restart, a
 
 Do not make `beforeunload`, a late `closed` callback, or a blind teardown capture the correctness path. The native launcher X needs a cancellable pre-close event that opens the in-page choice UI; the explicit browser close button can use the same UI. Console interrupts, task-manager kills, and browser-tab closure cannot reliably complete an asynchronous save and should retain the documented last-good-snapshot behavior.
 
+### SGP-12 — High: a stale lifecycle window registration permanently blocks every later save-on-exit
+
+Found by the [Stages 0–4 verification review](#stages-04-verification-review-2026-08-08), in code Stage 4 shipped. This is the one defect that review turned up in production code.
+
+Evidence:
+
+- `LifecycleCoordinator._windows` entries are removed in exactly two places: `leave_workspace()`, and replacement by a `join_workspace()` carrying the *same* `window_id` (`web/lifecycle.py:97`, `web/lifecycle.py:90`).
+- `disconnect_client()` deliberately does not remove the record. It pops the client from `_client_windows` and sets `connected = False`, leaving the window registered as stale (`web/lifecycle.py:116`).
+- Because `_client_windows[client]` is gone, a later `leave_workspace()` for that dead socket cannot find the window either — the record is unreachable by every removal path except a same-`window_id` rejoin.
+- The `window_id` is **not stable across page loads**. `lifecycleWindowId` is a module-scope `const` seeded from `crypto.randomUUID()` on every script evaluation (`web/static/js/terminals.js:530`), so a reloaded window registers a *new* id and never replaces the old record.
+- `request_flush()` puts every stale record into `expected`, pre-acknowledges it, and appends a `client_stale` error, so the result is `ok: False` (`web/lifecycle.py:190`).
+- `POST /api/lifecycle/prepare` turns any non-`ok` flush into a `503` with `retryable: true` and performs no save (`web/api.py:771`).
+- Nothing reaps stale records: there is no TTL, no sweep, and no cap on `_windows`. Only `reset()` clears them, and `reset()` is for tests.
+
+The normal paths are clean, which is why this survived: a browser reload or tab close fires `pagehide`, which emits `leave_workspace` while the socket is still connected (`web/static/js/terminals.js:7979`), and a plain Socket.IO reconnect re-joins with the same in-page id. The defect needs a socket to die *without* `pagehide` — a renderer or browser crash, a `kill -9`, a network partition or VPN flap, a laptop suspend long enough to drop the transport, or a mobile/background tab evicted without firing the event.
+
+`tests/test_lifecycle.py::test_disconnected_window_stays_stale_until_its_stable_id_rejoins` encodes the current behavior as intended, and its name states the assumption the client does not satisfy: the id is per *page load*, not per window.
+
+Impact:
+
+- for the rest of the process's life, **Save open workspaces** and **Save open sessions + workspaces** fail with `503` for that workspace on manual restart, update restart, browser close, and native close; only **Continue without saving** still works;
+- the user's escape hatch is to restart GridVibe — which is precisely the action being blocked from saving, so the recovery costs the unsaved changes;
+- `_windows` grows without bound in a long-lived process, and each stale record adds one more permanent error to every lifecycle response;
+- the failure text ("A workspace window is disconnected and cannot flush") names a window the user cannot see and cannot close, so it is not actionable.
+
+Low-risk direction:
+
+Make the stale record recoverable rather than permanent, without weakening the guarantee that a genuinely unreachable window is reported instead of ignored:
+
+- give the workspace page a `window_id` that is stable per *window*, not per page load — `sessionStorage` is scoped to the tab/window and survives reload while staying distinct between tabs — so a reload replaces its own record even when `pagehide` did not fire;
+- record a disconnect timestamp and treat a record stale for longer than a bounded grace period as departed: drop it and do not count it in `expected`. A window that has been gone for minutes is not a window whose flush is worth waiting for;
+- bound `_windows` per workspace so an unbounded accumulation cannot occur even if both rules above are somehow bypassed;
+- keep the short-lived case exactly as it is today — a socket that dropped seconds ago is still a real window and must still be reported as `client_stale`.
+
+Add a test proving that a disconnected window is reported while it is fresh, is no longer reported once it is past the grace period, and that a reload with the same stable id replaces its own record even when no `leave_workspace` was sent.
+
+### SGP-13 — Medium: workspace labels have no uniqueness rule, so a live workspace and a saved snapshot can share a name
+
+Raised by `docs/r&d/todos.txt`, verified against the source.
+
+Evidence:
+
+- `normalize_workspace_label()` trims, collapses whitespace, and truncates. It applies no uniqueness rule of any kind (`web/workspaces.py:54`).
+- `POST /api/workspaces` and `PATCH /api/workspaces/<id>` both pass a label straight through to `SessionManager.create_workspace()` / `rename_workspace()`, whose only collision check is on the workspace *id* (`web/api.py:1686`, `web/api.py:1728`, `sessions/manager.py:341`).
+- Closing a live workspace without `?forget=true` deliberately leaves its saved slot on offer in the restore chooser (`web/api.py:1737`). That is the documented **Close live workspace** verb, and the launcher row's own tooltip says so ("its saved snapshot stays on offer"); **Close and forget** is the other verb, offered on the saved-workspace row.
+- The restore chooser's `live_conflict` flag compares workspace *ids*, so two entries whose labels match but whose ids differ are not a conflict and both render.
+
+The retained saved slot is therefore correct and intended — that half of the `todos.txt` note is the feature working. The real gap is the one immediately after it: because nothing owns the label namespace, the user can close a workspace called "api work", launch a new one with the same name, and end up with a live "api work" beside a saved "api work" that restores into a *third* workspace. The launcher's own display falls back to a positional label when a workspace is unlabelled, so duplicates are not even distinguishable by their metadata.
+
+Impact:
+
+- the restore chooser and the Workspaces card can show two or three rows the user cannot tell apart;
+- **Launch into a new workspace** silently accepts a name that already identifies stored state, so the user believes they are reusing a workspace when they are creating a rival to it;
+- a user who meant "reopen my old workspace" can instead accumulate duplicates and then guess which snapshot to forget;
+- naming is the only handle the user has on a workspace — the id is opaque — so an unowned namespace defeats the identity model rather than merely being untidy.
+
+Low-risk direction:
+
+Make the label namespace explicit and enforce it in one place, over both live workspaces *and* saved slots:
+
+- add one normalizer/validator in `web/workspaces.py` that resolves a requested label against both sets, case- and whitespace-insensitively;
+- reject a duplicate at `POST /api/workspaces` and `PATCH /api/workspaces/<id>` with a `409` whose body names the conflicting kind (live or saved) so the client can say *"'api work' is a saved workspace — reopen it, forget it, or pick another name"* and offer the matching action inline;
+- do not auto-rename and do not auto-forget: both discard a decision that is the user's. The audit's own rule — an actionable error that mutates nothing — applies here exactly as it does to the capacity error in SGP-06.
+- leave an *empty* label alone. It is the "unnamed workspace" case, positional labels already disambiguate it, and forcing uniqueness on it would make creating two scratch workspaces impossible.
+
+### SGP-14 — Low: the launcher's live-workspace rows cannot save one workspace
+
+Raised by `docs/r&d/todos.txt`.
+
+Evidence:
+
+- each row in the launcher's Workspaces card renders exactly two actions, **Open** and **Close** (`web/static/js/launcher.js:2916`, `web/static/js/launcher.js:2931`).
+- explicit save exists in two shapes only: **Save Workspace** inside a workspace window, which saves *that* window; and the Stage 4 lifecycle choices, which save *every* live workspace and then exit.
+- there is no way to durably capture one named workspace from the surface that lists them all, and the launcher is the only page that lists them all.
+
+This is a genuine gap in the verb set rather than a defect: after Stage 4 the launcher can already reach every workspace window's flush barrier, so the machinery a per-row save needs is built and unused for this purpose.
+
+Impact:
+
+- the only "save this one workspace, keep working" action requires switching to that workspace's window and finding its button;
+- the Workspaces card otherwise offers the complete workspace verb set (open, close, close-and-forget, restore, forget), so its omission reads as an oversight;
+- users reach for **Save & Restart** — a whole-process, teardown-coupled action — to get a durable snapshot of one workspace.
+
+Low-risk direction:
+
+Add a per-row **Save** button that reuses the Stage 4 flush handshake scoped to one workspace, rather than adding a third capture path. It must flush the owning window before capturing (or refuse), so the button means the same thing as in-window **Save Workspace**; it must not touch reusable presets; and it must never terminate anything. A workspace with no reachable window is the interesting case — report it rather than silently capturing the last acknowledged server state, for the same reason Stage 4 item 3 forbids guessing that a debounce completed.
+
 ## Risk-ranked implementation proposal
 
 Each stage is independently reviewable and preserves backward compatibility. New optional fields should be ignored by old readers; new readers must accept old files.
@@ -926,6 +1015,85 @@ Completed 2026-08-08. The proposal remained valid, with two implementation clari
 
 **Native-close and menu follow-up (2026-08-08).** Native X initially called pywebview's synchronous `evaluate_js()` from inside its synchronous cancellable `closing` event. On WebView2 that can block the UI callback waiting for JavaScript while the webview is waiting for the callback to return, presenting as a frozen window. The closing callback now records one pending prompt, schedules JavaScript evaluation on a daemon worker, and returns `False` immediately. The worker opens the shared in-page dialog after the callback releases the UI thread. The confusing post-failure Retry/Review group was also removed: Continue without saving is the first of one persistent three-choice list, and a failed save reports its error while leaving that list active. Behavioral tests verify deferred native JavaScript, single-prompt re-entry protection, the exact choice order on both pages, and failure-state reuse of the same list. Follow-up gates: `python -m ruff check .` passed; JavaScript syntax checks passed; `python tests/run_tests.py` passed 1,292 tests with 7 skips and the 9 expected failures reserved for later audit stages.
 
+### Stages 0–4 verification review (2026-08-08)
+
+Stages 0–4 were re-read against the source after Stage 4 landed, to answer three questions: is the shipped work solid, is it flaky, and did it breach any `## Regression Guardrails` rule. Summary: **solid, not flaky, no guardrail breach, one defect** (SGP-12).
+
+**Gates, re-run on this machine.**
+
+| Gate | Result |
+|---|---|
+| `python -m ruff check .` | passed, "All checks passed!" |
+| `python tests/run_tests.py` | 1,292 tests, `OK (skipped=7, expected failures=9)` |
+| `python -m unittest tests.test_lifecycle tests.test_session_presentation tests.test_saved_session_store tests.test_session_persistence_contract` ×3 | 81 tests, `OK (expected failures=9)` on every run; 2.55 s ±0.02 s |
+
+The counts match what [Stage 4 results](#stage-4-results) recorded, so nothing has drifted since.
+
+**Flakiness.** The persistence suites were run three times and are bit-identical in outcome and near-identical in wall time. The reason they are stable rather than luckily green is structural, and worth stating so a later change does not give it away: the lifecycle tests drive `LifecycleCoordinator` directly and acknowledge the flush *synchronously inside the `emit` callback*, so the "success" cases never depend on a thread winning a race. The two tests that do use a wall-clock timeout (`timeout=0` and `timeout=0.1`) are the cases that are *expected* to time out, where a slow machine makes the assertion more certain rather than less. No test sleeps to wait for a condition, and the Node-backed client tests skip cleanly when `node` is absent instead of failing.
+
+**The nine remaining expected failures are the right nine.** They map exactly onto unshipped stages, with no stage's forcing function consumed early and none left behind:
+
+| Test | Owed by |
+|---|---|
+| `test_restore_keeps_a_root_wider_than_the_current_directory` | Stage 5 item 1 |
+| `test_the_canonical_normalizer_preserves_every_in_boundary_field` | Stage 5 items 2–4 |
+| `test_the_fixture_round_trips_through_save_workspace_and_restore` | Stage 5 items 2–4 |
+| `test_changed_content_drops_scroll_and_folds_but_keeps_view_intent` | Stage 5 item 5 |
+| `test_a_staged_diff_identity_tracks_the_index_not_the_working_file` | Stage 5 item 6 |
+| `test_markdown_appearance_is_one_workspace_scoped_value` | Stage 5 item 8 |
+| `test_an_oversized_group_fails_with_an_actionable_capacity_error` | Stage 6 items 6–7 |
+| `test_a_malformed_pane_makes_the_whole_group_unrestorable` | Stage 6 items 4–5 |
+| `test_the_chooser_count_matches_what_a_restore_would_really_start` | Stage 6 items 4–5 |
+
+**Guardrail audit.** Each rule was checked against the Stage 1–4 diff (34 files, +8,257/−1,009), not merely against the stage text.
+
+| Guardrail | Verdict | Evidence |
+|---|---|---|
+| 1. Security | pass | The cross-origin write guard is a blanket `before_request` on every non-GET, so the three new POST routes are covered without registration (`web/app.py:91`). Emits are room-scoped to `workspace_room(...)`. `snapshot_lifecycle_workspaces()` is the only credential-bearing snapshot; its consumer is the preset writer alone, its result never enters a response, and `_save_live_presets()` deliberately drops exception text so a state-file path or secret cannot leak into an error body (`web/lifecycle.py:471`). Host-key policy and password handling are untouched. |
+| 2. Concurrency | pass | `apply_group_presentation()` normalizes before the lock, then does every identity/revision/membership check and the whole mutation in one `SessionManager.lock` hold with no emit, request, or file work inside it (`sessions/manager.py:1012`). `capture_live_workspaces()` takes the manager snapshot *before* acquiring the file locks, preserving the documented order (`web/runtime_state.py:844`). `/api/lifecycle/prepare` snapshots membership, releases, and only then emits and waits (`web/api.py:762`). `LifecycleCoordinator` emits outside its own condition lock. `self.lock` is an `RLock`, so `snapshot_lifecycle_workspaces()` nesting `snapshot_live_workspaces()` is safe rather than lucky. `write_json_atomically()` builds a unique `uuid4` temp name in the target directory, fsyncs, backs up, then `os.replace`s (`web/state_files.py`). |
+| 3. Performance | pass | No new polling. `CONTINUOUS_UPDATE_FLOOR_MS = 1000` floors scroll/zoom coalescing, and scroll is not even an event — it is folded into the batch at capture time. Structural changes batch on a microtask. No new SSH handshakes and no CDN assets; `session-persistence.js` and `lifecycle.js` are vendored local files. |
+| 4. Correctness | pass | No `window.confirm`/`alert`/`prompt` anywhere in `lifecycle.js` or `session-persistence.js`; the lifecycle dialog is the shared in-page partial, and the post-correction fix to use the shared `visible` class is the right one. Shell quoting is untouched. |
+| 5. Dead code | pass | `lifecycle_flush_requested` has exactly one listener (`lifecycle.js:182`) and `lifecycle_flush_ack` exactly one handler (`api.py:2926`) — the emit and its consumer shipped in the same change, as Stage 2 required. Both superseded writers were deleted rather than left dual. The one deliberate exception is documented: `window.gridvibeFlushLivePresentation` was exported by Stage 3 with no consumer, and Stage 4 consumed it. |
+| 6. Architecture/DRY | pass, with a note | New backend code went to `web/lifecycle.py`, `web/session_presentation.py`, `web/state_files.py`, and `web/saved_session_store.py`; the API routes stayed thin. Stage 1's unplanned extraction of the file primitives was the DRY-correct call — copying the lock/atomic-write/backup code would have given the two stores two chances to drift. Frontend logic went to two new files. **Note:** `terminals.js` grew ~340 lines to 8,001 and is again the largest frontend file (`explorer-viewer.js` is 7,934). The growth is defensible — what landed there is the DOM adapter, which by definition cannot leave the page — but the file is back at the size that triggered the original split, and the next substantial addition to it should force a domain extraction rather than another exception. |
+| 7. Styling | pass | `lifecycle.css` contains no hex or `rgb()` literal; every color comes from `tokens.css`. Icons are unchanged `currentColor` SVGs. |
+| 8. Interaction | pass | Irreversible actions keep their in-page confirms; the lifecycle modal *is* the confirm for close/restart. Failure states keep the three choices active, so retry is the same button. Busy state is `card.classList.toggle('is-busy', …)` and `aria-busy`, never rewritten markup. |
+| 9. Logging | pass | No new INFO-level teardown chatter and no ANSI. `web/lifecycle.py` logs nothing at all, which is safe but leaves Stage 7 item 3's shape diagnostics (workspace/group ids, revisions, failure category) still owed. |
+| 10. New features | pass | No new state file; both new writers go through the existing durable machinery. `runtime_state.json` stays password-free — the credential snapshot is a separate method feeding only the preset writer. Manual-retention markers are preserved: `capture_live_workspaces()` carries `previous_slot` into `_build_slot()`, and native zoom falls back to the stored value only when the owning window supplied none. |
+
+**What was verified beyond the guardrails.**
+
+- **Stage 3's flush barrier is real, not nominal.** `saveWorkspace()` re-captures every visible *and* cached group plus window chrome, awaits acknowledgement, and only then calls `/api/runtime-state/save`; a failed flush produces no capture and no success toast.
+- **Stage 4's ordering is as specified.** Presets commit before runtime state; a preset error returns before workspace capture; a runtime-state error keeps the successful preset commits and reports them; `ready_to_exit` is false and no token is issued in either case. `save: none` writes neither file.
+- **Teardown really is gated.** `/api/browser-shutdown` consumes a one-use decision and answers `409 lifecycle_decision_required` without one, and the native bridge does the same. The token is `secrets.token_urlsafe(24)`, single-use, 60-second TTL, pruned and capped.
+- **The `attachFlushResponder` listener is registered once**, at socket construction rather than on `connect`, so a reconnect does not stack duplicate handlers.
+
+**The one defect.** The stale-window registration in `LifecycleCoordinator` is unbounded in time and unreachable by every removal path once its socket dies without `pagehide`, and the `window_id` that is supposed to redeem it is regenerated on every page load. The consequence is that one abnormally lost window permanently blocks save-on-exit for its workspace. Written up in full as [SGP-12](#sgp-12--high-a-stale-lifecycle-window-registration-permanently-blocks-every-later-save-on-exit); fixed by Stage 4.5 item 1.
+
+**Where `docs/r&d/todos.txt` fits.** Its notes were checked against every stage, shipped and unshipped. Two are genuinely uncovered and become Stage 4.5; one is the design working as intended.
+
+| `todos.txt` note | Covered by | Disposition |
+|---|---|---|
+| "Add save button to workspaces panel in launcher window … besides open and close" | nothing | New — [SGP-14](#sgp-14--low-the-launchers-live-workspace-rows-cannot-save-one-workspace), Stage 4.5 item 3. Stage 4 built the flush handshake this needs and used it only for the all-live exit transaction. |
+| "I can close a workspace, it gets removed from the opened workspaces list but remains in the saved Reopen a saved workspace pop up" | intended behavior | **Not a defect.** This is the **Close live workspace** verb, distinct from **Close and forget**; both are offered, and the launcher row's tooltip states the difference. Recorded in [SGP-13](#sgp-13--medium-workspace-labels-have-no-uniqueness-rule-so-a-live-workspace-and-a-saved-snapshot-can-share-a-name) so it is not "fixed" into a data-losing close. If the distinction is being missed in practice that is a labelling problem, not a persistence one. |
+| "I can make a new workspace with the same workspace name … should notify the user the name is taken" | nothing | New — [SGP-13](#sgp-13--medium-workspace-labels-have-no-uniqueness-rule-so-a-live-workspace-and-a-saved-snapshot-can-share-a-name), Stage 4.5 item 2. Confirmed: no uniqueness check exists over live workspaces or saved slots. |
+
+The note's own closing question — whether the workspace-name issue fits into Stage 4 — is answered no. Stage 4 owns the close/restart *transaction*; workspace naming and identity is a different surface that Stage 4 neither touched nor depends on.
+
+### Stage 4.5 — Lifecycle window recovery, workspace name identity, and per-workspace save
+
+Connected findings: SGP-12, SGP-13, SGP-14.
+
+This stage was added by the [Stages 0–4 verification review](#stages-04-verification-review-2026-08-08). It exists because three problems share one surface — the launcher's workspace list and the Stage 4 flush handshake behind it — and because item 1 is a defect in shipped code rather than new work.
+
+**Ordering.** Item 1 is a bug fix in Stage 4's own module and should ship first; it is independent of Stages 5 and 6 and must not wait for them. Items 2 and 3 are user-visible additions that can ship in parallel with Stage 5 or 6, but before Stage 7 closes the documentation. Item 3 depends on item 1: a per-workspace Save that inherits a permanently stale window record would fail exactly as the exit transaction does today.
+
+1. **Make a lost workspace window recoverable.** Give the workspace page a `window_id` that is stable per window across reloads (`sessionStorage` is window-scoped and survives reload while staying distinct between tabs), so a reload replaces its own registration even when `pagehide` never fired. Add a bounded disconnect grace period after which a stale record is treated as departed and dropped from `expected` rather than blocking the flush forever. Bound `_windows` per workspace. Keep the fresh-disconnect case reporting `client_stale` exactly as today — the point is to stop a *permanent* block, not to start ignoring real windows. Update `test_disconnected_window_stays_stale_until_its_stable_id_rejoins`, whose name currently asserts a stability the client does not provide.
+2. **Give workspace labels one owner.** Add a single resolver in `web/workspaces.py` that checks a requested label against both live workspaces and saved slots, case- and whitespace-insensitively, and reject a duplicate at `POST /api/workspaces` and `PATCH /api/workspaces/<id>` with a `409` that names the conflicting kind. The client turns that into an actionable choice — reopen the saved workspace, forget it, or pick another name — with the matching action inline. Mutate nothing on rejection: no auto-rename, no auto-forget. Leave empty labels unconstrained; "unnamed" is not a name, and positional labels already disambiguate them.
+3. **Add a per-row Save to the launcher's Workspaces card.** Reuse the Stage 4 flush handshake scoped to one workspace rather than adding a third capture path. It flushes the owning window before capturing or refuses with the existing retryable affordance; it never writes reusable presets and never terminates anything. A workspace with no reachable window is reported, not silently captured from the last acknowledged server state — the same rule as Stage 4 item 3.
+4. **Tests.** A window lost without `leave_workspace` blocks the flush while fresh, stops blocking it after the grace period, and is replaced by its own reload; a duplicate label is refused at create and at rename against both a live and a saved namesake, with stored state unchanged; an empty label is still accepted twice; the per-row Save captures one workspace after a real flush, leaves `saved_sessions.json` untouched, leaves every other workspace's slot untouched, and reports rather than guesses when the window is unreachable.
+
+Exit gate: no single lost window can permanently prevent saving on exit, a workspace name identifies at most one workspace across both live and saved state, and one workspace can be saved from the surface that lists them all without exiting anything.
+
 ### Stage 5 — Complete explorer snapshot semantics and preserve explorer root
 
 Connected findings: SGP-03, SGP-04, SGP-08, SGP-10.
@@ -1028,7 +1196,11 @@ The implementation should include at least these behavioral cases:
 32. manual restart, update restart, browser shutdown, and native launcher close use the same lifecycle action contract;
 33. workspace top-bar visibility round-trips through manual Save Workspace, autosave, and restart restore, and an invalid stored value degrades to visible without failing the slot (covered today);
 34. two fast top-bar toggles cannot leave the server holding the older value once the field moves onto the ordered queue, and a failed write is repaired rather than left to be committed by the next autosave (covered by Stage 3 — `PresentationControllerTestCase`);
-35. after `PATCH /api/workspaces/<id>/ui-state` is removed, top-bar visibility still reaches the snapshot from a live window and from a launcher-initiated all-workspace save, with no `localStorage` read in the launcher path (covered by Stages 3–4; Stage 4's lifecycle route test acknowledges the owning window's exact value and asserts it in the all-live stored slot).
+35. after `PATCH /api/workspaces/<id>/ui-state` is removed, top-bar visibility still reaches the snapshot from a live window and from a launcher-initiated all-workspace save, with no `localStorage` read in the launcher path (covered by Stages 3–4; Stage 4's lifecycle route test acknowledges the owning window's exact value and asserts it in the all-live stored slot);
+36. a workspace window whose socket dies without `leave_workspace` blocks the lifecycle flush while the loss is fresh, stops blocking it once past the grace period, and is replaced by its own reload rather than accumulating a second registration (Stage 4.5 item 1 — the permanent-block half fails today);
+37. creating or renaming a workspace to a label already held by a live workspace *or* by a saved slot is refused with an actionable conflict, and neither the live workspace nor the stored slot is mutated by the refusal (Stage 4.5 item 2);
+38. two workspaces may still both be unlabelled — uniqueness applies to names, not to their absence (Stage 4.5 item 2);
+39. a per-workspace Save from the launcher flushes that workspace's window and captures only its slot, leaving every sibling slot and `saved_sessions.json` byte-for-byte unchanged, and reports rather than guesses when the window is unreachable (Stage 4.5 item 3).
 
 ## Product decisions
 
@@ -1046,6 +1218,8 @@ The schema and lifecycle choices previously left open for Stages 4 and 5 are res
 10. **Close surfaces using lifecycle choices:** the explicit browser close button and the native launcher's close button/X use the shared modal. Closing only a workspace window retains its current “hide window, leave sessions live” contract. Browser tab/window closure, Ctrl+C, task-manager kill, and power loss retain last-good behavior because they cannot reliably await a save.
 11. **Unsaved SSH groups in “Save open sessions”:** create a uniquely named preset and encrypt the live password server-side without returning it to the browser. Updating an already attached preset preserves its existing credential rules. The modal states that session passwords are encrypted while workspace snapshots remain password-free.
 12. **Partial combined-save success:** save presets first and workspace snapshots second. Keep GridVibe open on any failure, show per-group/workspace results, and keep the same three choices active; selecting the same save option tries it again, while Continue without saving current changes remains first. Do not promise atomic rollback across two files, delete successful unrelated writes, or terminate immediately after a failure.
+13. **Workspace name uniqueness scope:** a workspace label identifies at most one workspace across *both* live workspaces and saved slots, compared case- and whitespace-insensitively. An empty label is exempt — it is the absence of a name, and two unnamed scratch workspaces must remain possible. A collision is refused with an actionable conflict that mutates nothing; GridVibe never auto-renames and never auto-forgets on the user's behalf, because both silently discard a decision only the user can make. Closing a workspace deliberately keeps its saved slot on offer, so the retained slot continues to own its name until the user forgets it.
+14. **Scope of a per-workspace Save:** it is exactly in-window **Save Workspace**, invoked from the launcher. It captures one runtime slot, never writes reusable presets, never terminates anything, and requires a real flush of the owning window — an unreachable window is reported, not approximated from the last acknowledged server state.
 
 ## Audit verification
 
@@ -1058,6 +1232,8 @@ The findings revision changed only this Markdown document, and its gate results 
 
 Stage 0 then added `tests/test_session_persistence_contract.py` and touched no production file. Its own gate results are recorded in [Stage 0 results](#stage-0-results): ruff passed, and the suite reported `OK (skipped=7, expected failures=26)` across 1,231 tests.
 
+Stages 0–4 were then re-verified against the source after Stage 4 landed. The gate results, guardrail audit, flakiness check, and the mapping of `docs/r&d/todos.txt` onto the stages are in [Stages 0–4 verification review](#stages-04-verification-review-2026-08-08). New line references confirmed for that review: `web/lifecycle.py:90`/`:97`/`:116`/`:190` (the window registry's only two removal paths, the disconnect that removes neither, and the pre-acknowledged stale error), `web/static/js/terminals.js:530` (a `window_id` regenerated per page load) and `:7979` (the `pagehide` that is the only clean removal), `web/api.py:771` (a non-`ok` flush becoming a `503` with no save), `web/workspaces.py:54` and `sessions/manager.py:341` (a label namespace with no owner; only ids collide), and `web/static/js/launcher.js:2916`/`:2931` (Open and Close as the complete live-workspace verb set). The review's own gates were `python -m ruff check .` passed and `python tests/run_tests.py` reporting `OK (skipped=7, expected failures=9)` across 1,292 tests, with the persistence suites run three times for stability. It changed only this Markdown document.
+
 The out-of-band top-bar change was then read end to end against this document, and the amendments above record only what the source now says. Line references updated for it: `web/static/js/launcher.js:2459` (update-triggered restart, unchanged) and `web/api.py:708` (browser shutdown, unchanged); the two SGP-11 bullets that pointed at the old `saveWorkspaceForRestart()` are struck through rather than renumbered, because the behavior they described no longer exists. Gate results for this revision: `python tests/run_tests.py` reported `OK (skipped=7, expected failures=26)` across 1,237 tests, and `tests/test_session_persistence_contract.py` alone reported `OK (expected failures=26)` — confirming the change consumed none of Stage 0's forcing functions.
 
 ## Final recommendation
@@ -1067,5 +1243,7 @@ Do not start by adding more fields directly to `runtime_state.py`. The durable s
 That order has the lowest blast radius: it fixes data authority and write safety before increasing the amount of state being persisted, keeps all slow work outside shared locks, avoids polling, preserves the server-owned restore model, and prevents another round of duplicate client/server persistence logic.
 
 The out-of-band top-bar change does not alter that order. It is a well-built vertical slice through machinery Stage 5 will need anyway, and its one real cost is a third presentation writer that Stage 2 must absorb and Stage 3 must delete. The lesson worth carrying forward is the one it demonstrates rather than the debt it adds: a workspace-scoped UI field can be persisted correctly end to end today, provided the on-change writer is ordered and the explicit save reads the live value instead of the last acknowledged one.
+
+Stages 0–4 have now shipped in that order and hold up under re-review, which is evidence for the ordering rather than merely for the code. One correction follows from the review and belongs in the recommendation itself: **Stage 4.5 item 1 should ship before Stage 5 or 6 begins.** It is not new scope competing with them for priority — it is a defect in Stage 4's own module that makes the save-on-exit transaction Stage 4 exists to provide permanently unavailable after one abnormally lost window. Shipping more persistence surface on top of a save path that can be silently disabled would be the same mistake this audit's ordering was designed to avoid. Items 2 and 3 of that stage are ordinary user-visible work and may be scheduled freely against Stage 5 and 6.
 
 Two ordering rules carry the most weight and should not be relaxed for convenience. Capacity decoupling precedes any lifecycle action that mass-writes presets, because that action would otherwise turn a lowered preference into one-click preset truncation. And no stage may introduce a coercing normalizer, a silent stale-writer discard, or an emit without a consumer — each of those trades a visible defect for an invisible one, which is the failure mode this whole audit exists to remove.
