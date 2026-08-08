@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
+from web.session_presentation import (
+    PANE_PRESENTATION_FIELDS,
+    deep_copy_presentation,
+    pane_fields_for_mode,
+)
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     generate_workspace_id,
@@ -23,20 +28,6 @@ logger = logging.getLogger(__name__)
 # Pane presentation restored when an already-live workspace window is reopened.
 # Connection/process metadata deliberately stays untouched: saving a view must
 # never retarget or restart a running terminal.
-_SAVED_SESSION_VIEW_FIELDS = {
-    "explorer_tree_open",
-    "explorer_git_open",
-    "explorer_search_open",
-    "explorer_open_tabs",
-    "explorer_active_tab",
-    "explorer_tab_views",
-    "explorer_md_preset",
-    "explorer_md_font",
-    "explorer_source_font",
-    "explorer_theme",
-    "browser_tabs",
-    "browser_active_tab",
-}
 _UNCHANGED = object()
 
 
@@ -139,6 +130,7 @@ class Workspace:
     created_at: float = field(default_factory=time.time)
     active_group_id: str = ""
     topbar_visible: bool = True
+    presentation_revision: int = 0
     # Live-only lifecycle hint: a workspace the user deliberately created empty
     # must survive the empty-workspace pruning that closes a workspace emptied
     # by a close or a move. Absence of groups alone cannot tell the two apart.
@@ -153,6 +145,7 @@ class Workspace:
             "created_at": self.created_at,
             "active_group_id": self.active_group_id,
             "topbar_visible": self.topbar_visible,
+            "presentation_revision": self.presentation_revision,
             "retain_when_empty": self.retain_when_empty,
         }
 
@@ -169,6 +162,8 @@ class SessionGroup:
     workspace_id: str = DEFAULT_WORKSPACE_ID
     saved_session_id: str = ""
     workspace_layout: Optional[Dict[str, Any]] = None
+    pane_order: List[str] = field(default_factory=list)
+    presentation_revision: int = 0
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -182,7 +177,9 @@ class SessionGroup:
             "display_order": self.display_order,
             "workspace_id": self.workspace_id,
             "saved_session_id": self.saved_session_id,
-            "workspace_layout": self.workspace_layout,
+            "workspace_layout": copy.deepcopy(self.workspace_layout),
+            "pane_order": list(self.pane_order),
+            "presentation_revision": self.presentation_revision,
             "created_at": self.created_at,
         }
 
@@ -529,7 +526,10 @@ class SessionManager:
                 if require_owned:
                     raise ValueError("Workspace not found")
                 return None
-            workspace.topbar_visible = bool(visible)
+            normalized = bool(visible)
+            if workspace.topbar_visible != normalized:
+                workspace.topbar_visible = normalized
+                workspace.presentation_revision += 1
             return workspace.topbar_visible
 
     def get_topbar_visible(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> bool:
@@ -538,6 +538,54 @@ class SessionManager:
         with self.lock:
             workspace = self.workspaces.get(resolved_workspace_id)
             return workspace.topbar_visible if workspace is not None else True
+
+    def get_workspace_presentation(
+        self,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+    ) -> Dict[str, Any]:
+        """Return one atomic workspace-chrome snapshot for client rebasing."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            if workspace is None:
+                return {
+                    "workspace_id": resolved_workspace_id,
+                    "topbar_visible": True,
+                    "presentation_revision": 0,
+                }
+            return {
+                "workspace_id": resolved_workspace_id,
+                "topbar_visible": workspace.topbar_visible,
+                "presentation_revision": workspace.presentation_revision,
+            }
+
+    def apply_workspace_presentation(
+        self,
+        *,
+        workspace_id: str,
+        expected_revision: int,
+        topbar_visible: bool,
+    ) -> Dict[str, Any]:
+        """Compare-and-swap workspace-scoped presentation under one lock."""
+        with self.lock:
+            workspace = self.workspaces.get(workspace_id)
+            if workspace is None:
+                return {"outcome": "not_found", "error": "Workspace not found"}
+            if workspace.presentation_revision != expected_revision:
+                return {
+                    "outcome": "conflict",
+                    "error": "Workspace presentation revision is stale",
+                    "workspace_id": workspace_id,
+                    "presentation_revision": workspace.presentation_revision,
+                }
+            workspace.topbar_visible = topbar_visible
+            workspace.presentation_revision += 1
+            return {
+                "outcome": "ok",
+                "workspace_id": workspace_id,
+                "presentation_revision": workspace.presentation_revision,
+                "topbar_visible": workspace.topbar_visible,
+            }
 
     def _generate_session_id(self) -> str:
         """Return a short session id that is not already in use.
@@ -569,6 +617,10 @@ class SessionManager:
         with self.lock:
             session = self._build_session(group_id, **fields)
             self.sessions[session.session_id] = session
+            group = self.groups.get(group_id)
+            if group is not None:
+                group.pane_order.append(session.session_id)
+                group.terminal_count = len(group.pane_order)
 
         logger.info(f"Created session {session.session_id} for {session.host}")
         return session
@@ -581,6 +633,7 @@ class SessionManager:
                 return None
             session = self._build_session(group_id, **fields)
             self.sessions[session.session_id] = session
+            group.pane_order.append(session.session_id)
             group.terminal_count += 1
 
         logger.info(
@@ -739,6 +792,7 @@ class SessionManager:
                 self.sessions[session.session_id] = session
                 sessions.append(session)
             group.terminal_count = len(sessions)
+            group.pane_order = [session.session_id for session in sessions]
 
         logger.info(
             "Installed session group group_id=%s workspace_id=%s panes=%d displaced=%d",
@@ -951,9 +1005,98 @@ class SessionManager:
                 if session is None or session.group_id != group_id:
                     continue
                 for field_name, value in updates.items():
-                    if field_name in _SAVED_SESSION_VIEW_FIELDS:
+                    if field_name in PANE_PRESENTATION_FIELDS:
                         setattr(session, field_name, copy.deepcopy(value))
             return group
+
+    def apply_group_presentation(
+        self,
+        *,
+        workspace_id: str,
+        group_id: str,
+        expected_revision: int,
+        pane_order: List[str],
+        pane_updates: Dict[str, Dict[str, Any]],
+        layout: Any = _UNCHANGED,
+        workspace_layout: Any = _UNCHANGED,
+    ) -> Dict[str, Any]:
+        """Compare-and-swap one complete live group presentation atomically.
+
+        The web service has already normalized and deep-bounded every value.
+        This lock hold is therefore limited to identity/revision checks and a
+        complete in-memory replacement; it performs no emit, request, or file
+        work. Every failure is decided before the first mutation.
+        """
+        with self.lock:
+            workspace = self.workspaces.get(workspace_id)
+            if workspace is None:
+                return {"outcome": "not_found", "error": "Workspace not found"}
+            group = self.groups.get(group_id)
+            if group is None:
+                return {"outcome": "not_found", "error": "Session group not found"}
+            if group.workspace_id != workspace_id:
+                return {
+                    "outcome": "invalid",
+                    "error": "Session group belongs to another workspace",
+                }
+            if group.presentation_revision != expected_revision:
+                return {
+                    "outcome": "conflict",
+                    "error": "Presentation revision is stale",
+                    "workspace_id": workspace_id,
+                    "group_id": group_id,
+                    "presentation_revision": group.presentation_revision,
+                }
+
+            current_sessions = {
+                session_id: session
+                for session_id, session in self.sessions.items()
+                if session.group_id == group_id
+            }
+            if set(pane_order) != set(current_sessions):
+                return {
+                    "outcome": "invalid",
+                    "error": "Pane ids do not match the live session group",
+                }
+            if set(pane_updates) != set(current_sessions):
+                return {
+                    "outcome": "invalid",
+                    "error": "Pane updates do not match the live session group",
+                }
+            for session_id, updates in pane_updates.items():
+                session = current_sessions[session_id]
+                invalid_fields = set(updates) - pane_fields_for_mode(
+                    session.startup_mode
+                )
+                if invalid_fields:
+                    return {
+                        "outcome": "invalid",
+                        "error": (
+                            f"Presentation field is invalid for {session.startup_mode} pane"
+                        ),
+                    }
+
+            if layout is not _UNCHANGED:
+                group.layout = layout
+            if workspace_layout is not _UNCHANGED:
+                group.workspace_layout = deep_copy_presentation(workspace_layout)
+            group.pane_order = list(pane_order)
+            for session_id, updates in pane_updates.items():
+                session = current_sessions[session_id]
+                for field_name, value in updates.items():
+                    setattr(session, field_name, deep_copy_presentation(value))
+                if "browser_tabs" in updates:
+                    tabs = session.browser_tabs
+                    active = session.browser_active_tab
+                    session.initial_command = tabs[active] if tabs else ""
+            group.presentation_revision += 1
+            return {
+                "outcome": "ok",
+                "workspace_id": workspace_id,
+                "group_id": group_id,
+                "presentation_revision": group.presentation_revision,
+                "pane_order": list(group.pane_order),
+            }
 
     def reorder_groups(
         self,
@@ -1010,7 +1153,16 @@ class SessionManager:
     def get_group_sessions(self, group_id: str) -> List[TerminalSession]:
         """Get sessions belonging to one group."""
         with self.lock:
-            return [s for s in self.sessions.values() if s.group_id == group_id]
+            sessions = {
+                session.session_id: session
+                for session in self.sessions.values()
+                if session.group_id == group_id
+            }
+            group = self.groups.get(group_id)
+            ordered_ids = group.pane_order if group is not None else []
+            result = [sessions.pop(session_id) for session_id in ordered_ids if session_id in sessions]
+            result.extend(sessions.values())
+            return result
 
     def get_workspace_sessions(
         self,
@@ -1111,8 +1263,7 @@ class SessionManager:
                 for group in self.get_workspace_groups(workspace.workspace_id):
                     sessions = [
                         session.to_dict()
-                        for session in self.sessions.values()
-                        if session.group_id == group.group_id
+                        for session in self.get_group_sessions(group.group_id)
                     ]
                     if not sessions:
                         continue

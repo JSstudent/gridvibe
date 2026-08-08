@@ -211,9 +211,8 @@ class SaveWorkspaceFlushBarrierTestCase(_PersistencePathsMixin, unittest.TestCas
     def setUp(self):
         self._isolate_state()
 
-    @unittest.expectedFailure
     def test_save_workspace_captures_the_acknowledged_client_snapshot(self):
-        """Stage 2/3. Matrix row 11."""
+        """Stage 2 backend transaction; Stage 3 wires the actual flush. Matrix row 11."""
         launched = self._launch_explorer()
         group_id = launched["group_id"]
         session_id = self._session_ids(group_id)[0]
@@ -251,7 +250,6 @@ class SaveWorkspaceFlushBarrierTestCase(_PersistencePathsMixin, unittest.TestCas
             self._stored_sessions()[0]["explorer_open_tabs"], ["docs/new.md"]
         )
 
-    @unittest.expectedFailure
     def test_presentation_route_refuses_launch_and_credential_fields(self):
         """Stage 2 rule 6: presentation only — never a launch or a secret."""
         launched = self._launch_explorer()
@@ -272,7 +270,6 @@ class SaveWorkspaceFlushBarrierTestCase(_PersistencePathsMixin, unittest.TestCas
                 )
                 self.assertEqual(response.status_code, 400, response.get_json())
 
-    @unittest.expectedFailure
     def test_presentation_route_rejects_a_foreign_session_id(self):
         """Stage 2 rule 1: unknown/cross-group ids never reach the manager."""
         first = self._launch_explorer(session_name="One")
@@ -292,7 +289,6 @@ class SaveWorkspaceFlushBarrierTestCase(_PersistencePathsMixin, unittest.TestCas
 
         self.assertEqual(response.status_code, 400, response.get_json())
 
-    @unittest.expectedFailure
     def test_a_stale_revision_is_refused_with_the_current_one(self):
         """Stage 2 rule 7 / product decision 7. Matrix row 13."""
         launched = self._launch_explorer()
@@ -343,9 +339,8 @@ class BrowserPresentationOrderingTestCase(_PersistencePathsMixin, unittest.TestC
     def setUp(self):
         self._isolate_state()
 
-    @unittest.expectedFailure
     def test_an_older_tab_strip_cannot_overwrite_a_newer_one_on_the_server(self):
-        """Stage 2/3. Matrix row 12, server half."""
+        """Stage 2 ordered server transaction. Matrix row 12, server half."""
         launched = self.client.post(
             "/api/sessions",
             json={
@@ -393,7 +388,6 @@ class BrowserPresentationOrderingTestCase(_PersistencePathsMixin, unittest.TestC
         session = api.session_manager.get_session(session_id)
         self.assertEqual(session.browser_tabs, ["http://127.0.0.1:3000/b"])
 
-    @unittest.expectedFailure
     def test_the_client_queue_keeps_one_write_in_flight_and_ignores_late_replies(self):
         """Stage 2. Matrix row 12, client half.
 
@@ -485,9 +479,8 @@ class PaneOrderAndSplitGeometryTestCase(_PersistencePathsMixin, unittest.TestCas
             "original_split_slot_count": 2,
         }
 
-    @unittest.expectedFailure
     def test_reordered_panes_and_resized_tracks_round_trip_through_a_restart(self):
-        """Stage 3. Matrix row 10."""
+        """Stage 2 backend transaction; Stage 3 wires DOM capture. Matrix row 10."""
         launched = self._launch_explorer(
             panes=2,
             layout="split",
@@ -964,7 +957,7 @@ class LaunchCapacityNondestructiveTestCase(_PersistencePathsMixin, unittest.Test
         self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
 
 
-# ==================== Item 7 — SGP-07 (Stage 6 items 4-5) ====================
+# ==================== Item 7 — SGP-07 (Stage 2 + Stage 6 items 4-5) ====================
 
 
 class MalformedPresentationValidationTestCase(_PersistencePathsMixin, unittest.TestCase):
@@ -1057,9 +1050,8 @@ class MalformedPresentationValidationTestCase(_PersistencePathsMixin, unittest.T
         self.assertEqual(rows[0]["group_count"], 1)
         self.assertEqual(rows[0]["pane_count"], 2)
 
-    @unittest.expectedFailure
     def test_the_canonical_normalizer_rejects_wrong_types_instead_of_coercing(self):
-        """Stage 6 item 4: type-*check* and reject, never `list()`/`dict()`/`int()`."""
+        """Stage 2 live boundary: type-check, never `list()`/`dict()`/`int()` coercion."""
         module = __import__(PRESENTATION_MODULE, fromlist=["normalize_pane_presentation"])
 
         for field_name, value in self.MALFORMED_FIELDS:

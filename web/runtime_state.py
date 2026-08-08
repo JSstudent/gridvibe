@@ -56,6 +56,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from web.paths import BASE_DIR
+from web.session_presentation import normalize_topbar_visible
 from web.state_files import (
     CrossProcessFileLock,
     StateFilePersistenceError,
@@ -135,11 +136,6 @@ def normalize_native_zoom_factor(value: Any) -> Optional[float]:
     ):
         return None
     return round(factor, 3)
-
-
-def normalize_topbar_visible(value: Any) -> Optional[bool]:
-    """Normalize optional workspace top-bar visibility without truthy coercion."""
-    return value if isinstance(value, bool) else None
 
 
 # TerminalSession launch fields worth replaying through POST /api/sessions.

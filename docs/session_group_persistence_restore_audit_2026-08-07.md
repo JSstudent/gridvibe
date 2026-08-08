@@ -2,7 +2,7 @@
 
 Date: 2026-08-07
 
-Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stage 1 is **done** — the saved-preset store and the encryption key are durable (see [Stage 1 results](#stage-1-results)); SGP-05 is closed. Stages 2-7 are not started by this audit.
+Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stage 1 is **done** — the saved-preset store and the encryption key are durable (see [Stage 1 results](#stage-1-results)); SGP-05 is closed. Stage 2 is **done** — the ordered live presentation transactions, canonical normalizer, manager revisions/order, and DOM-free client queue are implemented (see [Stage 2 results](#stage-2-results)). Stages 3-7 are not started by this audit.
 
 One production change has since landed outside the audit's stage sequence: workspace top-bar visibility is now persisted and restored, and the launcher's **Save & Restart** was corrected to capture every live workspace. It touches surfaces Stages 2, 3, 4, 6, and 7 own. Its effect on the plan is recorded in [Out-of-band change: workspace top-bar visibility](#out-of-band-change-workspace-top-bar-visibility), and the affected findings and stages carry amendment notes inline. It did not flip any frozen Stage 0 test.
 
@@ -607,9 +607,9 @@ A change landed after Stage 0 that persists and restores whether a workspace win
 
 **What it owes the remaining stages.**
 
-1. **A third presentation writer now exists.** `PATCH /api/workspaces/<id>/ui-state` joins the browser-tab mode-endpoint writer and the explorer's local-only writes. It is fire-and-forget with no revision, so it carries the SGP-02 ordering defect in miniature (see that finding's amendment). Stage 2 must absorb it and Stage 3 must delete it; leaving it is the "second writer" failure Stage 3 item 2 names explicitly.
-2. **The Stage 2 payload is group-scoped and this field is workspace-scoped.** The transaction body frozen in Stage 2 has `workspace_id`, `group_id`, `pane_order`, `layout`, `workspace_layout`, and `panes`. `topbar_visible` belongs to none of those. Stage 2 must therefore make one explicit decision *before* it starts: either add an optional `workspace` object to the transaction for window-chrome state that has no group, or declare window chrome out of the presentation transaction and give it its own small workspace-state route with the same revision discipline. Do not resolve it by hanging a workspace field off an arbitrary group — a workspace with two groups then has two writers for one value.
-3. **`normalize_topbar_visible()` is in the wrong module.** SGP-07 and Stage 6 item 4 require one canonical normalizer in `web/session_presentation.py`. This one sits in `web/runtime_state.py`, which is the module the final recommendation warns against growing first. Stage 2 should move it when it creates that module and leave a re-export only if a caller genuinely needs one.
+1. **A transition writer remains for Stage 3 to delete.** Stage 2 added the canonical `POST /api/workspace-presentation` compare-and-swap route. Until Stage 3 wires the page to it, `PATCH /api/workspaces/<id>/ui-state` remains compatible; it now increments the same workspace presentation revision, so it can no longer mutate chrome invisibly to the canonical transaction. Stage 3 must still remove it rather than leave two permanent writers.
+2. **The workspace-scoped design decision is resolved.** Group state stays on `POST /api/session-presentation`; window chrome uses the separate `POST /api/workspace-presentation` transaction and its own workspace revision. `topbar_visible` is not attached to an arbitrary group, so a two-group workspace still has one chrome authority.
+3. **`normalize_topbar_visible()` moved to the canonical module.** `web/session_presentation.py` now owns it, and `web/runtime_state.py` imports the definition. The existing non-coercing behavior and invalid-slot fallback remain unchanged.
 4. **Its slot validation defaults rather than rejects, deliberately — record why.** An invalid stored `topbar_visible` degrades to `True` instead of failing the slot, unlike the pane-level rule Stage 6 item 5 sets. That asymmetry is defensible: window chrome is not launchable shape, a wrong value costs one keystroke to correct, and failing a whole workspace restore over it would be worse than the defect. Stage 6 should keep the behavior and state the boundary explicitly — *shape fails, chrome degrades* — rather than let a future reader read it as an inconsistency to "fix."
 5. **The launcher reads another window's `localStorage`.** Covered under SGP-09 and SGP-11 above. Stage 4 item 3's flush handshake replaces it; until then it is the only way the launcher can see the value, so do not remove it early.
 6. **New source-text assertions were added.** `tests/test_api.py` gained assertions on JavaScript substrings (`"function workspaceTopbarVisibilityStorageKey(workspaceId)"`, `"/ui-state\`, {"`, `"typeof data.topbar_visible === 'boolean'"`, and four in the launcher block). `CLAUDE.md` forbids adding these and SGP-10 lists them as the coverage to *replace*. The backend tests added alongside them are genuinely behavioral and cover the round trip well; the string assertions add nothing those do not, and they will break on the Stage 3 refactor that deletes the route they name. Stage 7 item 4 should remove them as part of retiring the writer.
@@ -718,6 +718,39 @@ Four rules the schema above does not settle, each of which must be decided befor
 **No orphan events.** Guardrail 5 requires every server event to have a client listener. Name the consumer of the presentation notification in the same change that introduces the emit, or do not emit at all — a revision broadcast with no subscriber is dead code on arrival.
 
 Exit gate: the manager is the canonical acknowledged presentation source, update order is deterministic, autosave sees either a complete old group presentation or a complete new one, scroll activity alone produces no disk write, and every emitted event has a named consumer.
+
+#### Stage 2 results
+
+Completed 2026-08-08. The backend transaction, manager authority, schema extraction, workspace-chrome decision, and client ordering primitive all landed. Stage 3 still owns DOM capture and replacement of the legacy writers; completing Stage 2 does not claim that current browser/explorer events are wired yet.
+
+**Correctness validation and stage-boundary amendments.**
+
+1. The proposed compare-and-swap batch is correct only if pane order and group geometry are applied in Stage 2. Deferring those manager fields to Stage 3 would leave the manager unable to be the canonical acknowledged snapshot source. Consequently, the frozen pane-order/geometry test now passes in Stage 2 when it manually posts a transaction; Stage 3 still owns capturing that state from the DOM.
+2. The strict live boundary belongs here, while strict runtime-file rejection remains Stage 6. `normalize_pane_presentation()` now rejects unknown and wrong-typed live fields before the manager lock. Saved presets import the same field normalizers. `runtime_state.py` read validation and launch preparation are deliberately not switched to whole-group rejection yet, so the two Stage 6 malformed-restore forcing tests remain expected failures.
+3. Workspace chrome uses a separate transaction and revision. This avoids attaching `topbar_visible` to an arbitrary group and gives a multi-group workspace one chrome writer. The legacy `/ui-state` bridge increments the same revision until Stage 3 removes it.
+4. No Socket.IO notification was introduced. There is therefore no orphan server event and no emit under `SessionManager.lock`; clients can refetch `GET /api/sessions` on a stale revision. Stage 3 may add a room-scoped notification only with its listener in the same change.
+
+**What shipped.**
+
+| Surface | Change |
+|---|---|
+| `web/session_presentation.py` (new) | Import-cycle-safe owner of browser/explorer presentation bounds and normalizers; strict pane/group/workspace payload validation; thin service functions translating manager outcomes to HTTP status. `normalize_topbar_visible()` moved here. |
+| `sessions/manager.py` | `SessionGroup.pane_order` and `presentation_revision`; `Workspace.presentation_revision`; atomic group/workspace compare-and-swap methods; ordered session enumeration/snapshotting; deep-copy application; browser active URL mirrored into `initial_command`. |
+| `web/api.py` | Thin `POST /api/session-presentation` and `POST /api/workspace-presentation` routes. `GET /api/session-groups` exposes the workspace revision; the transitional `/ui-state` response exposes and participates in that revision. |
+| `web/saved_sessions.py` | Imports and compatibility-re-exports the canonical presentation field definitions instead of owning duplicate browser/explorer/geometry normalizers. The saved JSON contract is unchanged. |
+| `web/runtime_state.py` | Imports `normalize_topbar_visible()` from the canonical module; runtime-state schema and persistence behavior are unchanged. |
+| `web/static/js/session-persistence.js` (new) | DOM-free per-group queue with one in-flight request, one coalesced latest snapshot, structural microtask batching, a one-second continuous-update floor, explicit flush, revision rebasing, current-state refetch/reconciliation hooks, and no late-response overwrite of local state. |
+| `tests/test_session_presentation.py` (new) | Six behavioral tests covering atomic rejection, deep-copy isolation, ordered snapshot output, derived browser URL state, no runtime-state write, separately revisioned workspace chrome, continuous coalescing, stale refetch/rebase, and retry ordering. |
+| `tests/test_session_persistence_contract.py` | Removed eight `expectedFailure` decorators now satisfied: four route/CAS cases, two server/client browser-ordering cases, pane order/geometry, and strict live normalization. Future-stage decorators remain. |
+
+**Transaction behavior.** The group route requires exact workspace/group identities, a non-negative expected revision, a duplicate-free pane order, and exactly one pane entry for every live session. It rejects launch, credential, process/status, unknown, cross-group, cross-workspace, missing, or mode-incompatible fields. All values are normalized before the lock. Revision, ownership, membership, pane order, optional layout/geometry, and every pane update are checked/applied in one lock hold; nested values are deep-copied; stale requests return `409` with the current revision. The route performs no file write and no emit, so autosave keeps its existing cadence and observes either the complete old presentation or the complete new one.
+
+**Gate results:**
+
+- `python -m ruff check .` — passed, "All checks passed!".
+- `python tests/run_tests.py` — 1,269 tests, `OK (skipped=7, expected failures=18)`. The expected-failure count fell from 26 to 18 exactly because the eight Stage 2 forcing functions above were consumed.
+
+**What remains for Stage 3.** Load `session-persistence.js` in the terminals page; capture full live group presentation; route browser tabs, explorer state, pane reorder/layout settle, and top-bar toggles through the queues; surface stale reconciliation; make explicit Save Workspace flush every group and workspace queue; then remove the browser-tab presentation writer and `PATCH /api/workspaces/<id>/ui-state`. Until that wiring lands, current UI events still follow their legacy paths even though the canonical transactions are ready.
 
 ### Stage 3 — Wire exact Save Workspace and existing browser/explorer state into the canonical source
 

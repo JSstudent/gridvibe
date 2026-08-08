@@ -205,6 +205,11 @@ from web.selfupdate import (  # noqa: F401 - perform_self_update re-exported for
     perform_app_update,
     perform_self_update,
 )
+from web.session_presentation import (
+    PresentationValidationError,
+    apply_group_presentation,
+    apply_workspace_presentation,
+)
 from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatibility
     _MAX_TRACKED_SOCKET_CLIENTS,
     _MAX_TRACKED_TERMINAL_COMMAND_LENGTH,
@@ -1685,10 +1690,9 @@ def update_workspace_ui_state(workspace_id: str):
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
-    return jsonify({
-        "workspace_id": resolved_workspace_id,
-        "topbar_visible": topbar_visible,
-    })
+    presentation = session_manager.get_workspace_presentation(resolved_workspace_id)
+    presentation["topbar_visible"] = topbar_visible
+    return jsonify(presentation)
 
 
 @app.route('/api/session-groups/<group_id>/move', methods=['POST'])
@@ -1696,6 +1700,32 @@ def move_session_group(group_id: str):
     """Move one live session tab to another workspace without restarting it."""
     data = request.get_json(silent=True) or {}
     payload, status = move_group_to_workspace(group_id, data)
+    return jsonify(payload), status
+
+
+@app.route('/api/session-presentation', methods=['POST'])
+def update_session_presentation():
+    """Compare-and-swap one bounded live group-presentation snapshot."""
+    try:
+        payload, status = apply_group_presentation(
+            session_manager,
+            request.get_json(silent=True),
+        )
+    except PresentationValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(payload), status
+
+
+@app.route('/api/workspace-presentation', methods=['POST'])
+def update_workspace_presentation():
+    """Compare-and-swap bounded workspace-window presentation state."""
+    try:
+        payload, status = apply_workspace_presentation(
+            session_manager,
+            request.get_json(silent=True),
+        )
+    except PresentationValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify(payload), status
 
 
@@ -1712,11 +1742,15 @@ def get_session_groups():
         group.to_dict()
         for group in session_manager.get_workspace_groups(workspace_id)
     ]
+    workspace_presentation = session_manager.get_workspace_presentation(workspace_id)
     return jsonify({
         "workspace_id": workspace_id,
         "groups": groups,
         "count": len(groups),
-        "topbar_visible": session_manager.get_topbar_visible(workspace_id),
+        "topbar_visible": workspace_presentation["topbar_visible"],
+        "workspace_presentation_revision": workspace_presentation[
+            "presentation_revision"
+        ],
     })
 
 

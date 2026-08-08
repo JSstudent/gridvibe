@@ -13,12 +13,47 @@ import re
 import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import urlparse
 
 from web.config import runtime_config
 from web.paths import BASE_DIR
 from web.saved_session_store import UNCHANGED, SavedSessionStore
 from web.secrets import _decrypt_password, _encrypt_password
+from web.session_presentation import (  # noqa: F401 - compatibility re-exports
+    BROWSER_MAX_TABS,
+    BROWSER_MAX_URL_LENGTH,
+    DEFAULT_BROWSER_URL,
+    EXPLORER_DIFF_MODES,
+    EXPLORER_EDITOR_FONT_MAX,
+    EXPLORER_EDITOR_FONT_MIN,
+    EXPLORER_FONT_ALIASES,
+    EXPLORER_MAX_DIFF_COMMIT_LENGTH,
+    EXPLORER_MAX_MARKDOWN_FOLDS,
+    EXPLORER_MAX_MARKDOWN_LINE,
+    EXPLORER_MAX_OPEN_TABS,
+    EXPLORER_MAX_TAB_PATH_LENGTH,
+    EXPLORER_MAX_TAB_VIEW_IDENTITY_LENGTH,
+    EXPLORER_MD_FONTS,
+    EXPLORER_MD_PRESETS,
+    EXPLORER_PREVIEW_TAB_KEY,
+    EXPLORER_SOURCE_FONTS,
+    EXPLORER_TAB_VIEW_MODES,
+    _normalize_browser_active_tab,
+    _normalize_browser_tabs,
+    _normalize_browser_url,
+    _normalize_explorer_active_tab,
+    _normalize_explorer_diff_target,
+    _normalize_explorer_line_wrap,
+    _normalize_explorer_markdown_folds,
+    _normalize_explorer_md_choice,
+    _normalize_explorer_open_tabs,
+    _normalize_explorer_tab_font_size,
+    _normalize_explorer_tab_path,
+    _normalize_explorer_tab_views,
+    _normalize_explorer_theme,
+    _normalize_explorer_view_identity,
+    _normalize_explorer_view_snapshot,
+    _normalize_workspace_layout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,246 +73,6 @@ SCRATCH_NAME_MAX_SUFFIX = 999
 # It is a shortcut list, not a session browser — Import Session is still the way
 # to reach an old preset in full.
 CONNECTION_TARGET_LIMIT = 20
-
-# Explorer tabbed viewer persistence bounds (ISSUE-2026-015).
-EXPLORER_MAX_OPEN_TABS = 12
-EXPLORER_MAX_TAB_PATH_LENGTH = 4096
-
-# Per-tab view persistence (item 2.f): mode + scroll fraction + content
-# identity + editor zoom per open tab, plus the global Markdown appearance
-# (ISSUE-2026-033). Allowlists and bounds mirror the client
-# (`EXPLORER_MD_PRESETS` / `EXPLORER_MD_FONTS`, the file-view panel names,
-# and `EXPLORER_EDITOR_FONT_MIN/MAX` in web/static/js/terminals.js). The
-# reserved `__preview__` key carries the permanent Preview tab's own view state,
-# including zoom, path, and Markdown folds.
-EXPLORER_TAB_VIEW_MODES = ("source", "preview", "diff")
-EXPLORER_DIFF_MODES = ("worktree", "staged")
-EXPLORER_MAX_TAB_VIEW_IDENTITY_LENGTH = 64
-EXPLORER_MAX_DIFF_COMMIT_LENGTH = 64
-EXPLORER_MAX_MARKDOWN_FOLDS = 256
-EXPLORER_MAX_MARKDOWN_LINE = 1_000_000
-EXPLORER_PREVIEW_TAB_KEY = "__preview__"
-EXPLORER_EDITOR_FONT_MIN = 10
-EXPLORER_EDITOR_FONT_MAX = 24
-EXPLORER_MD_PRESETS = ("default", "paper", "contrast", "vscode")
-EXPLORER_MD_FONTS = (
-    "system",
-    "serif",
-    "cascadia-code",
-    "jetbrains-mono",
-    "courier-new",
-)
-EXPLORER_SOURCE_FONTS = (
-    "default",
-    "cascadia-code",
-    "jetbrains-mono",
-    "courier-new",
-)
-# Retired options mapped onto their nearest survivor so an older saved session
-# keeps its intent: "consolas" was dropped when it rendered identically to
-# JetBrains Mono, whose stack fell back to it before the faces were vendored.
-EXPLORER_FONT_ALIASES = {"consolas": "jetbrains-mono"}
-
-
-def _normalize_explorer_tab_path(value: Any) -> str:
-    """Normalize one persisted explorer tab path (root-relative, no traversal).
-
-    Returns "" for absolute paths, drive letters, ``..`` traversal, or anything
-    over the length cap, so an unsafe or out-of-root entry is dropped rather
-    than restored.
-    """
-    text = str(value or "").replace("\\", "/").strip()
-    if not text or len(text) > EXPLORER_MAX_TAB_PATH_LENGTH:
-        return ""
-    segments: List[str] = []
-    for segment in text.split("/"):
-        if segment in ("", "."):
-            continue
-        if segment == ".." or ":" in segment:
-            return ""
-        segments.append(segment)
-    return "/".join(segments)
-
-
-def _normalize_explorer_open_tabs(value: Any) -> List[str]:
-    """Bound and de-duplicate the persisted list of open explorer tab paths."""
-    if not isinstance(value, list):
-        return []
-    result: List[str] = []
-    seen = set()
-    for item in value:
-        path = _normalize_explorer_tab_path(item)
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        result.append(path)
-        if len(result) >= EXPLORER_MAX_OPEN_TABS:
-            break
-    return result
-
-
-def _normalize_explorer_active_tab(value: Any, open_tabs: List[str]) -> str:
-    """Keep the active tab only when it points at one of the open tabs."""
-    path = _normalize_explorer_tab_path(value)
-    return path if path in open_tabs else ""
-
-
-def _normalize_explorer_md_choice(value: Any, allowed: tuple, aliases: dict = None) -> str:
-    """Return an allowlisted viewer appearance value, or "" for unset."""
-    text = str(value or "").strip()
-    text = (aliases or {}).get(text, text)
-    return text if text in allowed else ""
-
-
-def _normalize_explorer_theme(value: Any) -> str:
-    """Return the saved per-pane explorer theme; anything but "light" is "dark"."""
-    return "light" if str(value or "").strip() == "light" else "dark"
-
-
-def _normalize_explorer_tab_font_size(value: Any) -> int:
-    """Clamp a persisted per-tab editor font size to the client bounds; 0 = unset."""
-    try:
-        font_size = int(value)
-    except (TypeError, ValueError):
-        return 0
-    if font_size <= 0:
-        return 0
-    return max(EXPLORER_EDITOR_FONT_MIN, min(EXPLORER_EDITOR_FONT_MAX, font_size))
-
-
-def _normalize_explorer_line_wrap(raw_view: Dict[str, Any]) -> Dict[str, bool]:
-    """Return the per-tab source/preview/diff line-wrap opt-outs.
-
-    Wrapping is on by default, so only an explicit off flag persists — an absent
-    key restores wrapped, which is also what tabs saved before wrapping existed
-    (and every never-touched tab) get.
-    """
-    return {
-        key: False
-        for key in ("wrap_source", "wrap_preview", "wrap_diff")
-        if key in raw_view and not raw_view[key]
-    }
-
-
-def _normalize_explorer_markdown_folds(value: Any) -> List[int]:
-    """Return bounded, unique Markdown heading line numbers in document order."""
-    if not isinstance(value, list):
-        return []
-    folds: List[int] = []
-    seen = set()
-    for raw_line in value:
-        if isinstance(raw_line, bool):
-            continue
-        try:
-            line = int(raw_line)
-        except (TypeError, ValueError):
-            continue
-        if line < 1 or line > EXPLORER_MAX_MARKDOWN_LINE or line in seen:
-            continue
-        seen.add(line)
-        folds.append(line)
-        if len(folds) >= EXPLORER_MAX_MARKDOWN_FOLDS:
-            break
-    return sorted(folds)
-
-
-def _normalize_explorer_view_identity(value: Any) -> str:
-    """Validate one short, opaque content identity token."""
-    identity = str(value or "")
-    return identity if len(identity) <= EXPLORER_MAX_TAB_VIEW_IDENTITY_LENGTH else ""
-
-
-def _normalize_explorer_diff_target(raw_view: Dict[str, Any], mode: str) -> Dict[str, str]:
-    """Return the bounded Git selector for a persisted Diff view."""
-    if mode != "diff":
-        return {}
-    commit = str(raw_view.get("diff_commit") or "").strip()
-    if commit and len(commit) <= EXPLORER_MAX_DIFF_COMMIT_LENGTH and re.fullmatch(
-        r"[0-9a-fA-F]{7,64}", commit
-    ):
-        return {"diff_commit": commit}
-    diff_mode = str(raw_view.get("diff_mode") or "").strip()
-    return {"diff_mode": diff_mode} if diff_mode in EXPLORER_DIFF_MODES else {}
-
-
-def _normalize_explorer_view_snapshot(raw_view: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize mode, scroll, identity, and optional Git diff selector."""
-    mode = str(raw_view.get("mode") or "")
-    if mode not in EXPLORER_TAB_VIEW_MODES:
-        return {}
-    try:
-        scroll = float(raw_view.get("scroll", 0.0))
-    except (TypeError, ValueError):
-        scroll = 0.0
-    if scroll != scroll:  # NaN guard
-        scroll = 0.0
-    record: Dict[str, Any] = {
-        "mode": mode,
-        "scroll": max(0.0, min(1.0, scroll)),
-        "identity": _normalize_explorer_view_identity(raw_view.get("identity")),
-    }
-    record.update(_normalize_explorer_diff_target(raw_view, mode))
-    return record
-
-
-def _normalize_explorer_tab_views(value: Any, open_tabs: List[str]) -> Dict[str, Any]:
-    """Validate the per-tab view map: mode + scroll + identity + zoom + wrapping.
-
-    Only entries for persisted open tabs survive (plus the reserved Preview
-    key, which keeps zoom, line wrapping, Markdown folds, and the tab's own
-    separated path — shown file and/or browsed directory); the mode must be a
-    known file view, the scroll is clamped to a [0, 1] fraction (OD-4), content
-    identities are short opaque tokens, line-wrap flags are booleans, and the
-    font size and fold lines are bounded — anything else is dropped rather than
-    restored.
-    """
-    if not isinstance(value, dict):
-        return {}
-    views: Dict[str, Any] = {}
-    for raw_path, raw_view in value.items():
-        if not isinstance(raw_view, dict):
-            continue
-        if str(raw_path) == EXPLORER_PREVIEW_TAB_KEY:
-            record = _normalize_explorer_view_snapshot(raw_view)
-            font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
-            if font_size:
-                record["font_size"] = font_size
-            record.update(_normalize_explorer_line_wrap(raw_view))
-            preview_path = _normalize_explorer_tab_path(raw_view.get("path"))
-            if preview_path:
-                record["path"] = preview_path
-            raw_preview_dir = raw_view.get("dir")
-            preview_dir = _normalize_explorer_tab_path(raw_preview_dir)
-            # The explorer root is the intentionally empty relative path. Its
-            # presence is distinct from a missing ``dir`` field; unsafe values
-            # that merely normalize to empty must still be dropped.
-            if preview_dir or ("dir" in raw_view and raw_preview_dir == ""):
-                record["dir"] = preview_dir
-            folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
-            fold_identity = _normalize_explorer_view_identity(raw_view.get("fold_identity"))
-            if folds and fold_identity:
-                record["folds"] = folds
-                record["fold_identity"] = fold_identity
-            if record and EXPLORER_PREVIEW_TAB_KEY not in views:
-                views[EXPLORER_PREVIEW_TAB_KEY] = record
-            continue
-        path = _normalize_explorer_tab_path(raw_path)
-        if not path or path not in open_tabs or path in views:
-            continue
-        record = _normalize_explorer_view_snapshot(raw_view)
-        font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
-        if font_size:
-            record["font_size"] = font_size
-        record.update(_normalize_explorer_line_wrap(raw_view))
-        folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
-        fold_identity = _normalize_explorer_view_identity(raw_view.get("fold_identity"))
-        if folds and fold_identity:
-            record["folds"] = folds
-            record["fold_identity"] = fold_identity
-        if record:
-            views[path] = record
-    return views
-
 
 def _default_terminal_entries():
     """Build default per-terminal settings."""
@@ -337,143 +132,6 @@ def _normalize_startup_mode(value: Any, connection_mode: str = "ssh") -> str:
     if normalized == "explorer" and connection_mode in {"ssh", "wsl"}:
         return "explorer"
     return "terminal"
-
-
-def _normalize_browser_url(value: Any) -> str:
-    """Return a browser-pane URL with only HTTP(S) schemes allowed."""
-    raw_value = str(value or DEFAULT_BROWSER_URL).strip()
-    if not raw_value:
-        raise ValueError("Browser panes require an HTTP or HTTPS URL")
-    if len(raw_value) > BROWSER_MAX_URL_LENGTH:
-        raise ValueError("Browser pane URL is too long")
-
-    candidate = raw_value
-    if "://" not in candidate:
-        candidate = f"http://{candidate}"
-
-    parsed = urlparse(candidate)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Browser panes only support http:// and https:// URLs")
-
-    return candidate
-
-
-DEFAULT_BROWSER_URL = "http://127.0.0.1:3000"
-
-# Browser-pane tab persistence bounds. Mirrored by BROWSER_MAX_TABS in
-# web/static/js/browser-pane.js — a pane is a preview surface, not a full
-# browser, so the strip stays short enough to read at pane width.
-BROWSER_MAX_TABS = 8
-BROWSER_MAX_URL_LENGTH = 2048
-
-
-def _normalize_browser_tabs(value: Any, active_url: str = "") -> List[str]:
-    """Bound one browser pane's persisted tab URLs, dropping unusable entries.
-
-    Unlike explorer tabs, duplicates are kept: the same URL open twice is a
-    legitimate side-by-side comparison. ``active_url`` seeds a single-tab list
-    for panes saved before tabs existed, so an upgrade never loses the URL.
-    """
-    tabs: List[str] = []
-    for item in value if isinstance(value, list) else []:
-        # `_normalize_browser_url` treats an empty value as "use the default",
-        # which is right for the single-URL entry point but wrong here: a blank
-        # tab is a broken entry and must be dropped, not become the default.
-        if not str(item or "").strip():
-            continue
-        try:
-            tabs.append(_normalize_browser_url(item))
-        except ValueError:
-            continue
-        if len(tabs) >= BROWSER_MAX_TABS:
-            break
-
-    if not tabs and active_url:
-        try:
-            tabs.append(_normalize_browser_url(active_url))
-        except ValueError:
-            return []
-    return tabs
-
-
-def _normalize_browser_active_tab(value: Any, tabs: List[str]) -> int:
-    """Clamp the active tab index into the persisted tab list ("" -> 0)."""
-    if not tabs:
-        return 0
-    try:
-        index = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return max(0, min(len(tabs) - 1, index))
-
-
-def _normalize_workspace_layout(data: Any, terminal_count: int) -> Optional[Dict[str, Any]]:
-    """Normalize optional runtime workspace geometry stored with a saved preset."""
-    if not isinstance(data, dict):
-        return None
-
-    raw_rects = data.get("split_slot_rects")
-    if not isinstance(raw_rects, list) or len(raw_rects) != terminal_count:
-        return None
-
-    rects = []
-    # The frontend lays base cells out on an 8-unit grid (SPLIT_CELL_UNIT), so the
-    # densest base (4 columns) spans 4 * 8 = 32 grid lines before any split; keep a
-    # comfortable margin above that and scale with a larger configured max_sessions.
-    max_grid_line = max(64, runtime_config.max_sessions * 8)
-    for index, raw_rect in enumerate(raw_rects):
-        if not isinstance(raw_rect, dict):
-            return None
-        try:
-            x = int(raw_rect.get("x", 1))
-            y = int(raw_rect.get("y", 1))
-            w = int(raw_rect.get("w", 1))
-            h = int(raw_rect.get("h", 1))
-            origin_slot = int(raw_rect.get("originSlot", index))
-        except (TypeError, ValueError):
-            return None
-
-        if x < 1 or y < 1 or w < 1 or h < 1:
-            return None
-        if x + w - 1 > max_grid_line or y + h - 1 > max_grid_line:
-            return None
-
-        rects.append(
-            {
-                "originSlot": max(0, min(runtime_config.max_sessions - 1, origin_slot)),
-                "x": x,
-                "y": y,
-                "w": w,
-                "h": h,
-            }
-        )
-
-    def normalize_weights(values: Any, target_length: int) -> List[float]:
-        if not isinstance(values, list):
-            return [1.0 for _ in range(target_length)]
-        normalized = []
-        for index in range(target_length):
-            try:
-                value = float(values[index])
-            except (IndexError, TypeError, ValueError):
-                value = 1.0
-            normalized.append(max(0.01, min(value, 100.0)))
-        return normalized
-
-    column_count = max(rect["x"] + rect["w"] - 1 for rect in rects)
-    row_count = max(rect["y"] + rect["h"] - 1 for rect in rects)
-    try:
-        original_count = int(data.get("original_split_slot_count", terminal_count))
-    except (TypeError, ValueError):
-        original_count = terminal_count
-
-    return {
-        "class_name": "layout-split-local",
-        "split_slot_rects": rects,
-        "split_column_weights": normalize_weights(data.get("split_column_weights"), column_count),
-        "split_row_weights": normalize_weights(data.get("split_row_weights"), row_count),
-        "original_split_slot_count": max(1, min(runtime_config.max_sessions, original_count)),
-    }
 
 
 def _default_session_config() -> Dict[str, Any]:
