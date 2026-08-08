@@ -12,11 +12,12 @@ import os
 import re
 import time
 import uuid
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from web.config import runtime_config
 from web.paths import BASE_DIR
+from web.saved_session_store import UNCHANGED, SavedSessionStore
 from web.secrets import _decrypt_password, _encrypt_password
 
 logger = logging.getLogger(__name__)
@@ -831,16 +832,33 @@ def _normalize_saved_session_entry(entry: Any, encrypt_password: bool = False) -
     }
 
 
-def _load_saved_sessions_payload() -> Dict[str, Any]:
-    """Load named saved launcher presets and last-used metadata from disk."""
-    if not os.path.exists(SAVED_SESSIONS_PATH):
-        return {"sessions": [], "last_session": ""}
+def _saved_payload_is_supported(payload: Any) -> bool:
+    """Whether a stored blob is a preset store this build can read.
 
-    try:
-        with open(SAVED_SESSIONS_PATH, "r", encoding="utf-8") as file_handle:
-            raw = json.load(file_handle)
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning(f"Failed to load {SAVED_SESSIONS_PATH}: {exc}")
+    A dict is the current shape and a bare list is the pre-``last_session``
+    one. Anything else is not a preset store, and reading it as "no saved
+    sessions" would let the next successful save overwrite the user's real
+    presets — so the store quarantines it and falls back to the backup instead.
+    """
+    return isinstance(payload, (dict, list))
+
+
+_saved_session_store = SavedSessionStore(
+    # Resolved per call: the module global is redirected per test case, and a
+    # store that pinned the path at import would keep writing the old file.
+    path_resolver=lambda: SAVED_SESSIONS_PATH,
+    is_supported=_saved_payload_is_supported,
+)
+
+
+def _normalize_stored_payload(raw: Any) -> Dict[str, Any]:
+    """Normalize one raw stored blob into ``{sessions, last_session}``.
+
+    Passwords come back decrypted, so this is the in-memory representation the
+    rest of the module (and the API) works with; :func:`_build_saved_sessions_commit`
+    is its exact inverse on the way back to disk.
+    """
+    if raw is None:
         return {"sessions": [], "last_session": ""}
 
     has_last_session_field = False
@@ -876,16 +894,28 @@ def _load_saved_sessions_payload() -> Dict[str, Any]:
     return {"sessions": normalized_entries, "last_session": last_session}
 
 
+def _load_saved_sessions_payload() -> Dict[str, Any]:
+    """Load named saved launcher presets and last-used metadata from disk."""
+    return _normalize_stored_payload(_saved_session_store.read())
+
+
 def load_saved_sessions() -> List[Dict[str, Any]]:
     """Load the saved launcher presets list from disk."""
     return _load_saved_sessions_payload()["sessions"]
 
 
-def _save_saved_sessions_payload(
+def _build_saved_sessions_commit(
     entries: List[Dict[str, Any]],
     last_session: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Persist named saved launcher presets plus last-used metadata to disk."""
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Return ``(payload to store, in-memory result)`` for one commit.
+
+    Pure: it normalizes, encrypts, and decides the last-used id, but performs no
+    I/O. :meth:`SavedSessionStore.transaction` does the writing, which is what
+    lets an upsert or a delete read and rewrite the file under one lock hold.
+    A ``None`` payload means "no presets left", and an empty preset store is
+    represented by the absence of the file rather than by an empty list.
+    """
     normalized_entries = []
     seen_ids = set()
     for entry in entries:
@@ -898,17 +928,12 @@ def _save_saved_sessions_payload(
 
     normalized_entries.sort(key=lambda item: item["updated_at"], reverse=True)
     if not normalized_entries:
-        if os.path.exists(SAVED_SESSIONS_PATH):
-            try:
-                os.remove(SAVED_SESSIONS_PATH)
-            except OSError as exc:
-                logger.warning(f"Failed to remove {SAVED_SESSIONS_PATH}: {exc}")
-        return {"sessions": [], "last_session": ""}
+        return None, {"sessions": [], "last_session": ""}
 
-    valid_ids = {entry["id"] for entry in normalized_entries}
+    valid_ids = set(seen_ids)
     valid_ids.add(DEFAULT_SAVED_SESSION_ID)
     if last_session is None:
-        last_session_value = normalized_entries[0]["id"] if normalized_entries else ""
+        last_session_value = normalized_entries[0]["id"]
     else:
         last_session_value = str(last_session).strip()
         if last_session_value and last_session_value not in valid_ids:
@@ -920,16 +945,23 @@ def _save_saved_sessions_payload(
         if normalized is not None:
             encrypted_entries.append(normalized)
 
-    with open(SAVED_SESSIONS_PATH, "w", encoding="utf-8") as file_handle:
-        json.dump(
-            {
-                "last_session": last_session_value,
-                "sessions": encrypted_entries,
-            },
-            file_handle,
-            indent=2,
-        )
-    return {"sessions": normalized_entries, "last_session": last_session_value}
+    payload = {"last_session": last_session_value, "sessions": encrypted_entries}
+    return payload, {"sessions": normalized_entries, "last_session": last_session_value}
+
+
+def _save_saved_sessions_payload(
+    entries: List[Dict[str, Any]],
+    last_session: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Persist named saved launcher presets plus last-used metadata to disk.
+
+    A whole-store replacement: the caller already decided the complete list.
+    Prefer a store transaction for read-modify-write changes, so a concurrent
+    writer's unrelated preset cannot be read here and dropped there.
+    """
+    return _saved_session_store.transaction(
+        lambda _stored: _build_saved_sessions_commit(entries, last_session)
+    )
 
 
 def save_saved_sessions(entries: List[Dict[str, Any]], last_session: Optional[str] = None):
@@ -1023,66 +1055,92 @@ def upsert_saved_session(
     session_id: Optional[str] = None,
     set_last_session: bool = True,
 ) -> Dict[str, Any]:
-    """Create or update one named saved session preset."""
+    """Create or update one named saved session preset.
+
+    The read and the write are one store transaction (SGP-05): a second thread
+    or process saving an unrelated preset at the same moment can no longer have
+    its entry read here and dropped by this write.
+    """
     normalized_config = _normalize_session_config(config)
     if str(session_id or "").strip() == DEFAULT_SAVED_SESSION_ID:
         session_id = None
     normalized_name = str(name or session_id or "").strip()
-    state = _load_saved_sessions_payload()
-    saved_sessions = state["sessions"]
     now = _utc_timestamp()
 
-    if session_id:
-        for entry in saved_sessions:
-            if entry["id"] == session_id:
-                entry["name"] = normalized_name or entry["name"]
-                entry["updated_at"] = now
-                entry["config"] = normalized_config
-                save_saved_sessions(
-                    saved_sessions,
-                    last_session=entry["id"] if set_last_session else state["last_session"],
-                )
-                return entry
+    def mutate(stored: Any):
+        state = _normalize_stored_payload(stored)
+        saved_sessions = state["sessions"]
 
-    entry_id = session_id or _generate_saved_session_id()
-    entry = {
-        "id": entry_id,
-        "name": normalized_name or entry_id,
-        "created_at": now,
-        "updated_at": now,
-        "config": normalized_config,
-    }
-    saved_sessions.append(entry)
-    save_saved_sessions(
-        saved_sessions,
-        last_session=entry_id if set_last_session else state["last_session"],
-    )
-    return entry
+        if session_id:
+            for entry in saved_sessions:
+                if entry["id"] == session_id:
+                    entry["name"] = normalized_name or entry["name"]
+                    entry["updated_at"] = now
+                    entry["config"] = normalized_config
+                    payload, _result = _build_saved_sessions_commit(
+                        saved_sessions,
+                        last_session=(
+                            entry["id"] if set_last_session else state["last_session"]
+                        ),
+                    )
+                    return payload, entry
+
+        entry_id = session_id or _generate_saved_session_id()
+        entry = {
+            "id": entry_id,
+            "name": normalized_name or entry_id,
+            "created_at": now,
+            "updated_at": now,
+            "config": normalized_config,
+        }
+        saved_sessions.append(entry)
+        payload, _result = _build_saved_sessions_commit(
+            saved_sessions,
+            last_session=entry_id if set_last_session else state["last_session"],
+        )
+        return payload, entry
+
+    return _saved_session_store.transaction(mutate)
 
 
 def set_last_saved_session(session_id: Optional[str]):
     """Persist the last-used saved session id when it still exists."""
-    state = _load_saved_sessions_payload()
-    target_id = str(session_id or "").strip()
-    if not state["sessions"] and target_id != DEFAULT_SAVED_SESSION_ID:
-        return state
-    return save_saved_sessions(state["sessions"], last_session=target_id)
+    def mutate(stored: Any):
+        state = _normalize_stored_payload(stored)
+        target_id = str(session_id or "").strip()
+        if not state["sessions"] and target_id != DEFAULT_SAVED_SESSION_ID:
+            # Nothing to point at, and nothing to rewrite: selecting the
+            # built-in default on an empty store must not create a file.
+            return UNCHANGED, state
+        return _build_saved_sessions_commit(state["sessions"], last_session=target_id)
+
+    return _saved_session_store.transaction(mutate)
 
 
 def delete_saved_sessions(session_ids: List[str]) -> Dict[str, Any]:
     """Delete one or more saved presets."""
-    state = _load_saved_sessions_payload()
     target_ids = {str(session_id).strip() for session_id in session_ids if str(session_id).strip()}
-    remaining_entries = [entry for entry in state["sessions"] if entry["id"] not in target_ids]
 
-    if not remaining_entries:
-        return save_saved_sessions([], last_session="")
+    def mutate(stored: Any):
+        state = _normalize_stored_payload(stored)
+        remaining_entries = [
+            entry for entry in state["sessions"] if entry["id"] not in target_ids
+        ]
 
-    next_last_session = state["last_session"]
-    if next_last_session in target_ids or not _find_saved_session_entry(remaining_entries, next_last_session):
-        next_last_session = remaining_entries[0]["id"]
+        if not remaining_entries:
+            return _build_saved_sessions_commit([], last_session="")
 
-    return save_saved_sessions(remaining_entries, last_session=next_last_session)
+        next_last_session = state["last_session"]
+        if next_last_session in target_ids or not _find_saved_session_entry(
+            remaining_entries, next_last_session
+        ):
+            next_last_session = remaining_entries[0]["id"]
+
+        return _build_saved_sessions_commit(
+            remaining_entries, last_session=next_last_session
+        )
+
+    return _saved_session_store.transaction(mutate)
 
 
 def build_unique_session_name(base_name: str, taken_names: Iterable[Any]) -> str:

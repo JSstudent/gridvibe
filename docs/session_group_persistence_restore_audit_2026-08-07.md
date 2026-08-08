@@ -2,7 +2,7 @@
 
 Date: 2026-08-07
 
-Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stages 1-7 are not started by this audit.
+Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stage 1 is **done** — the saved-preset store and the encryption key are durable (see [Stage 1 results](#stage-1-results)); SGP-05 is closed. Stages 2-7 are not started by this audit.
 
 One production change has since landed outside the audit's stage sequence: workspace top-bar visibility is now persisted and restored, and the launcher's **Save & Restart** was corrected to capture every live workspace. It touches surfaces Stages 2, 3, 4, 6, and 7 own. Its effect on the plan is recorded in [Out-of-band change: workspace top-bar visibility](#out-of-band-change-workspace-top-bar-visibility), and the affected findings and stages carry amendment notes inline. It did not flip any frozen Stage 0 test.
 
@@ -319,6 +319,8 @@ In launch preparation, preserve a provided normalized `explorer_root_directory` 
 
 ### SGP-05 — High: `saved_sessions.json` has lost-update and torn-write paths
 
+**Status: fixed by Stage 1** (2026-08-08). The evidence and direction below are kept as written, because they describe the code the fix replaced; what shipped is recorded in [Stage 1 results](#stage-1-results). The line references no longer resolve.
+
 Evidence:
 
 - upsert, last-session update, and delete are separate load/modify/save operations with no shared in-process or OS-level lock (`web/saved_sessions.py:1020`, `web/saved_sessions.py:1063`, `web/saved_sessions.py:1072`).
@@ -628,6 +630,42 @@ Connected findings: SGP-05, SGP-10, SGP-11.
 Keep the public JSON shape and encryption format unchanged. This stage is isolated from frontend behavior and has a small rollback surface. The out-of-band top-bar change does not touch anything in this stage; ship it as written.
 
 Exit gate: concurrent unrelated saved-session mutations survive, interrupted writes retain a readable last-good store, and no plaintext secret reaches logs or runtime state.
+
+#### Stage 1 results
+
+Completed 2026-08-08. All six items landed, plus one refactor the stage text did not call for and the DRY guardrail did.
+
+**What shipped.**
+
+| Surface | Change |
+|---|---|
+| `web/state_files.py` (new) | The durability mechanics both stores need, in one place: `CrossProcessFileLock`, `write_json_atomically()`, `back_up_state_file()`, `quarantine_state_file()`, `read_backup_json()`, and `create_file_exclusively()`. |
+| `web/saved_session_store.py` (new) | `SavedSessionStore` — path resolver, process lock, cross-process lock, and one `transaction(mutate)` entry point. Deliberately schema-free; it moves whole JSON payloads, nothing else. `SavedSessionsPersistenceError` lives here. |
+| `web/saved_sessions.py` | `upsert_saved_session()`, `delete_saved_sessions()`, and `set_last_saved_session()` are each now one transaction instead of a load/save pair. Normalization split into the pure `_normalize_stored_payload()` / `_build_saved_sessions_commit()` inverse pair so the mutator does no I/O. |
+| `web/runtime_state.py` | Rewired onto the shared primitives. `_CrossProcessStateLock`, `_quarantine_state_file`, `_write_state_locked` and `_recover_from_backup` keep their names and behavior as thin wrappers; `_back_up_current_state` is gone (absorbed by the shared writer). |
+| `web/secrets.py` | Exclusive, atomic first-run key creation plus a bounded retry against a legacy non-atomic writer, and a loud `RuntimeError` instead of an opaque `Fernet` failure on an empty key file. |
+| `web/api.py` | `POST /api/saved-sessions`, `DELETE /api/saved-sessions`, and `POST /api/session-config` answer `503` with `retryable: true` on a failed commit, through one `_saved_sessions_write_failure()` helper. |
+| `.gitignore` | The new sidecars (`saved_sessions.json.{lock,bak,corrupt-*}`) and both stores' scratch files. |
+
+**Item-by-item.**
+
+| Stage 1 item | Where | Note |
+|---|---|---|
+| 1. One locked read-modify-write per mutation | `SavedSessionStore.transaction` | `_exclusive()` is re-entrant per thread, because the file lock takes a fresh descriptor and would otherwise deadlock against itself. |
+| 2. Unique temp file, atomic replace, last-good backup | `write_json_atomically` | Shared with runtime state, so the two files cannot drift apart on this. |
+| 3. Quarantine instead of an empty store | `SavedSessionStore._read_locked` | "Unsupported" is `_saved_payload_is_supported()`: a dict (current) or a bare list (pre-`last_session`). Anything else is not a preset store. |
+| 4. Surfaced failures | `_saved_sessions_write_failure` | Matches the shape the runtime-state save route already returns. A failed *delete* raises too, which is the "false success" bullet in SGP-05. |
+| 5. Exclusive, durable Fernet key | `create_file_exclusively` | `os.rename` on Windows, `os.link` elsewhere — both fail rather than clobber. Content is complete and fsynced before the name exists. |
+| 6. Tests | `tests/test_saved_session_store.py` | 26 tests: concurrent upserts, concurrent delete-vs-upsert, a paused writer blocking the next transaction, cross-process lock exclusivity, failed replace / failed temp write / failed delete, unique temp paths, corrupt-primary and unsupported-payload recovery, quarantine surviving the next save, plaintext absence from file/backup/quarantine/exception/logs, the three retryable routes, key convergence across threads, the never-partial key claim, and the frozen file shape plus legacy bare-list load. |
+
+**One deviation from the stage text.** The stage said to add the store and left the file primitives implicit. Copying ~120 lines of lock/atomic-write/backup/quarantine code out of `web/runtime_state.py` would have violated guardrail 6 and given the two files two chances to drift, so the primitives were extracted to `web/state_files.py` first and `runtime_state.py` was rewired onto them. Its module-level names and their behavior are unchanged, which is why the existing runtime-state tests (including the ones that patch `_write_state_locked` and instantiate `_CrossProcessStateLock`) all still pass untouched.
+
+**Gate results:**
+
+- `python -m ruff check .` — passed, "All checks passed!".
+- `python tests/run_tests.py` — 1,263 tests, `OK (skipped=7, expected failures=26)`. The 26 expected failures are unchanged: Stage 1 touches nothing Stage 0 froze, so no forcing function was consumed.
+
+**What this does *not* do.** The capacity coupling in SGP-06 still runs through `upsert_saved_session()`, so the Stage 4 hard prerequisite is unaffected — a durable store makes a truncating write *reliably* durable, which is the wrong direction until Stage 6 items 1–3 land.
 
 ### Stage 2 — Add one canonical live group-presentation transaction
 

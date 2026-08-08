@@ -156,6 +156,7 @@ from web.runtime_state import (  # noqa: F401 - re-exported for backwards compat
     list_restorable_workspaces,
     load_restorable_workspace,
 )
+from web.saved_session_store import SavedSessionsPersistenceError
 from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compatibility
     BROWSER_MAX_TABS,
     DEFAULT_BROWSER_URL,
@@ -2022,11 +2023,30 @@ def get_session_config():
     return jsonify(load_session_config())
 
 
+def _saved_sessions_write_failure(action: str, exc: Exception):
+    """Answer a failed ``saved_sessions.json`` commit as retryable, never 200.
+
+    The preset store is the only file that holds an encrypted SSH password, so a
+    write that did not reach the disk must not be echoed back as saved. The
+    message deliberately carries the failure, not the payload — no preset name,
+    host, or secret reaches the client or the log line.
+    """
+    logger.error("Saved-session %s failed: %s", action, exc)
+    return jsonify({
+        "saved": False,
+        "error": "The saved sessions could not be written to disk",
+        "retryable": True,
+    }), 503
+
+
 @app.route('/api/session-config', methods=['POST'])
 def persist_session_config():
     """Persist the last-used saved session selection."""
     data = request.get_json(silent=True) or {}
-    set_last_saved_session(data.get("saved_session_id"))
+    try:
+        set_last_saved_session(data.get("saved_session_id"))
+    except SavedSessionsPersistenceError as exc:
+        return _saved_sessions_write_failure("selection", exc)
     return jsonify(load_session_config())
 
 
@@ -2136,12 +2156,15 @@ def create_saved_session():
             config = _merge_workspace_session_config(source_entry["config"], raw_config)
     group_id = str(data.get("group_id") or "").strip()
     activate_saved_session = data.get("activate", True) is not False
-    saved_entry = upsert_saved_session(
-        config=config,
-        name=data.get("name"),
-        session_id=data.get("id"),
-        set_last_session=activate_saved_session,
-    )
+    try:
+        saved_entry = upsert_saved_session(
+            config=config,
+            name=data.get("name"),
+            session_id=data.get("id"),
+            set_last_session=activate_saved_session,
+        )
+    except SavedSessionsPersistenceError as exc:
+        return _saved_sessions_write_failure("save", exc)
     live_view_update = {}
     if data.get("workspace_only") is True:
         live_view_update = {
@@ -2184,7 +2207,12 @@ def remove_saved_sessions():
     if not isinstance(raw_ids, list) or not raw_ids:
         return jsonify({"error": "At least one saved session id is required"}), 400
 
-    state = delete_saved_sessions(raw_ids)
+    try:
+        state = delete_saved_sessions(raw_ids)
+    except SavedSessionsPersistenceError as exc:
+        # A delete that did not reach the disk used to answer "updated
+        # successfully" while the presets were still there (SGP-05).
+        return _saved_sessions_write_failure("delete", exc)
     last_entry = _find_saved_session_entry(state["sessions"], state["last_session"])
     return jsonify(
         {

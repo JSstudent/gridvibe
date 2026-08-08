@@ -51,13 +51,18 @@ import json
 import logging
 import math
 import os
-import shutil
 import threading
 import time
-import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from web.paths import BASE_DIR
+from web.state_files import (
+    CrossProcessFileLock,
+    StateFilePersistenceError,
+    quarantine_state_file,
+    read_backup_json,
+    write_json_atomically,
+)
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     normalize_workspace_id,
@@ -65,16 +70,6 @@ from web.workspaces import (
 )
 
 logger = logging.getLogger(__name__)
-
-try:  # POSIX advisory locking
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
-
-try:  # Windows mandatory byte-range locking
-    import msvcrt
-except ImportError:  # pragma: no cover - POSIX
-    msvcrt = None
 
 # The one file a production process owns. ``RUNTIME_STATE_PATH`` starts there
 # but is deliberately overridable: a test process (or a second GridVibe run)
@@ -118,7 +113,7 @@ class RuntimeStatePathError(RuntimeError):
     """Raised when this process must not touch the production state file."""
 
 
-class RuntimeStatePersistenceError(RuntimeError):
+class RuntimeStatePersistenceError(StateFilePersistenceError):
     """Raised when an intended runtime-state revision did not reach the disk.
 
     Callers must treat this as "not stored": a route answers with a retryable
@@ -396,97 +391,24 @@ def _validate_slot(workspace_id: Any, slot: Any) -> Optional[Dict[str, Any]]:
 # ==================== File primitives ====================
 
 
-class _CrossProcessStateLock:
+class _CrossProcessStateLock(CrossProcessFileLock):
     """Exclusive OS-level lock over one runtime-state file.
 
-    The in-process lock orders threads inside one interpreter; it says nothing
-    about a second GridVibe process doing its own read-modify-replace. Both
-    would read, both would modify, and the later ``os.replace`` would discard
-    the other's update wholesale. A sidecar ``<state>.lock`` (never the state
-    file itself, which is replaced rather than written in place) makes the
-    complete operation single-writer across processes.
-
-    Degrades to a no-op with one warning where neither locking primitive is
-    available — a missing lock must not make GridVibe unable to save at all.
+    The mechanics live in :class:`web.state_files.CrossProcessFileLock`, which
+    ``saved_sessions.json`` uses too; this subclass only names the file and the
+    exception a failed acquisition must raise.
     """
 
-    _unsupported_warned = False
+    error_type = RuntimeStatePersistenceError
+    label = "runtime-state"
 
     def __init__(self, state_path: str, timeout: float = STATE_LOCK_TIMEOUT_SECONDS):
-        self._lock_path = f"{state_path}.lock"
-        self._timeout = timeout
-        self._fd: Optional[int] = None
-
-    def __enter__(self) -> "_CrossProcessStateLock":
-        if fcntl is None and msvcrt is None:  # pragma: no cover - exotic platform
-            if not _CrossProcessStateLock._unsupported_warned:
-                _CrossProcessStateLock._unsupported_warned = True
-                logger.warning(
-                    "No file-locking primitive available; runtime state is "
-                    "protected within this process only"
-                )
-            return self
-        directory = os.path.dirname(os.path.abspath(self._lock_path))
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        self._fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-        deadline = time.monotonic() + self._timeout
-        while True:
-            try:
-                self._acquire_once(self._fd)
-                return self
-            except OSError:
-                if time.monotonic() >= deadline:
-                    os.close(self._fd)
-                    self._fd = None
-                    raise RuntimeStatePersistenceError(
-                        "Another process is holding the runtime-state lock "
-                        f"({self._lock_path}); the workspace was not saved"
-                    )
-                time.sleep(0.05)
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        if self._fd is None:
-            return
-        try:
-            self._release_once(self._fd)
-        finally:
-            os.close(self._fd)
-            self._fd = None
-
-    @staticmethod
-    def _acquire_once(fd: int) -> None:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
-        os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-
-    @staticmethod
-    def _release_once(fd: int) -> None:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            return
-        os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        super().__init__(state_path, timeout=timeout)
 
 
 def _quarantine_state_file(state_path: str, reason: str) -> None:
     """Move an unreadable/unsupported state file aside, keeping the evidence."""
-    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-    quarantine_path = f"{state_path}.corrupt-{stamp}"
-    if os.path.exists(quarantine_path):
-        quarantine_path = f"{quarantine_path}-{uuid.uuid4().hex[:8]}"
-    try:
-        os.replace(state_path, quarantine_path)
-    except OSError as exc:
-        logger.error("Could not quarantine unreadable runtime state: %s", exc)
-        return
-    logger.error(
-        "Quarantined unreadable runtime state (%s) as %s",
-        reason,
-        os.path.basename(quarantine_path),
-    )
+    quarantine_state_file(state_path, reason, label="runtime state")
 
 
 def _parse_state(data: Any) -> Optional[Dict[str, Any]]:
@@ -609,14 +531,8 @@ def _read_state_locked(state_path: str) -> Dict[str, Any]:
 
 def _recover_from_backup(state_path: str) -> Dict[str, Any]:
     """Return the last-good backup's state, or empty state when there is none."""
-    backup_path = f"{state_path}.bak"
-    try:
-        with open(backup_path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except FileNotFoundError:
-        return _empty_state()
-    except (OSError, ValueError) as exc:
-        logger.error("Last-good runtime state is unusable too: %s", exc)
+    data = read_backup_json(state_path, label="runtime state")
+    if data is None:
         return _empty_state()
     state = _parse_state(data)
     if state is None:
@@ -638,39 +554,12 @@ def _write_state_locked(state: Dict[str, Any], state_path: str) -> None:
     The previous file is copied to ``<state>.bak`` first, so a torn or corrupt
     successor always has a last-good predecessor to recover from.
     """
-    directory = os.path.dirname(os.path.abspath(state_path)) or "."
-    temp_path = os.path.join(
-        directory,
-        f".{os.path.basename(state_path)}.{uuid.uuid4().hex}.tmp",
+    write_json_atomically(
+        state,
+        state_path,
+        error_type=RuntimeStatePersistenceError,
+        failure_message="Could not persist the workspace snapshot",
     )
-    try:
-        with open(temp_path, "w", encoding="utf-8") as handle:
-            json.dump(state, handle, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        _back_up_current_state(state_path)
-        os.replace(temp_path, state_path)
-    except Exception as exc:
-        try:
-            os.remove(temp_path)
-        except OSError:
-            pass
-        logger.error("Could not persist runtime workspace state: %s", exc)
-        raise RuntimeStatePersistenceError(
-            f"Could not persist the workspace snapshot: {exc}"
-        ) from exc
-
-
-def _back_up_current_state(state_path: str) -> None:
-    """Copy the current state file to ``<state>.bak`` (best effort)."""
-    if not os.path.exists(state_path):
-        return
-    try:
-        shutil.copyfile(state_path, f"{state_path}.bak")
-    except OSError as exc:
-        # A missing backup weakens recovery but must not fail the commit.
-        logger.debug("Could not refresh the runtime-state backup: %s", exc)
 
 
 # ==================== The store ====================

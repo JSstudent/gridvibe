@@ -38,11 +38,17 @@ logs/
 saved_sessions.json
 saved_sessions*.json
 runtime_state.json
-# Sidecars of the runtime-state store: cross-process lock, last-good backup,
-# and any quarantined file it moved aside.
+# Sidecars of the durable stores: cross-process lock, last-good backup, any
+# quarantined file moved aside, and the unique scratch file each atomic commit
+# writes before replacing the real one.
 runtime_state.json.lock
 runtime_state.json.bak
 runtime_state.json.corrupt-*
+saved_sessions.json.lock
+saved_sessions.json.bak
+saved_sessions.json.corrupt-*
+.*.json.*.tmp
+..encryption_key.*.tmp
 gridvibe.log
 .encryption_key
 .known_hosts

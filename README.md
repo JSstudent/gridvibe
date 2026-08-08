@@ -249,6 +249,8 @@ Created at runtime, never committed:
 | `.encryption_key` | Fernet key for password encryption |
 | `logs/gridvibe.log` | Main rotating log file |
 
+Both JSON state files are written the same careful way: one change at a time under an OS-level `<file>.lock`, committed through a scratch file and an atomic replace, with the previous version kept as `<file>.bak`. A file GridVibe cannot read is moved aside as `<file>.corrupt-<timestamp>` and the backup is loaded in its place, rather than being reported as empty and overwritten. A save that does not reach the disk is reported as a retryable failure, never as success. Those sidecar files are local state and are gitignored alongside the files they protect.
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
