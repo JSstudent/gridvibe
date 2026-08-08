@@ -696,7 +696,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("terminal?._explorerPath", entry_html)
         self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
         self.assertIn("Boolean(terminal?._explorerGitSidebarOpen)", entry_html)
-        self.assertIn("terminal?._cachedExplorerTheme", entry_html)
         cache_state_start = html.index("function captureCachedPaneUiState()")
         cache_state_end = html.index("function restoreCachedPaneUiState", cache_state_start)
         cache_state_html = html[cache_state_start:cache_state_end]
@@ -1229,44 +1228,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('title="Match case">Aa</button>', search)
         self.assertIn('title="Match whole word">ab</button>', search)
         self.assertIn('title="Use regular expression">.*</button>', search)
-
-    def test_browser_tab_persist_is_cancelled_and_revalidated_before_post(self):
-        """F1 — a stale debounce must not switch a terminal back to browser mode."""
-        browser_response = self.client.get("/static/js/browser-pane.js")
-        terminals_response = self.client.get("/static/js/terminals.js")
-        browser_js = browser_response.get_data(as_text=True)
-        terminals_js = terminals_response.get_data(as_text=True)
-        browser_response.close()
-        terminals_response.close()
-
-        self.assertIn("function browserCancelPendingPersist(sessionId)", browser_js)
-        persist_start = browser_js.index("const push = async () => {")
-        persist_end = browser_js.index("const snapshot = browserSerializeTabs(pane);", persist_start)
-        persist_guard = browser_js[persist_start:persist_end]
-        self.assertIn("const currentIndex = sessionIds.indexOf(sessionId);", persist_guard)
-        self.assertIn("terminals[currentIndex] !== pane", persist_guard)
-        self.assertIn("!isBrowserSession(terminals[currentIndex]?._session)", persist_guard)
-        self.assertIn("isSessionModeSwitchPending(sessionId)", persist_guard)
-
-        switch_start = terminals_js.index("async function switchSessionBrowserMode(index)")
-        switch_end = terminals_js.index("function captureSurvivingPaneClientState", switch_start)
-        switch_body = terminals_js[switch_start:switch_end]
-        self.assertLess(
-            switch_body.index("browserCancelPendingPersist(sessionId);"),
-            switch_body.index("pendingModeSwitchSessionIds.add(sessionId);"),
-        )
-        close_start = terminals_js.index("async function closeTerminalPane(index)")
-        close_end = terminals_js.index("async function splitTerminalPane(index", close_start)
-        self.assertIn(
-            "browserCancelPendingPersist(plan.sessionId);",
-            terminals_js[close_start:close_end],
-        )
-        group_start = terminals_js.index("async function closeSessionGroup(")
-        group_end = terminals_js.index("async function _closeWindowAfterLastSession(", group_start)
-        self.assertIn(
-            "closingSessionIds.forEach(browserCancelPendingPersist);",
-            terminals_js[group_start:group_end],
-        )
 
     def test_browser_pane_new_tab_never_duplicates_the_active_tab(self):
         """A '+' that copied the active URL made a pane showing GridVibe
@@ -3525,7 +3486,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';", html)
         self.assertIn("function workspaceTopbarVisibilityStorageKey(workspaceId)", html)
         self.assertIn("getStoredWorkspaceTopbarVisible(currentWorkspaceId) ?? true", html)
-        self.assertIn("/ui-state`, {", html)
         self.assertIn("document.body.classList.toggle('topbar-collapsed', !shouldShow);", html)
         self.assertIn("path.setAttribute('d', visible ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6');", html)
         self.assertIn("typeof data.topbar_visible === 'boolean'", html)
@@ -4907,7 +4867,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(session.browser_tabs, ["http://127.0.0.1:4000"])
         self.assertEqual(session.browser_active_tab, 0)
 
-    def test_switch_browser_pane_replaces_whole_tab_strip(self):
+    def test_a_whole_tab_strip_is_replaced_through_the_presentation_route(self):
+        """The strip is presentation state, so the ordered transaction owns it.
+
+        The mode route used to accept a whole strip as well, which made it a
+        second unordered writer for the same field (audit SGP-02, Stage 3).
+        """
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
         group = api.session_manager.create_group(
@@ -4927,17 +4892,27 @@ class ApiRoutesTestCase(unittest.TestCase):
             browser_tabs=["http://127.0.0.1:3000"],
         )
 
-        with patch.object(api, "_close_ssh_connection"):
-            response = self.client.post(
-                f"/api/sessions/{session.session_id}/mode",
-                json={
-                    "startup_mode": "browser",
-                    "tabs": ["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
-                    "active_tab": 1,
-                },
-            )
+        response = self.client.post(
+            "/api/session-presentation",
+            json={
+                "workspace_id": "default",
+                "group_id": group.group_id,
+                "expected_revision": 0,
+                "pane_order": [session.session_id],
+                "panes": [
+                    {
+                        "session_id": session.session_id,
+                        "browser_tabs": [
+                            "http://127.0.0.1:3000",
+                            "http://127.0.0.1:5050/",
+                        ],
+                        "browser_active_tab": 1,
+                    }
+                ],
+            },
+        )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.get_json())
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(
             updated.browser_tabs,
@@ -4945,6 +4920,24 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertEqual(updated.browser_active_tab, 1)
         self.assertEqual(updated.initial_command, "http://127.0.0.1:5050/")
+
+        # The retired writer is gone rather than left behind as a second one:
+        # the mode route now navigates the active tab and ignores a strip.
+        with patch.object(api, "_close_ssh_connection"):
+            ignored = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={
+                    "startup_mode": "browser",
+                    "url": "http://127.0.0.1:5050/",
+                    "tabs": ["http://127.0.0.1:9999"],
+                    "active_tab": 1,
+                },
+            )
+        self.assertEqual(ignored.status_code, 200, ignored.get_json())
+        self.assertEqual(
+            api.session_manager.get_session(session.session_id).browser_tabs,
+            ["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
+        )
 
     def test_switch_browser_pane_navigation_only_moves_active_tab(self):
         """A plain single-URL navigate edits the active tab and leaves siblings."""
@@ -5006,11 +4999,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         original_merge = api.session_manager.merge_browser_tabs
 
         def merge_after_concurrent_strip_update(session_id, **kwargs):
-            api.session_manager.update_browser_tab_strip(
-                session_id,
-                browser_tabs=["http://127.0.0.1:6000", "http://127.0.0.1:7000"],
-                browser_active_tab=0,
-                initial_command="http://127.0.0.1:6000",
+            # A presentation transaction landing between the read and the merge.
+            api.session_manager.apply_group_presentation(
+                workspace_id="default",
+                group_id=group.group_id,
+                expected_revision=0,
+                pane_order=[session_id],
+                pane_updates={
+                    session_id: {
+                        "browser_tabs": [
+                            "http://127.0.0.1:6000",
+                            "http://127.0.0.1:7000",
+                        ],
+                        "browser_active_tab": 0,
+                    }
+                },
             )
             return original_merge(session_id, **kwargs)
 
@@ -5096,17 +5099,27 @@ class ApiRoutesTestCase(unittest.TestCase):
                 f"/api/sessions/{session.session_id}/mode",
                 json={"startup_mode": "terminal"},
             )
+        # A pane's presentation fields are scoped to the mode it is actually in,
+        # so a late tab strip is refused instead of quietly re-creating one.
         stale_response = self.client.post(
-            f"/api/sessions/{session.session_id}/mode",
+            "/api/session-presentation",
             json={
-                "startup_mode": "browser",
-                "tabs": ["http://127.0.0.1:3000"],
-                "active_tab": 0,
+                "workspace_id": "default",
+                "group_id": group.group_id,
+                "expected_revision": 0,
+                "pane_order": [session.session_id],
+                "panes": [
+                    {
+                        "session_id": session.session_id,
+                        "browser_tabs": ["http://127.0.0.1:3000"],
+                        "browser_active_tab": 0,
+                    }
+                ],
             },
         )
 
         self.assertEqual(terminal_response.status_code, 200)
-        self.assertEqual(stale_response.status_code, 409)
+        self.assertEqual(stale_response.status_code, 400, stale_response.get_json())
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(updated.startup_mode, "terminal")
         self.assertEqual(updated.browser_tabs, [])
@@ -15848,9 +15861,13 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
     def test_reported_topbar_visibility_is_captured_by_autosave(self):
         self._launch_explorer_group()
 
-        response = self.client.patch(
-            "/api/workspaces/default/ui-state",
-            json={"topbar_visible": False},
+        response = self.client.post(
+            "/api/workspace-presentation",
+            json={
+                "workspace_id": "default",
+                "expected_revision": 0,
+                "topbar_visible": False,
+            },
         )
 
         self.assertEqual(response.status_code, 200)
@@ -15883,9 +15900,13 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
 
     def test_launcher_style_save_captures_cached_live_topbar_visibility(self):
         self._launch_explorer_group()
-        hint = self.client.patch(
-            "/api/workspaces/default/ui-state",
-            json={"topbar_visible": False},
+        hint = self.client.post(
+            "/api/workspace-presentation",
+            json={
+                "workspace_id": "default",
+                "expected_revision": 0,
+                "topbar_visible": False,
+            },
         )
         self.assertEqual(hint.status_code, 200)
 
@@ -15903,9 +15924,13 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
     def test_topbar_visibility_routes_reject_non_boolean_values(self):
         self._launch_explorer_group()
 
-        hint = self.client.patch(
-            "/api/workspaces/default/ui-state",
-            json={"topbar_visible": "hidden"},
+        hint = self.client.post(
+            "/api/workspace-presentation",
+            json={
+                "workspace_id": "default",
+                "expected_revision": 0,
+                "topbar_visible": "hidden",
+            },
         )
         save = self.client.post(
             "/api/runtime-state/save",

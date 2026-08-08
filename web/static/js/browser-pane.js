@@ -20,11 +20,8 @@
     /* Mirrors BROWSER_MAX_TABS in web/saved_sessions.py. */
     const BROWSER_MAX_TABS = 8;
     const BROWSER_DEFAULT_URL = 'http://127.0.0.1:3000';
-    const BROWSER_TAB_PERSIST_DEBOUNCE_MS = 400;
     const BROWSER_FRAME_SANDBOX = 'allow-downloads allow-forms allow-modals allow-popups '
         + 'allow-popups-to-escape-sandbox allow-same-origin allow-scripts';
-
-    const browserPersistTimers = new Map();
 
     function getBrowserSessionUrl(session) {
         const rawUrl = String(session?.initial_command || '').trim();
@@ -153,78 +150,32 @@
     }
 
     /* ── Persistence ──────────────────────────────
-       The whole strip is pushed to the session so a restart-restore, a
-       sibling-pane close rebuild, and Save Workspace all read the same state.
-       Debounced because rapid navigation inside a frame fires repeatedly. */
-    function browserCancelPendingPersist(sessionId) {
-        if (!sessionId || !browserPersistTimers.has(sessionId)) {
-            return false;
-        }
-        clearTimeout(browserPersistTimers.get(sessionId));
-        browserPersistTimers.delete(sessionId);
-        return true;
-    }
+       The whole strip rides the group's ordered presentation transaction, the
+       same one explorer state and pane order use. That is what removed this
+       pane's own fire-and-forget writer: a debounced POST per pane could be
+       overtaken by an explicit save and could complete out of order, and its
+       response used to be assigned back over `pane._session` — so a late reply
+       regressed the browser's own state as well as the server's.
 
-    function browserPersistTabs(index, { immediate = false } = {}) {
+       Nothing is written back from the response here; the local session object
+       is updated first and stays the newest thing this window knows. */
+    function browserPersistTabs(index, { continuous = false } = {}) {
         const pane = browserPaneAt(index);
         const sessionId = sessionIds[index];
-        if (!pane || !sessionId) {
-            return;
+        if (!pane || !sessionId || isSessionModeSwitchPending(sessionId)) {
+            return false;
         }
 
-        const existingTimer = browserPersistTimers.get(sessionId);
-        if (existingTimer) {
-            clearTimeout(existingTimer);
-            browserPersistTimers.delete(sessionId);
+        const snapshot = browserSerializeTabs(pane);
+        if (pane._session) {
+            pane._session.browser_tabs = snapshot.tabs;
+            pane._session.browser_active_tab = snapshot.active_tab;
+            pane._session.initial_command = snapshot.tabs[snapshot.active_tab];
         }
-
-        const push = async () => {
-            browserPersistTimers.delete(sessionId);
-            const currentIndex = sessionIds.indexOf(sessionId);
-            if (
-                currentIndex === -1
-                || terminals[currentIndex] !== pane
-                || !isBrowserSession(terminals[currentIndex]?._session)
-                || isSessionModeSwitchPending(sessionId)
-            ) {
-                return;
-            }
-            const snapshot = browserSerializeTabs(pane);
-            /* Keep the local session object in step even if the POST fails, so
-               a Save Workspace issued right after still sees the live strip. */
-            if (pane._session) {
-                pane._session.browser_tabs = snapshot.tabs;
-                pane._session.browser_active_tab = snapshot.active_tab;
-                pane._session.initial_command = snapshot.tabs[snapshot.active_tab];
-            }
-            try {
-                const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/mode`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        startup_mode: 'browser',
-                        tabs: snapshot.tabs,
-                        active_tab: snapshot.active_tab
-                    })
-                });
-                if (!response.ok) {
-                    const data = await response.json().catch(() => ({}));
-                    throw new Error(data.error || `status ${response.status}`);
-                }
-                const data = await response.json();
-                if (pane._session) {
-                    pane._session = data;
-                }
-            } catch (error) {
-                console.error('[GridVibe Sessions] browser tab persist failed:', error);
-            }
-        };
-
-        if (immediate) {
-            push();
-            return;
-        }
-        browserPersistTimers.set(sessionId, setTimeout(push, BROWSER_TAB_PERSIST_DEBOUNCE_MS));
+        /* Opening, closing, reordering and switching a tab are structural and
+           go out at once; a frame navigating itself repeatedly is continuous
+           and coalesces on the queue's one-second floor. */
+        return notePanePresentationChanged(index, { continuous });
     }
 
     /* ── Markup ─────────────────────────────────── */
@@ -601,7 +552,7 @@
             frame.src = nextUrl;
         }
         browserRenderTabStrip(index);
-        browserPersistTabs(index, { immediate: true });
+        browserPersistTabs(index);
     }
 
     /* ── Same-origin frame hooks ──────────────────
@@ -706,7 +657,7 @@
         }
         if (changed) {
             browserRenderTabStrip(index);
-            browserPersistTabs(index);
+            browserPersistTabs(index, { continuous: true });
         }
     }
 

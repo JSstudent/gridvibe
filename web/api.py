@@ -1672,29 +1672,6 @@ def close_workspace(workspace_id: str):
     return jsonify(payload), status
 
 
-@app.route('/api/workspaces/<workspace_id>/ui-state', methods=['PATCH'])
-def update_workspace_ui_state(workspace_id: str):
-    """Update live workspace-window state for the next snapshot capture."""
-    data = request.get_json(silent=True) or {}
-    try:
-        resolved_workspace_id = normalize_workspace_id(workspace_id)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    if not isinstance(data.get("topbar_visible"), bool):
-        return jsonify({"error": "'topbar_visible' must be a boolean"}), 400
-    try:
-        topbar_visible = session_manager.set_topbar_visible(
-            resolved_workspace_id,
-            data["topbar_visible"],
-            require_owned=True,
-        )
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 404
-    presentation = session_manager.get_workspace_presentation(resolved_workspace_id)
-    presentation["topbar_visible"] = topbar_visible
-    return jsonify(presentation)
-
-
 @app.route('/api/session-groups/<group_id>/move', methods=['POST'])
 def move_session_group(group_id: str):
     """Move one live session tab to another workspace without restarting it."""
@@ -2528,45 +2505,25 @@ def change_session_mode(session_id: str):
     if target_mode == "browser":
         if session.mode != "wsl":
             return jsonify({"error": "Browser mode is only available for Local Repo sessions"}), 400
-        # One endpoint serves three client actions — switching a terminal into
-        # browser mode, navigating the active tab, and opening/closing tabs — so
-        # the tab strip never needs a second route. `tabs` wins when present;
-        # otherwise the pane's existing strip is kept and only the active tab's
-        # URL moves, which keeps the plain single-URL navigate call working.
+        # Mode transitions only. A live pane's tab strip is presentation state
+        # and belongs to the ordered, revisioned `/api/session-presentation`
+        # transaction — this route used to accept a whole strip as well, which
+        # made it a second, unordered writer for the same field.
         try:
-            if "tabs" in data:
-                browser_tabs = _normalize_browser_tabs(data.get("tabs"))
-                if not browser_tabs:
-                    raise ValueError("Browser panes require at least one HTTP or HTTPS tab")
-                browser_active_tab = _normalize_browser_active_tab(
-                    data.get("active_tab"), browser_tabs
-                )
-                browser_url = browser_tabs[browser_active_tab]
-                browser_snapshot = session_manager.update_browser_tab_strip(
-                    session_id,
-                    browser_tabs=browser_tabs,
-                    browser_active_tab=browser_active_tab,
-                    initial_command=browser_url,
-                )
-                if browser_snapshot is None:
-                    return jsonify({"error": "Browser tab update is stale"}), 409
-                _broadcast_session_status(session_id)
-                return jsonify(browser_snapshot)
-            else:
-                requested_browser_url = data.get("url") or data.get("initial_command")
-                browser_url = (
-                    _normalize_browser_url(requested_browser_url)
-                    if requested_browser_url
-                    else None
-                )
-                browser_snapshot = session_manager.merge_browser_tabs(
-                    session_id,
-                    browser_url=browser_url,
-                    browser_active_tab=data.get("active_tab"),
-                    default_browser_url=DEFAULT_BROWSER_URL,
-                )
-                if browser_snapshot is None:
-                    return jsonify({"error": "Session not found"}), 404
+            requested_browser_url = data.get("url") or data.get("initial_command")
+            browser_url = (
+                _normalize_browser_url(requested_browser_url)
+                if requested_browser_url
+                else None
+            )
+            browser_snapshot = session_manager.merge_browser_tabs(
+                session_id,
+                browser_url=browser_url,
+                browser_active_tab=data.get("active_tab"),
+                default_browser_url=DEFAULT_BROWSER_URL,
+            )
+            if browser_snapshot is None:
+                return jsonify({"error": "Session not found"}), 404
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 

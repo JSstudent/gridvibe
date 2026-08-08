@@ -377,6 +377,7 @@
        shell picker is offered there only. */
     const LOCAL_SHELL_MODES_AVAILABLE = {{ local_windows_shells_available|tojson }};
 </script>
+<script src="{{ url_for('static', filename='js/session-persistence.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/shared.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/workspaces.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/app-settings.js') }}?v={{ version }}"></script>

@@ -1662,6 +1662,7 @@
         }
         pane[panel.openFlag] = Boolean(open);
         syncExplorerSidebar(index);
+        notePanePresentationChanged(index);
         return pane[panel.openFlag] ? panel.onOpen?.(index) : undefined;
     }
 
@@ -4205,6 +4206,9 @@
         }
         applyExplorerMarkdownAppearanceToAll();
         refreshExplorerMarkdownAppearanceMenu();
+        /* Still one page-global setting (SGP-08), so every explorer pane in the
+           group on screen carries the new value into the next snapshot. */
+        noteExplorerAppearanceChanged();
         return next;
     }
 
@@ -6983,6 +6987,10 @@
         pane._session.explorer_open_tabs = serialized.open_tabs;
         pane._session.explorer_active_tab = serialized.active_tab;
         pane._session.explorer_tab_views = serialized.tab_views;
+        /* The one funnel every tab, view-mode, wrap, fold and zoom change
+           already passes through, so it is also where the group's ordered
+           presentation transaction is enqueued (terminals.js owns the queue). */
+        notePanePresentationChanged(index);
     }
 
     /* Restore fell through to nothing showable: browse a directory so the pane

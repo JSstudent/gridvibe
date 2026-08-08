@@ -2,7 +2,7 @@
 
 Date: 2026-08-07
 
-Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stage 1 is **done** — the saved-preset store and the encryption key are durable (see [Stage 1 results](#stage-1-results)); SGP-05 is closed. Stage 2 is **done** — the ordered live presentation transactions, canonical normalizer, manager revisions/order, and DOM-free client queue are implemented (see [Stage 2 results](#stage-2-results)). Stages 3-7 are not started by this audit.
+Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stage 1 is **done** — the saved-preset store and the encryption key are durable (see [Stage 1 results](#stage-1-results)); SGP-05 is closed. Stage 2 is **done** — the ordered live presentation transactions, canonical normalizer, manager revisions/order, and DOM-free client queue are implemented (see [Stage 2 results](#stage-2-results)). Stage 3 is **done** — the live page is wired to those transactions, Save Workspace is an exact flush barrier, and both superseded writers are gone (see [Stage 3 results](#stage-3-results)); SGP-01 and SGP-02 are closed. Stages 4-7 are not started by this audit.
 
 One production change has since landed outside the audit's stage sequence: workspace top-bar visibility is now persisted and restored, and the launcher's **Save & Restart** was corrected to capture every live workspace. It touches surfaces Stages 2, 3, 4, 6, and 7 own. Its effect on the plan is recorded in [Out-of-band change: workspace top-bar visibility](#out-of-band-change-workspace-top-bar-visibility), and the affected findings and stages carry amendment notes inline. It did not flip any frozen Stage 0 test.
 
@@ -68,6 +68,8 @@ The implementation should preserve these invariants throughout the proposed work
 ## Current state-authority map
 
 The current model has three different meanings of “current”:
+
+The table below is the map **as the audit found it**. Stage 3 changed the third column for every browser-owned row; the post-Stage-3 map is in [Stage 3 results](#stage-3-results). The original is kept because the findings below reference it.
 
 | State | Live authority | Saved Session source | Runtime autosave / Save Workspace source |
 |---|---|---|---|
@@ -226,6 +228,8 @@ Severity describes user-data or restore impact, not exploitability.
 
 ### SGP-01 — High: runtime snapshots read a stale presentation source
 
+**Status: fixed by Stage 2 (transaction) and Stage 3 (wiring)** (2026-08-08). The evidence and direction below describe the code the fix replaced; what shipped is in [Stage 3 results](#stage-3-results). Some line references no longer resolve.
+
 Evidence:
 
 - `SessionManager.snapshot_live_workspaces()` serializes only server objects (`sessions/manager.py:1078`).
@@ -249,6 +253,8 @@ Add one bounded group-presentation update service in the correct backend module 
 The client should be event-driven and coalesced, with at most one in-flight update per group. Save Workspace must await a flush of every group's latest local snapshot before calling the runtime-state save route. Autosave then consumes the last acknowledged state; it does not poll the browser.
 
 ### SGP-02 — High: browser tab writes can race Save Workspace and each other
+
+**Status: fixed by Stage 3** (2026-08-08). Both writers named below are gone: browser tabs and top-bar visibility ride the ordered compare-and-swap queues, and neither the mode route nor `PATCH /api/workspaces/<id>/ui-state` can write presentation any more. See [Stage 3 results](#stage-3-results).
 
 Evidence:
 
@@ -447,7 +453,9 @@ Explorer light/dark overrides are stored in a JSON object keyed by ephemeral `se
 
 This is not the primary persistence defect, but the common presentation store makes it unnecessary. Once accepted theme state lives in the manager, prune the local override after acknowledgement or bound/migrate the legacy object. Do not remove it before server synchronization is reliable, because it currently protects live UI state from some rebuilds.
 
-*Amended.* A second key family now exists: `gridvibe.terminalTopbarVisibility.<workspace_id>`, written by `storeWorkspaceTopbarVisible()` in `shared.js`. It is materially better than the theme object — one key per workspace rather than one entry per ephemeral session ID, so it does not grow without bound and it survives a restart meaningfully — but it is still a client-side authority for state the server now also holds, and it is read *cross-window*: the launcher page reads the key a workspace window wrote in order to include the field in that workspace's restart capture. That works only because both pages share one origin, which is precisely the coupling SGP-08 identifies as unsound for anything the workspace record should own. Once the server value is reliably acknowledged, the launcher must stop reading it and the key becomes a non-authoritative cache. Deleting a workspace should also drop its key; nothing does that today.
+*Amended after Stage 3.* Both key families survive deliberately, and both are now *caches* rather than the only copy: the manager holds the acknowledged explorer theme (the pane sends it on every toggle) and the acknowledged top-bar visibility. Item 8 of Stage 3 forbids pruning them yet, and the reason is unchanged — the launcher still reads the top-bar key cross-window, and the explorer-theme object still protects live UI state across a rebuild that has no session id to key on. The unbounded growth of the theme object is therefore still open, and still Stage 7's to close once Stage 4 gives the launcher a flush handshake.
+
+A second key family now exists: `gridvibe.terminalTopbarVisibility.<workspace_id>`, written by `storeWorkspaceTopbarVisible()` in `shared.js`. It is materially better than the theme object — one key per workspace rather than one entry per ephemeral session ID, so it does not grow without bound and it survives a restart meaningfully — but it is still a client-side authority for state the server now also holds, and it is read *cross-window*: the launcher page reads the key a workspace window wrote in order to include the field in that workspace's restart capture. That works only because both pages share one origin, which is precisely the coupling SGP-08 identifies as unsound for anything the workspace record should own. Once the server value is reliably acknowledged, the launcher must stop reading it and the key becomes a non-authoritative cache. Deleting a workspace should also drop its key; nothing does that today.
 
 ### SGP-10 — Medium: current tests prove field presence more often than a user-visible round trip
 
@@ -607,12 +615,12 @@ A change landed after Stage 0 that persists and restores whether a workspace win
 
 **What it owes the remaining stages.**
 
-1. **A transition writer remains for Stage 3 to delete.** Stage 2 added the canonical `POST /api/workspace-presentation` compare-and-swap route. Until Stage 3 wires the page to it, `PATCH /api/workspaces/<id>/ui-state` remains compatible; it now increments the same workspace presentation revision, so it can no longer mutate chrome invisibly to the canonical transaction. Stage 3 must still remove it rather than leave two permanent writers.
+1. ~~**A transition writer remains for Stage 3 to delete.**~~ **Done.** Stage 3 routed the toggle through `POST /api/workspace-presentation` and deleted `PATCH /api/workspaces/<id>/ui-state`, its route function, and every test that used it. There is one chrome writer.
 2. **The workspace-scoped design decision is resolved.** Group state stays on `POST /api/session-presentation`; window chrome uses the separate `POST /api/workspace-presentation` transaction and its own workspace revision. `topbar_visible` is not attached to an arbitrary group, so a two-group workspace still has one chrome authority.
 3. **`normalize_topbar_visible()` moved to the canonical module.** `web/session_presentation.py` now owns it, and `web/runtime_state.py` imports the definition. The existing non-coercing behavior and invalid-slot fallback remain unchanged.
 4. **Its slot validation defaults rather than rejects, deliberately — record why.** An invalid stored `topbar_visible` degrades to `True` instead of failing the slot, unlike the pane-level rule Stage 6 item 5 sets. That asymmetry is defensible: window chrome is not launchable shape, a wrong value costs one keystroke to correct, and failing a whole workspace restore over it would be worse than the defect. Stage 6 should keep the behavior and state the boundary explicitly — *shape fails, chrome degrades* — rather than let a future reader read it as an inconsistency to "fix."
 5. **The launcher reads another window's `localStorage`.** Covered under SGP-09 and SGP-11 above. Stage 4 item 3's flush handshake replaces it; until then it is the only way the launcher can see the value, so do not remove it early.
-6. **New source-text assertions were added.** `tests/test_api.py` gained assertions on JavaScript substrings (`"function workspaceTopbarVisibilityStorageKey(workspaceId)"`, `"/ui-state\`, {"`, `"typeof data.topbar_visible === 'boolean'"`, and four in the launcher block). `CLAUDE.md` forbids adding these and SGP-10 lists them as the coverage to *replace*. The backend tests added alongside them are genuinely behavioral and cover the round trip well; the string assertions add nothing those do not, and they will break on the Stage 3 refactor that deletes the route they name. Stage 7 item 4 should remove them as part of retiring the writer.
+6. **New source-text assertions were added.** `tests/test_api.py` gained assertions on JavaScript substrings (`"function workspaceTopbarVisibilityStorageKey(workspaceId)"`, `"/ui-state\`, {"`, `"typeof data.topbar_visible === 'boolean'"`, and four in the launcher block). `CLAUDE.md` forbids adding these and SGP-10 lists them as the coverage to *replace*. The backend tests added alongside them are genuinely behavioral and cover the round trip well; the string assertions add nothing those do not, and they will break on the Stage 3 refactor that deletes the route they name. Stage 7 item 4 should remove them as part of retiring the writer. *Stage 3 removed the `"/ui-state\`, {"` one, because it named a route that no longer exists; the other five name surfaces that are still live and remain Stage 7's.*
 
 **What it did not affect.** Stage 0's frozen contract is intact: `tests/test_session_persistence_contract.py` is untouched and still reports 26 expected failures and one pass, so no stage's forcing function was consumed. Stage 1 is unaffected in full — nothing here reaches `saved_sessions.json` or `web/secrets.py`. The full suite is green (1,237 tests, `OK (skipped=7, expected failures=26)`).
 
@@ -750,9 +758,9 @@ Completed 2026-08-08. The backend transaction, manager authority, schema extract
 - `python -m ruff check .` — passed, "All checks passed!".
 - `python tests/run_tests.py` — 1,269 tests, `OK (skipped=7, expected failures=18)`. The expected-failure count fell from 26 to 18 exactly because the eight Stage 2 forcing functions above were consumed.
 
-**What remains for Stage 3.** Load `session-persistence.js` in the terminals page; capture full live group presentation; route browser tabs, explorer state, pane reorder/layout settle, and top-bar toggles through the queues; surface stale reconciliation; make explicit Save Workspace flush every group and workspace queue; then remove the browser-tab presentation writer and `PATCH /api/workspaces/<id>/ui-state`. Until that wiring lands, current UI events still follow their legacy paths even though the canonical transactions are ready.
+**What remains for Stage 3.** Load `session-persistence.js` in the terminals page; capture full live group presentation; route browser tabs, explorer state, pane reorder/layout settle, and top-bar toggles through the queues; surface stale reconciliation; make explicit Save Workspace flush every group and workspace queue; then remove the browser-tab presentation writer and `PATCH /api/workspaces/<id>/ui-state`. *All of that shipped — see [Stage 3 results](#stage-3-results).*
 
-### Stage 3 — Wire exact Save Workspace and existing browser/explorer state into the canonical source
+### Stage 3 — Wire exact Save Workspace and existing browser/explorer state into the canonical source — **done**
 
 Connected findings: SGP-01, SGP-02, SGP-09, SGP-10, SGP-11.
 
@@ -770,6 +778,84 @@ Connected findings: SGP-01, SGP-02, SGP-09, SGP-10, SGP-11.
 Do not use `beforeunload` as the correctness mechanism; browsers may cancel asynchronous work. State-change events plus the explicit save barrier are the reliable paths.
 
 Exit gate: change tabs/view/layout, immediately click Save Workspace, restart, and restore the exact acknowledged state. A forced failed sync produces no success toast.
+
+#### Stage 3 results
+
+Completed 2026-08-08. All ten items landed. Both superseded writers were removed in the same change rather than deferred, so no field has two paths to the manager.
+
+**What shipped.**
+
+| Surface | Change |
+|---|---|
+| `web/static/js/session-persistence.js` | Grew the DOM-free half Stage 3 needs: `buildGroupPresentationPayload()` / `buildWorkspacePresentationPayload()` (descriptor → wire body) and `createPresentationController()` (one queue per group plus one for window chrome, re-capture on enqueue, revision rebasing, a bounded repair after a failed write, and the `flush()` barrier). The queue gained `setRevision()`, `forget()`, and an `onAccepted` hook. Still `require()`-able from Node with no DOM. |
+| `web/static/js/terminals.js` | The adapter only: `describePanePresentation()` / `describeGroupPresentation()` read a group from the live DOM, `customSplitLayoutSnapshot()` decides when geometry travels, `explorerPaneLiveTheme()` is now shared with Save Session, and `flushLivePresentation()` is the barrier. `reportTopbarVisibility()` posts through the workspace queue. Change hooks at `swapTerminalCards()`, `finishGridResize()`, `splitTerminalPane()`, `replaceSessionPaneMode()`, `toggleExplorerTheme()`, and `cacheVisibleGroupView()`. `loadSessionGroups()` rebases every queue on the revisions it just read. |
+| `web/static/js/explorer-viewer.js` | Three one-line hooks at the existing funnels: `persistExplorerTabsToSession()` (tabs, view mode, wrap, folds, zoom), `setExplorerSidebarPanelOpen()`, and `setExplorerMarkdownAppearance()`. |
+| `web/static/js/browser-pane.js` | `browserPersistTabs()` no longer owns a debounce timer, a fetch, or a response handler — it updates the local session object and enqueues. `browserCancelPendingPersist()` and its three call sites are gone. |
+| `templates/terminals.html` | Loads `js/session-persistence.js` first. |
+| `web/api.py` | `PATCH /api/workspaces/<id>/ui-state` deleted. The mode route's `tabs` branch deleted; it does mode transitions and single-URL navigation only. |
+| `sessions/manager.py` | `update_browser_tab_strip()` deleted (its only caller was that branch). |
+
+**Item-by-item.**
+
+| Stage 3 item | Where | Note |
+|---|---|---|
+| 1. Explorer tab/view/sidebar/theme on the queue | the three explorer funnels + `toggleExplorerTheme()` | Scroll is deliberately *not* an event: it is folded into the batch by `explorerCaptureActiveTabView()` at capture time, so an explicit save is exact and a drag writes nothing. |
+| 2. Browser tabs on the queue, old writer removed | `browserPersistTabs()` | Enumeration first, as the stage demands — see the table below. |
+| 3. Pane order and geometry on settle | `swapTerminalCards()`, `finishGridResize()`, `splitTerminalPane()` | Settle, not drag: the pointer stream itself enqueues nothing. |
+| 4. Capture before caching a group | `cacheVisibleGroupView()` | Enqueued right after `captureCachedPaneUiState()`, while the cards are still in the document — a detached pane can still be serialized but its live view and theme can only be read from the DOM. |
+| 5. Save Workspace flushes first | `saveWorkspace()` → `flushLivePresentation()` | The barrier re-captures every visible/cached group *and* window chrome, then awaits the acknowledgement, before `/api/runtime-state/save`. |
+| 6. A failed flush is not a save | `saveWorkspace()` | The existing retryable failure message; no success toast and no capture. |
+| 7. Autosave untouched | — | No timer, cadence, or route changed. Presentation writes never trigger a capture (already covered by a Stage 2 test). |
+| 8. Legacy `localStorage` retained | — | Deliberately unchanged; see the SGP-09 amendment. Both key families are now caches, but the launcher still reads the top-bar key cross-window and cannot stop until Stage 4 item 3. |
+| 9. Reusable flush barrier | `window.gridvibeFlushLivePresentation` | Exposed as a named seam so Stage 4 reuses this one barrier instead of re-deriving mode-specific capture. It is the one export here with no consumer yet, and that is on purpose. |
+| 10. Top bar on the queue, `/ui-state` removed | `reportTopbarVisibility()` | The DOM read in explicit Save Workspace is kept — it was already the correct barrier behaviour for that field. |
+
+**Enumerating `update_browser_tab_strip()` before removing it, as item 2 requires.** The stage text warns that "real mode switches and restore also reach it." They do not, and the removal is safe because of that:
+
+| Caller | Reached by | Disposition |
+|---|---|---|
+| `change_session_mode()`, `"tabs" in data` branch | `browserPersistTabs()` only | Both removed. The strip is now presentation state. |
+| `change_session_mode()`, URL branch | terminal ⇄ browser toggle, URL-bar navigate | Untouched — it calls `merge_browser_tabs()`, a different method. |
+| restart restore and saved-preset launch | `POST /api/sessions` launch config | Untouched — never went through the mode route. |
+
+The F1 guarantee that used to live in the deleted branch ("only an explicit mode switch may put a pane back into browser mode") is preserved and better placed: `pane_fields_for_mode()` rejects `browser_tabs` for a pane whose `startup_mode` is not `browser`, so a late strip is a `400` instead of a silent re-entry. `tests/test_api.py::test_stale_browser_tab_post_cannot_reenter_browser_mode` now asserts that.
+
+**Three decisions the stage text left open.**
+
+1. **Geometry is sent only for a real custom split.** `buildActiveWorkspaceLayoutSnapshot()` will happily synthesise a `layout-split-local` record for a standard grid, and sending it would make every restore take the split path for no gain. The payload omits `workspace_layout` unless the live (or cached) grid actually is `layout-split-local`; omitted means "unchanged" in the manager, so a group's stored geometry is never overwritten by a derived equivalent. `layout` is never sent — nothing in this stage changes it.
+2. **A pane a batch cannot identify cancels the whole batch.** The transaction is all-or-nothing by design, so `buildGroupPresentationPayload()` returns `null` rather than a partial group, and a tab this window has never rendered contributes nothing at all (the manager's copy stays authoritative). The same rule keeps a not-yet-rendered browser pane from blanking a stored strip with an empty one.
+3. **Pane mode is read from `session.startup_mode`, not from the rendered pane type.** They disagree for a moment during a mode switch, and the server decides which fields a pane may carry from the former. `replaceSessionPaneMode()` republishes the group afterwards, so a batch built for the previous mode self-heals instead of waiting for the next user action.
+
+**Coverage.** `tests/test_session_presentation.py` grew from 6 to 17 tests. The client half runs for real in Node (skipped when `node` is absent) rather than being asserted as source text, and the payload it produces is posted at the live route so the two halves cannot drift:
+
+| Test case | Covers |
+|---|---|
+| `GroupPresentationPayloadTestCase` (4) | Every in-boundary field in visual pane order, no launch/credential field, custom geometry present vs. a standard layout absent, an unidentifiable pane sending nothing, an empty strip not blanking a stored one. |
+| `PresentationWiringTestCase` (2) | The page's own Node-built payload accepted end to end, then Save Workspace storing the reordered panes, resized weights, explorer tabs/theme/sidebars, browser strip, and top-bar state — starting from a manager whose copy is deliberately older. Plus: the terminals page really loads the module. |
+| `PresentationControllerTestCase` (5) | The flush barrier re-capturing the newest state before resolving; a failed write failing the barrier *and* being repaired within a bounded budget; the repair stopping on the first acceptance; two fast top-bar toggles leaving the newer value; a refetched revision refusing to rebase over an in-flight write. |
+| `PresentationRouteTestCase` | Now also asserts `PATCH /ui-state` is absent from the URL map. |
+
+Three `tests/test_api.py` cases were rewritten rather than deleted: the whole-strip replacement and the stale-strip refusal moved to the presentation route, and the concurrent-write injection in `test_switch_browser_navigation_merges_with_latest_tab_strip` now lands a presentation transaction between the read and the merge. One pure source-text test (`test_browser_tab_persist_is_cancelled_and_revalidated_before_post`) was removed with the functions it named; two single-line source-text assertions went with the surfaces they named.
+
+**Post-Stage-3 state-authority map.** Only the rows the stage changed:
+
+| State | Live authority | Runtime autosave / Save Workspace source |
+|---|---|---|
+| pane visual order | browser DOM, acknowledged on drop | manager `pane_order` |
+| custom split rectangles/weights | browser, acknowledged on resize/split settle | manager `workspace_layout` |
+| browser tab URLs and active tab | browser, acknowledged on the ordered queue | manager, exact after a flush |
+| explorer open/active tabs, view mode, diff target, scroll, zoom, wrap, folds | browser, acknowledged on change (scroll at capture) | manager, exact after a flush |
+| explorer sidebar open flags | browser, acknowledged on toggle | manager |
+| explorer theme | browser DOM, acknowledged on toggle; `localStorage` is a cache | manager |
+| Markdown/source appearance | page-global `localStorage`, acknowledged per explorer pane | manager (still per-pane — scope is Stage 5) |
+| workspace top-bar visibility | browser DOM, acknowledged on the ordered workspace queue | manager, plus the exact DOM value on explicit Save Workspace |
+
+**What this stage does *not* do.** Autosave still reads the last acknowledged state, so a change made in the second between an event and its acknowledgement is not in an autosave snapshot — only an explicit save is exact, which is the stage's own contract (item 7). Save Session still writes presentation fields through `update_group_saved_session()` without touching the group revision; it is a different product and Stage 5 owns any reconciliation. And Stage 3 changed no field *schema*: the richer explorer record in SGP-03 is Stage 5's, so the Stage 0 fixture tests are still expected failures.
+
+**Gate results:**
+
+- `python -m ruff check .` — passed, "All checks passed!".
+- `python tests/run_tests.py` — 1,279 tests, `OK (skipped=7, expected failures=18)`. The expected-failure count is unchanged at 18: Stage 2 consumed the eight forcing functions this work shares with it, and the remaining ones belong to Stages 4-6.
 
 ### Stage 4 — Unify explicit close and restart as one save-or-exit transaction
 
@@ -860,8 +946,8 @@ Connected findings: all, especially SGP-09 and SGP-10.
 1. Update `README.md` and `CHANGELOG.md` with the final snapshot boundary and capacity behavior.
 2. Keep `CLAUDE.md` and `AGENTS.md` field/architecture contracts accurate if a new presentation module or route is added.
 3. Log safe shape diagnostics only: workspace/group/session IDs, revisions, mode names, field counts, and failure category. Never log paths, URLs with secrets, commands, file contents, passwords, or full payloads.
-4. Remove superseded browser-tab and local-only explorer persistence writers after every consumer uses the canonical path; do not leave dual writers. This now includes `PATCH /api/workspaces/<id>/ui-state` and the launcher's `localStorage` read of another window's top-bar state.
-5. Remove the JavaScript source-text assertions added with the top-bar change in `tests/test_api.py` — the `workspaceTopbarVisibilityStorageKey`, `/ui-state`, `data.topbar_visible`, and `snapshotState` string checks. Their behavior is already covered by the backend round-trip tests beside them, and they name surfaces Stage 3 deletes. `CLAUDE.md` forbids adding new ones; do not replace them with equivalents.
+4. Remove superseded browser-tab and local-only explorer persistence writers after every consumer uses the canonical path; do not leave dual writers. *Stage 3 already removed the browser-tab writer (`update_browser_tab_strip()` and the mode route's `tabs` branch) and `PATCH /api/workspaces/<id>/ui-state`.* What remains here is the launcher's `localStorage` read of another window's top-bar state, and pruning the two legacy key families once Stage 4 item 3 lands.
+5. Remove the JavaScript source-text assertions added with the top-bar change in `tests/test_api.py` — the `workspaceTopbarVisibilityStorageKey`, `data.topbar_visible`, and `snapshotState` string checks. Their behavior is already covered by the backend round-trip tests beside them. *The `/ui-state` one is gone: Stage 3 deleted the route it named.* `CLAUDE.md` forbids adding new ones; do not replace them with equivalents.
 6. Run the full Windows gates: `python tests/run_tests.py` and `python -m ruff check .`.
 
 Exit gate: maintained docs match behavior, dead writers are gone, every server event has a consumer, and the full suite passes without source-text-only tests being added.
@@ -903,8 +989,8 @@ The implementation should include at least these behavioral cases:
 31. a flush, preset write, or runtime-state write failure leaves the app running with retry and explicit no-save continuation affordances;
 32. manual restart, update restart, browser shutdown, and native launcher close use the same lifecycle action contract;
 33. workspace top-bar visibility round-trips through manual Save Workspace, autosave, and restart restore, and an invalid stored value degrades to visible without failing the slot (covered today);
-34. two fast top-bar toggles cannot leave the server holding the older value once the field moves onto the ordered queue, and a failed write is repaired rather than left to be committed by the next autosave (not covered — Stage 2/3);
-35. after `PATCH /api/workspaces/<id>/ui-state` is removed, top-bar visibility still reaches the snapshot from a live window and from a launcher-initiated all-workspace save, with no `localStorage` read in the launcher path (not covered — Stage 3/4).
+34. two fast top-bar toggles cannot leave the server holding the older value once the field moves onto the ordered queue, and a failed write is repaired rather than left to be committed by the next autosave (covered by Stage 3 — `PresentationControllerTestCase`);
+35. after `PATCH /api/workspaces/<id>/ui-state` is removed, top-bar visibility still reaches the snapshot from a live window and from a launcher-initiated all-workspace save, with no `localStorage` read in the launcher path (half covered — Stage 3 removed the route and covers the live-window half; the launcher still reads `localStorage` until Stage 4 item 3).
 
 ## Product decisions
 
