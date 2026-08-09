@@ -164,6 +164,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         api._refresh_runtime_config()
         api.app.config["TESTING"] = True
         api.configure_browser_shutdown(False)
+        api.lifecycle_coordinator.reset()
         self.client = api.app.test_client()
         api.session_manager.reset_sessions()
         api.active_launch_options.update(
@@ -255,6 +256,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def tearDown(self):
         api.configure_browser_shutdown(False)
+        api.lifecycle_coordinator.reset()
         api.session_manager.reset_sessions()
         api.active_launch_options.update(
             {"connection_mode": "ssh", "layout": "grid", "terminal_count": 4}
@@ -333,11 +335,15 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_browser_shutdown_endpoint_schedules_process_exit(self):
         token = api.configure_browser_shutdown(True)
+        decision = api.lifecycle_coordinator.issue_decision("close")
 
         with patch.object(api, "_schedule_browser_shutdown") as schedule_shutdown:
             response = self.client.post(
                 "/api/browser-shutdown",
-                headers={"X-GridVibe-Shutdown-Token": token},
+                headers={
+                    "X-GridVibe-Shutdown-Token": token,
+                    "X-GridVibe-Lifecycle-Decision": decision,
+                },
             )
 
         self.assertEqual(response.status_code, 202)
@@ -696,7 +702,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("terminal?._explorerPath", entry_html)
         self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
         self.assertIn("Boolean(terminal?._explorerGitSidebarOpen)", entry_html)
-        self.assertIn("terminal?._cachedExplorerTheme", entry_html)
         cache_state_start = html.index("function captureCachedPaneUiState()")
         cache_state_end = html.index("function restoreCachedPaneUiState", cache_state_start)
         cache_state_html = html[cache_state_start:cache_state_end]
@@ -1229,44 +1234,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('title="Match case">Aa</button>', search)
         self.assertIn('title="Match whole word">ab</button>', search)
         self.assertIn('title="Use regular expression">.*</button>', search)
-
-    def test_browser_tab_persist_is_cancelled_and_revalidated_before_post(self):
-        """F1 — a stale debounce must not switch a terminal back to browser mode."""
-        browser_response = self.client.get("/static/js/browser-pane.js")
-        terminals_response = self.client.get("/static/js/terminals.js")
-        browser_js = browser_response.get_data(as_text=True)
-        terminals_js = terminals_response.get_data(as_text=True)
-        browser_response.close()
-        terminals_response.close()
-
-        self.assertIn("function browserCancelPendingPersist(sessionId)", browser_js)
-        persist_start = browser_js.index("const push = async () => {")
-        persist_end = browser_js.index("const snapshot = browserSerializeTabs(pane);", persist_start)
-        persist_guard = browser_js[persist_start:persist_end]
-        self.assertIn("const currentIndex = sessionIds.indexOf(sessionId);", persist_guard)
-        self.assertIn("terminals[currentIndex] !== pane", persist_guard)
-        self.assertIn("!isBrowserSession(terminals[currentIndex]?._session)", persist_guard)
-        self.assertIn("isSessionModeSwitchPending(sessionId)", persist_guard)
-
-        switch_start = terminals_js.index("async function switchSessionBrowserMode(index)")
-        switch_end = terminals_js.index("function captureSurvivingPaneClientState", switch_start)
-        switch_body = terminals_js[switch_start:switch_end]
-        self.assertLess(
-            switch_body.index("browserCancelPendingPersist(sessionId);"),
-            switch_body.index("pendingModeSwitchSessionIds.add(sessionId);"),
-        )
-        close_start = terminals_js.index("async function closeTerminalPane(index)")
-        close_end = terminals_js.index("async function splitTerminalPane(index", close_start)
-        self.assertIn(
-            "browserCancelPendingPersist(plan.sessionId);",
-            terminals_js[close_start:close_end],
-        )
-        group_start = terminals_js.index("async function closeSessionGroup(")
-        group_end = terminals_js.index("async function _closeWindowAfterLastSession(", group_start)
-        self.assertIn(
-            "closingSessionIds.forEach(browserCancelPendingPersist);",
-            terminals_js[group_start:group_end],
-        )
 
     def test_browser_pane_new_tab_never_duplicates_the_active_tab(self):
         """A '+' that copied the active URL made a pane showing GridVibe
@@ -2245,8 +2212,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerPersistedTabFontSize(raw)", html)
         self.assertIn("fontSize !== EXPLORER_EDITOR_FONT_DEFAULT", html)
         self.assertIn("tabViews[EXPLORER_PREVIEW_TAB_ID] = previewRecord;", html)
-        self.assertIn("record.diff_mode = diffMode;", html)
-        self.assertIn("record.diff_commit = diffCommit;", html)
         self.assertIn("const previewView = explorerInflatePersistedTabView(rawPreviewView);", html)
         self.assertIn("previewTab.view = previewView;", html)
         self.assertIn("previewTab.fontSize = previewFont;", html)
@@ -2258,11 +2223,10 @@ class ApiRoutesTestCase(unittest.TestCase):
             "explorer_tab_views: resolvedStartupMode === 'explorer' && terminal?.explorer_tab_views",
             html,
         )
-        # Markdown appearance re-applies once per session id (ISSUE-2026-033) so
-        # a close rebuild cannot clobber an appearance changed since launch.
-        self.assertIn("function applyExplorerSessionMarkdownAppearance(index)", html)
-        self.assertIn("setExplorerMarkdownAppearance({ preset, font, sourceFont });", html)
-        self.assertIn("applyExplorerSessionMarkdownAppearance(index);", html)
+        # Versioning, diff-target migration, and workspace appearance authority
+        # are exercised behaviorally in tests/test_session_presentation.py and
+        # tests/test_session_persistence_contract.py. Keep this legacy page test
+        # focused on the DOM adapter it can actually observe.
 
     def test_terminals_page_preview_tab_keeps_separated_path(self):
         """The Preview tab keeps its own file/directory path across tab swaps
@@ -2307,18 +2271,12 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        # Per-tab snapshot helpers (mode + fraction-based scroll + identity).
+        # Per-tab capture is wired before DOM replacement. Record migration,
+        # revision filtering, and x/y ratios are executed in the DOM-free Stage
+        # 5 tests rather than asserted as implementation strings here.
         self.assertIn("function explorerCaptureActiveTabView(index)", html)
-        self.assertIn("function explorerMatchingTabView(tab, identity)", html)
-        self.assertIn(
-            "function explorerFileContentIdentity(path, content, diffCommit, diffMode)",
-            html,
-        )
-        self.assertIn("function explorerDirectoryContentIdentity(path, entries)", html)
         # The snapshot lives on the tab record, not in pane-global state.
         self.assertIn("tab.view = {", html)
-        # OD-4 skip rule: a stale snapshot (content changed) is never restored.
-        self.assertIn("view.identity !== identity", html)
         # Capture runs before the active tab id flips, while the DOM is intact.
         activate = html[html.index("function activateExplorerTab(index, id)"):]
         self.assertLess(
@@ -2340,12 +2298,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         # the restored mode; fractions + clamping live in restoreExplorerFileScroll.
         self.assertIn("const effectiveScrollState = scrollState || (restoredTabView", html)
         self.assertIn("{ ...restoredTabView.scroll, activeView: initialFileView }", html)
-        # Directory browsing on the Preview tab gets the same treatment — on
-        # capture, on the in-memory re-render, and after a re-browse fetch.
-        self.assertEqual(
-            html.count("explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries)"),
-            3,
-        )
         # Mode switching is skipped when there are no file panels (directory).
         self.assertIn("listEl.querySelector('[data-explorer-file-panel]')", html)
 
@@ -2573,7 +2525,28 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertIn("return setExplorerSidebarPanelOpen(index, 'tree', open);", html)
         self.assertIn("function focusExplorerTreeRow(index, path)", html)
-        self.assertIn("row.scrollIntoView({ block: 'nearest' });", html)
+        # Flashing is layered on the shared scroll helper, which every reveal
+        # (opening a file, browsing a directory) also runs so the `.active`
+        # row is never highlighted off screen.
+        focus = html[
+            html.index("function focusExplorerTreeRow(index, path)"):
+            html.index("async function loadExplorerTree(index)")
+        ]
+        self.assertIn("scrollExplorerTreeRowIntoView(index, path)", focus)
+        self.assertIn("explorer-tree-located", focus)
+        reveal_path = html[
+            html.index("async function revealExplorerTreePath(index, targetPath = '')"):
+            html.index("function explorerTreeRowElement(panel, path)")
+        ]
+        self.assertIn("scrollExplorerTreeRowIntoView(index, target);", reveal_path)
+        # The helper scrolls the tree panel itself rather than every ancestor
+        # of the row, so revealing a file cannot move the pane around it.
+        scroller = html[
+            html.index("function scrollExplorerTreeRowIntoView(index, path = '')"):
+            html.index("function focusExplorerTreeRow(index, path)")
+        ]
+        self.assertIn("panel.scrollTop", scroller)
+        self.assertNotIn("scrollIntoView(", scroller)
         # Token-driven flash styling only (Regression Guardrail 7).
         located_css = html[html.index(".explorer-tree-row.explorer-tree-located {"):]
         located_css = located_css[:located_css.index("}")]
@@ -2755,11 +2728,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("source: current.source !== false,", html)
         self.assertIn("preview: current.preview !== false,", html)
         self.assertIn("diff: current.diff !== false,", html)
-        self.assertIn("record.wrap_source = false;", html)
-        self.assertIn("record.wrap_preview = false;", html)
-        self.assertIn("record.wrap_diff = false;", html)
-        self.assertIn("source: view.wrap_source !== false,", html)
-        self.assertIn("preview: view.wrap_preview !== false,", html)
+        # Both the v2 wrap map and the legacy flat-record migration are covered
+        # by the executed explorer-persistence contract tests.
         # Unwrapped source keeps one row per line and scrolls sideways; the
         # wrapped variant drops the max-content floor so the code column reflows,
         # and the in-place editor follows the same per-tab flag.
@@ -2822,8 +2792,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("Alt: expand all at this level", html)
         self.assertIn("function wireExplorerMarkdownSectionControls(index)", html)
         self.assertIn("tab.collapsedLines = new Set();", html)
-        self.assertIn("record.folds = Array.from(tab.collapsedLines)", html)
-        self.assertIn("record.fold_identity = tab.collapsedIdentity;", html)
+        # Fold serialization/revision filtering is executed by the Stage 5
+        # DOM-free record tests; this test retains the UI wiring assertions.
         self.assertIn("explorerPersistedMarkdownFolds(rawViews[key])", html)
         self.assertIn("persistExplorerTabsToSession(index);", html)
         self.assertIn("wireExplorerMarkdownSectionControls(index);", html)
@@ -2910,14 +2880,29 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const EXPLORER_SOURCE_FONT_KEY = 'gridvibe.sourceViewFont';", html)
         self.assertIn("const EXPLORER_SOURCE_FONT_DEFAULT = 'default';", html)
         self.assertIn("function applyExplorerSourceFontToElement(view, appearance)", html)
-        self.assertIn("window.localStorage.setItem(EXPLORER_SOURCE_FONT_KEY, next.sourceFont);", html)
-        # Applied to every open source panel and diff panel, and to a freshly
-        # rendered file.
+        # localStorage is now only a startup cache; the workspace presentation
+        # transaction is the durable authority covered by the behavioral
+        # presentation tests.
         self.assertIn(
-            "document.querySelectorAll('.explorer-source-view, .explorer-diff-content')"
-            ".forEach(view => {",
+            "window.localStorage.setItem(EXPLORER_SOURCE_FONT_KEY, appearance.sourceFont);",
             html,
         )
+        # Applied to every open source panel and diff panel — in the mounted
+        # document and in each cached (hidden) session-tab fragment, so a
+        # change lands instantly on every workspace tab instead of waiting
+        # for a tab switch or pane reset — and to a freshly rendered file.
+        apply_all = html[
+            html.index("function applyExplorerMarkdownAppearanceToAll()"):
+            html.index("function setExplorerMarkdownAppearance(patch)")
+        ]
+        self.assertIn("applyToRoot(document);", apply_all)
+        self.assertIn(
+            "root.querySelectorAll('.explorer-source-view, .explorer-diff-content')"
+            ".forEach(view => {",
+            apply_all,
+        )
+        self.assertIn("cachedGroupViews.forEach(cached => {", apply_all)
+        self.assertIn("applyToRoot(cached.fragment);", apply_all)
         self.assertIn("applyExplorerSourceFontToElement(", html)
         # Its own menu group, alongside the preview groups.
         self.assertIn("'Source font',", html)
@@ -3648,10 +3633,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+        # Audit item 6/product decision 6: the refusal names the number to
+        # raise the setting to, and the setting, so it is actionable on its own.
         self.assertEqual(
             response.get_json(),
-            {"error": f"Maximum {api.runtime_config.max_sessions} sessions allowed"},
+            {
+                "error": api.capacity_refusal(
+                    api.runtime_config.max_sessions + 1,
+                    api.runtime_config.max_sessions,
+                )
+            },
         )
+        self.assertIn(
+            str(api.runtime_config.max_sessions + 1), response.get_json()["error"]
+        )
+        self.assertIn("max_sessions", response.get_json()["error"])
 
     def test_voice_status_endpoint_includes_engine_model_and_language(self):
         with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
@@ -4882,7 +4878,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(session.browser_tabs, ["http://127.0.0.1:4000"])
         self.assertEqual(session.browser_active_tab, 0)
 
-    def test_switch_browser_pane_replaces_whole_tab_strip(self):
+    def test_a_whole_tab_strip_is_replaced_through_the_presentation_route(self):
+        """The strip is presentation state, so the ordered transaction owns it.
+
+        The mode route used to accept a whole strip as well, which made it a
+        second unordered writer for the same field (audit SGP-02, Stage 3).
+        """
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
         group = api.session_manager.create_group(
@@ -4902,17 +4903,27 @@ class ApiRoutesTestCase(unittest.TestCase):
             browser_tabs=["http://127.0.0.1:3000"],
         )
 
-        with patch.object(api, "_close_ssh_connection"):
-            response = self.client.post(
-                f"/api/sessions/{session.session_id}/mode",
-                json={
-                    "startup_mode": "browser",
-                    "tabs": ["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
-                    "active_tab": 1,
-                },
-            )
+        response = self.client.post(
+            "/api/session-presentation",
+            json={
+                "workspace_id": "default",
+                "group_id": group.group_id,
+                "expected_revision": 0,
+                "pane_order": [session.session_id],
+                "panes": [
+                    {
+                        "session_id": session.session_id,
+                        "browser_tabs": [
+                            "http://127.0.0.1:3000",
+                            "http://127.0.0.1:5050/",
+                        ],
+                        "browser_active_tab": 1,
+                    }
+                ],
+            },
+        )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.get_json())
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(
             updated.browser_tabs,
@@ -4920,6 +4931,24 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertEqual(updated.browser_active_tab, 1)
         self.assertEqual(updated.initial_command, "http://127.0.0.1:5050/")
+
+        # The retired writer is gone rather than left behind as a second one:
+        # the mode route now navigates the active tab and ignores a strip.
+        with patch.object(api, "_close_ssh_connection"):
+            ignored = self.client.post(
+                f"/api/sessions/{session.session_id}/mode",
+                json={
+                    "startup_mode": "browser",
+                    "url": "http://127.0.0.1:5050/",
+                    "tabs": ["http://127.0.0.1:9999"],
+                    "active_tab": 1,
+                },
+            )
+        self.assertEqual(ignored.status_code, 200, ignored.get_json())
+        self.assertEqual(
+            api.session_manager.get_session(session.session_id).browser_tabs,
+            ["http://127.0.0.1:3000", "http://127.0.0.1:5050/"],
+        )
 
     def test_switch_browser_pane_navigation_only_moves_active_tab(self):
         """A plain single-URL navigate edits the active tab and leaves siblings."""
@@ -4981,11 +5010,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         original_merge = api.session_manager.merge_browser_tabs
 
         def merge_after_concurrent_strip_update(session_id, **kwargs):
-            api.session_manager.update_browser_tab_strip(
-                session_id,
-                browser_tabs=["http://127.0.0.1:6000", "http://127.0.0.1:7000"],
-                browser_active_tab=0,
-                initial_command="http://127.0.0.1:6000",
+            # A presentation transaction landing between the read and the merge.
+            api.session_manager.apply_group_presentation(
+                workspace_id="default",
+                group_id=group.group_id,
+                expected_revision=0,
+                pane_order=[session_id],
+                pane_updates={
+                    session_id: {
+                        "browser_tabs": [
+                            "http://127.0.0.1:6000",
+                            "http://127.0.0.1:7000",
+                        ],
+                        "browser_active_tab": 0,
+                    }
+                },
             )
             return original_merge(session_id, **kwargs)
 
@@ -5071,17 +5110,27 @@ class ApiRoutesTestCase(unittest.TestCase):
                 f"/api/sessions/{session.session_id}/mode",
                 json={"startup_mode": "terminal"},
             )
+        # A pane's presentation fields are scoped to the mode it is actually in,
+        # so a late tab strip is refused instead of quietly re-creating one.
         stale_response = self.client.post(
-            f"/api/sessions/{session.session_id}/mode",
+            "/api/session-presentation",
             json={
-                "startup_mode": "browser",
-                "tabs": ["http://127.0.0.1:3000"],
-                "active_tab": 0,
+                "workspace_id": "default",
+                "group_id": group.group_id,
+                "expected_revision": 0,
+                "pane_order": [session.session_id],
+                "panes": [
+                    {
+                        "session_id": session.session_id,
+                        "browser_tabs": ["http://127.0.0.1:3000"],
+                        "browser_active_tab": 0,
+                    }
+                ],
             },
         )
 
         self.assertEqual(terminal_response.status_code, 200)
-        self.assertEqual(stale_response.status_code, 409)
+        self.assertEqual(stale_response.status_code, 400, stale_response.get_json())
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(updated.startup_mode, "terminal")
         self.assertEqual(updated.browser_tabs, [])
@@ -10810,9 +10859,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.post(f"/api/sessions/{source.session_id}/split")
 
         self.assertEqual(response.status_code, 400)
+        # The split boundary answers with the same actionable refusal as launch.
         self.assertEqual(
             response.get_json(),
-            {"error": f"Maximum {api.runtime_config.max_sessions} sessions allowed"},
+            {
+                "error": api.capacity_refusal(
+                    api.runtime_config.max_sessions + 1,
+                    api.runtime_config.max_sessions,
+                )
+            },
         )
 
     def test_delete_session_closes_and_removes_it(self):
@@ -13171,6 +13226,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/shared.js",
         "js/workspaces.js",
         "js/app-settings.js",
+        "js/lifecycle.js",
         "js/launcher.js",
         "js/terminals.js",
         "js/explorer-viewer.js",
@@ -13202,16 +13258,14 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
                 with self.subTest(filename=filename, call=call):
                     self.assertNotIn(call, body)
 
-    def test_launcher_page_ships_generic_confirm_shell(self):
-        """N1 — restart/close confirmations go through the in-page shell."""
+    def test_launcher_page_ships_in_page_confirmation_shells(self):
+        """N1 — ordinary confirms and lifecycle choices are in-page dialogs."""
         launcher_html = self._get_text("/")
         self.assertIn('id="genericConfirmModal"', launcher_html)
-        launcher_js = self._get_text("/static/js/launcher.js")
-        for caller in ("shutdownBrowserApp", "restartApplication", "checkForUpdates"):
-            with self.subTest(caller=caller):
-                body = launcher_js[launcher_js.index(f"async function {caller}"):]
-                body = body[:body.index("\n    }")]
-                self.assertIn("await openGenericConfirmModal", body)
+        self.assertIn('id="lifecycleModal"', launcher_html)
+        self.assertIn('data-lifecycle-save="none"', launcher_html)
+        self.assertIn('data-lifecycle-save="workspaces"', launcher_html)
+        self.assertIn('data-lifecycle-save="sessions+workspaces"', launcher_html)
 
     def test_static_js_uses_no_emoji_glyph_icons(self):
         """N3 — guardrail 7: stroke-style SVG icons, not emoji glyphs."""
@@ -14114,7 +14168,7 @@ class RuntimeConfigExtractionTestCase(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(
-            response.get_json(), {"error": "Maximum 2 sessions allowed"}
+            response.get_json(), {"error": api.capacity_refusal(3, 2)}
         )
 
 
@@ -15820,6 +15874,89 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         payload = self.client.get("/api/runtime-state").get_json()
         self.assertEqual(payload["native_zoom_factor"], 1.25)
 
+    def test_reported_topbar_visibility_is_captured_by_autosave(self):
+        self._launch_explorer_group()
+
+        response = self.client.post(
+            "/api/workspace-presentation",
+            json={
+                "workspace_id": "default",
+                "expected_revision": 0,
+                "topbar_visible": False,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["topbar_visible"])
+        groups = self.client.get("/api/session-groups").get_json()
+        self.assertFalse(groups["topbar_visible"])
+
+        api._run_workspace_autosave_tick()
+
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertFalse(slot["topbar_visible"])
+        self.assertFalse(self.client.get("/api/runtime-state").get_json()["topbar_visible"])
+
+    def test_manual_save_captures_topbar_visibility_and_the_next_autosave_agrees(self):
+        self._launch_explorer_group()
+
+        response = self.client.post(
+            "/api/runtime-state/save",
+            json={"topbar_visible": False},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["topbar_visible"])
+        self.assertFalse(api.session_manager.get_topbar_visible())
+        self.assertFalse(web_runtime_state.load_restorable_workspace()["topbar_visible"])
+
+        api._run_workspace_autosave_tick()
+
+        self.assertFalse(web_runtime_state.load_restorable_workspace()["topbar_visible"])
+
+    def test_launcher_style_save_captures_cached_live_topbar_visibility(self):
+        self._launch_explorer_group()
+        hint = self.client.post(
+            "/api/workspace-presentation",
+            json={
+                "workspace_id": "default",
+                "expected_revision": 0,
+                "topbar_visible": False,
+            },
+        )
+        self.assertEqual(hint.status_code, 200)
+
+        response = self.client.post(
+            "/api/runtime-state/save",
+            json={"native_zoom_factor": 1.1},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["topbar_visible"])
+        slot = web_runtime_state.load_restorable_workspace()
+        self.assertFalse(slot["topbar_visible"])
+        self.assertEqual(slot["native_zoom_factor"], 1.1)
+
+    def test_topbar_visibility_routes_reject_non_boolean_values(self):
+        self._launch_explorer_group()
+
+        hint = self.client.post(
+            "/api/workspace-presentation",
+            json={
+                "workspace_id": "default",
+                "expected_revision": 0,
+                "topbar_visible": "hidden",
+            },
+        )
+        save = self.client.post(
+            "/api/runtime-state/save",
+            json={"topbar_visible": 0},
+        )
+
+        self.assertEqual(hint.status_code, 400)
+        self.assertEqual(save.status_code, 400)
+        self.assertTrue(api.session_manager.get_topbar_visible())
+
     def test_invalid_stored_native_zoom_degrades_to_no_preference(self):
         self._launch_explorer_group()
         web_runtime_state.capture_workspace(api.session_manager)
@@ -15831,6 +15968,18 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertIsNone(slot["native_zoom_factor"])
         payload = self.client.get("/api/runtime-state").get_json()
         self.assertIsNone(payload["native_zoom_factor"])
+
+    def test_missing_or_invalid_stored_topbar_visibility_defaults_visible(self):
+        self._launch_explorer_group()
+        web_runtime_state.capture_workspace(api.session_manager)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        data["workspaces"]["default"]["topbar_visible"] = "hidden"
+        self.state_path.write_text(json.dumps(data), encoding="utf-8")
+
+        slot = web_runtime_state.load_restorable_workspace()
+
+        self.assertTrue(slot["topbar_visible"])
+        self.assertTrue(self.client.get("/api/runtime-state").get_json()["topbar_visible"])
 
     def test_save_endpoint_captures_a_manual_slot_immediately_restorable(self):
         self._launch_explorer_group()
@@ -16201,8 +16350,9 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         shared_js = self._static("js/shared.js")
         self.assertIn("function normalizeNativeZoomFactor(value)", shared_js)
         self.assertIn("async function getNativeSessionZoomFactor()", shared_js)
-        launcher_js = self._static("js/launcher.js")
-        self.assertIn("body: JSON.stringify({ native_zoom_factor: nativeZoomFactor })", launcher_js)
+        launcher_html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="lifecycleModal"', launcher_html)
+        self.assertIn("js/lifecycle.js", launcher_html)
         workspaces_js = self._static("js/workspaces.js")
         self.assertIn("api.open_workspace_window(", workspaces_js)
         self.assertIn("resolvedWorkspaceId,\n                    groupId,", workspaces_js)

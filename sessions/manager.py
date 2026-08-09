@@ -12,6 +12,16 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
+from web.session_presentation import (
+    DEFAULT_EXPLORER_MD_FONT,
+    DEFAULT_EXPLORER_MD_PRESET,
+    DEFAULT_EXPLORER_SOURCE_FONT,
+    PANE_PRESENTATION_FIELDS,
+    deep_copy_presentation,
+    normalize_pane_presentation_fields,
+    pane_fields_for_mode,
+    workspace_appearance_from_panes,
+)
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     generate_workspace_id,
@@ -23,20 +33,6 @@ logger = logging.getLogger(__name__)
 # Pane presentation restored when an already-live workspace window is reopened.
 # Connection/process metadata deliberately stays untouched: saving a view must
 # never retarget or restart a running terminal.
-_SAVED_SESSION_VIEW_FIELDS = {
-    "explorer_tree_open",
-    "explorer_git_open",
-    "explorer_search_open",
-    "explorer_open_tabs",
-    "explorer_active_tab",
-    "explorer_tab_views",
-    "explorer_md_preset",
-    "explorer_md_font",
-    "explorer_source_font",
-    "explorer_theme",
-    "browser_tabs",
-    "browser_active_tab",
-}
 _UNCHANGED = object()
 
 
@@ -74,6 +70,10 @@ class TerminalSession:
     explorer_tree_open: bool = False
     explorer_git_open: bool = False
     explorer_search_open: bool = False
+    explorer_sidebar_width: int = 260
+    explorer_sidebar_scroll: Dict[str, Any] = field(default_factory=dict)
+    explorer_tree_expanded: List[str] = field(default_factory=list)
+    explorer_git_expanded: List[str] = field(default_factory=list)
     explorer_open_tabs: List[str] = field(default_factory=list)
     explorer_active_tab: str = ""
     explorer_tab_views: Dict[str, Any] = field(default_factory=dict)
@@ -115,6 +115,10 @@ class TerminalSession:
             "explorer_tree_open": self.explorer_tree_open,
             "explorer_git_open": self.explorer_git_open,
             "explorer_search_open": self.explorer_search_open,
+            "explorer_sidebar_width": self.explorer_sidebar_width,
+            "explorer_sidebar_scroll": copy.deepcopy(self.explorer_sidebar_scroll),
+            "explorer_tree_expanded": list(self.explorer_tree_expanded),
+            "explorer_git_expanded": list(self.explorer_git_expanded),
             "explorer_open_tabs": list(self.explorer_open_tabs),
             "explorer_active_tab": self.explorer_active_tab,
             "explorer_tab_views": dict(self.explorer_tab_views),
@@ -138,6 +142,15 @@ class Workspace:
     label: str = ""
     created_at: float = field(default_factory=time.time)
     active_group_id: str = ""
+    topbar_visible: bool = True
+    md_preset: str = DEFAULT_EXPLORER_MD_PRESET
+    md_font: str = DEFAULT_EXPLORER_MD_FONT
+    source_font: str = DEFAULT_EXPLORER_SOURCE_FONT
+    presentation_revision: int = 0
+    # Live-only migration flag.  A first legacy preset may seed a brand-new
+    # workspace from its per-pane aliases; an acknowledged workspace value or
+    # restored slot owns the setting thereafter.
+    appearance_initialized: bool = False
     # Live-only lifecycle hint: a workspace the user deliberately created empty
     # must survive the empty-workspace pruning that closes a workspace emptied
     # by a close or a move. Absence of groups alone cannot tell the two apart.
@@ -151,6 +164,11 @@ class Workspace:
             "label": self.label,
             "created_at": self.created_at,
             "active_group_id": self.active_group_id,
+            "topbar_visible": self.topbar_visible,
+            "md_preset": self.md_preset,
+            "md_font": self.md_font,
+            "source_font": self.source_font,
+            "presentation_revision": self.presentation_revision,
             "retain_when_empty": self.retain_when_empty,
         }
 
@@ -167,6 +185,8 @@ class SessionGroup:
     workspace_id: str = DEFAULT_WORKSPACE_ID
     saved_session_id: str = ""
     workspace_layout: Optional[Dict[str, Any]] = None
+    pane_order: List[str] = field(default_factory=list)
+    presentation_revision: int = 0
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -180,7 +200,9 @@ class SessionGroup:
             "display_order": self.display_order,
             "workspace_id": self.workspace_id,
             "saved_session_id": self.saved_session_id,
-            "workspace_layout": self.workspace_layout,
+            "workspace_layout": copy.deepcopy(self.workspace_layout),
+            "pane_order": list(self.pane_order),
+            "presentation_revision": self.presentation_revision,
             "created_at": self.created_at,
         }
 
@@ -512,6 +534,138 @@ class SessionManager:
                 workspace.active_group_id = ""
             return workspace.active_group_id
 
+    def set_topbar_visible(
+        self,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        visible: bool = True,
+        *,
+        require_owned: bool = False,
+    ) -> Optional[bool]:
+        """Record one workspace window's live top-bar visibility hint."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            if workspace is None:
+                if require_owned:
+                    raise ValueError("Workspace not found")
+                return None
+            normalized = bool(visible)
+            if workspace.topbar_visible != normalized:
+                workspace.topbar_visible = normalized
+                workspace.presentation_revision += 1
+            return workspace.topbar_visible
+
+    def get_topbar_visible(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> bool:
+        """Return one live workspace's top-bar visibility, visible by default."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            return workspace.topbar_visible if workspace is not None else True
+
+    def get_workspace_presentation(
+        self,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+    ) -> Dict[str, Any]:
+        """Return one atomic workspace-chrome snapshot for client rebasing."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            if workspace is None:
+                return {
+                    "workspace_id": resolved_workspace_id,
+                    "topbar_visible": True,
+                    "md_preset": DEFAULT_EXPLORER_MD_PRESET,
+                    "md_font": DEFAULT_EXPLORER_MD_FONT,
+                    "source_font": DEFAULT_EXPLORER_SOURCE_FONT,
+                    "presentation_revision": 0,
+                }
+            return {
+                "workspace_id": resolved_workspace_id,
+                "topbar_visible": workspace.topbar_visible,
+                "md_preset": workspace.md_preset,
+                "md_font": workspace.md_font,
+                "source_font": workspace.source_font,
+                "presentation_revision": workspace.presentation_revision,
+            }
+
+    def set_workspace_appearance(
+        self,
+        workspace_id: str,
+        *,
+        md_preset: str,
+        md_font: str,
+        source_font: str,
+    ) -> Dict[str, str]:
+        """Install a validated workspace appearance and its legacy aliases."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            if workspace is None:
+                raise ValueError("Workspace not found")
+            workspace.md_preset = md_preset
+            workspace.md_font = md_font
+            workspace.source_font = source_font
+            workspace.appearance_initialized = True
+            self._mirror_workspace_appearance_locked(workspace)
+            return {
+                "md_preset": workspace.md_preset,
+                "md_font": workspace.md_font,
+                "source_font": workspace.source_font,
+            }
+
+    def _mirror_workspace_appearance_locked(self, workspace: Workspace) -> None:
+        """Keep legacy per-pane read aliases in step with workspace authority."""
+        for group in self.groups.values():
+            if group.workspace_id != workspace.workspace_id:
+                continue
+            for session_id in group.pane_order:
+                session = self.sessions.get(session_id)
+                if session is None or session.startup_mode != "explorer":
+                    continue
+                session.explorer_md_preset = workspace.md_preset
+                session.explorer_md_font = workspace.md_font
+                session.explorer_source_font = workspace.source_font
+
+    def apply_workspace_presentation(
+        self,
+        *,
+        workspace_id: str,
+        expected_revision: int,
+        topbar_visible: bool,
+        md_preset: Optional[str] = None,
+        md_font: Optional[str] = None,
+        source_font: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Compare-and-swap workspace-scoped presentation under one lock."""
+        with self.lock:
+            workspace = self.workspaces.get(workspace_id)
+            if workspace is None:
+                return {"outcome": "not_found", "error": "Workspace not found"}
+            if workspace.presentation_revision != expected_revision:
+                return {
+                    "outcome": "conflict",
+                    "error": "Workspace presentation revision is stale",
+                    "workspace_id": workspace_id,
+                    "presentation_revision": workspace.presentation_revision,
+                }
+            workspace.topbar_visible = topbar_visible
+            if md_preset is not None and md_font is not None and source_font is not None:
+                workspace.md_preset = md_preset
+                workspace.md_font = md_font
+                workspace.source_font = source_font
+                workspace.appearance_initialized = True
+                self._mirror_workspace_appearance_locked(workspace)
+            workspace.presentation_revision += 1
+            return {
+                "outcome": "ok",
+                "workspace_id": workspace_id,
+                "presentation_revision": workspace.presentation_revision,
+                "topbar_visible": workspace.topbar_visible,
+                "md_preset": workspace.md_preset,
+                "md_font": workspace.md_font,
+                "source_font": workspace.source_font,
+            }
+
     def _generate_session_id(self) -> str:
         """Return a short session id that is not already in use.
 
@@ -542,6 +696,10 @@ class SessionManager:
         with self.lock:
             session = self._build_session(group_id, **fields)
             self.sessions[session.session_id] = session
+            group = self.groups.get(group_id)
+            if group is not None:
+                group.pane_order.append(session.session_id)
+                group.terminal_count = len(group.pane_order)
 
         logger.info(f"Created session {session.session_id} for {session.host}")
         return session
@@ -554,6 +712,7 @@ class SessionManager:
                 return None
             session = self._build_session(group_id, **fields)
             self.sessions[session.session_id] = session
+            group.pane_order.append(session.session_id)
             group.terminal_count += 1
 
         logger.info(
@@ -596,9 +755,28 @@ class SessionManager:
 
         Pure: it touches no shared state, so a launch can stage every pane of a
         group before it takes the lock that publishes them together.
+
+        Presentation fields are *not* coerced here (audit SGP-07). They come
+        from the one canonical normalizer, which rejects a wrong-typed value
+        instead of running it through ``list()``/``dict()``/``int()``: a request
+        carrying ``explorer_open_tabs: "abc"`` used to install ``['a','b','c']``
+        as live state, which the next autosave made durable. The rejection
+        raises, and :meth:`install_session_group` turns it into a failed group.
+        The dictionary below therefore holds each field's *default*, applied
+        only when the request did not supply the field at all.
         """
         mode = config.get("mode", "ssh")
-        return {
+        # A stored 0 is the preset store's "no width recorded", not a request
+        # for the 180px minimum the normalizer would otherwise clamp it to.
+        # Dropped before validation so the default below still applies; `False`
+        # is deliberately left in place, because it is a wrong type, not a
+        # sentinel, and has to be rejected.
+        if config.get("explorer_sidebar_width") == 0 and not isinstance(
+            config.get("explorer_sidebar_width"), bool
+        ):
+            config = {**config, "explorer_sidebar_width": None}
+        presentation = normalize_pane_presentation_fields(config)
+        fields = {
             "host": (
                 config.get("host")
                 or config.get("ip")
@@ -622,19 +800,25 @@ class SessionManager:
             "use_powershell": bool(config.get("use_powershell")),
             "startup_mode": str(config.get("startup_mode") or "terminal"),
             "explorer_root_directory": config.get("explorer_root_directory"),
-            "explorer_tree_open": bool(config.get("explorer_tree_open")),
-            "explorer_git_open": bool(config.get("explorer_git_open")),
-            "explorer_search_open": bool(config.get("explorer_search_open")),
-            "explorer_open_tabs": list(config.get("explorer_open_tabs") or []),
-            "explorer_active_tab": str(config.get("explorer_active_tab") or ""),
-            "explorer_tab_views": dict(config.get("explorer_tab_views") or {}),
-            "explorer_md_preset": str(config.get("explorer_md_preset") or ""),
-            "explorer_md_font": str(config.get("explorer_md_font") or ""),
-            "explorer_source_font": str(config.get("explorer_source_font") or ""),
-            "explorer_theme": "light" if config.get("explorer_theme") == "light" else "dark",
-            "browser_tabs": list(config.get("browser_tabs") or []),
-            "browser_active_tab": int(config.get("browser_active_tab") or 0),
+            "explorer_tree_open": False,
+            "explorer_git_open": False,
+            "explorer_search_open": False,
+            "explorer_sidebar_width": 260,
+            "explorer_sidebar_scroll": {},
+            "explorer_tree_expanded": [],
+            "explorer_git_expanded": [],
+            "explorer_open_tabs": [],
+            "explorer_active_tab": "",
+            "explorer_tab_views": {},
+            "explorer_md_preset": "",
+            "explorer_md_font": "",
+            "explorer_source_font": "",
+            "explorer_theme": "dark",
+            "browser_tabs": [],
+            "browser_active_tab": 0,
         }
+        fields.update(deep_copy_presentation(presentation))
+        return fields
 
     def install_session_group(
         self,
@@ -665,24 +849,39 @@ class SessionManager:
 
         Raises ``ValueError`` — before touching anything — when the workspace
         is gone, when the group id is owned by another workspace or by another
-        preset, or when no requested pane is usable.
+        preset, or when **any** requested pane is not launchable.
         """
         resolved_group_id = str(group_id or uuid.uuid4().hex[:12])
         resolved_workspace_id = normalize_workspace_id(workspace_id)
         resolved_saved_session_id = str(saved_session_id or "").strip()
 
         staged_fields: List[Dict[str, Any]] = []
-        for config in sessions_config:
+        for index, config in enumerate(sessions_config):
             try:
                 staged_fields.append(self._session_launch_fields(config))
             except Exception as exc:
-                logger.error(f"Failed to create session: {exc}")
+                # A pane that cannot be staged fails the *group* (audit SGP-07,
+                # invariant 6). Skipping it launched a smaller group, reported
+                # it as a complete restore, and let the next autosave commit the
+                # smaller shape. Shape-only diagnostics: the pane's position and
+                # the validation reason, never its host, directory, or command.
+                logger.error(
+                    "Pane %d of group %s is not launchable: %s",
+                    index + 1,
+                    resolved_group_id,
+                    exc,
+                )
+                raise ValueError(
+                    f"Pane {index + 1} of this group is not launchable"
+                ) from exc
         if not staged_fields:
             raise ValueError("No valid sessions were created")
+        legacy_appearance = workspace_appearance_from_panes(sessions_config)
 
         with self.lock:
             if resolved_workspace_id not in self.workspaces:
                 raise ValueError("Workspace not found")
+            workspace = self.workspaces[resolved_workspace_id]
             existing_group = self.groups.get(resolved_group_id)
             if existing_group is not None:
                 if existing_group.workspace_id != resolved_workspace_id:
@@ -712,6 +911,18 @@ class SessionManager:
                 self.sessions[session.session_id] = session
                 sessions.append(session)
             group.terminal_count = len(sessions)
+            group.pane_order = [session.session_id for session in sessions]
+            if not workspace.appearance_initialized and legacy_appearance is not None:
+                workspace.md_preset = legacy_appearance["md_preset"]
+                workspace.md_font = legacy_appearance["md_font"]
+                workspace.source_font = legacy_appearance["source_font"]
+                workspace.appearance_initialized = True
+            # The mirror walks `group.pane_order`, so the new group must be
+            # populated before it runs; otherwise it updates every *other*
+            # group in the workspace and skips the panes it was called for,
+            # leaving freshly installed explorer panes carrying the launch
+            # config's appearance instead of the workspace authority's.
+            self._mirror_workspace_appearance_locked(workspace)
 
         logger.info(
             "Installed session group group_id=%s workspace_id=%s panes=%d displaced=%d",
@@ -753,6 +964,10 @@ class SessionManager:
             "explorer_tree_open",
             "explorer_git_open",
             "explorer_search_open",
+            "explorer_sidebar_width",
+            "explorer_sidebar_scroll",
+            "explorer_tree_expanded",
+            "explorer_git_expanded",
             "explorer_open_tabs",
             "explorer_active_tab",
             "explorer_tab_views",
@@ -773,24 +988,6 @@ class SessionManager:
                     setattr(session, field_name, value)
 
             return session
-
-    def update_browser_tab_strip(
-        self,
-        session_id: str,
-        *,
-        browser_tabs: List[str],
-        browser_active_tab: int,
-        initial_command: str,
-    ) -> Optional[Dict[str, Any]]:
-        """Atomically update tabs only while the session is still a browser pane."""
-        with self.lock:
-            session = self.sessions.get(session_id)
-            if session is None or session.startup_mode != "browser":
-                return None
-            session.browser_tabs = browser_tabs
-            session.browser_active_tab = browser_active_tab
-            session.initial_command = initial_command
-            return session.to_dict()
 
     def merge_browser_tabs(
         self,
@@ -924,9 +1121,98 @@ class SessionManager:
                 if session is None or session.group_id != group_id:
                     continue
                 for field_name, value in updates.items():
-                    if field_name in _SAVED_SESSION_VIEW_FIELDS:
+                    if field_name in PANE_PRESENTATION_FIELDS:
                         setattr(session, field_name, copy.deepcopy(value))
             return group
+
+    def apply_group_presentation(
+        self,
+        *,
+        workspace_id: str,
+        group_id: str,
+        expected_revision: int,
+        pane_order: List[str],
+        pane_updates: Dict[str, Dict[str, Any]],
+        layout: Any = _UNCHANGED,
+        workspace_layout: Any = _UNCHANGED,
+    ) -> Dict[str, Any]:
+        """Compare-and-swap one complete live group presentation atomically.
+
+        The web service has already normalized and deep-bounded every value.
+        This lock hold is therefore limited to identity/revision checks and a
+        complete in-memory replacement; it performs no emit, request, or file
+        work. Every failure is decided before the first mutation.
+        """
+        with self.lock:
+            workspace = self.workspaces.get(workspace_id)
+            if workspace is None:
+                return {"outcome": "not_found", "error": "Workspace not found"}
+            group = self.groups.get(group_id)
+            if group is None:
+                return {"outcome": "not_found", "error": "Session group not found"}
+            if group.workspace_id != workspace_id:
+                return {
+                    "outcome": "invalid",
+                    "error": "Session group belongs to another workspace",
+                }
+            if group.presentation_revision != expected_revision:
+                return {
+                    "outcome": "conflict",
+                    "error": "Presentation revision is stale",
+                    "workspace_id": workspace_id,
+                    "group_id": group_id,
+                    "presentation_revision": group.presentation_revision,
+                }
+
+            current_sessions = {
+                session_id: session
+                for session_id, session in self.sessions.items()
+                if session.group_id == group_id
+            }
+            if set(pane_order) != set(current_sessions):
+                return {
+                    "outcome": "invalid",
+                    "error": "Pane ids do not match the live session group",
+                }
+            if set(pane_updates) != set(current_sessions):
+                return {
+                    "outcome": "invalid",
+                    "error": "Pane updates do not match the live session group",
+                }
+            for session_id, updates in pane_updates.items():
+                session = current_sessions[session_id]
+                invalid_fields = set(updates) - pane_fields_for_mode(
+                    session.startup_mode
+                )
+                if invalid_fields:
+                    return {
+                        "outcome": "invalid",
+                        "error": (
+                            f"Presentation field is invalid for {session.startup_mode} pane"
+                        ),
+                    }
+
+            if layout is not _UNCHANGED:
+                group.layout = layout
+            if workspace_layout is not _UNCHANGED:
+                group.workspace_layout = deep_copy_presentation(workspace_layout)
+            group.pane_order = list(pane_order)
+            for session_id, updates in pane_updates.items():
+                session = current_sessions[session_id]
+                for field_name, value in updates.items():
+                    setattr(session, field_name, deep_copy_presentation(value))
+                if "browser_tabs" in updates:
+                    tabs = session.browser_tabs
+                    active = session.browser_active_tab
+                    session.initial_command = tabs[active] if tabs else ""
+            group.presentation_revision += 1
+            return {
+                "outcome": "ok",
+                "workspace_id": workspace_id,
+                "group_id": group_id,
+                "presentation_revision": group.presentation_revision,
+                "pane_order": list(group.pane_order),
+            }
 
     def reorder_groups(
         self,
@@ -983,7 +1269,16 @@ class SessionManager:
     def get_group_sessions(self, group_id: str) -> List[TerminalSession]:
         """Get sessions belonging to one group."""
         with self.lock:
-            return [s for s in self.sessions.values() if s.group_id == group_id]
+            sessions = {
+                session.session_id: session
+                for session in self.sessions.values()
+                if session.group_id == group_id
+            }
+            group = self.groups.get(group_id)
+            ordered_ids = group.pane_order if group is not None else []
+            result = [sessions.pop(session_id) for session_id in ordered_ids if session_id in sessions]
+            result.extend(sessions.values())
+            return result
 
     def get_workspace_sessions(
         self,
@@ -1068,6 +1363,9 @@ class SessionManager:
             # The destination now holds content: a deliberately empty workspace
             # stops being retained the moment its first group arrives.
             self.workspaces[resolved_target_id].retain_when_empty = False
+            self._mirror_workspace_appearance_locked(
+                self.workspaces[resolved_target_id]
+            )
             source_workspace = self.workspaces.get(source_workspace_id)
             if source_workspace and source_workspace.active_group_id == group.group_id:
                 source_workspace.active_group_id = ""
@@ -1084,8 +1382,7 @@ class SessionManager:
                 for group in self.get_workspace_groups(workspace.workspace_id):
                     sessions = [
                         session.to_dict()
-                        for session in self.sessions.values()
-                        if session.group_id == group.group_id
+                        for session in self.get_group_sessions(group.group_id)
                     ]
                     if not sessions:
                         continue
@@ -1099,6 +1396,10 @@ class SessionManager:
                     "workspace_id": workspace.workspace_id,
                     "label": workspace.label,
                     "created_at": workspace.created_at,
+                    "topbar_visible": workspace.topbar_visible,
+                    "md_preset": workspace.md_preset,
+                    "md_font": workspace.md_font,
+                    "source_font": workspace.source_font,
                     "active_group_id": (
                         workspace.active_group_id
                         if workspace.active_group_id in captured_group_ids
@@ -1106,6 +1407,24 @@ class SessionManager:
                     ),
                     "groups": groups,
                 }
+            return snapshots
+
+    def snapshot_lifecycle_workspaces(self) -> Dict[str, Dict[str, Any]]:
+        """Take the lifecycle preset snapshot, including in-memory credentials.
+
+        This is the sole credential-bearing snapshot path.  The caller uses it
+        only to encrypt reusable presets and never returns or logs it; runtime
+        workspace capture continues to call :meth:`snapshot_live_workspaces`,
+        whose dictionaries are password-free.  The outer lock spans both shape
+        capture and credential attachment so a close/move cannot mix versions.
+        """
+        with self.lock:
+            snapshots = self.snapshot_live_workspaces()
+            for snapshot in snapshots.values():
+                for group in snapshot.get("groups") or []:
+                    for pane in group.get("sessions") or []:
+                        session = self.sessions.get(pane.get("session_id"))
+                        pane["password"] = session.password if session is not None else None
             return snapshots
 
     def get_active_sessions(self) -> List[TerminalSession]:

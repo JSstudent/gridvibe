@@ -20,6 +20,66 @@
     const APP_CONFIG_UPDATE_STORAGE_KEY = 'gridvibe.appConfigUpdated';
     const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';
     const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';
+    const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';
+
+    function workspaceTopbarVisibilityStorageKey(workspaceId) {
+        return `${TOPBAR_VISIBILITY_STORAGE_KEY}.${String(workspaceId || 'default')}`;
+    }
+
+    /* The lifecycle window id is stable per *window*, not per page load:
+       sessionStorage is tab/window-scoped and survives a reload, so a reloaded
+       workspace window rejoins with its own id and replaces its own server-side
+       registration even when `pagehide` never fired (a crash, a kill, a network
+       partition). Two tabs on the same workspace keep distinct ids. Storage can
+       be unavailable (private modes, locked-down webviews); the per-load
+       fallback is then bounded by the server-side stale-window grace period. */
+    const LIFECYCLE_WINDOW_ID_STORAGE_KEY = 'gridvibe.lifecycleWindowId';
+
+    function generateLifecycleWindowId() {
+        return globalThis.crypto?.randomUUID?.()
+            || `window-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    }
+
+    function getLifecycleWindowId() {
+        try {
+            const stored = window.sessionStorage.getItem(LIFECYCLE_WINDOW_ID_STORAGE_KEY);
+            if (stored) {
+                return stored;
+            }
+            const generated = generateLifecycleWindowId();
+            window.sessionStorage.setItem(LIFECYCLE_WINDOW_ID_STORAGE_KEY, generated);
+            return generated;
+        } catch (_) {
+            return generateLifecycleWindowId();
+        }
+    }
+
+    function getStoredWorkspaceTopbarVisible(workspaceId) {
+        try {
+            const stored = localStorage.getItem(workspaceTopbarVisibilityStorageKey(workspaceId));
+            return stored === null ? null : stored !== 'hidden';
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function storeWorkspaceTopbarVisible(workspaceId, visible) {
+        try {
+            localStorage.setItem(
+                workspaceTopbarVisibilityStorageKey(workspaceId),
+                visible ? 'visible' : 'hidden'
+            );
+        } catch (_) {}
+    }
+
+    /* The top-bar key is only a same-window restoration cache for a value the
+       workspace record owns, so forgetting a workspace drops its key too —
+       otherwise one dead key per forgotten workspace would linger forever. */
+    function clearStoredWorkspaceTopbarVisible(workspaceId) {
+        try {
+            localStorage.removeItem(workspaceTopbarVisibilityStorageKey(workspaceId));
+        } catch (_) {}
+    }
 
     /* One confirmation controller serves both pages. The shared template puts
        each page's button classes on the modal as data attributes, so the

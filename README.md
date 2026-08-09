@@ -112,9 +112,10 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 | --- | --- |
 | **Session tabs** | Keep related panes together in draggable tabs. Use `Alt+1`–`Alt+9` to switch, middle-click to close, or broadcast typing to every pane in the active tab. |
 | **Saved sessions** | Save a setup as a reusable preset, import one later, or choose **New Session** for a clean start. Stored SSH passwords are encrypted. |
-| **Save & restore** | GridVibe autosaves your workspace and also offers **Save Workspace**. After a restart, restore the same tabs, pane layouts, directories, commands, and active group; passwords are never written to the workspace snapshot. |
+| **Save & restore** | GridVibe autosaves your workspace and also offers **Save Workspace**. After a restart, restore the same tabs, pane layouts, directories, commands, active group, and explorer presentation; passwords are never written to the workspace snapshot. Lowering `max_sessions` does not truncate wider stored presets or rewrite their split geometry; a group that no longer fits is refused with the number to raise the setting to, and the stored preset and snapshot are left untouched. A snapshot damaged outside GridVibe fails as a whole tab rather than restoring one pane short, so the restore chooser's counts always match what a restore starts; window chrome such as top-bar visibility and Markdown appearance falls back to its default instead. |
+| **Close & restart** | Voluntary close, manual restart, and update restart share one in-page choice: continue without saving, save every open workspace, or save every open session preset and then every workspace. GridVibe waits for each live workspace window to flush its current presentation; if a requested save fails, GridVibe stays open and leaves the same three choices available. |
 | **Multiple workspaces** | Optionally keep separate projects in separate windows, move tabs between them without restarting terminals, and switch with `Alt+W` / `Alt+Shift+W`. |
-| **Updates** | **Check for updates** fast-forwards a Git clone, with an option to save the workspace and restart. |
+| **Updates** | **Check for updates** fast-forwards a Git clone, then uses the same save-or-restart choices as a manual restart. |
 
 Closing a workspace ends its terminals but keeps it available to restore. **Close and forget** removes both the live workspace and its snapshot, while closing only the window leaves its terminals running. Closing the last tab removes an empty workspace.
 
@@ -128,6 +129,7 @@ Swap any pane between a terminal and a file explorer with one button — same di
 | **Edit** | Edit complete UTF-8 text files in place and save with `Ctrl+S`. Saves are atomic, and a conflict prompt protects files changed on disk. |
 | **Git** | See branch and file status, inspect current or historical diffs, and stage, unstage, commit, publish, or discard changes. Diff views also support line and block undo. |
 | **Search** | Press `Ctrl+Shift+F` for repository-wide search with case, whole-word, regex, file-pattern, scope, and `.gitignore` controls. |
+| **Restore fidelity** | Saved sessions and workspaces preserve the explorer root, ordered file tabs, Preview/Source/Diff intent, per-panel and directory scroll, wrapping, folds, sidebar width/scroll, Files-tree expansion, Git commit expansion, theme, and workspace-wide Markdown/source appearance. Content-relative scroll and folds restore only when their file, directory, or rendered Diff revision still matches; queries and fetched results are always refetched, never stored. |
 | **Manage files** | Create, copy, move, rename, and delete from the context menu. Every write stays inside the explorer root; collisions never overwrite existing files, and deletion requires confirmation. |
 
 Uploading, cross-root transfers, and Git checkout, pull, or merge are intentionally left to the terminal.
@@ -248,6 +250,8 @@ Created at runtime, never committed:
 | `.known_hosts` | Persisted SSH host keys |
 | `.encryption_key` | Fernet key for password encryption |
 | `logs/gridvibe.log` | Main rotating log file |
+
+Both JSON state files are written the same careful way: one change at a time under an OS-level `<file>.lock`, committed through a scratch file and an atomic replace, with the previous version kept as `<file>.bak`. A file GridVibe cannot read is moved aside as `<file>.corrupt-<timestamp>` and the backup is loaded in its place, rather than being reported as empty and overwritten. A save that does not reach the disk is reported as a retryable failure, never as success. Those sidecar files are local state and are gitignored alongside the files they protect.
 
 ## License
 

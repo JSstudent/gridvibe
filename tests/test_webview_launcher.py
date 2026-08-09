@@ -70,8 +70,11 @@ class _FakeWindow:
             before_show=_FakeEvent(),
             shown=_FakeEvent(),
             loaded=_FakeEvent(),
+            closing=_FakeEvent(),
             closed=_FakeEvent(),
         )
+        self.evaluate_js = Mock()
+        self.destroy = Mock()
 
 
 class _FakeHandle:
@@ -98,6 +101,12 @@ class _FakeZoomNative:
 
 
 class WebviewLauncherTestCase(unittest.TestCase):
+    def setUp(self):
+        webview_launcher.lifecycle_coordinator.reset()
+
+    def tearDown(self):
+        webview_launcher.lifecycle_coordinator.reset()
+
     def test_launcher_close_exits_even_when_session_window_is_still_open(self):
         self.assertTrue(
             webview_launcher._should_exit_after_window_close("launcher", {"session"})
@@ -313,8 +322,15 @@ class WebviewLauncherTestCase(unittest.TestCase):
         ), patch.object(
             webview_launcher,
             "_set_linux_qtwebengine_env",
-        ):
+        ), patch.object(
+            webview_launcher,
+            "_request_native_close_prompt",
+        ) as request_native_close_prompt:
             webview_launcher.main()
+            closing = fake_webview.create_window.return_value.events.closing.handlers
+            self.assertEqual(len(closing), 1)
+            self.assertFalse(closing[0]())
+            self.assertFalse(closing[0]())
 
         fake_webview.create_window.assert_called_once()
         self.assertTrue(fake_webview.create_window.call_args.kwargs["resizable"])
@@ -328,6 +344,47 @@ class WebviewLauncherTestCase(unittest.TestCase):
         fake_webview.start.assert_called_once()
         self.assertEqual(len(fake_webview.create_window.return_value.events.before_show.handlers), 1)
         self.assertEqual(len(fake_webview.create_window.return_value.events.shown.handlers), 1)
+        request_native_close_prompt.assert_called_once()
+        self.assertIs(
+            request_native_close_prompt.call_args.args[0],
+            fake_webview.create_window.return_value,
+        )
+        fake_webview.create_window.return_value.evaluate_js.assert_not_called()
+
+    def test_native_close_prompt_defers_synchronous_javascript_to_worker(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        api_bridge._close_prompt_pending = True
+        window = _FakeWindow()
+        threads = []
+
+        class DeferredThread:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.started = False
+                threads.append(self)
+
+            def start(self):
+                self.started = True
+
+        with patch.object(
+            webview_launcher.threading,
+            "Thread",
+            DeferredThread,
+        ):
+            webview_launcher._request_native_close_prompt(window, api_bridge)
+
+        window.evaluate_js.assert_not_called()
+        self.assertEqual(len(threads), 1)
+        self.assertTrue(threads[0].started)
+        self.assertTrue(threads[0].kwargs["daemon"])
+        self.assertEqual(threads[0].kwargs["name"], "gridvibe-native-close-prompt")
+
+        threads[0].kwargs["target"]()
+
+        window.evaluate_js.assert_called_once_with(
+            "window.gridvibeRequestLifecycleClose && "
+            "window.gridvibeRequestLifecycleClose()"
+        )
 
     def test_maximized_event_clears_stale_minimized_flag(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
@@ -926,6 +983,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
     def test_restart_application_queues_restart_and_shutdown(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
         restart_command = ["/usr/bin/python3", "/tmp/webview_launcher.py", "--debug"]
+        decision = webview_launcher.lifecycle_coordinator.issue_decision("restart")
 
         with patch.object(
             webview_launcher,
@@ -938,13 +996,31 @@ class WebviewLauncherTestCase(unittest.TestCase):
             webview_launcher,
             "_start_restart_shutdown_thread",
         ) as start_shutdown:
-            result = api_bridge.restart_application()
+            result = api_bridge.restart_application(decision)
 
         self.assertEqual(result, {"ok": True, "restarting": True})
         schedule_restart.assert_called_once()
         self.assertEqual(schedule_restart.call_args.args[0], restart_command)
         self.assertEqual(schedule_restart.call_args.args[2], webview_launcher.os.getpid())
         start_shutdown.assert_called_once_with(api_bridge=api_bridge)
+
+    def test_native_close_requires_and_consumes_one_lifecycle_decision(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _FakeWindow()
+        api_bridge._attach_window(window)
+
+        refused = api_bridge.approve_application_close("")
+        self.assertFalse(refused["ok"])
+        self.assertTrue(refused["lifecycle_decision_required"])
+        window.destroy.assert_not_called()
+
+        decision = webview_launcher.lifecycle_coordinator.issue_decision("close")
+        approved = api_bridge.approve_application_close(decision)
+
+        self.assertEqual(approved, {"ok": True})
+        window.destroy.assert_called_once_with()
+        replay = api_bridge.approve_application_close(decision)
+        self.assertFalse(replay["ok"])
 
     def test_schedule_process_restart_uses_detached_helper_on_windows(self):
         command = [

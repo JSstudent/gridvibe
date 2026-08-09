@@ -30,8 +30,24 @@ def _js_function_source(script, name):
     # syntax error the moment the harness runs them.
     if script[max(0, start - 6):start] == "async ":
         start -= 6
+    # Defaults such as ``options = {}`` and destructured parameters contain
+    # braces before the function body. Find the closing parameter parenthesis
+    # first so those values cannot truncate the extracted source.
+    parameter_depth = 0
+    parameter_end = None
+    for index in range(script.index("(", start), len(script)):
+        if script[index] == "(":
+            parameter_depth += 1
+        elif script[index] == ")":
+            parameter_depth -= 1
+            if parameter_depth == 0:
+                parameter_end = index
+                break
+    if parameter_end is None:
+        raise AssertionError(f"unbalanced parameters in {name}")
+
     depth = 0
-    for index in range(script.index("{", start), len(script)):
+    for index in range(script.index("{", parameter_end), len(script)):
         if script[index] == "{":
             depth += 1
         elif script[index] == "}":
@@ -1583,6 +1599,157 @@ class RuntimeStateSlotValidationTestCase(unittest.TestCase):
         self.assertEqual(self.state_path.read_bytes(), before)
 
 
+class RuntimeStateNestedFieldValidationTestCase(unittest.TestCase):
+    """Audit SGP-07 / Stage 6 items 4-5: nested pane state is type-checked.
+
+    The session allowlist only ever proved a *key* was expected. Whether a
+    wrong-typed value cost the user a pane, or was installed as garbage, came
+    down to whether a defensive coercion in ``_session_launch_fields`` happened
+    to raise: ``dict("x")`` and ``int("abc")`` did, so the pane vanished and the
+    group launched smaller; ``list("abc")`` did not, so ``['a','b','c']`` became
+    live state that the next autosave made durable.
+
+    The boundary this class pins is deliberately narrow: **launchable shape
+    fails, window chrome degrades.** A wrong-typed pane field costs the group;
+    a wrong-typed ``topbar_visible`` or appearance value costs only itself.
+    """
+
+    WORKSPACE_A = "aaaaaaaaaaaa"
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_pane(self, **pane_fields):
+        state = {
+            "version": web_runtime_state.SCHEMA_VERSION,
+            "workspaces": {
+                self.WORKSPACE_A: {
+                    "workspace_id": self.WORKSPACE_A,
+                    "label": "Alpha",
+                    "origin": "manual",
+                    "saved_at": 1000.0,
+                    "groups": [
+                        {
+                            "group_id": "g1",
+                            "name": "Group",
+                            "connection_mode": "wsl",
+                            "layout": "vertical",
+                            "sessions": [
+                                {"directory": "/srv", "title": "Kept"},
+                                {"directory": "/srv", "title": "Suspect", **pane_fields},
+                            ],
+                        }
+                    ],
+                }
+            },
+        }
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    def _pane(self):
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+        return slot["groups"][0]["sessions"][1] if slot else None
+
+    def test_a_wrong_typed_nested_value_costs_the_group_not_one_pane(self):
+        for field_name, value in (
+            ("explorer_tab_views", "x"),
+            ("browser_active_tab", "abc"),
+            ("explorer_open_tabs", "abc"),
+            ("explorer_tree_open", "yes"),
+            ("explorer_sidebar_width", "wide"),
+            ("explorer_tree_expanded", {"a": 1}),
+            ("browser_tabs", "http://x"),
+        ):
+            with self.subTest(field=field_name):
+                self._write_pane(**{field_name: value})
+
+                self.assertIsNone(
+                    web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+                )
+                self.assertEqual(web_runtime_state.list_restorable_workspaces(), [])
+
+    def test_an_out_of_range_value_of_the_right_type_is_bounded_not_rejected(self):
+        """Rejection is for wrong *types*; a legal type is still normalized."""
+        self._write_pane(
+            explorer_sidebar_width=9999,
+            explorer_open_tabs=[f"file{index}.md" for index in range(40)],
+            explorer_active_tab="file3.md",
+        )
+
+        pane = self._pane()
+
+        self.assertIsNotNone(pane)
+        self.assertEqual(pane["explorer_sidebar_width"], 520)
+        self.assertEqual(len(pane["explorer_open_tabs"]), 12)
+        self.assertEqual(pane["explorer_active_tab"], "file3.md")
+
+    def test_an_active_tab_outside_the_open_tabs_degrades_to_preview(self):
+        self._write_pane(
+            explorer_open_tabs=["a.md"], explorer_active_tab="gone.md"
+        )
+
+        self.assertEqual(self._pane()["explorer_active_tab"], "")
+
+    def test_a_legacy_slot_without_the_newer_fields_still_restores(self):
+        """Absent is not malformed: an older capture keeps its defaults."""
+        self._write_pane(host="h.example")
+
+        pane = self._pane()
+
+        self.assertIsNotNone(pane)
+        self.assertEqual(pane["host"], "h.example")
+        self.assertIsNone(pane["explorer_sidebar_scroll"])
+
+    def test_invalid_window_chrome_degrades_instead_of_costing_the_slot(self):
+        """The stated boundary: chrome is not launchable shape."""
+        self._write_pane()
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state["workspaces"][self.WORKSPACE_A]["topbar_visible"] = "hidden"
+        state["workspaces"][self.WORKSPACE_A]["md_preset"] = 17
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        self.assertIsNotNone(slot)
+        self.assertTrue(slot["topbar_visible"])
+        self.assertEqual(slot["md_preset"], "default")
+
+    def test_a_rejected_pane_is_logged_as_shape_only(self):
+        self._write_pane(
+            explorer_open_tabs="abc",
+            host="secret.example",
+            directory="/srv/secret-project",
+        )
+
+        with self.assertLogs(web_runtime_state.logger, level="WARNING") as captured:
+            web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        joined = "\n".join(captured.output)
+        self.assertIn("not restorable", joined)
+        self.assertNotIn("secret.example", joined)
+        self.assertNotIn("secret-project", joined)
+
+    def test_a_read_that_rejects_a_group_never_rewrites_the_file(self):
+        """The bad slot stays on disk for diagnosis and for a later fix."""
+        self._write_pane(explorer_open_tabs="abc")
+        before = self.state_path.read_bytes()
+
+        web_runtime_state.list_restorable_workspaces()
+        web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+
 class WorkspaceDiagnosticsTestCase(unittest.TestCase):
     """MW-16 (diagnostics half): safe metadata for every state transition.
 
@@ -1974,6 +2141,398 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
         label = response.get_json()["label"]
         self.assertEqual(len(label), 80)
         self.assertTrue(label.startswith("spaced name x"))
+
+    # ── Label namespace (Stage 4.5, SGP-13) ──
+
+    def test_create_rejects_a_label_taken_by_a_live_workspace(self):
+        first = self.client.post("/api/workspaces", json={"label": "Alpha"})
+        self.assertEqual(first.status_code, 201)
+        before = len(api.session_manager.get_all_workspaces())
+
+        # Case- and whitespace-insensitive: this is the same name to a user.
+        response = self.client.post("/api/workspaces", json={"label": " alpha "})
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertEqual(payload["conflict"], "workspace_label_taken")
+        self.assertEqual(payload["conflict_kind"], "live")
+        self.assertEqual(payload["workspace_id"], first.get_json()["workspace_id"])
+        self.assertEqual(payload["label"], "alpha")
+        # Nothing is mutated by the refusal.
+        self.assertEqual(len(api.session_manager.get_all_workspaces()), before)
+
+    def test_create_rejects_a_label_taken_by_a_saved_slot(self):
+        self._launch(session_name="Main")
+        self.client.patch("/api/workspaces/default", json={"label": "Saved WS"})
+        save = self.client.post("/api/runtime-state/save", json={"workspace_id": "default"})
+        self.assertEqual(save.status_code, 200, save.get_json())
+        # The saved slot keeps the name while the live workspace moves on, so
+        # only the saved namespace can conflict here.
+        self.client.patch("/api/workspaces/default", json={"label": "Main again"})
+        state_before = self.state_path.read_bytes()
+
+        response = self.client.post("/api/workspaces", json={"label": "saved  ws"})
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertEqual(payload["conflict"], "workspace_label_taken")
+        self.assertEqual(payload["conflict_kind"], "saved")
+        self.assertEqual(payload["workspace_id"], "default")
+        # The stored slot survives the refusal byte-for-byte.
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+
+    def test_label_validation_reports_a_saved_conflict_without_mutating_state(self):
+        """The launcher's name dialog checks the namespace without reserving it."""
+        self._launch(session_name="Main")
+        self.client.patch("/api/workspaces/default", json={"label": "Saved WS"})
+        save = self.client.post(
+            "/api/runtime-state/save", json={"workspace_id": "default"}
+        )
+        self.assertEqual(save.status_code, 200, save.get_json())
+        self.client.patch("/api/workspaces/default", json={"label": "Main again"})
+        state_before = self.state_path.read_bytes()
+        live_before = {
+            workspace.workspace_id
+            for workspace in api.session_manager.get_all_workspaces()
+        }
+
+        conflict = self.client.post(
+            "/api/workspaces/validate-label", json={"label": " saved   ws "}
+        )
+        available = self.client.post(
+            "/api/workspaces/validate-label", json={"label": " Fresh\nWorkspace "}
+        )
+
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.get_json()["conflict"], "workspace_label_taken")
+        self.assertEqual(conflict.get_json()["conflict_kind"], "saved")
+        self.assertEqual(conflict.get_json()["workspace_id"], "default")
+        self.assertEqual(available.status_code, 200, available.get_json())
+        self.assertEqual(
+            available.get_json(), {"available": True, "label": "Fresh Workspace"}
+        )
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+        self.assertEqual(
+            {
+                workspace.workspace_id
+                for workspace in api.session_manager.get_all_workspaces()
+            },
+            live_before,
+        )
+
+    def test_rename_rejects_a_label_taken_by_a_live_workspace(self):
+        first = self.client.post("/api/workspaces", json={"label": "Alpha"}).get_json()
+        second = self.client.post("/api/workspaces", json={"label": "Beta"}).get_json()
+
+        response = self.client.patch(
+            f"/api/workspaces/{second['workspace_id']}", json={"label": "ALPHA"}
+        )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertEqual(payload["conflict_kind"], "live")
+        self.assertEqual(payload["workspace_id"], first["workspace_id"])
+        self.assertEqual(
+            api.session_manager.get_workspace(second["workspace_id"]).label, "Beta"
+        )
+
+    def test_rename_rejects_a_label_taken_by_a_saved_slot(self):
+        self._launch(session_name="Main")
+        self.client.patch("/api/workspaces/default", json={"label": "Saved WS"})
+        self.client.post("/api/runtime-state/save", json={"workspace_id": "default"})
+        # The saved slot keeps the name while the live workspace moves on.
+        self.client.patch("/api/workspaces/default", json={"label": "Main again"})
+        state_before = self.state_path.read_bytes()
+        other = self.client.post("/api/workspaces", json={"label": "Other"}).get_json()
+
+        response = self.client.patch(
+            f"/api/workspaces/{other['workspace_id']}", json={"label": "Saved WS"}
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["conflict_kind"], "saved")
+        self.assertEqual(
+            api.session_manager.get_workspace(other["workspace_id"]).label, "Other"
+        )
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+
+    def test_rename_may_keep_its_own_name_with_new_casing(self):
+        """Its own live record and its own saved slot are the same identity."""
+        self._launch(session_name="Main")
+        self.client.patch("/api/workspaces/default", json={"label": "Reviews"})
+        self.client.post("/api/runtime-state/save", json={"workspace_id": "default"})
+
+        response = self.client.patch("/api/workspaces/default", json={"label": "reviews"})
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(api.session_manager.get_workspace("default").label, "reviews")
+
+    def test_unlabelled_workspaces_stay_unconstrained(self):
+        """Uniqueness applies to names, not to their absence."""
+        first = self.client.post("/api/workspaces", json={})
+        second = self.client.post("/api/workspaces", json={"label": "  "})
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        self.assertNotEqual(
+            first.get_json()["workspace_id"], second.get_json()["workspace_id"]
+        )
+
+    def test_launch_into_a_new_workspace_rejects_a_taken_label(self):
+        self.client.post("/api/workspaces", json={"label": "Alpha"})
+        before = {ws.workspace_id for ws in api.session_manager.get_all_workspaces()}
+
+        response = self._launch(new_workspace=True, workspace_label="alpha")
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertEqual(payload["conflict"], "workspace_label_taken")
+        self.assertEqual(payload["conflict_kind"], "live")
+        # No rival workspace was minted for the taken name.
+        after = {ws.workspace_id for ws in api.session_manager.get_all_workspaces()}
+        self.assertEqual(before, after)
+
+    def test_launch_name_dialog_starts_blank_and_keeps_conflicts_inline(self):
+        """Exercise the shipped dialog, validator, and launcher chooser together."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        workspaces_js = self._static("js/workspaces.js")
+        launcher_js = self._static("js/launcher.js")
+        source = "\n".join(
+            [
+                *(
+                    _js_function_source(workspaces_js, name)
+                    for name in (
+                        "workspaceApiRequest",
+                        "workspaceNameError",
+                        "validateWorkspaceLabel",
+                        "setWorkspaceNameModalBusy",
+                        "setWorkspaceNameModalError",
+                        "closeWorkspaceNameModal",
+                        "openWorkspaceNameModal",
+                        "wireWorkspaceNameModal",
+                    )
+                ),
+                *(
+                    _js_function_source(launcher_js, name)
+                    for name in (
+                        "setWorkspaceDestination",
+                        "chooseNewWorkspaceDestination",
+                        "handleLaunchWorkspaceLabelConflict",
+                    )
+                ),
+            ]
+        )
+        script = source + r"""
+const WORKSPACE_NEW_DESTINATION = '__new__';
+let workspaceNameResolver = null;
+let workspaceNameValidator = null;
+let workspaceNameValidationId = 0;
+let workspaceDestination = WORKSPACE_NEW_DESTINATION;
+let workspaceDestinationLabelDraft = 'Rejected draft';
+const syncDrafts = [];
+const loadingStates = [];
+const requests = [];
+
+function makeClassList() {
+    const values = new Set();
+    return {
+        add(...names) { names.forEach(name => values.add(name)); },
+        remove(...names) { names.forEach(name => values.delete(name)); },
+        contains(name) { return values.has(name); },
+        toggle(name, force) {
+            const enabled = force === undefined ? !values.has(name) : Boolean(force);
+            if (enabled) values.add(name); else values.delete(name);
+            return enabled;
+        }
+    };
+}
+
+function makeElement() {
+    const listeners = new Map();
+    return {
+        value: '',
+        textContent: '',
+        hidden: false,
+        disabled: false,
+        attributes: {},
+        classList: makeClassList(),
+        setAttribute(name, value) { this.attributes[name] = String(value); },
+        removeAttribute(name) { delete this.attributes[name]; },
+        addEventListener(name, listener) {
+            if (!listeners.has(name)) listeners.set(name, []);
+            listeners.get(name).push(listener);
+        },
+        async dispatch(name, supplied = {}) {
+            const event = {
+                target: this,
+                preventDefault() {},
+                stopPropagation() {},
+                ...supplied
+            };
+            for (const listener of listeners.get(name) || []) {
+                await listener(event);
+            }
+        },
+        focus() { this.focused = true; },
+        select() { this.selected = true; },
+        querySelectorAll() { return []; }
+    };
+}
+
+const ids = [
+    'workspaceNameModal', 'workspaceNameInput', 'workspaceNameTitle',
+    'workspaceNameCopy', 'workspaceNameAccept', 'workspaceNameForm',
+    'workspaceNameCancel', 'workspaceNameError'
+];
+const elements = Object.fromEntries(ids.map(id => [id, makeElement()]));
+elements.workspaceNameError.hidden = true;
+elements.workspaceNameModal.querySelectorAll = () => [
+    elements.workspaceNameInput,
+    elements.workspaceNameAccept,
+    elements.workspaceNameCancel
+];
+
+const document = { getElementById: id => elements[id] || null };
+const window = { setTimeout: callback => callback() };
+
+function syncLaunchDestinationControl() {
+    syncDrafts.push([workspaceDestination, workspaceDestinationLabelDraft]);
+}
+
+function setLaunchButtonLoading(_button, loading) {
+    loadingStates.push(Boolean(loading));
+}
+
+async function fetch(path, options) {
+    const body = JSON.parse(options.body);
+    requests.push([path, body]);
+    if (body.label === 'Saved WS') {
+        return {
+            ok: false,
+            status: 409,
+            json: async () => ({
+                error: '"Saved WS" is a saved workspace — reopen it, forget it, or pick another name.',
+                conflict: 'workspace_label_taken',
+                conflict_kind: 'saved',
+                workspace_id: 'default',
+                label: 'Saved WS'
+            })
+        };
+    }
+    return {
+        ok: true,
+        status: 200,
+        json: async () => ({ available: true, label: body.label })
+    };
+}
+
+(async () => {
+    wireWorkspaceNameModal();
+    const choice = chooseNewWorkspaceDestination();
+    const initialValue = elements.workspaceNameInput.value;
+    const draftAfterOpen = workspaceDestinationLabelDraft;
+
+    elements.workspaceNameInput.value = 'Saved WS';
+    await elements.workspaceNameForm.dispatch('submit');
+    const rejected = {
+        message: elements.workspaceNameError.textContent,
+        errorHidden: elements.workspaceNameError.hidden,
+        modalVisible: elements.workspaceNameModal.classList.contains('visible'),
+        inputDisabled: elements.workspaceNameInput.disabled,
+        draft: workspaceDestinationLabelDraft
+    };
+
+    elements.workspaceNameInput.value = 'Fresh workspace';
+    await elements.workspaceNameInput.dispatch('input');
+    const errorHiddenAfterEdit = elements.workspaceNameError.hidden;
+    await elements.workspaceNameForm.dispatch('submit');
+    await choice;
+    const accepted = {
+        modalVisible: elements.workspaceNameModal.classList.contains('visible'),
+        destination: workspaceDestination,
+        draft: workspaceDestinationLabelDraft
+    };
+
+    // The launch route checks again. Simulate another window taking the name
+    // after validation and prove the commit-time 409 returns to the same blank
+    // dialog instead of leaving the rejected name on the Launch button.
+    workspaceDestinationLabelDraft = 'Fresh workspace';
+    const race = handleLaunchWorkspaceLabelConflict(
+        409,
+        { conflict: 'workspace_label_taken', error: 'Taken during launch.' },
+        {}
+    );
+    const raceDialog = {
+        value: elements.workspaceNameInput.value,
+        message: elements.workspaceNameError.textContent,
+        modalVisible: elements.workspaceNameModal.classList.contains('visible'),
+        draft: workspaceDestinationLabelDraft
+    };
+    await elements.workspaceNameCancel.dispatch('click');
+    const raceHandled = await race;
+
+    process.stdout.write(JSON.stringify({
+        initialValue,
+        draftAfterOpen,
+        rejected,
+        errorHiddenAfterEdit,
+        accepted,
+        raceDialog,
+        raceHandled,
+        loadingStates,
+        requests,
+        syncDrafts
+    }));
+})();
+"""
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "workspace-name-dialog.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["initialValue"], "")
+        self.assertEqual(result["draftAfterOpen"], "")
+        self.assertIn("saved workspace", result["rejected"]["message"])
+        self.assertFalse(result["rejected"]["errorHidden"])
+        self.assertTrue(result["rejected"]["modalVisible"])
+        self.assertFalse(result["rejected"]["inputDisabled"])
+        self.assertEqual(result["rejected"]["draft"], "")
+        self.assertTrue(result["errorHiddenAfterEdit"])
+        self.assertEqual(
+            result["accepted"],
+            {
+                "modalVisible": False,
+                "destination": "__new__",
+                "draft": "Fresh workspace",
+            },
+        )
+        self.assertEqual(
+            result["raceDialog"],
+            {
+                "value": "",
+                "message": "Taken during launch.",
+                "modalVisible": True,
+                "draft": "",
+            },
+        )
+        self.assertTrue(result["raceHandled"])
+        self.assertEqual(result["loadingStates"], [False])
+        self.assertEqual(
+            result["requests"],
+            [
+                ["/api/workspaces/validate-label", {"label": "Saved WS"}],
+                ["/api/workspaces/validate-label", {"label": "Fresh workspace"}],
+            ],
+        )
 
     # ── Move ──
 
@@ -2723,7 +3282,11 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
         workspace_result = payload["workspaces"][0]
         self.assertTrue(workspace_result["restored"])
         self.assertEqual([group["started"] for group in workspace_result["groups"]], [True, False])
-        self.assertIn("Maximum", workspace_result["groups"][1]["error"])
+        # The forwarded per-group error is the actionable capacity refusal: it
+        # names the number to raise `max_sessions` to (audit product decision 6).
+        self.assertEqual(
+            workspace_result["groups"][1]["error"], web_workspaces.capacity_refusal(2, 1)
+        )
 
     def test_r8_front_group_hint_falls_back_to_the_first_started_group(self):
         first = self._launch(session_name="First")
@@ -2766,6 +3329,24 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
             ).name,
             "Second",
         )
+
+    def test_restore_reapplies_the_saved_workspace_topbar_visibility(self):
+        self._launch(session_name="Hidden chrome")
+        api.session_manager.set_topbar_visible("default", False)
+        slot = self._save_slot()
+        self.assertFalse(slot["topbar_visible"])
+        self._close_everything()
+        self.assertTrue(api.session_manager.get_topbar_visible("default"))
+
+        response, payload = self._restore(["default"])
+
+        self.assertEqual(response.status_code, 200)
+        workspace_result = payload["workspaces"][0]
+        self.assertTrue(workspace_result["restored"])
+        self.assertFalse(workspace_result["topbar_visible"])
+        self.assertFalse(api.session_manager.get_topbar_visible("default"))
+        groups = self.client.get("/api/session-groups").get_json()
+        self.assertFalse(groups["topbar_visible"])
 
     def test_r9_a_blank_label_is_derived_never_a_bare_timestamp(self):
         self._launch(session_name="Session 12:34:56")
@@ -2852,7 +3433,10 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(payload["workspaces"][0]["restored"])
-        self.assertIn("Maximum", payload["workspaces"][0]["groups"][0]["error"])
+        self.assertEqual(
+            payload["workspaces"][0]["groups"][0]["error"],
+            web_workspaces.capacity_refusal(1, 0),
+        )
 
     # ── R13 / R14 Forget ──
 
@@ -4984,7 +5568,7 @@ class AtomicGroupInstallTestCase(unittest.TestCase):
 
         self.assertEqual(broken.status_code, 400)
         self.assertEqual(
-            broken.get_json()["error"], "No valid sessions were created"
+            broken.get_json()["error"], "Pane 1 of this group is not launchable"
         )
         # The old code tore the group's panes down before it discovered it had
         # nothing to put back, leaving an empty group where a working one was.
@@ -4995,6 +5579,82 @@ class AtomicGroupInstallTestCase(unittest.TestCase):
             },
             live_before,
         )
+
+    def test_one_unlaunchable_pane_fails_the_group_not_only_itself(self):
+        """Audit SGP-07 / Stage 6 item 5: no silently smaller group.
+
+        A group used to launch without its malformed pane and report success,
+        so the user got a narrower arrangement described as an exact one.
+        """
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "ssh",
+                "session_name": "Mixed",
+                "sessions": [
+                    {"host": "10.0.0.1", "directory": "/srv"},
+                    {
+                        "host": "10.0.0.2",
+                        "directory": "/srv",
+                        "explorer_tab_views": "not-an-object",
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.get_json()["error"], "Pane 2 of this group is not launchable"
+        )
+        self.assertEqual(api.session_manager.get_all_sessions(), [])
+        self.assertEqual(api.session_manager.get_all_groups(), [])
+
+    def test_a_preset_with_no_recorded_sidebar_width_still_opens_at_the_default(self):
+        """0 is the preset store's "unset", not a request for the 180px floor."""
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": "Files",
+                "sessions": [
+                    {
+                        "directory": "/srv",
+                        "startup_mode": "explorer",
+                        "explorer_sidebar_width": 0,
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(
+            api.session_manager.get_all_sessions()[0].explorer_sidebar_width, 260
+        )
+
+    def test_a_coercible_malformed_pane_field_never_becomes_live_state(self):
+        """Matrix row 23: `list("abc")` used to install `['a','b','c']`.
+
+        Nothing raised, nothing was logged, and the next autosave made the
+        garbage durable — the reason a fix that only rescues *dropped* panes
+        is not enough.
+        """
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": "Files",
+                "sessions": [
+                    {
+                        "directory": "/srv",
+                        "startup_mode": "explorer",
+                        "explorer_open_tabs": "abc",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(api.session_manager.get_all_sessions(), [])
 
     def test_a_workspace_that_vanished_mid_launch_installs_nothing(self):
         workspace_id = self.client.post(

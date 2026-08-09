@@ -1,0 +1,26 @@
+{# Shared voluntary close/restart choices. static/js/lifecycle.js owns it. #}
+{% set lifecycle_is_launcher = lifecycle_variant == 'launcher' %}
+{% set lifecycle_button_class = 'ghost-btn' if lifecycle_is_launcher else 'btn btn-neutral' %}
+{% set lifecycle_primary_class = 'ghost-btn danger-btn' if lifecycle_is_launcher else 'btn btn-danger' %}
+<div id="lifecycleModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card lifecycle-card" role="dialog" aria-modal="true" aria-labelledby="lifecycleTitle">
+        <div class="modal-head">
+            <div>
+                <div id="lifecycleTitle" class="modal-title">Close GridVibe?</div>
+                <div id="lifecycleCopy" class="modal-copy"></div>
+            </div>
+        </div>
+        <div id="lifecycleStatus" class="lifecycle-status modal-copy" role="status" aria-live="polite"></div>
+        <div id="lifecycleChoices" class="lifecycle-choice-list">
+            <button class="{{ lifecycle_button_class }}" type="button" data-lifecycle-save="none"></button>
+            <button class="{{ lifecycle_button_class }}" type="button" data-lifecycle-save="workspaces"></button>
+            <button class="{{ lifecycle_primary_class }}" type="button" data-lifecycle-save="sessions+workspaces"></button>
+        </div>
+        <div class="modal-actions">
+            <div class="modal-copy">Live shells do not survive an application close or restart.</div>
+            <div class="modal-actions-buttons">
+                <button id="lifecycleCancel" class="{{ lifecycle_button_class }}" type="button">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>

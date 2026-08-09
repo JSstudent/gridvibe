@@ -4,40 +4,35 @@
         if (!BROWSER_SHUTDOWN_TOKEN) {
             return;
         }
-        const confirmed = await openGenericConfirmModal({
-            title: 'Close GridVibe?',
-            copy: 'Close GridVibe and end the browser server?',
-            confirmLabel: 'Close GridVibe',
-            danger: true
-        });
-        if (!confirmed) {
-            return;
-        }
-
         const button = document.getElementById('browserCloseBtn');
-        if (button) {
-            button.disabled = true;
-            button.textContent = 'Closing...';
-        }
-
-        try {
-            const response = await fetch('/api/browser-shutdown', {
-                method: 'POST',
-                headers: {
-                    'X-GridVibe-Shutdown-Token': BROWSER_SHUTDOWN_TOKEN
+        openGridVibeLifecycleModal({
+            action: 'close',
+            onReady: async decisionToken => {
+                if (button) {
+                    button.disabled = true;
+                    button.classList.add('loading');
                 }
-            });
-            if (!response.ok) {
-                const data = await response.json().catch(() => ({}));
-                throw new Error(data.error || 'GridVibe could not be closed.');
-            }
-        } catch (error) {
-            if (button) {
-                button.disabled = false;
-                button.textContent = 'Close';
-            }
-            showMessage(error.message || 'GridVibe could not be closed.', 'error');
-        }
+                const response = await fetch('/api/browser-shutdown', {
+                    method: 'POST',
+                    headers: {
+                        'X-GridVibe-Shutdown-Token': BROWSER_SHUTDOWN_TOKEN,
+                        'X-GridVibe-Lifecycle-Decision': decisionToken
+                    }
+                });
+                if (!response.ok) {
+                    const data = await response.json().catch(() => ({}));
+                    if (button) {
+                        button.disabled = false;
+                        button.classList.remove('loading');
+                    }
+                    throw new Error(data.error || 'GridVibe could not be closed.');
+                }
+            },
+            onError: error => showMessage(
+                error.message || 'GridVibe remains open because saving did not finish.',
+                'error'
+            )
+        });
     }
 
 
@@ -2451,35 +2446,11 @@
             );
 
             if (data.updated && data.restart_required) {
-                setUpdateStatus(`${updateSummary} Restarting GridVibe...`, 'success');
-                showMessage(`${updateSummary} Restarting GridVibe...`, 'success');
-
-                if (window.pywebview?.api?.restart_application) {
-                    try {
-                        const restartResult = await window.pywebview.api.restart_application();
-                        if (restartResult?.ok) {
-                            return;
-                        }
-
-                        const restartError = restartResult?.error || 'Automatic restart failed.';
-                        button.disabled = false;
-                        button.classList.remove('loading');
-                        setUpdateStatus(`${updateSummary} ${restartError} Restart GridVibe manually.`, 'error');
-                        showMessage(`${updateSummary} ${restartError} Restart GridVibe manually.`, 'error');
-                        return;
-                    } catch (error) {
-                        button.disabled = false;
-                        button.classList.remove('loading');
-                        setUpdateStatus(`${updateSummary} ${error.message} Restart GridVibe manually.`, 'error');
-                        showMessage(`${updateSummary} ${error.message} Restart GridVibe manually.`, 'error');
-                        return;
-                    }
-                }
-
                 button.disabled = false;
                 button.classList.remove('loading');
-                setUpdateStatus(`${updateSummary} Restart GridVibe to load the latest version.`, 'success');
-                showMessage(`${updateSummary} Restart GridVibe to load the latest version.`, 'success');
+                setUpdateStatus(`${updateSummary} Choose how to save before restarting.`, 'success');
+                showMessage(`${updateSummary} Choose how to save before restarting.`, 'success');
+                requestRestartLifecycle(updateSummary, button);
                 return;
             }
 
@@ -2495,80 +2466,40 @@
         }
     }
 
-    async function saveWorkspaceForRestart() {
-        /* Best-effort workspace capture before a restart. A 409 means the
-           workspace is empty (nothing live to save), which is not an error —
-           the restart still proceeds. */
-        try {
-            const nativeZoomFactor = await getNativeSessionZoomFactor();
-            const response = await fetch('/api/runtime-state/save', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ native_zoom_factor: nativeZoomFactor })
-            });
-            if (response.ok || response.status === 409) {
-                return true;
+    function requestRestartLifecycle(prefix = '', button = null) {
+        openGridVibeLifecycleModal({
+            action: 'restart',
+            onReady: async decisionToken => {
+                if (!window.pywebview?.api?.restart_application) {
+                    const message = `${prefix ? `${prefix} ` : ''}State prepared. Restart GridVibe manually to reload the app.`;
+                    setUpdateStatus(message, 'success');
+                    showMessage(message, 'success');
+                    return;
+                }
+                if (button) {
+                    button.disabled = true;
+                    button.classList.add('loading');
+                }
+                setUpdateStatus('Restarting GridVibe...', 'success');
+                const result = await window.pywebview.api.restart_application(decisionToken);
+                if (!result?.ok) {
+                    if (button) {
+                        button.disabled = false;
+                        button.classList.remove('loading');
+                    }
+                    throw new Error(result?.error || 'Automatic restart failed.');
+                }
+            },
+            onError: error => {
+                const message = error.message || 'GridVibe remains open because saving did not finish.';
+                setUpdateStatus(message, 'error');
+                showMessage(message, 'error');
             }
-            const data = await response.json().catch(() => ({}));
-            throw new Error(data.error || `Save failed with status ${response.status}`);
-        } catch (error) {
-            console.error('[GridVibe Launcher] workspace save before restart failed:', error);
-            return false;
-        }
+        });
     }
 
-    async function restartApplication() {
-        const button = document.getElementById('restartAppBtn');
-
-        // In-page confirm, not window.confirm: the native WebView2 window
-        // blocks the browser dialog, which made this button a silent no-op
-        // in the desktop app (guardrail audit finding N1).
-        const confirmed = await openGenericConfirmModal({
-            title: 'Restart GridVibe?',
-            copy: 'Save the workspace and restart GridVibe?',
-            note: 'Live shells do not survive a restart.',
-            confirmLabel: 'Save & Restart',
-            danger: true
-        });
-        if (!confirmed) {
-            return;
-        }
-
-        button.disabled = true;
-        button.classList.add('loading');
-        setUpdateStatus('Saving workspace...');
-
-        const saved = await saveWorkspaceForRestart();
-        const savePrefix = saved ? 'Workspace saved.' : 'Workspace save failed.';
-
-        if (!window.pywebview?.api?.restart_application) {
-            // Browser mode (or no native bridge): there is nothing to relaunch.
-            button.disabled = false;
-            button.classList.remove('loading');
-            setUpdateStatus(`${savePrefix} Restart GridVibe manually to reload the app.`, saved ? 'success' : 'error');
-            showMessage(`${savePrefix} Restart GridVibe manually to reload the app.`, saved ? 'success' : 'error');
-            return;
-        }
-
-        setUpdateStatus(`${savePrefix} Restarting GridVibe...`, 'success');
-        showMessage(`${savePrefix} Restarting GridVibe...`, 'success');
-
-        try {
-            const restartResult = await window.pywebview.api.restart_application();
-            if (restartResult?.ok) {
-                return;
-            }
-            const restartError = restartResult?.error || 'Automatic restart failed.';
-            button.disabled = false;
-            button.classList.remove('loading');
-            setUpdateStatus(`${savePrefix} ${restartError} Restart GridVibe manually.`, 'error');
-            showMessage(`${savePrefix} ${restartError} Restart GridVibe manually.`, 'error');
-        } catch (error) {
-            button.disabled = false;
-            button.classList.remove('loading');
-            setUpdateStatus(`${savePrefix} ${error.message} Restart GridVibe manually.`, 'error');
-            showMessage(`${savePrefix} ${error.message} Restart GridVibe manually.`, 'error');
-        }
+    function restartApplication() {
+        requestRestartLifecycle('', document.getElementById('restartAppBtn'));
     }
 
     function logLauncherWindowAction(action, details = {}) {
@@ -2915,17 +2846,37 @@
         syncLaunchDestinationControl();
     }
 
-    async function chooseNewWorkspaceDestination() {
+    async function chooseNewWorkspaceDestination(initialError = '') {
+        /* A new choice is always a new draft. In particular, a name rejected
+           by the server must never remain cached behind "Use this name" and
+           become launchable on the next click. */
+        workspaceDestinationLabelDraft = '';
+        syncLaunchDestinationControl();
         const label = await openWorkspaceNameModal({
             title: 'Launch into a new workspace',
             copy: 'The name is shown in workspace pickers and on the saved snapshot. Leave it blank for an automatic name.',
-            value: workspaceDestinationLabelDraft,
-            confirmLabel: 'Use this name'
+            value: '',
+            confirmLabel: 'Use this name',
+            validate: validateWorkspaceLabel,
+            initialError
         });
         if (label === null) {
             return;
         }
         setWorkspaceDestination(WORKSPACE_NEW_DESTINATION, label);
+    }
+
+    async function handleLaunchWorkspaceLabelConflict(status, data, button) {
+        if (status !== 409 || data?.conflict !== 'workspace_label_taken') {
+            return false;
+        }
+        /* Validation and launch are separate requests. If another window takes
+           the name between them, send the exact commit-time error back into a
+           fresh, blank name dialog instead of leaving a rejected draft on the
+           Launch button or degrading to the page-level error line. */
+        setLaunchButtonLoading(button, false);
+        await chooseNewWorkspaceDestination(data.error || 'That workspace name is taken');
+        return true;
     }
 
     function toggleLaunchDestinationMenu(event) {
@@ -2993,6 +2944,35 @@
                     });
                 }
             });
+            /* Per-workspace Save (SGP-14): the same flush handshake as
+               in-window Workspace ▸ Save Workspace, scoped to this one
+               workspace — the owning window acknowledges its latest
+               presentation before the capture, or the save is refused. A
+               window that cannot be reached is reported, never silently
+               captured from stale server state. */
+            const saveButton = document.createElement('button');
+            saveButton.type = 'button';
+            saveButton.className = 'ghost-btn';
+            saveButton.textContent = 'Save';
+            saveButton.title = 'Save this workspace — its window is flushed first, exactly like Workspace ▸ Save Workspace';
+            saveButton.addEventListener('click', async () => {
+                saveButton.classList.add('is-busy');
+                try {
+                    const result = await saveLiveWorkspace(workspace.workspace_id);
+                    showMessage(`Saved ${result.label || workspaceDisplayLabel(workspace, index)}.`, 'success');
+                } catch (error) {
+                    if (error.status === 409) {
+                        showMessage(error.message, 'info');
+                    } else {
+                        showMessage(
+                            `Could not save the workspace: ${error.message}${error.retryable ? ' — try again.' : ''}`,
+                            'error'
+                        );
+                    }
+                } finally {
+                    saveButton.classList.remove('is-busy');
+                }
+            });
             /* Close live workspace, from the surface that lists them. Distinct
                from closing its window (which changes nothing) and from closing
                its last tab (which forgets the snapshot): this ends the sessions
@@ -3023,7 +3003,7 @@
             });
             const actions = document.createElement('div');
             actions.className = 'workspace-live-actions';
-            actions.append(openButton, closeButton);
+            actions.append(openButton, saveButton, closeButton);
             row.append(name, meta, actions);
             list.appendChild(row);
         });
@@ -3204,6 +3184,9 @@
             } else {
                 await forgetSavedWorkspace(summary.workspace_id);
             }
+            /* The workspace's top-bar cache key dies with its snapshot; a
+               failure keeps both so a retry sees the same state. */
+            clearStoredWorkspaceTopbarVisible(summary.workspace_id);
         } catch (error) {
             /* A close that succeeded but could not forget says so, and the row
                stays so the user can retry just the forget. */
@@ -3378,6 +3361,9 @@
             });
 
             const data = await response.json();
+            if (await handleLaunchWorkspaceLabelConflict(response.status, data, button)) {
+                return;
+            }
             if (response.status === 409 && data.conflict === 'saved_session_live') {
                 /* Plan §6: a saved preset is live in at most one workspace.
                    Explain it and offer the two real resolutions instead of

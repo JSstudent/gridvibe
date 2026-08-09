@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/terminals.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app-settings.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/workspaces.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/lifecycle.css') }}?v={{ version }}">
 </head>
 <body
     data-voice-enabled="{{ 'true' if voice_enabled else 'false' }}"
@@ -314,6 +315,8 @@
 
 {% set generic_confirm_variant = 'terminals' %}
 {% include 'partials/generic_confirm_modal.html' %}
+{% set lifecycle_variant = 'terminals' %}
+{% include 'partials/lifecycle_modal.html' %}
 
 <!-- Workspace naming (New Workspace / Rename Workspace). In-page, never
      window.prompt — WebView2 blocks it and GuardrailAuditFixesTestCase
@@ -377,9 +380,13 @@
        shell picker is offered there only. */
     const LOCAL_SHELL_MODES_AVAILABLE = {{ local_windows_shells_available|tojson }};
 </script>
+<script src="{{ url_for('static', filename='js/session-persistence.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/explorer-persistence.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/explorer-theme-store.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/shared.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/workspaces.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/app-settings.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/lifecycle.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminal-icons.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/voice-input.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/explorer-viewer.js') }}?v={{ version }}"></script>

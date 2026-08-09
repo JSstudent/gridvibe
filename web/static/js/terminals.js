@@ -1,6 +1,5 @@
     /* ── Theme management ── */
     const SURFACE_MODE_STORAGE_KEY = 'gridvibe.terminalSurfaceMode';
-    const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';
     const DEFAULT_SAVED_SESSION_ID = 'default-session';
 
 
@@ -340,11 +339,7 @@
     }
 
     function getStoredTopbarVisible() {
-        try {
-            return localStorage.getItem(TOPBAR_VISIBILITY_STORAGE_KEY) !== 'hidden';
-        } catch (_) {
-            return true;
-        }
+        return getStoredWorkspaceTopbarVisible(currentWorkspaceId) ?? true;
     }
 
     function updateTopbarToggleButton(visible) {
@@ -362,17 +357,26 @@
         }
     }
 
-    function applyTopbarVisibility(visible, { persist = false, refit = false } = {}) {
+    /* Window chrome rides the same ordered compare-and-swap transaction as
+       group presentation, on its own workspace revision — two fast toggles
+       cannot land out of order, and a failed write is repaired instead of being
+       left for the next autosave to commit. */
+    function reportTopbarVisibility() {
+        noteWorkspacePresentationChanged();
+    }
+
+    function applyTopbarVisibility(
+        visible,
+        { persist = false, refit = false, report = false } = {}
+    ) {
         const shouldShow = Boolean(visible);
         document.body.classList.toggle('topbar-collapsed', !shouldShow);
         updateTopbarToggleButton(shouldShow);
         if (persist) {
-            try {
-                localStorage.setItem(
-                    TOPBAR_VISIBILITY_STORAGE_KEY,
-                    shouldShow ? 'visible' : 'hidden'
-                );
-            } catch (_) {}
+            storeWorkspaceTopbarVisible(currentWorkspaceId, shouldShow);
+        }
+        if (report) {
+            reportTopbarVisibility();
         }
         if (refit) {
             refitAttachedTerminalsForSurfaceMode();
@@ -382,56 +386,38 @@
     function toggleTopbarVisibility() {
         applyTopbarVisibility(document.body.classList.contains('topbar-collapsed'), {
             persist: true,
-            refit: true
+            refit: true,
+            report: true
         });
     }
 
-    const EXPLORER_THEME_STORAGE_KEY = 'gridvibe.explorerTheme';
+    /* The override object lives in GridVibeExplorerThemeStore (DOM-free,
+       bounded to live pane keys — SGP-09). The wrappers below keep the local
+       call sites unchanged. */
+    function liveExplorerThemeKeys() {
+        return [...document.querySelectorAll('.explorer-pane')]
+            .map(card => card.dataset.explorerThemeKey || '')
+            .filter(Boolean);
+    }
 
     function normalizeExplorerTheme(theme) {
-        return theme === 'dark' ? 'dark' : 'light';
+        return GridVibeExplorerThemeStore.normalizeTheme(theme);
     }
 
     function getExplorerThemeStore() {
-        try {
-            const raw = localStorage.getItem(EXPLORER_THEME_STORAGE_KEY);
-            if (!raw) {
-                return {};
-            }
-            if (raw === 'light' || raw === 'dark') {
-                return {};
-            }
-            const parsed = JSON.parse(raw);
-            return parsed && typeof parsed === 'object' ? parsed : {};
-        } catch (_) {
-            return {};
-        }
+        return GridVibeExplorerThemeStore.readStore(localStorage);
     }
 
     function hasExplorerThemeOverride(key = '') {
-        const store = getExplorerThemeStore();
-        return Boolean(key && Object.prototype.hasOwnProperty.call(store, key));
+        return GridVibeExplorerThemeStore.hasOverride(localStorage, key);
     }
 
     function getExplorerTheme(key = '') {
-        const store = getExplorerThemeStore();
-        return normalizeExplorerTheme(
-            key && Object.prototype.hasOwnProperty.call(store, key)
-                ? store[key]
-                : 'dark'
-        );
+        return GridVibeExplorerThemeStore.getTheme(localStorage, key);
     }
 
     function saveExplorerTheme(key, theme) {
-        if (!key) {
-            return;
-        }
-        const store = getExplorerThemeStore();
-        store[key] = normalizeExplorerTheme(theme);
-        try {
-            localStorage.setItem(EXPLORER_THEME_STORAGE_KEY, JSON.stringify(store));
-        } catch (_) {
-        }
+        GridVibeExplorerThemeStore.saveTheme(localStorage, key, theme, liveExplorerThemeKeys());
     }
 
     /* An explicit per-pane explorer theme carried in a saved/restored session
@@ -506,6 +492,10 @@
         applyExplorerThemeToCard(card, nextTheme);
         card.dataset.explorerThemeSource = 'override';
         saveExplorerTheme(card.dataset.explorerThemeKey || '', nextTheme);
+        /* The localStorage override is keyed by an ephemeral session id and
+           cannot survive a restart; the manager copy can. It is now only a
+           same-run cache, bounded to live pane keys on every write (SGP-09). */
+        notePanePresentationChanged(index);
     }
 
     /* ─────────────────────────────────────────────
@@ -518,6 +508,7 @@
     let _focusedTerminalIndex = -1;
     let _activeExplorerIndex = -1;
     let socket     = null;   // set at the bottom after all defs
+    const lifecycleWindowId = getLifecycleWindowId();
     let resizeObservers = [];
     let cachedGroupViews = new Map();
     let sessionRouteMap = new Map();
@@ -540,6 +531,12 @@
     let activeLoadToken = 0;
     let knownGroupIds = [];
     let workspaceSaveTargets = new Map();
+    /* Live-presentation sync state. Declared here rather than beside the
+       adapter below it, because reportTopbarVisibility() sits far earlier in
+       the file and a `let` would still be in its temporal dead zone there. */
+    let presentationSync;
+    let presentationSyncBuilt = false;
+    let workspacePresentationRevision = 0;
     let surfaceModeChangedManually = false;
     let currentGlobalSurfaceMode = normalizeSurfaceMode(DEFAULT_SURFACE_MODE);
     let pendingSplitRestore = null;
@@ -929,6 +926,10 @@
         clearActiveGridResize();
         clearResizeHandles();
         captureCachedPaneUiState();
+        /* Enqueue the visible state before the cards leave the document: once
+           the group is detached its panes can still be serialized, but the
+           active tab's live view and theme can only be read from the DOM. */
+        noteGroupPresentationChanged(groupId);
         clearFitTimers(terminals);
         disconnectObservers(resizeObservers);
         terminals.forEach(terminal => {
@@ -1069,6 +1070,7 @@
             }
         });
         cachedGroupViews.delete(groupId);
+        presentationController()?.forgetGroup(groupId);
     }
 
     /* Tell the backend which group this window has in front, so the workspace
@@ -1375,6 +1377,16 @@
             notifyWorkspacesChanged('renamed');
             setWorkspaceSaveMessage(`Workspace renamed to "${workspaceDisplayLabel(updated)}".`, 'success');
         } catch (error) {
+            /* A taken name offers its remedy inline (open the live namesake /
+               forget the saved one / pick another name) instead of just failing. */
+            try {
+                if (await resolveWorkspaceNameConflict(error)) {
+                    return;
+                }
+            } catch (actionError) {
+                setWorkspaceSaveMessage(`${actionError.message} — try again.`, 'error');
+                return;
+            }
             setWorkspaceSaveMessage(`Rename failed: ${error.message} — try again.`, 'error');
         }
     }
@@ -1393,6 +1405,14 @@
             notifyWorkspacesChanged('created');
             await switchToWorkspaceWindow(workspace.workspace_id);
         } catch (error) {
+            try {
+                if (await resolveWorkspaceNameConflict(error)) {
+                    return;
+                }
+            } catch (actionError) {
+                setWorkspaceSaveMessage(`${actionError.message} — try again.`, 'error');
+                return;
+            }
             setWorkspaceSaveMessage(`Could not create the workspace: ${error.message}`, 'error');
         }
     }
@@ -2068,6 +2088,219 @@
         return cachedTerminals.filter(Boolean);
     }
 
+    /* ─────────────────────────────────────────────
+       Live presentation synchronisation
+
+       One ordered compare-and-swap transaction per group carries every
+       browser-owned presentation field to the manager, which is what autosave
+       and Save Workspace actually serialize. The queue itself is DOM-free and
+       lives in session-persistence.js; everything below is the adapter that
+       describes a group from the live DOM, plus the explicit flush barrier
+       Save Workspace (and, later, the lifecycle transaction) awaits.
+    ───────────────────────────────────────────── */
+
+    /* The pane's light/dark explorer theme as it is on screen right now: the
+       card's dataset while mounted, the value folded into the pane object when
+       its group was cached, then whatever the session was launched with. */
+    function explorerPaneLiveTheme(terminal, index) {
+        const card = index >= 0 ? document.getElementById(`tc-${index}`) : null;
+        return normalizeExplorerTheme(
+            card?.dataset.explorerTheme
+            || terminal?._cachedExplorerTheme
+            || terminal?._session?.explorer_theme
+            || 'dark'
+        );
+    }
+
+    /* Custom split geometry only. A standard layout's rectangles are derived
+       from its layout name, so synthesising a split snapshot for one would
+       replace a plain grid with an equivalent-looking custom split on restore
+       for no gain. Omitting the field leaves the stored geometry untouched. */
+    function customSplitLayoutSnapshot(groupId) {
+        const isVisible = visibleGroupId === groupId && gridBuilt;
+        const className = isVisible
+            ? document.getElementById('terminalsGrid')?.className
+            : cachedGroupViews.get(groupId)?.className;
+        return className === 'layout-split-local'
+            ? buildActiveWorkspaceLayoutSnapshot(groupId)
+            : null;
+    }
+
+    function describePanePresentation(terminal) {
+        const session = terminal?._session || {};
+        const sessionId = session.session_id || '';
+        const index = terminals.indexOf(terminal);
+
+        /* Keyed off the session's own startup_mode, not the rendered pane type:
+           the server decides which presentation fields a pane may carry, and
+           during a mode switch the two disagree for a moment. */
+        if (isExplorerSession(session)) {
+            if (index !== -1) {
+                /* Fold the shown tab's live mode + scroll into its record so the
+                   batch reflects what is on screen right now. A cached group was
+                   already folded in by cacheVisibleGroupView(). */
+                explorerCaptureActiveTabView(index);
+            }
+            const tabs = explorerSerializeTabs(terminal);
+            const sidebar = explorerSidebarPresentation(index);
+            return {
+                sessionId,
+                mode: 'explorer',
+                explorer: {
+                    treeOpen: Boolean(terminal?._explorerTreeSidebarOpen),
+                    gitOpen: Boolean(terminal?._explorerGitSidebarOpen),
+                    searchOpen: Boolean(terminal?._explorerSearchSidebarOpen),
+                    sidebarWidth: sidebar.width,
+                    sidebarScroll: sidebar.scroll,
+                    treeExpanded: sidebar.expanded,
+                    gitExpanded: sidebar.gitExpanded,
+                    openTabs: tabs.open_tabs,
+                    activeTab: tabs.active_tab,
+                    tabViews: tabs.tab_views,
+                    theme: explorerPaneLiveTheme(terminal, index)
+                }
+            };
+        }
+
+        if (isBrowserSession(session)) {
+            const strip = browserSerializeTabs(terminal, session);
+            return {
+                sessionId,
+                mode: 'browser',
+                browser: { tabs: strip.tabs, activeTab: strip.active_tab }
+            };
+        }
+
+        return { sessionId, mode: 'terminal' };
+    }
+
+    function describeGroupPresentation(groupId) {
+        const group = getGroupById(groupId);
+        if (!group) {
+            return null;
+        }
+        const panes = getWorkspacePanesInVisualOrder(groupId);
+        if (!panes.length) {
+            /* A tab this window has never rendered has no browser-owned state
+               to contribute; the manager's own copy stays authoritative. */
+            return null;
+        }
+        const descriptor = {
+            workspaceId: currentWorkspaceId,
+            groupId,
+            revision: Number.isInteger(group.presentation_revision)
+                ? group.presentation_revision
+                : 0,
+            panes: panes.map(describePanePresentation)
+        };
+        const geometry = customSplitLayoutSnapshot(groupId);
+        if (geometry) {
+            descriptor.workspaceLayout = geometry;
+        }
+        return descriptor;
+    }
+
+    function postPresentation(url, payload) {
+        return fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+    }
+
+    function presentationController() {
+        if (!presentationSyncBuilt) {
+            presentationSyncBuilt = true;
+            const factory = window.GridVibeSessionPersistence;
+            presentationSync = factory
+                ? factory.createPresentationController({
+                    describeGroup: describeGroupPresentation,
+                    describeWorkspace: () => {
+                        const appearance = explorerMarkdownAppearance();
+                        return {
+                            workspaceId: currentWorkspaceId,
+                            revision: workspacePresentationRevision,
+                            topbarVisible: !document.body.classList.contains('topbar-collapsed'),
+                            mdPreset: appearance.preset,
+                            mdFont: appearance.font,
+                            sourceFont: appearance.sourceFont
+                        };
+                    },
+                    sendGroup: payload => postPresentation('/api/session-presentation', payload),
+                    sendWorkspace: payload => postPresentation('/api/workspace-presentation', payload),
+                    onError: (scope, error, id) => {
+                        console.error(
+                            `[GridVibe Sessions] ${scope} presentation sync failed`,
+                            id || currentWorkspaceId,
+                            error
+                        );
+                    }
+                })
+                : null;
+        }
+        return presentationSync;
+    }
+
+    function noteGroupPresentationChanged(groupId, options) {
+        const controller = presentationController();
+        return controller ? controller.noteGroupChange(groupId, options) : false;
+    }
+
+    /* Called from the explorer and browser modules, which only ever act on the
+       group currently mounted in the grid. */
+    function notePanePresentationChanged(index, options) {
+        if (!terminals[index]) {
+            return false;
+        }
+        return noteGroupPresentationChanged(visibleGroupId || activeGroupId, options);
+    }
+
+    function noteWorkspacePresentationChanged(options) {
+        const controller = presentationController();
+        return controller ? controller.noteWorkspaceChange(options) : false;
+    }
+
+    /* Markdown/source appearance is one ordered workspace presentation value. */
+    function noteExplorerAppearanceChanged() {
+        return noteWorkspacePresentationChanged();
+    }
+
+    function adoptPresentationRevisions(payload) {
+        const controller = presentationController();
+        if (!controller) {
+            return;
+        }
+        if (Number.isInteger(payload?.workspace_presentation_revision)) {
+            workspacePresentationRevision = payload.workspace_presentation_revision;
+            controller.setWorkspaceRevision(workspacePresentationRevision);
+        }
+        (Array.isArray(payload?.groups) ? payload.groups : []).forEach(group => {
+            controller.setGroupRevision(group.group_id, group.presentation_revision);
+        });
+    }
+
+    /* The exact-save barrier. Every group this window can describe is
+       re-captured and acknowledged before the caller asks the server to write a
+       snapshot, so Save Workspace records the screen rather than the last thing
+       the server happened to hear. Exposed on `window` because Stage 4's
+       lifecycle transaction must reuse this one barrier, not re-derive it. */
+    async function flushLivePresentation() {
+        const controller = presentationController();
+        if (!controller) {
+            return { ok: true, flushed: [] };
+        }
+        const groupIds = sessionGroups
+            .map(group => group.group_id)
+            .filter(groupId => groupId === visibleGroupId || cachedGroupViews.has(groupId));
+        try {
+            return { ok: true, flushed: await controller.flush(groupIds) };
+        } catch (error) {
+            return { ok: false, error };
+        }
+    }
+
+    window.gridvibeFlushLivePresentation = flushLivePresentation;
+
     function buildWorkspaceTerminalEntry(terminal, index, connectionMode) {
         const session = terminal?._session || {};
         const rawStartupMode = String(session.startup_mode || '').trim();
@@ -2092,6 +2325,14 @@
             ? explorerSerializeTabs(terminal)
             : { open_tabs: [], active_tab: '', tab_views: {} };
         const mdAppearance = startupMode === 'explorer' ? explorerMarkdownAppearance() : null;
+        const explorerSidebar = startupMode === 'explorer' && explorerSlot !== -1
+            ? explorerSidebarPresentation(explorerSlot)
+            : {
+                width: Number(session.explorer_sidebar_width) || 260,
+                scroll: session.explorer_sidebar_scroll || {},
+                expanded: session.explorer_tree_expanded || [],
+                gitExpanded: session.explorer_git_expanded || []
+            };
         const browserTabs = startupMode === 'browser'
             ? browserSerializeTabs(terminal, session)
             : { tabs: [], active_tab: 0 };
@@ -2099,13 +2340,7 @@
            relaunches with the same appearance (its localStorage override is
            keyed by session_id and won't survive new session ids). */
         const explorerTheme = startupMode === 'explorer'
-            ? normalizeExplorerTheme(
-                (explorerSlot !== -1
-                    ? document.getElementById(`tc-${explorerSlot}`)?.dataset.explorerTheme
-                    : terminal?._cachedExplorerTheme)
-                || session.explorer_theme
-                || 'dark'
-            )
+            ? explorerPaneLiveTheme(terminal, explorerSlot)
             : '';
 
         return {
@@ -2124,6 +2359,10 @@
             explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?._explorerTreeSidebarOpen) : false,
             explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
             explorer_search_open: startupMode === 'explorer' ? Boolean(terminal?._explorerSearchSidebarOpen) : false,
+            explorer_sidebar_width: explorerSidebar.width,
+            explorer_sidebar_scroll: explorerSidebar.scroll,
+            explorer_tree_expanded: explorerSidebar.expanded,
+            explorer_git_expanded: explorerSidebar.gitExpanded,
             explorer_open_tabs: explorerTabs.open_tabs,
             explorer_active_tab: explorerTabs.active_tab,
             explorer_tab_views: explorerTabs.tab_views,
@@ -2362,6 +2601,17 @@
         }
 
         try {
+            /* Barrier first: capture every group this window owns and wait for
+               the manager to acknowledge it, so the capture below serializes
+               the screen instead of the last state the server happened to hear.
+               A failed flush is a failed save — never a success toast over a
+               snapshot that is missing the change the user just made. */
+            const flushed = await flushLivePresentation();
+            if (!flushed.ok) {
+                throw new Error(
+                    flushed.error?.message || 'Live pane state could not be synchronised'
+                );
+            }
             const nativeZoomFactor = await getCurrentWorkspaceNativeZoomFactor();
             const response = await fetch('/api/runtime-state/save', {
                 method: 'POST',
@@ -2371,7 +2621,8 @@
                 body: JSON.stringify({
                     workspace_id: currentWorkspaceId,
                     active_group_id: activeGroupId,
-                    native_zoom_factor: nativeZoomFactor
+                    native_zoom_factor: nativeZoomFactor,
+                    topbar_visible: !document.body.classList.contains('topbar-collapsed')
                 })
             });
             const data = await response.json().catch(() => ({}));
@@ -3169,6 +3420,8 @@
         clearActiveGridResize();
         applySplitSlotGeometry({ fit: true });
         redrawAttachedTerminals(affectedIndices, { forceResize: true });
+        /* Settle, not drag: the pointer stream itself writes nothing. */
+        noteGroupPresentationChanged(visibleGroupId);
     }
 
     function cloneSplitRect(rect) {
@@ -4416,6 +4669,9 @@
         if (Number.isInteger(secondIndex)) {
             scheduleFit(secondIndex);
         }
+        /* A drop settles the visual order; the server enumerates panes by the
+           order it was last told, so tell it now rather than at save time. */
+        noteGroupPresentationChanged(visibleGroupId);
     }
 
     function wireCardDragAndDrop(card, header) {
@@ -4522,7 +4778,19 @@
                 _attached: false,
                 _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
                 _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
-                _explorerSearchSidebarOpen: Boolean(session.explorer_search_open)
+                _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
+                _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
+                _explorerSidebarScroll: session.explorer_sidebar_scroll || {},
+                _explorerTreeExpanded: new Set(
+                    Array.isArray(session.explorer_tree_expanded)
+                        ? session.explorer_tree_expanded
+                        : []
+                ),
+                _explorerDiffExpandedCommits: new Set(
+                    Array.isArray(session.explorer_git_expanded)
+                        ? session.explorer_git_expanded
+                        : []
+                )
             };
         }
         if (isBrowserSession(session)) {
@@ -4655,6 +4923,11 @@
 
         /* wire up terminal input events now that DOM elements exist */
         terminals.forEach((t, i) => wirePaneInputForwarding(t, i));
+
+        /* Every pane of the new grid now exists: drop explorer-theme overrides
+           keyed by panes that no longer do (a restart hands out new session
+           ids), so the cache cannot accumulate dead entries (SGP-09). */
+        GridVibeExplorerThemeStore.pruneStore(localStorage, liveExplorerThemeKeys());
 
         document.getElementById('emptyState').classList.remove('visible');
         gridBuilt = true;
@@ -5661,7 +5934,19 @@
             _attached: false,
             _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
             _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
-            _explorerSearchSidebarOpen: Boolean(session.explorer_search_open)
+            _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
+            _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
+            _explorerSidebarScroll: session.explorer_sidebar_scroll || {},
+            _explorerTreeExpanded: new Set(
+                Array.isArray(session.explorer_tree_expanded)
+                    ? session.explorer_tree_expanded
+                    : []
+            ),
+            _explorerDiffExpandedCommits: new Set(
+                Array.isArray(session.explorer_git_expanded)
+                    ? session.explorer_git_expanded
+                    : []
+            )
         };
         sessionIds[index] = session.session_id;
         setSessionRoute(session.session_id, activeGroupId, index);
@@ -5846,13 +6131,18 @@
     }
 
     function replaceSessionPaneMode(index, session) {
-        if (isBrowserSession(session)) {
-            return replacePaneWithBrowser(index, session);
+        const replaced = isBrowserSession(session)
+            ? replacePaneWithBrowser(index, session)
+            : (isExplorerSession(session)
+                ? replacePaneWithExplorer(index, session)
+                : replacePaneWithTerminal(index, session));
+        if (replaced) {
+            /* The pane's mode decides which presentation fields the transaction
+               may carry, so republish the group rather than let a batch built
+               for the previous mode be rejected until the next change. */
+            noteGroupPresentationChanged(visibleGroupId);
         }
-        if (isExplorerSession(session)) {
-            return replacePaneWithExplorer(index, session);
-        }
-        return replacePaneWithTerminal(index, session);
+        return replaced;
     }
 
     async function switchSessionPaneMode(index) {
@@ -5908,8 +6198,6 @@
         if (!sessionId || !terminal?._session) {
             return;
         }
-        browserCancelPendingPersist(sessionId);
-
         const switchingToTerminal = isBrowserSession(terminal._session);
         const targetMode = switchingToTerminal ? 'terminal' : 'browser';
         const body = { startup_mode: targetMode };
@@ -5966,6 +6254,7 @@
                    state 2.e introduced. */
                 explorerCaptureActiveTabView(index);
                 const tabs = explorerSerializeTabs(pane);
+                const sidebar = explorerSidebarPresentation(index);
                 const previewTab = explorerPreviewTab(pane);
                 const previewActive = pane._explorerActiveTabId === EXPLORER_PREVIEW_TAB_ID;
                 stateBySessionId[sessionId] = {
@@ -5973,6 +6262,10 @@
                     explorer_tree_open: Boolean(pane._explorerTreeSidebarOpen),
                     explorer_git_open: Boolean(pane._explorerGitSidebarOpen),
                     explorer_search_open: Boolean(pane._explorerSearchSidebarOpen),
+                    explorer_sidebar_width: sidebar.width,
+                    explorer_sidebar_scroll: sidebar.scroll,
+                    explorer_tree_expanded: sidebar.expanded,
+                    explorer_git_expanded: sidebar.gitExpanded,
                     explorer_open_tabs: tabs.open_tabs,
                     explorer_active_tab: tabs.active_tab,
                     explorer_tab_views: tabs.tab_views,
@@ -6062,7 +6355,6 @@
             }
             return;
         }
-        browserCancelPendingPersist(plan.sessionId);
         // Past the confirm and the layout check: this pane is really closing.
         forgetExplorerSessionMarkdownAppearance(plan.sessionId);
 
@@ -6211,6 +6503,14 @@
 
             updateSessionChrome(terminals.length, activeGroupId);
             updateAllSplitButtonStates();
+            /* The group gained a pane and a custom rectangle set. Rebase on the
+               revision the split response carries, then publish the geometry —
+               nothing else does, which is why a split used to revert. */
+            presentationController()?.setGroupRevision(
+                activeGroupId,
+                data.group?.presentation_revision
+            );
+            noteGroupPresentationChanged(activeGroupId);
             await ensureAttachedTerminalsReady([index, newIndex]);
             emitTerminalResize(index, true);
             emitTerminalResize(newIndex, true);
@@ -6774,6 +7074,10 @@
                         entry.explorer_tree_open = snapshot.explorer_tree_open;
                         entry.explorer_git_open = snapshot.explorer_git_open;
                         entry.explorer_search_open = snapshot.explorer_search_open;
+                        entry.explorer_sidebar_width = snapshot.explorer_sidebar_width;
+                        entry.explorer_sidebar_scroll = snapshot.explorer_sidebar_scroll;
+                        entry.explorer_tree_expanded = snapshot.explorer_tree_expanded;
+                        entry.explorer_git_expanded = snapshot.explorer_git_expanded;
                         entry.explorer_open_tabs = snapshot.explorer_open_tabs;
                         entry.explorer_active_tab = snapshot.explorer_active_tab;
                         entry.explorer_tab_views = snapshot.explorer_tab_views;
@@ -7065,7 +7369,23 @@
 
         const previousActiveGroupId = activeGroupId;
         const previousGroupIds = knownGroupIds.slice();
+        if (typeof data.topbar_visible === 'boolean') {
+            const currentTopbarVisible = !document.body.classList.contains('topbar-collapsed');
+            applyTopbarVisibility(data.topbar_visible, {
+                persist: true,
+                refit: gridBuilt && currentTopbarVisible !== data.topbar_visible
+            });
+        }
+        setExplorerWorkspaceAppearance({
+            preset: data.md_preset,
+            font: data.md_font,
+            sourceFont: data.source_font
+        });
         sessionGroups = Array.isArray(data.groups) ? data.groups : [];
+        /* Rebase the presentation queues on the revisions this read just
+           observed, so the next change starts from the server's number rather
+           than from whatever this window last remembered. */
+        adoptPresentationRevisions(data);
         knownGroupIds = sessionGroups.map(group => group.group_id);
         previousGroupIds
             .filter(groupId => !knownGroupIds.includes(groupId))
@@ -7370,7 +7690,6 @@
         if (!(await confirmCloseSessionGroup(groupId))) {
             return;
         }
-        closingSessionIds.forEach(browserCancelPendingPersist);
         // Past both confirmations, so this close is really happening: drop the
         // per-session/per-group entries that would otherwise outlive it.
         closingSessionIds.forEach(forgetExplorerSessionMarkdownAppearance);
@@ -7535,6 +7854,15 @@
     ───────────────────────────────────────────── */
     try {
         socket = io();
+        GridVibeLifecycle.attachFlushResponder(socket, {
+            workspaceId: currentWorkspaceId,
+            flush: flushLivePresentation,
+            metadata: async () => ({
+                active_group_id: activeGroupId,
+                native_zoom_factor: await getCurrentWorkspaceNativeZoomFactor(),
+                topbar_visible: !document.body.classList.contains('topbar-collapsed')
+            })
+        });
 
         socket.on('terminal_output', ({ session_id, data }) => {
             const target = resolveSessionTarget(session_id);
@@ -7629,7 +7957,10 @@
            Skipped on the first connect — initialLoad() covers boot. */
         let hadSocketConnection = false;
         socket.on('connect', () => {
-            socket.emit('join_workspace', { workspace_id: currentWorkspaceId });
+            socket.emit('join_workspace', {
+                workspace_id: currentWorkspaceId,
+                window_id: lifecycleWindowId
+            });
             if (!hadSocketConnection) {
                 hadSocketConnection = true;
                 return;

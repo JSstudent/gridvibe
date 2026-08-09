@@ -1500,6 +1500,7 @@
                     expanded.add(key);
                 }
                 renderExplorerGitPanel(index);
+                notePanePresentationChanged(index);
             });
         });
     }
@@ -1631,6 +1632,7 @@
         if (openCount > 0) {
             applyExplorerSidebarWidth(index);
             wireExplorerSidebarResize(index);
+            wireExplorerSidebarPresentation(index);
         }
         /* Always re-apply, including below two panels: closing one back down
            to a single panel has to clear the inline grid-template-rows, or
@@ -1649,6 +1651,7 @@
         explorerOpenSidebarPanels(pane).forEach(panel => {
             panel.onOpen?.(index);
         });
+        restoreExplorerSidebarPresentation(index);
     }
 
     /* Returns whatever the panel's onOpen hook returns (a promise for the
@@ -1662,6 +1665,7 @@
         }
         pane[panel.openFlag] = Boolean(open);
         syncExplorerSidebar(index);
+        notePanePresentationChanged(index);
         return pane[panel.openFlag] ? panel.onOpen?.(index) : undefined;
     }
 
@@ -1694,6 +1698,58 @@
         main.style.setProperty('--explorer-sidebar-width', `${width}px`);
     }
 
+    function explorerSidebarPresentation(index) {
+        const pane = terminals[index];
+        if (!pane) return { width: 260, scroll: {}, expanded: [], gitExpanded: [] };
+        ensureExplorerTreeState(pane);
+        const scroll = { ...(pane._explorerSidebarScroll || {}) };
+        ['tree', 'git'].forEach(panel => {
+            const metrics = captureScrollMetrics(
+                document.getElementById(`explorer-${panel}-panel-${index}`)
+            );
+            const point = window.GridVibeExplorerPersistence?.scrollPoint(metrics);
+            if (point) scroll[panel] = point;
+        });
+        pane._explorerSidebarScroll = scroll;
+        return {
+            width: Math.max(180, Math.min(Number(pane._explorerSidebarWidth || 260), 520)),
+            scroll,
+            expanded: Array.from(pane._explorerTreeExpanded).slice(0, 128),
+            gitExpanded: Array.from(ensureExplorerDiffExpandedCommits(pane)).slice(0, 128)
+        };
+    }
+
+    function restoreExplorerSidebarPresentation(index) {
+        const pane = terminals[index];
+        if (!pane) return;
+        applyExplorerSidebarWidth(index);
+        const apply = () => {
+            ['tree', 'git'].forEach(panel => {
+                const point = pane._explorerSidebarScroll?.[panel];
+                const metrics = window.GridVibeExplorerPersistence?.scrollMetrics(point);
+                applyScrollMetrics(
+                    document.getElementById(`explorer-${panel}-panel-${index}`),
+                    metrics
+                );
+            });
+        };
+        apply();
+        requestAnimationFrame(apply);
+        window.setTimeout(apply, 80);
+    }
+
+    function wireExplorerSidebarPresentation(index) {
+        ['tree', 'git'].forEach(panel => {
+            const element = document.getElementById(`explorer-${panel}-panel-${index}`);
+            if (!element || element.dataset.presentationBound) return;
+            element.dataset.presentationBound = 'true';
+            element.addEventListener('scroll', () => {
+                explorerSidebarPresentation(index);
+                notePanePresentationChanged(index, { continuous: true });
+            }, { passive: true });
+        });
+    }
+
     function wireExplorerSidebarResize(index) {
         const pane = terminals[index];
         const main = document.getElementById(`explorer-main-${index}`);
@@ -1721,6 +1777,7 @@
             const onEnd = endEvent => {
                 handle.classList.remove('dragging');
                 handle.releasePointerCapture?.(endEvent.pointerId);
+                notePanePresentationChanged(index, { continuous: true });
                 window.removeEventListener('pointermove', onMove);
                 window.removeEventListener('pointerup', onEnd);
                 window.removeEventListener('pointercancel', onEnd);
@@ -2070,6 +2127,7 @@
         if (pane._explorerTreeExpanded.has(path)) {
             pane._explorerTreeExpanded.delete(path);
             renderExplorerTreePanel(index);
+            notePanePresentationChanged(index);
             return;
         }
 
@@ -2077,6 +2135,7 @@
         pane._explorerTreeErrors.delete(path);
         renderExplorerTreePanel(index);
         await loadExplorerTreeChildren(index, path);
+        notePanePresentationChanged(index);
     }
 
     /* Directory name click: browse it in the Preview tab, and expand it so the
@@ -2127,6 +2186,51 @@
             await loadExplorerTreeChildren(index, current);
         }
         renderExplorerTreePanel(index);
+        /* Expanding the ancestors is only half the reveal: in a long tree the
+           target's row can still sit outside the panel's scrolled viewport,
+           which leaves its `.active` highlight off screen. */
+        scrollExplorerTreeRowIntoView(index, target);
+    }
+
+    /* The tree row for a path (file or directory), or the row marked `.active`
+       when no path is given. Matched by iterating the rendered buttons rather
+       than with an attribute selector, because paths carry quotes and
+       brackets. Null whenever the row is not rendered — a collapsed or still
+       loading branch. */
+    function explorerTreeRowElement(panel, path) {
+        if (!panel) {
+            return null;
+        }
+        if (!path) {
+            return panel.querySelector('.explorer-tree-row.active');
+        }
+        const button = Array
+            .from(panel.querySelectorAll('[data-explorer-tree-file], [data-explorer-tree-dir]'))
+            .find(entry => (entry.dataset.explorerTreeFile ?? entry.dataset.explorerTreeDir) === path);
+        return button?.closest('.explorer-tree-row') || null;
+    }
+
+    /* Scroll the tree panel — and only it, which is why this does the maths
+       instead of calling `scrollIntoView`, whose `nearest` also scrolls every
+       other ancestor — by the minimum needed to show a row, leaving one row of
+       margin so the target never lands flush against an edge. A row already in
+       view is left alone, so clicking around inside the tree never jumps.
+       Returns the row so callers can decorate it. */
+    function scrollExplorerTreeRowIntoView(index, path = '') {
+        const panel = document.getElementById(`explorer-tree-panel-${index}`);
+        const row = panel && !panel.hidden ? explorerTreeRowElement(panel, path) : null;
+        if (!row) {
+            return null;
+        }
+        const panelBox = panel.getBoundingClientRect();
+        const rowBox = row.getBoundingClientRect();
+        const margin = Math.min(rowBox.height, Math.max(0, (panelBox.height - rowBox.height) / 2));
+        if (rowBox.top < panelBox.top + margin) {
+            panel.scrollTop -= (panelBox.top + margin) - rowBox.top;
+        } else if (rowBox.bottom > panelBox.bottom - margin) {
+            panel.scrollTop += rowBox.bottom - (panelBox.bottom - margin);
+        }
+        return row;
     }
 
     /* Scroll a file's tree row into view and flash it. The row's own `.active`
@@ -2135,17 +2239,10 @@
        loading branch) is left alone — the expansion above is the visible
        part of the reveal. */
     function focusExplorerTreeRow(index, path) {
-        const panel = document.getElementById(`explorer-tree-panel-${index}`);
-        if (!panel || !path) {
-            return false;
-        }
-        const button = Array.from(panel.querySelectorAll('[data-explorer-tree-file]'))
-            .find(entry => (entry.dataset.explorerTreeFile || '') === path);
-        const row = button?.closest('.explorer-tree-row');
+        const row = path ? scrollExplorerTreeRowIntoView(index, path) : null;
         if (!row) {
             return false;
         }
-        row.scrollIntoView({ block: 'nearest' });
         row.classList.add('explorer-tree-located');
         window.setTimeout(() => row.classList.remove('explorer-tree-located'), 1200);
         return true;
@@ -3698,6 +3795,23 @@
             // the flag so the rendered patch is never mistaken for the whole change.
             pane._explorerDiffTruncated = Boolean(data.truncated);
             renderExplorerDiff(index);
+            const renderedTab = explorerFindTab(
+                pane,
+                pane._explorerRenderedTabId || pane._explorerActiveTabId
+            );
+            const restoredDiffView = explorerMatchingTabView(
+                renderedTab,
+                explorerCurrentContentRevisions(pane)
+            );
+            const restoredDiffScroll = restoredDiffView?.scroll?.panels?.diff;
+            if (restoredDiffScroll) {
+                applyScrollMetrics(
+                    explorerPanelScrollTarget(
+                        document.getElementById(`explorer-diff-panel-${index}`)
+                    ),
+                    restoredDiffScroll
+                );
+            }
             // A patch is back (or was there all along): re-expose the toggle a
             // previous empty-diff fallback may have hidden.
             setExplorerDiffToggleHidden(index, false);
@@ -3910,8 +4024,10 @@
     // ── Viewer appearance (ISSUE-2026-030) ───────────────────────────────────
     // Three orthogonal axes: the preview's reading-surface preset, the preview
     // font family, and the Source view's font family. All are bounded
-    // allowlists persisted in localStorage (and carried by saved sessions) and
-    // applied idempotently to every open panel via classes + CSS custom
+    // allowlists owned by the workspace presentation record. The legacy
+    // localStorage keys remain only as a first-paint/migration cache and are
+    // overwritten whenever the server workspace snapshot is applied. Values
+    // are applied idempotently to every open panel via classes + CSS custom
     // properties (defined from tokens in terminals.css), so no palette literals
     // live in JS.
     const EXPLORER_MD_PRESETS = ['default', 'paper', 'contrast', 'vscode'];
@@ -3934,6 +4050,7 @@
     const EXPLORER_MD_PRESET_KEY = 'gridvibe.mdPreviewPreset';
     const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';
     const EXPLORER_SOURCE_FONT_KEY = 'gridvibe.sourceViewFont';
+    let workspaceExplorerAppearance = null;
     /* Line wrapping is per explorer tab, like the editor zoom above: each tab
        record carries its own source/preview/diff flags instead of one
        workspace-global preference, so every tab keeps the wrapping it was left
@@ -4094,6 +4211,9 @@
     }
 
     function explorerMarkdownAppearance() {
+        if (workspaceExplorerAppearance) {
+            return { ...workspaceExplorerAppearance };
+        }
         return {
             preset: readExplorerMarkdownPref(
                 EXPLORER_MD_PRESET_KEY, EXPLORER_MD_PRESETS, EXPLORER_MD_PRESET_DEFAULT
@@ -4105,6 +4225,35 @@
                 EXPLORER_SOURCE_FONT_KEY, EXPLORER_SOURCE_FONTS, EXPLORER_SOURCE_FONT_DEFAULT
             ),
         };
+    }
+
+    function cacheExplorerMarkdownAppearance(appearance) {
+        try {
+            window.localStorage.setItem(EXPLORER_MD_PRESET_KEY, appearance.preset);
+            window.localStorage.setItem(EXPLORER_MD_FONT_KEY, appearance.font);
+            window.localStorage.setItem(EXPLORER_SOURCE_FONT_KEY, appearance.sourceFont);
+        } catch (err) {
+            // Non-fatal cache: the manager remains the durable authority.
+        }
+    }
+
+    function setExplorerWorkspaceAppearance(appearance, { cache = true } = {}) {
+        const current = explorerMarkdownAppearance();
+        workspaceExplorerAppearance = {
+            preset: normalizeExplorerAppearanceChoice(
+                appearance?.preset, EXPLORER_MD_PRESETS, current.preset
+            ),
+            font: normalizeExplorerAppearanceChoice(
+                appearance?.font, EXPLORER_MD_FONTS, current.font
+            ),
+            sourceFont: normalizeExplorerAppearanceChoice(
+                appearance?.sourceFont, EXPLORER_SOURCE_FONTS, current.sourceFont
+            ),
+        };
+        if (cache) cacheExplorerMarkdownAppearance(workspaceExplorerAppearance);
+        applyExplorerMarkdownAppearanceToAll();
+        refreshExplorerMarkdownAppearanceMenu();
+        return { ...workspaceExplorerAppearance };
     }
 
     function applyExplorerMarkdownAppearanceToElement(preview, appearance) {
@@ -4137,11 +4286,25 @@
 
     function applyExplorerMarkdownAppearanceToAll() {
         const appearance = explorerMarkdownAppearance();
-        document.querySelectorAll('.explorer-markdown-preview').forEach(preview => {
-            applyExplorerMarkdownAppearanceToElement(preview, appearance);
-        });
-        document.querySelectorAll('.explorer-source-view, .explorer-diff-content').forEach(view => {
-            applyExplorerSourceFontToElement(view, appearance);
+        const applyToRoot = root => {
+            root.querySelectorAll('.explorer-markdown-preview').forEach(preview => {
+                applyExplorerMarkdownAppearanceToElement(preview, appearance);
+            });
+            root.querySelectorAll('.explorer-source-view, .explorer-diff-content').forEach(view => {
+                applyExplorerSourceFontToElement(view, appearance);
+            });
+        };
+        applyToRoot(document);
+        /* Hidden session tabs keep their panes in detached cached fragments
+           (terminals.js `cachedGroupViews`), which a document query cannot
+           reach — restyle them in place too, so switching to another tab
+           shows the new appearance instantly instead of the stale classes
+           until a rebuild. Same contract as the cached-group restyle in
+           applyAppConfigTerminalFont. */
+        cachedGroupViews.forEach(cached => {
+            if (cached?.fragment) {
+                applyToRoot(cached.fragment);
+            }
         });
     }
 
@@ -4158,15 +4321,8 @@
                 patch?.sourceFont, EXPLORER_SOURCE_FONTS, current.sourceFont
             ),
         };
-        try {
-            window.localStorage.setItem(EXPLORER_MD_PRESET_KEY, next.preset);
-            window.localStorage.setItem(EXPLORER_MD_FONT_KEY, next.font);
-            window.localStorage.setItem(EXPLORER_SOURCE_FONT_KEY, next.sourceFont);
-        } catch (err) {
-            // Non-fatal: appearance still applies to the live DOM this session.
-        }
-        applyExplorerMarkdownAppearanceToAll();
-        refreshExplorerMarkdownAppearanceMenu();
+        setExplorerWorkspaceAppearance(next);
+        noteExplorerAppearanceChanged();
         return next;
     }
 
@@ -5564,16 +5720,24 @@
         }
 
         const activeButton = list.querySelector('[data-explorer-file-view][aria-selected="true"]');
+        const listMaxScrollTop = Math.max(0, list.scrollHeight - list.clientHeight);
+        const listMaxScrollLeft = Math.max(0, list.scrollWidth - list.clientWidth);
         const state = {
             activeView: activeButton?.dataset.explorerFileView || 'source',
             listScrollLeft: list.scrollLeft,
             listScrollTop: list.scrollTop,
+            directory: {
+                scrollLeftRatio: listMaxScrollLeft > 0 ? list.scrollLeft / listMaxScrollLeft : 0,
+                scrollTopRatio: listMaxScrollTop > 0 ? list.scrollTop / listMaxScrollTop : 0,
+                wasAtBottom: listMaxScrollTop > 0 && list.scrollTop >= listMaxScrollTop - 2
+            },
             panels: {},
             // File tree / Git sidebar panels sit outside the list and are their own
             // overflow:auto scrollers, so capture them too (they reset on reattach).
             sidebar: {
                 tree: captureScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`)),
-                git: captureScrollMetrics(document.getElementById(`explorer-git-panel-${index}`))
+                git: captureScrollMetrics(document.getElementById(`explorer-git-panel-${index}`)),
+                search: captureScrollMetrics(document.getElementById(`explorer-search-panel-${index}`))
             }
         };
         list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
@@ -5613,8 +5777,10 @@
             }
             list.scrollLeft = state.listScrollLeft || 0;
             list.scrollTop = state.listScrollTop || 0;
+            if (state.directory) applyScrollMetrics(list, state.directory);
             applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), state.sidebar?.tree);
             applyScrollMetrics(document.getElementById(`explorer-git-panel-${index}`), state.sidebar?.git);
+            applyScrollMetrics(document.getElementById(`explorer-search-panel-${index}`), state.sidebar?.search);
             list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
                 const panelState = state.panels?.[panel.dataset.explorerFilePanel || 'source'];
                 const scrollEl = explorerPanelScrollTarget(panel);
@@ -5664,19 +5830,45 @@
         return (hash >>> 0).toString(36);
     }
 
-    /* Identity of a rendered file view: same path, same content, same diff
-       target. Any change (tail-updated log, re-fetch with new bytes) produces
-       a different identity, which suppresses scroll restore. */
-    function explorerFileContentIdentity(path, content, diffCommit, diffMode) {
-        return explorerHashText(
-            [path || '', content || '', diffCommit || '', diffMode || ''].join('\u0000')
-        );
+    /* Source/Preview state follows file bytes only. Diff has its own rendered
+       revision below, so an index-only change cannot masquerade as unchanged. */
+    function explorerFileContentIdentity(path, content) {
+        return `file:${explorerHashText([path || '', content || ''].join('\u0000'))}`;
     }
 
     function explorerDirectoryContentIdentity(path, entries) {
-        return explorerHashText(
-            `${path || ''}\u0000${Array.isArray(entries) ? entries.length : 0}`
+        return `dir:${explorerHashText(JSON.stringify([
+            path || '',
+            (Array.isArray(entries) ? entries : []).map(entry => [
+                entry?.path || '', entry?.type || '', entry?.size || 0, entry?.modified || 0
+            ])
+        ]))}`;
+    }
+
+    function explorerCurrentContentRevisions(pane) {
+        if (!pane) return {};
+        if (pane._explorerMode === 'directory') {
+            return {
+                directory: String(
+                    pane._explorerDirectoryRevision
+                    || explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries)
+                )
+            };
+        }
+        const fileRevision = explorerFileContentIdentity(
+            pane._explorerFilePath,
+            pane._explorerFileContent
         );
+        const revisions = { source: fileRevision, preview: fileRevision };
+        if (pane._explorerDiffLoaded) {
+            revisions.diff = window.GridVibeExplorerPersistence?.diffContentRevision({
+                path: pane._explorerFilePath,
+                diffCommit: pane._explorerDiffCommit,
+                diffMode: pane._explorerDiffMode,
+                renderedDiff: pane._explorerDiffContent
+            }) || '';
+        }
+        return revisions;
     }
 
     /* Snapshot the currently shown tab's view mode + scroll onto its tab
@@ -5711,15 +5903,8 @@
             return;
         }
         tab.view = {
-            mode: isFile ? (scroll.activeView || 'source') : '',
-            identity: isFile
-                ? explorerFileContentIdentity(
-                    pane._explorerFilePath,
-                    pane._explorerFileContent,
-                    pane._explorerDiffCommit,
-                    pane._explorerDiffMode
-                )
-                : explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries),
+            mode: isFile ? (scroll.activeView || 'source') : 'preview',
+            revisions: explorerCurrentContentRevisions(pane),
             diffCommit: isFile && scroll.activeView === 'diff'
                 ? String(pane._explorerDiffCommit || '')
                 : '',
@@ -5730,25 +5915,50 @@
         };
     }
 
-    /* Return the tab's stored view snapshot when its content identity still
-       matches what is about to render, otherwise null (OD-4 skip rule). */
-    function explorerMatchingTabView(tab, identity) {
+    /* Durable intent always returns; revision-bound scroll is filtered panel by
+       panel. A changed file keeps Diff/Preview selected without stale offsets. */
+    function explorerMatchingTabView(tab, revisions) {
         const view = tab && tab.view;
-        if (!view || !view.identity || !view.scroll || view.identity !== identity) {
+        if (!view) {
             return null;
         }
-        return view;
+        const current = typeof revisions === 'string'
+            ? { source: revisions, preview: revisions, diff: revisions, directory: revisions }
+            : (revisions || {});
+        if (view.persistedRecord) {
+            return window.GridVibeExplorerPersistence?.resolveRecord(
+                view.persistedRecord,
+                current
+            ) || null;
+        }
+        const same = Object.entries(view.revisions || {}).every(
+            ([panel, revision]) => !revision || current[panel] === revision
+        );
+        return {
+            ...view,
+            scroll: same ? view.scroll : { activeView: view.mode, panels: {}, sidebar: {} },
+            folds: same ? Array.from(tab.collapsedLines || []) : []
+        };
     }
 
     /* Diff content loads asynchronously, after restoreExplorerFileScroll has
        already run; re-apply a stashed diff-panel scroll once it arrives. */
     function applyExplorerPendingDiffScroll(index) {
         const pane = terminals[index];
-        const metrics = pane ? pane._explorerPendingDiffScroll : null;
-        if (!pane || !metrics) {
+        const pending = pane ? pane._explorerPendingDiffScroll : null;
+        if (!pane || !pending) {
             return;
         }
         pane._explorerPendingDiffScroll = null;
+        let metrics = pending;
+        if (pending.persistedRecord) {
+            const resolved = window.GridVibeExplorerPersistence?.resolveRecord(
+                pending.persistedRecord,
+                explorerCurrentContentRevisions(pane)
+            );
+            metrics = resolved?.scroll?.panels?.diff || null;
+        }
+        if (!metrics) return;
         const panel = document.getElementById(`explorer-diff-panel-${index}`);
         applyScrollMetrics(explorerPanelScrollTarget(panel), metrics);
     }
@@ -6124,6 +6334,13 @@
             return null;
         }
         wireExplorerContextMenu(list, index);
+        if (!list.dataset.presentationScrollBound) {
+            list.dataset.presentationScrollBound = 'true';
+            list.addEventListener('scroll', () => {
+                explorerCaptureActiveTabView(index);
+                notePanePresentationChanged(index, { continuous: true });
+            }, { capture: true, passive: true });
+        }
         let viewer = document.getElementById(`explorer-viewer-${index}`);
         if (!viewer) {
             list.innerHTML =
@@ -6473,7 +6690,7 @@
             renderExplorerDirectoryRows(index);
             const restoredView = explorerMatchingTabView(
                 tab,
-                explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries)
+                explorerCurrentContentRevisions(pane)
             );
             if (restoredView) {
                 restoreExplorerFileScroll(index, restoredView.scroll);
@@ -6560,11 +6777,9 @@
         persistExplorerTabsToSession(index);
     }
 
-    /* One-shot per session id: re-apply the viewer appearance a saved session
-       or restart snapshot carries (ISSUE-2026-033). The set keeps a
-       close-driven rebuild of the same session from clobbering an appearance
-       the user changed since launch; setExplorerMarkdownAppearance validates
-       the values and syncs the shared localStorage keys. */
+    /* Backward-compatible migration read for an older server/preset that has
+       only per-pane aliases. A workspace value received from the server always
+       wins, so render order can no longer choose the workspace appearance. */
     const appliedExplorerMdSessions = new Set();
     function applyExplorerSessionMarkdownAppearance(index) {
         const sessionId = sessionIds[index];
@@ -6573,7 +6788,12 @@
         const font = session.explorer_md_font || '';
         const sourceFont = session.explorer_source_font || '';
         const hasAny = Boolean(preset || font || sourceFont);
-        if (!sessionId || appliedExplorerMdSessions.has(sessionId) || !hasAny) {
+        if (
+            workspaceExplorerAppearance
+            || !sessionId
+            || appliedExplorerMdSessions.has(sessionId)
+            || !hasAny
+        ) {
             return;
         }
         appliedExplorerMdSessions.add(sessionId);
@@ -6606,6 +6826,7 @@
         }
         applyExplorerSessionMarkdownAppearance(index);
         restoreExplorerPersistedTabs(index);
+        restoreExplorerSidebarPresentation(index);
         return true;
     }
 
@@ -6764,48 +6985,41 @@
         if (!tab) {
             return null;
         }
-        const record = {};
         const view = tab.view;
-        if (view && view.mode && view.identity) {
-            const panel = view.scroll && view.scroll.panels ? view.scroll.panels[view.mode] : null;
-            record.mode = view.mode;
-            record.scroll = panel
-                ? (panel.wasAtBottom ? 1 : Math.max(0, Math.min(1, panel.scrollTopRatio || 0)))
-                : 0;
-            record.identity = view.identity;
-            if (view.mode === 'diff') {
-                const diffCommit = String(view.diffCommit || '');
-                const diffMode = String(view.diffMode || '');
-                if (/^[0-9a-f]{7,64}$/i.test(diffCommit)) {
-                    record.diff_commit = diffCommit;
-                } else if (['worktree', 'staged'].includes(diffMode)) {
-                    record.diff_mode = diffMode;
-                }
-            }
-        }
+        let record = view?.persistedRecord
+            ? window.GridVibeExplorerPersistence?.normalizeRecord(view.persistedRecord)
+            : null;
         const fontSize = tab.fontSize ? clampExplorerEditorFontSize(tab.fontSize) : 0;
-        if (fontSize && fontSize !== EXPLORER_EDITOR_FONT_DEFAULT) {
-            record.font_size = fontSize;
+        if (!record && view) {
+            record = window.GridVibeExplorerPersistence?.buildRecord({
+                mode: view.mode,
+                diffCommit: view.diffCommit,
+                diffMode: view.diffMode,
+                revisions: view.revisions,
+                scroll: view.scroll,
+                fontSize: fontSize || undefined,
+                wrap: ensureExplorerTabLineWrap(tab),
+                folds: Array.from(tab.collapsedLines || []),
+                foldRevision: tab.collapsedIdentity || view.revisions?.source || ''
+            }) || null;
         }
-        if (tab.lineWrap && tab.lineWrap.source === false) {
-            record.wrap_source = false;
+        if (!record) return null;
+        if (fontSize && fontSize !== EXPLORER_EDITOR_FONT_DEFAULT) record.font_size = fontSize;
+        else delete record.font_size;
+        record.wrap = { ...ensureExplorerTabLineWrap(tab) };
+        const folds = Array.from(tab.collapsedLines || [])
+            .filter(line => Number.isInteger(line) && line > 0)
+            .sort((left, right) => left - right)
+            .slice(0, 256);
+        if (folds.length) {
+            record.folds = folds;
+            const foldRevision = tab.collapsedIdentity || view?.revisions?.source || '';
+            if (foldRevision) record.fold_revision = foldRevision;
+        } else {
+            delete record.folds;
+            delete record.fold_revision;
         }
-        if (tab.lineWrap && tab.lineWrap.preview === false) {
-            record.wrap_preview = false;
-        }
-        if (tab.lineWrap && tab.lineWrap.diff === false) {
-            record.wrap_diff = false;
-        }
-        if (tab.collapsedLines instanceof Set && tab.collapsedLines.size) {
-            record.folds = Array.from(tab.collapsedLines)
-                .filter(line => Number.isInteger(line) && line > 0)
-                .sort((left, right) => left - right)
-                .slice(0, 256);
-            if (tab.collapsedIdentity) {
-                record.fold_identity = tab.collapsedIdentity;
-            }
-        }
-        return Object.keys(record).length ? record : null;
+        return record;
     }
 
     /* Clamped editor font size from one persisted tab view record; 0 = unset. */
@@ -6822,6 +7036,13 @@
        means tabs saved before wrapping existed restore wrapped. */
     function explorerPersistedTabLineWrap(raw) {
         const view = raw && typeof raw === 'object' ? raw : {};
+        if (view.version === 2 && view.wrap && typeof view.wrap === 'object') {
+            return {
+                source: view.wrap.source !== false,
+                preview: view.wrap.preview !== false,
+                diff: view.wrap.diff !== false,
+            };
+        }
         return {
             source: view.wrap_source !== false,
             preview: view.wrap_preview !== false,
@@ -6840,39 +7061,25 @@
     }
 
     function explorerPersistedMarkdownFoldIdentity(raw) {
-        return raw && typeof raw === 'object' && typeof raw.fold_identity === 'string'
-            ? raw.fold_identity
-            : '';
+        if (!raw || typeof raw !== 'object') return '';
+        if (raw.version === 2 && typeof raw.fold_revision === 'string') {
+            return raw.fold_revision;
+        }
+        return typeof raw.fold_identity === 'string' ? raw.fold_identity : '';
     }
 
     /* Inflate one persisted tab view back into the in-memory `tab.view`
        snapshot shape 2.e restores from (clamped fraction-based metrics). */
     function explorerInflatePersistedTabView(raw) {
-        if (!raw || typeof raw !== 'object') {
-            return null;
-        }
-        const mode = ['source', 'preview', 'diff'].includes(raw.mode) ? raw.mode : '';
-        const identity = typeof raw.identity === 'string' ? raw.identity : '';
-        if (!mode || !identity) {
-            return null;
-        }
-        const fraction = Math.max(0, Math.min(1, Number(raw.scroll) || 0));
-        const diffCommit = mode === 'diff' && /^[0-9a-f]{7,64}$/i.test(String(raw.diff_commit || ''))
-            ? String(raw.diff_commit)
-            : '';
-        const diffMode = mode === 'diff' && !diffCommit && ['worktree', 'staged'].includes(raw.diff_mode)
-            ? raw.diff_mode
-            : '';
+        const record = window.GridVibeExplorerPersistence?.normalizeRecord(raw);
+        if (!record) return null;
         return {
-            mode,
-            identity,
-            diffCommit,
-            diffMode,
-            scroll: {
-                activeView: mode,
-                panels: { [mode]: { scrollTopRatio: fraction, wasAtBottom: fraction >= 0.999 } },
-                sidebar: {}
-            }
+            mode: record.intent.mode,
+            diffCommit: record.intent.diff_commit || '',
+            diffMode: record.intent.diff_mode || '',
+            persistedRecord: record,
+            revisions: {},
+            scroll: { activeView: record.intent.mode, panels: {}, sidebar: {} }
         };
     }
 
@@ -6945,6 +7152,10 @@
         pane._session.explorer_open_tabs = serialized.open_tabs;
         pane._session.explorer_active_tab = serialized.active_tab;
         pane._session.explorer_tab_views = serialized.tab_views;
+        /* The one funnel every tab, view-mode, wrap, fold and zoom change
+           already passes through, so it is also where the group's ordered
+           presentation transaction is enqueued (terminals.js owns the queue). */
+        notePanePresentationChanged(index);
     }
 
     /* Restore fell through to nothing showable: browse a directory so the pane
@@ -7248,9 +7459,11 @@
         const hasGitDiff = explorerHasGitDiff(data.git) || Boolean(requestedDiffCommit);
         const metaParts = explorerFileMetaParts(data, fileType);
         const previousPath = pane._explorerFilePath || '';
-        const contentIdentity = explorerFileContentIdentity(
-            path, data.content, requestedDiffCommit, requestedDiffMode
-        );
+        const contentIdentity = explorerFileContentIdentity(path, data.content);
+        const currentContentRevisions = {
+            source: contentIdentity,
+            preview: contentIdentity
+        };
         if (assignedTab.collapsedIdentity !== contentIdentity) {
             assignedTab.collapsedLines = new Set();
             assignedTab.collapsedIdentity = contentIdentity;
@@ -7261,7 +7474,7 @@
             ? null
             : explorerMatchingTabView(
                 assignedTab,
-                contentIdentity
+                currentContentRevisions
             );
         const restoredMode = restoredTabView ? restoredTabView.mode : '';
         /* The Preview tab also keeps its sticky source/preview preference
@@ -7337,7 +7550,10 @@
         // Diff content loads async; stash the restored diff scroll until then.
         pane._explorerPendingDiffScroll = initialFileView === 'diff'
             ? (restoredTabView && restoredTabView.scroll.panels
-                ? restoredTabView.scroll.panels.diff || null
+                ? restoredTabView.scroll.panels.diff
+                    || (restoredTabView.record
+                        ? { persistedRecord: restoredTabView.record }
+                        : null)
                 : null)
             : null;
         document.getElementById(`ph-${index}`)?.remove();
@@ -7830,6 +8046,10 @@
             pane._explorerPath = data.path || '';
             pane._explorerParentPath = data.parent_path || '';
             pane._explorerEntries = Array.isArray(data.entries) ? data.entries : [];
+            pane._explorerDirectoryRevision = String(
+                data.revision
+                || explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries)
+            );
             cancelExplorerSearch(index);
             if (isNavigation) {
                 resetExplorerDirectorySearch(pane);
@@ -7873,7 +8093,7 @@
                never matches, so navigation always starts at the top. */
             const restoredDirView = explorerMatchingTabView(
                 previewTab,
-                explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries)
+                explorerCurrentContentRevisions(pane)
             );
             if (restoredDirView) {
                 restoreExplorerFileScroll(index, restoredDirView.scroll);

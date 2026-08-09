@@ -147,6 +147,16 @@ from web.hostkeys import (  # noqa: F401 - re-exported for backwards compatibili
     _apply_host_key_policy,
     _load_persistent_host_keys,
 )
+from web.lifecycle import (
+    LIFECYCLE_ACTIONS,
+    LIFECYCLE_SAVE_CHOICES,
+    LIFECYCLE_SAVE_NONE,
+    LifecycleValidationError,
+    lifecycle_coordinator,
+    normalize_workspace_metadata,
+    prepare_lifecycle_action,
+    prepare_workspace_save,
+)
 from web.paths import BASE_DIR, install_kind
 from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
     RuntimeStatePersistenceError,
@@ -156,6 +166,7 @@ from web.runtime_state import (  # noqa: F401 - re-exported for backwards compat
     list_restorable_workspaces,
     load_restorable_workspace,
 )
+from web.saved_session_store import SavedSessionsPersistenceError
 from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compatibility
     BROWSER_MAX_TABS,
     DEFAULT_BROWSER_URL,
@@ -203,6 +214,11 @@ from web.selfupdate import (  # noqa: F401 - perform_self_update re-exported for
     AppUpdateError,
     perform_app_update,
     perform_self_update,
+)
+from web.session_presentation import (
+    PresentationValidationError,
+    apply_group_presentation,
+    apply_workspace_presentation,
 )
 from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatibility
     _MAX_TRACKED_SOCKET_CLIENTS,
@@ -292,6 +308,7 @@ from web.voice import (  # noqa: F401 - re-exported for backwards compatibility
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     _redacted_launch_summary,
+    capacity_refusal,
     close_extra_workspaces,
     close_live_workspace,
     forget_emptied_default_workspace,
@@ -306,6 +323,7 @@ from web.workspaces import (
     restore_workspaces,
     workspace_has_groups,
     workspace_label,
+    workspace_label_conflict,
     workspace_missing_payload,
     workspace_room,
 )
@@ -717,9 +735,93 @@ def shutdown_browser_application():
     if provided_token != expected_token:
         return jsonify({"error": "Invalid shutdown token"}), 403
 
+    decision_token = request.headers.get("X-GridVibe-Lifecycle-Decision", "")
+    if not lifecycle_coordinator.consume_decision(decision_token, "close"):
+        return jsonify({
+            "error": "Choose how to handle current changes before closing GridVibe",
+            "lifecycle_decision_required": True,
+        }), 409
+
     logger.info("Accepted browser mode shutdown request")
     _schedule_browser_shutdown()
     return jsonify({"message": "GridVibe is shutting down"}), 202
+
+
+@app.route('/api/lifecycle/prepare', methods=['POST'])
+def prepare_application_lifecycle():
+    """Flush and persist the requested process-wide close/restart transaction."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid lifecycle payload"}), 400
+    action = str(data.get("action") or "").strip()
+    save = str(data.get("save") or "").strip()
+    if action not in LIFECYCLE_ACTIONS or save not in LIFECYCLE_SAVE_CHOICES:
+        return jsonify({"error": "Unknown lifecycle action or save choice"}), 400
+
+    workspace_metadata = {}
+    if save != LIFECYCLE_SAVE_NONE:
+        # Snapshot manager membership before any wait, then release its lock.
+        # Socket emits and client acknowledgements happen only after that read.
+        live_snapshot = session_manager.snapshot_live_workspaces()
+        flush_result = lifecycle_coordinator.request_flush(
+            live_snapshot,
+            lambda workspace_id, request_id: socketio.emit(
+                "lifecycle_flush_requested",
+                {"request_id": request_id, "workspace_id": workspace_id},
+                room=workspace_room(workspace_id),
+            ),
+        )
+        if not flush_result["ok"]:
+            logger.warning(
+                "Lifecycle %s flush failed: save=%s categories=%s",
+                action,
+                save,
+                sorted(
+                    {
+                        error.get("category", "client_flush")
+                        for error in flush_result["errors"]
+                    }
+                ),
+            )
+            return jsonify({
+                "action": action,
+                "save": save,
+                "ready_to_exit": False,
+                "retryable": True,
+                "saved_sessions": [],
+                "saved_workspaces": [],
+                "errors": flush_result["errors"],
+                "missing_workspaces": flush_result["missing_workspaces"],
+            }), 503
+        try:
+            workspace_metadata = normalize_workspace_metadata(
+                flush_result["metadata"],
+                session_manager.snapshot_live_workspaces(),
+            )
+        except LifecycleValidationError as exc:
+            return jsonify({
+                "action": action,
+                "save": save,
+                "ready_to_exit": False,
+                "retryable": True,
+                "saved_sessions": [],
+                "saved_workspaces": [],
+                "errors": [{"category": "client_metadata", "error": str(exc)}],
+            }), 503
+
+    try:
+        result = prepare_lifecycle_action(
+            session_manager,
+            action,
+            save,
+            workspace_metadata=workspace_metadata,
+        )
+    except LifecycleValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if result["ready_to_exit"]:
+        result["decision_token"] = lifecycle_coordinator.issue_decision(action)
+        return jsonify(result)
+    return jsonify(result), 503
 
 
 @app.route('/api/app-update', methods=['POST'])
@@ -1596,9 +1698,31 @@ def create_workspace():
     """
     data = request.get_json(silent=True) or {}
     label = normalize_workspace_label(data.get("label") or data.get("workspace_label"))
+    conflict = workspace_label_conflict(label)
+    if conflict is not None:
+        return jsonify(conflict), 409
     workspace = session_manager.create_workspace(label=label, retain_when_empty=True)
     logger.debug("Created workspace %s label=%r", workspace.workspace_id, workspace.label)
     return jsonify(public_workspace_payload(workspace, 0)), 201
+
+
+@app.route('/api/workspaces/validate-label', methods=['POST'])
+def validate_workspace_label():
+    """Check whether a new-workspace label is available without creating it.
+
+    The launcher's destination picker is a draft until a session is launched,
+    so using ``POST /api/workspaces`` as its validator would leak deliberately
+    empty workspaces whenever the user changed their mind. This route reads the
+    same namespace owner as create, rename, move, and launch, and returns the
+    same actionable ``409`` payload while mutating nothing. The launch route
+    checks again when it commits, closing the validation/launch race.
+    """
+    data = request.get_json(silent=True) or {}
+    label = normalize_workspace_label(data.get("label") or data.get("workspace_label"))
+    conflict = workspace_label_conflict(label)
+    if conflict is not None:
+        return jsonify(conflict), 409
+    return jsonify({"available": True, "label": label})
 
 
 @app.route('/api/workspaces/close-extra', methods=['POST'])
@@ -1638,6 +1762,13 @@ def rename_workspace(workspace_id: str):
         return jsonify({"error": "A 'label' is required"}), 400
 
     label = normalize_workspace_label(data.get("label"))
+    if session_manager.get_workspace(resolved_workspace_id) is None:
+        return jsonify({"error": "Workspace not found"}), 404
+    # The renamed workspace's own live record and its own saved slot are the
+    # same identity, never a conflict (SGP-13).
+    conflict = workspace_label_conflict(label, exclude_workspace_id=resolved_workspace_id)
+    if conflict is not None:
+        return jsonify(conflict), 409
     workspace = session_manager.rename_workspace(resolved_workspace_id, label)
     if workspace is None:
         return jsonify({"error": "Workspace not found"}), 404
@@ -1666,11 +1797,63 @@ def close_workspace(workspace_id: str):
     return jsonify(payload), status
 
 
+@app.route('/api/workspaces/<workspace_id>/save', methods=['POST'])
+def save_workspace(workspace_id: str):
+    """Save one live workspace from the surface that lists them all (SGP-14).
+
+    The launcher's per-row **Save**: the Stage 4 flush handshake scoped to this
+    one workspace, then a capture of only its slot. It flushes the owning
+    window first or refuses — a workspace with no reachable window is reported,
+    never captured from stale server state — and it never writes reusable
+    presets and never terminates anything.
+    """
+    try:
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    payload, status = prepare_workspace_save(
+        session_manager,
+        resolved_workspace_id,
+        lambda target_id, request_id: socketio.emit(
+            "lifecycle_flush_requested",
+            {"request_id": request_id, "workspace_id": target_id},
+            room=workspace_room(target_id),
+        ),
+    )
+    return jsonify(payload), status
+
+
 @app.route('/api/session-groups/<group_id>/move', methods=['POST'])
 def move_session_group(group_id: str):
     """Move one live session tab to another workspace without restarting it."""
     data = request.get_json(silent=True) or {}
     payload, status = move_group_to_workspace(group_id, data)
+    return jsonify(payload), status
+
+
+@app.route('/api/session-presentation', methods=['POST'])
+def update_session_presentation():
+    """Compare-and-swap one bounded live group-presentation snapshot."""
+    try:
+        payload, status = apply_group_presentation(
+            session_manager,
+            request.get_json(silent=True),
+        )
+    except PresentationValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(payload), status
+
+
+@app.route('/api/workspace-presentation', methods=['POST'])
+def update_workspace_presentation():
+    """Compare-and-swap bounded workspace-window presentation state."""
+    try:
+        payload, status = apply_workspace_presentation(
+            session_manager,
+            request.get_json(silent=True),
+        )
+    except PresentationValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify(payload), status
 
 
@@ -1687,10 +1870,18 @@ def get_session_groups():
         group.to_dict()
         for group in session_manager.get_workspace_groups(workspace_id)
     ]
+    workspace_presentation = session_manager.get_workspace_presentation(workspace_id)
     return jsonify({
         "workspace_id": workspace_id,
         "groups": groups,
         "count": len(groups),
+        "topbar_visible": workspace_presentation["topbar_visible"],
+        "md_preset": workspace_presentation["md_preset"],
+        "md_font": workspace_presentation["md_font"],
+        "source_font": workspace_presentation["source_font"],
+        "workspace_presentation_revision": workspace_presentation[
+            "presentation_revision"
+        ],
     })
 
 
@@ -1777,6 +1968,10 @@ def get_runtime_state():
         "active_group_id": slot.get("active_group_id", "") if slot else "",
         # Optional desktop session-window zoom; null means no preference.
         "native_zoom_factor": slot.get("native_zoom_factor") if slot else None,
+        "topbar_visible": slot.get("topbar_visible", True) if slot else True,
+        "md_preset": slot.get("md_preset", "default") if slot else "default",
+        "md_font": slot.get("md_font", "system") if slot else "system",
+        "source_font": slot.get("source_font", "default") if slot else "default",
         "active_group_count": len(active_groups),
     })
 
@@ -1795,11 +1990,19 @@ def save_runtime_state():
         return jsonify({"error": str(exc)}), 400
     if not _workspace_exists(workspace_id):
         return jsonify(workspace_missing_payload()), 400
+    if "topbar_visible" in data and not isinstance(data["topbar_visible"], bool):
+        return jsonify({"error": "'topbar_visible' must be a boolean"}), 400
     label = str(data.get("label") or "").strip() or None
     active_group_id = session_manager.set_active_group(
         workspace_id,
         data.get("active_group_id"),
     )
+    topbar_visible = session_manager.get_topbar_visible(workspace_id)
+    if "topbar_visible" in data:
+        topbar_visible = session_manager.set_topbar_visible(
+            workspace_id,
+            data["topbar_visible"],
+        )
     try:
         slot = capture_workspace(
             session_manager,
@@ -1808,6 +2011,7 @@ def save_runtime_state():
             label=label,
             active_group_id=active_group_id,
             native_zoom_factor=data.get("native_zoom_factor"),
+            topbar_visible=topbar_visible,
         )
     except RuntimeStatePersistenceError as exc:
         # The revision never reached the disk. Never answer 200/"saved": a
@@ -1831,6 +2035,10 @@ def save_runtime_state():
         "saved_at": slot["saved_at"],
         "active_group_id": slot["active_group_id"],
         "native_zoom_factor": slot.get("native_zoom_factor"),
+        "topbar_visible": slot["topbar_visible"],
+        "md_preset": slot["md_preset"],
+        "md_font": slot["md_font"],
+        "source_font": slot["source_font"],
         "groups": slot["groups"],
     })
 
@@ -1986,11 +2194,30 @@ def get_session_config():
     return jsonify(load_session_config())
 
 
+def _saved_sessions_write_failure(action: str, exc: Exception):
+    """Answer a failed ``saved_sessions.json`` commit as retryable, never 200.
+
+    The preset store is the only file that holds an encrypted SSH password, so a
+    write that did not reach the disk must not be echoed back as saved. The
+    message deliberately carries the failure, not the payload — no preset name,
+    host, or secret reaches the client or the log line.
+    """
+    logger.error("Saved-session %s failed: %s", action, exc)
+    return jsonify({
+        "saved": False,
+        "error": "The saved sessions could not be written to disk",
+        "retryable": True,
+    }), 503
+
+
 @app.route('/api/session-config', methods=['POST'])
 def persist_session_config():
     """Persist the last-used saved session selection."""
     data = request.get_json(silent=True) or {}
-    set_last_saved_session(data.get("saved_session_id"))
+    try:
+        set_last_saved_session(data.get("saved_session_id"))
+    except SavedSessionsPersistenceError as exc:
+        return _saved_sessions_write_failure("selection", exc)
     return jsonify(load_session_config())
 
 
@@ -2100,12 +2327,15 @@ def create_saved_session():
             config = _merge_workspace_session_config(source_entry["config"], raw_config)
     group_id = str(data.get("group_id") or "").strip()
     activate_saved_session = data.get("activate", True) is not False
-    saved_entry = upsert_saved_session(
-        config=config,
-        name=data.get("name"),
-        session_id=data.get("id"),
-        set_last_session=activate_saved_session,
-    )
+    try:
+        saved_entry = upsert_saved_session(
+            config=config,
+            name=data.get("name"),
+            session_id=data.get("id"),
+            set_last_session=activate_saved_session,
+        )
+    except SavedSessionsPersistenceError as exc:
+        return _saved_sessions_write_failure("save", exc)
     live_view_update = {}
     if data.get("workspace_only") is True:
         live_view_update = {
@@ -2148,7 +2378,12 @@ def remove_saved_sessions():
     if not isinstance(raw_ids, list) or not raw_ids:
         return jsonify({"error": "At least one saved session id is required"}), 400
 
-    state = delete_saved_sessions(raw_ids)
+    try:
+        state = delete_saved_sessions(raw_ids)
+    except SavedSessionsPersistenceError as exc:
+        # A delete that did not reach the disk used to answer "updated
+        # successfully" while the presets were still there (SGP-05).
+        return _saved_sessions_write_failure("delete", exc)
     last_entry = _find_saved_session_entry(state["sessions"], state["last_session"])
     return jsonify(
         {
@@ -2242,7 +2477,11 @@ def split_session(session_id: str):
 
     group_sessions = session_manager.get_group_sessions(group.group_id)
     if len(group_sessions) >= runtime_config.max_sessions:
-        return jsonify({"error": f"Maximum {runtime_config.max_sessions} sessions allowed"}), 400
+        return jsonify({
+            "error": capacity_refusal(
+                len(group_sessions) + 1, runtime_config.max_sessions
+            )
+        }), 400
 
     host = source.host
     directory = source.directory
@@ -2430,45 +2669,25 @@ def change_session_mode(session_id: str):
     if target_mode == "browser":
         if session.mode != "wsl":
             return jsonify({"error": "Browser mode is only available for Local Repo sessions"}), 400
-        # One endpoint serves three client actions — switching a terminal into
-        # browser mode, navigating the active tab, and opening/closing tabs — so
-        # the tab strip never needs a second route. `tabs` wins when present;
-        # otherwise the pane's existing strip is kept and only the active tab's
-        # URL moves, which keeps the plain single-URL navigate call working.
+        # Mode transitions only. A live pane's tab strip is presentation state
+        # and belongs to the ordered, revisioned `/api/session-presentation`
+        # transaction — this route used to accept a whole strip as well, which
+        # made it a second, unordered writer for the same field.
         try:
-            if "tabs" in data:
-                browser_tabs = _normalize_browser_tabs(data.get("tabs"))
-                if not browser_tabs:
-                    raise ValueError("Browser panes require at least one HTTP or HTTPS tab")
-                browser_active_tab = _normalize_browser_active_tab(
-                    data.get("active_tab"), browser_tabs
-                )
-                browser_url = browser_tabs[browser_active_tab]
-                browser_snapshot = session_manager.update_browser_tab_strip(
-                    session_id,
-                    browser_tabs=browser_tabs,
-                    browser_active_tab=browser_active_tab,
-                    initial_command=browser_url,
-                )
-                if browser_snapshot is None:
-                    return jsonify({"error": "Browser tab update is stale"}), 409
-                _broadcast_session_status(session_id)
-                return jsonify(browser_snapshot)
-            else:
-                requested_browser_url = data.get("url") or data.get("initial_command")
-                browser_url = (
-                    _normalize_browser_url(requested_browser_url)
-                    if requested_browser_url
-                    else None
-                )
-                browser_snapshot = session_manager.merge_browser_tabs(
-                    session_id,
-                    browser_url=browser_url,
-                    browser_active_tab=data.get("active_tab"),
-                    default_browser_url=DEFAULT_BROWSER_URL,
-                )
-                if browser_snapshot is None:
-                    return jsonify({"error": "Session not found"}), 404
+            requested_browser_url = data.get("url") or data.get("initial_command")
+            browser_url = (
+                _normalize_browser_url(requested_browser_url)
+                if requested_browser_url
+                else None
+            )
+            browser_snapshot = session_manager.merge_browser_tabs(
+                session_id,
+                browser_url=browser_url,
+                browser_active_tab=data.get("active_tab"),
+                default_browser_url=DEFAULT_BROWSER_URL,
+            )
+            if browser_snapshot is None:
+                return jsonify({"error": "Session not found"}), 404
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -2748,6 +2967,7 @@ def handle_disconnect():
     """Handle client disconnection."""
     logger.info(f"Client disconnected: {request.sid}") # type: ignore
     _clear_client_joined_sessions(request.sid) # type: ignore
+    lifecycle_coordinator.disconnect_client(request.sid) # type: ignore
 
 
 @socketio.on('join_workspace')
@@ -2764,6 +2984,11 @@ def handle_join_workspace(data):
         logger.warning(f"join_workspace: workspace not found: {workspace_id}")
         return
     join_room(workspace_room(workspace_id))
+    lifecycle_coordinator.join_workspace(
+        request.sid, # type: ignore
+        workspace_id,
+        data.get("window_id") if isinstance(data, dict) else None,
+    )
 
 
 @socketio.on('leave_workspace')
@@ -2777,6 +3002,13 @@ def handle_leave_workspace(data):
         logger.warning(f"leave_workspace rejected: {exc}")
         return
     leave_room(workspace_room(workspace_id))
+    lifecycle_coordinator.leave_workspace(request.sid, workspace_id) # type: ignore
+
+
+@socketio.on('lifecycle_flush_ack')
+def handle_lifecycle_flush_ack(data):
+    """Accept a room-scoped lifecycle flush result from this socket only."""
+    lifecycle_coordinator.acknowledge_flush(request.sid, data) # type: ignore
 
 
 _TERMINAL_QUERY_RE = re.compile(

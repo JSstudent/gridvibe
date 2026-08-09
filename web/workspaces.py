@@ -57,6 +57,74 @@ def normalize_workspace_label(value: Any) -> str:
     return label[:WORKSPACE_LABEL_MAX_LENGTH]
 
 
+def _workspace_label_key(value: Any) -> str:
+    """Comparison key for the workspace-name namespace.
+
+    Case- and whitespace-insensitive: ``"API  Work"`` and ``"api work"`` are
+    the same name as far as a user reading a picker is concerned.
+    """
+    return " ".join(str(value or "").split()).casefold()
+
+
+def workspace_label_conflict(
+    label: Any,
+    exclude_workspace_id: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Resolve a requested label against live workspaces *and* saved slots.
+
+    The one owner of the workspace-name namespace (SGP-13): a non-empty label
+    identifies at most one workspace across both states, so the launcher can
+    never show a live "api work" beside a saved "api work" that restores into
+    a third workspace. Returns the ``409`` payload naming the conflicting kind
+    when the name is taken, ``None`` when it is free.
+
+    ``exclude_workspace_id`` lets a rename keep its own name (the live record
+    and its own saved slot are the same identity, not a conflict). An *empty*
+    label is not a name: it stays unconstrained, and positional labels already
+    disambiguate unlabelled workspaces. Nothing is mutated either way — no
+    auto-rename, no auto-forget; the choice belongs to the user.
+    """
+    normalized = normalize_workspace_label(label)
+    if not normalized:
+        return None
+    key = _workspace_label_key(normalized)
+    excluded = str(exclude_workspace_id or "").strip()
+
+    for workspace in _manager().get_all_workspaces():
+        if str(getattr(workspace, "workspace_id", "")) == excluded:
+            continue
+        if _workspace_label_key(getattr(workspace, "label", "")) == key:
+            return {
+                "error": (
+                    f'"{normalized}" is an open workspace'
+                    " — open it or pick another name."
+                ),
+                "conflict": "workspace_label_taken",
+                "conflict_kind": "live",
+                "workspace_id": str(getattr(workspace, "workspace_id", "")),
+                "label": normalized,
+            }
+
+    from web.runtime_state import list_restorable_workspaces
+
+    for summary in list_restorable_workspaces():
+        summary_workspace_id = str(summary.get("workspace_id") or "")
+        if summary_workspace_id == excluded:
+            continue
+        if _workspace_label_key(summary.get("label")) == key:
+            return {
+                "error": (
+                    f'"{normalized}" is a saved workspace'
+                    " — reopen it, forget it, or pick another name."
+                ),
+                "conflict": "workspace_label_taken",
+                "conflict_kind": "saved",
+                "workspace_id": summary_workspace_id,
+                "label": normalized,
+            }
+    return None
+
+
 def public_workspace_payload(workspace: Any, group_count: int = 0) -> Dict[str, Any]:
     """Return the credential-free public summary for one live workspace."""
     return {
@@ -286,6 +354,14 @@ def resolve_launch_destination(data: Dict[str, Any]) -> Tuple[str, str]:
             if data.get("workspace_label") is not None
             else data.get("label")
         )
+        # A new workspace takes a name in the shared namespace: refuse a label
+        # already held by a live workspace or a saved slot rather than minting
+        # a rival to state the user already has (SGP-13).
+        conflict = workspace_label_conflict(label)
+        if conflict is not None:
+            raise WorkspaceRequestError(
+                conflict["error"], status=409, payload=conflict
+            )
         workspace = session_manager.create_workspace(label=label)
         return workspace.workspace_id, workspace.workspace_id
 
@@ -379,6 +455,23 @@ def _redacted_launch_summary(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def capacity_refusal(required_panes: int, current_cap: int) -> str:
+    """The one actionable answer to "this group wants more panes than allowed".
+
+    Product decision 6 of the session-persistence audit: a lowered
+    ``max_sessions`` preserves the stored preset and snapshot untouched and the
+    refusal names the number to raise the setting to. The setting's own name is
+    part of the sentence on purpose — a per-group restore result forwards only
+    this string, so anything the user needs to act on has to be inside it.
+    """
+    panes = "pane" if required_panes == 1 else "panes"
+    return (
+        f"This group needs {required_panes} {panes}, but the current "
+        f"max_sessions limit is {current_cap}. Raise max_sessions to "
+        f"{required_panes} in App Settings, then retry."
+    )
+
+
 def _prepare_launch_sessions(
     sessions_config: List[Dict[str, Any]],
     connection_mode: str,
@@ -407,7 +500,11 @@ def _prepare_launch_sessions(
 
         if connection_mode == "ssh" and startup_mode == "explorer":
             prepared["initial_command"] = ""
-            prepared["explorer_root_directory"] = prepared.get("directory") or ""
+            prepared["explorer_root_directory"] = (
+                prepared.get("explorer_root_directory")
+                or prepared.get("directory")
+                or ""
+            )
 
         if connection_mode == "wsl":
             if startup_mode == "browser":
@@ -439,7 +536,11 @@ def _prepare_launch_sessions(
                 use_powershell = False
                 use_wsl = False
                 prepared["initial_command"] = ""
-                prepared["explorer_root_directory"] = prepared.get("directory") or ""
+                prepared["explorer_root_directory"] = (
+                    prepared.get("explorer_root_directory")
+                    or prepared.get("directory")
+                    or ""
+                )
                 prepared["distribution"] = ""
                 prepared["username"] = ""
             else:
@@ -525,7 +626,9 @@ def launch_session_group(
                 runtime_config.max_sessions,
             )
             return {
-                "error": f"Maximum {runtime_config.max_sessions} sessions allowed"
+                "error": capacity_refusal(
+                    len(sessions_config), runtime_config.max_sessions
+                )
             }, 400
 
         connection_mode = _normalize_connection_mode(data.get("connection_mode"))
@@ -1109,6 +1212,16 @@ def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
     if not active_group_id:
         active_group_id = started_group_ids[0]
     session_manager.set_active_group(resolved_workspace_id, active_group_id)
+    session_manager.set_topbar_visible(
+        resolved_workspace_id,
+        slot.get("topbar_visible", True),
+    )
+    session_manager.set_workspace_appearance(
+        resolved_workspace_id,
+        md_preset=slot["md_preset"],
+        md_font=slot["md_font"],
+        source_font=slot["source_font"],
+    )
 
     # Shape-only diagnostics (MW-16): enough to reconstruct what a restore did
     # and why a tab is missing, with no host, directory, command, or credential.
@@ -1133,6 +1246,10 @@ def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
         "reason": "",
         "active_group_id": active_group_id,
         "native_zoom_factor": slot.get("native_zoom_factor"),
+        "topbar_visible": slot.get("topbar_visible", True),
+        "md_preset": slot["md_preset"],
+        "md_font": slot["md_font"],
+        "source_font": slot["source_font"],
         "group_count": len(started_group_ids),
         "groups": group_results,
     }

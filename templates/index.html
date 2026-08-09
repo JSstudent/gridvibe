@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/launcher.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app-settings.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/workspaces.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/lifecycle.css') }}?v={{ version }}">
 </head>
 <body>
 <div class="app-frame">
@@ -361,6 +362,8 @@
 
 {% set generic_confirm_variant = 'launcher' %}
 {% include 'partials/generic_confirm_modal.html' %}
+{% set lifecycle_variant = 'launcher' %}
+{% include 'partials/lifecycle_modal.html' %}
 
 <!-- Restore chooser: one row per saved workspace snapshot. Restore and Forget
      are per row; "Not now" is dialog-level and loses nothing. It is a dialog
@@ -405,6 +408,7 @@
 <script src="{{ url_for('static', filename='js/shared.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/workspaces.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/app-settings.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/lifecycle.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/launcher.js') }}?v={{ version }}"></script>
 </body>
 </html>

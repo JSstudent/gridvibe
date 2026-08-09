@@ -609,6 +609,7 @@ class MultiWorkspaceSessionManagerTestCase(unittest.TestCase):
     def test_saved_session_lookup_and_consistent_snapshot_are_global(self):
         self._group("a-1", self.WORKSPACE_A, saved_session_id="preset-a")
         self._group("b-1", self.WORKSPACE_B, saved_session_id="preset-b")
+        self.manager.set_topbar_visible(self.WORKSPACE_A, False)
 
         snapshots = self.manager.snapshot_live_workspaces()
 
@@ -621,6 +622,10 @@ class MultiWorkspaceSessionManagerTestCase(unittest.TestCase):
             "password",
             snapshots[self.WORKSPACE_A]["groups"][0]["sessions"][0],
         )
+        self.assertFalse(snapshots[self.WORKSPACE_A]["topbar_visible"])
+        self.assertTrue(snapshots[self.WORKSPACE_B]["topbar_visible"])
+        self.assertFalse(self.manager.get_topbar_visible(self.WORKSPACE_A))
+        self.assertTrue(self.manager.get_topbar_visible(self.WORKSPACE_B))
         self.assertEqual(
             self.manager.find_saved_session_group("preset-b").workspace_id,
             self.WORKSPACE_B,
@@ -759,6 +764,126 @@ class EmptyGroupCleanupTestCase(unittest.TestCase):
 
         self.assertIsNotNone(self.manager.get_group("group-atomic"))
         self.assertEqual(len(self.manager.get_group_sessions("group-atomic")), 2)
+
+
+class WorkspaceAppearanceMirrorTestCase(unittest.TestCase):
+    """PRV-03 — a freshly installed pane carries the workspace's appearance.
+
+    The per-pane explorer appearance fields are read aliases of the
+    workspace-level authority (SGP-08). ``install_session_group`` mirrored the
+    authority onto every *other* group in the workspace but skipped the panes
+    it was called for, so a capture taken before the next appearance write
+    stored per-pane aliases contradicting the workspace value in the same slot.
+    """
+
+    def setUp(self):
+        self.manager = SessionManager()
+
+    def _install_explorer_pane(self, group_id, **overrides):
+        config = {
+            "host": "10.0.0.1",
+            "directory": "/srv",
+            "startup_mode": "explorer",
+        }
+        config.update(overrides)
+        installation = self.manager.install_session_group(
+            [config],
+            name="Explorer",
+            connection_mode="ssh",
+            layout="single",
+            group_id=group_id,
+        )
+        return installation.sessions[0]
+
+    def _appearance(self, session):
+        return (
+            session.explorer_md_preset,
+            session.explorer_md_font,
+            session.explorer_source_font,
+        )
+
+    def test_a_pane_installed_into_a_set_workspace_adopts_it_immediately(self):
+        self.manager.set_workspace_appearance(
+            "default",
+            md_preset="paper",
+            md_font="serif",
+            source_font="jetbrains-mono",
+        )
+
+        session = self._install_explorer_pane(
+            "group-new",
+            explorer_md_preset="contrast",
+            explorer_md_font="system",
+            explorer_source_font="default",
+        )
+
+        # The workspace is the authority: the launch config's own values lose
+        # at once, not on the next install or appearance write.
+        self.assertEqual(
+            self._appearance(session), ("paper", "serif", "jetbrains-mono")
+        )
+
+    def test_the_mirror_still_reaches_the_workspace_other_groups(self):
+        first = self._install_explorer_pane("group-first")
+        second = self._install_explorer_pane("group-second")
+
+        self.manager.set_workspace_appearance(
+            "default",
+            md_preset="vscode",
+            md_font="courier-new",
+            source_font="cascadia-code",
+        )
+
+        expected = ("vscode", "courier-new", "cascadia-code")
+        self.assertEqual(self._appearance(first), expected)
+        self.assertEqual(self._appearance(second), expected)
+
+    def test_an_uninitialized_workspace_still_adopts_the_first_pane(self):
+        """The legacy seeding path survives the reorder."""
+        session = self._install_explorer_pane(
+            "group-legacy",
+            explorer_md_preset="contrast",
+            explorer_md_font="cascadia-code",
+            explorer_source_font="courier-new",
+        )
+
+        appearance = self.manager.get_workspace_presentation("default")
+        self.assertEqual(
+            (
+                appearance["md_preset"],
+                appearance["md_font"],
+                appearance["source_font"],
+            ),
+            ("contrast", "cascadia-code", "courier-new"),
+        )
+        # Seeded, then mirrored back onto the pane that supplied it — the
+        # alias and the authority agree rather than merely coinciding.
+        self.assertEqual(
+            self._appearance(session),
+            ("contrast", "cascadia-code", "courier-new"),
+        )
+
+    def test_a_pane_launched_after_seeding_does_not_reseed_the_workspace(self):
+        self._install_explorer_pane(
+            "group-first",
+            explorer_md_preset="contrast",
+            explorer_md_font="cascadia-code",
+            explorer_source_font="courier-new",
+        )
+
+        later = self._install_explorer_pane(
+            "group-second",
+            explorer_md_preset="paper",
+            explorer_md_font="serif",
+            explorer_source_font="jetbrains-mono",
+        )
+
+        appearance = self.manager.get_workspace_presentation("default")
+        self.assertEqual(appearance["md_preset"], "contrast")
+        self.assertEqual(
+            self._appearance(later),
+            ("contrast", "cascadia-code", "courier-new"),
+        )
 
 
 class WorkspaceLaunchReservationTestCase(unittest.TestCase):

@@ -3,10 +3,12 @@
 Deep-dive feature 10.5: live shells cannot survive a backend restart by
 design, but the workspace *shape* (groups + per-session launch config) can.
 Schema v3 stores one slot per workspace id (``workspaces`` dict); with
-multi-workspace there is one slot per captured workspace. **Exactly two
-writers** capture shape: the autosave timer (``capture_live_workspaces``) and
-the user's explicit Save Workspace action (``capture_workspace`` with origin
-``"manual"``). Renaming a workspace deliberately does *not* capture — it
+multi-workspace there is one slot per captured workspace. **Exactly three
+user/runtime intents** capture shape: the autosave timer
+(``capture_live_workspaces``), the user's explicit Save Workspace action
+(``capture_workspace`` with origin ``"manual"``), and a successful voluntary
+close/restart lifecycle save (one all-live manual ``capture_live_workspaces``).
+Renaming a workspace deliberately does *not* capture — it
 changes the live label, and the next capture by either real writer persists it.
 A slot also records which group was in front (``active_group_id``) so the
 restore reopens the workspace on it rather than on whichever group happens to
@@ -51,13 +53,27 @@ import json
 import logging
 import math
 import os
-import shutil
 import threading
 import time
-import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from web.paths import BASE_DIR
+from web.session_presentation import (
+    MAX_STORED_SESSION_PANES,
+    PresentationValidationError,
+    default_workspace_appearance,
+    normalize_pane_presentation_fields,
+    normalize_topbar_visible,
+    normalize_workspace_appearance,
+    workspace_appearance_from_panes,
+)
+from web.state_files import (
+    CrossProcessFileLock,
+    StateFilePersistenceError,
+    quarantine_state_file,
+    read_backup_json,
+    write_json_atomically,
+)
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     normalize_workspace_id,
@@ -65,16 +81,6 @@ from web.workspaces import (
 )
 
 logger = logging.getLogger(__name__)
-
-try:  # POSIX advisory locking
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
-
-try:  # Windows mandatory byte-range locking
-    import msvcrt
-except ImportError:  # pragma: no cover - POSIX
-    msvcrt = None
 
 # The one file a production process owns. ``RUNTIME_STATE_PATH`` starts there
 # but is deliberately overridable: a test process (or a second GridVibe run)
@@ -107,7 +113,7 @@ MAX_TOMBSTONES = 64
 # max_sessions must not make a saved workspace vanish from the restore
 # chooser with no way to learn why. This ceiling only catches a file that is
 # not describing a workspace at all.
-MAX_STORED_GROUP_PANES = 64
+MAX_STORED_GROUP_PANES = MAX_STORED_SESSION_PANES
 # How long one process waits for another to finish its read-modify-replace.
 STATE_LOCK_TIMEOUT_SECONDS = 10.0
 NATIVE_ZOOM_FACTOR_MIN = 0.25
@@ -118,7 +124,7 @@ class RuntimeStatePathError(RuntimeError):
     """Raised when this process must not touch the production state file."""
 
 
-class RuntimeStatePersistenceError(RuntimeError):
+class RuntimeStatePersistenceError(StateFilePersistenceError):
     """Raised when an intended runtime-state revision did not reach the disk.
 
     Callers must treat this as "not stored": a route answers with a retryable
@@ -163,6 +169,10 @@ _SESSION_SNAPSHOT_FIELDS = (
     "explorer_tree_open",
     "explorer_git_open",
     "explorer_search_open",
+    "explorer_sidebar_width",
+    "explorer_sidebar_scroll",
+    "explorer_tree_expanded",
+    "explorer_git_expanded",
     "explorer_open_tabs",
     "explorer_active_tab",
     "explorer_tab_views",
@@ -264,20 +274,42 @@ def _validate_session(session: Any) -> Optional[Dict[str, Any]]:
     truncated) file added. It is also where the module's "the snapshot never
     contains passwords" promise is enforced on *read*: ``password`` is not a
     captured field, so it cannot re-enter a launch body through the state file.
+
+    The allowlist alone only proves a *key* is expected, not that its value is
+    (audit SGP-07). Nested explorer/browser presentation therefore goes through
+    the canonical normalizer, which type-checks and rejects: a stored
+    ``explorer_open_tabs: "abc"`` used to survive as ``['a','b','c']`` live
+    state that the next autosave made durable. ``None`` means "not captured by
+    this build" and is left to the launch defaults.
     """
     if not isinstance(session, dict):
         return None
-    return {key: session.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    validated = {key: session.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    try:
+        validated.update(normalize_pane_presentation_fields(session))
+    except PresentationValidationError as exc:
+        logger.warning("Runtime-state pane is not restorable: %s", exc)
+        return None
+    return validated
 
 
 def _validate_group(group: Any) -> Optional[Dict[str, Any]]:
     """Return one restorable group, or ``None`` when it is not one.
 
     A group is unrestorable when it is not an object, when it carries no usable
-    pane, or when it claims more panes than :data:`MAX_STORED_GROUP_PANES`. The
-    zero-pane case is the one MW-16 names: such a group used to be counted in
-    the restore chooser's summary ("1 group, 0 panes") and then relaunch
-    nothing, so the offer promised a tab it could never deliver.
+    pane, when *any* stored pane is unusable, or when it claims more panes than
+    :data:`MAX_STORED_GROUP_PANES`. The zero-pane case is the one MW-16 names:
+    such a group used to be counted in the restore chooser's summary ("1 group,
+    0 panes") and then relaunch nothing, so the offer promised a tab it could
+    never deliver.
+
+    One bad pane failing the whole group is deliberate (audit SGP-07, invariant
+    6). Keeping the readable panes restored a *smaller* group and reported it
+    as an exact restore, and the next autosave then committed the smaller shape
+    over the good one. The boundary is narrow and worth stating: **launchable
+    shape fails; window chrome degrades.** An invalid stored ``topbar_visible``
+    or appearance value still falls back to its default in
+    :func:`_validate_slot` rather than costing the user a whole workspace.
 
     Layout and connection mode are normalized through the same helpers the
     launch uses, so a stored geometry that no longer matches its pane count is
@@ -293,8 +325,9 @@ def _validate_group(group: Any) -> Optional[Dict[str, Any]]:
     sessions: List[Dict[str, Any]] = []
     for raw_session in raw_sessions:
         pane = _validate_session(raw_session)
-        if pane is not None:
-            sessions.append(pane)
+        if pane is None:
+            return None
+        sessions.append(pane)
     if not sessions or len(sessions) > MAX_STORED_GROUP_PANES:
         return None
 
@@ -381,103 +414,44 @@ def _validate_slot(workspace_id: Any, slot: Any) -> Optional[Dict[str, Any]]:
     validated["native_zoom_factor"] = normalize_native_zoom_factor(
         slot.get("native_zoom_factor")
     )
+    normalized_topbar_visible = normalize_topbar_visible(slot.get("topbar_visible"))
+    validated["topbar_visible"] = (
+        normalized_topbar_visible if normalized_topbar_visible is not None else True
+    )
+    appearance = normalize_workspace_appearance(slot)
+    if appearance is None:
+        legacy_panes = [
+            pane
+            for group in groups
+            for pane in group.get("sessions") or []
+            if isinstance(pane, dict)
+        ]
+        appearance = workspace_appearance_from_panes(legacy_panes)
+    validated.update(appearance or default_workspace_appearance())
     return validated
 
 
 # ==================== File primitives ====================
 
 
-class _CrossProcessStateLock:
+class _CrossProcessStateLock(CrossProcessFileLock):
     """Exclusive OS-level lock over one runtime-state file.
 
-    The in-process lock orders threads inside one interpreter; it says nothing
-    about a second GridVibe process doing its own read-modify-replace. Both
-    would read, both would modify, and the later ``os.replace`` would discard
-    the other's update wholesale. A sidecar ``<state>.lock`` (never the state
-    file itself, which is replaced rather than written in place) makes the
-    complete operation single-writer across processes.
-
-    Degrades to a no-op with one warning where neither locking primitive is
-    available — a missing lock must not make GridVibe unable to save at all.
+    The mechanics live in :class:`web.state_files.CrossProcessFileLock`, which
+    ``saved_sessions.json`` uses too; this subclass only names the file and the
+    exception a failed acquisition must raise.
     """
 
-    _unsupported_warned = False
+    error_type = RuntimeStatePersistenceError
+    label = "runtime-state"
 
     def __init__(self, state_path: str, timeout: float = STATE_LOCK_TIMEOUT_SECONDS):
-        self._lock_path = f"{state_path}.lock"
-        self._timeout = timeout
-        self._fd: Optional[int] = None
-
-    def __enter__(self) -> "_CrossProcessStateLock":
-        if fcntl is None and msvcrt is None:  # pragma: no cover - exotic platform
-            if not _CrossProcessStateLock._unsupported_warned:
-                _CrossProcessStateLock._unsupported_warned = True
-                logger.warning(
-                    "No file-locking primitive available; runtime state is "
-                    "protected within this process only"
-                )
-            return self
-        directory = os.path.dirname(os.path.abspath(self._lock_path))
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        self._fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-        deadline = time.monotonic() + self._timeout
-        while True:
-            try:
-                self._acquire_once(self._fd)
-                return self
-            except OSError:
-                if time.monotonic() >= deadline:
-                    os.close(self._fd)
-                    self._fd = None
-                    raise RuntimeStatePersistenceError(
-                        "Another process is holding the runtime-state lock "
-                        f"({self._lock_path}); the workspace was not saved"
-                    )
-                time.sleep(0.05)
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        if self._fd is None:
-            return
-        try:
-            self._release_once(self._fd)
-        finally:
-            os.close(self._fd)
-            self._fd = None
-
-    @staticmethod
-    def _acquire_once(fd: int) -> None:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
-        os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-
-    @staticmethod
-    def _release_once(fd: int) -> None:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            return
-        os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        super().__init__(state_path, timeout=timeout)
 
 
 def _quarantine_state_file(state_path: str, reason: str) -> None:
     """Move an unreadable/unsupported state file aside, keeping the evidence."""
-    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-    quarantine_path = f"{state_path}.corrupt-{stamp}"
-    if os.path.exists(quarantine_path):
-        quarantine_path = f"{quarantine_path}-{uuid.uuid4().hex[:8]}"
-    try:
-        os.replace(state_path, quarantine_path)
-    except OSError as exc:
-        logger.error("Could not quarantine unreadable runtime state: %s", exc)
-        return
-    logger.error(
-        "Quarantined unreadable runtime state (%s) as %s",
-        reason,
-        os.path.basename(quarantine_path),
-    )
+    quarantine_state_file(state_path, reason, label="runtime state")
 
 
 def _parse_state(data: Any) -> Optional[Dict[str, Any]]:
@@ -600,14 +574,8 @@ def _read_state_locked(state_path: str) -> Dict[str, Any]:
 
 def _recover_from_backup(state_path: str) -> Dict[str, Any]:
     """Return the last-good backup's state, or empty state when there is none."""
-    backup_path = f"{state_path}.bak"
-    try:
-        with open(backup_path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except FileNotFoundError:
-        return _empty_state()
-    except (OSError, ValueError) as exc:
-        logger.error("Last-good runtime state is unusable too: %s", exc)
+    data = read_backup_json(state_path, label="runtime state")
+    if data is None:
         return _empty_state()
     state = _parse_state(data)
     if state is None:
@@ -629,39 +597,12 @@ def _write_state_locked(state: Dict[str, Any], state_path: str) -> None:
     The previous file is copied to ``<state>.bak`` first, so a torn or corrupt
     successor always has a last-good predecessor to recover from.
     """
-    directory = os.path.dirname(os.path.abspath(state_path)) or "."
-    temp_path = os.path.join(
-        directory,
-        f".{os.path.basename(state_path)}.{uuid.uuid4().hex}.tmp",
+    write_json_atomically(
+        state,
+        state_path,
+        error_type=RuntimeStatePersistenceError,
+        failure_message="Could not persist the workspace snapshot",
     )
-    try:
-        with open(temp_path, "w", encoding="utf-8") as handle:
-            json.dump(state, handle, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        _back_up_current_state(state_path)
-        os.replace(temp_path, state_path)
-    except Exception as exc:
-        try:
-            os.remove(temp_path)
-        except OSError:
-            pass
-        logger.error("Could not persist runtime workspace state: %s", exc)
-        raise RuntimeStatePersistenceError(
-            f"Could not persist the workspace snapshot: {exc}"
-        ) from exc
-
-
-def _back_up_current_state(state_path: str) -> None:
-    """Copy the current state file to ``<state>.bak`` (best effort)."""
-    if not os.path.exists(state_path):
-        return
-    try:
-        shutil.copyfile(state_path, f"{state_path}.bak")
-    except OSError as exc:
-        # A missing backup weakens recovery but must not fail the commit.
-        logger.debug("Could not refresh the runtime-state backup: %s", exc)
 
 
 # ==================== The store ====================
@@ -809,6 +750,10 @@ class RuntimeStateStore:
         active_group_id: str,
         saved_at: float,
         native_zoom_factor: Optional[float],
+        topbar_visible: bool,
+        md_preset: str,
+        md_font: str,
+        source_font: str,
     ) -> Dict[str, Any]:
         """Assemble one stored slot from a captured shape."""
         captured_group_ids = {group["group_id"] for group in groups}
@@ -828,6 +773,10 @@ class RuntimeStateStore:
             "active_group_id": (
                 active_group_id if active_group_id in captured_group_ids else ""
             ),
+            "topbar_visible": topbar_visible,
+            "md_preset": md_preset,
+            "md_font": md_font,
+            "source_font": source_font,
             "groups": groups,
         }
         manually_saved_at = (
@@ -854,6 +803,7 @@ class RuntimeStateStore:
         label: Optional[str] = None,
         active_group_id: Optional[str] = None,
         native_zoom_factor: Any = None,
+        topbar_visible: Any = None,
     ) -> Optional[Dict[str, Any]]:
         """Capture one workspace's shape and persist its slot. See module docs."""
         workspace_id = normalize_workspace_id(workspace_id)
@@ -877,7 +827,17 @@ class RuntimeStateStore:
             active_group_id = live_snapshot.get("active_group_id")
         active_group_id = str(active_group_id or "").strip()
         normalized_zoom = normalize_native_zoom_factor(native_zoom_factor)
+        normalized_topbar_visible = normalize_topbar_visible(topbar_visible)
+        if normalized_topbar_visible is None:
+            normalized_topbar_visible = normalize_topbar_visible(
+                live_snapshot.get("topbar_visible")
+            )
+        if normalized_topbar_visible is None:
+            normalized_topbar_visible = True
         workspace_label = str(live_snapshot.get("label") or "").strip()
+        appearance = normalize_workspace_appearance(live_snapshot)
+        if appearance is None:
+            appearance = default_workspace_appearance()
 
         state_path = self.state_path()
         with self._lock, _CrossProcessStateLock(state_path):
@@ -901,6 +861,8 @@ class RuntimeStateStore:
                 active_group_id=active_group_id,
                 saved_at=time.time(),
                 native_zoom_factor=normalized_zoom,
+                topbar_visible=normalized_topbar_visible,
+                **appearance,
             )
             slot["revision"] = self._bump_revision(
                 revisions, workspace_id, "commit", observed
@@ -917,6 +879,7 @@ class RuntimeStateStore:
         self,
         session_manager: Any,
         origin: str = "auto",
+        workspace_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Capture every non-empty live workspace with one consistent file write.
 
@@ -929,6 +892,9 @@ class RuntimeStateStore:
         workspace nor undo a newer capture.
         """
         ticket = self._next_ticket()
+        workspace_metadata = (
+            workspace_metadata if isinstance(workspace_metadata, dict) else {}
+        )
         observed = self.observed_revisions()
         live_snapshots = session_manager.snapshot_live_workspaces()
         if not live_snapshots:
@@ -942,6 +908,8 @@ class RuntimeStateStore:
             revisions = state.setdefault("revisions", {})
             stored_slots: Dict[str, Dict[str, Any]] = {}
             for workspace_id, snapshot in live_snapshots.items():
+                metadata = workspace_metadata.get(workspace_id)
+                metadata = metadata if isinstance(metadata, dict) else {}
                 observed_revision = observed.get(workspace_id, 0)
                 if self._is_stale_locked(
                     workspace_id, ticket, origin, observed_revision, revisions
@@ -961,6 +929,16 @@ class RuntimeStateStore:
                     continue
                 previous_slot = workspaces.get(workspace_id)
                 previous_slot = previous_slot if isinstance(previous_slot, dict) else {}
+                active_group_id = (
+                    str(metadata.get("active_group_id") or "").strip()
+                    if "active_group_id" in metadata
+                    else str(snapshot.get("active_group_id") or "").strip()
+                )
+                topbar_visible = (
+                    metadata.get("topbar_visible")
+                    if isinstance(metadata.get("topbar_visible"), bool)
+                    else snapshot.get("topbar_visible")
+                )
                 slot = self._build_slot(
                     workspace_id=workspace_id,
                     groups=groups,
@@ -968,9 +946,20 @@ class RuntimeStateStore:
                     origin=origin,
                     label=None,
                     workspace_label=str(snapshot.get("label") or "").strip(),
-                    active_group_id=str(snapshot.get("active_group_id") or "").strip(),
+                    active_group_id=active_group_id,
                     saved_at=saved_at,
-                    native_zoom_factor=None,
+                    native_zoom_factor=normalize_native_zoom_factor(
+                        metadata.get("native_zoom_factor")
+                    ),
+                    topbar_visible=(
+                        topbar_visible
+                        if isinstance(topbar_visible, bool)
+                        else True
+                    ),
+                    **(
+                        normalize_workspace_appearance(snapshot)
+                        or default_workspace_appearance()
+                    ),
                 )
                 slot["revision"] = self._bump_revision(
                     revisions, workspace_id, "commit", observed_revision
@@ -1198,6 +1187,7 @@ def capture_workspace(
     label: Optional[str] = None,
     active_group_id: Optional[str] = None,
     native_zoom_factor: Any = None,
+    topbar_visible: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """Capture one workspace's shape from the live manager and persist its slot.
 
@@ -1226,15 +1216,21 @@ def capture_workspace(
         label=label,
         active_group_id=active_group_id,
         native_zoom_factor=native_zoom_factor,
+        topbar_visible=topbar_visible,
     )
 
 
 def capture_live_workspaces(
     session_manager: Any,
     origin: str = "auto",
+    workspace_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Capture every non-empty live workspace with one consistent file write."""
-    return _default_store.capture_live_workspaces(session_manager, origin=origin)
+    return _default_store.capture_live_workspaces(
+        session_manager,
+        origin=origin,
+        workspace_metadata=workspace_metadata,
+    )
 
 
 def load_restorable_workspace(
