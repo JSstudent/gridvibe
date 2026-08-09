@@ -1,0 +1,45 @@
+{# The one global notification banner (web/static/js/notice-banner.js).
+
+   Static markup on purpose: the adapter binds to these ids and only ever
+   flips attributes and classes, so it never builds DOM and there is no race
+   between a notice fired during page init and the banner existing. All four
+   severity icons ship hidden; show() unhides exactly one.
+
+   Included by the launcher today; page-agnostic so the workspace page can
+   include the same partial rather than growing a second toast. #}
+<div id="gvNoticeBanner" class="gv-notice-banner" role="status" aria-live="polite" hidden>
+    <span class="gv-notice-icon" aria-hidden="true">
+        <svg id="gvNoticeIconError" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" focusable="false" hidden>
+            <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
+            <line x1="12" y1="9" x2="12" y2="13"></line>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+        <svg id="gvNoticeIconWarning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" focusable="false" hidden>
+            <circle cx="12" cy="12" r="9"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+        </svg>
+        <svg id="gvNoticeIconSuccess" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" focusable="false" hidden>
+            <path d="M21.2 11.1V12a9 9 0 1 1-5.3-8.2"></path>
+            <polyline points="21 4.5 12 13.5 9.3 10.8"></polyline>
+        </svg>
+        <svg id="gvNoticeIconInfo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" focusable="false" hidden>
+            <circle cx="12" cy="12" r="9"></circle>
+            <line x1="12" y1="11" x2="12" y2="16"></line>
+            <line x1="12" y1="8" x2="12.01" y2="8"></line>
+        </svg>
+    </span>
+    <span id="gvNoticeText" class="gv-notice-text"></span>
+    <button
+        type="button"
+        class="gv-notice-dismiss"
+        onclick="dismissGridVibeNotice()"
+        aria-label="Dismiss notification"
+        title="Dismiss notification"
+    >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+    </button>
+</div>

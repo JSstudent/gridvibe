@@ -4059,7 +4059,11 @@ function isMultiWorkspaceEnabled() { return false; }
 async function loadWorkspaceRestoreChooser() { throw new Error('multi-mode chooser'); }
 function formatWorkspaceSavedAgo() { return 'just now'; }
 const messages = [];
-function showMessage(text, kind) { messages.push([text, kind]); }
+function showGridVibeNotice(text, kind) { messages.push([text, kind]); }
+function describeFailure(summary, error) {
+    const detail = String((error && error.message) || '').trim();
+    return detail ? `${summary} ${detail}` : summary;
+}
 function normalizeNativeZoomFactor(value) { return value == null ? null : Number(value); }
 async function viewActiveTerminals(_event, groupId, zoomFactor) {
     opened.push([groupId, zoomFactor]);
@@ -4158,11 +4162,11 @@ async function restoreSavedWorkspaces(workspaceIds) {
         # Already live: no offer, no request.
         self.assertTrue(result["liveBannerHidden"])
         self.assertEqual(result["callsWhileLive"], 0)
-        # Refused: the offer and its re-enabled button stay put, with retry
-        # wording on the message (guardrail 8).
+        # Refused: the offer and its re-enabled button stay put, so the retry
+        # is still in front of the user (guardrail 8) — the affordance is the
+        # live button, not the words "try again" appended to a message.
         self.assertFalse(result["refusedBannerHidden"])
         self.assertFalse(result["refusedButtonDisabled"])
-        self.assertIn("try again", result["refusedMessage"][0])
         self.assertEqual(result["refusedMessage"][1], "error")
         # Offered: the banner names the saved workspace and its shape.
         self.assertFalse(result["offeredBannerHidden"])

@@ -14947,22 +14947,65 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         self.assertIn(".action-btn.loading .arrow { display: none; }", launcher_css)
         self.assertIn(".action-btn.loading .action-btn-spinner", launcher_css)
 
-    # ── 8.3: one update-status area with an auto-clear ──────────────────────
+    # ── 8.3: exactly one global message surface ─────────────────────────────
 
-    def test_update_status_renders_in_one_place_and_auto_clears(self):
+    def test_launcher_has_exactly_one_global_message_surface(self):
+        """The launcher used to have two independent message sinks: `#message`,
+        which was markup inside the Terminal Layout card, and
+        `#quickUpdateStatus` under the icon row. The update flow wrote to both,
+        so one failure arrived twice. The notification banner is the only
+        global surface left, and neither old sink can be written."""
         html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="gvNoticeBanner"', html)
+        self.assertIn('id="gvNoticeText"', html)
+        self.assertNotIn('id="quickUpdateStatus"', html)
         self.assertNotIn('id="updateStatus"', html)
-        self.assertIn('id="quickUpdateStatus"', html)
+        # The banner still needs somewhere to be written from and painted.
+        self.assertIn("js/notice-banner.js", html)
+        self.assertIn("css/notice-banner.css", html)
         launcher_js = self._static("js/launcher.js")
+        self.assertNotIn("setUpdateStatus", launcher_js)
         self.assertNotIn("getElementById('updateStatus')", launcher_js)
-        set_fn = launcher_js[
-            launcher_js.index("function setUpdateStatus"):
-            launcher_js.index("function shortCommit")
-        ]
-        self.assertIn("quickUpdateStatus", set_fn)
-        self.assertIn("6000", set_fn)
+        # #message survives only as the Terminal Layout card's helper copy.
+        self.assertIn('id="message"', html)
+        self.assertNotIn("getElementById('message')", launcher_js)
         launcher_css = self._static("css/launcher.css")
         self.assertNotIn(".toolbar-status", launcher_css)
+        self.assertNotIn(".inline-status", launcher_css)
+        self.assertNotIn(".message.error", launcher_css)
+
+    def test_notice_banner_stays_below_every_dialog_layer(self):
+        """The banner is launcher content, not an overlay: it takes no
+        position and no stacking order of its own, so every dialog paints over
+        it. Floating a minutes-old notice on top of a modal the user just
+        opened reads as a bug — a persistent one is still there when the
+        dialog closes."""
+        notice_css = self._static("css/notice-banner.css")
+        banner = re.search(r"\.gv-notice-banner \{(.*?)\}", notice_css, re.DOTALL)
+        self.assertIsNotNone(banner)
+        self.assertNotIn("z-index", banner.group(1))
+        self.assertNotIn("position:", banner.group(1))
+        # Nothing anywhere in the banner's own stylesheet lifts it either
+        # (comments stripped — the rule is about declarations).
+        self.assertNotIn("z-index", re.sub(r"/\*.*?\*/", "", notice_css, flags=re.DOTALL))
+        # The dialog layers it has to lose to are real.
+        dialog_layers = [
+            int(match)
+            for sheet in ("css/workspaces.css", "css/app-settings.css")
+            for match in re.findall(r"z-index:\s*(\d+)", self._static(sheet))
+        ]
+        self.assertTrue(dialog_layers)
+
+    def test_notice_banner_text_is_height_bounded(self):
+        """D2 — no message length can eat the page: the text wraps to a capped
+        height and scrolls inside itself, and an unbroken path or git blob
+        cannot force horizontal overflow."""
+        notice_css = self._static("css/notice-banner.css")
+        text = re.search(r"\.gv-notice-text \{(.*?)\}", notice_css, re.DOTALL)
+        self.assertIsNotNone(text)
+        self.assertIn("max-height", text.group(1))
+        self.assertIn("overflow-y: auto", text.group(1))
+        self.assertIn("overflow-wrap: anywhere", text.group(1))
 
     # ── 8.5: save-settings button keeps only the custom tooltip ─────────────
 
@@ -16262,15 +16305,18 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
     def test_restore_banner_keeps_a_content_sized_row(self):
         """Todo 2 — the banner used to land in .app-frame's 1fr row and grow
         with the window. Rows are placed explicitly so its row is content
-        sized, and its margins line it up with the columns below."""
+        sized, and its margins line it up with the columns below. The
+        notification banner owns a row of its own for the same reason, so the
+        two optional banners can never share a row or overlap."""
         launcher_css = self._static("css/launcher.css")
         app_frame = re.search(r"\n        \.app-frame \{(.*?)\}", launcher_css, re.DOTALL)
         self.assertIsNotNone(app_frame)
-        self.assertIn("grid-template-rows: auto auto 1fr", app_frame.group(1))
+        self.assertIn("grid-template-rows: auto auto auto 1fr", app_frame.group(1))
         for placement in (
             ".app-titlebar { grid-row: 1; }",
-            ".restore-banner { grid-row: 2; }",
-            ".shell { grid-row: 3; }",
+            ".gv-notice-banner { grid-row: 2; }",
+            ".restore-banner { grid-row: 3; }",
+            ".shell { grid-row: 4; }",
         ):
             self.assertIn(placement, launcher_css)
         # The declaration block, not the one-line grid-row placement above it.

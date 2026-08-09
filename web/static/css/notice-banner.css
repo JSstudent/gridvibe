@@ -1,0 +1,130 @@
+/* The one global notification banner (templates/partials/notice_banner.html,
+   web/static/js/notice-banner.js).
+
+   Page-agnostic: colours come from tokens.css only and the text colour is
+   inherited, so the same stylesheet works on either page. Where the banner
+   sits in the page grid is the page's business — launcher.css owns its
+   grid-row, exactly as it owns the restore banner's.
+
+   Two structural guarantees live here:
+
+   1. The banner can never eat the layout. Its text has a hard max-height and
+      scrolls internally, so a 2 KB git error wraps to four lines and stops,
+      and `overflow-wrap: anywhere` keeps an unbroken path from forcing
+      horizontal overflow.
+   2. It is ordinary in-flow launcher content — deliberately unpositioned and
+      with no z-index of its own — so every dialog paints over it. A notice
+      belongs to the launcher behind the dialog, not on top of it: floating a
+      minutes-old error over a modal the user just opened reads as a bug. A
+      persistent notice is still there when the dialog closes. */
+.gv-notice-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    /* Identical insets to .restore-banner so the two read as one family and
+       line up with the columns below. */
+    margin: 14px 30px 0;
+    padding: 10px 16px;
+    border: 1px solid var(--gv-accent);
+    border-radius: var(--gv-radius-m, 12px);
+    background: var(--gv-accent-soft);
+    color: inherit;
+    font-size: .85rem;
+}
+
+.gv-notice-banner[hidden] {
+    display: none;
+}
+
+.gv-notice-icon {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    height: 1.45em;
+    color: var(--gv-accent);
+}
+
+.gv-notice-icon svg {
+    width: 17px;
+    height: 17px;
+}
+
+.gv-notice-icon svg[hidden] {
+    display: none;
+}
+
+.gv-notice-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    /* Four lines at this size, then scroll — the height is bounded by the
+       content, never by the window. */
+    max-height: 6rem;
+    overflow-y: auto;
+    overflow-wrap: anywhere;
+    line-height: 1.45;
+}
+
+.gv-notice-dismiss {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--gv-radius-s, 8px);
+    background: transparent;
+    color: inherit;
+    opacity: .68;
+    cursor: pointer;
+}
+
+.gv-notice-dismiss:hover,
+.gv-notice-dismiss:focus-visible {
+    opacity: 1;
+}
+
+.gv-notice-dismiss svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* Severity is border + tint + icon, never colour alone (guardrail 7): the
+   four icons are different shapes, so the state survives colour blindness. */
+.gv-notice-banner.is-error {
+    border-color: var(--gv-danger);
+    background: var(--gv-danger-soft);
+}
+
+.gv-notice-banner.is-error .gv-notice-icon {
+    color: var(--gv-danger);
+}
+
+.gv-notice-banner.is-warning {
+    border-color: var(--gv-warning);
+    background: var(--gv-warning-soft);
+}
+
+.gv-notice-banner.is-warning .gv-notice-icon {
+    color: var(--gv-warning);
+}
+
+.gv-notice-banner.is-success {
+    border-color: var(--gv-success);
+    background: var(--gv-success-soft);
+}
+
+.gv-notice-banner.is-success .gv-notice-icon {
+    color: var(--gv-success);
+}
+
+.gv-notice-banner.is-info {
+    border-color: var(--gv-accent);
+    background: var(--gv-accent-soft);
+}
+
+.gv-notice-banner.is-info .gv-notice-icon {
+    color: var(--gv-accent);
+}
