@@ -1014,6 +1014,39 @@ def normalize_pane_presentation(data: Any) -> Dict[str, Any]:
     return normalized
 
 
+def normalize_pane_presentation_fields(config: Any) -> Dict[str, Any]:
+    """Return the strict presentation subset of one stored or requested pane.
+
+    The same rules as :func:`normalize_pane_presentation`, applied to a pane
+    body that also carries launch fields (a stored runtime-state pane, a launch
+    request).  A field that is absent — or ``None``, which is how an older
+    capture wrote "not set" — stays absent so the caller keeps its documented
+    default; every field that *is* present is type-checked and bounded, never
+    fed through ``list()``/``dict()``/``int()``.
+
+    Raises :class:`PresentationValidationError`, which is the signal that this
+    pane is not launchable (audit SGP-07): the caller must fail the whole group
+    rather than drop the pane or install a coerced value.
+    """
+    if not isinstance(config, dict):
+        raise PresentationValidationError("Each pane must be an object")
+    supplied = {
+        field_name: config[field_name]
+        for field_name in PANE_PRESENTATION_FIELDS & config.keys()
+        if config[field_name] is not None
+    }
+    # Capture always writes these together, so a record holding only the
+    # dependent half predates the field or was hand-edited. Supplying the empty
+    # companion keeps the "active tab must be an open tab" rule a *value* rule
+    # here instead of turning an old file into an unrestorable one; the
+    # dependency itself stays enforced for live client payloads.
+    if supplied.keys() & {"explorer_active_tab", "explorer_tab_views"}:
+        supplied.setdefault("explorer_open_tabs", [])
+    if "browser_active_tab" in supplied:
+        supplied.setdefault("browser_tabs", [])
+    return normalize_pane_presentation(supplied)
+
+
 def normalize_group_presentation(data: Any) -> Dict[str, Any]:
     """Validate and normalize one exact live-group presentation transaction."""
     if not isinstance(data, dict):

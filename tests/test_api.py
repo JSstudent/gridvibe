@@ -3627,10 +3627,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+        # Audit item 6/product decision 6: the refusal names the number to
+        # raise the setting to, and the setting, so it is actionable on its own.
         self.assertEqual(
             response.get_json(),
-            {"error": f"Maximum {api.runtime_config.max_sessions} sessions allowed"},
+            {
+                "error": api.capacity_refusal(
+                    api.runtime_config.max_sessions + 1,
+                    api.runtime_config.max_sessions,
+                )
+            },
         )
+        self.assertIn(
+            str(api.runtime_config.max_sessions + 1), response.get_json()["error"]
+        )
+        self.assertIn("max_sessions", response.get_json()["error"])
 
     def test_voice_status_endpoint_includes_engine_model_and_language(self):
         with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
@@ -10842,9 +10853,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         response = self.client.post(f"/api/sessions/{source.session_id}/split")
 
         self.assertEqual(response.status_code, 400)
+        # The split boundary answers with the same actionable refusal as launch.
         self.assertEqual(
             response.get_json(),
-            {"error": f"Maximum {api.runtime_config.max_sessions} sessions allowed"},
+            {
+                "error": api.capacity_refusal(
+                    api.runtime_config.max_sessions + 1,
+                    api.runtime_config.max_sessions,
+                )
+            },
         )
 
     def test_delete_session_closes_and_removes_it(self):
@@ -14145,7 +14162,7 @@ class RuntimeConfigExtractionTestCase(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(
-            response.get_json(), {"error": "Maximum 2 sessions allowed"}
+            response.get_json(), {"error": api.capacity_refusal(3, 2)}
         )
 
 

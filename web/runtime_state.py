@@ -60,7 +60,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from web.paths import BASE_DIR
 from web.session_presentation import (
     MAX_STORED_SESSION_PANES,
+    PresentationValidationError,
     default_workspace_appearance,
+    normalize_pane_presentation_fields,
     normalize_topbar_visible,
     normalize_workspace_appearance,
     workspace_appearance_from_panes,
@@ -272,20 +274,42 @@ def _validate_session(session: Any) -> Optional[Dict[str, Any]]:
     truncated) file added. It is also where the module's "the snapshot never
     contains passwords" promise is enforced on *read*: ``password`` is not a
     captured field, so it cannot re-enter a launch body through the state file.
+
+    The allowlist alone only proves a *key* is expected, not that its value is
+    (audit SGP-07). Nested explorer/browser presentation therefore goes through
+    the canonical normalizer, which type-checks and rejects: a stored
+    ``explorer_open_tabs: "abc"`` used to survive as ``['a','b','c']`` live
+    state that the next autosave made durable. ``None`` means "not captured by
+    this build" and is left to the launch defaults.
     """
     if not isinstance(session, dict):
         return None
-    return {key: session.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    validated = {key: session.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    try:
+        validated.update(normalize_pane_presentation_fields(session))
+    except PresentationValidationError as exc:
+        logger.warning("Runtime-state pane is not restorable: %s", exc)
+        return None
+    return validated
 
 
 def _validate_group(group: Any) -> Optional[Dict[str, Any]]:
     """Return one restorable group, or ``None`` when it is not one.
 
     A group is unrestorable when it is not an object, when it carries no usable
-    pane, or when it claims more panes than :data:`MAX_STORED_GROUP_PANES`. The
-    zero-pane case is the one MW-16 names: such a group used to be counted in
-    the restore chooser's summary ("1 group, 0 panes") and then relaunch
-    nothing, so the offer promised a tab it could never deliver.
+    pane, when *any* stored pane is unusable, or when it claims more panes than
+    :data:`MAX_STORED_GROUP_PANES`. The zero-pane case is the one MW-16 names:
+    such a group used to be counted in the restore chooser's summary ("1 group,
+    0 panes") and then relaunch nothing, so the offer promised a tab it could
+    never deliver.
+
+    One bad pane failing the whole group is deliberate (audit SGP-07, invariant
+    6). Keeping the readable panes restored a *smaller* group and reported it
+    as an exact restore, and the next autosave then committed the smaller shape
+    over the good one. The boundary is narrow and worth stating: **launchable
+    shape fails; window chrome degrades.** An invalid stored ``topbar_visible``
+    or appearance value still falls back to its default in
+    :func:`_validate_slot` rather than costing the user a whole workspace.
 
     Layout and connection mode are normalized through the same helpers the
     launch uses, so a stored geometry that no longer matches its pane count is
@@ -301,8 +325,9 @@ def _validate_group(group: Any) -> Optional[Dict[str, Any]]:
     sessions: List[Dict[str, Any]] = []
     for raw_session in raw_sessions:
         pane = _validate_session(raw_session)
-        if pane is not None:
-            sessions.append(pane)
+        if pane is None:
+            return None
+        sessions.append(pane)
     if not sessions or len(sessions) > MAX_STORED_GROUP_PANES:
         return None
 

@@ -308,6 +308,7 @@ from web.voice import (  # noqa: F401 - re-exported for backwards compatibility
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     _redacted_launch_summary,
+    capacity_refusal,
     close_extra_workspaces,
     close_live_workspace,
     forget_emptied_default_workspace,
@@ -2465,7 +2466,11 @@ def split_session(session_id: str):
 
     group_sessions = session_manager.get_group_sessions(group.group_id)
     if len(group_sessions) >= runtime_config.max_sessions:
-        return jsonify({"error": f"Maximum {runtime_config.max_sessions} sessions allowed"}), 400
+        return jsonify({
+            "error": capacity_refusal(
+                len(group_sessions) + 1, runtime_config.max_sessions
+            )
+        }), 400
 
     host = source.host
     directory = source.directory

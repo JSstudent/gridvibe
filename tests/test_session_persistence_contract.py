@@ -28,6 +28,10 @@ Stage 0 item → test case:
 6. Lowering `max_sessions` is non-destructive       `LaunchCapacityNondestructiveTestCase`
 7. Malformed nested presentation state              `MalformedPresentationValidationTestCase`
 8. The close/restart action matrix                  `LifecycleActionMatrixTestCase`
+
+Stages 1-6 have shipped, so no `expectedFailure` remains: every forcing
+function in this module now asserts behaviour the production code delivers.
+A new decorator here means a new deferred contract, not a known defect.
 """
 
 import json
@@ -1120,7 +1124,6 @@ class LaunchCapacityNondestructiveTestCase(_PersistencePathsMixin, unittest.Test
             stored_slots,
         )
 
-    @unittest.expectedFailure
     def test_an_oversized_group_fails_with_an_actionable_capacity_error(self):
         """Stage 6 items 6-7 / product decision 6. Matrix row 20."""
         state = {
@@ -1165,6 +1168,39 @@ class LaunchCapacityNondestructiveTestCase(_PersistencePathsMixin, unittest.Test
         self.assertIn("max_sessions", errors)
         # Non-destructive: the slot is untouched and still on offer.
         self.assertEqual(self.state_path.read_text(encoding="utf-8"), before)
+        with patch.object(api.runtime_config, "max_sessions", 4):
+            self.assertIsNotNone(web_runtime_state.load_restorable_workspace("default"))
+
+    def test_launching_an_oversized_preset_refuses_without_touching_it(self):
+        """Stage 6 items 6-7 / product decision 6, launch side.
+
+        Same refusal from the other persistence product: the current cap is
+        enforced at the launch boundary, and the preset the user asked to
+        launch is still the eight-pane preset afterwards.
+        """
+        with patch.object(api.runtime_config, "max_sessions", 8):
+            web_saved_sessions.upsert_saved_session(self._wide_config(8), name="Wide")
+        before = self.saved_sessions_path.read_text(encoding="utf-8")
+
+        with patch.object(api.runtime_config, "max_sessions", 4):
+            response = self.client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "ssh",
+                    "session_name": "Wide",
+                    "sessions": [
+                        {"host": "wide.example", "directory": "/srv"}
+                        for _ in range(8)
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        error = response.get_json()["error"]
+        self.assertIn("8", error)
+        self.assertIn("max_sessions", error)
+        self.assertEqual(self.saved_sessions_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(api.session_manager.get_all_sessions(), [])
 
 
 # ==================== Item 7 — SGP-07 (Stage 2 + Stage 6 items 4-5) ====================
@@ -1225,7 +1261,6 @@ class MalformedPresentationValidationTestCase(_PersistencePathsMixin, unittest.T
             "sessions": sessions,
         }
 
-    @unittest.expectedFailure
     def test_a_malformed_pane_makes_the_whole_group_unrestorable(self):
         """Stage 6 items 4-5. Matrix rows 22 and 23.
 
@@ -1239,7 +1274,6 @@ class MalformedPresentationValidationTestCase(_PersistencePathsMixin, unittest.T
                 self.assertIsNone(web_runtime_state.load_restorable_workspace("default"))
                 self.assertEqual(web_runtime_state.list_restorable_workspaces(), [])
 
-    @unittest.expectedFailure
     def test_the_chooser_count_matches_what_a_restore_would_really_start(self):
         """Invariant 6: a partial group is never advertised as exact."""
         self._write_slot(

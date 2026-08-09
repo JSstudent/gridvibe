@@ -455,6 +455,23 @@ def _redacted_launch_summary(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def capacity_refusal(required_panes: int, current_cap: int) -> str:
+    """The one actionable answer to "this group wants more panes than allowed".
+
+    Product decision 6 of the session-persistence audit: a lowered
+    ``max_sessions`` preserves the stored preset and snapshot untouched and the
+    refusal names the number to raise the setting to. The setting's own name is
+    part of the sentence on purpose — a per-group restore result forwards only
+    this string, so anything the user needs to act on has to be inside it.
+    """
+    panes = "pane" if required_panes == 1 else "panes"
+    return (
+        f"This group needs {required_panes} {panes}, but the current "
+        f"max_sessions limit is {current_cap}. Raise max_sessions to "
+        f"{required_panes} in App Settings, then retry."
+    )
+
+
 def _prepare_launch_sessions(
     sessions_config: List[Dict[str, Any]],
     connection_mode: str,
@@ -609,7 +626,9 @@ def launch_session_group(
                 runtime_config.max_sessions,
             )
             return {
-                "error": f"Maximum {runtime_config.max_sessions} sessions allowed"
+                "error": capacity_refusal(
+                    len(sessions_config), runtime_config.max_sessions
+                )
             }, 400
 
         connection_mode = _normalize_connection_mode(data.get("connection_mode"))

@@ -1599,6 +1599,157 @@ class RuntimeStateSlotValidationTestCase(unittest.TestCase):
         self.assertEqual(self.state_path.read_bytes(), before)
 
 
+class RuntimeStateNestedFieldValidationTestCase(unittest.TestCase):
+    """Audit SGP-07 / Stage 6 items 4-5: nested pane state is type-checked.
+
+    The session allowlist only ever proved a *key* was expected. Whether a
+    wrong-typed value cost the user a pane, or was installed as garbage, came
+    down to whether a defensive coercion in ``_session_launch_fields`` happened
+    to raise: ``dict("x")`` and ``int("abc")`` did, so the pane vanished and the
+    group launched smaller; ``list("abc")`` did not, so ``['a','b','c']`` became
+    live state that the next autosave made durable.
+
+    The boundary this class pins is deliberately narrow: **launchable shape
+    fails, window chrome degrades.** A wrong-typed pane field costs the group;
+    a wrong-typed ``topbar_visible`` or appearance value costs only itself.
+    """
+
+    WORKSPACE_A = "aaaaaaaaaaaa"
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_pane(self, **pane_fields):
+        state = {
+            "version": web_runtime_state.SCHEMA_VERSION,
+            "workspaces": {
+                self.WORKSPACE_A: {
+                    "workspace_id": self.WORKSPACE_A,
+                    "label": "Alpha",
+                    "origin": "manual",
+                    "saved_at": 1000.0,
+                    "groups": [
+                        {
+                            "group_id": "g1",
+                            "name": "Group",
+                            "connection_mode": "wsl",
+                            "layout": "vertical",
+                            "sessions": [
+                                {"directory": "/srv", "title": "Kept"},
+                                {"directory": "/srv", "title": "Suspect", **pane_fields},
+                            ],
+                        }
+                    ],
+                }
+            },
+        }
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    def _pane(self):
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+        return slot["groups"][0]["sessions"][1] if slot else None
+
+    def test_a_wrong_typed_nested_value_costs_the_group_not_one_pane(self):
+        for field_name, value in (
+            ("explorer_tab_views", "x"),
+            ("browser_active_tab", "abc"),
+            ("explorer_open_tabs", "abc"),
+            ("explorer_tree_open", "yes"),
+            ("explorer_sidebar_width", "wide"),
+            ("explorer_tree_expanded", {"a": 1}),
+            ("browser_tabs", "http://x"),
+        ):
+            with self.subTest(field=field_name):
+                self._write_pane(**{field_name: value})
+
+                self.assertIsNone(
+                    web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+                )
+                self.assertEqual(web_runtime_state.list_restorable_workspaces(), [])
+
+    def test_an_out_of_range_value_of_the_right_type_is_bounded_not_rejected(self):
+        """Rejection is for wrong *types*; a legal type is still normalized."""
+        self._write_pane(
+            explorer_sidebar_width=9999,
+            explorer_open_tabs=[f"file{index}.md" for index in range(40)],
+            explorer_active_tab="file3.md",
+        )
+
+        pane = self._pane()
+
+        self.assertIsNotNone(pane)
+        self.assertEqual(pane["explorer_sidebar_width"], 520)
+        self.assertEqual(len(pane["explorer_open_tabs"]), 12)
+        self.assertEqual(pane["explorer_active_tab"], "file3.md")
+
+    def test_an_active_tab_outside_the_open_tabs_degrades_to_preview(self):
+        self._write_pane(
+            explorer_open_tabs=["a.md"], explorer_active_tab="gone.md"
+        )
+
+        self.assertEqual(self._pane()["explorer_active_tab"], "")
+
+    def test_a_legacy_slot_without_the_newer_fields_still_restores(self):
+        """Absent is not malformed: an older capture keeps its defaults."""
+        self._write_pane(host="h.example")
+
+        pane = self._pane()
+
+        self.assertIsNotNone(pane)
+        self.assertEqual(pane["host"], "h.example")
+        self.assertIsNone(pane["explorer_sidebar_scroll"])
+
+    def test_invalid_window_chrome_degrades_instead_of_costing_the_slot(self):
+        """The stated boundary: chrome is not launchable shape."""
+        self._write_pane()
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state["workspaces"][self.WORKSPACE_A]["topbar_visible"] = "hidden"
+        state["workspaces"][self.WORKSPACE_A]["md_preset"] = 17
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        self.assertIsNotNone(slot)
+        self.assertTrue(slot["topbar_visible"])
+        self.assertEqual(slot["md_preset"], "default")
+
+    def test_a_rejected_pane_is_logged_as_shape_only(self):
+        self._write_pane(
+            explorer_open_tabs="abc",
+            host="secret.example",
+            directory="/srv/secret-project",
+        )
+
+        with self.assertLogs(web_runtime_state.logger, level="WARNING") as captured:
+            web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        joined = "\n".join(captured.output)
+        self.assertIn("not restorable", joined)
+        self.assertNotIn("secret.example", joined)
+        self.assertNotIn("secret-project", joined)
+
+    def test_a_read_that_rejects_a_group_never_rewrites_the_file(self):
+        """The bad slot stays on disk for diagnosis and for a later fix."""
+        self._write_pane(explorer_open_tabs="abc")
+        before = self.state_path.read_bytes()
+
+        web_runtime_state.list_restorable_workspaces()
+        web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+
 class WorkspaceDiagnosticsTestCase(unittest.TestCase):
     """MW-16 (diagnostics half): safe metadata for every state transition.
 
@@ -3131,7 +3282,11 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
         workspace_result = payload["workspaces"][0]
         self.assertTrue(workspace_result["restored"])
         self.assertEqual([group["started"] for group in workspace_result["groups"]], [True, False])
-        self.assertIn("Maximum", workspace_result["groups"][1]["error"])
+        # The forwarded per-group error is the actionable capacity refusal: it
+        # names the number to raise `max_sessions` to (audit product decision 6).
+        self.assertEqual(
+            workspace_result["groups"][1]["error"], web_workspaces.capacity_refusal(2, 1)
+        )
 
     def test_r8_front_group_hint_falls_back_to_the_first_started_group(self):
         first = self._launch(session_name="First")
@@ -3278,7 +3433,10 @@ class MultiWorkspaceRestoreTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(payload["workspaces"][0]["restored"])
-        self.assertIn("Maximum", payload["workspaces"][0]["groups"][0]["error"])
+        self.assertEqual(
+            payload["workspaces"][0]["groups"][0]["error"],
+            web_workspaces.capacity_refusal(1, 0),
+        )
 
     # ── R13 / R14 Forget ──
 
@@ -5410,7 +5568,7 @@ class AtomicGroupInstallTestCase(unittest.TestCase):
 
         self.assertEqual(broken.status_code, 400)
         self.assertEqual(
-            broken.get_json()["error"], "No valid sessions were created"
+            broken.get_json()["error"], "Pane 1 of this group is not launchable"
         )
         # The old code tore the group's panes down before it discovered it had
         # nothing to put back, leaving an empty group where a working one was.
@@ -5421,6 +5579,82 @@ class AtomicGroupInstallTestCase(unittest.TestCase):
             },
             live_before,
         )
+
+    def test_one_unlaunchable_pane_fails_the_group_not_only_itself(self):
+        """Audit SGP-07 / Stage 6 item 5: no silently smaller group.
+
+        A group used to launch without its malformed pane and report success,
+        so the user got a narrower arrangement described as an exact one.
+        """
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "ssh",
+                "session_name": "Mixed",
+                "sessions": [
+                    {"host": "10.0.0.1", "directory": "/srv"},
+                    {
+                        "host": "10.0.0.2",
+                        "directory": "/srv",
+                        "explorer_tab_views": "not-an-object",
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.get_json()["error"], "Pane 2 of this group is not launchable"
+        )
+        self.assertEqual(api.session_manager.get_all_sessions(), [])
+        self.assertEqual(api.session_manager.get_all_groups(), [])
+
+    def test_a_preset_with_no_recorded_sidebar_width_still_opens_at_the_default(self):
+        """0 is the preset store's "unset", not a request for the 180px floor."""
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": "Files",
+                "sessions": [
+                    {
+                        "directory": "/srv",
+                        "startup_mode": "explorer",
+                        "explorer_sidebar_width": 0,
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(
+            api.session_manager.get_all_sessions()[0].explorer_sidebar_width, 260
+        )
+
+    def test_a_coercible_malformed_pane_field_never_becomes_live_state(self):
+        """Matrix row 23: `list("abc")` used to install `['a','b','c']`.
+
+        Nothing raised, nothing was logged, and the next autosave made the
+        garbage durable — the reason a fix that only rescues *dropped* panes
+        is not enough.
+        """
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": "Files",
+                "sessions": [
+                    {
+                        "directory": "/srv",
+                        "startup_mode": "explorer",
+                        "explorer_open_tabs": "abc",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(api.session_manager.get_all_sessions(), [])
 
     def test_a_workspace_that_vanished_mid_launch_installs_nothing(self):
         workspace_id = self.client.post(

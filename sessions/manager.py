@@ -18,6 +18,7 @@ from web.session_presentation import (
     DEFAULT_EXPLORER_SOURCE_FONT,
     PANE_PRESENTATION_FIELDS,
     deep_copy_presentation,
+    normalize_pane_presentation_fields,
     pane_fields_for_mode,
     workspace_appearance_from_panes,
 )
@@ -754,9 +755,28 @@ class SessionManager:
 
         Pure: it touches no shared state, so a launch can stage every pane of a
         group before it takes the lock that publishes them together.
+
+        Presentation fields are *not* coerced here (audit SGP-07). They come
+        from the one canonical normalizer, which rejects a wrong-typed value
+        instead of running it through ``list()``/``dict()``/``int()``: a request
+        carrying ``explorer_open_tabs: "abc"`` used to install ``['a','b','c']``
+        as live state, which the next autosave made durable. The rejection
+        raises, and :meth:`install_session_group` turns it into a failed group.
+        The dictionary below therefore holds each field's *default*, applied
+        only when the request did not supply the field at all.
         """
         mode = config.get("mode", "ssh")
-        return {
+        # A stored 0 is the preset store's "no width recorded", not a request
+        # for the 180px minimum the normalizer would otherwise clamp it to.
+        # Dropped before validation so the default below still applies; `False`
+        # is deliberately left in place, because it is a wrong type, not a
+        # sentinel, and has to be rejected.
+        if config.get("explorer_sidebar_width") == 0 and not isinstance(
+            config.get("explorer_sidebar_width"), bool
+        ):
+            config = {**config, "explorer_sidebar_width": None}
+        presentation = normalize_pane_presentation_fields(config)
+        fields = {
             "host": (
                 config.get("host")
                 or config.get("ip")
@@ -780,27 +800,25 @@ class SessionManager:
             "use_powershell": bool(config.get("use_powershell")),
             "startup_mode": str(config.get("startup_mode") or "terminal"),
             "explorer_root_directory": config.get("explorer_root_directory"),
-            "explorer_tree_open": bool(config.get("explorer_tree_open")),
-            "explorer_git_open": bool(config.get("explorer_git_open")),
-            "explorer_search_open": bool(config.get("explorer_search_open")),
-            "explorer_sidebar_width": int(config.get("explorer_sidebar_width") or 260),
-            "explorer_sidebar_scroll": copy.deepcopy(
-                config.get("explorer_sidebar_scroll") or {}
-            ),
-            "explorer_tree_expanded": list(
-                config.get("explorer_tree_expanded") or []
-            ),
-            "explorer_git_expanded": list(config.get("explorer_git_expanded") or []),
-            "explorer_open_tabs": list(config.get("explorer_open_tabs") or []),
-            "explorer_active_tab": str(config.get("explorer_active_tab") or ""),
-            "explorer_tab_views": dict(config.get("explorer_tab_views") or {}),
-            "explorer_md_preset": str(config.get("explorer_md_preset") or ""),
-            "explorer_md_font": str(config.get("explorer_md_font") or ""),
-            "explorer_source_font": str(config.get("explorer_source_font") or ""),
-            "explorer_theme": "light" if config.get("explorer_theme") == "light" else "dark",
-            "browser_tabs": list(config.get("browser_tabs") or []),
-            "browser_active_tab": int(config.get("browser_active_tab") or 0),
+            "explorer_tree_open": False,
+            "explorer_git_open": False,
+            "explorer_search_open": False,
+            "explorer_sidebar_width": 260,
+            "explorer_sidebar_scroll": {},
+            "explorer_tree_expanded": [],
+            "explorer_git_expanded": [],
+            "explorer_open_tabs": [],
+            "explorer_active_tab": "",
+            "explorer_tab_views": {},
+            "explorer_md_preset": "",
+            "explorer_md_font": "",
+            "explorer_source_font": "",
+            "explorer_theme": "dark",
+            "browser_tabs": [],
+            "browser_active_tab": 0,
         }
+        fields.update(deep_copy_presentation(presentation))
+        return fields
 
     def install_session_group(
         self,
@@ -831,18 +849,31 @@ class SessionManager:
 
         Raises ``ValueError`` — before touching anything — when the workspace
         is gone, when the group id is owned by another workspace or by another
-        preset, or when no requested pane is usable.
+        preset, or when **any** requested pane is not launchable.
         """
         resolved_group_id = str(group_id or uuid.uuid4().hex[:12])
         resolved_workspace_id = normalize_workspace_id(workspace_id)
         resolved_saved_session_id = str(saved_session_id or "").strip()
 
         staged_fields: List[Dict[str, Any]] = []
-        for config in sessions_config:
+        for index, config in enumerate(sessions_config):
             try:
                 staged_fields.append(self._session_launch_fields(config))
             except Exception as exc:
-                logger.error(f"Failed to create session: {exc}")
+                # A pane that cannot be staged fails the *group* (audit SGP-07,
+                # invariant 6). Skipping it launched a smaller group, reported
+                # it as a complete restore, and let the next autosave commit the
+                # smaller shape. Shape-only diagnostics: the pane's position and
+                # the validation reason, never its host, directory, or command.
+                logger.error(
+                    "Pane %d of group %s is not launchable: %s",
+                    index + 1,
+                    resolved_group_id,
+                    exc,
+                )
+                raise ValueError(
+                    f"Pane {index + 1} of this group is not launchable"
+                ) from exc
         if not staged_fields:
             raise ValueError("No valid sessions were created")
         legacy_appearance = workspace_appearance_from_panes(sessions_config)
