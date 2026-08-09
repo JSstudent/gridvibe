@@ -4286,11 +4286,25 @@
 
     function applyExplorerMarkdownAppearanceToAll() {
         const appearance = explorerMarkdownAppearance();
-        document.querySelectorAll('.explorer-markdown-preview').forEach(preview => {
-            applyExplorerMarkdownAppearanceToElement(preview, appearance);
-        });
-        document.querySelectorAll('.explorer-source-view, .explorer-diff-content').forEach(view => {
-            applyExplorerSourceFontToElement(view, appearance);
+        const applyToRoot = root => {
+            root.querySelectorAll('.explorer-markdown-preview').forEach(preview => {
+                applyExplorerMarkdownAppearanceToElement(preview, appearance);
+            });
+            root.querySelectorAll('.explorer-source-view, .explorer-diff-content').forEach(view => {
+                applyExplorerSourceFontToElement(view, appearance);
+            });
+        };
+        applyToRoot(document);
+        /* Hidden session tabs keep their panes in detached cached fragments
+           (terminals.js `cachedGroupViews`), which a document query cannot
+           reach — restyle them in place too, so switching to another tab
+           shows the new appearance instantly instead of the stale classes
+           until a rebuild. Same contract as the cached-group restyle in
+           applyAppConfigTerminalFont. */
+        cachedGroupViews.forEach(cached => {
+            if (cached?.fragment) {
+                applyToRoot(cached.fragment);
+            }
         });
     }
 

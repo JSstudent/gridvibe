@@ -2887,13 +2887,22 @@ class ApiRoutesTestCase(unittest.TestCase):
             "window.localStorage.setItem(EXPLORER_SOURCE_FONT_KEY, appearance.sourceFont);",
             html,
         )
-        # Applied to every open source panel and diff panel, and to a freshly
-        # rendered file.
+        # Applied to every open source panel and diff panel — in the mounted
+        # document and in each cached (hidden) session-tab fragment, so a
+        # change lands instantly on every workspace tab instead of waiting
+        # for a tab switch or pane reset — and to a freshly rendered file.
+        apply_all = html[
+            html.index("function applyExplorerMarkdownAppearanceToAll()"):
+            html.index("function setExplorerMarkdownAppearance(patch)")
+        ]
+        self.assertIn("applyToRoot(document);", apply_all)
         self.assertIn(
-            "document.querySelectorAll('.explorer-source-view, .explorer-diff-content')"
+            "root.querySelectorAll('.explorer-source-view, .explorer-diff-content')"
             ".forEach(view => {",
-            html,
+            apply_all,
         )
+        self.assertIn("cachedGroupViews.forEach(cached => {", apply_all)
+        self.assertIn("applyToRoot(cached.fragment);", apply_all)
         self.assertIn("applyExplorerSourceFontToElement(", html)
         # Its own menu group, alongside the preview groups.
         self.assertIn("'Source font',", html)
