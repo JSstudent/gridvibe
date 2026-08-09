@@ -259,8 +259,16 @@ class LifecycleCoordinator:
             pending["acknowledged"].update(matching)
             if data.get("ok") is True:
                 metadata = data.get("metadata")
+                # Carry the acknowledging window's join order alongside its
+                # chrome so `request_flush` can hand the records back oldest
+                # window first; that ordering is what makes a disagreement
+                # between two windows resolvable instead of fatal.
+                joined_at = max(
+                    (pending["joined"].get(key, 0) for key in matching),
+                    default=0,
+                )
                 pending["metadata"].setdefault(workspace_id, []).append(
-                    metadata if isinstance(metadata, dict) else {}
+                    (joined_at, metadata if isinstance(metadata, dict) else {})
                 )
             else:
                 error = str(data.get("error") or "Presentation flush failed")
@@ -280,7 +288,12 @@ class LifecycleCoordinator:
         emit_request: Callable[[str, str], None],
         timeout: float = LIFECYCLE_FLUSH_TIMEOUT_SECONDS,
     ) -> Dict[str, Any]:
-        """Ask every currently joined window to flush, then wait boundedly."""
+        """Ask every currently joined window to flush, then wait boundedly.
+
+        Each workspace's returned ``metadata`` list is ordered oldest-joined
+        window first, so a caller resolving window chrome can apply
+        last-writer-wins without knowing anything about the window registry.
+        """
         live_ids = {str(value or "").strip() for value in workspace_ids}
         live_ids.discard("")
         request_id = uuid.uuid4().hex
@@ -311,6 +324,9 @@ class LifecycleCoordinator:
                 },
                 "clients": {
                     key: self._windows[key[0]]["client_id"] for key in expected
+                },
+                "joined": {
+                    key: self._windows[key[0]]["joined_at"] for key in expected
                 },
                 "metadata": {},
                 "errors": [
@@ -385,7 +401,15 @@ class LifecycleCoordinator:
         return {
             "ok": not errors,
             "request_id": request_id,
-            "metadata": pending["metadata"],
+            "metadata": {
+                workspace_id: [
+                    record
+                    for _joined_at, record in sorted(
+                        records, key=lambda entry: entry[0]
+                    )
+                ]
+                for workspace_id, records in pending["metadata"].items()
+            },
             "errors": errors,
             "missing_workspaces": missing_workspaces,
         }
@@ -482,7 +506,27 @@ def normalize_workspace_metadata(
     metadata_by_workspace: Any,
     live_snapshots: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Dict[str, Any]]:
-    """Validate and coalesce metadata returned by all windows per workspace."""
+    """Validate and resolve the window chrome reported by a workspace's windows.
+
+    Two windows on one workspace legitimately disagree — the front session tab
+    is per window, and a top-bar toggle in one is not pushed to the other — so a
+    disagreement is resolved, never refused: **a workspace's chrome is whichever
+    window most recently joined.** Records for one workspace arrive ordered
+    oldest-joined first (:meth:`LifecycleCoordinator.request_flush`), and each
+    field is applied last-writer-wins, so the newest window supplying a field
+    owns it. This is product decision 7's compare-and-swap ordering applied to
+    chrome, and Stage 6's *launchable shape fails; window chrome degrades*
+    boundary applied where it belongs: refusing here costs the whole save and
+    leaves "continue without saving" as the only escape.
+
+    An ``active_group_id`` naming no live group is a window that has not yet
+    processed a close from a sibling window, not a corrupt payload: that one
+    field is dropped and the capture falls back to the server's own hint, which
+    :meth:`RuntimeStateStore._build_slot` re-validates anyway.
+
+    Malformed *types* — a non-boolean ``topbar_visible``, an out-of-range native
+    zoom — still raise: those indicate a broken client, not a disagreement.
+    """
     if not isinstance(metadata_by_workspace, dict):
         return {}
     normalized: Dict[str, Dict[str, Any]] = {}
@@ -491,10 +535,12 @@ def normalize_workspace_metadata(
         if snapshot is None:
             continue
         records = raw_records if isinstance(raw_records, list) else [raw_records]
-        candidates: List[Dict[str, Any]] = []
         valid_group_ids = {
             str(group.get("group_id") or "") for group in snapshot.get("groups") or []
         }
+        resolved: Dict[str, Any] = {}
+        disagreeing_fields: Set[str] = set()
+        stale_active_groups = 0
         for raw in records:
             if not isinstance(raw, dict):
                 raw = {}
@@ -502,10 +548,9 @@ def normalize_workspace_metadata(
             if "active_group_id" in raw:
                 active_group_id = str(raw.get("active_group_id") or "").strip()
                 if active_group_id and active_group_id not in valid_group_ids:
-                    raise LifecycleValidationError(
-                        f"Workspace {workspace_id} reported an unknown active group"
-                    )
-                candidate["active_group_id"] = active_group_id
+                    stale_active_groups += 1
+                else:
+                    candidate["active_group_id"] = active_group_id
             if "topbar_visible" in raw:
                 if not isinstance(raw.get("topbar_visible"), bool):
                     raise LifecycleValidationError(
@@ -519,14 +564,23 @@ def normalize_workspace_metadata(
                         f"Workspace {workspace_id} reported invalid native zoom"
                     )
                 candidate["native_zoom_factor"] = zoom
-            candidates.append(candidate)
-        nonempty = [candidate for candidate in candidates if candidate]
-        if nonempty and any(candidate != nonempty[0] for candidate in nonempty[1:]):
-            raise LifecycleValidationError(
-                f"Workspace {workspace_id} windows reported conflicting presentation metadata"
+            for field, value in candidate.items():
+                if field in resolved and resolved[field] != value:
+                    disagreeing_fields.add(field)
+            resolved.update(candidate)
+        if disagreeing_fields or stale_active_groups:
+            # Shape only: the workspace id, how many windows answered, which
+            # fields disagreed, and how many stale tab hints were dropped.
+            logger.debug(
+                "Workspace %s chrome resolved to the newest window: "
+                "windows=%d disagreed=%s stale_active_group=%d",
+                workspace_id,
+                len(records),
+                sorted(disagreeing_fields),
+                stale_active_groups,
             )
-        if nonempty:
-            normalized[workspace_id] = nonempty[0]
+        if resolved:
+            normalized[workspace_id] = resolved
     return normalized
 
 

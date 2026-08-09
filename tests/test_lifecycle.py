@@ -151,23 +151,118 @@ class LifecycleCoordinatorTestCase(unittest.TestCase):
         self.assertNotIn("window-0", coordinator._windows)
         self.assertIn(f"window-{_MAX_WINDOWS_PER_WORKSPACE + 2}", coordinator._windows)
 
-    def test_conflicting_window_metadata_is_rejected(self):
-        snapshots = {
-            "default": {
-                "groups": [{"group_id": "g1", "sessions": [{}]}],
-            }
-        }
+    def test_flush_metadata_is_ordered_oldest_window_first(self):
+        """PRV-01: join order, not acknowledgement order, decides the winner."""
+        coordinator = LifecycleCoordinator()
+        coordinator.join_workspace("client-old", "default", "window-old")
+        coordinator.join_workspace("client-new", "default", "window-new")
 
-        with self.assertRaises(ValueError):
-            normalize_workspace_metadata(
-                {
-                    "default": [
-                        {"active_group_id": "g1", "topbar_visible": True},
-                        {"active_group_id": "g1", "topbar_visible": False},
-                    ]
-                },
-                snapshots,
-            )
+        def emit(workspace_id, request_id):
+            # The newest window answers first, so arrival order is the reverse
+            # of join order; the returned list must still be oldest first.
+            for client, visible in (("client-new", True), ("client-old", False)):
+                coordinator.acknowledge_flush(
+                    client,
+                    {
+                        "request_id": request_id,
+                        "workspace_id": workspace_id,
+                        "ok": True,
+                        "metadata": {"topbar_visible": visible},
+                    },
+                )
+
+        result = coordinator.request_flush({"default"}, emit, timeout=1.0)
+
+        self.assertTrue(result["ok"], result["errors"])
+        self.assertEqual(
+            [record["topbar_visible"] for record in result["metadata"]["default"]],
+            [False, True],
+        )
+
+
+class LifecycleWindowChromeTestCase(unittest.TestCase):
+    """PRV-01: window chrome degrades to a deterministic winner, never fails."""
+
+    snapshots = {
+        "default": {
+            "groups": [
+                {"group_id": "g1", "sessions": [{}]},
+                {"group_id": "g2", "sessions": [{}]},
+            ],
+        }
+    }
+
+    def test_disagreeing_windows_resolve_to_the_most_recently_joined(self):
+        resolved = normalize_workspace_metadata(
+            {
+                "default": [
+                    {"active_group_id": "g1", "topbar_visible": True},
+                    {"active_group_id": "g2", "topbar_visible": False},
+                ]
+            },
+            self.snapshots,
+        )
+
+        self.assertEqual(
+            resolved["default"],
+            {"active_group_id": "g2", "topbar_visible": False},
+        )
+
+    def test_each_field_is_owned_by_the_newest_window_that_reported_it(self):
+        resolved = normalize_workspace_metadata(
+            {
+                "default": [
+                    {"active_group_id": "g1", "topbar_visible": True},
+                    {"active_group_id": "g2"},
+                ]
+            },
+            self.snapshots,
+        )
+
+        # The newer window said nothing about the top bar, so the older
+        # window's opinion survives rather than being erased.
+        self.assertEqual(
+            resolved["default"],
+            {"active_group_id": "g2", "topbar_visible": True},
+        )
+
+    def test_a_group_closed_from_another_window_drops_only_that_field(self):
+        resolved = normalize_workspace_metadata(
+            {
+                "default": [
+                    {"active_group_id": "g1", "topbar_visible": True},
+                    {"active_group_id": "closed-elsewhere", "topbar_visible": False},
+                ]
+            },
+            self.snapshots,
+        )
+
+        self.assertEqual(
+            resolved["default"],
+            {"active_group_id": "g1", "topbar_visible": False},
+        )
+
+    def test_a_stale_tab_hint_alone_leaves_the_hint_to_the_server(self):
+        resolved = normalize_workspace_metadata(
+            {"default": [{"active_group_id": "closed-elsewhere"}]},
+            self.snapshots,
+        )
+
+        # Nothing survived, so the capture falls back to the server's own hint
+        # instead of recording a group that no longer exists.
+        self.assertEqual(resolved, {})
+
+    def test_malformed_client_types_still_fail_the_save(self):
+        for broken in (
+            {"topbar_visible": "yes"},
+            {"native_zoom_factor": 42.0},
+        ):
+            with self.subTest(broken=broken):
+                with self.assertRaises(ValueError):
+                    normalize_workspace_metadata(
+                        {"default": [{"active_group_id": "g1"}, broken]},
+                        self.snapshots,
+                    )
 
 
 class LifecycleRouteTestCase(unittest.TestCase):
@@ -251,6 +346,118 @@ class LifecycleRouteTestCase(unittest.TestCase):
         self.assertEqual(slot["active_group_id"], launched["group_id"])
         self.assertEqual(slot["native_zoom_factor"], 1.2)
         self.assertFalse(slot["topbar_visible"])
+
+    def test_two_windows_disagreeing_about_chrome_still_save_on_exit(self):
+        """PRV-01: an ordinary second browser tab no longer blocks the save."""
+        first = self._launch()
+        second = self._launch()
+        self.assertNotEqual(first["group_id"], second["group_id"])
+        api.lifecycle_coordinator.join_workspace("client-old", "default", "window-old")
+        api.lifecycle_coordinator.join_workspace("client-new", "default", "window-new")
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            # One room emit reaches both windows: they show different front
+            # tabs and disagree about the top bar, and the older one is still
+            # pointing at a group the newer one has moved on from.
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-new",
+                {
+                    **data,
+                    "ok": True,
+                    "metadata": {
+                        "active_group_id": second["group_id"],
+                        "topbar_visible": False,
+                    },
+                },
+            )
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-old",
+                {
+                    **data,
+                    "ok": True,
+                    "metadata": {
+                        "active_group_id": first["group_id"],
+                        "topbar_visible": True,
+                    },
+                },
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            response = self.client.post(
+                "/api/lifecycle/prepare",
+                json={"action": "close", "save": "workspaces"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertTrue(payload["ready_to_exit"])
+        self.assertEqual(payload["saved_workspaces"], ["default"])
+        slot = json.loads(self.state_path.read_text(encoding="utf-8"))["workspaces"][
+            "default"
+        ]
+        # The most recently joined window owns the chrome, both fields.
+        self.assertEqual(slot["active_group_id"], second["group_id"])
+        self.assertFalse(slot["topbar_visible"])
+
+    def test_a_window_pointing_at_a_group_closed_elsewhere_still_saves(self):
+        """PRV-01: a not-yet-processed close is stale chrome, not a bad payload."""
+        self._launch()
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+        server_hint = api.session_manager.snapshot_live_workspaces()["default"][
+            "active_group_id"
+        ]
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a",
+                {
+                    **data,
+                    "ok": True,
+                    "metadata": {
+                        "active_group_id": "closed-elsewhere",
+                        "topbar_visible": True,
+                    },
+                },
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            response = self.client.post(
+                "/api/lifecycle/prepare",
+                json={"action": "close", "save": "workspaces"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["ready_to_exit"])
+        slot = json.loads(self.state_path.read_text(encoding="utf-8"))["workspaces"][
+            "default"
+        ]
+        # The stale hint was dropped; the server's own hint took its place.
+        self.assertEqual(slot["active_group_id"], server_hint)
+        self.assertTrue(slot["topbar_visible"])
+
+    def test_a_broken_client_type_still_fails_the_save_on_exit(self):
+        """PRV-01: degrading chrome must not swallow a malformed payload."""
+        self._launch()
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a",
+                {**data, "ok": True, "metadata": {"topbar_visible": "yes"}},
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            response = self.client.post(
+                "/api/lifecycle/prepare",
+                json={"action": "close", "save": "workspaces"},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.get_json()
+        self.assertFalse(payload["ready_to_exit"])
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(payload["errors"][0]["category"], "client_metadata")
+        self.assertFalse(self.state_path.exists())
 
     def test_flush_timeout_keeps_the_application_open(self):
         self._launch()
@@ -410,6 +617,90 @@ class LifecycleRouteTestCase(unittest.TestCase):
         )
         self.assertTrue(state["workspaces"]["default"]["topbar_visible"])
         self.assertFalse(self.saved_path.exists())
+
+    def test_workspace_save_resolves_two_windows_instead_of_refusing(self):
+        """PRV-01: the per-row Save gets the same chrome resolution."""
+        first = self._launch()
+        second = self._launch()
+        api.lifecycle_coordinator.join_workspace("client-old", "default", "window-old")
+        api.lifecycle_coordinator.join_workspace("client-new", "default", "window-new")
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-new",
+                {
+                    **data,
+                    "ok": True,
+                    "metadata": {
+                        "active_group_id": second["group_id"],
+                        "topbar_visible": True,
+                    },
+                },
+            )
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-old",
+                {
+                    **data,
+                    "ok": True,
+                    "metadata": {
+                        "active_group_id": first["group_id"],
+                        "topbar_visible": False,
+                    },
+                },
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            response = self.client.post("/api/workspaces/default/save")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertTrue(payload["saved"])
+        self.assertEqual(payload["active_group_id"], second["group_id"])
+        self.assertTrue(payload["topbar_visible"])
+
+    def test_workspace_save_survives_a_tab_hint_closed_from_another_window(self):
+        """PRV-01: a stale front-tab hint costs the field, not the save."""
+        self._launch()
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+        server_hint = api.session_manager.snapshot_live_workspaces()["default"][
+            "active_group_id"
+        ]
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a",
+                {
+                    **data,
+                    "ok": True,
+                    "metadata": {"active_group_id": "closed-elsewhere"},
+                },
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            response = self.client.post("/api/workspaces/default/save")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()["active_group_id"], server_hint)
+
+    def test_workspace_save_still_refuses_a_malformed_client_payload(self):
+        self._launch()
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a",
+                {**data, "ok": True, "metadata": {"native_zoom_factor": 42.0}},
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            response = self.client.post("/api/workspaces/default/save")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.get_json()
+        self.assertFalse(payload["saved"])
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(payload["errors"][0]["category"], "client_metadata")
+        self.assertFalse(self.state_path.exists())
 
     def test_workspace_save_without_a_window_reports_instead_of_guessing(self):
         self._launch()

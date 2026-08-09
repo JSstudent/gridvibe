@@ -152,6 +152,9 @@ Note the flush itself is not in doubt: every window acknowledged, so nothing is
 being guessed. Only the answer to "which window's chrome should the slot record"
 is ambiguous, and that question has cheap, deterministic answers.
 
+**Resolved — Stage A, 2026-08-09.** See "Stage A — implemented" below for the
+product line, the code, and the tests.
+
 ### PRV-02 — Medium: two server-side explorer resolvers are dead, and two frozen contract tests assert against them
 
 **Evidence.** `resolve_tab_view()` (`web/session_presentation.py:559`) and
@@ -326,6 +329,74 @@ fails the save and the slot falls back to a valid hint; a non-boolean
 Exit gate: no combination of *reachable* live windows can make **Save open
 workspaces** or a per-row **Save** fail while every window has flushed
 successfully.
+
+#### Stage A — implemented (2026-08-09)
+
+**Product line, recorded as required by step 5: a workspace's chrome is
+whichever window most recently joined.** Per field, not per window: the newest
+window that *supplied* a field owns it, so a window that says nothing about the
+top bar does not erase a sibling's opinion. Every field is window chrome —
+front tab, top-bar visibility, native zoom — and none of it is launchable shape,
+so a disagreement between two honest windows must cost at most a stale-looking
+tab, never the save.
+
+Code changed (both files under `web/`; no client change was needed, since the
+metadata each window reports is already correct — only the server's reading of
+it was wrong):
+
+1. **Join order is carried through the handshake.** `LifecycleCoordinator`
+   already recorded `joined_at` per window; `request_flush()` now snapshots it
+   into the pending flush (`"joined"`) alongside `"clients"`, inside the same
+   lock hold that builds `expected`. `acknowledge_flush()` tags each accepted
+   metadata record with its window's `joined_at`, and `request_flush()` returns
+   each workspace's records **ordered oldest-joined first**. Acknowledgement
+   *arrival* order is therefore irrelevant — the newest window wins even when it
+   answers first, which is the common case since it is usually the foreground
+   tab.
+2. **`normalize_workspace_metadata()` resolves instead of refusing.** The
+   disagreement refusal is gone; fields are applied last-writer-wins over the
+   ordered records. A workspace whose windows all agree behaves exactly as
+   before.
+3. **A stale `active_group_id` drops one field, not the save.** An id naming no
+   live group is a window that has not yet processed a sibling's close, so that
+   single field is skipped and the capture falls back to the server's own hint
+   (`capture_live_workspaces`/`capture_workspace` already prefer the snapshot
+   hint when the key is absent, and `_build_slot` re-validates it against the
+   captured groups). If a stale hint was the *only* thing a workspace's windows
+   reported, the workspace is simply omitted from the normalized map.
+4. **Malformed types still raise**, unchanged: a non-boolean `topbar_visible`
+   and an out-of-range `native_zoom_factor` remain `LifecycleValidationError`,
+   still surfacing as a retryable `503` with category `client_metadata` from
+   both consumers. A broken client is not a disagreement.
+5. **The disagreement is logged at DEBUG, shape-only**: workspace id, how many
+   windows answered, which field names disagreed, and how many stale tab hints
+   were dropped. No group names, no labels, no paths.
+
+Tests added (`tests/test_lifecycle.py`, 11 new, all behavioral):
+
+- `LifecycleCoordinatorTestCase.test_flush_metadata_is_ordered_oldest_window_first`
+  — the newest window acknowledges first and the returned list is still oldest
+  first, pinning join order against arrival order.
+- New `LifecycleWindowChromeTestCase` covering the resolver directly:
+  disagreeing windows resolve to the most recently joined; each field is owned
+  by the newest window that reported it; a group closed from another window
+  drops only that field; a stale hint alone leaves the hint to the server;
+  malformed types still fail.
+- `LifecycleRouteTestCase`, through `POST /api/lifecycle/prepare` with two
+  windows joined on `default` and one room emit reaching both: disagreeing front
+  tabs *and* top-bar states now save, and the slot on disk records the newest
+  window's values; a window pointing at a group closed elsewhere saves with the
+  server's hint in the slot; a non-boolean `topbar_visible` still returns `503`
+  with `client_metadata` and writes nothing.
+- The same three cases through the launcher's per-row `POST
+  /api/workspaces/<id>/save`, asserting the returned `active_group_id` /
+  `topbar_visible` and that a malformed payload leaves `runtime_state.json`
+  absent.
+
+Exit gate met. Gates re-run on this machine: `tests/run_tests.py` → 1,351 tests,
+`OK (skipped=7)`; `ruff check .` → "All checks passed!". Documentation of the
+rule in `README.md` / `CLAUDE.md` / `AGENTS.md` is deliberately left to Stage D,
+per that stage's step 4.
 
 ### Stage B — Delete the dead resolvers and re-point their contract tests (PRV-02)
 
