@@ -2212,8 +2212,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerPersistedTabFontSize(raw)", html)
         self.assertIn("fontSize !== EXPLORER_EDITOR_FONT_DEFAULT", html)
         self.assertIn("tabViews[EXPLORER_PREVIEW_TAB_ID] = previewRecord;", html)
-        self.assertIn("record.diff_mode = diffMode;", html)
-        self.assertIn("record.diff_commit = diffCommit;", html)
         self.assertIn("const previewView = explorerInflatePersistedTabView(rawPreviewView);", html)
         self.assertIn("previewTab.view = previewView;", html)
         self.assertIn("previewTab.fontSize = previewFont;", html)
@@ -2225,11 +2223,10 @@ class ApiRoutesTestCase(unittest.TestCase):
             "explorer_tab_views: resolvedStartupMode === 'explorer' && terminal?.explorer_tab_views",
             html,
         )
-        # Markdown appearance re-applies once per session id (ISSUE-2026-033) so
-        # a close rebuild cannot clobber an appearance changed since launch.
-        self.assertIn("function applyExplorerSessionMarkdownAppearance(index)", html)
-        self.assertIn("setExplorerMarkdownAppearance({ preset, font, sourceFont });", html)
-        self.assertIn("applyExplorerSessionMarkdownAppearance(index);", html)
+        # Versioning, diff-target migration, and workspace appearance authority
+        # are exercised behaviorally in tests/test_session_presentation.py and
+        # tests/test_session_persistence_contract.py. Keep this legacy page test
+        # focused on the DOM adapter it can actually observe.
 
     def test_terminals_page_preview_tab_keeps_separated_path(self):
         """The Preview tab keeps its own file/directory path across tab swaps
@@ -2274,18 +2271,12 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        # Per-tab snapshot helpers (mode + fraction-based scroll + identity).
+        # Per-tab capture is wired before DOM replacement. Record migration,
+        # revision filtering, and x/y ratios are executed in the DOM-free Stage
+        # 5 tests rather than asserted as implementation strings here.
         self.assertIn("function explorerCaptureActiveTabView(index)", html)
-        self.assertIn("function explorerMatchingTabView(tab, identity)", html)
-        self.assertIn(
-            "function explorerFileContentIdentity(path, content, diffCommit, diffMode)",
-            html,
-        )
-        self.assertIn("function explorerDirectoryContentIdentity(path, entries)", html)
         # The snapshot lives on the tab record, not in pane-global state.
         self.assertIn("tab.view = {", html)
-        # OD-4 skip rule: a stale snapshot (content changed) is never restored.
-        self.assertIn("view.identity !== identity", html)
         # Capture runs before the active tab id flips, while the DOM is intact.
         activate = html[html.index("function activateExplorerTab(index, id)"):]
         self.assertLess(
@@ -2307,12 +2298,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         # the restored mode; fractions + clamping live in restoreExplorerFileScroll.
         self.assertIn("const effectiveScrollState = scrollState || (restoredTabView", html)
         self.assertIn("{ ...restoredTabView.scroll, activeView: initialFileView }", html)
-        # Directory browsing on the Preview tab gets the same treatment — on
-        # capture, on the in-memory re-render, and after a re-browse fetch.
-        self.assertEqual(
-            html.count("explorerDirectoryContentIdentity(pane._explorerPath, pane._explorerEntries)"),
-            3,
-        )
         # Mode switching is skipped when there are no file panels (directory).
         self.assertIn("listEl.querySelector('[data-explorer-file-panel]')", html)
 
@@ -2743,11 +2728,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("source: current.source !== false,", html)
         self.assertIn("preview: current.preview !== false,", html)
         self.assertIn("diff: current.diff !== false,", html)
-        self.assertIn("record.wrap_source = false;", html)
-        self.assertIn("record.wrap_preview = false;", html)
-        self.assertIn("record.wrap_diff = false;", html)
-        self.assertIn("source: view.wrap_source !== false,", html)
-        self.assertIn("preview: view.wrap_preview !== false,", html)
+        # Both the v2 wrap map and the legacy flat-record migration are covered
+        # by the executed explorer-persistence contract tests.
         # Unwrapped source keeps one row per line and scrolls sideways; the
         # wrapped variant drops the max-content floor so the code column reflows,
         # and the in-place editor follows the same per-tab flag.
@@ -2810,8 +2792,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("Alt: expand all at this level", html)
         self.assertIn("function wireExplorerMarkdownSectionControls(index)", html)
         self.assertIn("tab.collapsedLines = new Set();", html)
-        self.assertIn("record.folds = Array.from(tab.collapsedLines)", html)
-        self.assertIn("record.fold_identity = tab.collapsedIdentity;", html)
+        # Fold serialization/revision filtering is executed by the Stage 5
+        # DOM-free record tests; this test retains the UI wiring assertions.
         self.assertIn("explorerPersistedMarkdownFolds(rawViews[key])", html)
         self.assertIn("persistExplorerTabsToSession(index);", html)
         self.assertIn("wireExplorerMarkdownSectionControls(index);", html)
@@ -2898,7 +2880,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const EXPLORER_SOURCE_FONT_KEY = 'gridvibe.sourceViewFont';", html)
         self.assertIn("const EXPLORER_SOURCE_FONT_DEFAULT = 'default';", html)
         self.assertIn("function applyExplorerSourceFontToElement(view, appearance)", html)
-        self.assertIn("window.localStorage.setItem(EXPLORER_SOURCE_FONT_KEY, next.sourceFont);", html)
+        # localStorage is now only a startup cache; the workspace presentation
+        # transaction is the durable authority covered by the behavioral
+        # presentation tests.
+        self.assertIn(
+            "window.localStorage.setItem(EXPLORER_SOURCE_FONT_KEY, appearance.sourceFont);",
+            html,
+        )
         # Applied to every open source panel and diff panel, and to a freshly
         # rendered file.
         self.assertIn(

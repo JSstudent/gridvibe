@@ -2,9 +2,9 @@
 
 Date: 2026-08-07
 
-Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stage 1 is **done** — the saved-preset store and the encryption key are durable (see [Stage 1 results](#stage-1-results)); SGP-05 is closed. Stage 2 is **done** — the ordered live presentation transactions, canonical normalizer, manager revisions/order, and DOM-free client queue are implemented (see [Stage 2 results](#stage-2-results)). Stage 3 is **done** — the live page is wired to those transactions, Save Workspace is an exact flush barrier, and both superseded writers are gone (see [Stage 3 results](#stage-3-results)); SGP-01 and SGP-02 are closed. Stage 4 is **done** — voluntary close/restart uses one process-wide flush/save/exit transaction, and its Stage 6 items 1–3 prerequisite shipped with it (see [Stage 4 results](#stage-4-results)); SGP-11 is closed and SGP-06 is narrowed to the remaining launch-validation work.
+Status: findings and implementation proposal. Stage 0 is **done** — the snapshot contract is frozen as executable tests in `tests/test_session_persistence_contract.py` (see [Stage 0 results](#stage-0-results)). Stage 1 is **done** — the saved-preset store and the encryption key are durable (see [Stage 1 results](#stage-1-results)); SGP-05 is closed. Stage 2 is **done** — the ordered live presentation transactions, canonical normalizer, manager revisions/order, and DOM-free client queue are implemented (see [Stage 2 results](#stage-2-results)). Stage 3 is **done** — the live page is wired to those transactions, Save Workspace is an exact flush barrier, and both superseded writers are gone (see [Stage 3 results](#stage-3-results)); SGP-01 and SGP-02 are closed. Stage 4 is **done** — voluntary close/restart uses one process-wide flush/save/exit transaction, and its Stage 6 items 1–3 prerequisite shipped with it (see [Stage 4 results](#stage-4-results)); SGP-11 is closed and SGP-06 is narrowed to the remaining launch-validation work. Stage 5 is **done** — explorer v2 presentation records, complete bounded structural state, exact explorer roots, and workspace-scoped appearance are implemented (see [Stage 5 results](#stage-5-results)); SGP-03, SGP-04, and SGP-08 are closed.
 
-Stages 0–4 were then re-reviewed end to end against the source and the guardrails; the result is in [Stages 0–4 verification review](#stages-04-verification-review-2026-08-08). The shipped work holds — gates are green and non-flaky, and no `## Regression Guardrails` rule is breached — with one defect found in Stage 4's own code (SGP-12). Stage 4.5, added by that review to collect SGP-12 plus the two `docs/r&d/todos.txt` items no existing stage covered (SGP-13, SGP-14), is now **done** — see [Stage 4.5 results](#stage-45-results); all three findings are closed, and item 1 shipped before Stage 5 or 6 began, as the closing recommendation requires. Stage 5, the remainder of 6, and 7 are not started by this audit.
+Stages 0–4 were then re-reviewed end to end against the source and the guardrails; the result is in [Stages 0–4 verification review](#stages-04-verification-review-2026-08-08). The shipped work holds — gates are green and non-flaky, and no `## Regression Guardrails` rule is breached — with one defect found in Stage 4's own code (SGP-12). Stage 4.5, added by that review to collect SGP-12 plus the two `docs/r&d/todos.txt` items no existing stage covered (SGP-13, SGP-14), is now **done** — see [Stage 4.5 results](#stage-45-results); all three findings are closed, and item 1 shipped before Stage 5 or 6 began, as the closing recommendation requires. Stage 5 is now **done** after a fresh validity review against the shipped source and product decisions. The remainder of 6 and 7 are not started by this audit.
 
 One production change has since landed outside the audit's stage sequence: workspace top-bar visibility is now persisted and restored, and the launcher's **Save & Restart** was corrected to capture every live workspace. It touches surfaces Stages 2, 3, 4, 6, and 7 own. Its effect on the plan is recorded in [Out-of-band change: workspace top-bar visibility](#out-of-band-change-workspace-top-bar-visibility), and the affected findings and stages carry amendment notes inline. It did not flip any frozen Stage 0 test.
 
@@ -281,6 +281,8 @@ Move browser tab presentation onto the common ordered group-presentation queue f
 
 ### SGP-03 — High: explorer snapshot coverage does not meet the requested snapshot semantics
 
+**Status: fixed by Stage 5** (2026-08-09). Explorer records are now versioned, intent is independent of revision-bound state, every approved structural field is bounded and synchronized, and old flat records remain readable. See [Stage 5 results](#stage-5-results).
+
 Evidence:
 
 - `captureExplorerFileScroll()` already knows horizontal and vertical metrics for every file panel plus Files/Git sidebar scroll (`web/static/js/explorer-viewer.js:5560`).
@@ -308,6 +310,8 @@ Version the explorer presentation record and separate:
 Store normalized scroll ratios rather than pixels. Persist only intent needed to rebuild; re-fetch Files/Git/Search data instead of storing results. Keep strict caps on paths, expanded nodes, hashes, queries, and maps.
 
 ### SGP-04 — High: restore captures and then discards a distinct explorer root
+
+**Status: fixed by Stage 5** (2026-08-09). Launch preparation now preserves a captured root for both local and SSH explorers and retains the legacy fallback to the captured directory when an old slot has no root.
 
 Evidence:
 
@@ -431,6 +435,8 @@ Extract presentation-field normalizers from `web/saved_sessions.py` into one imp
 
 ### SGP-08 — Medium: Markdown/source appearance is modeled per pane but implemented page-globally
 
+**Status: fixed by Stage 5** (2026-08-09). The workspace record is authoritative, uses the existing ordered workspace-presentation revision and runtime-slot path, and deterministically migrates the first legacy per-pane value. Per-pane fields remain read aliases; `localStorage` is only a startup cache.
+
 Evidence:
 
 - every `TerminalSession` carries `explorer_md_preset`, `explorer_md_font`, and `explorer_source_font`.
@@ -464,6 +470,8 @@ This is not the primary persistence defect, but the common presentation store ma
 A second key family now exists: `gridvibe.terminalTopbarVisibility.<workspace_id>`, written by `storeWorkspaceTopbarVisible()` in `shared.js`. It is materially better than the theme object — one key per workspace rather than one entry per ephemeral session ID, so it does not grow without bound and it survives a restart meaningfully — but it is still a client-side authority for state the server now also holds, and it is read *cross-window*: the launcher page reads the key a workspace window wrote in order to include the field in that workspace's restart capture. That works only because both pages share one origin, which is precisely the coupling SGP-08 identifies as unsound for anything the workspace record should own. Once the server value is reliably acknowledged, the launcher must stop reading it and the key becomes a non-authoritative cache. Deleting a workspace should also drop its key; nothing does that today.
 
 ### SGP-10 — Medium: current tests prove field presence more often than a user-visible round trip
+
+**Status: narrowed by Stage 5** (2026-08-09). Explorer record behavior is now executed in Node and the agreed fixture crosses saved-session import/relaunch, manual workspace save/restore, autosave/restore, local panes, and SSH panes. Stage 6 still owns malformed launch-shape coverage, and Stage 7 still owns removal of unrelated legacy source-text assertions.
 
 Positive coverage already exists for:
 
@@ -1124,17 +1132,19 @@ Completed 2026-08-08 and corrected 2026-08-09 after hands-on launcher testing. A
 
 **Stage 5 readiness.** Item 1 shipped before Stage 5 or 6 began, as the closing recommendation requires. Nothing in this stage touched the surfaces Stage 5 owns — the explorer presentation record, `_prepare_launch_sessions()` root handling, or the appearance-field migration path — and the frozen Stage 0 contract constants are unchanged, so Stage 5 starts from a green suite with its forcing functions still failing for the right reasons.
 
-### Stage 5 — Complete explorer snapshot semantics and preserve explorer root
+### Stage 5 — Complete explorer snapshot semantics and preserve explorer root — **done**
+
+Outcome recorded in [Stage 5 results](#stage-5-results).
 
 Connected findings: SGP-03, SGP-04, SGP-08, SGP-10.
 
 1. Preserve a supplied `explorer_root_directory` through `_prepare_launch_sessions()` with the existing root-confinement validation.
 2. Version the explorer presentation record while continuing to read the current flat record.
 3. Separate view intent from content-bound state.
-4. Add bounded per-panel horizontal/vertical ratios, directory-list scroll, sidebar scroll/width, expanded tree paths, and any additional state approved in the open questions.
+4. Add bounded per-panel horizontal/vertical ratios, directory-list scroll, Files/Git structural sidebar scroll, sidebar width, expanded tree paths, and approved Git commit expansion. Repository-search result scroll remains ephemeral under product decision 4.
 5. Restore intent even when content changed; restore scroll/folds only when the relevant revision matches.
 6. For Diff, use an identity that changes with the rendered diff (commit hash or Git/index/worktree revision), not only working-file content plus mode.
-7. Re-fetch directory, tree, Git, and search data. Persist only normalized navigation/expansion intent.
+7. Re-fetch directory, tree, Git, and search data. Persist only normalized navigation/expansion intent; never persist the Search query, results, selection, expansion, or result-list scroll.
 8. Move Markdown/source appearance authority to the workspace record, keep the per-pane fields as backward-compatible read aliases during migration, and retire the shared `localStorage` keys as an authority. Product decision 5 chose workspace-global scope, and that scope cannot be expressed in `localStorage`, which is per origin and therefore shared by every workspace window in one browser profile. **Follow the `topbar_visible` path already in production** — `Workspace` field → `snapshot_live_workspaces()` → slot validation with a non-coercing normalizer → restore reapplication — rather than designing a new one. The only difference is that appearance has three values instead of one boolean and needs a migration read from the existing per-pane fields; the plumbing is otherwise identical and already proven by tests.
 
 Suggested backward-compatible record shape:
@@ -1143,7 +1153,11 @@ Suggested backward-compatible record shape:
 {
   "version": 2,
   "intent": {"mode": "diff", "diff_mode": "staged"},
-  "content_revision": "bounded opaque revision",
+  "content_revision": "sha256:index...",
+  "content_revisions": {
+    "source": "sha256:file...",
+    "diff": "sha256:index..."
+  },
   "scroll": {
     "source": {"x": 0.0, "y": 0.3},
     "preview": {"x": 0.0, "y": 0.6},
@@ -1151,13 +1165,47 @@ Suggested backward-compatible record shape:
   },
   "font_size": 18,
   "wrap": {"source": true, "preview": true, "diff": false},
-  "folds": [12, 44]
+  "folds": [12, 44],
+  "fold_revision": "sha256:file..."
 }
 ```
 
 The exact keys are less important than one canonical normalizer and separate identity semantics.
 
 Exit gate: the agreed explorer fixture round-trips through Save Session/import, manual workspace save/restart restore, and autosave/restart restore on both local and mocked SSH/SFTP explorers.
+
+#### Stage 5 results
+
+Completed 2026-08-09 after re-validating every item against the post-Stage-4.5 source, the product decisions above, and the executable Stage 0 fixture. SGP-03, SGP-04, and SGP-08 are closed; SGP-10 is narrowed to the Stage 6/7 work outside explorer persistence.
+
+**Validity review and corrections.** All eight implementation points remain necessary and compatible with the current architecture. Four details needed correction before implementation:
+
+1. The frozen fixture draft named unsupported appearance choices (`compact` and `mono`). The actual allowlists are the UI/backend contract, so the fixture now uses `paper` and `jetbrains-mono` rather than adding dead aliases.
+2. Directory scroll is content-bound too. The Preview directory fixture now carries a directory revision; source, preview, diff, and folds carry their relevant per-panel/fold revisions instead of sharing one ambiguous identity.
+3. Workspace appearance belongs on the existing `POST /api/workspace-presentation` compare-and-swap transaction. A separate appearance endpoint would have introduced the duplicate writer item 8 explicitly forbids.
+4. “Sidebar scroll” is structural Files/Git scroll. Search's only scrolling body is fetched result state, which product decision 4 excludes. Conversely, product decision 3 explicitly approves Git view/expansion intent, so bounded expanded commit identities were added alongside Files-tree paths.
+
+Item 1's “existing root-confinement validation” remains the explorer backend's local/SFTP operation boundary: preserving the captured root does not weaken it. Old snapshots without a root still fall back to their captured directory.
+
+**What shipped.**
+
+| Surface | Change |
+|---|---|
+| `web/session_presentation.py` | One strict bounded v2 normalizer plus flat-v1 read compatibility. Durable mode/diff intent is separate from per-panel x/y scroll and Markdown folds; content revisions are bounded per panel. Sidebar width, Files/Git scroll, Files-tree paths, and Git commit expansion are normalized here for every persistence product. Unsupported record versions and wrong nested types are rejected at the live boundary. |
+| `web/static/js/explorer-persistence.js` | New DOM-free, Node-testable record builder/migrator/resolver. It filters scroll panel by panel, keeps view intent through changed content, migrates flat records, and derives Diff identity from the actual rendered patch plus target. |
+| `explorer-viewer.js` / `terminals.js` / `session-persistence.js` | The DOM adapter captures/restores every approved structural field, queues continuous scroll/resize updates on the existing one-second floor, refetches content, and delays Diff scroll restoration until the asynchronous rendered patch can be revision-checked. Search result state remains unsaved. |
+| `sessions/manager.py`, `web/saved_sessions.py`, `web/runtime_state.py` | The manager model and both durable products carry the same canonical fields. Save Session/import, acknowledged autosave, explicit Save Workspace, lifecycle capture, and restart restore therefore share one schema. |
+| `web/workspaces.py` | `_prepare_launch_sessions()` preserves a supplied local or SSH `explorer_root_directory`; an absent legacy value still falls back to `directory`. |
+| Workspace appearance path | `Workspace` now owns preset/Markdown-font/source-font values. The existing workspace transaction, manager snapshot, runtime-slot validation, and restore path carry them with `topbar_visible`. The first valid legacy explorer pane seeds an uninitialized workspace once, then workspace values mirror back to per-pane read aliases. Browser `localStorage` remains only a non-authoritative startup cache. |
+
+**Behavioral coverage.** `tests/test_session_presentation.py` executes v1 migration, v2 construction, per-panel x/y filtering, stale-content intent retention, fold revision filtering, directory scroll, rendered-Diff identity, workspace payload construction, strict appearance validation, and the existing ordered workspace transaction. `tests/test_session_persistence_contract.py` now runs the complete explorer fixture through saved-session create/import/relaunch, explicit workspace save/restart restore, acknowledged autosave/restart restore, legacy runtime appearance migration, local root restore, SSH presentation restore, and remote parent-root preservation. Existing mocked-SFTP explorer tests continue to prove that operations remain confined to that restored root. The six Stage 5 forcing functions no longer use `expectedFailure`; the three remaining expected failures belong to Stage 6.
+
+**Exit gate:** met. The fixture crosses both persistence products and both runtime capture intents; local and SSH explorer restoration preserve presentation and distinct roots, while mocked-SFTP behavior remains root-confined.
+
+**Gate results:**
+
+- `.venv\Scripts\python.exe -m ruff check .` — passed, "All checks passed!".
+- `.venv\Scripts\python.exe tests/run_tests.py` — 1,318 tests, `OK (skipped=7, expected failures=3)`. The six Stage 5 forcing functions are green; the three expected failures are the explicitly deferred Stage 6 contracts.
 
 ### Stage 6 — Decouple stored shape from current capacity and harden restore validation
 

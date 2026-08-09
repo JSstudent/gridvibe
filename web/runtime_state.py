@@ -58,7 +58,13 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from web.paths import BASE_DIR
-from web.session_presentation import MAX_STORED_SESSION_PANES, normalize_topbar_visible
+from web.session_presentation import (
+    MAX_STORED_SESSION_PANES,
+    default_workspace_appearance,
+    normalize_topbar_visible,
+    normalize_workspace_appearance,
+    workspace_appearance_from_panes,
+)
 from web.state_files import (
     CrossProcessFileLock,
     StateFilePersistenceError,
@@ -161,6 +167,10 @@ _SESSION_SNAPSHOT_FIELDS = (
     "explorer_tree_open",
     "explorer_git_open",
     "explorer_search_open",
+    "explorer_sidebar_width",
+    "explorer_sidebar_scroll",
+    "explorer_tree_expanded",
+    "explorer_git_expanded",
     "explorer_open_tabs",
     "explorer_active_tab",
     "explorer_tab_views",
@@ -383,6 +393,16 @@ def _validate_slot(workspace_id: Any, slot: Any) -> Optional[Dict[str, Any]]:
     validated["topbar_visible"] = (
         normalized_topbar_visible if normalized_topbar_visible is not None else True
     )
+    appearance = normalize_workspace_appearance(slot)
+    if appearance is None:
+        legacy_panes = [
+            pane
+            for group in groups
+            for pane in group.get("sessions") or []
+            if isinstance(pane, dict)
+        ]
+        appearance = workspace_appearance_from_panes(legacy_panes)
+    validated.update(appearance or default_workspace_appearance())
     return validated
 
 
@@ -706,6 +726,9 @@ class RuntimeStateStore:
         saved_at: float,
         native_zoom_factor: Optional[float],
         topbar_visible: bool,
+        md_preset: str,
+        md_font: str,
+        source_font: str,
     ) -> Dict[str, Any]:
         """Assemble one stored slot from a captured shape."""
         captured_group_ids = {group["group_id"] for group in groups}
@@ -726,6 +749,9 @@ class RuntimeStateStore:
                 active_group_id if active_group_id in captured_group_ids else ""
             ),
             "topbar_visible": topbar_visible,
+            "md_preset": md_preset,
+            "md_font": md_font,
+            "source_font": source_font,
             "groups": groups,
         }
         manually_saved_at = (
@@ -784,6 +810,9 @@ class RuntimeStateStore:
         if normalized_topbar_visible is None:
             normalized_topbar_visible = True
         workspace_label = str(live_snapshot.get("label") or "").strip()
+        appearance = normalize_workspace_appearance(live_snapshot)
+        if appearance is None:
+            appearance = default_workspace_appearance()
 
         state_path = self.state_path()
         with self._lock, _CrossProcessStateLock(state_path):
@@ -808,6 +837,7 @@ class RuntimeStateStore:
                 saved_at=time.time(),
                 native_zoom_factor=normalized_zoom,
                 topbar_visible=normalized_topbar_visible,
+                **appearance,
             )
             slot["revision"] = self._bump_revision(
                 revisions, workspace_id, "commit", observed
@@ -900,6 +930,10 @@ class RuntimeStateStore:
                         topbar_visible
                         if isinstance(topbar_visible, bool)
                         else True
+                    ),
+                    **(
+                        normalize_workspace_appearance(snapshot)
+                        or default_workspace_appearance()
                     ),
                 )
                 slot["revision"] = self._bump_revision(

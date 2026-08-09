@@ -83,18 +83,25 @@ EXPLORER_PRESENTATION_FIXTURE = {
     "explorer_git_open": True,
     "explorer_search_open": True,
     "explorer_sidebar_width": 320,
+    "explorer_sidebar_scroll": {
+        "tree": {"x": 0.0, "y": 0.2},
+        "git": {"x": 0.0, "y": 0.4},
+    },
     "explorer_tree_expanded": ["docs", "docs/guides", "web/static"],
+    "explorer_git_expanded": ["explorer:abcdef1"],
     "explorer_open_tabs": ["docs/guides/intro.md", "web/static/js/shared.js"],
     "explorer_active_tab": "web/static/js/shared.js",
-    "explorer_md_preset": "compact",
+    "explorer_md_preset": "paper",
     "explorer_md_font": "serif",
-    "explorer_source_font": "mono",
+    "explorer_source_font": "jetbrains-mono",
     "explorer_theme": "light",
     "explorer_tab_views": {
         # Preview keeps its own browsed directory and its own scroll.
         "__preview__": {
             "version": 2,
             "intent": {"mode": "preview"},
+            "content_revision": "sha256:dir-guides",
+            "content_revisions": {"directory": "sha256:dir-guides"},
             "dir": "docs/guides",
             "font_size": 16,
             "wrap": {"source": True, "preview": True, "diff": False},
@@ -104,6 +111,10 @@ EXPLORER_PRESENTATION_FIXTURE = {
             "version": 2,
             "intent": {"mode": "preview"},
             "content_revision": "sha256:intro",
+            "content_revisions": {
+                "source": "sha256:intro",
+                "preview": "sha256:intro",
+            },
             "font_size": 18,
             "wrap": {"source": False, "preview": True, "diff": False},
             "scroll": {
@@ -111,6 +122,7 @@ EXPLORER_PRESENTATION_FIXTURE = {
                 "preview": {"x": 0.0, "y": 0.60},
             },
             "folds": [12, 44],
+            "fold_revision": "sha256:intro",
         },
         "web/static/js/shared.js": {
             "version": 2,
@@ -118,6 +130,10 @@ EXPLORER_PRESENTATION_FIXTURE = {
             # identity must track the *rendered* diff, not the working file.
             "intent": {"mode": "diff", "diff_mode": "staged"},
             "content_revision": "sha256:index-abc",
+            "content_revisions": {
+                "source": "sha256:shared-js",
+                "diff": "sha256:index-abc",
+            },
             "font_size": 14,
             "wrap": {"source": False, "preview": True, "diff": False},
             "scroll": {
@@ -244,7 +260,6 @@ class SaveWorkspaceFlushBarrierTestCase(_PersistencePathsMixin, unittest.TestCas
             },
         )
         self.assertEqual(accepted.status_code, 200, accepted.get_json())
-
         saved = self._save_workspace()
 
         self.assertEqual(saved.status_code, 200, saved.get_json())
@@ -560,7 +575,12 @@ class ExplorerRootRestoreTestCase(_PersistencePathsMixin, unittest.TestCase):
         self.child_dir = self.repo_dir / "src"
         self.child_dir.mkdir()
 
-    def _write_slot(self, session_overrides, workspace_id="default"):
+    def _write_slot(
+        self,
+        session_overrides,
+        workspace_id="default",
+        connection_mode="wsl",
+    ):
         state = {
             "version": web_runtime_state.SCHEMA_VERSION,
             "workspaces": {
@@ -575,7 +595,7 @@ class ExplorerRootRestoreTestCase(_PersistencePathsMixin, unittest.TestCase):
                         {
                             "group_id": "g1",
                             "name": "Files",
-                            "connection_mode": "wsl",
+                            "connection_mode": connection_mode,
                             "layout": "single",
                             "sessions": [
                                 {
@@ -592,7 +612,6 @@ class ExplorerRootRestoreTestCase(_PersistencePathsMixin, unittest.TestCase):
         self.state_path.write_text(json.dumps(state), encoding="utf-8")
         return workspace_id
 
-    @unittest.expectedFailure
     def test_restore_keeps_a_root_wider_than_the_current_directory(self):
         """Stage 5 item 1. Matrix row 9."""
         workspace_id = self._write_slot(
@@ -631,6 +650,29 @@ class ExplorerRootRestoreTestCase(_PersistencePathsMixin, unittest.TestCase):
         session = api.session_manager.get_group_sessions(group.group_id)[0]
         self.assertEqual(session.explorer_root_directory, str(self.child_dir))
 
+    def test_ssh_restore_keeps_the_remote_parent_root(self):
+        """The same preparation branch backs mocked-SFTP explorer restores."""
+        workspace_id = self._write_slot(
+            {
+                "host": "example.test",
+                "username": "ubuntu",
+                "port": 22,
+                "directory": "/srv/app/src",
+                "explorer_root_directory": "/srv/app",
+            },
+            connection_mode="ssh",
+        )
+
+        response = self.client.post(
+            "/api/runtime-state/restore", json={"workspace_ids": [workspace_id]}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        group = api.session_manager.get_workspace_groups(workspace_id)[0]
+        session = api.session_manager.get_group_sessions(group.group_id)[0]
+        self.assertEqual(session.explorer_root_directory, "/srv/app")
+        self.assertEqual(session.directory, "/srv/app/src")
+
 
 # ==================== Item 5 — SGP-03 / SGP-08 (Stage 5) ====================
 
@@ -649,7 +691,35 @@ class ExplorerPresentationFixtureTestCase(_PersistencePathsMixin, unittest.TestC
     def setUp(self):
         self._isolate_state()
 
-    @unittest.expectedFailure
+    def _acknowledge_fixture(self, group_id, session_id):
+        accepted = self.client.post(
+            PRESENTATION_ROUTE,
+            json={
+                "workspace_id": "default",
+                "group_id": group_id,
+                "expected_revision": 0,
+                "pane_order": [session_id],
+                "panes": [
+                    {"session_id": session_id, **EXPLORER_PRESENTATION_FIXTURE}
+                ],
+            },
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.get_json())
+        appearance = self.client.post(
+            "/api/workspace-presentation",
+            json={
+                "workspace_id": "default",
+                "expected_revision": 0,
+                "topbar_visible": True,
+                "md_preset": EXPLORER_PRESENTATION_FIXTURE["explorer_md_preset"],
+                "md_font": EXPLORER_PRESENTATION_FIXTURE["explorer_md_font"],
+                "source_font": EXPLORER_PRESENTATION_FIXTURE[
+                    "explorer_source_font"
+                ],
+            },
+        )
+        self.assertEqual(appearance.status_code, 200, appearance.get_json())
+
     def test_the_canonical_normalizer_preserves_every_in_boundary_field(self):
         """Stage 5 items 2-4 through the SGP-07 canonical normalizer."""
         module = __import__(PRESENTATION_MODULE, fromlist=["normalize_pane_presentation"])
@@ -660,24 +730,13 @@ class ExplorerPresentationFixtureTestCase(_PersistencePathsMixin, unittest.TestC
             with self.subTest(field=field_name):
                 self.assertEqual(normalized[field_name], expected)
 
-    @unittest.expectedFailure
     def test_the_fixture_round_trips_through_save_workspace_and_restore(self):
         """Stage 3 + Stage 5. Matrix rows 2, 4, 5, 7."""
         launched = self._launch_explorer()
         group_id = launched["group_id"]
         session_id = self._session_ids(group_id)[0]
 
-        accepted = self.client.post(
-            PRESENTATION_ROUTE,
-            json={
-                "workspace_id": "default",
-                "group_id": group_id,
-                "expected_revision": 0,
-                "pane_order": [session_id],
-                "panes": [{"session_id": session_id, **EXPLORER_PRESENTATION_FIXTURE}],
-            },
-        )
-        self.assertEqual(accepted.status_code, 200, accepted.get_json())
+        self._acknowledge_fixture(group_id, session_id)
 
         saved = self._save_workspace()
         self.assertEqual(saved.status_code, 200, saved.get_json())
@@ -699,7 +758,153 @@ class ExplorerPresentationFixtureTestCase(_PersistencePathsMixin, unittest.TestC
             with self.subTest(field=field_name):
                 self.assertEqual(session[field_name], expected)
 
-    @unittest.expectedFailure
+    def test_the_fixture_round_trips_through_autosave_and_restore(self):
+        """Stage 5 exit gate: acknowledged state is the autosave source."""
+        launched = self._launch_explorer()
+        group_id = launched["group_id"]
+        session_id = self._session_ids(group_id)[0]
+        self._acknowledge_fixture(group_id, session_id)
+
+        captured = web_runtime_state.capture_live_workspaces(api.session_manager)
+        self.assertIn("default", captured)
+        self.assertEqual(captured["default"]["origin"], "auto")
+
+        self.client.delete("/api/sessions")
+        api.session_manager.reset_sessions()
+        restored = self.client.post(
+            "/api/runtime-state/restore", json={"workspace_ids": ["default"]}
+        )
+        self.assertEqual(restored.status_code, 200, restored.get_json())
+        group = api.session_manager.get_workspace_groups("default")[0]
+        session = api.session_manager.get_group_sessions(group.group_id)[0].to_dict()
+        for field_name, expected in EXPLORER_PRESENTATION_FIXTURE.items():
+            with self.subTest(field=field_name):
+                self.assertEqual(session[field_name], expected)
+
+    def test_the_fixture_round_trips_through_save_session_import_and_relaunch(self):
+        """Stage 5 exit gate: the reusable-preset product uses the same schema."""
+        payload = {
+            "name": "Explorer v2 fixture",
+            "config": {
+                "connection_mode": "wsl",
+                "terminal_count": 1,
+                "layout": "single",
+                "wsl": {
+                    "distribution": "",
+                    "username": "",
+                    "default_dir": str(self.repo_dir),
+                },
+                "terminals": [
+                    {
+                        "title": "Files",
+                        "directory": str(self.repo_dir),
+                        "startup_mode": "explorer",
+                        **EXPLORER_PRESENTATION_FIXTURE,
+                    }
+                ],
+            },
+        }
+        created = self.client.post("/api/saved-sessions", json=payload)
+        self.assertEqual(created.status_code, 201, created.get_json())
+        fetched = self.client.get(
+            f"/api/saved-sessions/{created.get_json()['id']}"
+        )
+        self.assertEqual(fetched.status_code, 200, fetched.get_json())
+        terminal = fetched.get_json()["config"]["terminals"][0]
+        for field_name, expected in EXPLORER_PRESENTATION_FIXTURE.items():
+            with self.subTest(field=field_name, phase="import"):
+                self.assertEqual(terminal[field_name], expected)
+
+        launched = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": "Imported fixture",
+                "workspace_id": "default",
+                "layout": "single",
+                "sessions": [terminal],
+            },
+        )
+        self.assertEqual(launched.status_code, 201, launched.get_json())
+        session = api.session_manager.get_group_sessions(
+            launched.get_json()["group_id"]
+        )[0].to_dict()
+        for field_name, expected in EXPLORER_PRESENTATION_FIXTURE.items():
+            with self.subTest(field=field_name, phase="relaunch"):
+                self.assertEqual(session[field_name], expected)
+        appearance = api.session_manager.get_workspace_presentation("default")
+        self.assertEqual(appearance["md_preset"], "paper")
+        self.assertEqual(appearance["md_font"], "serif")
+        self.assertEqual(appearance["source_font"], "jetbrains-mono")
+
+    def test_legacy_pane_appearance_migrates_to_the_workspace_record(self):
+        """Old runtime slots have aliases only; the first explorer seeds scope."""
+        launched = self._launch_explorer()
+        group_id = launched["group_id"]
+        session_id = self._session_ids(group_id)[0]
+        self._acknowledge_fixture(group_id, session_id)
+        self.assertEqual(self._save_workspace().status_code, 200)
+
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        slot = state["workspaces"]["default"]
+        for field_name in ("md_preset", "md_font", "source_font"):
+            slot.pop(field_name, None)
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        self.client.delete("/api/sessions")
+        api.session_manager.reset_sessions()
+        restored = self.client.post(
+            "/api/runtime-state/restore", json={"workspace_ids": ["default"]}
+        )
+        self.assertEqual(restored.status_code, 200, restored.get_json())
+        appearance = api.session_manager.get_workspace_presentation("default")
+        self.assertEqual(appearance["md_preset"], "paper")
+        self.assertEqual(appearance["md_font"], "serif")
+        self.assertEqual(appearance["source_font"], "jetbrains-mono")
+
+    def test_the_fixture_round_trips_on_an_ssh_explorer_without_narrowing_root(self):
+        """Stage 5 exit gate: SSH/SFTP panes share the canonical snapshot path."""
+        launched = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "ssh",
+                "session_name": "Remote files",
+                "workspace_id": "default",
+                "layout": "single",
+                "sessions": [
+                    {
+                        "host": "example.test",
+                        "username": "ubuntu",
+                        "port": 22,
+                        "directory": "/srv/app/src",
+                        "explorer_root_directory": "/srv/app",
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(launched.status_code, 201, launched.get_json())
+        group_id = launched.get_json()["group_id"]
+        session_id = self._session_ids(group_id)[0]
+        self._acknowledge_fixture(group_id, session_id)
+        saved = self._save_workspace()
+        self.assertEqual(saved.status_code, 200, saved.get_json())
+
+        self.client.delete("/api/sessions")
+        api.session_manager.reset_sessions()
+        restored = self.client.post(
+            "/api/runtime-state/restore", json={"workspace_ids": ["default"]}
+        )
+        self.assertEqual(restored.status_code, 200, restored.get_json())
+        group = api.session_manager.get_workspace_groups("default")[0]
+        session = api.session_manager.get_group_sessions(group.group_id)[0].to_dict()
+        self.assertEqual(session["explorer_root_directory"], "/srv/app")
+        self.assertEqual(session["directory"], "/srv/app/src")
+        for field_name, expected in EXPLORER_PRESENTATION_FIXTURE.items():
+            with self.subTest(field=field_name):
+                self.assertEqual(session[field_name], expected)
+
     def test_changed_content_drops_scroll_and_folds_but_keeps_view_intent(self):
         """Stage 5 items 3 and 5. Matrix row 6.
 
@@ -718,7 +923,6 @@ class ExplorerPresentationFixtureTestCase(_PersistencePathsMixin, unittest.TestC
         self.assertEqual(resolved.get("scroll"), {})
         self.assertEqual(resolved.get("folds"), [])
 
-    @unittest.expectedFailure
     def test_a_staged_diff_identity_tracks_the_index_not_the_working_file(self):
         """Stage 5 item 6.
 
@@ -738,7 +942,6 @@ class ExplorerPresentationFixtureTestCase(_PersistencePathsMixin, unittest.TestC
 
         self.assertNotEqual(before, after)
 
-    @unittest.expectedFailure
     def test_markdown_appearance_is_one_workspace_scoped_value(self):
         """SGP-08 / product decision 5, Stage 5 item 8.
 
@@ -748,15 +951,22 @@ class ExplorerPresentationFixtureTestCase(_PersistencePathsMixin, unittest.TestC
         self._launch_explorer()
 
         response = self.client.post(
-            "/api/workspaces/default/appearance",
-            json={"md_preset": "compact", "md_font": "serif", "source_font": "mono"},
+            "/api/workspace-presentation",
+            json={
+                "workspace_id": "default",
+                "expected_revision": 0,
+                "topbar_visible": True,
+                "md_preset": "paper",
+                "md_font": "serif",
+                "source_font": "jetbrains-mono",
+            },
         )
 
         self.assertEqual(response.status_code, 200, response.get_json())
         workspace = api.session_manager.get_workspace("default")
-        self.assertEqual(workspace.md_preset, "compact")
+        self.assertEqual(workspace.md_preset, "paper")
         self.assertEqual(workspace.md_font, "serif")
-        self.assertEqual(workspace.source_font, "mono")
+        self.assertEqual(workspace.source_font, "jetbrains-mono")
 
 
 # ==================== Item 6 — SGP-06 (Stage 6 items 1-3) ====================

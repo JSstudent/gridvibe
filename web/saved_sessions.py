@@ -35,6 +35,8 @@ from web.session_presentation import (  # noqa: F401 - compatibility re-exports
     EXPLORER_MD_FONTS,
     EXPLORER_MD_PRESETS,
     EXPLORER_PREVIEW_TAB_KEY,
+    EXPLORER_SIDEBAR_PANELS,
+    EXPLORER_SIDEBAR_WIDTH_MIN,
     EXPLORER_SOURCE_FONTS,
     EXPLORER_TAB_VIEW_MODES,
     MAX_STORED_SESSION_PANES,
@@ -43,16 +45,20 @@ from web.session_presentation import (  # noqa: F401 - compatibility re-exports
     _normalize_browser_url,
     _normalize_explorer_active_tab,
     _normalize_explorer_diff_target,
+    _normalize_explorer_git_expanded,
     _normalize_explorer_line_wrap,
     _normalize_explorer_markdown_folds,
     _normalize_explorer_md_choice,
     _normalize_explorer_open_tabs,
+    _normalize_explorer_sidebar_width,
     _normalize_explorer_tab_font_size,
     _normalize_explorer_tab_path,
     _normalize_explorer_tab_views,
     _normalize_explorer_theme,
+    _normalize_explorer_tree_expanded,
     _normalize_explorer_view_identity,
     _normalize_explorer_view_snapshot,
+    _normalize_scroll_map,
     _normalize_workspace_layout,
 )
 
@@ -90,6 +96,10 @@ def _default_terminal_entries():
             "explorer_tree_open": False,
             "explorer_git_open": False,
             "explorer_search_open": False,
+            "explorer_sidebar_width": EXPLORER_SIDEBAR_WIDTH_MIN + 80,
+            "explorer_sidebar_scroll": {},
+            "explorer_tree_expanded": [],
+            "explorer_git_expanded": [],
             "explorer_open_tabs": [],
             "explorer_active_tab": "",
             "explorer_tab_views": {},
@@ -225,6 +235,18 @@ def _normalize_terminal_entries(
                 "explorer_tree_open": bool(entry.get("explorer_tree_open")),
                 "explorer_git_open": bool(entry.get("explorer_git_open")),
                 "explorer_search_open": bool(entry.get("explorer_search_open")),
+                "explorer_sidebar_width": _normalize_explorer_sidebar_width(
+                    entry.get("explorer_sidebar_width")
+                ) or (EXPLORER_SIDEBAR_WIDTH_MIN + 80),
+                "explorer_sidebar_scroll": _normalize_scroll_map(
+                    entry.get("explorer_sidebar_scroll"), EXPLORER_SIDEBAR_PANELS
+                ),
+                "explorer_tree_expanded": _normalize_explorer_tree_expanded(
+                    entry.get("explorer_tree_expanded")
+                ),
+                "explorer_git_expanded": _normalize_explorer_git_expanded(
+                    entry.get("explorer_git_expanded")
+                ),
                 "explorer_open_tabs": open_tabs,
                 "explorer_active_tab": _normalize_explorer_active_tab(entry.get("explorer_active_tab"), open_tabs),
                 "explorer_tab_views": _normalize_explorer_tab_views(entry.get("explorer_tab_views"), open_tabs),
@@ -251,6 +273,10 @@ _LIVE_SESSION_VIEW_FIELDS = (
     "explorer_tree_open",
     "explorer_git_open",
     "explorer_search_open",
+    "explorer_sidebar_width",
+    "explorer_sidebar_scroll",
+    "explorer_tree_expanded",
+    "explorer_git_expanded",
     "explorer_open_tabs",
     "explorer_active_tab",
     "explorer_tab_views",
@@ -399,6 +425,26 @@ def _merge_workspace_session_config(
         )
         saved_terminal["explorer_search_open"] = (
             startup_mode == "explorer" and workspace_terminal.get("explorer_search_open", False)
+        )
+        saved_terminal["explorer_sidebar_width"] = (
+            workspace_terminal["explorer_sidebar_width"]
+            if startup_mode == "explorer"
+            else EXPLORER_SIDEBAR_WIDTH_MIN + 80
+        )
+        saved_terminal["explorer_sidebar_scroll"] = (
+            workspace_terminal["explorer_sidebar_scroll"]
+            if startup_mode == "explorer"
+            else {}
+        )
+        saved_terminal["explorer_tree_expanded"] = (
+            workspace_terminal["explorer_tree_expanded"]
+            if startup_mode == "explorer"
+            else []
+        )
+        saved_terminal["explorer_git_expanded"] = (
+            workspace_terminal["explorer_git_expanded"]
+            if startup_mode == "explorer"
+            else []
         )
         saved_terminal["explorer_open_tabs"] = (
             workspace_terminal["explorer_open_tabs"] if startup_mode == "explorer" else []

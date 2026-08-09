@@ -1864,6 +1864,9 @@ def get_session_groups():
         "groups": groups,
         "count": len(groups),
         "topbar_visible": workspace_presentation["topbar_visible"],
+        "md_preset": workspace_presentation["md_preset"],
+        "md_font": workspace_presentation["md_font"],
+        "source_font": workspace_presentation["source_font"],
         "workspace_presentation_revision": workspace_presentation[
             "presentation_revision"
         ],
@@ -1954,6 +1957,9 @@ def get_runtime_state():
         # Optional desktop session-window zoom; null means no preference.
         "native_zoom_factor": slot.get("native_zoom_factor") if slot else None,
         "topbar_visible": slot.get("topbar_visible", True) if slot else True,
+        "md_preset": slot.get("md_preset", "default") if slot else "default",
+        "md_font": slot.get("md_font", "system") if slot else "system",
+        "source_font": slot.get("source_font", "default") if slot else "default",
         "active_group_count": len(active_groups),
     })
 
@@ -2018,6 +2024,9 @@ def save_runtime_state():
         "active_group_id": slot["active_group_id"],
         "native_zoom_factor": slot.get("native_zoom_factor"),
         "topbar_visible": slot["topbar_visible"],
+        "md_preset": slot["md_preset"],
+        "md_font": slot["md_font"],
+        "source_font": slot["source_font"],
         "groups": slot["groups"],
     })
 

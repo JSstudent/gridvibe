@@ -13,9 +13,13 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
 from web.session_presentation import (
+    DEFAULT_EXPLORER_MD_FONT,
+    DEFAULT_EXPLORER_MD_PRESET,
+    DEFAULT_EXPLORER_SOURCE_FONT,
     PANE_PRESENTATION_FIELDS,
     deep_copy_presentation,
     pane_fields_for_mode,
+    workspace_appearance_from_panes,
 )
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
@@ -65,6 +69,10 @@ class TerminalSession:
     explorer_tree_open: bool = False
     explorer_git_open: bool = False
     explorer_search_open: bool = False
+    explorer_sidebar_width: int = 260
+    explorer_sidebar_scroll: Dict[str, Any] = field(default_factory=dict)
+    explorer_tree_expanded: List[str] = field(default_factory=list)
+    explorer_git_expanded: List[str] = field(default_factory=list)
     explorer_open_tabs: List[str] = field(default_factory=list)
     explorer_active_tab: str = ""
     explorer_tab_views: Dict[str, Any] = field(default_factory=dict)
@@ -106,6 +114,10 @@ class TerminalSession:
             "explorer_tree_open": self.explorer_tree_open,
             "explorer_git_open": self.explorer_git_open,
             "explorer_search_open": self.explorer_search_open,
+            "explorer_sidebar_width": self.explorer_sidebar_width,
+            "explorer_sidebar_scroll": copy.deepcopy(self.explorer_sidebar_scroll),
+            "explorer_tree_expanded": list(self.explorer_tree_expanded),
+            "explorer_git_expanded": list(self.explorer_git_expanded),
             "explorer_open_tabs": list(self.explorer_open_tabs),
             "explorer_active_tab": self.explorer_active_tab,
             "explorer_tab_views": dict(self.explorer_tab_views),
@@ -130,7 +142,14 @@ class Workspace:
     created_at: float = field(default_factory=time.time)
     active_group_id: str = ""
     topbar_visible: bool = True
+    md_preset: str = DEFAULT_EXPLORER_MD_PRESET
+    md_font: str = DEFAULT_EXPLORER_MD_FONT
+    source_font: str = DEFAULT_EXPLORER_SOURCE_FONT
     presentation_revision: int = 0
+    # Live-only migration flag.  A first legacy preset may seed a brand-new
+    # workspace from its per-pane aliases; an acknowledged workspace value or
+    # restored slot owns the setting thereafter.
+    appearance_initialized: bool = False
     # Live-only lifecycle hint: a workspace the user deliberately created empty
     # must survive the empty-workspace pruning that closes a workspace emptied
     # by a close or a move. Absence of groups alone cannot tell the two apart.
@@ -145,6 +164,9 @@ class Workspace:
             "created_at": self.created_at,
             "active_group_id": self.active_group_id,
             "topbar_visible": self.topbar_visible,
+            "md_preset": self.md_preset,
+            "md_font": self.md_font,
+            "source_font": self.source_font,
             "presentation_revision": self.presentation_revision,
             "retain_when_empty": self.retain_when_empty,
         }
@@ -551,13 +573,57 @@ class SessionManager:
                 return {
                     "workspace_id": resolved_workspace_id,
                     "topbar_visible": True,
+                    "md_preset": DEFAULT_EXPLORER_MD_PRESET,
+                    "md_font": DEFAULT_EXPLORER_MD_FONT,
+                    "source_font": DEFAULT_EXPLORER_SOURCE_FONT,
                     "presentation_revision": 0,
                 }
             return {
                 "workspace_id": resolved_workspace_id,
                 "topbar_visible": workspace.topbar_visible,
+                "md_preset": workspace.md_preset,
+                "md_font": workspace.md_font,
+                "source_font": workspace.source_font,
                 "presentation_revision": workspace.presentation_revision,
             }
+
+    def set_workspace_appearance(
+        self,
+        workspace_id: str,
+        *,
+        md_preset: str,
+        md_font: str,
+        source_font: str,
+    ) -> Dict[str, str]:
+        """Install a validated workspace appearance and its legacy aliases."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            if workspace is None:
+                raise ValueError("Workspace not found")
+            workspace.md_preset = md_preset
+            workspace.md_font = md_font
+            workspace.source_font = source_font
+            workspace.appearance_initialized = True
+            self._mirror_workspace_appearance_locked(workspace)
+            return {
+                "md_preset": workspace.md_preset,
+                "md_font": workspace.md_font,
+                "source_font": workspace.source_font,
+            }
+
+    def _mirror_workspace_appearance_locked(self, workspace: Workspace) -> None:
+        """Keep legacy per-pane read aliases in step with workspace authority."""
+        for group in self.groups.values():
+            if group.workspace_id != workspace.workspace_id:
+                continue
+            for session_id in group.pane_order:
+                session = self.sessions.get(session_id)
+                if session is None or session.startup_mode != "explorer":
+                    continue
+                session.explorer_md_preset = workspace.md_preset
+                session.explorer_md_font = workspace.md_font
+                session.explorer_source_font = workspace.source_font
 
     def apply_workspace_presentation(
         self,
@@ -565,6 +631,9 @@ class SessionManager:
         workspace_id: str,
         expected_revision: int,
         topbar_visible: bool,
+        md_preset: Optional[str] = None,
+        md_font: Optional[str] = None,
+        source_font: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Compare-and-swap workspace-scoped presentation under one lock."""
         with self.lock:
@@ -579,12 +648,21 @@ class SessionManager:
                     "presentation_revision": workspace.presentation_revision,
                 }
             workspace.topbar_visible = topbar_visible
+            if md_preset is not None and md_font is not None and source_font is not None:
+                workspace.md_preset = md_preset
+                workspace.md_font = md_font
+                workspace.source_font = source_font
+                workspace.appearance_initialized = True
+                self._mirror_workspace_appearance_locked(workspace)
             workspace.presentation_revision += 1
             return {
                 "outcome": "ok",
                 "workspace_id": workspace_id,
                 "presentation_revision": workspace.presentation_revision,
                 "topbar_visible": workspace.topbar_visible,
+                "md_preset": workspace.md_preset,
+                "md_font": workspace.md_font,
+                "source_font": workspace.source_font,
             }
 
     def _generate_session_id(self) -> str:
@@ -705,6 +783,14 @@ class SessionManager:
             "explorer_tree_open": bool(config.get("explorer_tree_open")),
             "explorer_git_open": bool(config.get("explorer_git_open")),
             "explorer_search_open": bool(config.get("explorer_search_open")),
+            "explorer_sidebar_width": int(config.get("explorer_sidebar_width") or 260),
+            "explorer_sidebar_scroll": copy.deepcopy(
+                config.get("explorer_sidebar_scroll") or {}
+            ),
+            "explorer_tree_expanded": list(
+                config.get("explorer_tree_expanded") or []
+            ),
+            "explorer_git_expanded": list(config.get("explorer_git_expanded") or []),
             "explorer_open_tabs": list(config.get("explorer_open_tabs") or []),
             "explorer_active_tab": str(config.get("explorer_active_tab") or ""),
             "explorer_tab_views": dict(config.get("explorer_tab_views") or {}),
@@ -759,10 +845,12 @@ class SessionManager:
                 logger.error(f"Failed to create session: {exc}")
         if not staged_fields:
             raise ValueError("No valid sessions were created")
+        legacy_appearance = workspace_appearance_from_panes(sessions_config)
 
         with self.lock:
             if resolved_workspace_id not in self.workspaces:
                 raise ValueError("Workspace not found")
+            workspace = self.workspaces[resolved_workspace_id]
             existing_group = self.groups.get(resolved_group_id)
             if existing_group is not None:
                 if existing_group.workspace_id != resolved_workspace_id:
@@ -791,6 +879,12 @@ class SessionManager:
                 session = self._build_session(resolved_group_id, **fields)
                 self.sessions[session.session_id] = session
                 sessions.append(session)
+            if not workspace.appearance_initialized and legacy_appearance is not None:
+                workspace.md_preset = legacy_appearance["md_preset"]
+                workspace.md_font = legacy_appearance["md_font"]
+                workspace.source_font = legacy_appearance["source_font"]
+                workspace.appearance_initialized = True
+            self._mirror_workspace_appearance_locked(workspace)
             group.terminal_count = len(sessions)
             group.pane_order = [session.session_id for session in sessions]
 
@@ -834,6 +928,10 @@ class SessionManager:
             "explorer_tree_open",
             "explorer_git_open",
             "explorer_search_open",
+            "explorer_sidebar_width",
+            "explorer_sidebar_scroll",
+            "explorer_tree_expanded",
+            "explorer_git_expanded",
             "explorer_open_tabs",
             "explorer_active_tab",
             "explorer_tab_views",
@@ -1229,6 +1327,9 @@ class SessionManager:
             # The destination now holds content: a deliberately empty workspace
             # stops being retained the moment its first group arrives.
             self.workspaces[resolved_target_id].retain_when_empty = False
+            self._mirror_workspace_appearance_locked(
+                self.workspaces[resolved_target_id]
+            )
             source_workspace = self.workspaces.get(source_workspace_id)
             if source_workspace and source_workspace.active_group_id == group.group_id:
                 source_workspace.active_group_id = ""
@@ -1260,6 +1361,9 @@ class SessionManager:
                     "label": workspace.label,
                     "created_at": workspace.created_at,
                     "topbar_visible": workspace.topbar_visible,
+                    "md_preset": workspace.md_preset,
+                    "md_font": workspace.md_font,
+                    "source_font": workspace.source_font,
                     "active_group_id": (
                         workspace.active_group_id
                         if workspace.active_group_id in captured_group_ids

@@ -30,6 +30,17 @@ EXPLORER_MAX_MARKDOWN_LINE = 1_000_000
 EXPLORER_PREVIEW_TAB_KEY = "__preview__"
 EXPLORER_EDITOR_FONT_MIN = 10
 EXPLORER_EDITOR_FONT_MAX = 24
+EXPLORER_PRESENTATION_VERSION = 2
+EXPLORER_MAX_CONTENT_REVISION_LENGTH = 128
+EXPLORER_MAX_EXPANDED_PATHS = 128
+EXPLORER_MAX_GIT_EXPANDED = 128
+EXPLORER_SIDEBAR_WIDTH_MIN = 180
+EXPLORER_SIDEBAR_WIDTH_MAX = 520
+EXPLORER_SCROLL_PANELS = ("source", "preview", "diff", "directory")
+# Repository-search result scroll is deliberately ephemeral (product decision
+# 4). Files and Git have structural navigation whose scroll can be restored
+# after their data is refetched; Search has no structural scroll of its own.
+EXPLORER_SIDEBAR_PANELS = ("tree", "git")
 EXPLORER_MD_PRESETS = ("default", "paper", "contrast", "vscode")
 EXPLORER_MD_FONTS = (
     "system",
@@ -45,6 +56,9 @@ EXPLORER_SOURCE_FONTS = (
     "courier-new",
 )
 EXPLORER_FONT_ALIASES = {"consolas": "jetbrains-mono"}
+DEFAULT_EXPLORER_MD_PRESET = "default"
+DEFAULT_EXPLORER_MD_FONT = "system"
+DEFAULT_EXPLORER_SOURCE_FONT = "default"
 
 DEFAULT_BROWSER_URL = "http://127.0.0.1:3000"
 BROWSER_MAX_TABS = 8
@@ -59,6 +73,10 @@ PANE_PRESENTATION_FIELDS = frozenset(
         "explorer_tree_open",
         "explorer_git_open",
         "explorer_search_open",
+        "explorer_sidebar_width",
+        "explorer_sidebar_scroll",
+        "explorer_tree_expanded",
+        "explorer_git_expanded",
         "explorer_open_tabs",
         "explorer_active_tab",
         "explorer_tab_views",
@@ -89,7 +107,7 @@ _EXPLORER_STRING_FIELDS = frozenset(
         "explorer_theme",
     }
 )
-_VIEW_FIELDS = frozenset(
+_VIEW_V1_FIELDS = frozenset(
     {
         "mode",
         "scroll",
@@ -107,10 +125,110 @@ _VIEW_FIELDS = frozenset(
     }
 )
 
+_VIEW_V2_FIELDS = frozenset(
+    {
+        "version",
+        "intent",
+        "content_revision",
+        "content_revisions",
+        "font_size",
+        "wrap",
+        "scroll",
+        "path",
+        "dir",
+        "folds",
+        "fold_revision",
+    }
+)
+
+_VIEW_INTENT_FIELDS = frozenset({"mode", "diff_commit", "diff_mode"})
+
 
 def normalize_topbar_visible(value: Any) -> Optional[bool]:
     """Normalize optional workspace top-bar visibility without coercion."""
     return value if isinstance(value, bool) else None
+
+
+def normalize_workspace_appearance(data: Any) -> Optional[Dict[str, str]]:
+    """Type-check one workspace-global explorer appearance.
+
+    ``None`` means the value is not a complete valid record.  Callers at a live
+    request boundary reject it; runtime-state migration may instead fall back
+    to pane aliases or the product defaults.
+    """
+    if not isinstance(data, dict):
+        return None
+    values = {
+        "md_preset": (data.get("md_preset"), EXPLORER_MD_PRESETS, None),
+        "md_font": (data.get("md_font"), EXPLORER_MD_FONTS, EXPLORER_FONT_ALIASES),
+        "source_font": (
+            data.get("source_font"),
+            EXPLORER_SOURCE_FONTS,
+            EXPLORER_FONT_ALIASES,
+        ),
+    }
+    normalized: Dict[str, str] = {}
+    for field_name, (raw, allowed, aliases) in values.items():
+        if not isinstance(raw, str):
+            return None
+        value = (aliases or {}).get(raw.strip(), raw.strip())
+        if value not in allowed:
+            return None
+        normalized[field_name] = value
+    return normalized
+
+
+def default_workspace_appearance() -> Dict[str, str]:
+    """Return the concrete product defaults for a workspace record."""
+    return {
+        "md_preset": DEFAULT_EXPLORER_MD_PRESET,
+        "md_font": DEFAULT_EXPLORER_MD_FONT,
+        "source_font": DEFAULT_EXPLORER_SOURCE_FONT,
+    }
+
+
+def workspace_appearance_from_panes(panes: Any) -> Optional[Dict[str, str]]:
+    """Read one deterministic legacy per-pane appearance for migration."""
+    if not isinstance(panes, list):
+        return None
+    defaults = default_workspace_appearance()
+    aliases = {
+        "md_preset": "explorer_md_preset",
+        "md_font": "explorer_md_font",
+        "source_font": "explorer_source_font",
+    }
+    for pane in panes:
+        if not isinstance(pane, dict) or pane.get("startup_mode") != "explorer":
+            continue
+        candidate = dict(defaults)
+        has_alias = False
+        raw_values = {
+            "md_preset": (
+                pane.get(aliases["md_preset"]),
+                EXPLORER_MD_PRESETS,
+                None,
+            ),
+            "md_font": (
+                pane.get(aliases["md_font"]),
+                EXPLORER_MD_FONTS,
+                EXPLORER_FONT_ALIASES,
+            ),
+            "source_font": (
+                pane.get(aliases["source_font"]),
+                EXPLORER_SOURCE_FONTS,
+                EXPLORER_FONT_ALIASES,
+            ),
+        }
+        for field_name, (raw, allowed, value_aliases) in raw_values.items():
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            value = (value_aliases or {}).get(raw.strip(), raw.strip())
+            if value in allowed:
+                candidate[field_name] = value
+                has_alias = True
+        if has_alias:
+            return candidate
+    return None
 
 
 def _normalize_explorer_tab_path(value: Any) -> str:
@@ -203,6 +321,92 @@ def _normalize_explorer_markdown_folds(value: Any) -> List[int]:
     return sorted(folds)
 
 
+def _normalize_explorer_sidebar_width(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        width = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(EXPLORER_SIDEBAR_WIDTH_MIN, min(EXPLORER_SIDEBAR_WIDTH_MAX, width))
+
+
+def _normalize_explorer_tree_expanded(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    result: List[str] = []
+    seen = set()
+    for raw_path in value:
+        path = _normalize_explorer_tab_path(raw_path)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        result.append(path)
+        if len(result) >= EXPLORER_MAX_EXPANDED_PATHS:
+            break
+    return result
+
+
+def _normalize_explorer_git_expanded(value: Any) -> List[str]:
+    """Bound Git-sidebar expansion intent to commit identities only."""
+    if not isinstance(value, list):
+        return []
+    result: List[str] = []
+    seen = set()
+    for raw_key in value:
+        key = str(raw_key or "").strip()
+        if not re.fullmatch(r"explorer:[0-9a-fA-F]{7,64}", key) or key in seen:
+            continue
+        seen.add(key)
+        result.append(key)
+        if len(result) >= EXPLORER_MAX_GIT_EXPANDED:
+            break
+    return result
+
+
+def _normalize_scroll_ratio(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    ratio = float(value)
+    if not math.isfinite(ratio):
+        return None
+    return max(0.0, min(1.0, ratio))
+
+
+def _normalize_scroll_map(value: Any, panels: tuple) -> Dict[str, Dict[str, float]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: Dict[str, Dict[str, float]] = {}
+    for panel in panels:
+        point = value.get(panel)
+        if not isinstance(point, dict):
+            continue
+        x = _normalize_scroll_ratio(point.get("x"))
+        y = _normalize_scroll_ratio(point.get("y"))
+        if x is None or y is None:
+            continue
+        normalized[panel] = {"x": x, "y": y}
+    return normalized
+
+
+def _normalize_content_revision(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    return value if len(value) <= EXPLORER_MAX_CONTENT_REVISION_LENGTH else ""
+
+
+def _normalize_content_revisions(value: Any) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    revisions: Dict[str, str] = {}
+    for panel in EXPLORER_SCROLL_PANELS:
+        revision = _normalize_content_revision(value.get(panel))
+        if revision:
+            revisions[panel] = revision
+    return revisions
+
+
 def _normalize_explorer_view_identity(value: Any) -> str:
     identity = str(value or "")
     return identity if len(identity) <= EXPLORER_MAX_TAB_VIEW_IDENTITY_LENGTH else ""
@@ -224,6 +428,60 @@ def _normalize_explorer_diff_target(
 
 
 def _normalize_explorer_view_snapshot(raw_view: Dict[str, Any]) -> Dict[str, Any]:
+    if raw_view.get("version") == EXPLORER_PRESENTATION_VERSION:
+        raw_intent = raw_view.get("intent")
+        if not isinstance(raw_intent, dict):
+            return {}
+        mode = raw_intent.get("mode")
+        if mode not in EXPLORER_TAB_VIEW_MODES:
+            return {}
+        intent: Dict[str, str] = {"mode": mode}
+        intent.update(_normalize_explorer_diff_target(raw_intent, mode))
+        record: Dict[str, Any] = {
+            "version": EXPLORER_PRESENTATION_VERSION,
+            "intent": intent,
+        }
+        content_revision = _normalize_content_revision(
+            raw_view.get("content_revision")
+        )
+        if content_revision:
+            record["content_revision"] = content_revision
+        content_revisions = _normalize_content_revisions(
+            raw_view.get("content_revisions")
+        )
+        if content_revisions:
+            record["content_revisions"] = content_revisions
+        scroll = _normalize_scroll_map(
+            raw_view.get("scroll"), EXPLORER_SCROLL_PANELS
+        )
+        if scroll:
+            record["scroll"] = scroll
+        font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
+        if font_size:
+            record["font_size"] = font_size
+        raw_wrap = raw_view.get("wrap")
+        if isinstance(raw_wrap, dict):
+            wrap = {
+                panel: raw_wrap[panel]
+                for panel in ("source", "preview", "diff")
+                if panel in raw_wrap and isinstance(raw_wrap[panel], bool)
+            }
+            if wrap:
+                record["wrap"] = wrap
+        folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
+        if folds:
+            record["folds"] = folds
+        fold_revision = _normalize_content_revision(raw_view.get("fold_revision"))
+        if fold_revision:
+            record["fold_revision"] = fold_revision
+        return record
+
+    if "version" in raw_view:
+        return {}
+
+    # Version 1 is deliberately retained as a read-compatible flat record.
+    # New captures use v2, but rewriting an older saved preset must not silently
+    # reinterpret or discard its still-valid state.
     mode = str(raw_view.get("mode") or "")
     if mode not in EXPLORER_TAB_VIEW_MODES:
         return {}
@@ -254,10 +512,11 @@ def _normalize_explorer_tab_views(
             continue
         if str(raw_path) == EXPLORER_PREVIEW_TAB_KEY:
             record = _normalize_explorer_view_snapshot(raw_view)
-            font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
-            if font_size:
-                record["font_size"] = font_size
-            record.update(_normalize_explorer_line_wrap(raw_view))
+            if raw_view.get("version") != EXPLORER_PRESENTATION_VERSION:
+                font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
+                if font_size:
+                    record["font_size"] = font_size
+                record.update(_normalize_explorer_line_wrap(raw_view))
             preview_path = _normalize_explorer_tab_path(raw_view.get("path"))
             if preview_path:
                 record["path"] = preview_path
@@ -265,13 +524,14 @@ def _normalize_explorer_tab_views(
             preview_dir = _normalize_explorer_tab_path(raw_preview_dir)
             if preview_dir or ("dir" in raw_view and raw_preview_dir == ""):
                 record["dir"] = preview_dir
-            folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
-            fold_identity = _normalize_explorer_view_identity(
-                raw_view.get("fold_identity")
-            )
-            if folds and fold_identity:
-                record["folds"] = folds
-                record["fold_identity"] = fold_identity
+            if raw_view.get("version") != EXPLORER_PRESENTATION_VERSION:
+                folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
+                fold_identity = _normalize_explorer_view_identity(
+                    raw_view.get("fold_identity")
+                )
+                if folds and fold_identity:
+                    record["folds"] = folds
+                    record["fold_identity"] = fold_identity
             if record and EXPLORER_PREVIEW_TAB_KEY not in views:
                 views[EXPLORER_PREVIEW_TAB_KEY] = record
             continue
@@ -279,18 +539,97 @@ def _normalize_explorer_tab_views(
         if not path or path not in open_tabs or path in views:
             continue
         record = _normalize_explorer_view_snapshot(raw_view)
-        font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
-        if font_size:
-            record["font_size"] = font_size
-        record.update(_normalize_explorer_line_wrap(raw_view))
-        folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
-        fold_identity = _normalize_explorer_view_identity(raw_view.get("fold_identity"))
-        if folds and fold_identity:
-            record["folds"] = folds
-            record["fold_identity"] = fold_identity
+        if raw_view.get("version") != EXPLORER_PRESENTATION_VERSION:
+            font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
+            if font_size:
+                record["font_size"] = font_size
+            record.update(_normalize_explorer_line_wrap(raw_view))
+            folds = _normalize_explorer_markdown_folds(raw_view.get("folds"))
+            fold_identity = _normalize_explorer_view_identity(
+                raw_view.get("fold_identity")
+            )
+            if folds and fold_identity:
+                record["folds"] = folds
+                record["fold_identity"] = fold_identity
         if record:
             views[path] = record
     return views
+
+
+def resolve_tab_view(
+    stored: Any,
+    *,
+    content_revision: str,
+    content_revisions: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Resolve durable intent independently from revision-bound view state."""
+    if not isinstance(stored, dict):
+        return {}
+    normalized = _normalize_explorer_view_snapshot(stored)
+    if not normalized:
+        return {}
+    if normalized.get("version") != EXPLORER_PRESENTATION_VERSION:
+        mode = normalized.get("mode")
+        resolved: Dict[str, Any] = {
+            "version": EXPLORER_PRESENTATION_VERSION,
+            "intent": {"mode": mode},
+        }
+        resolved["intent"].update(_normalize_explorer_diff_target(normalized, mode))
+        if normalized.get("identity") == content_revision:
+            resolved["scroll"] = {
+                mode: {"x": 0.0, "y": normalized.get("scroll", 0.0)}
+            }
+            if stored.get("fold_identity") == content_revision:
+                resolved["folds"] = _normalize_explorer_markdown_folds(
+                    stored.get("folds")
+                )
+        else:
+            resolved["scroll"] = {}
+            resolved["folds"] = []
+        return resolved
+
+    resolved = copy.deepcopy(normalized)
+    current_revisions = {
+        panel: content_revision for panel in EXPLORER_SCROLL_PANELS
+    }
+    if isinstance(content_revisions, dict):
+        current_revisions.update(content_revisions)
+    stored_revisions = normalized.get("content_revisions") or {}
+    active_mode = normalized["intent"]["mode"]
+    resolved_scroll: Dict[str, Any] = {}
+    for panel, point in (normalized.get("scroll") or {}).items():
+        stored_revision = stored_revisions.get(panel)
+        if not stored_revision and panel in {active_mode, "directory"}:
+            stored_revision = normalized.get("content_revision")
+        if stored_revision and current_revisions.get(panel) == stored_revision:
+            resolved_scroll[panel] = point
+    resolved["scroll"] = resolved_scroll
+    fold_revision = (
+        normalized.get("fold_revision")
+        or stored_revisions.get("source")
+        or normalized.get("content_revision")
+    )
+    if not fold_revision or current_revisions.get("source") != fold_revision:
+        resolved["folds"] = []
+    return resolved
+
+
+def diff_content_revision(metadata: Any, *, diff_mode: str) -> str:
+    """Return the revision that owns the rendered Diff panel.
+
+    A staged diff tracks the Git index, not the working file.  Worktree diffs
+    track the working-tree revision, while commit views use their immutable
+    commit/diff revision when supplied.
+    """
+    if not isinstance(metadata, dict):
+        return ""
+    if diff_mode == "staged":
+        value = metadata.get("index_revision")
+    elif diff_mode == "worktree":
+        value = metadata.get("worktree_revision")
+    else:
+        value = metadata.get("commit_revision") or metadata.get("commit")
+    return _normalize_content_revision(value)
 
 
 def _normalize_browser_url(value: Any) -> str:
@@ -410,11 +749,82 @@ def _normalize_workspace_layout(
 
 
 def _require_view_types(value: Dict[str, Any]) -> None:
-    unknown = set(value) - _VIEW_FIELDS
+    versioned = "version" in value
+    if versioned and (
+        isinstance(value["version"], bool)
+        or value["version"] != EXPLORER_PRESENTATION_VERSION
+    ):
+        raise PresentationValidationError("Unsupported explorer view version")
+    allowed_fields = _VIEW_V2_FIELDS if versioned else _VIEW_V1_FIELDS
+    unknown = set(value) - allowed_fields
     if unknown:
         raise PresentationValidationError(
             f"Unknown explorer view field: {sorted(unknown)[0]}"
         )
+    if versioned:
+        intent = value.get("intent")
+        if not isinstance(intent, dict) or set(intent) - _VIEW_INTENT_FIELDS:
+            raise PresentationValidationError("'intent' must be a bounded object")
+        for field_name in _VIEW_INTENT_FIELDS & intent.keys():
+            if not isinstance(intent[field_name], str):
+                raise PresentationValidationError(
+                    f"'intent.{field_name}' must be a string"
+                )
+        if intent.get("mode") not in EXPLORER_TAB_VIEW_MODES:
+            raise PresentationValidationError("'intent.mode' is invalid")
+        for field_name in {"content_revision", "fold_revision"} & value.keys():
+            if not isinstance(value[field_name], str):
+                raise PresentationValidationError(f"'{field_name}' must be a string")
+        if "content_revisions" in value:
+            revisions = value["content_revisions"]
+            if (
+                not isinstance(revisions, dict)
+                or set(revisions) - set(EXPLORER_SCROLL_PANELS)
+                or any(not isinstance(item, str) for item in revisions.values())
+            ):
+                raise PresentationValidationError(
+                    "'content_revisions' must map known panels to strings"
+                )
+        if "scroll" in value:
+            scroll = value["scroll"]
+            if not isinstance(scroll, dict) or set(scroll) - set(EXPLORER_SCROLL_PANELS):
+                raise PresentationValidationError("'scroll' must be a bounded panel map")
+            for point in scroll.values():
+                if (
+                    not isinstance(point, dict)
+                    or set(point) != {"x", "y"}
+                    or any(
+                        isinstance(axis, bool) or not isinstance(axis, (int, float))
+                        for axis in point.values()
+                    )
+                ):
+                    raise PresentationValidationError(
+                        "Each scroll panel needs numeric 'x' and 'y' ratios"
+                    )
+        if "wrap" in value:
+            wrap = value["wrap"]
+            if (
+                not isinstance(wrap, dict)
+                or set(wrap) - {"source", "preview", "diff"}
+                or any(not isinstance(item, bool) for item in wrap.values())
+            ):
+                raise PresentationValidationError("'wrap' must be a boolean panel map")
+        if "font_size" in value and (
+            isinstance(value["font_size"], bool)
+            or not isinstance(value["font_size"], int)
+        ):
+            raise PresentationValidationError("'font_size' must be an integer")
+        if "folds" in value:
+            folds = value["folds"]
+            if not isinstance(folds, list) or any(
+                isinstance(line, bool) or not isinstance(line, int) for line in folds
+            ):
+                raise PresentationValidationError("'folds' must be an integer list")
+        for field_name in {"path", "dir"} & value.keys():
+            if not isinstance(value[field_name], str):
+                raise PresentationValidationError(f"'{field_name}' must be a string")
+        return
+
     string_fields = {
         "mode",
         "identity",
@@ -467,6 +877,62 @@ def normalize_pane_presentation(data: Any) -> Dict[str, Any]:
         if not isinstance(data[field_name], bool):
             raise PresentationValidationError(f"'{field_name}' must be a boolean")
         normalized[field_name] = data[field_name]
+
+    if "explorer_sidebar_width" in data:
+        raw_width = data["explorer_sidebar_width"]
+        if isinstance(raw_width, bool) or not isinstance(raw_width, int):
+            raise PresentationValidationError(
+                "'explorer_sidebar_width' must be an integer"
+            )
+        normalized["explorer_sidebar_width"] = _normalize_explorer_sidebar_width(
+            raw_width
+        )
+    if "explorer_tree_expanded" in data:
+        raw_expanded = data["explorer_tree_expanded"]
+        if not isinstance(raw_expanded, list) or any(
+            not isinstance(path, str) for path in raw_expanded
+        ):
+            raise PresentationValidationError(
+                "'explorer_tree_expanded' must be a string list"
+            )
+        normalized["explorer_tree_expanded"] = _normalize_explorer_tree_expanded(
+            raw_expanded
+        )
+    if "explorer_git_expanded" in data:
+        raw_expanded = data["explorer_git_expanded"]
+        if not isinstance(raw_expanded, list) or any(
+            not isinstance(key, str) for key in raw_expanded
+        ):
+            raise PresentationValidationError(
+                "'explorer_git_expanded' must be a string list"
+            )
+        normalized["explorer_git_expanded"] = _normalize_explorer_git_expanded(
+            raw_expanded
+        )
+    if "explorer_sidebar_scroll" in data:
+        raw_sidebar_scroll = data["explorer_sidebar_scroll"]
+        if (
+            not isinstance(raw_sidebar_scroll, dict)
+            or set(raw_sidebar_scroll) - set(EXPLORER_SIDEBAR_PANELS)
+        ):
+            raise PresentationValidationError(
+                "'explorer_sidebar_scroll' must be a bounded panel map"
+            )
+        for point in raw_sidebar_scroll.values():
+            if (
+                not isinstance(point, dict)
+                or set(point) != {"x", "y"}
+                or any(
+                    isinstance(axis, bool) or not isinstance(axis, (int, float))
+                    for axis in point.values()
+                )
+            ):
+                raise PresentationValidationError(
+                    "Each sidebar scroll panel needs numeric 'x' and 'y' ratios"
+                )
+        normalized["explorer_sidebar_scroll"] = _normalize_scroll_map(
+            raw_sidebar_scroll, EXPLORER_SIDEBAR_PANELS
+        )
     for field_name in _EXPLORER_STRING_FIELDS & data.keys():
         if not isinstance(data[field_name], str):
             raise PresentationValidationError(f"'{field_name}' must be a string")
@@ -654,7 +1120,14 @@ def normalize_workspace_presentation(data: Any) -> Dict[str, Any]:
         raise PresentationValidationError(
             "Workspace presentation payload must be an object"
         )
-    allowed = {"workspace_id", "expected_revision", "topbar_visible"}
+    allowed = {
+        "workspace_id",
+        "expected_revision",
+        "topbar_visible",
+        "md_preset",
+        "md_font",
+        "source_font",
+    }
     unknown = set(data) - allowed
     if unknown:
         raise PresentationValidationError(f"Unknown field: {sorted(unknown)[0]}")
@@ -669,11 +1142,23 @@ def normalize_workspace_presentation(data: Any) -> Dict[str, Any]:
         )
     if topbar_visible is None:
         raise PresentationValidationError("'topbar_visible' must be a boolean")
-    return {
+    normalized: Dict[str, Any] = {
         "workspace_id": workspace_id.strip(),
         "expected_revision": revision,
         "topbar_visible": topbar_visible,
     }
+    appearance_keys = {"md_preset", "md_font", "source_font"}
+    supplied_appearance = appearance_keys & data.keys()
+    if supplied_appearance and supplied_appearance != appearance_keys:
+        raise PresentationValidationError(
+            "Workspace appearance fields must be supplied together"
+        )
+    if supplied_appearance:
+        appearance = normalize_workspace_appearance(data)
+        if appearance is None:
+            raise PresentationValidationError("Invalid workspace explorer appearance")
+        normalized.update(appearance)
+    return normalized
 
 
 def apply_workspace_presentation(

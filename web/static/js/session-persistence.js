@@ -247,6 +247,19 @@
             entry.explorer_tree_open = Boolean(explorer.treeOpen);
             entry.explorer_git_open = Boolean(explorer.gitOpen);
             entry.explorer_search_open = Boolean(explorer.searchOpen);
+            entry.explorer_sidebar_width = Number.isInteger(explorer.sidebarWidth)
+                ? explorer.sidebarWidth
+                : 260;
+            entry.explorer_sidebar_scroll = explorer.sidebarScroll
+                && typeof explorer.sidebarScroll === 'object'
+                ? explorer.sidebarScroll
+                : {};
+            entry.explorer_tree_expanded = Array.isArray(explorer.treeExpanded)
+                ? explorer.treeExpanded.map(String)
+                : [];
+            entry.explorer_git_expanded = Array.isArray(explorer.gitExpanded)
+                ? explorer.gitExpanded.map(String)
+                : [];
             /* Active tab and views are only meaningful next to the tab list the
                server validates them against, so the three always travel together. */
             entry.explorer_open_tabs = Array.isArray(explorer.openTabs)
@@ -256,9 +269,6 @@
             entry.explorer_tab_views = explorer.tabViews && typeof explorer.tabViews === 'object'
                 ? explorer.tabViews
                 : {};
-            entry.explorer_md_preset = String(explorer.mdPreset || '');
-            entry.explorer_md_font = String(explorer.mdFont || '');
-            entry.explorer_source_font = String(explorer.sourceFont || '');
             entry.explorer_theme = String(explorer.theme || '');
         } else if (pane.mode === PANE_MODE_BROWSER && pane.browser) {
             const tabs = Array.isArray(pane.browser.tabs)
@@ -317,13 +327,22 @@
     function buildWorkspacePresentationPayload(descriptor) {
         if (!descriptor) return null;
         const workspaceId = String(descriptor.workspaceId || '').trim();
-        if (!workspaceId || typeof descriptor.topbarVisible !== 'boolean') return null;
+        if (
+            !workspaceId
+            || typeof descriptor.topbarVisible !== 'boolean'
+            || typeof descriptor.mdPreset !== 'string'
+            || typeof descriptor.mdFont !== 'string'
+            || typeof descriptor.sourceFont !== 'string'
+        ) return null;
         return {
             workspace_id: workspaceId,
             expected_revision: Number.isInteger(descriptor.revision) && descriptor.revision >= 0
                 ? descriptor.revision
                 : 0,
-            topbar_visible: descriptor.topbarVisible
+            topbar_visible: descriptor.topbarVisible,
+            md_preset: descriptor.mdPreset,
+            md_font: descriptor.mdFont,
+            source_font: descriptor.sourceFont
         };
     }
 

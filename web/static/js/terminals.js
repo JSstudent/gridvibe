@@ -2161,7 +2161,7 @@
                 explorerCaptureActiveTabView(index);
             }
             const tabs = explorerSerializeTabs(terminal);
-            const appearance = explorerMarkdownAppearance();
+            const sidebar = explorerSidebarPresentation(index);
             return {
                 sessionId,
                 mode: 'explorer',
@@ -2169,12 +2169,13 @@
                     treeOpen: Boolean(terminal?._explorerTreeSidebarOpen),
                     gitOpen: Boolean(terminal?._explorerGitSidebarOpen),
                     searchOpen: Boolean(terminal?._explorerSearchSidebarOpen),
+                    sidebarWidth: sidebar.width,
+                    sidebarScroll: sidebar.scroll,
+                    treeExpanded: sidebar.expanded,
+                    gitExpanded: sidebar.gitExpanded,
                     openTabs: tabs.open_tabs,
                     activeTab: tabs.active_tab,
                     tabViews: tabs.tab_views,
-                    mdPreset: appearance.preset,
-                    mdFont: appearance.font,
-                    sourceFont: appearance.sourceFont,
                     theme: explorerPaneLiveTheme(terminal, index)
                 }
             };
@@ -2233,11 +2234,17 @@
             presentationSync = factory
                 ? factory.createPresentationController({
                     describeGroup: describeGroupPresentation,
-                    describeWorkspace: () => ({
-                        workspaceId: currentWorkspaceId,
-                        revision: workspacePresentationRevision,
-                        topbarVisible: !document.body.classList.contains('topbar-collapsed')
-                    }),
+                    describeWorkspace: () => {
+                        const appearance = explorerMarkdownAppearance();
+                        return {
+                            workspaceId: currentWorkspaceId,
+                            revision: workspacePresentationRevision,
+                            topbarVisible: !document.body.classList.contains('topbar-collapsed'),
+                            mdPreset: appearance.preset,
+                            mdFont: appearance.font,
+                            sourceFont: appearance.sourceFont
+                        };
+                    },
                     sendGroup: payload => postPresentation('/api/session-presentation', payload),
                     sendWorkspace: payload => postPresentation('/api/workspace-presentation', payload),
                     onError: (scope, error, id) => {
@@ -2272,11 +2279,9 @@
         return controller ? controller.noteWorkspaceChange(options) : false;
     }
 
-    /* Markdown/source appearance is still one page-global setting (SGP-08 and
-       Stage 5 own moving its authority), so a change touches every explorer
-       pane in the group that is on screen. */
+    /* Markdown/source appearance is one ordered workspace presentation value. */
     function noteExplorerAppearanceChanged() {
-        return noteGroupPresentationChanged(visibleGroupId || activeGroupId);
+        return noteWorkspacePresentationChanged();
     }
 
     function adoptPresentationRevisions(payload) {
@@ -2339,6 +2344,14 @@
             ? explorerSerializeTabs(terminal)
             : { open_tabs: [], active_tab: '', tab_views: {} };
         const mdAppearance = startupMode === 'explorer' ? explorerMarkdownAppearance() : null;
+        const explorerSidebar = startupMode === 'explorer' && explorerSlot !== -1
+            ? explorerSidebarPresentation(explorerSlot)
+            : {
+                width: Number(session.explorer_sidebar_width) || 260,
+                scroll: session.explorer_sidebar_scroll || {},
+                expanded: session.explorer_tree_expanded || [],
+                gitExpanded: session.explorer_git_expanded || []
+            };
         const browserTabs = startupMode === 'browser'
             ? browserSerializeTabs(terminal, session)
             : { tabs: [], active_tab: 0 };
@@ -2365,6 +2378,10 @@
             explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?._explorerTreeSidebarOpen) : false,
             explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
             explorer_search_open: startupMode === 'explorer' ? Boolean(terminal?._explorerSearchSidebarOpen) : false,
+            explorer_sidebar_width: explorerSidebar.width,
+            explorer_sidebar_scroll: explorerSidebar.scroll,
+            explorer_tree_expanded: explorerSidebar.expanded,
+            explorer_git_expanded: explorerSidebar.gitExpanded,
             explorer_open_tabs: explorerTabs.open_tabs,
             explorer_active_tab: explorerTabs.active_tab,
             explorer_tab_views: explorerTabs.tab_views,
@@ -4780,7 +4797,19 @@
                 _attached: false,
                 _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
                 _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
-                _explorerSearchSidebarOpen: Boolean(session.explorer_search_open)
+                _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
+                _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
+                _explorerSidebarScroll: session.explorer_sidebar_scroll || {},
+                _explorerTreeExpanded: new Set(
+                    Array.isArray(session.explorer_tree_expanded)
+                        ? session.explorer_tree_expanded
+                        : []
+                ),
+                _explorerDiffExpandedCommits: new Set(
+                    Array.isArray(session.explorer_git_expanded)
+                        ? session.explorer_git_expanded
+                        : []
+                )
             };
         }
         if (isBrowserSession(session)) {
@@ -5919,7 +5948,19 @@
             _attached: false,
             _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
             _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
-            _explorerSearchSidebarOpen: Boolean(session.explorer_search_open)
+            _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
+            _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
+            _explorerSidebarScroll: session.explorer_sidebar_scroll || {},
+            _explorerTreeExpanded: new Set(
+                Array.isArray(session.explorer_tree_expanded)
+                    ? session.explorer_tree_expanded
+                    : []
+            ),
+            _explorerDiffExpandedCommits: new Set(
+                Array.isArray(session.explorer_git_expanded)
+                    ? session.explorer_git_expanded
+                    : []
+            )
         };
         sessionIds[index] = session.session_id;
         setSessionRoute(session.session_id, activeGroupId, index);
@@ -6227,6 +6268,7 @@
                    state 2.e introduced. */
                 explorerCaptureActiveTabView(index);
                 const tabs = explorerSerializeTabs(pane);
+                const sidebar = explorerSidebarPresentation(index);
                 const previewTab = explorerPreviewTab(pane);
                 const previewActive = pane._explorerActiveTabId === EXPLORER_PREVIEW_TAB_ID;
                 stateBySessionId[sessionId] = {
@@ -6234,6 +6276,10 @@
                     explorer_tree_open: Boolean(pane._explorerTreeSidebarOpen),
                     explorer_git_open: Boolean(pane._explorerGitSidebarOpen),
                     explorer_search_open: Boolean(pane._explorerSearchSidebarOpen),
+                    explorer_sidebar_width: sidebar.width,
+                    explorer_sidebar_scroll: sidebar.scroll,
+                    explorer_tree_expanded: sidebar.expanded,
+                    explorer_git_expanded: sidebar.gitExpanded,
                     explorer_open_tabs: tabs.open_tabs,
                     explorer_active_tab: tabs.active_tab,
                     explorer_tab_views: tabs.tab_views,
@@ -7042,6 +7088,10 @@
                         entry.explorer_tree_open = snapshot.explorer_tree_open;
                         entry.explorer_git_open = snapshot.explorer_git_open;
                         entry.explorer_search_open = snapshot.explorer_search_open;
+                        entry.explorer_sidebar_width = snapshot.explorer_sidebar_width;
+                        entry.explorer_sidebar_scroll = snapshot.explorer_sidebar_scroll;
+                        entry.explorer_tree_expanded = snapshot.explorer_tree_expanded;
+                        entry.explorer_git_expanded = snapshot.explorer_git_expanded;
                         entry.explorer_open_tabs = snapshot.explorer_open_tabs;
                         entry.explorer_active_tab = snapshot.explorer_active_tab;
                         entry.explorer_tab_views = snapshot.explorer_tab_views;
@@ -7340,6 +7390,11 @@
                 refit: gridBuilt && currentTopbarVisible !== data.topbar_visible
             });
         }
+        setExplorerWorkspaceAppearance({
+            preset: data.md_preset,
+            font: data.md_font,
+            sourceFont: data.source_font
+        });
         sessionGroups = Array.isArray(data.groups) ? data.groups : [];
         /* Rebase the presentation queues on the revisions this read just
            observed, so the next change starts from the server's number rather

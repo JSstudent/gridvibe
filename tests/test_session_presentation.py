@@ -27,6 +27,7 @@ PRESENTATION_JS = (
     / "js"
     / "session-persistence.js"
 )
+EXPLORER_PERSISTENCE_JS = PRESENTATION_JS.with_name("explorer-persistence.js")
 
 
 class _NodeHarnessMixin:
@@ -61,6 +62,110 @@ class _NodeHarnessMixin:
             """,
             json.dumps(descriptor),
         )
+
+
+class ExplorerPresentationRecordTestCase(_NodeHarnessMixin, unittest.TestCase):
+    """Execute the DOM-free Stage 5 record migration and revision rules."""
+
+    def _exercise_records(self):
+        return self._run_node(
+            r"""
+            const persistence = require(process.argv[3]);
+            const legacy = persistence.normalizeRecord({
+                mode: 'preview', scroll: 0.75, identity: 'file:old',
+                font_size: 18, wrap_source: false
+            });
+            const record = persistence.buildRecord({
+                mode: 'diff',
+                diffMode: 'staged',
+                revisions: {
+                    source: 'file:old', preview: 'file:old', diff: 'diff:old'
+                },
+                scroll: { panels: {
+                    source: { scrollLeftRatio: 0.2, scrollTopRatio: 0.3 },
+                    preview: { scrollLeftRatio: 0.1, scrollTopRatio: 0.6 },
+                    diff: { scrollLeftRatio: 0.4, scrollTopRatio: 0.8 }
+                } },
+                folds: [12, 44],
+                foldRevision: 'file:old',
+                wrap: { source: false, preview: true, diff: false }
+            });
+            const stale = persistence.resolveRecord(record, {
+                source: 'file:new', preview: 'file:new', diff: 'diff:new'
+            });
+            const partial = persistence.resolveRecord(record, {
+                source: 'file:old', preview: 'file:new', diff: 'diff:old'
+            });
+            const directory = persistence.resolveRecord(
+                persistence.buildRecord({
+                    mode: 'preview',
+                    revisions: { directory: 'dir:1' },
+                    scroll: {
+                        directory: { scrollLeftRatio: 0.15, scrollTopRatio: 0.55 }
+                    }
+                }),
+                { directory: 'dir:1' }
+            );
+            process.stdout.write(JSON.stringify({
+                legacy, record, stale, partial, directory,
+                sameDiff: persistence.diffContentRevision({
+                    path: 'a.js', diffMode: 'staged', renderedDiff: 'one'
+                }) === persistence.diffContentRevision({
+                    path: 'a.js', diffMode: 'staged', renderedDiff: 'one'
+                }),
+                changedDiff: persistence.diffContentRevision({
+                    path: 'a.js', diffMode: 'staged', renderedDiff: 'one'
+                }) !== persistence.diffContentRevision({
+                    path: 'a.js', diffMode: 'staged', renderedDiff: 'two'
+                })
+            }));
+            """,
+            str(EXPLORER_PERSISTENCE_JS),
+        )
+
+    def test_v2_keeps_intent_while_filtering_revision_bound_state_per_panel(self):
+        result = self._exercise_records()
+
+        self.assertEqual(result["record"]["version"], 2)
+        self.assertEqual(
+            result["record"]["wrap"],
+            {"source": False, "preview": True, "diff": False},
+        )
+        self.assertEqual(
+            result["stale"]["mode"],
+            "diff",
+            "content changes must not erase durable Diff intent",
+        )
+        self.assertEqual(result["stale"]["scroll"]["panels"], {})
+        self.assertEqual(result["stale"]["folds"], [])
+        self.assertEqual(
+            result["partial"]["scroll"]["panels"],
+            {
+                "source": {
+                    "scrollLeftRatio": 0.2,
+                    "scrollTopRatio": 0.3,
+                    "wasAtBottom": False,
+                },
+                "diff": {
+                    "scrollLeftRatio": 0.4,
+                    "scrollTopRatio": 0.8,
+                    "wasAtBottom": False,
+                },
+            },
+        )
+        self.assertEqual(result["partial"]["folds"], [12, 44])
+        self.assertEqual(
+            result["directory"]["scroll"]["directory"]["scrollLeftRatio"],
+            0.15,
+        )
+
+    def test_flat_records_remain_readable_and_diff_identity_tracks_rendered_data(self):
+        result = self._exercise_records()
+
+        self.assertEqual(result["legacy"]["version"], 2)
+        self.assertEqual(result["legacy"]["intent"], {"mode": "preview"})
+        self.assertTrue(result["sameDiff"])
+        self.assertTrue(result["changedDiff"])
 
 
 class GroupPresentationTransactionTestCase(unittest.TestCase):
@@ -249,6 +354,9 @@ class PresentationRouteTestCase(unittest.TestCase):
                 "workspace_id": "default",
                 "expected_revision": 1,
                 "topbar_visible": True,
+                "md_preset": "paper",
+                "md_font": "serif",
+                "source_font": "jetbrains-mono",
             },
         )
 
@@ -258,7 +366,41 @@ class PresentationRouteTestCase(unittest.TestCase):
         self.assertEqual(accepted.get_json()["presentation_revision"], 2)
         groups = self.client.get("/api/session-groups").get_json()
         self.assertTrue(groups["topbar_visible"])
+        self.assertEqual(groups["md_preset"], "paper")
+        self.assertEqual(groups["md_font"], "serif")
+        self.assertEqual(groups["source_font"], "jetbrains-mono")
         self.assertEqual(groups["workspace_presentation_revision"], 2)
+
+    def test_workspace_appearance_is_complete_and_strictly_normalized(self):
+        partial = self.client.post(
+            "/api/workspace-presentation",
+            json={
+                "workspace_id": "default",
+                "expected_revision": 0,
+                "topbar_visible": True,
+                "md_preset": "paper",
+            },
+        )
+        invalid = self.client.post(
+            "/api/workspace-presentation",
+            json={
+                "workspace_id": "default",
+                "expected_revision": 0,
+                "topbar_visible": True,
+                "md_preset": "compact",
+                "md_font": "serif",
+                "source_font": "mono",
+            },
+        )
+
+        self.assertEqual(partial.status_code, 400, partial.get_json())
+        self.assertEqual(invalid.status_code, 400, invalid.get_json())
+        self.assertEqual(
+            api.session_manager.get_workspace_presentation("default")[
+                "presentation_revision"
+            ],
+            0,
+        )
 
 
 class PresentationQueueTestCase(unittest.TestCase):
@@ -344,6 +486,10 @@ class GroupPresentationPayloadTestCase(_NodeHarnessMixin, unittest.TestCase):
             "treeOpen": True,
             "gitOpen": False,
             "searchOpen": True,
+            "sidebarWidth": 312,
+            "sidebarScroll": {"tree": {"x": 0, "y": 0.4}},
+            "treeExpanded": ["docs", "web/static"],
+            "gitExpanded": ["explorer:abcdef1"],
             "openTabs": ["docs/a.md", "web/b.js"],
             "activeTab": "web/b.js",
             "tabViews": {
@@ -397,12 +543,13 @@ class GroupPresentationPayloadTestCase(_NodeHarnessMixin, unittest.TestCase):
                 "explorer_tree_open": True,
                 "explorer_git_open": False,
                 "explorer_search_open": True,
+                "explorer_sidebar_width": 312,
+                "explorer_sidebar_scroll": {"tree": {"x": 0, "y": 0.4}},
+                "explorer_tree_expanded": ["docs", "web/static"],
+                "explorer_git_expanded": ["explorer:abcdef1"],
                 "explorer_open_tabs": ["docs/a.md", "web/b.js"],
                 "explorer_active_tab": "web/b.js",
                 "explorer_tab_views": self.EXPLORER["explorer"]["tabViews"],
-                "explorer_md_preset": "paper",
-                "explorer_md_font": "serif",
-                "explorer_source_font": "cascadia-code",
                 "explorer_theme": "light",
             },
         )
@@ -441,6 +588,33 @@ class GroupPresentationPayloadTestCase(_NodeHarnessMixin, unittest.TestCase):
         )
 
         self.assertIsNone(payload)
+
+    def test_workspace_payload_carries_appearance_on_the_existing_ordered_path(self):
+        payload = self._run_node(
+            """
+            const { buildWorkspacePresentationPayload } = require(process.argv[2]);
+            process.stdout.write(JSON.stringify(buildWorkspacePresentationPayload({
+                workspaceId: 'default',
+                revision: 4,
+                topbarVisible: false,
+                mdPreset: 'paper',
+                mdFont: 'serif',
+                sourceFont: 'jetbrains-mono'
+            })));
+            """
+        )
+
+        self.assertEqual(
+            payload,
+            {
+                "workspace_id": "default",
+                "expected_revision": 4,
+                "topbar_visible": False,
+                "md_preset": "paper",
+                "md_font": "serif",
+                "source_font": "jetbrains-mono",
+            },
+        )
 
     def test_a_browser_pane_with_no_strip_yet_cannot_blank_the_stored_one(self):
         payload = self._build_group_payload(
@@ -631,7 +805,10 @@ class PresentationControllerTestCase(_NodeHarnessMixin, unittest.TestCase):
             describeWorkspace: () => ({
                 workspaceId: 'default',
                 revision: 0,
-                topbarVisible
+                topbarVisible,
+                mdPreset: 'paper',
+                mdFont: 'serif',
+                sourceFont: 'jetbrains-mono'
             }),
             sendGroup(payload) {
                 sentGroup.push(payload.panes[0].browser_tabs.slice());
