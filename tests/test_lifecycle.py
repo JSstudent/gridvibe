@@ -3,6 +3,8 @@
 import json
 import shutil
 import subprocess
+import threading
+import time
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
@@ -125,6 +127,84 @@ class LifecycleCoordinatorTestCase(unittest.TestCase):
         self.assertEqual(result["errors"], [])
         # Departed means forgotten: the record is gone, not merely ignored.
         self.assertEqual(coordinator._windows, {})
+
+    def test_a_window_lost_after_the_snapshot_is_stale_not_a_timeout(self):
+        """PRV-04: a drop the coordinator already saw must not cost the timeout."""
+        coordinator = LifecycleCoordinator()
+        coordinator.join_workspace("socket-a", "default", "window-a")
+
+        def emit(_workspace_id, _request_id):
+            # `request_flush` decided its expected/emit sets before releasing
+            # the lock; the window dies on the way to its room.
+            coordinator.disconnect_client("socket-a")
+
+        started = time.monotonic()
+        result = coordinator.request_flush({"default"}, emit, timeout=5.0)
+        elapsed = time.monotonic() - started
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            [error["category"] for error in result["errors"]], ["client_stale"]
+        )
+        self.assertLess(elapsed, 1.0)
+
+    def test_a_window_lost_while_the_flush_waits_answers_immediately(self):
+        """PRV-04: the same holds for the common case — a drop during the wait."""
+        coordinator = LifecycleCoordinator()
+        coordinator.join_workspace("socket-a", "default", "window-a")
+        emitted = threading.Event()
+
+        def emit(_workspace_id, _request_id):
+            emitted.set()
+
+        def drop():
+            emitted.wait(5.0)
+            coordinator.disconnect_client("socket-a")
+
+        dropper = threading.Thread(target=drop)
+        dropper.start()
+        try:
+            started = time.monotonic()
+            result = coordinator.request_flush({"default"}, emit, timeout=5.0)
+            elapsed = time.monotonic() - started
+        finally:
+            dropper.join(5.0)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            [error["category"] for error in result["errors"]], ["client_stale"]
+        )
+        self.assertLess(elapsed, 1.0)
+
+    def test_a_window_that_leaves_mid_flush_is_forgotten_not_reported(self):
+        """PRV-04: a deliberate departure is not a failed save, and does not wait.
+
+        A window that left *before* the flush was never expected at all, so one
+        that leaves during it is released the same way.
+        """
+        coordinator = LifecycleCoordinator()
+        coordinator.join_workspace("socket-a", "default", "window-a")
+        coordinator.join_workspace("socket-b", "default", "window-b")
+
+        def emit(workspace_id, request_id):
+            coordinator.leave_workspace("socket-a", "default")
+            coordinator.acknowledge_flush(
+                "socket-b",
+                {
+                    "request_id": request_id,
+                    "workspace_id": workspace_id,
+                    "ok": True,
+                    "metadata": {"topbar_visible": True},
+                },
+            )
+
+        started = time.monotonic()
+        result = coordinator.request_flush({"default"}, emit, timeout=5.0)
+        elapsed = time.monotonic() - started
+
+        self.assertTrue(result["ok"], result["errors"])
+        self.assertEqual(len(result["metadata"]["default"]), 1)
+        self.assertLess(elapsed, 1.0)
 
     def test_a_reloaded_window_replaces_its_own_record_without_leave(self):
         """SGP-12: same stable id, no pagehide — one record, not two."""

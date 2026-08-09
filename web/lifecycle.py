@@ -135,6 +135,7 @@ class LifecycleCoordinator:
             return
         with self._condition:
             joined = set(self._client_windows.get(client) or set())
+            departed: Set[str] = set()
             for window in joined:
                 record = self._windows.get(window)
                 if record is None:
@@ -143,8 +144,10 @@ class LifecycleCoordinator:
                     continue
                 self._windows.pop(window, None)
                 self._client_windows.get(client, set()).discard(window)
+                departed.add(window)
             if not self._client_windows.get(client):
                 self._client_windows.pop(client, None)
+            self._drop_pending_windows_locked(departed)
             self._condition.notify_all()
 
     def disconnect_client(self, client_id: Any):
@@ -160,11 +163,14 @@ class LifecycleCoordinator:
             return
         with self._condition:
             now = time.monotonic()
+            stale: Set[str] = set()
             for window in self._client_windows.pop(client, set()):
                 record = self._windows.get(window)
                 if record is not None:
                     record["connected"] = False
                     record["disconnected_at"] = now
+                    stale.add(window)
+            self._stale_pending_windows_locked(stale)
             self._condition.notify_all()
 
     def connected_window_count(self, workspace_id: Any) -> int:
@@ -194,6 +200,57 @@ class LifecycleCoordinator:
             joined.discard(window_id)
             if not joined:
                 self._client_windows.pop(client, None)
+
+    def _stale_pending_windows_locked(self, window_ids: Set[str]):
+        """Answer a flush in flight for windows that just went stale.
+
+        ``request_flush`` decides its expected, pre-acknowledged, and emit sets
+        in one hold, but a window can still drop *after* that snapshot. Such a
+        window was emitted to and can never acknowledge, so without this the
+        flush waits out its whole timeout and then reports ``client_timeout``
+        for a loss the coordinator already knows about. Pre-acknowledging it
+        with the same ``client_stale`` category ``request_flush`` uses for an
+        already-disconnected window keeps the outcome identical, accurate, and
+        immediate.
+        """
+        if not window_ids:
+            return
+        for pending in self._flushes.values():
+            dropped = {
+                key
+                for key in pending["expected"] - pending["acknowledged"]
+                if key[0] in window_ids
+            }
+            if not dropped:
+                continue
+            pending["acknowledged"].update(dropped)
+            pending["errors"].extend(
+                {
+                    "workspace_id": workspace_id,
+                    "category": "client_stale",
+                    "error": "A workspace window is disconnected and cannot flush",
+                }
+                for _window_id, workspace_id in sorted(dropped)
+            )
+
+    def _drop_pending_windows_locked(self, window_ids: Set[str]):
+        """Release a flush in flight from a window that has left the workspace.
+
+        A window that left before the flush was never in ``expected`` at all,
+        so one that leaves during the flush is forgotten the same way rather
+        than reported: a deliberate departure is not a failed save.
+        """
+        if not window_ids:
+            return
+        for pending in self._flushes.values():
+            departed = {key for key in pending["expected"] if key[0] in window_ids}
+            if not departed:
+                continue
+            pending["expected"].difference_update(departed)
+            pending["acknowledged"].difference_update(departed)
+            for key in departed:
+                pending["clients"].pop(key, None)
+                pending["joined"].pop(key, None)
 
     def _drop_departed_windows_locked(self, now: float):
         """Forget windows whose disconnect outlived the grace period."""
@@ -340,14 +397,20 @@ class LifecycleCoordinator:
                 ],
             }
             self._flushes[request_id] = pending
+            # The emit set is decided in the *same* hold that built `expected`
+            # and the pre-acknowledged set, so the two can never disagree. Read
+            # outside the lock, a window that dropped in between was neither
+            # emitted to nor pre-acknowledged, so its flush could only end in a
+            # full timeout reported as `client_timeout` instead of the accurate
+            # `client_stale`.
+            connected_workspaces = {
+                workspace
+                for window, workspace in expected
+                if self._windows[window]["connected"]
+            }
 
         # Room emits are deliberately outside the coordinator lock and outside
         # SessionManager.lock. A slow transport must never stall shared state.
-        connected_workspaces = {
-            workspace
-            for window, workspace in expected
-            if self._windows.get(window, {}).get("connected")
-        }
         for workspace_id in sorted(connected_workspaces):
             try:
                 emit_request(workspace_id, request_id)

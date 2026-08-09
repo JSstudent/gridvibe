@@ -229,6 +229,8 @@ are not. The latent risk is `workspace_appearance_from_panes()`, the legacy
 migration fallback, which would seed a workspace from those contradicting values
 if the workspace-level fields were ever absent.
 
+**Resolved — Stage C, 2026-08-09.** See "Stage C — implemented" below.
+
 ### PRV-04 — Low: a window lost between the flush snapshot and the emit costs a full 5-second timeout and is mislabelled
 
 **Evidence.** `request_flush()` builds `expected`, the pre-acknowledged set, and
@@ -256,6 +258,10 @@ plus a failure category that points a later reader at the wrong cause. The read
 itself is safe (a CPython dict `get` is atomic), but it is shared coordinator
 state read outside the lock that guards it, which is the kind of thing that stops
 being harmless the moment the record shape grows.
+
+**Resolved — Stage C, 2026-08-09.** See "Stage C — implemented" below; the fix
+also covers the wider case the finding's title does not name — a window lost
+during the wait rather than during the emit, which stalled identically.
 
 ### PRV-05 — Low: two shipped user-visible behaviours are missing from `README.md`
 
@@ -518,6 +524,98 @@ tests, `OK (skipped=7)`; `ruff check .` → "All checks passed!".
 Exit gate: the appearance mirror covers the panes it was called for, and no
 disconnect can turn a flush into a full-timeout wait.
 
+#### Stage C — implemented (2026-08-09)
+
+**PRV-03 — the mirror now runs after the group is populated.** In
+`install_session_group()`, `group.terminal_count` and `group.pane_order` are
+assigned *before* `_mirror_workspace_appearance_locked(workspace)`
+(`sessions/manager.py:913-925`), inside the same lock hold as before — a
+statement reorder, not a new transaction, and no change to what is published or
+when. The legacy seeding block stays between the two: it reads
+`legacy_appearance`, which is derived from `sessions_config` and never from
+`pane_order`, so a workspace with no appearance of its own still adopts the
+first valid pane's values and *then* mirrors them back onto that same pane. The
+reason for the ordering is recorded as a comment at the call site, since the
+coupling between the mirror and `pane_order` is invisible from either end alone.
+
+One consequence worth stating plainly: a freshly installed explorer pane's
+`explorer_md_*` fields are now overwritten by the workspace authority
+immediately, so a launch config carrying its own appearance into a workspace
+that already has one loses at once instead of on the next install. That is the
+intended contract (Stage 5: the per-pane fields are read aliases of the
+workspace value, not independent state), and it is what makes a capture taken
+in that window self-consistent.
+
+Tests added (`tests/test_session_manager.py`, new
+`WorkspaceAppearanceMirrorTestCase`, 4 behavioral):
+
+- a pane installed into a workspace with initialized appearance carries the
+  workspace's three values immediately, not the launch config's;
+- a later `set_workspace_appearance` still reaches every other group in the
+  workspace (the behaviour that already worked, pinned so the reorder cannot
+  trade one bug for the other);
+- an uninitialized workspace still adopts the first valid pane's appearance,
+  and that pane ends up agreeing with the authority rather than merely
+  coinciding with it;
+- a second pane launched after seeding does not reseed the workspace and adopts
+  the seeded values.
+
+**Verified by reverting the fix**, not by reading the tests: with the two
+statements moved back below the mirror, cases 1 and 4 fail
+(`('contrast', 'system', 'default') != ('paper', 'serif', 'jetbrains-mono')`)
+while cases 2 and 3 — the regression guards — pass either way, which is exactly
+the split they were written for.
+
+**PRV-04 — the flush snapshot is now one hold, and a lost window answers at
+once.** Two changes in `web/lifecycle.py`:
+
+1. **The emit set is computed inside the lock.** `request_flush()` now derives
+   `connected_workspaces` in the same `with self._condition` block that builds
+   `expected`, the pre-acknowledged set, and the `client_stale` errors, and
+   indexes `self._windows[window]` directly rather than re-reading with a
+   defensive `.get(...)`. The emit itself stays outside the lock, unchanged.
+   The three sets can no longer disagree, and the last read of shared
+   coordinator state outside its own lock is gone (guardrail 2).
+2. **A window that drops while a flush is in flight resolves that flush.**
+   Moving the computation alone was not sufficient for the stage's exit gate:
+   it closes the gap between the snapshot and the emit, but the *common* case
+   is a socket dying during the five-second wait, which stalled just as long
+   and reported the same wrong category. `disconnect_client()` now calls
+   `_stale_pending_windows_locked()`, which pre-acknowledges the dropped
+   window in every pending flush and records the same `client_stale` error
+   `request_flush()` already uses for a window that was disconnected before the
+   flush began — identical outcome (a retryable `503`), accurate category,
+   immediate. Symmetrically, `leave_workspace()` calls
+   `_drop_pending_windows_locked()`, which removes the departed window from
+   `expected` instead of reporting it: a window that left *before* the flush
+   was never expected at all, so a deliberate departure mid-flush must not
+   invent a failed save. Both helpers run under the coordinator lock the
+   callers already hold and touch nothing but the pending-flush bookkeeping.
+
+Tests added (`tests/test_lifecycle.py`,
+`LifecycleCoordinatorTestCase`, 3 behavioral):
+
+- a window that disconnects between the flush snapshot and the emit (the
+  disconnect is driven from inside the `emit` callback, which is precisely that
+  gap) reports `client_stale` and returns in well under a second;
+- a window that disconnects while the flush is genuinely blocked in `wait()`
+  does the same — the notify wakes the waiter, so this needs no polling and no
+  sleep;
+- a window that leaves mid-flush is forgotten: the flush succeeds on its
+  sibling's acknowledgement alone, returns one metadata record, and does not
+  wait.
+
+**Verified by disabling the fix**, not by reading the tests: with both helpers
+short-circuited, all three fail with `client_timeout` and the class takes 15.0 s
+instead of 0.4 s — three full timeouts, which is the defect stated exactly.
+
+Exit gates met. Gates re-run on this machine: `tests/run_tests.py` → 1,358
+tests, `OK (skipped=7)` in 38.7 s; `ruff check .` → "All checks passed!". The
+persistence suites (lifecycle, session-manager, multi-workspace, presentation)
+were run three times — 339 tests, `OK` each time, 6.54 s / 6.55 s / 6.56 s — to
+confirm the one threaded test is not flaky. Documentation is deliberately left
+to Stage D.
+
 ### Stage D — Documentation truth (PRV-05, PRV-06)
 
 1. Add workspace-name uniqueness to `README.md`'s Multiple-workspaces material:
@@ -539,6 +637,58 @@ disconnect can turn a flush into a full-timeout wait.
 Exit gate: `README.md`, `CHANGELOG.md`, `CLAUDE.md`, and `AGENTS.md` describe the
 shipped behaviour, including Stage A's resolution rule.
 
+#### Stage D — steps 3 and 4 implemented (2026-08-09)
+
+**Steps 1 and 2 (`README.md`, PRV-05) are deliberately deferred** to the
+documentation pass before the next major release, by the maintainer's decision.
+Nothing else in Stage D depends on them: PRV-05 is a gap in user-facing
+documentation of behaviour that shipped correctly, so it stays open rather than
+being marked resolved. Steps 3 and 4 are done.
+
+**Step 3 — `CHANGELOG.md`.** One new bullet at the head of **Unreleased**. The
+1.8.0 entry is untouched, as the step requires — release history is not
+rewritten; the correction lives in the same file, in the section that describes
+current behaviour, and closes with the explicit line that workspace shape now
+has **three** writers (autosave, **Save Workspace** in-window or per-row, and a
+successful voluntary close/restart save), which is what a reader who has just
+met 1.8.0's "only two writers" sentence needs. The bullet also records the two
+user-visible changes Stages A and C shipped and Stage D owed the changelog:
+window chrome resolving to the most recently joined window instead of failing
+every save while two windows are open, and a window lost mid-flush resolving the
+save at once with the accurate `client_stale` category instead of a five-second
+stall reported as a timeout. PRV-06 is closed by this line.
+
+**Step 4 — `CLAUDE.md` and `AGENTS.md` re-checked against Stage A.** Both
+carried the lifecycle contract prose written *before* Stage A, and neither said
+anything about how a disagreement between two windows resolves — a reader could
+have concluded either way, and the previous behaviour (refuse) was the one a
+careful implementer would have re-derived from "every connected or stale window
+must be accounted for". Both now state the rule in the same words the code's
+docstring uses:
+
+- `CLAUDE.md`, the *Voluntary application exit is a transaction* key concept:
+  window chrome is resolved, never refused; a workspace's chrome is whichever
+  window most recently joined, applied per field over the oldest-joined-first
+  records; a stale `active_group_id` drops one field to the server hint; a
+  malformed type still raises. The same bullet's stale-window sentence gained
+  Stage C's two clauses — a drop *during* a flush resolves it at once with the
+  same category, and a deliberate leave is forgotten rather than reported.
+- `AGENTS.md`, the `web/lifecycle.py` entry: the same two rules, phrased for the
+  module index.
+
+No other maintained document asserted the old refusal behaviour: `git grep` for
+`conflicting presentation metadata` across `*.md` found no hit outside this
+document, and the phrase is gone from the source with Stage A.
+
+Gates re-run on this machine after the documentation edits:
+`tests/run_tests.py` → 1,358 tests, `OK (skipped=7)`; `ruff check .` → "All
+checks passed!".
+
+Exit gate partially met, by decision: `CHANGELOG.md`, `CLAUDE.md`, and
+`AGENTS.md` describe the shipped behaviour including Stage A's resolution rule.
+`README.md` still lacks SGP-13 and SGP-14 (PRV-05), scheduled for the
+pre-release documentation pass.
+
 ## Guardrail audit
 
 Each rule checked against the shipped persistence/lifecycle surface, not against
@@ -547,7 +697,7 @@ the audit text.
 | Guardrail | Verdict | Evidence |
 |---|---|---|
 | 1. Security | pass | The cross-origin write guard is a blanket `before_request` on every non-GET, so the presentation, lifecycle, and per-workspace-save routes are covered without registration. Emits are room-scoped through `workspace_room(...)`. `snapshot_lifecycle_workspaces()` remains the only credential-bearing snapshot and feeds only the preset writer; `_SESSION_SNAPSHOT_FIELDS` omits `password`, and `_validate_session()` re-applies that allowlist on *read*, so a hand-added password cannot re-enter a launch body. Host-key policy untouched. |
-| 2. Concurrency | pass | No emit, broadcast, SSH teardown, or state-file write inside `SessionManager.lock` or `connection_lock` (full scan). Captures read the manager and return before taking file locks, preserving the documented order. Every state commit uses a unique `uuid4` same-directory temp path, fsync, backup, then `os.replace`. **One style exception, PRV-04:** `request_flush()` reads `self._windows` outside the coordinator lock — safe today, and Stage C folds it back in. |
+| 2. Concurrency | pass | No emit, broadcast, SSH teardown, or state-file write inside `SessionManager.lock` or `connection_lock` (full scan). Captures read the manager and return before taking file locks, preserving the documented order. Every state commit uses a unique `uuid4` same-directory temp path, fsync, backup, then `os.replace`. The one style exception, PRV-04 — `request_flush()` reading `self._windows` outside the coordinator lock — was folded back into the snapshot hold in Stage C; no shared coordinator state is now read outside its lock. |
 | 3. Performance | pass | No new polling. `CONTINUOUS_UPDATE_FLOOR_MS = 1000` floors scroll/zoom coalescing and scroll is folded into the batch at capture time rather than being an event; structural changes batch on a microtask. `setTimeout` appears exactly once in the new frontend modules, as that floor. No CDN assets — every new module is vendored local. |
 | 4. Correctness | pass | No `window.confirm`/`alert`/`prompt` anywhere. Shell quoting untouched. The lifecycle dialog is the shared in-page partial and uses the shared `visible` class. |
 | 5. Dead code | **fail — PRV-02**, *fixed in Stage B* | Every server event has exactly one client listener, no config key is unread, and both superseded writers (`update_browser_tab_strip()`, `PATCH /api/workspaces/<id>/ui-state`) are gone. But `resolve_tab_view()` and `diff_content_revision()` ship with no production consumer. Both were deleted in Stage B; the rule passes in the current tree. |

@@ -910,14 +910,19 @@ class SessionManager:
                 session = self._build_session(resolved_group_id, **fields)
                 self.sessions[session.session_id] = session
                 sessions.append(session)
+            group.terminal_count = len(sessions)
+            group.pane_order = [session.session_id for session in sessions]
             if not workspace.appearance_initialized and legacy_appearance is not None:
                 workspace.md_preset = legacy_appearance["md_preset"]
                 workspace.md_font = legacy_appearance["md_font"]
                 workspace.source_font = legacy_appearance["source_font"]
                 workspace.appearance_initialized = True
+            # The mirror walks `group.pane_order`, so the new group must be
+            # populated before it runs; otherwise it updates every *other*
+            # group in the workspace and skips the panes it was called for,
+            # leaving freshly installed explorer panes carrying the launch
+            # config's appearance instead of the workspace authority's.
             self._mirror_workspace_appearance_locked(workspace)
-            group.terminal_count = len(sessions)
-            group.pane_order = [session.session_id for session in sessions]
 
         logger.info(
             "Installed session group group_id=%s workspace_id=%s panes=%d displaced=%d",
