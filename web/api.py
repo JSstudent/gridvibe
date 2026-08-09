@@ -772,6 +772,17 @@ def prepare_application_lifecycle():
             ),
         )
         if not flush_result["ok"]:
+            logger.warning(
+                "Lifecycle %s flush failed: save=%s categories=%s",
+                action,
+                save,
+                sorted(
+                    {
+                        error.get("category", "client_flush")
+                        for error in flush_result["errors"]
+                    }
+                ),
+            )
             return jsonify({
                 "action": action,
                 "save": save,

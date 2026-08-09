@@ -391,52 +391,33 @@
         });
     }
 
-    const EXPLORER_THEME_STORAGE_KEY = 'gridvibe.explorerTheme';
+    /* The override object lives in GridVibeExplorerThemeStore (DOM-free,
+       bounded to live pane keys — SGP-09). The wrappers below keep the local
+       call sites unchanged. */
+    function liveExplorerThemeKeys() {
+        return [...document.querySelectorAll('.explorer-pane')]
+            .map(card => card.dataset.explorerThemeKey || '')
+            .filter(Boolean);
+    }
 
     function normalizeExplorerTheme(theme) {
-        return theme === 'dark' ? 'dark' : 'light';
+        return GridVibeExplorerThemeStore.normalizeTheme(theme);
     }
 
     function getExplorerThemeStore() {
-        try {
-            const raw = localStorage.getItem(EXPLORER_THEME_STORAGE_KEY);
-            if (!raw) {
-                return {};
-            }
-            if (raw === 'light' || raw === 'dark') {
-                return {};
-            }
-            const parsed = JSON.parse(raw);
-            return parsed && typeof parsed === 'object' ? parsed : {};
-        } catch (_) {
-            return {};
-        }
+        return GridVibeExplorerThemeStore.readStore(localStorage);
     }
 
     function hasExplorerThemeOverride(key = '') {
-        const store = getExplorerThemeStore();
-        return Boolean(key && Object.prototype.hasOwnProperty.call(store, key));
+        return GridVibeExplorerThemeStore.hasOverride(localStorage, key);
     }
 
     function getExplorerTheme(key = '') {
-        const store = getExplorerThemeStore();
-        return normalizeExplorerTheme(
-            key && Object.prototype.hasOwnProperty.call(store, key)
-                ? store[key]
-                : 'dark'
-        );
+        return GridVibeExplorerThemeStore.getTheme(localStorage, key);
     }
 
     function saveExplorerTheme(key, theme) {
-        if (!key) {
-            return;
-        }
-        const store = getExplorerThemeStore();
-        store[key] = normalizeExplorerTheme(theme);
-        try {
-            localStorage.setItem(EXPLORER_THEME_STORAGE_KEY, JSON.stringify(store));
-        } catch (_) {
-        }
+        GridVibeExplorerThemeStore.saveTheme(localStorage, key, theme, liveExplorerThemeKeys());
     }
 
     /* An explicit per-pane explorer theme carried in a saved/restored session
@@ -512,8 +493,8 @@
         card.dataset.explorerThemeSource = 'override';
         saveExplorerTheme(card.dataset.explorerThemeKey || '', nextTheme);
         /* The localStorage override is keyed by an ephemeral session id and
-           cannot survive a restart; the manager copy can. Stage 3 item 8 keeps
-           the local key as well until acknowledgement is proven reliable. */
+           cannot survive a restart; the manager copy can. It is now only a
+           same-run cache, bounded to live pane keys on every write (SGP-09). */
         notePanePresentationChanged(index);
     }
 
@@ -4942,6 +4923,11 @@
 
         /* wire up terminal input events now that DOM elements exist */
         terminals.forEach((t, i) => wirePaneInputForwarding(t, i));
+
+        /* Every pane of the new grid now exists: drop explorer-theme overrides
+           keyed by panes that no longer do (a restart hands out new session
+           ids), so the cache cannot accumulate dead entries (SGP-09). */
+        GridVibeExplorerThemeStore.pruneStore(localStorage, liveExplorerThemeKeys());
 
         document.getElementById('emptyState').classList.remove('visible');
         gridBuilt = true;

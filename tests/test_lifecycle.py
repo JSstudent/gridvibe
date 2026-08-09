@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from web import api
+from web import lifecycle as web_lifecycle
 from web import runtime_state as web_runtime_state
 from web import saved_sessions as web_saved_sessions
 from web.lifecycle import (
@@ -459,6 +460,194 @@ class LifecycleRouteTestCase(unittest.TestCase):
         self.assertEqual(unknown.status_code, 404)
         self.assertTrue(unknown.get_json()["workspace_missing"])
         self.assertEqual(malformed.status_code, 400)
+
+
+class LifecycleDiagnosticsTestCase(unittest.TestCase):
+    """Stage 7 item 3 — lifecycle logging carries shape diagnostics only:
+    ids, revisions, counts, and failure categories, never paths, payloads,
+    or secrets."""
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        self.saved_path = Path(self.temp_dir.name) / "saved_sessions.json"
+        self.state_patch = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        self.saved_patch = patch.object(
+            web_saved_sessions, "SAVED_SESSIONS_PATH", str(self.saved_path)
+        )
+        self.state_patch.start()
+        self.saved_patch.start()
+        self.addCleanup(self.state_patch.stop)
+        self.addCleanup(self.saved_patch.stop)
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        api.lifecycle_coordinator.reset()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.addCleanup(api.lifecycle_coordinator.reset)
+
+    def _launch(self):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": "Files",
+                "workspace_id": "default",
+                "layout": "single",
+                "sessions": [
+                    {
+                        "directory": str(self.repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return response.get_json()
+
+    @staticmethod
+    def _messages(output):
+        return [record.getMessage() for record in output.records]
+
+    def test_successful_workspace_save_logs_ids_origin_and_revision(self):
+        self._launch()
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a", {**data, "ok": True, "metadata": {"topbar_visible": True}}
+            )
+
+        with self.assertLogs("web.lifecycle", level="DEBUG") as captured:
+            with patch.object(api.socketio, "emit", side_effect=acknowledge):
+                response = self.client.post("/api/workspaces/default/save")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        messages = self._messages(captured)
+        self.assertTrue(
+            any(
+                "Workspace default saved from launcher origin=manual revision=" in message
+                for message in messages
+            ),
+            messages,
+        )
+        # Shape only: the pane's directory never reaches the log.
+        self.assertFalse(
+            any(str(self.repo_dir) in message for message in messages), messages
+        )
+
+    def test_flush_failure_logs_the_category_not_the_client_error_text(self):
+        self._launch()
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+        failed_flush = {
+            "ok": False,
+            "metadata": {},
+            "errors": [
+                {
+                    "workspace_id": "default",
+                    "category": "client_timeout",
+                    "error": "flush died near C:\\secret\\window token=hunter2",
+                }
+            ],
+            "missing_workspaces": ["default"],
+        }
+        with self.assertLogs("web.lifecycle", level="DEBUG") as captured:
+            with patch.object(
+                api.lifecycle_coordinator, "request_flush", return_value=failed_flush
+            ):
+                response = self.client.post("/api/workspaces/default/save")
+
+        self.assertEqual(response.status_code, 503)
+        messages = self._messages(captured)
+        self.assertTrue(any("client_timeout" in message for message in messages), messages)
+        self.assertFalse(any("hunter2" in message for message in messages), messages)
+        self.assertFalse(any("C:\\secret" in message for message in messages), messages)
+
+    def test_capture_failure_logs_the_exception_category_not_its_text(self):
+        self._launch()
+        with self.assertLogs("web.lifecycle", level="DEBUG") as captured:
+            with patch.object(
+                web_lifecycle,
+                "capture_live_workspaces",
+                side_effect=RuntimeError("write failed at C:\\secret\\runtime_state.json"),
+            ):
+                response = self.client.post(
+                    "/api/lifecycle/prepare",
+                    json={"action": "close", "save": "workspaces"},
+                )
+
+        self.assertEqual(response.status_code, 503, response.get_json())
+        messages = self._messages(captured)
+        self.assertTrue(any("category=RuntimeError" in message for message in messages), messages)
+        self.assertFalse(any("C:\\secret" in message for message in messages), messages)
+
+    def test_preset_failure_logs_counts_and_scopes_only(self):
+        group = api.session_manager.create_group(
+            "Private host", "ssh", "single", 1, group_id="private-host",
+            workspace_id="default",
+        )
+        api.session_manager.create_session(
+            group.group_id,
+            host="private.example",
+            directory="/srv/private",
+            username="ubuntu",
+            port=22,
+            password="live-secret",
+            title="Shell",
+            mode="ssh",
+        )
+        with self.assertLogs("web.lifecycle", level="DEBUG") as captured:
+            with patch.object(
+                web_lifecycle,
+                "upsert_saved_session",
+                side_effect=RuntimeError("disk full at C:\\secret\\saved_sessions.json"),
+            ):
+                response = self.client.post(
+                    "/api/lifecycle/prepare",
+                    json={"action": "close", "save": "sessions+workspaces"},
+                )
+
+        self.assertEqual(response.status_code, 503, response.get_json())
+        messages = self._messages(captured)
+        self.assertTrue(
+            any(
+                "preset save incomplete: saved=0 failed=1 scopes=['session']" in message
+                for message in messages
+            ),
+            messages,
+        )
+        for forbidden in ("live-secret", "private.example", "/srv/private", "C:\\secret"):
+            self.assertFalse(
+                any(forbidden in message for message in messages),
+                (forbidden, messages),
+            )
+
+    def test_window_registry_changes_log_at_debug_with_ids_only(self):
+        coordinator = LifecycleCoordinator()
+        coordinator.join_workspace("socket-old", "default", "window-a")
+        coordinator.disconnect_client("socket-old")
+
+        with self.assertLogs("web.lifecycle", level="DEBUG") as captured:
+            coordinator.join_workspace("socket-new", "default", "window-a")
+            departed = LifecycleCoordinator(stale_window_grace_seconds=0)
+            departed.join_workspace("socket-b", "research", "window-b")
+            departed.disconnect_client("socket-b")
+            departed.connected_window_count("research")
+
+        messages = self._messages(captured)
+        self.assertTrue(
+            any("rejoined workspace=default" in message for message in messages), messages
+        )
+        self.assertTrue(
+            any("departed past grace workspace=research" in message for message in messages),
+            messages,
+        )
 
 
 @unittest.skipUnless(shutil.which("node"), "Node.js is required for lifecycle client tests")

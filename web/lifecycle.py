@@ -10,6 +10,7 @@ cycle.
 
 from __future__ import annotations
 
+import logging
 import secrets
 import threading
 import time
@@ -58,6 +59,8 @@ _MAX_WINDOW_ID_LENGTH = 128
 # are somehow bypassed, one workspace can never accumulate window records
 # without bound. Generous enough that real multi-window use never reaches it.
 _MAX_WINDOWS_PER_WORKSPACE = 16
+
+logger = logging.getLogger(__name__)
 
 
 class LifecycleValidationError(ValueError):
@@ -110,6 +113,10 @@ class LifecycleCoordinator:
                     previous_windows.discard(window)
                     if not previous_windows:
                         self._client_windows.pop(previous_client, None)
+                logger.debug(
+                    "Lifecycle window rejoined workspace=%s, replacing its own record",
+                    workspace,
+                )
             self._join_sequence += 1
             self._windows[window] = {
                 "client_id": client,
@@ -198,6 +205,10 @@ class LifecycleCoordinator:
             and now - record["disconnected_at"] >= self._stale_window_grace
         ]
         for window_id, record in departed:
+            logger.debug(
+                "Lifecycle window departed past grace workspace=%s",
+                record["workspace_id"],
+            )
             self._drop_window_locked(window_id, record)
 
     def _enforce_window_bound_locked(self, workspace_id: str):
@@ -219,6 +230,11 @@ class LifecycleCoordinator:
         records.sort(key=lambda item: (item[1]["connected"], item[1]["joined_at"]))
         for window_id, record in records[:excess]:
             self._drop_window_locked(window_id, record)
+        logger.debug(
+            "Lifecycle window bound reached workspace=%s evicted=%d",
+            workspace_id,
+            excess,
+        )
 
     def acknowledge_flush(self, client_id: Any, data: Any) -> bool:
         """Accept one Socket.IO acknowledgement from its authenticated sid."""
@@ -614,6 +630,15 @@ def prepare_lifecycle_action(
         result["saved_sessions"] = saved_ids
         result["errors"].extend(preset_errors)
         if preset_errors:
+            # Shape diagnostics only: counts and scopes, never names, targets,
+            # or exception text — preset failures can carry state-file paths.
+            logger.warning(
+                "Lifecycle %s preset save incomplete: saved=%d failed=%d scopes=%s",
+                action,
+                len(saved_ids),
+                len(preset_errors),
+                sorted({error.get("scope", "session") for error in preset_errors}),
+            )
             result["retryable"] = True
             return result
 
@@ -624,7 +649,14 @@ def prepare_lifecycle_action(
             workspace_metadata=workspace_metadata,
         )
         result["saved_workspaces"] = sorted(stored)
-    except Exception:
+    except Exception as exc:
+        # The category is the exception class, not its text: store failures
+        # can embed filesystem paths, which must stay out of the log.
+        logger.warning(
+            "Lifecycle %s workspace capture failed: category=%s",
+            action,
+            type(exc).__name__,
+        )
         result["errors"].append(
             {
                 "scope": "workspace",
@@ -634,6 +666,13 @@ def prepare_lifecycle_action(
         result["retryable"] = True
         return result
 
+    logger.info(
+        "Lifecycle %s prepared save=%s presets=%d workspaces=%s",
+        action,
+        save,
+        len(result["saved_sessions"]),
+        sorted(stored),
+    )
     result["ready_to_exit"] = True
     return result
 
@@ -662,6 +701,9 @@ def prepare_workspace_save(
         return {"error": "Workspace not found", "workspace_missing": True}, 404
 
     if lifecycle_coordinator.connected_window_count(workspace) == 0:
+        logger.debug(
+            "Workspace save %s refused: category=no_reachable_window", workspace
+        )
         return {
             "saved": False,
             "workspace_id": workspace,
@@ -671,6 +713,11 @@ def prepare_workspace_save(
 
     flush_result = lifecycle_coordinator.request_flush({workspace}, emit_request)
     if not flush_result["ok"]:
+        logger.warning(
+            "Workspace save %s flush failed: categories=%s",
+            workspace,
+            sorted({error.get("category", "client_flush") for error in flush_result["errors"]}),
+        )
         return {
             "saved": False,
             "workspace_id": workspace,
@@ -687,6 +734,10 @@ def prepare_workspace_save(
             flush_result["metadata"], {workspace: live_snapshot}
         ).get(workspace) or {}
     except LifecycleValidationError as exc:
+        logger.warning(
+            "Workspace save %s rejected client metadata: category=client_metadata",
+            workspace,
+        )
         return {
             "saved": False,
             "workspace_id": workspace,
@@ -705,8 +756,13 @@ def prepare_workspace_save(
             native_zoom_factor=metadata.get("native_zoom_factor"),
             topbar_visible=topbar_visible if isinstance(topbar_visible, bool) else None,
         )
-    except RuntimeStatePersistenceError:
+    except RuntimeStatePersistenceError as exc:
         # Never answer "saved" for a revision that did not reach the disk.
+        logger.warning(
+            "Workspace save %s could not commit: category=%s",
+            workspace,
+            type(exc).__name__,
+        )
         return {
             "saved": False,
             "workspace_id": workspace,
@@ -716,11 +772,18 @@ def prepare_workspace_save(
     if slot is None:
         # An empty workspace is never captured, so it never overwrites (or
         # clears) the previously saved slot.
+        logger.debug("Workspace save %s skipped: category=empty_workspace", workspace)
         return {
             "saved": False,
             "workspace_id": workspace,
             "error": "This workspace has no sessions to save",
         }, 409
+    logger.info(
+        "Workspace %s saved from launcher origin=%s revision=%s",
+        slot["workspace_id"],
+        slot["origin"],
+        slot.get("revision"),
+    )
     return {
         "saved": True,
         "workspace_id": slot["workspace_id"],

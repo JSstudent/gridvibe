@@ -3184,6 +3184,9 @@
             } else {
                 await forgetSavedWorkspace(summary.workspace_id);
             }
+            /* The workspace's top-bar cache key dies with its snapshot; a
+               failure keeps both so a retry sees the same state. */
+            clearStoredWorkspaceTopbarVisible(summary.workspace_id);
         } catch (error) {
             /* A close that succeeded but could not forget says so, and the row
                stays so the user can retry just the forget. */

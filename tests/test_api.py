@@ -3478,11 +3478,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="topbarToggleBtn"', html)
         self.assertIn('aria-controls="terminalTopbar"', html)
         self.assertIn("const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';", html)
-        self.assertIn("function workspaceTopbarVisibilityStorageKey(workspaceId)", html)
-        self.assertIn("getStoredWorkspaceTopbarVisible(currentWorkspaceId) ?? true", html)
         self.assertIn("document.body.classList.toggle('topbar-collapsed', !shouldShow);", html)
         self.assertIn("path.setAttribute('d', visible ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6');", html)
-        self.assertIn("typeof data.topbar_visible === 'boolean'", html)
         self.assertIn("applyTopbarVisibility(getStoredTopbarVisible());", html)
 
     def test_terminals_page_centers_topbar_actions_without_custom_window_controls(self):
@@ -16340,7 +16337,6 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         self.assertIn("async function saveWorkspace(", terminals_js)
         self.assertIn("/api/runtime-state/save", terminals_js)
         self.assertIn("native_zoom_factor: nativeZoomFactor", terminals_js)
-        self.assertIn("topbar_visible: !document.body.classList.contains('topbar-collapsed')", terminals_js)
         self.assertIn("item.disabled = !sessionGroups.length;", terminals_js)
         shared_js = self._static("js/shared.js")
         self.assertIn("function normalizeNativeZoomFactor(value)", shared_js)

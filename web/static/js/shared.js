@@ -72,6 +72,15 @@
         } catch (_) {}
     }
 
+    /* The top-bar key is only a same-window restoration cache for a value the
+       workspace record owns, so forgetting a workspace drops its key too —
+       otherwise one dead key per forgotten workspace would linger forever. */
+    function clearStoredWorkspaceTopbarVisible(workspaceId) {
+        try {
+            localStorage.removeItem(workspaceTopbarVisibilityStorageKey(workspaceId));
+        } catch (_) {}
+    }
+
     /* One confirmation controller serves both pages. The shared template puts
        each page's button classes on the modal as data attributes, so the
        behavior stays shared without coupling it to either page stylesheet. */
