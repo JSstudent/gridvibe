@@ -63,6 +63,12 @@ PRESENTATION_MODULE = "web.session_presentation"
 #: asserted as source text.
 PRESENTATION_JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js" / "session-persistence.js"
 
+#: The DOM-free explorer record module (Stage 5). It is the *only* implementation
+#: of the record migration, revision-bound resolution, and Diff-identity rules —
+#: the shipped explorer calls it directly — so the two SGP-03 forcing functions
+#: below execute it rather than a server-side restatement of the same contract.
+EXPLORER_PERSISTENCE_JS = PRESENTATION_JS.with_name("explorer-persistence.js")
+
 #: The one lifecycle preparation service behind explicit close, manual restart,
 #: update restart, and native launcher close (Stage 4).
 LIFECYCLE_ROUTE = "/api/lifecycle/prepare"
@@ -681,7 +687,35 @@ class ExplorerRootRestoreTestCase(_PersistencePathsMixin, unittest.TestCase):
 # ==================== Item 5 — SGP-03 / SGP-08 (Stage 5) ====================
 
 
-class ExplorerPresentationFixtureTestCase(_PersistencePathsMixin, unittest.TestCase):
+class _ExplorerPersistenceNodeMixin:
+    """Run one snippet against the shipped explorer-persistence.js module."""
+
+    def _run_explorer_persistence(self, harness, *args):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        self.assertTrue(
+            EXPLORER_PERSISTENCE_JS.exists(),
+            f"Stage 5 must keep {EXPLORER_PERSISTENCE_JS.name} as a "
+            "require()-able, DOM-free module",
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "explorer-records.js"
+            script_path.write_text(harness, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path), str(EXPLORER_PERSISTENCE_JS), *args],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+
+class ExplorerPresentationFixtureTestCase(
+    _ExplorerPersistenceNodeMixin, _PersistencePathsMixin, unittest.TestCase
+):
     """The agreed explorer fixture must survive every persistence path.
 
     SGP-03: `explorerPersistableTabView()` reduces rich per-panel metrics to a
@@ -915,36 +949,91 @@ class ExplorerPresentationFixtureTestCase(_PersistencePathsMixin, unittest.TestC
         A durable mode preference is not a content-relative coordinate: when
         the file changes underneath, Diff must stay Diff while its stale
         scroll and folds are discarded.
-        """
-        module = __import__(PRESENTATION_MODULE, fromlist=["resolve_tab_view"])
 
+        Executed against `explorer-persistence.js`, the module the shipped
+        explorer actually resolves records through, so this fails when the
+        product breaks rather than when a server-side restatement drifts.
+        """
         stored = EXPLORER_PRESENTATION_FIXTURE["explorer_tab_views"][
             "web/static/js/shared.js"
         ]
-        resolved = module.resolve_tab_view(stored, content_revision="sha256:index-xyz")
+        result = self._run_explorer_persistence(
+            r"""
+            const persistence = require(process.argv[2]);
+            const stored = JSON.parse(process.argv[3]);
+            const fresh = {
+                source: 'sha256:index-xyz',
+                preview: 'sha256:index-xyz',
+                diff: 'sha256:index-xyz',
+                directory: 'sha256:index-xyz'
+            };
+            process.stdout.write(JSON.stringify({
+                changed: persistence.resolveRecord(stored, fresh),
+                unchanged: persistence.resolveRecord(stored, {
+                    source: 'sha256:shared-js',
+                    diff: 'sha256:index-abc'
+                })
+            }));
+            """,
+            json.dumps(stored),
+        )
 
-        self.assertEqual(resolved["intent"], {"mode": "diff", "diff_mode": "staged"})
-        self.assertEqual(resolved.get("scroll"), {})
-        self.assertEqual(resolved.get("folds"), [])
+        changed = result["changed"]
+        self.assertEqual(
+            changed["record"]["intent"], {"mode": "diff", "diff_mode": "staged"}
+        )
+        self.assertEqual(changed["mode"], "diff")
+        self.assertEqual(changed["diffMode"], "staged")
+        self.assertEqual(changed["scroll"]["panels"], {})
+        self.assertNotIn("directory", changed["scroll"])
+        self.assertEqual(changed["folds"], [])
+
+        # …and the drop is content-relative, not unconditional: the same record
+        # against the revisions it was captured at restores its scroll.
+        unchanged = result["unchanged"]
+        self.assertEqual(unchanged["record"]["intent"], changed["record"]["intent"])
+        self.assertEqual(
+            unchanged["scroll"]["panels"],
+            {
+                "source": {"scrollLeftRatio": 0.0, "scrollTopRatio": 0.10, "wasAtBottom": False},
+                "diff": {"scrollLeftRatio": 0.20, "scrollTopRatio": 0.40, "wasAtBottom": False},
+            },
+        )
 
     def test_a_staged_diff_identity_tracks_the_index_not_the_working_file(self):
         """Stage 5 item 6.
 
-        The current identity is path + working-file content + the word
-        `staged`, so an index change that leaves the working file untouched
-        looks identical and restores scroll into different diff content.
+        The old identity was path + working-file content + the word `staged`,
+        so an index change that left the working file untouched looked
+        identical and restored scroll into different diff content. The shipped
+        identity hashes the *rendered* diff, which is what the index moves.
         """
-        module = __import__(PRESENTATION_MODULE, fromlist=["diff_content_revision"])
-
-        unchanged_worktree = {"path": "a.js", "worktree_revision": "sha256:same"}
-        before = module.diff_content_revision(
-            {**unchanged_worktree, "index_revision": "sha256:index-1"}, diff_mode="staged"
+        result = self._run_explorer_persistence(
+            r"""
+            const persistence = require(process.argv[2]);
+            const staged = rendered => persistence.diffContentRevision({
+                path: 'a.js', diffMode: 'staged', renderedDiff: rendered
+            });
+            process.stdout.write(JSON.stringify({
+                indexOne: staged('@@ -1 +1 @@\n-old\n+staged-one\n'),
+                indexTwo: staged('@@ -1 +1 @@\n-old\n+staged-two\n'),
+                indexOneAgain: staged('@@ -1 +1 @@\n-old\n+staged-one\n'),
+                worktree: persistence.diffContentRevision({
+                    path: 'a.js',
+                    diffMode: 'worktree',
+                    renderedDiff: '@@ -1 +1 @@\n-old\n+staged-one\n'
+                })
+            }));
+            """
         )
-        after = module.diff_content_revision(
-            {**unchanged_worktree, "index_revision": "sha256:index-2"}, diff_mode="staged"
-        )
 
-        self.assertNotEqual(before, after)
+        # The working file never moved; only the index did.
+        self.assertNotEqual(result["indexOne"], result["indexTwo"])
+        # Identity is a pure function of the rendered diff, so an unrelated
+        # working-file edit that leaves the staged diff alone keeps the scroll.
+        self.assertEqual(result["indexOne"], result["indexOneAgain"])
+        # Staged and worktree are different panels, even at identical text.
+        self.assertNotEqual(result["indexOne"], result["worktree"])
 
     def test_markdown_appearance_is_one_workspace_scoped_value(self):
         """SGP-08 / product decision 5, Stage 5 item 8.

@@ -189,6 +189,9 @@ and *that* is what the shipped explorer calls —
    Stage 0 test that cannot fail when the product breaks is worse than no test,
    because it reads as protection.
 
+**Resolved — Stage B, 2026-08-09.** See "Stage B — implemented" below for the
+removal sweep and the re-pointed tests.
+
 ### PRV-03 — Low: a freshly installed explorer pane keeps the launch config's Markdown appearance instead of the workspace's
 
 **Evidence.** `install_session_group()` calls
@@ -421,6 +424,79 @@ long: every day the duplicate exists is a day someone can "fix" the wrong copy.
 Exit gate: no server-side copy of the explorer resolution or Diff-identity rules
 remains, and the two contract tests execute shipped code.
 
+#### Stage B — implemented (2026-08-09)
+
+**The enumerate-then-remove sweep, run before deleting** (step 3). `git grep` for
+`resolve_tab_view` and `diff_content_revision` across `*.py`, `*.js`, and
+`templates/` found, in total: the two definitions in
+`web/session_presentation.py`, and four references in
+`tests/test_session_persistence_contract.py`. No route, no module, no template,
+no `__all__`, and none of the root compatibility shims re-exported either name.
+The sweep is recorded here rather than in a commit message because this working
+tree is not committed by the agent; whoever commits should carry the same two
+lines across.
+
+Every helper the two functions used survives with other callers
+(`_normalize_explorer_view_snapshot`, `_normalize_explorer_diff_target`,
+`_normalize_explorer_markdown_folds`, `_normalize_content_revision`,
+`EXPLORER_SCROLL_PANELS`, `EXPLORER_PRESENTATION_VERSION`, and `import copy`),
+so step 1's "any constant left with no other reader" clause removed nothing
+further — the ~75 dead lines were the two function bodies exactly. `ruff` agrees:
+no import became unused.
+
+Code changed:
+
+1. **`web/session_presentation.py`** — `resolve_tab_view()` and
+   `diff_content_revision()` deleted. The module keeps its normalizers, which
+   *are* the server's job (validating stored shape); what is gone is the second,
+   divergent answer to a question only the client asks.
+
+Tests changed (`tests/test_session_persistence_contract.py`; no test added or
+deleted, so the suite count is unchanged at 1,351):
+
+1. **A new `EXPLORER_PERSISTENCE_JS` constant** beside `PRESENTATION_JS`, naming
+   `web/static/js/explorer-persistence.js` as the one implementation of the
+   record/resolution/Diff-identity rules — the Stage 0 discipline of freezing
+   the *name* a stage must use, applied to the surviving surface.
+2. **A `_ExplorerPersistenceNodeMixin`** that runs a snippet against that module
+   under Node, mirroring `tests/test_session_presentation.py`'s harness: it
+   skips when the `node` binary is absent, so the always-running floor remains
+   `test_session_presentation.py`'s assertions, exactly as step 2 requires.
+3. **`test_changed_content_drops_scroll_and_folds_but_keeps_view_intent`** now
+   feeds the frozen fixture's staged-Diff record to the shipped `resolveRecord`.
+   It asserts the original contract — durable intent survives, scroll and folds
+   do not — and adds the missing other half: the same record resolved against
+   the revisions it was *captured* at restores its per-panel scroll. Without
+   that second case an implementation that dropped scroll unconditionally would
+   still pass, which is the failure mode the finding objected to.
+4. **`test_a_staged_diff_identity_tracks_the_index_not_the_working_file`** now
+   exercises the shipped `diffContentRevision`. The behaviour it pins is the
+   same contract expressed against the shipped rule: with the working file
+   untouched, two different rendered staged diffs get different identities, the
+   same rendered diff is stable, and staged and worktree differ at identical
+   text. `PRESENTATION_MODULE` keeps its two other readers and stays.
+
+**Verified by breaking the product, not by reading the tests.** Two mutations
+were applied to `explorer-persistence.js` in a throwaway edit — the revision
+gate in `resolveRecord` forced true, and `renderedDiff` dropped from
+`diffContentRevision`'s hash input (the old, defective identity) — and both
+tests failed:
+
+```
+FAIL: test_changed_content_drops_scroll_and_folds_but_keeps_view_intent
+  AssertionError: {'source': {...}, 'diff': {...}} != {}
+FAIL: test_a_staged_diff_identity_tracks_the_index_not_the_working_file
+  AssertionError: 'djb2:1yqi79l' == 'djb2:1yqi79l'
+```
+
+The file was restored from Git immediately; the only modified files are the two
+above and this document.
+
+Exit gate met: no server-side copy of the explorer resolution or Diff-identity
+rules remains, and both contract tests execute shipped code and demonstrably
+fail when it breaks. Gates re-run on this machine: `tests/run_tests.py` → 1,351
+tests, `OK (skipped=7)`; `ruff check .` → "All checks passed!".
+
 ### Stage C — Ordering and diagnostic cleanups (PRV-03, PRV-04)
 
 1. **PRV-03.** In `install_session_group()`, assign `group.pane_order` before
@@ -474,8 +550,8 @@ the audit text.
 | 2. Concurrency | pass | No emit, broadcast, SSH teardown, or state-file write inside `SessionManager.lock` or `connection_lock` (full scan). Captures read the manager and return before taking file locks, preserving the documented order. Every state commit uses a unique `uuid4` same-directory temp path, fsync, backup, then `os.replace`. **One style exception, PRV-04:** `request_flush()` reads `self._windows` outside the coordinator lock — safe today, and Stage C folds it back in. |
 | 3. Performance | pass | No new polling. `CONTINUOUS_UPDATE_FLOOR_MS = 1000` floors scroll/zoom coalescing and scroll is folded into the batch at capture time rather than being an event; structural changes batch on a microtask. `setTimeout` appears exactly once in the new frontend modules, as that floor. No CDN assets — every new module is vendored local. |
 | 4. Correctness | pass | No `window.confirm`/`alert`/`prompt` anywhere. Shell quoting untouched. The lifecycle dialog is the shared in-page partial and uses the shared `visible` class. |
-| 5. Dead code | **fail — PRV-02** | Every server event has exactly one client listener, no config key is unread, and both superseded writers (`update_browser_tab_strip()`, `PATCH /api/workspaces/<id>/ui-state`) are gone. But `resolve_tab_view()` and `diff_content_revision()` ship with no production consumer. |
-| 6. Architecture/DRY | **fail — PRV-02** | New backend code went to focused modules and the routes stayed thin; new frontend logic went to new domain files rather than back into `terminals.js`. The failure is the second, divergent implementation of the explorer resolution and Diff-identity rules. **Watch item:** `terminals.js` is 8,059 lines and `explorer-viewer.js` is 8,094 — both back at the size that triggered the original split, and `explorer-viewer.js` has overtaken it. The next substantial addition to either should force a domain extraction, as the Stages 0–4 review already warned. |
+| 5. Dead code | **fail — PRV-02**, *fixed in Stage B* | Every server event has exactly one client listener, no config key is unread, and both superseded writers (`update_browser_tab_strip()`, `PATCH /api/workspaces/<id>/ui-state`) are gone. But `resolve_tab_view()` and `diff_content_revision()` ship with no production consumer. Both were deleted in Stage B; the rule passes in the current tree. |
+| 6. Architecture/DRY | **fail — PRV-02**, *fixed in Stage B* | New backend code went to focused modules and the routes stayed thin; new frontend logic went to new domain files rather than back into `terminals.js`. The failure is the second, divergent implementation of the explorer resolution and Diff-identity rules — removed in Stage B, leaving `explorer-persistence.js` as the single owner. **Watch item:** `terminals.js` is 8,059 lines and `explorer-viewer.js` is 8,094 — both back at the size that triggered the original split, and `explorer-viewer.js` has overtaken it. The next substantial addition to either should force a domain extraction, as the Stages 0–4 review already warned. |
 | 7. Styling | pass | `lifecycle.css` carries no palette literal; every colour comes from `tokens.css`. |
 | 8. Interaction | pass | The lifecycle modal is itself the confirm for close/restart, and a failed save leaves the same three choices active so retry is the same button. Busy state is a class plus `aria-busy`, never rewritten markup. Failures keep the "— try again" wording. |
 | 9. Logging | pass | Lifecycle diagnostics are shape-only: ids, revisions, counts, and failure *categories* taken from exception class names rather than exception text, which is what keeps state-file paths out of the log. Window-registry transitions are DEBUG, one-off save outcomes INFO, anomalies WARNING. No ANSI, no per-keystroke path. |
