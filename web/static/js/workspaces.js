@@ -281,19 +281,81 @@
     }
 
     async function createWorkspaceRecord(label = '') {
-        const { ok, data } = await workspaceApiRequest('/api/workspaces', {
+        const { ok, status, data } = await workspaceApiRequest('/api/workspaces', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ label: String(label || '') })
         });
         if (!ok) {
-            throw new Error(data.error || 'Could not create the workspace');
+            throw workspaceNameError(data, status, 'Could not create the workspace');
         }
         return data;
     }
 
+    /* A taken workspace name is not a plain failure (SGP-13): the 409 names the
+       conflicting kind so the caller can offer the matching action inline. */
+    function workspaceNameError(data, status, fallback) {
+        const error = new Error(data.error || fallback);
+        error.status = status;
+        if (data.conflict === 'workspace_label_taken') {
+            error.conflict = data.conflict;
+            error.conflictKind = data.conflict_kind === 'saved' ? 'saved' : 'live';
+            error.conflictWorkspaceId = String(data.workspace_id || '');
+            error.conflictLabel = String(data.label || '');
+        }
+        return error;
+    }
+
+    async function validateWorkspaceLabel(label) {
+        const { ok, status, data } = await workspaceApiRequest(
+            '/api/workspaces/validate-label',
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ label: String(label || '') })
+            }
+        );
+        if (!ok) {
+            throw workspaceNameError(data, status, 'Could not check the workspace name');
+        }
+        return data;
+    }
+
+    /* Turn a name conflict into the user's choice: open the live namesake,
+       forget the saved one (confirmed, danger-styled), or cancel and pick
+       another name. Returns true when the error was a conflict and was
+       handled; rethrows nothing itself — a failed follow-up action propagates
+       so the caller can show it with its own retry wording. */
+    async function resolveWorkspaceNameConflict(error) {
+        if (error?.conflict !== 'workspace_label_taken') {
+            return false;
+        }
+        const name = error.conflictLabel || 'That name';
+        const isSaved = error.conflictKind === 'saved';
+        const confirmed = await openGenericConfirmModal({
+            title: isSaved ? `"${name}" is a saved workspace` : `"${name}" is an open workspace`,
+            copy: isSaved
+                ? 'Reopen it from the launcher\'s Reopen saved… list, forget the saved'
+                    + ' snapshot, or pick another name.'
+                : 'A workspace with this name is already open. Open it or pick another name.',
+            note: isSaved ? 'Forgetting removes only the saved snapshot, never saved sessions.' : '',
+            confirmLabel: isSaved ? 'Forget saved workspace' : 'Open workspace',
+            danger: isSaved
+        });
+        if (!confirmed) {
+            return true;
+        }
+        if (isSaved) {
+            await forgetSavedWorkspace(error.conflictWorkspaceId);
+            notifyWorkspacesChanged('workspace_forgotten');
+        } else if (!(await focusWorkspaceWindow(error.conflictWorkspaceId))) {
+            await openWorkspaceWindow(error.conflictWorkspaceId);
+        }
+        return true;
+    }
+
     async function renameWorkspaceRecord(workspaceId, label) {
-        const { ok, data } = await workspaceApiRequest(
+        const { ok, status, data } = await workspaceApiRequest(
             `/api/workspaces/${encodeURIComponent(normalizeWorkspaceId(workspaceId))}`,
             {
                 method: 'PATCH',
@@ -302,7 +364,7 @@
             }
         );
         if (!ok) {
-            throw new Error(data.error || 'Could not rename the workspace');
+            throw workspaceNameError(data, status, 'Could not rename the workspace');
         }
         return data;
     }
@@ -403,6 +465,26 @@
        and removes it. `forget` additionally drops the saved snapshot — without
        it the workspace stays in the restore chooser, which is the whole point
        of having a verb separate from closing its last tab. */
+
+    /* Per-workspace Save, from the launcher's Workspaces card (SGP-14): the
+       same flush handshake as in-window Workspace ▸ Save Workspace, scoped to
+       this one workspace. The server flushes the owning window before
+       capturing or refuses — a 503 is retryable, a 409 means the workspace is
+       empty and simply has nothing to capture. */
+    async function saveLiveWorkspace(workspaceId) {
+        const resolvedWorkspaceId = normalizeWorkspaceId(workspaceId);
+        const { ok, status, data } = await workspaceApiRequest(
+            `/api/workspaces/${encodeURIComponent(resolvedWorkspaceId)}/save`,
+            { method: 'POST' }
+        );
+        if (!ok) {
+            const error = new Error(data.error || 'Could not save this workspace');
+            error.status = status;
+            error.retryable = Boolean(data.retryable);
+            throw error;
+        }
+        return data;
+    }
 
     async function closeLiveWorkspace(workspaceId, { forget = false } = {}) {
         const resolvedWorkspaceId = normalizeWorkspaceId(workspaceId);
@@ -658,11 +740,44 @@
     }
 
     /* ── Workspace name dialog (New Workspace / Rename Workspace) ──
-       Resolves to the entered label, or null when cancelled. The shell only
-       exists on the terminals page; callers elsewhere get null. */
+       Resolves to the entered label, or null when cancelled. An optional async
+       validator keeps the dialog open and reports its error beside the field;
+       this is how a launch draft checks the server namespace without creating
+       an empty workspace merely to reserve its name. */
     let workspaceNameResolver = null;
+    let workspaceNameValidator = null;
+    let workspaceNameValidationId = 0;
+
+    function setWorkspaceNameModalBusy(busy) {
+        const modal = document.getElementById('workspaceNameModal');
+        modal?.classList.toggle('is-busy', Boolean(busy));
+        (modal?.querySelectorAll('input, button') || []).forEach(control => {
+            control.disabled = Boolean(busy);
+        });
+    }
+
+    function setWorkspaceNameModalError(message = '') {
+        const error = document.getElementById('workspaceNameError');
+        const input = document.getElementById('workspaceNameInput');
+        const text = String(message || '');
+        if (error) {
+            error.textContent = text;
+            error.hidden = !text;
+        }
+        if (input) {
+            if (text) {
+                input.setAttribute('aria-invalid', 'true');
+            } else {
+                input.removeAttribute('aria-invalid');
+            }
+        }
+    }
 
     function closeWorkspaceNameModal(result = null) {
+        workspaceNameValidationId += 1;
+        workspaceNameValidator = null;
+        setWorkspaceNameModalBusy(false);
+        setWorkspaceNameModalError('');
         const modal = document.getElementById('workspaceNameModal');
         if (modal) {
             modal.classList.remove('visible');
@@ -675,7 +790,14 @@
         }
     }
 
-    function openWorkspaceNameModal({ title = 'New workspace', copy = '', value = '', confirmLabel = 'Save' } = {}) {
+    function openWorkspaceNameModal({
+        title = 'New workspace',
+        copy = '',
+        value = '',
+        confirmLabel = 'Save',
+        validate = null,
+        initialError = ''
+    } = {}) {
         const modal = document.getElementById('workspaceNameModal');
         const input = document.getElementById('workspaceNameInput');
         if (!modal || !input) {
@@ -689,6 +811,8 @@
         copyElement.hidden = !copy;
         document.getElementById('workspaceNameAccept').textContent = confirmLabel;
         input.value = String(value || '');
+        workspaceNameValidator = typeof validate === 'function' ? validate : null;
+        setWorkspaceNameModalError(initialError);
 
         modal.classList.add('visible');
         modal.setAttribute('aria-hidden', 'false');
@@ -707,9 +831,36 @@
         if (!modal) {
             return;
         }
-        document.getElementById('workspaceNameForm')?.addEventListener('submit', event => {
+        document.getElementById('workspaceNameForm')?.addEventListener('submit', async event => {
             event.preventDefault();
-            closeWorkspaceNameModal(document.getElementById('workspaceNameInput')?.value || '');
+            const input = document.getElementById('workspaceNameInput');
+            const value = input?.value || '';
+            const validate = workspaceNameValidator;
+            if (!validate) {
+                closeWorkspaceNameModal(value);
+                return;
+            }
+
+            const validationId = ++workspaceNameValidationId;
+            setWorkspaceNameModalError('');
+            setWorkspaceNameModalBusy(true);
+            try {
+                await validate(value);
+                if (validationId !== workspaceNameValidationId) {
+                    return;
+                }
+                closeWorkspaceNameModal(value);
+            } catch (error) {
+                if (validationId !== workspaceNameValidationId) {
+                    return;
+                }
+                setWorkspaceNameModalBusy(false);
+                setWorkspaceNameModalError(error?.message || 'Could not check the workspace name');
+                input?.focus();
+            }
+        });
+        document.getElementById('workspaceNameInput')?.addEventListener('input', () => {
+            setWorkspaceNameModalError('');
         });
         document.getElementById('workspaceNameCancel')?.addEventListener('click', () => {
             closeWorkspaceNameModal(null);

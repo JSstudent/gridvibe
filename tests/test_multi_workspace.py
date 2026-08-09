@@ -30,8 +30,24 @@ def _js_function_source(script, name):
     # syntax error the moment the harness runs them.
     if script[max(0, start - 6):start] == "async ":
         start -= 6
+    # Defaults such as ``options = {}`` and destructured parameters contain
+    # braces before the function body. Find the closing parameter parenthesis
+    # first so those values cannot truncate the extracted source.
+    parameter_depth = 0
+    parameter_end = None
+    for index in range(script.index("(", start), len(script)):
+        if script[index] == "(":
+            parameter_depth += 1
+        elif script[index] == ")":
+            parameter_depth -= 1
+            if parameter_depth == 0:
+                parameter_end = index
+                break
+    if parameter_end is None:
+        raise AssertionError(f"unbalanced parameters in {name}")
+
     depth = 0
-    for index in range(script.index("{", start), len(script)):
+    for index in range(script.index("{", parameter_end), len(script)):
         if script[index] == "{":
             depth += 1
         elif script[index] == "}":
@@ -1974,6 +1990,398 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
         label = response.get_json()["label"]
         self.assertEqual(len(label), 80)
         self.assertTrue(label.startswith("spaced name x"))
+
+    # ── Label namespace (Stage 4.5, SGP-13) ──
+
+    def test_create_rejects_a_label_taken_by_a_live_workspace(self):
+        first = self.client.post("/api/workspaces", json={"label": "Alpha"})
+        self.assertEqual(first.status_code, 201)
+        before = len(api.session_manager.get_all_workspaces())
+
+        # Case- and whitespace-insensitive: this is the same name to a user.
+        response = self.client.post("/api/workspaces", json={"label": " alpha "})
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertEqual(payload["conflict"], "workspace_label_taken")
+        self.assertEqual(payload["conflict_kind"], "live")
+        self.assertEqual(payload["workspace_id"], first.get_json()["workspace_id"])
+        self.assertEqual(payload["label"], "alpha")
+        # Nothing is mutated by the refusal.
+        self.assertEqual(len(api.session_manager.get_all_workspaces()), before)
+
+    def test_create_rejects_a_label_taken_by_a_saved_slot(self):
+        self._launch(session_name="Main")
+        self.client.patch("/api/workspaces/default", json={"label": "Saved WS"})
+        save = self.client.post("/api/runtime-state/save", json={"workspace_id": "default"})
+        self.assertEqual(save.status_code, 200, save.get_json())
+        # The saved slot keeps the name while the live workspace moves on, so
+        # only the saved namespace can conflict here.
+        self.client.patch("/api/workspaces/default", json={"label": "Main again"})
+        state_before = self.state_path.read_bytes()
+
+        response = self.client.post("/api/workspaces", json={"label": "saved  ws"})
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertEqual(payload["conflict"], "workspace_label_taken")
+        self.assertEqual(payload["conflict_kind"], "saved")
+        self.assertEqual(payload["workspace_id"], "default")
+        # The stored slot survives the refusal byte-for-byte.
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+
+    def test_label_validation_reports_a_saved_conflict_without_mutating_state(self):
+        """The launcher's name dialog checks the namespace without reserving it."""
+        self._launch(session_name="Main")
+        self.client.patch("/api/workspaces/default", json={"label": "Saved WS"})
+        save = self.client.post(
+            "/api/runtime-state/save", json={"workspace_id": "default"}
+        )
+        self.assertEqual(save.status_code, 200, save.get_json())
+        self.client.patch("/api/workspaces/default", json={"label": "Main again"})
+        state_before = self.state_path.read_bytes()
+        live_before = {
+            workspace.workspace_id
+            for workspace in api.session_manager.get_all_workspaces()
+        }
+
+        conflict = self.client.post(
+            "/api/workspaces/validate-label", json={"label": " saved   ws "}
+        )
+        available = self.client.post(
+            "/api/workspaces/validate-label", json={"label": " Fresh\nWorkspace "}
+        )
+
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.get_json()["conflict"], "workspace_label_taken")
+        self.assertEqual(conflict.get_json()["conflict_kind"], "saved")
+        self.assertEqual(conflict.get_json()["workspace_id"], "default")
+        self.assertEqual(available.status_code, 200, available.get_json())
+        self.assertEqual(
+            available.get_json(), {"available": True, "label": "Fresh Workspace"}
+        )
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+        self.assertEqual(
+            {
+                workspace.workspace_id
+                for workspace in api.session_manager.get_all_workspaces()
+            },
+            live_before,
+        )
+
+    def test_rename_rejects_a_label_taken_by_a_live_workspace(self):
+        first = self.client.post("/api/workspaces", json={"label": "Alpha"}).get_json()
+        second = self.client.post("/api/workspaces", json={"label": "Beta"}).get_json()
+
+        response = self.client.patch(
+            f"/api/workspaces/{second['workspace_id']}", json={"label": "ALPHA"}
+        )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertEqual(payload["conflict_kind"], "live")
+        self.assertEqual(payload["workspace_id"], first["workspace_id"])
+        self.assertEqual(
+            api.session_manager.get_workspace(second["workspace_id"]).label, "Beta"
+        )
+
+    def test_rename_rejects_a_label_taken_by_a_saved_slot(self):
+        self._launch(session_name="Main")
+        self.client.patch("/api/workspaces/default", json={"label": "Saved WS"})
+        self.client.post("/api/runtime-state/save", json={"workspace_id": "default"})
+        # The saved slot keeps the name while the live workspace moves on.
+        self.client.patch("/api/workspaces/default", json={"label": "Main again"})
+        state_before = self.state_path.read_bytes()
+        other = self.client.post("/api/workspaces", json={"label": "Other"}).get_json()
+
+        response = self.client.patch(
+            f"/api/workspaces/{other['workspace_id']}", json={"label": "Saved WS"}
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["conflict_kind"], "saved")
+        self.assertEqual(
+            api.session_manager.get_workspace(other["workspace_id"]).label, "Other"
+        )
+        self.assertEqual(self.state_path.read_bytes(), state_before)
+
+    def test_rename_may_keep_its_own_name_with_new_casing(self):
+        """Its own live record and its own saved slot are the same identity."""
+        self._launch(session_name="Main")
+        self.client.patch("/api/workspaces/default", json={"label": "Reviews"})
+        self.client.post("/api/runtime-state/save", json={"workspace_id": "default"})
+
+        response = self.client.patch("/api/workspaces/default", json={"label": "reviews"})
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(api.session_manager.get_workspace("default").label, "reviews")
+
+    def test_unlabelled_workspaces_stay_unconstrained(self):
+        """Uniqueness applies to names, not to their absence."""
+        first = self.client.post("/api/workspaces", json={})
+        second = self.client.post("/api/workspaces", json={"label": "  "})
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        self.assertNotEqual(
+            first.get_json()["workspace_id"], second.get_json()["workspace_id"]
+        )
+
+    def test_launch_into_a_new_workspace_rejects_a_taken_label(self):
+        self.client.post("/api/workspaces", json={"label": "Alpha"})
+        before = {ws.workspace_id for ws in api.session_manager.get_all_workspaces()}
+
+        response = self._launch(new_workspace=True, workspace_label="alpha")
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertEqual(payload["conflict"], "workspace_label_taken")
+        self.assertEqual(payload["conflict_kind"], "live")
+        # No rival workspace was minted for the taken name.
+        after = {ws.workspace_id for ws in api.session_manager.get_all_workspaces()}
+        self.assertEqual(before, after)
+
+    def test_launch_name_dialog_starts_blank_and_keeps_conflicts_inline(self):
+        """Exercise the shipped dialog, validator, and launcher chooser together."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        workspaces_js = self._static("js/workspaces.js")
+        launcher_js = self._static("js/launcher.js")
+        source = "\n".join(
+            [
+                *(
+                    _js_function_source(workspaces_js, name)
+                    for name in (
+                        "workspaceApiRequest",
+                        "workspaceNameError",
+                        "validateWorkspaceLabel",
+                        "setWorkspaceNameModalBusy",
+                        "setWorkspaceNameModalError",
+                        "closeWorkspaceNameModal",
+                        "openWorkspaceNameModal",
+                        "wireWorkspaceNameModal",
+                    )
+                ),
+                *(
+                    _js_function_source(launcher_js, name)
+                    for name in (
+                        "setWorkspaceDestination",
+                        "chooseNewWorkspaceDestination",
+                        "handleLaunchWorkspaceLabelConflict",
+                    )
+                ),
+            ]
+        )
+        script = source + r"""
+const WORKSPACE_NEW_DESTINATION = '__new__';
+let workspaceNameResolver = null;
+let workspaceNameValidator = null;
+let workspaceNameValidationId = 0;
+let workspaceDestination = WORKSPACE_NEW_DESTINATION;
+let workspaceDestinationLabelDraft = 'Rejected draft';
+const syncDrafts = [];
+const loadingStates = [];
+const requests = [];
+
+function makeClassList() {
+    const values = new Set();
+    return {
+        add(...names) { names.forEach(name => values.add(name)); },
+        remove(...names) { names.forEach(name => values.delete(name)); },
+        contains(name) { return values.has(name); },
+        toggle(name, force) {
+            const enabled = force === undefined ? !values.has(name) : Boolean(force);
+            if (enabled) values.add(name); else values.delete(name);
+            return enabled;
+        }
+    };
+}
+
+function makeElement() {
+    const listeners = new Map();
+    return {
+        value: '',
+        textContent: '',
+        hidden: false,
+        disabled: false,
+        attributes: {},
+        classList: makeClassList(),
+        setAttribute(name, value) { this.attributes[name] = String(value); },
+        removeAttribute(name) { delete this.attributes[name]; },
+        addEventListener(name, listener) {
+            if (!listeners.has(name)) listeners.set(name, []);
+            listeners.get(name).push(listener);
+        },
+        async dispatch(name, supplied = {}) {
+            const event = {
+                target: this,
+                preventDefault() {},
+                stopPropagation() {},
+                ...supplied
+            };
+            for (const listener of listeners.get(name) || []) {
+                await listener(event);
+            }
+        },
+        focus() { this.focused = true; },
+        select() { this.selected = true; },
+        querySelectorAll() { return []; }
+    };
+}
+
+const ids = [
+    'workspaceNameModal', 'workspaceNameInput', 'workspaceNameTitle',
+    'workspaceNameCopy', 'workspaceNameAccept', 'workspaceNameForm',
+    'workspaceNameCancel', 'workspaceNameError'
+];
+const elements = Object.fromEntries(ids.map(id => [id, makeElement()]));
+elements.workspaceNameError.hidden = true;
+elements.workspaceNameModal.querySelectorAll = () => [
+    elements.workspaceNameInput,
+    elements.workspaceNameAccept,
+    elements.workspaceNameCancel
+];
+
+const document = { getElementById: id => elements[id] || null };
+const window = { setTimeout: callback => callback() };
+
+function syncLaunchDestinationControl() {
+    syncDrafts.push([workspaceDestination, workspaceDestinationLabelDraft]);
+}
+
+function setLaunchButtonLoading(_button, loading) {
+    loadingStates.push(Boolean(loading));
+}
+
+async function fetch(path, options) {
+    const body = JSON.parse(options.body);
+    requests.push([path, body]);
+    if (body.label === 'Saved WS') {
+        return {
+            ok: false,
+            status: 409,
+            json: async () => ({
+                error: '"Saved WS" is a saved workspace — reopen it, forget it, or pick another name.',
+                conflict: 'workspace_label_taken',
+                conflict_kind: 'saved',
+                workspace_id: 'default',
+                label: 'Saved WS'
+            })
+        };
+    }
+    return {
+        ok: true,
+        status: 200,
+        json: async () => ({ available: true, label: body.label })
+    };
+}
+
+(async () => {
+    wireWorkspaceNameModal();
+    const choice = chooseNewWorkspaceDestination();
+    const initialValue = elements.workspaceNameInput.value;
+    const draftAfterOpen = workspaceDestinationLabelDraft;
+
+    elements.workspaceNameInput.value = 'Saved WS';
+    await elements.workspaceNameForm.dispatch('submit');
+    const rejected = {
+        message: elements.workspaceNameError.textContent,
+        errorHidden: elements.workspaceNameError.hidden,
+        modalVisible: elements.workspaceNameModal.classList.contains('visible'),
+        inputDisabled: elements.workspaceNameInput.disabled,
+        draft: workspaceDestinationLabelDraft
+    };
+
+    elements.workspaceNameInput.value = 'Fresh workspace';
+    await elements.workspaceNameInput.dispatch('input');
+    const errorHiddenAfterEdit = elements.workspaceNameError.hidden;
+    await elements.workspaceNameForm.dispatch('submit');
+    await choice;
+    const accepted = {
+        modalVisible: elements.workspaceNameModal.classList.contains('visible'),
+        destination: workspaceDestination,
+        draft: workspaceDestinationLabelDraft
+    };
+
+    // The launch route checks again. Simulate another window taking the name
+    // after validation and prove the commit-time 409 returns to the same blank
+    // dialog instead of leaving the rejected name on the Launch button.
+    workspaceDestinationLabelDraft = 'Fresh workspace';
+    const race = handleLaunchWorkspaceLabelConflict(
+        409,
+        { conflict: 'workspace_label_taken', error: 'Taken during launch.' },
+        {}
+    );
+    const raceDialog = {
+        value: elements.workspaceNameInput.value,
+        message: elements.workspaceNameError.textContent,
+        modalVisible: elements.workspaceNameModal.classList.contains('visible'),
+        draft: workspaceDestinationLabelDraft
+    };
+    await elements.workspaceNameCancel.dispatch('click');
+    const raceHandled = await race;
+
+    process.stdout.write(JSON.stringify({
+        initialValue,
+        draftAfterOpen,
+        rejected,
+        errorHiddenAfterEdit,
+        accepted,
+        raceDialog,
+        raceHandled,
+        loadingStates,
+        requests,
+        syncDrafts
+    }));
+})();
+"""
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "workspace-name-dialog.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+
+        self.assertEqual(result["initialValue"], "")
+        self.assertEqual(result["draftAfterOpen"], "")
+        self.assertIn("saved workspace", result["rejected"]["message"])
+        self.assertFalse(result["rejected"]["errorHidden"])
+        self.assertTrue(result["rejected"]["modalVisible"])
+        self.assertFalse(result["rejected"]["inputDisabled"])
+        self.assertEqual(result["rejected"]["draft"], "")
+        self.assertTrue(result["errorHiddenAfterEdit"])
+        self.assertEqual(
+            result["accepted"],
+            {
+                "modalVisible": False,
+                "destination": "__new__",
+                "draft": "Fresh workspace",
+            },
+        )
+        self.assertEqual(
+            result["raceDialog"],
+            {
+                "value": "",
+                "message": "Taken during launch.",
+                "modalVisible": True,
+                "draft": "",
+            },
+        )
+        self.assertTrue(result["raceHandled"])
+        self.assertEqual(result["loadingStates"], [False])
+        self.assertEqual(
+            result["requests"],
+            [
+                ["/api/workspaces/validate-label", {"label": "Saved WS"}],
+                ["/api/workspaces/validate-label", {"label": "Fresh workspace"}],
+            ],
+        )
 
     # ── Move ──
 

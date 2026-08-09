@@ -26,6 +26,34 @@
         return `${TOPBAR_VISIBILITY_STORAGE_KEY}.${String(workspaceId || 'default')}`;
     }
 
+    /* The lifecycle window id is stable per *window*, not per page load:
+       sessionStorage is tab/window-scoped and survives a reload, so a reloaded
+       workspace window rejoins with its own id and replaces its own server-side
+       registration even when `pagehide` never fired (a crash, a kill, a network
+       partition). Two tabs on the same workspace keep distinct ids. Storage can
+       be unavailable (private modes, locked-down webviews); the per-load
+       fallback is then bounded by the server-side stale-window grace period. */
+    const LIFECYCLE_WINDOW_ID_STORAGE_KEY = 'gridvibe.lifecycleWindowId';
+
+    function generateLifecycleWindowId() {
+        return globalThis.crypto?.randomUUID?.()
+            || `window-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    }
+
+    function getLifecycleWindowId() {
+        try {
+            const stored = window.sessionStorage.getItem(LIFECYCLE_WINDOW_ID_STORAGE_KEY);
+            if (stored) {
+                return stored;
+            }
+            const generated = generateLifecycleWindowId();
+            window.sessionStorage.setItem(LIFECYCLE_WINDOW_ID_STORAGE_KEY, generated);
+            return generated;
+        } catch (_) {
+            return generateLifecycleWindowId();
+        }
+    }
+
     function getStoredWorkspaceTopbarVisible(workspaceId) {
         try {
             const stored = localStorage.getItem(workspaceTopbarVisibilityStorageKey(workspaceId));

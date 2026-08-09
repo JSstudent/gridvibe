@@ -482,6 +482,25 @@
     border-color: var(--gv-accent);
 }
 
+#workspaceNameModal .workspace-modal-input[aria-invalid="true"] {
+    border-color: var(--gv-danger);
+}
+
+#workspaceNameModal .workspace-name-error {
+    color: var(--gv-danger);
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+#workspaceNameModal .workspace-name-error[hidden] {
+    display: none;
+}
+
+#workspaceNameModal.is-busy .workspace-modal-form,
+#workspaceNameModal.is-busy .modal-actions {
+    opacity: 0.7;
+}
+
 #workspaceNameModal .workspace-modal-btn {
     padding: 8px 16px;
     border: 1px solid var(--gv-dialog-border);

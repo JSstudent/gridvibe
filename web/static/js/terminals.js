@@ -527,8 +527,7 @@
     let _focusedTerminalIndex = -1;
     let _activeExplorerIndex = -1;
     let socket     = null;   // set at the bottom after all defs
-    const lifecycleWindowId = globalThis.crypto?.randomUUID?.()
-        || `workspace-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const lifecycleWindowId = getLifecycleWindowId();
     let resizeObservers = [];
     let cachedGroupViews = new Map();
     let sessionRouteMap = new Map();
@@ -1397,6 +1396,16 @@
             notifyWorkspacesChanged('renamed');
             setWorkspaceSaveMessage(`Workspace renamed to "${workspaceDisplayLabel(updated)}".`, 'success');
         } catch (error) {
+            /* A taken name offers its remedy inline (open the live namesake /
+               forget the saved one / pick another name) instead of just failing. */
+            try {
+                if (await resolveWorkspaceNameConflict(error)) {
+                    return;
+                }
+            } catch (actionError) {
+                setWorkspaceSaveMessage(`${actionError.message} — try again.`, 'error');
+                return;
+            }
             setWorkspaceSaveMessage(`Rename failed: ${error.message} — try again.`, 'error');
         }
     }
@@ -1415,6 +1424,14 @@
             notifyWorkspacesChanged('created');
             await switchToWorkspaceWindow(workspace.workspace_id);
         } catch (error) {
+            try {
+                if (await resolveWorkspaceNameConflict(error)) {
+                    return;
+                }
+            } catch (actionError) {
+                setWorkspaceSaveMessage(`${actionError.message} — try again.`, 'error');
+                return;
+            }
             setWorkspaceSaveMessage(`Could not create the workspace: ${error.message}`, 'error');
         }
     }

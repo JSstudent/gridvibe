@@ -2846,17 +2846,37 @@
         syncLaunchDestinationControl();
     }
 
-    async function chooseNewWorkspaceDestination() {
+    async function chooseNewWorkspaceDestination(initialError = '') {
+        /* A new choice is always a new draft. In particular, a name rejected
+           by the server must never remain cached behind "Use this name" and
+           become launchable on the next click. */
+        workspaceDestinationLabelDraft = '';
+        syncLaunchDestinationControl();
         const label = await openWorkspaceNameModal({
             title: 'Launch into a new workspace',
             copy: 'The name is shown in workspace pickers and on the saved snapshot. Leave it blank for an automatic name.',
-            value: workspaceDestinationLabelDraft,
-            confirmLabel: 'Use this name'
+            value: '',
+            confirmLabel: 'Use this name',
+            validate: validateWorkspaceLabel,
+            initialError
         });
         if (label === null) {
             return;
         }
         setWorkspaceDestination(WORKSPACE_NEW_DESTINATION, label);
+    }
+
+    async function handleLaunchWorkspaceLabelConflict(status, data, button) {
+        if (status !== 409 || data?.conflict !== 'workspace_label_taken') {
+            return false;
+        }
+        /* Validation and launch are separate requests. If another window takes
+           the name between them, send the exact commit-time error back into a
+           fresh, blank name dialog instead of leaving a rejected draft on the
+           Launch button or degrading to the page-level error line. */
+        setLaunchButtonLoading(button, false);
+        await chooseNewWorkspaceDestination(data.error || 'That workspace name is taken');
+        return true;
     }
 
     function toggleLaunchDestinationMenu(event) {
@@ -2924,6 +2944,35 @@
                     });
                 }
             });
+            /* Per-workspace Save (SGP-14): the same flush handshake as
+               in-window Workspace ▸ Save Workspace, scoped to this one
+               workspace — the owning window acknowledges its latest
+               presentation before the capture, or the save is refused. A
+               window that cannot be reached is reported, never silently
+               captured from stale server state. */
+            const saveButton = document.createElement('button');
+            saveButton.type = 'button';
+            saveButton.className = 'ghost-btn';
+            saveButton.textContent = 'Save';
+            saveButton.title = 'Save this workspace — its window is flushed first, exactly like Workspace ▸ Save Workspace';
+            saveButton.addEventListener('click', async () => {
+                saveButton.classList.add('is-busy');
+                try {
+                    const result = await saveLiveWorkspace(workspace.workspace_id);
+                    showMessage(`Saved ${result.label || workspaceDisplayLabel(workspace, index)}.`, 'success');
+                } catch (error) {
+                    if (error.status === 409) {
+                        showMessage(error.message, 'info');
+                    } else {
+                        showMessage(
+                            `Could not save the workspace: ${error.message}${error.retryable ? ' — try again.' : ''}`,
+                            'error'
+                        );
+                    }
+                } finally {
+                    saveButton.classList.remove('is-busy');
+                }
+            });
             /* Close live workspace, from the surface that lists them. Distinct
                from closing its window (which changes nothing) and from closing
                its last tab (which forgets the snapshot): this ends the sessions
@@ -2954,7 +3003,7 @@
             });
             const actions = document.createElement('div');
             actions.className = 'workspace-live-actions';
-            actions.append(openButton, closeButton);
+            actions.append(openButton, saveButton, closeButton);
             row.append(name, meta, actions);
             list.appendChild(row);
         });
@@ -3309,6 +3358,9 @@
             });
 
             const data = await response.json();
+            if (await handleLaunchWorkspaceLabelConflict(response.status, data, button)) {
+                return;
+            }
             if (response.status === 409 && data.conflict === 'saved_session_live') {
                 /* Plan §6: a saved preset is live in at most one workspace.
                    Explain it and offer the two real resolutions instead of

@@ -16,7 +16,12 @@ import time
 import uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from web.runtime_state import capture_live_workspaces, normalize_native_zoom_factor
+from web.runtime_state import (
+    RuntimeStatePersistenceError,
+    capture_live_workspaces,
+    capture_workspace,
+    normalize_native_zoom_factor,
+)
 from web.saved_sessions import (
     _find_saved_session_entry,
     _load_saved_sessions_payload,
@@ -40,9 +45,19 @@ LIFECYCLE_SAVE_CHOICES = frozenset(
 )
 LIFECYCLE_FLUSH_TIMEOUT_SECONDS = 5.0
 LIFECYCLE_DECISION_TTL_SECONDS = 60.0
+# A socket that died without `pagehide` (crash, kill, network partition, a
+# suspended laptop) leaves its window registered as stale. That record must
+# block the flush while the loss is fresh — it may be a real window about to
+# reconnect — but a window gone for minutes is departed, not busy: past the
+# grace period its record is dropped instead of blocking every later save.
+LIFECYCLE_STALE_WINDOW_GRACE_SECONDS = 120.0
 _MAX_DECISIONS = 128
 _MAX_CLIENT_ERROR_LENGTH = 300
 _MAX_WINDOW_ID_LENGTH = 128
+# Safety net behind the grace period and the stable per-window id: even if both
+# are somehow bypassed, one workspace can never accumulate window records
+# without bound. Generous enough that real multi-window use never reaches it.
+_MAX_WINDOWS_PER_WORKSPACE = 16
 
 
 class LifecycleValidationError(ValueError):
@@ -52,12 +67,17 @@ class LifecycleValidationError(ValueError):
 class LifecycleCoordinator:
     """Track workspace-window flushes and one-use teardown decisions."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        stale_window_grace_seconds: float = LIFECYCLE_STALE_WINDOW_GRACE_SECONDS,
+    ):
         self._condition = threading.Condition(threading.Lock())
         self._client_windows: Dict[str, Set[str]] = {}
         self._windows: Dict[str, Dict[str, Any]] = {}
         self._flushes: Dict[str, Dict[str, Any]] = {}
         self._decisions: Dict[str, Tuple[str, float]] = {}
+        self._stale_window_grace = max(0.0, float(stale_window_grace_seconds))
+        self._join_sequence = 0
 
     def reset(self):
         """Clear transient state. Intended for tests and process reconfiguration."""
@@ -79,6 +99,9 @@ class LifecycleCoordinator:
         if not client or not workspace or not window:
             return
         with self._condition:
+            # A window id is stable per window (the page keeps it in
+            # sessionStorage), so a reload rejoins with its own id and replaces
+            # its stale record even when `pagehide` never fired.
             previous = self._windows.get(window)
             if previous is not None:
                 previous_client = previous["client_id"]
@@ -87,12 +110,16 @@ class LifecycleCoordinator:
                     previous_windows.discard(window)
                     if not previous_windows:
                         self._client_windows.pop(previous_client, None)
+            self._join_sequence += 1
             self._windows[window] = {
                 "client_id": client,
                 "workspace_id": workspace,
                 "connected": True,
+                "disconnected_at": None,
+                "joined_at": self._join_sequence,
             }
             self._client_windows.setdefault(client, set()).add(window)
+            self._enforce_window_bound_locked(workspace)
 
     def leave_workspace(self, client_id: Any, workspace_id: Any = None):
         client = str(client_id or "").strip()
@@ -114,16 +141,84 @@ class LifecycleCoordinator:
             self._condition.notify_all()
 
     def disconnect_client(self, client_id: Any):
-        """Keep disconnected windows as stale until pagehide or stable rejoin."""
+        """Mark the client's windows stale; they stay recoverable, not permanent.
+
+        The record is kept so a genuinely unreachable window is still reported
+        (`client_stale`) while the loss is fresh, but it carries the disconnect
+        time so :meth:`request_flush` can treat it as departed once the grace
+        period has passed rather than blocking every later save-on-exit.
+        """
         client = str(client_id or "").strip()
         if not client:
             return
         with self._condition:
+            now = time.monotonic()
             for window in self._client_windows.pop(client, set()):
                 record = self._windows.get(window)
                 if record is not None:
                     record["connected"] = False
+                    record["disconnected_at"] = now
             self._condition.notify_all()
+
+    def connected_window_count(self, workspace_id: Any) -> int:
+        """How many windows of one workspace can currently answer a flush.
+
+        Departed records (disconnected past the grace period) are dropped on
+        the way through, so the count never includes a window that could not
+        be reached anyway.
+        """
+        workspace = str(workspace_id or "").strip()
+        if not workspace:
+            return 0
+        with self._condition:
+            self._drop_departed_windows_locked(time.monotonic())
+            return sum(
+                1
+                for record in self._windows.values()
+                if record["workspace_id"] == workspace and record["connected"]
+            )
+
+    def _drop_window_locked(self, window_id: str, record: Dict[str, Any]):
+        """Remove one window record and its client back-reference."""
+        self._windows.pop(window_id, None)
+        client = record.get("client_id")
+        joined = self._client_windows.get(client)
+        if joined is not None:
+            joined.discard(window_id)
+            if not joined:
+                self._client_windows.pop(client, None)
+
+    def _drop_departed_windows_locked(self, now: float):
+        """Forget windows whose disconnect outlived the grace period."""
+        departed = [
+            (window_id, record)
+            for window_id, record in self._windows.items()
+            if not record["connected"]
+            and record["disconnected_at"] is not None
+            and now - record["disconnected_at"] >= self._stale_window_grace
+        ]
+        for window_id, record in departed:
+            self._drop_window_locked(window_id, record)
+
+    def _enforce_window_bound_locked(self, workspace_id: str):
+        """Cap one workspace's window records, evicting the least useful first.
+
+        Disconnected records go before connected ones, oldest first within each
+        kind. Reaching the cap with every window connected means the stable-id
+        and grace mechanisms were both bypassed; losing the oldest record's
+        flush tracking is still better than unbounded growth.
+        """
+        records = [
+            (window_id, record)
+            for window_id, record in self._windows.items()
+            if record["workspace_id"] == workspace_id
+        ]
+        excess = len(records) - _MAX_WINDOWS_PER_WORKSPACE
+        if excess <= 0:
+            return
+        records.sort(key=lambda item: (item[1]["connected"], item[1]["joined_at"]))
+        for window_id, record in records[:excess]:
+            self._drop_window_locked(window_id, record)
 
     def acknowledge_flush(self, client_id: Any, data: Any) -> bool:
         """Accept one Socket.IO acknowledgement from its authenticated sid."""
@@ -174,6 +269,10 @@ class LifecycleCoordinator:
         live_ids.discard("")
         request_id = uuid.uuid4().hex
         with self._condition:
+            # A window disconnected past the grace period is departed: drop its
+            # record instead of counting it in `expected`, or one abnormally
+            # lost window would block save-on-exit for the rest of the process.
+            self._drop_departed_windows_locked(time.monotonic())
             expected = {
                 (window_id, record["workspace_id"])
                 for window_id, record in self._windows.items()
@@ -537,3 +636,98 @@ def prepare_lifecycle_action(
 
     result["ready_to_exit"] = True
     return result
+
+
+def prepare_workspace_save(
+    session_manager: Any,
+    workspace_id: Any,
+    emit_request: Callable[[str, str], None],
+) -> Tuple[Dict[str, Any], int]:
+    """Flush one workspace's window and capture only its slot (launcher Save).
+
+    The Stage 4 flush handshake scoped to a single workspace, so the launcher's
+    per-row **Save** means exactly what in-window **Save Workspace** means: the
+    owning window acknowledges its latest presentation before the capture. It
+    never writes reusable presets and never issues a teardown decision.
+
+    A workspace with no reachable window is reported, never silently captured
+    from the last acknowledged server state — the same rule the exit
+    transaction follows. Sibling slots and ``saved_sessions.json`` are left
+    untouched by construction (:func:`capture_workspace` writes one slot).
+
+    Returns ``(payload, status)``; the caller only serializes it.
+    """
+    workspace = str(workspace_id or "").strip()
+    if session_manager.get_workspace(workspace) is None:
+        return {"error": "Workspace not found", "workspace_missing": True}, 404
+
+    if lifecycle_coordinator.connected_window_count(workspace) == 0:
+        return {
+            "saved": False,
+            "workspace_id": workspace,
+            "error": "No reachable window for this workspace — open it, then save again",
+            "retryable": True,
+        }, 503
+
+    flush_result = lifecycle_coordinator.request_flush({workspace}, emit_request)
+    if not flush_result["ok"]:
+        return {
+            "saved": False,
+            "workspace_id": workspace,
+            "error": "The workspace window did not finish flushing — try again",
+            "retryable": True,
+            "errors": flush_result["errors"],
+            "missing_workspaces": flush_result["missing_workspaces"],
+        }, 503
+
+    snapshots = session_manager.snapshot_live_workspaces()
+    live_snapshot = snapshots.get(workspace) or {}
+    try:
+        metadata = normalize_workspace_metadata(
+            flush_result["metadata"], {workspace: live_snapshot}
+        ).get(workspace) or {}
+    except LifecycleValidationError as exc:
+        return {
+            "saved": False,
+            "workspace_id": workspace,
+            "error": str(exc),
+            "retryable": True,
+            "errors": [{"category": "client_metadata", "error": str(exc)}],
+        }, 503
+
+    topbar_visible = metadata.get("topbar_visible")
+    try:
+        slot = capture_workspace(
+            session_manager,
+            workspace_id=workspace,
+            origin="manual",
+            active_group_id=metadata.get("active_group_id") or None,
+            native_zoom_factor=metadata.get("native_zoom_factor"),
+            topbar_visible=topbar_visible if isinstance(topbar_visible, bool) else None,
+        )
+    except RuntimeStatePersistenceError:
+        # Never answer "saved" for a revision that did not reach the disk.
+        return {
+            "saved": False,
+            "workspace_id": workspace,
+            "error": "The workspace snapshot could not be written to disk",
+            "retryable": True,
+        }, 503
+    if slot is None:
+        # An empty workspace is never captured, so it never overwrites (or
+        # clears) the previously saved slot.
+        return {
+            "saved": False,
+            "workspace_id": workspace,
+            "error": "This workspace has no sessions to save",
+        }, 409
+    return {
+        "saved": True,
+        "workspace_id": slot["workspace_id"],
+        "label": slot["label"],
+        "origin": slot["origin"],
+        "saved_at": slot["saved_at"],
+        "active_group_id": slot["active_group_id"],
+        "native_zoom_factor": slot.get("native_zoom_factor"),
+        "topbar_visible": slot["topbar_visible"],
+    }, 200

@@ -155,6 +155,7 @@ from web.lifecycle import (
     lifecycle_coordinator,
     normalize_workspace_metadata,
     prepare_lifecycle_action,
+    prepare_workspace_save,
 )
 from web.paths import BASE_DIR, install_kind
 from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
@@ -321,6 +322,7 @@ from web.workspaces import (
     restore_workspaces,
     workspace_has_groups,
     workspace_label,
+    workspace_label_conflict,
     workspace_missing_payload,
     workspace_room,
 )
@@ -1684,9 +1686,31 @@ def create_workspace():
     """
     data = request.get_json(silent=True) or {}
     label = normalize_workspace_label(data.get("label") or data.get("workspace_label"))
+    conflict = workspace_label_conflict(label)
+    if conflict is not None:
+        return jsonify(conflict), 409
     workspace = session_manager.create_workspace(label=label, retain_when_empty=True)
     logger.debug("Created workspace %s label=%r", workspace.workspace_id, workspace.label)
     return jsonify(public_workspace_payload(workspace, 0)), 201
+
+
+@app.route('/api/workspaces/validate-label', methods=['POST'])
+def validate_workspace_label():
+    """Check whether a new-workspace label is available without creating it.
+
+    The launcher's destination picker is a draft until a session is launched,
+    so using ``POST /api/workspaces`` as its validator would leak deliberately
+    empty workspaces whenever the user changed their mind. This route reads the
+    same namespace owner as create, rename, move, and launch, and returns the
+    same actionable ``409`` payload while mutating nothing. The launch route
+    checks again when it commits, closing the validation/launch race.
+    """
+    data = request.get_json(silent=True) or {}
+    label = normalize_workspace_label(data.get("label") or data.get("workspace_label"))
+    conflict = workspace_label_conflict(label)
+    if conflict is not None:
+        return jsonify(conflict), 409
+    return jsonify({"available": True, "label": label})
 
 
 @app.route('/api/workspaces/close-extra', methods=['POST'])
@@ -1726,6 +1750,13 @@ def rename_workspace(workspace_id: str):
         return jsonify({"error": "A 'label' is required"}), 400
 
     label = normalize_workspace_label(data.get("label"))
+    if session_manager.get_workspace(resolved_workspace_id) is None:
+        return jsonify({"error": "Workspace not found"}), 404
+    # The renamed workspace's own live record and its own saved slot are the
+    # same identity, never a conflict (SGP-13).
+    conflict = workspace_label_conflict(label, exclude_workspace_id=resolved_workspace_id)
+    if conflict is not None:
+        return jsonify(conflict), 409
     workspace = session_manager.rename_workspace(resolved_workspace_id, label)
     if workspace is None:
         return jsonify({"error": "Workspace not found"}), 404
@@ -1751,6 +1782,32 @@ def close_workspace(workspace_id: str):
     """
     forget = str(request.args.get("forget", "")).strip().lower() in {"1", "true", "yes"}
     payload, status = close_live_workspace(workspace_id, forget=forget)
+    return jsonify(payload), status
+
+
+@app.route('/api/workspaces/<workspace_id>/save', methods=['POST'])
+def save_workspace(workspace_id: str):
+    """Save one live workspace from the surface that lists them all (SGP-14).
+
+    The launcher's per-row **Save**: the Stage 4 flush handshake scoped to this
+    one workspace, then a capture of only its slot. It flushes the owning
+    window first or refuses — a workspace with no reachable window is reported,
+    never captured from stale server state — and it never writes reusable
+    presets and never terminates anything.
+    """
+    try:
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    payload, status = prepare_workspace_save(
+        session_manager,
+        resolved_workspace_id,
+        lambda target_id, request_id: socketio.emit(
+            "lifecycle_flush_requested",
+            {"request_id": request_id, "workspace_id": target_id},
+            room=workspace_room(target_id),
+        ),
+    )
     return jsonify(payload), status
 
 
