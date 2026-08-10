@@ -154,6 +154,17 @@ def apply_resolved_server_origins(host, port):
         ", ".join(str(entry) for entry in origins),
         "" if configured else " (plus the request's own origin)",
     )
+    if any(str(entry).strip() == "*" for entry in configured or []):
+        # Not refused — a reverse proxy is a legitimate reason to widen this —
+        # but named at startup, because the value is easy to add while debugging
+        # and easy to forget, and it is the only thing standing between a page
+        # the user happens to visit and their live shells (audit F4).
+        logger.warning(
+            "security.cors_origins is [\"*\"]: any web page can reach Socket.IO "
+            "and write to terminals, and the cross-origin write guard is off. "
+            "Name the proxy origin explicitly, or clear the setting to derive "
+            "same-origin."
+        )
     return origins
 
 

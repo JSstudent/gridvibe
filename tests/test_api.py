@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import unittest
+from collections import deque
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -100,6 +101,20 @@ class RealpathFakeSftp(FakeSftp):
         if normalized not in self.entries:
             raise FileNotFoundError(errno.ENOENT, "No such file")
         return normalized
+
+
+class _CountedChunk(str):
+    """A terminal output chunk that records every ``len()`` taken of it.
+
+    Lets the rolling-buffer tests assert *how much* of the deque the cache
+    touches per chunk without timing anything (audit F3).
+    """
+
+    len_calls = 0
+
+    def __len__(self):
+        type(self).len_calls += 1
+        return super().__len__()
 
 
 class FakeSshStream:
@@ -3699,9 +3714,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("pip install -r requirements-voice.txt", payload["status_message"])
 
     def test_voice_status_endpoint_reports_per_engine_availability(self):
+        # ws_client is patched for the same reason WhisperModel and np are in the
+        # sibling test above: both Vosk paths short-circuit on `ws_client is None`
+        # before the packages check, so an environment without websocket-client
+        # would exercise a different branch than the one under test.
         with patch.object(api.runtime_config, "voice_engine", "vosk"), patch.object(
             api, "_vosk_service_reachable", return_value=False
-        ), patch.object(
+        ), patch.object(web_voice, "ws_client", object()), patch.object(
             web_voice, "_vosk_service_packages_available", return_value=False
         ), patch.object(web_voice, "WhisperModel", object()), patch.object(
             web_voice, "np", object()
@@ -3719,7 +3738,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_voice_status_endpoint_trusts_a_running_external_vosk_service(self):
         with patch.object(api.runtime_config, "voice_engine", "vosk"), patch.object(
             api, "_vosk_service_reachable", return_value=True
-        ), patch.object(
+        ), patch.object(web_voice, "ws_client", object()), patch.object(
             web_voice, "_vosk_service_packages_available", return_value=False
         ):
             response = self.client.get("/api/voice-status")
@@ -12726,6 +12745,97 @@ class TerminalOutputBufferCacheTestCase(unittest.TestCase):
 
         self.assertEqual(api._get_buffered_terminal_output("buf-e"), "")
 
+    def test_caching_a_chunk_does_not_rescan_the_whole_buffer(self):
+        """Audit F3 — the append path must not walk the deque under the lock."""
+        with patch.object(web_terminal_io, "TERMINAL_OUTPUT_BUFFER_MAX_CHARS", 500):
+            for _ in range(600):
+                api._cache_terminal_output("buf-f", _CountedChunk("x"))
+            # 1-character chunks are the worst case: one deque entry per char,
+            # which is the keystroke-echo path the finding measured.
+            self.assertEqual(len(api.session_output_buffers["buf-f"]), 500)
+
+            _CountedChunk.len_calls = 0
+            api._cache_terminal_output("buf-f", _CountedChunk("y"))
+
+        # The old implementation re-summed the deque on every chunk, so this was
+        # 501 measurements instead of a handful.
+        self.assertLessEqual(_CountedChunk.len_calls, 4)
+        self.assertEqual(api._get_buffered_terminal_output("buf-f"), "x" * 499 + "y")
+
+    def test_running_total_stays_exact_across_mixed_chunk_sizes(self):
+        limit = api.TERMINAL_OUTPUT_BUFFER_MAX_CHARS
+        api._cache_terminal_output("buf-g", "a" * (limit - 10))
+        api._cache_terminal_output("buf-g", "b" * 5)
+        api._cache_terminal_output("buf-g", "c" * 200)  # partially trims the head
+        api._cache_terminal_output("buf-g", "d")
+
+        buffered = api._get_buffered_terminal_output("buf-g")
+        self.assertEqual(len(buffered), limit)
+        self.assertTrue(buffered.endswith("b" * 5 + "c" * 200 + "d"))
+        # The carried total must still describe what the deque actually holds;
+        # a drifted total trims to the wrong length on some later chunk.
+        self.assertEqual(
+            api.session_output_buffers["buf-g"].total_chars, len(buffered)
+        )
+
+    def test_a_plain_deque_is_adopted_without_losing_its_tail(self):
+        with api.connection_lock:
+            api.session_output_buffers["buf-h"] = deque(["old "])
+
+        api._cache_terminal_output("buf-h", "new")
+
+        self.assertEqual(api._get_buffered_terminal_output("buf-h"), "old new")
+
+
+class BrowserPaneConnectDispatchTestCase(unittest.TestCase):
+    """Audit F5 — _connect_session must recognise browser panes itself."""
+
+    def _browser_session(self):
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        self.addCleanup(api.session_manager.remove_group, group.group_id)
+        return api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=os.getcwd(),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:3000",
+            initial_command_mode="browser",
+            browser_tabs=["http://127.0.0.1:3000"],
+        )
+
+    def test_a_browser_pane_never_reaches_a_shell_connector(self):
+        session = self._browser_session()
+
+        with patch.object(web_terminal_io, "_connect_local_session") as local, \
+                patch.object(web_terminal_io, "_connect_ssh_session") as ssh, \
+                patch.object(web_terminal_io, "_broadcast_session_status"):
+            api._connect_session(session.session_id)
+
+        # A browser pane is always mode == "wsl", so without its own branch it
+        # falls into the local shell and gets its tab URL typed at the prompt.
+        local.assert_not_called()
+        ssh.assert_not_called()
+        self.assertEqual(
+            api.session_manager.get_session(session.session_id).status,
+            api.SessionStatus.CONNECTED,
+        )
+
+    def test_a_browser_pane_reports_connected_to_the_room(self):
+        session = self._browser_session()
+
+        with patch.object(web_terminal_io, "_connect_local_session"), \
+                patch.object(web_terminal_io, "_connect_ssh_session"), \
+                patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            api._connect_session(session.session_id)
+
+        broadcast.assert_called_once_with(session.session_id)
+
 
 class SshSftpPoolTestCase(unittest.TestCase):
     """Perf finding 3.1 — explorer SSH transports are pooled per session."""
@@ -13923,6 +14033,28 @@ class ResolvedServerOriginsTestCase(unittest.TestCase):
         self._start_server("127.0.0.1", 8080, config)
 
         self.assertTrue(self._handshake("http://evil.example"))
+
+    def test_an_explicit_wildcard_is_named_in_the_startup_log(self):
+        """Audit F4 — `*` turns off both origin defences, so say so on start."""
+        config = {
+            "security": {"cors_origins": ["*"]},
+            "server": {"host": "127.0.0.1", "port": 5050},
+        }
+
+        with self.assertLogs("web.app", level="WARNING") as logs:
+            self._start_server("127.0.0.1", 8080, config)
+
+        warning = "\n".join(logs.output)
+        self.assertIn("security.cors_origins", warning)
+        self.assertIn("write guard", warning)
+
+    def test_the_derived_default_logs_no_wildcard_warning(self):
+        config = {"security": {"cors_origins": []}, "server": {"host": "127.0.0.1", "port": 5050}}
+
+        with self.assertLogs("web.app", level="INFO") as logs:
+            self._start_server("127.0.0.1", 8080, config)
+
+        self.assertNotIn("WARNING", "\n".join(logs.output))
 
     def test_same_origin_policy_ignores_a_missing_or_null_origin(self):
         policy = web_app.SameOriginPolicy(["http://127.0.0.1:8080"])

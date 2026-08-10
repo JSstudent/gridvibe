@@ -45,10 +45,10 @@ The findings below are concentrated in two places — the process entry points
 | --- | --- | --- | --- | --- |
 | F1 | **High** | Entry points / security | `--host`/`--port` silently break realtime transport | **Fixed 2026-08-10** |
 | F2 | **Medium** | Voice | Per-session voice state leaks on disconnect; PCM buffer unbounded | **Fixed 2026-08-10** |
-| F3 | **Medium** | Performance | `_cache_terminal_output` is O(n) per chunk under the global lock | Open |
-| F4 | **Medium** | Local config | `config.json` sets `cors_origins: ["*"]`, disabling both origin defences | Open (local machine) |
-| F5 | Low | Correctness | `_connect_session` has no browser-pane branch (guardrail 6 corollary) | Open |
-| F6 | Low | Tests | Two voice tests depend on an unpatched module-level import | Open |
+| F3 | **Medium** | Performance | `_cache_terminal_output` is O(n) per chunk under the global lock | **Fixed 2026-08-10** |
+| F4 | **Medium** | Local config | `config.json` sets `cors_origins: ["*"]`, disabling both origin defences | **Fixed 2026-08-10** |
+| F5 | Low | Correctness | `_connect_session` has no browser-pane branch (guardrail 6 corollary) | **Fixed 2026-08-10** |
+| F6 | Low | Tests | Two voice tests depend on an unpatched module-level import | **Fixed 2026-08-10** |
 | F7 | Low | Docs | `CLAUDE.md` line 116 describes a test contract that no longer exists | Open |
 | F8 | Low | Explorer | Pooled SSH client can be reaped underneath an in-flight request | Open |
 | F9 | Info | Docs | `GET /api/explorer/<id>/image` is missing from the read-only contract text | Open |
@@ -268,7 +268,7 @@ the baseline (F6); ruff clean.
 
 ---
 
-### F3 — `_cache_terminal_output` is O(n) per chunk under the global lock · **Medium**
+### F3 — `_cache_terminal_output` is O(n) per chunk under the global lock · **Medium** · *Fixed 2026-08-10*
 
 `web/terminal_io.py:136`:
 
@@ -305,9 +305,55 @@ a full-buffer walk on the hot path.
 incrementally on append and eviction. The trimming loop already computes
 exactly the deltas needed; only the initial `sum()` has to go.
 
+#### Resolution — 2026-08-10
+
+The running total went **onto** the deque rather than beside it. `_OutputBuffer`
+(`web/terminal_io.py`) is a `deque` subclass with one extra slot, `total_chars`;
+`session_output_buffers` stays a plain session → deque mapping, so every reader,
+the `web.api` re-export, and the tests that treat it as a dict of joinable
+chunks are untouched.
+
+That is the reason the parallel dict was not taken. Five places create or drop a
+buffer (`_clear_terminal_output_buffer`, `_close_ssh_connection`,
+`_close_all_ssh_connections`, and both connectors' registry inserts), and a
+parallel dict has to be kept in step at all of them — where the one that gets
+missed fails *silently*, because a drifted total does not show up at the miss.
+It shows up as a buffer trimmed to the wrong length some number of chunks later.
+Carrying the total on the object makes it impossible to create the deque without
+its total.
+
+`_cache_terminal_output` is the only function that mutates a buffer's *contents*,
+so all the bookkeeping is local to it: the trim loop already computed the exact
+deltas, and only the opening `sum()` had to go. A buffer that is not an
+`_OutputBuffer` — a plain deque left by an older path, or by a test — is adopted
+by paying the sum once, rather than being dropped with its tail.
+
+**Measured** on the same machine with the same harness as the finding:
+
+| Chunk size | Chunks held | Before | After |
+| --- | --- | --- | --- |
+| 1 char (keystroke echo, the `read(1)` fallback path) | 50 000 | 2390.4 µs | **0.6 µs** |
+| 64 chars (interactive line) | 782 | 39.7 µs | **0.8 µs** |
+| 4096 chars (bulk read) | 13 | 2.2 µs | **0.9 µs** |
+
+The number that matters is not the 4000× on the first row but the shape of the
+column: the cost is now flat in the number of chunks held. The 1-character path
+was never expensive because of anything it does — only because of how many
+chunks it leaves behind for the next append to walk.
+
+**Covered by three tests** in `TerminalOutputBufferCacheTestCase`
+(`tests/test_api.py`), none of which time anything. The regression is held by
+making the chunks measurable: they are `str` subclasses that count every `len()`
+taken of them, so caching one more chunk into a full buffer is asserted to
+measure a handful of chunks rather than all 500 — it measured 504 against the
+old implementation. The other two pin the total's exactness across the
+append / evict / partial-trim branches and the adoption of a plain deque. Suite:
+1422 tests, **0 failures** (the two environmental ones are gone — see F6); ruff
+clean.
+
 ---
 
-### F4 — Local `config.json` disables both origin defences · **Medium**
+### F4 — Local `config.json` disables both origin defences · **Medium** · *Fixed 2026-08-10*
 
 Not a repository defect — `config.json` is gitignored and the shipped
 `default_config.json` is correct (`"cors_origins": []` → derive same-origin).
@@ -338,9 +384,35 @@ it, and in that case name the proxy origin explicitly rather than using `*`.
 Worth considering upstream: refuse `*` when the bind host is loopback, or log a
 startup warning — the value is easy to add while debugging and easy to forget.
 
+#### Resolution — 2026-08-10
+
+**The local override is gone.** `config.json` on this machine now reads
+`"cors_origins": []`, matching the shipped default, so both layers are back:
+Socket.IO derives same-origin (plus the request's own origin, per F1) and
+`_allowed_write_origin_netlocs` returns a real set instead of `None`. Nothing in
+the repository changed for this — `config.json` is gitignored — and there is no
+reverse proxy on this machine that needed the value.
+
+**Upstream, the value now announces itself.** Refusing `*` was the finding's
+other suggestion and it was deliberately not taken: a reverse proxy in front of a
+loopback bind is a legitimate reason to widen this, and refusing would break a
+configuration the user explicitly asked for in order to protect them from one
+they might not have. A warning costs that user one log line and costs the
+forgetful user nothing but visibility, which is the whole gap here.
+`apply_resolved_server_origins` (`web/app.py`) now logs one `WARNING` at startup
+naming **both** defences the value switches off — the Socket.IO channel that
+accepts terminal input, and the cross-origin write guard — and what to do
+instead. It sits immediately after the allowlist line F1 added, so the first
+lines of a run describe the whole origin posture rather than half of it.
+
+Covered by two tests in `ResolvedServerOriginsTestCase` (`tests/test_api.py`): a
+configured `*` warns and names the write guard, and the derived default logs
+nothing above INFO. `test_explicit_wildcard_still_allows_every_origin` is
+unchanged and still passes — this is a report, not a behaviour change.
+
 ---
 
-### F5 — `_connect_session` has no browser-pane branch · Low
+### F5 — `_connect_session` has no browser-pane branch · Low · *Fixed 2026-08-10*
 
 `web/terminal_io.py:1112`:
 
@@ -378,9 +450,32 @@ dispatching. The one unguarded caller is `reconnect_session`
 function already imports `_is_explorer_session` from the same module that
 exports `_is_browser_session`. Cheap insurance against the next caller.
 
+#### Resolution — 2026-08-10
+
+Taken as written: the early return in `_connect_session` (`web/terminal_io.py`)
+is now `_is_explorer_session(session) or _is_browser_session(session)`, with
+`_is_browser_session` added to the existing `web.explorer` import.
+
+The comment beside it states the *failure mode*, not the rule. The rule — "a
+browser pane is not a shell" — is the part that is easy to satisfy accidentally
+and easy to forget deliberately; what makes this worth a comment is that
+omitting it does not raise. A browser pane is always `mode == "wsl"`, so the
+missing branch opens a working local shell and types the tab's URL at it.
+
+The external guards at the three live call sites stay. They are not redundant —
+each also decides what *else* not to do for a non-terminal pane. What changed is
+that `reconnect_session`, the one unguarded caller (unreachable today only
+because browser panes never reach `ERROR`/`DISCONNECTED`), is now correct by
+construction, as is whatever calls this next.
+
+**Covered by `BrowserPaneConnectDispatchTestCase`** (`tests/test_api.py`): a
+browser pane reaches neither shell connector, ends `CONNECTED`, and broadcasts
+that exactly once. Both tests fail when the browser check is forced never to
+fire, so they hold the branch rather than describing it.
+
 ---
 
-### F6 — Two voice tests depend on an unpatched module-level import · Low
+### F6 — Two voice tests depend on an unpatched module-level import · Low · *Fixed 2026-08-10*
 
 ```
 FAIL: ApiRoutes: voice status endpoint reports per engine availability
@@ -415,6 +510,36 @@ Two separate points, both worth acting on:
    makes them test their stated behaviour in any environment.
 2. This `.venv` is stale against `requirements.txt` — `make dev-deps` (or
    `pip install -r requirements-dev.txt`) will fix the run.
+
+#### Resolution — 2026-08-10
+
+Both points, and the second one turned out to be misdiagnosed above.
+
+**1. The tests now patch what they depend on.**
+`patch.object(web_voice, "ws_client", object())` was added to both, which is
+exactly what their sibling
+`test_voice_status_endpoint_reports_missing_whisper_dependency` already does for
+`WhisperModel`/`np`. Both Vosk paths short-circuit on `ws_client is None`
+*before* reaching the packages check these two tests exist to exercise, so
+without the patch they were asserting against a branch neither of them is about.
+They now pass or fail on their stated behaviour in any environment, installed
+dependency or not.
+
+**2. It was not the `.venv`.** The finding blamed a stale `.venv`; the `.venv`
+in this repository has `websocket-client` 1.9.0 and always did. What is stale is
+the interpreter the suite was actually being run with — `C:\Python314\python.exe`,
+the system Python, which is what `python tests/run_tests.py` resolves to on this
+machine (the Windows-without-`make` path in the Working Rules, which never goes
+near `make dev-deps` or its `.venv` stamp). `websocket-client>=1.9.0` is now
+installed there too, so both interpreters agree.
+
+That distinction is the more useful half of the finding: a `make check` run and a
+direct `python tests/run_tests.py` run on this machine were executing against two
+different dependency sets, and only one of them was the one `requirements.txt`
+describes. The test fix means that no longer changes the result.
+
+Suite (system interpreter): 1422 tests, **0 failures**, 7 skipped — the baseline's
+two failures are gone. Ruff clean.
 
 ---
 
@@ -624,11 +749,19 @@ already exist rather than opening new ones.
 
 1. ~~**F1** — a documented flag that silently breaks the app is the only
    user-facing breakage here.~~ **Done 2026-08-10.**
-2. **F4** — one line of local config; removes a real drive-by risk today.
+2. ~~**F4** — one line of local config; removes a real drive-by risk today.~~
+   **Done 2026-08-10** (local config cleared; upstream startup warning added).
 3. ~~**F2** — resource leak in the newest feature, cheapest to fix while it is
    still fresh.~~ **Done 2026-08-10.**
-4. **F6, F7** — restore a green suite and an accurate `CLAUDE.md`; both are
-   minutes of work and both currently mislead.
-5. **F3** — measurable, contained, and the fix is a running total.
-6. **F5, F8, F9** — latent/narrow/documentation; batch them.
+4. ~~**F6**~~ **Done 2026-08-10** — the suite is green again. **F7** remains
+   open: an accurate `CLAUDE.md` is still minutes of work and still misleads.
+5. ~~**F3** — measurable, contained, and the fix is a running total.~~
+   **Done 2026-08-10.**
+6. ~~**F5**~~ **Done 2026-08-10.** **F8, F9** remain — narrow/documentation;
+   batch them.
 7. **§4.1** — schedule the `explorer-viewer.js` split before it grows further.
+
+**Remaining after this round: F7, F8, F9, and §4.** Every **High** and **Medium**
+finding is closed; what is left is one stale documentation line, one narrow race
+that needs a same-session concurrent request during a >60 s transfer, one missing
+entry in a contract list, and the standing refactor/optimization items.

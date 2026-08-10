@@ -33,6 +33,7 @@ from web.config import runtime_config
 from web.explorer import (
     _evict_all_pooled_ssh_clients,
     _evict_pooled_ssh_client,
+    _is_browser_session,
     _is_explorer_session,
 )
 from web.hostkeys import _apply_host_key_policy
@@ -66,11 +67,32 @@ WINDOWS_DEVICE_ATTRIBUTES_RESPONSE = "[?1;2c"
 
 # Store active SSH connections and buffered output
 ssh_connections: Dict[str, Dict[str, Any]] = {}
+TERMINAL_OUTPUT_BUFFER_MAX_CHARS = 50000
+
+
+class _OutputBuffer(deque):
+    """Chunk deque that carries its own character total.
+
+    The buffer is bounded by total *characters*, not by chunk count, so the
+    number of chunks scales inversely with chunk size — 1-character keystroke
+    echoes (the ``read(1)`` fallback path) fill it with 50 000 entries. Re-summing
+    that on every append, while holding the process-wide ``connection_lock``,
+    cost ~2.4 ms per character and serialised every other pane behind it (audit
+    F3). The trim loop already computes the exact deltas, so the running total
+    only has to be carried alongside the chunks.
+    """
+
+    __slots__ = ("total_chars",)
+
+    def __init__(self, chunks=()):
+        super().__init__(chunks)
+        self.total_chars = sum(len(chunk) for chunk in self)
+
+
 # Rolling replay buffers kept as chunk deques so a busy pane appends cheaply
 # instead of re-copying the whole tail on every output chunk; join only at
 # replay time via _get_buffered_terminal_output.
 session_output_buffers: Dict[str, Deque[str]] = {}
-TERMINAL_OUTPUT_BUFFER_MAX_CHARS = 50000
 client_joined_sessions: Dict[str, set[str]] = {}
 _MAX_TRACKED_SOCKET_CLIENTS = 1000
 # Lock ordering: connection_lock may be taken before session_manager.lock
@@ -139,20 +161,22 @@ def _cache_terminal_output(session_id: str, output: str):
         return
     with connection_lock:
         buffer = session_output_buffers.get(session_id)
-        if buffer is None:
-            buffer = deque()
+        if not isinstance(buffer, _OutputBuffer):
+            # Adopts a plain deque left by an older path (or a test) by paying
+            # the one-time sum, rather than discarding the buffered tail.
+            buffer = _OutputBuffer(buffer or ())
             session_output_buffers[session_id] = buffer
         buffer.append(output)
-        total = sum(len(chunk) for chunk in buffer)
-        while buffer and total > TERMINAL_OUTPUT_BUFFER_MAX_CHARS:
-            excess = total - TERMINAL_OUTPUT_BUFFER_MAX_CHARS
+        buffer.total_chars += len(output)
+        while buffer and buffer.total_chars > TERMINAL_OUTPUT_BUFFER_MAX_CHARS:
+            excess = buffer.total_chars - TERMINAL_OUTPUT_BUFFER_MAX_CHARS
             head = buffer[0]
             if len(head) <= excess:
                 buffer.popleft()
-                total -= len(head)
+                buffer.total_chars -= len(head)
             else:
                 buffer[0] = head[excess:]
-                total = TERMINAL_OUTPUT_BUFFER_MAX_CHARS
+                buffer.total_chars = TERMINAL_OUTPUT_BUFFER_MAX_CHARS
 
 
 def _get_buffered_terminal_output(session_id: str) -> str:
@@ -171,7 +195,7 @@ def _clear_client_joined_sessions(client_id: str):
 def _clear_terminal_output_buffer(session_id: str):
     """Drop the buffered replay output for one terminal session."""
     with connection_lock:
-        session_output_buffers[session_id] = deque()
+        session_output_buffers[session_id] = _OutputBuffer()
 
 
 def _close_ssh_connection(session_id: str, clear_buffer: bool = True):
@@ -977,7 +1001,7 @@ def _connect_ssh_session(session_id: str, session: Any):
             stale = session_manager.get_session(session_id) is None
             if not stale:
                 ssh_connections[session_id] = connection
-                session_output_buffers[session_id] = deque()
+                session_output_buffers[session_id] = _OutputBuffer()
         if stale:
             logger.info("[%s] Session was removed before SSH startup completed", session_id)
             _shutdown_connection(connection)
@@ -1079,7 +1103,7 @@ def _connect_local_session(session_id: str, session: Any):
             stale = session_manager.get_session(session_id) is None
             if not stale:
                 ssh_connections[session_id] = connection
-                session_output_buffers[session_id] = deque()
+                session_output_buffers[session_id] = _OutputBuffer()
         if stale:
             logger.info("[%s] Session was removed before local shell startup completed", session_id)
             _shutdown_connection(connection)
@@ -1117,7 +1141,13 @@ def _connect_session(session_id: str):
         logger.error(f"[{session_id}] Session not found in manager")
         return
 
-    if _is_explorer_session(session):
+    # Browser panes are always mode == "wsl" (_normalize_startup_mode only admits
+    # `browser` for that connection mode), so without this branch they fall into
+    # the local-shell connector and _run_startup_sequence types their
+    # initial_command — the tab's URL — at the prompt. Every caller guards
+    # externally today; this is the guardrail-6 corollary held at the one place
+    # that resolves a pane's kind, so the next caller cannot reintroduce it.
+    if _is_explorer_session(session) or _is_browser_session(session):
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         _broadcast_session_status(session_id)
         return
