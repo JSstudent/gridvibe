@@ -3238,6 +3238,22 @@
             cursor: default;
         }
 
+        /* The editor's dictation mic. `position: relative` is what the shared
+           absolutely-positioned .voice-partial-preview anchors to; the
+           .voice-btn.recording / :disabled rules above supply every state, so
+           nothing is restyled here. Deliberately not `.voice-control`, which is
+           hidden inside .explorer-pane. */
+        .explorer-editor-voice {
+            position: relative;
+            display: inline-flex;
+            flex: 0 0 auto;
+        }
+
+        .explorer-editor-voice-btn {
+            min-width: 32px;
+            padding: 0 8px;
+        }
+
         /* The full-height edit surface: follows the Source view's per-tab line
            wrap flag (unwrapped it scrolls both directions), inherits the per-tab
            editor font-size variable. */

@@ -13352,6 +13352,15 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             terminals_html.index("js/terminal-icons.js"),
             terminals_html.index("js/voice-input.js"),
         )
+        # voice-dictation.js is the DOM-free transcript routing/insertion rule
+        # voice-input.js and terminals.js consume, so it loads first. It is not
+        # referenced by the launcher, which has no explorer panes.
+        self.assertIn(f"/static/js/voice-dictation.js?v={__version__}", terminals_html)
+        self.assertNotIn("js/voice-dictation.js", launcher_html)
+        self.assertLess(
+            terminals_html.index("js/voice-dictation.js"),
+            terminals_html.index("js/voice-input.js"),
+        )
         self.assertLess(
             terminals_html.index("js/voice-input.js"),
             terminals_html.index("js/explorer-viewer.js"),
@@ -15652,24 +15661,15 @@ class BroadcastInputTestCase(unittest.TestCase):
 
     def test_voice_transcript_honours_broadcast_typing(self):
         """ISSUE-2026-026: a committed voice transcript fans out to every plain
-        pane through the same broadcast filter keyboard input uses; interim
-        previews stay on the recording pane only."""
+        pane through the same broadcast filter keyboard input uses.
+
+        Which destination a transcript reaches (terminal, editor, preview
+        bubble, nowhere) is executed against the real routing rule in
+        tests/test_voice_dictation.py; what remains here is the DRY contract
+        that the voice path forwards through the *same* peer helper as
+        keyboard input rather than growing a second fan-out.
+        """
         terminals_js = self._static("js/terminals.js")
-        handler = terminals_js[
-            terminals_js.index("socket.on('voice_result'"):
-            terminals_js.index("socket.on('voice_status'")
-        ]
-        # final branch: deliver to recorder + fan out via the shared helper
-        self.assertIn("_sendToTerminal(index, text);", handler)
-        self.assertIn("broadcastInputToPeers(index, text);", handler)
-        self.assertIn("_clearVoicePreview(index);", handler)
-        # interim (non-final) previews are isolated to the recording pane
-        self.assertIn("_showVoicePreview(index, text);", handler)
-        self.assertLess(
-            handler.index("broadcastInputToPeers(index, text)"),
-            handler.index("_showVoicePreview(index, text)"),
-        )
-        # the voice path reuses the *same* peer helper as keyboard forwarding
         self.assertEqual(
             terminals_js.count("broadcastInputToPeers(index, "), 2
         )
