@@ -2399,15 +2399,20 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         toggle = html[
             html.index("async function toggleExplorerTreeDirectory(index, path)"):
-            html.index("async function openExplorerTreeDirectory(index, path)")
+            html.index("const EXPLORER_TREE_LEVEL_LOAD_CONCURRENCY")
         ]
         # The fold arrow is its own button and never navigates the Preview tab,
         # so browsing the tree cannot evict the file the pane is showing.
         self.assertIn("data-explorer-tree-chevron", html)
-        self.assertIn(
-            "toggleExplorerTreeDirectory(index, button.dataset.explorerTreeChevron || '');",
-            html,
-        )
+        # It routes two gestures: a plain click folds the one directory, Alt
+        # folds every directory at that level. What each of them does to the
+        # expanded set is executed in tests/test_explorer_tree_fold.py.
+        chevron_handler = html[html.index("panel.querySelectorAll('[data-explorer-tree-chevron]')"):]
+        chevron_handler = chevron_handler[: chevron_handler.index("});")]
+        self.assertIn("event.altKey", chevron_handler)
+        self.assertIn("toggleExplorerTreeLevel(index, path)", chevron_handler)
+        self.assertIn("toggleExplorerTreeDirectory(index, path)", chevron_handler)
+        self.assertNotIn("loadExplorerPane(", chevron_handler)
         self.assertNotIn("loadExplorerPane(", toggle)
         self.assertIn("pane._explorerTreeExpanded.delete(path);", toggle)
         # The name button navigates and expands, but never collapses.
