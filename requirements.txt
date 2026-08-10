@@ -10,7 +10,7 @@ bleach>=6.4.0
 paramiko>=5.0.0
 
 # Socket.IO transport
-python-socketio>=5.16.3
+python-socketio>=5.16.4
 python-engineio>=4.13.3
 
 # Encryption for saved session passwords
