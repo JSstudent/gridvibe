@@ -10,12 +10,12 @@ bleach>=6.4.0
 paramiko>=5.0.0
 
 # Socket.IO transport
-python-socketio>=5.16.3
-python-engineio>=4.13.3
+python-socketio>=5.16.4
+python-engineio>=4.13.4
 
 # Encryption for saved session passwords
-cryptography>=49.0.0
-cffi>=2.1.0
+cryptography>=50.0.0
+cffi>=2.1.1
 
 # Local Windows terminals (ConPTY; skipped on other platforms)
 pywinpty>=3.0.5; platform_system == "Windows"
