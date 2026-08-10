@@ -24,11 +24,28 @@
 
     /* Drop a pane's edit without a prompt. Callers that reach here have already
        confirmed (or the buffer was clean). Sync the tab marker immediately:
-       some exits refresh the file in place and do not rebuild the tab strip. */
+       some exits refresh the file in place and do not rebuild the tab strip.
+
+       This is also the one choke point that stops dictation: every deliberate
+       teardown route (cancel, discard, save success, reload from disk, tab or
+       pane close) already funnels here, so no exit path needs its own stop
+       call. `_stopVoice` clears `state.recording` before its first await, so
+       the microphone goes quiet in this tick even though the promise is not
+       awaited — this function is synchronous and several callers depend on
+       that. The expected-transcript epoch is deliberately *not* cleared, so a
+       transcript that lands after the editor is gone is reported instead of
+       silently vanishing. */
     function clearExplorerEditState(index) {
         const pane = terminals[index];
         if (pane) {
+            const state = pane._explorerEdit;
+            const capturedEpoch = state && state.voice ? state.voice.epoch : null;
+            explorerEditorCancelVoiceSettle(state);
             pane._explorerEdit = null;
+            if (capturedEpoch !== null) {
+                explorerEditorExpireOrphanedDictation(index, capturedEpoch);
+                Promise.resolve(_stopVoice(index)).catch(() => {});
+            }
             updateExplorerEditTabDirty(index);
         }
     }
@@ -56,27 +73,47 @@
     }
 
     /* Group-level guard: one prompt covers every rendered pane with a dirty
-       edit, clearing them all on confirmation. */
+       edit, and on confirmation *every* open editor in the group leaves edit
+       mode — not only the dirty ones.
+
+       Both halves matter because this guard's callers (group switch, group
+       close, session move) do not rebuild these cards: `cacheVisibleGroupView`
+       detaches them into a fragment exactly as they stand. Dropping the state
+       without rebuilding the view cached a read-only Source panel still
+       wearing Save/Cancel and a locked file chrome, and leaving a clean editor
+       untouched contradicted the promise this very dialog makes. Both come
+       back on the next visit with no way out but Cancel. */
     async function confirmDiscardAllExplorerEdits(actionLabel = '') {
-        if (!hasAnyDirtyExplorerEdit()) {
-            return true;
+        if (hasAnyDirtyExplorerEdit()) {
+            const dirtyCount = terminals.filter(
+                (_, index) => hasDirtyExplorerEdit(index)
+            ).length;
+            const confirmed = await openGenericConfirmModal({
+                title: 'Discard unsaved changes?',
+                copy: dirtyCount > 1
+                    ? `${dirtyCount} open files have unsaved changes.`
+                    : 'An open file has unsaved changes.',
+                note: actionLabel ? `${actionLabel} will discard them.` : '',
+                confirmLabel: 'Discard changes',
+                danger: true
+            });
+            if (!confirmed) {
+                return false;
+            }
         }
-        const dirtyIndexes = terminals
-            .map((_, index) => index)
-            .filter(index => hasDirtyExplorerEdit(index));
-        const confirmed = await openGenericConfirmModal({
-            title: 'Discard unsaved changes?',
-            copy: dirtyIndexes.length > 1
-                ? `${dirtyIndexes.length} open files have unsaved changes.`
-                : 'An open file has unsaved changes.',
-            note: actionLabel ? `${actionLabel} will discard them.` : '',
-            confirmLabel: 'Discard changes',
-            danger: true
+        exitAllExplorerEditModes();
+        return true;
+    }
+
+    /* Leave edit mode on every pane that has one, restoring each pane's
+       read-only Source view and file chrome. No focus is moved: the caller is
+       about to replace or detach this grid. */
+    function exitAllExplorerEditModes() {
+        terminals.forEach((pane, index) => {
+            if (explorerEditState(pane)) {
+                exitExplorerEditMode(index, { focusEditButton: false });
+            }
         });
-        if (confirmed) {
-            dirtyIndexes.forEach(clearExplorerEditState);
-        }
-        return confirmed;
     }
 
     function explorerEditDisabledTooltip(reason) {
@@ -104,9 +141,15 @@
         }
         const state = explorerEditState(pane);
         if (state) {
-            const canSave = state.dirty && !state.saving;
+            // Dictation and Save are mutually exclusive on the same buffer: a
+            // transcript landing across a save would be written into a draft
+            // that is already being discarded.
+            const dictating = Boolean(state.voice);
+            const canSave = state.dirty && !state.saving && !dictating;
+            const saveTitle = dictating ? 'Stop dictation to save' : 'Save (Ctrl+S)';
             host.innerHTML = `
-                <button type="button" class="explorer-editor-action-btn explorer-edit-save-btn${state.saving ? ' is-busy' : ''}" data-explorer-edit-save="${index}" ${canSave ? '' : 'disabled'} title="Save (Ctrl+S)" aria-label="Save file">${EXPLORER_SAVE_ICON}<span class="explorer-editor-action-label">Save</span></button>
+                ${explorerEditorVoiceHtml(index)}
+                <button type="button" class="explorer-editor-action-btn explorer-edit-save-btn${state.saving ? ' is-busy' : ''}" data-explorer-edit-save="${index}" ${canSave ? '' : 'disabled'} title="${escHtml(saveTitle)}" aria-label="Save file">${EXPLORER_SAVE_ICON}<span class="explorer-editor-action-label">Save</span></button>
                 <button type="button" class="explorer-editor-action-btn explorer-edit-cancel-btn" data-explorer-edit-cancel="${index}" ${state.saving ? 'disabled' : ''} title="Cancel (Esc)" aria-label="Cancel editing">${EXPLORER_CANCEL_ICON}<span class="explorer-editor-action-label">Cancel</span></button>
             `;
         } else {
@@ -128,6 +171,10 @@
             ?.addEventListener('click', () => saveExplorerEdit(index));
         host.querySelector(`[data-explorer-edit-cancel="${index}"]`)
             ?.addEventListener('click', () => cancelExplorerEdit(index));
+        // The mic is rebuilt with the rest of the group on every refresh, so
+        // its listeners and its live recording state are re-established here.
+        wireExplorerEditorVoice(index);
+        syncExplorerEditorVoiceButton(index);
     }
 
     /* While editing, the non-editor file chrome is disabled so a stray click
@@ -197,7 +244,8 @@
             conflictRevision: '',
             dirty: false,
             saving: false,
-            sourceViewport
+            sourceViewport,
+            voice: null   // { epoch, phase, settleTimer } while dictating
         };
 
         renderExplorerEditTextarea(index);
@@ -253,7 +301,7 @@
             state.dirty = dirty;
             const saveBtn = document.querySelector(`[data-explorer-edit-save="${index}"]`);
             if (saveBtn) {
-                saveBtn.disabled = !(dirty && !state.saving);
+                saveBtn.disabled = !(dirty && !state.saving && !state.voice);
             }
             updateExplorerEditTabDirty(index);
         }
@@ -296,7 +344,7 @@
     /* Leave edit mode for the same file (Cancel or after a discarded conflict).
        Rebuilds the read-only highlighted Source view from the unchanged buffer
        and restores the file chrome + Edit button. */
-    function exitExplorerEditMode(index) {
+    function exitExplorerEditMode(index, { focusEditButton = true } = {}) {
         const pane = terminals[index];
         if (!pane) {
             return;
@@ -313,9 +361,8 @@
         setExplorerEditChromeDisabled(index, false);
         refreshExplorerEditControls(index);
         applyExplorerSearch(index);
-        const editButton = document.querySelector(`[data-explorer-edit="${index}"]`);
-        if (editButton) {
-            editButton.focus();
+        if (focusEditButton) {
+            document.querySelector(`[data-explorer-edit="${index}"]`)?.focus();
         }
     }
 
@@ -347,6 +394,18 @@
         const state = explorerEditState(pane);
         const sessionId = sessionIds[index];
         if (!state || !sessionId || state.saving || !state.dirty) {
+            return;
+        }
+        /* Defence in depth behind the disabled Save button: Ctrl+S and the
+           conflict bar's Overwrite reach this function directly. Saving now
+           would post a draft the settling transcript is about to be appended
+           to, against a revision that has already moved on. */
+        if (state.voice) {
+            const settling = state.voice.phase === 'settling';
+            explorerEditorStopDictation(index);
+            showTerminalToast(settling
+                ? 'Waiting for the transcript — press Ctrl+S again in a moment.'
+                : 'Dictation stopped — press Ctrl+S again to save.');
             return;
         }
         state.saving = true;
@@ -549,3 +608,288 @@
     }
 
     installExplorerEditBeforeUnload();
+
+    /* ── Editor dictation ─────────────────────────────────────────────────────
+       The editor's own mic. It exists only while an edit session is open — no
+       editor, no mic — which is why there is no disabled-with-a-tooltip state
+       and why the pane-header mic stays hidden on explorer panes.
+
+       Capture itself is unchanged: one recorder per page, driven by the same
+       _voiceState / _voiceActiveIndex machinery as a terminal, entered through
+       the same _startVoice/_stopVoice. What is added here is a binding between
+       a running capture and the buffer that started it:
+
+           (none) → recording → settling → (none)
+
+       `settling` is the window between "the user let go" and "the words
+       exist" — with the shipped Whisper engine the transcript is produced
+       after voice_stop, and a save in that window would lose it. Save stays
+       unavailable for the whole binding, bounded by a settle timer so a
+       transcript that never arrives cannot hold the editor hostage.
+
+       Nothing here is persisted: the binding lives on pane._explorerEdit,
+       which is transient in-memory state by design. */
+    const EXPLORER_VOICE_SETTLE_MS = 5000;
+    let _explorerVoiceEpochCounter = 0;
+    /* The epoch of the capture each pane still owes a transcript for. Kept
+       past the edit session's teardown so a late transcript can be reported
+       rather than silently dropped; keyed by pane index, so it is bounded by
+       the grid. */
+    const _explorerDictationEpochs = {};
+
+    /* Hidden rather than disabled when voice is off in App Settings, mirroring
+       the pane-header .voice-control wrapper: a feature the user turned off
+       should not leave a dead control in the editor's button group. */
+    function explorerEditorVoiceHtml(index) {
+        const hidden = _voiceServiceStatus.enabled === false ? ' hidden' : '';
+        return `<span class="explorer-editor-voice" data-explorer-editor-voice-control="${index}"${hidden}>`
+            + `<button type="button" class="explorer-editor-action-btn voice-btn explorer-editor-voice-btn"`
+            + ` id="explorer-voice-${index}" data-terminal-voice="${index}"`
+            + ` title="Voice input (click to start recording)" aria-label="Dictate into this file">${VOICE_MIC_ICON}</button>`
+            + `</span>`;
+    }
+
+    function wireExplorerEditorVoice(index) {
+        const control = document.querySelector(`[data-explorer-editor-voice-control="${index}"]`);
+        const button = document.getElementById(`explorer-voice-${index}`);
+        if (!control || !button) {
+            return;
+        }
+        button.addEventListener('click', () => {
+            const state = explorerEditState(terminals[index]);
+            if (state && state.saving) {
+                showTerminalToast('Saving — start dictation again once the save finishes.', 'error');
+                return;
+            }
+            _toggleVoice(index);
+        });
+        _wireVoiceHoldToTalkElements(button, control, index);
+    }
+
+    /* A refresh rebuilds the button, so the live capture state has to be put
+       back on it. _setVoiceBtnsDisabled owns the cross-pane "another pane is
+       recording" rule; the two editor-only states are layered on top. */
+    function syncExplorerEditorVoiceButton(index) {
+        const control = document.querySelector(`[data-explorer-editor-voice-control="${index}"]`);
+        const button = document.getElementById(`explorer-voice-${index}`);
+        if (!control || !button) {
+            return;
+        }
+        control.hidden = _voiceServiceStatus.enabled === false;
+        _updateVoiceBtn(index, Boolean(_voiceState[index]?.recording));
+        _setVoiceBtnsDisabled(_voiceActiveIndex);
+        const state = explorerEditState(terminals[index]);
+        if (state && state.saving) {
+            button.disabled = true;
+            button.title = 'Saving — dictation is unavailable';
+            return;
+        }
+        if (state && state.voice && state.voice.phase === 'settling') {
+            button.disabled = true;
+            button.title = 'Waiting for the transcript…';
+        }
+    }
+
+    /* Push-to-talk only reaches the editor when the keybind carries a real
+       modifier. _matchesPttKeybind matches a bare printable key exactly and the
+       handler calls preventDefault(), so a keybind of `V` would start a
+       recording and swallow every `v` the user typed into the file. A terminal
+       can afford that; a text buffer cannot. Without a modifier the editor
+       simply has no push-to-talk and the mic button still works. */
+    function explorerEditorPttModifierPresent(keybind) {
+        const parts = String(keybind || '').split('+');
+        return parts.includes('Ctrl') || parts.includes('Alt') || parts.includes('Cmd');
+    }
+
+    function explorerEditorVoiceTargetIndex() {
+        if (!explorerEditorPttModifierPresent(_voicePrefs.pttKeybind)) {
+            return -1;
+        }
+        const active = document.activeElement;
+        const match = /^explorer-edit-textarea-(\d+)$/.exec((active && active.id) || '');
+        if (!match) {
+            return -1;
+        }
+        const index = Number.parseInt(match[1], 10);
+        if (!sessionIds[index] || !explorerEditState(terminals[index])) {
+            return -1;
+        }
+        return index;
+    }
+
+    function explorerEditorCancelVoiceSettle(state) {
+        if (state && state.voice && state.voice.settleTimer) {
+            window.clearTimeout(state.voice.settleTimer);
+            state.voice.settleTimer = null;
+        }
+    }
+
+    /* The edit session that owned this capture is gone, so there is no state
+       left to hang the settle timer on — but the pane still owes a transcript
+       and a late one must be reported rather than routed somewhere new. Bound
+       that expectation on the same timer budget, so a pane index later reused
+       by a terminal cannot inherit a stale one. Epochs are monotonic, so the
+       guard can never delete a newer capture's entry. */
+    function explorerEditorExpireOrphanedDictation(index, epoch) {
+        window.setTimeout(() => {
+            if (_explorerDictationEpochs[index] === epoch) {
+                delete _explorerDictationEpochs[index];
+            }
+        }, EXPLORER_VOICE_SETTLE_MS);
+    }
+
+    function explorerEditorClearVoiceBinding(index, state) {
+        explorerEditorCancelVoiceSettle(state);
+        if (state) {
+            state.voice = null;
+        }
+        delete _explorerDictationEpochs[index];
+    }
+
+    /* Called from the tail of _startVoice, for every pane. A pane with no open
+       editor is left exactly as it is today. */
+    function explorerEditorNoteVoiceStarted(index) {
+        const state = explorerEditState(terminals[index]);
+        if (!state || state.saving || state.voice) {
+            return;
+        }
+        _explorerVoiceEpochCounter += 1;
+        state.voice = {
+            epoch: _explorerVoiceEpochCounter,
+            phase: 'recording',
+            settleTimer: null
+        };
+        _explorerDictationEpochs[index] = state.voice.epoch;
+        refreshExplorerEditControls(index);
+    }
+
+    /* Called from the tail of _stopVoice, for every pane and every stop route:
+       mic click, hold release, push-to-talk keyup, a backend error, a group
+       switch, teardown. */
+    function explorerEditorNoteVoiceStopped(index) {
+        const state = explorerEditState(terminals[index]);
+        if (!state || !state.voice || state.voice.phase !== 'recording') {
+            return;
+        }
+        const epoch = state.voice.epoch;
+        state.voice.phase = 'settling';
+        state.voice.settleTimer = window.setTimeout(
+            () => explorerEditorVoiceSettleExpired(index, epoch),
+            EXPLORER_VOICE_SETTLE_MS
+        );
+        refreshExplorerEditControls(index);
+    }
+
+    /* The transcript never came. Release the buffer so the editor is savable
+       again, and say so once — silence here would look like lost words. */
+    function explorerEditorVoiceSettleExpired(index, epoch) {
+        const state = explorerEditState(terminals[index]);
+        if (!state || !state.voice || state.voice.epoch !== epoch) {
+            return;
+        }
+        explorerEditorClearVoiceBinding(index, state);
+        refreshExplorerEditControls(index);
+        showTerminalToast('No transcript arrived — dictation ended.', 'error');
+    }
+
+    /* Stop a bound capture without leaving the editor. A capture already in its
+       settling window is left to the timer: the words may still be on the way. */
+    function explorerEditorStopDictation(index) {
+        const state = explorerEditState(terminals[index]);
+        if (!state || !state.voice || state.voice.phase !== 'recording') {
+            return;
+        }
+        Promise.resolve(_stopVoice(index)).catch(() => {});
+    }
+
+    /* The two inputs terminals.js hands to resolveVoiceDelivery. */
+    function explorerDictationBinding(index) {
+        const state = explorerEditState(terminals[index]);
+        if (!state || !state.voice) {
+            return null;
+        }
+        return { epoch: state.voice.epoch, saving: Boolean(state.saving) };
+    }
+
+    function explorerDictationExpectedEpoch(index) {
+        return Object.prototype.hasOwnProperty.call(_explorerDictationEpochs, index)
+            ? _explorerDictationEpochs[index]
+            : null;
+    }
+
+    /* Insert a final transcript at the caret of the edit session that started
+       the capture. execCommand('insertText') is tried first because it is the
+       only insertion that feeds the native undo stack — setRangeText mutates
+       the value without pushing an undo entry, so a Ctrl+Z after dictation
+       would jump straight past the dictated block. It requires focus, returns
+       false when unavailable, and is deprecated, hence the fallback. */
+    function deliverExplorerDictation(index, text) {
+        const state = explorerEditState(terminals[index]);
+        const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
+        if (!state || !textarea) {
+            explorerEditorClearVoiceBinding(index, state);
+            showTerminalToast('Dictation was discarded — the editor is no longer open.', 'error');
+            return;
+        }
+        const start = Number.isInteger(textarea.selectionStart)
+            ? textarea.selectionStart
+            : textarea.value.length;
+        const end = Number.isInteger(textarea.selectionEnd) ? textarea.selectionEnd : start;
+        const composed = GridVibeVoiceDictation.composeDictationInsert({
+            before: textarea.value.slice(0, start),
+            text
+        }).text;
+
+        let inserted = false;
+        if (composed && document.activeElement === textarea) {
+            try {
+                inserted = Boolean(document.execCommand?.('insertText', false, composed));
+            } catch (_) {
+                inserted = false;
+            }
+        }
+        if (composed && !inserted) {
+            // The selection survives blur, so text still lands at the caret the
+            // user left behind; focus is never stolen back.
+            textarea.setRangeText(composed, start, end, 'end');
+            handleExplorerEditInput(index);
+        }
+        explorerEditorClearVoiceBinding(index, state);
+        refreshExplorerEditControls(index);
+    }
+
+    /* A cached group view is detached from the document while another group is
+       shown, and every control lookup here goes through document.getElementById.
+       So a capture that _stopAllVoice() ended during the switch could not clear
+       this pane's mic or re-render its Save/Cancel group — the card came back
+       with a stale recording ring and a Save button disabled by a binding that
+       has since expired. Re-derive both from live state once the card is back
+       in the document. */
+    function resyncExplorerEditorOnAttach(index) {
+        if (!explorerEditState(terminals[index])) {
+            return;
+        }
+        // The Source-view restore ran the search machinery, which re-derives
+        // the prev/next buttons edit mode had locked down.
+        setExplorerEditChromeDisabled(index, true);
+        refreshExplorerEditControls(index);
+    }
+
+    /* One toast per dropped transcript, and only for the reasons a user could
+       mistake for lost words. A pane that was never dictating says nothing. */
+    function noteExplorerDictationDropped(index, reason) {
+        const messages = {
+            'no-edit': 'Dictation was discarded — the editor is no longer open.',
+            'epoch-mismatch': 'Dictation was discarded — it belonged to an earlier recording.',
+            saving: 'Dictation was discarded — the file was being saved.'
+        };
+        const message = Object.prototype.hasOwnProperty.call(messages, reason)
+            ? messages[reason]
+            : '';
+        if (!message) {
+            return;
+        }
+        explorerEditorClearVoiceBinding(index, explorerEditState(terminals[index]));
+        refreshExplorerEditControls(index);
+        showTerminalToast(message, 'error');
+    }

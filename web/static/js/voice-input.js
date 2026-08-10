@@ -530,6 +530,13 @@
                 fallbackUsed: Boolean(fallbackMessage),
                 diagnostics: _voiceLastDiagnostics[index]
             });
+            /* Hooking the success tail rather than each caller is what makes
+               every entry point (mic click, hold-to-talk, push-to-talk) bind an
+               open explorer editor at once. A no-op on every other pane, and
+               absent entirely on the launcher page. */
+            if (typeof explorerEditorNoteVoiceStarted === 'function') {
+                explorerEditorNoteVoiceStarted(index);
+            }
         } catch (err) {
             console.error(`${VOICE_LOG_PREFIX} Voice input error:`, err, {
                 terminalIndex: index,
@@ -784,6 +791,11 @@
         _clearVoicePreview(index);
         _applyVoiceStateDiagnostics(index);
         _setVoicePanelStatus(index, 'Capture stopped. The last applied browser settings are preserved above for comparison.');
+        /* Mirror of the start hook: every stop route (release, error, teardown,
+           _stopAllVoice) moves a bound editor into its settling window here. */
+        if (typeof explorerEditorNoteVoiceStopped === 'function') {
+            explorerEditorNoteVoiceStopped(index);
+        }
     }
 
     async function _stopAllVoice() {
@@ -901,8 +913,18 @@
     const VOICE_HOLD_TO_TALK_MS = 350;
 
     function _wireVoiceHoldToTalk(card, index) {
-        const button = card.querySelector(`[data-terminal-voice="${index}"]`);
-        const control = card.querySelector(`[data-terminal-voice-control="${index}"]`);
+        _wireVoiceHoldToTalkElements(
+            card.querySelector(`[data-terminal-voice="${index}"]`),
+            card.querySelector(`[data-terminal-voice-control="${index}"]`),
+            index
+        );
+    }
+
+    /* The element form so surfaces outside the pane header (the explorer
+       editor's mic) get identical press-and-hold behaviour without a second
+       implementation. `control` is the positioned wrapper whose capture-phase
+       click listener swallows the click that follows a completed hold. */
+    function _wireVoiceHoldToTalkElements(button, control, index) {
         if (!button || !control) {
             return;
         }
@@ -1024,32 +1046,54 @@
         }
         return -1;
     }
+
+    /* Push-to-talk resolution for the whole page: a focused explorer edit
+       textarea claims the keybind, and everything else keeps today's
+       focused-terminal rule untouched. */
+    function _findVoiceTargetIndex() {
+        const editorIndex = typeof explorerEditorVoiceTargetIndex === 'function'
+            ? explorerEditorVoiceTargetIndex()
+            : -1;
+        return editorIndex !== -1 ? editorIndex : _findPttTerminalIndex();
+    }
+
+    /* The recording ring and the partial-preview bubble follow whichever mic
+       the user can actually see. On a terminal pane that is the single header
+       button these functions have always addressed; an explorer pane hides the
+       header mic in CSS and renders its own inside the open editor. */
+    function _voiceButtonsFor(index) {
+        return [
+            document.getElementById(`tvoice-${index}`),
+            document.getElementById(`explorer-voice-${index}`)
+        ].filter(Boolean);
+    }
+
     function _updateVoiceBtn(index, recording) {
-        const btn = document.getElementById(`tvoice-${index}`);
-        if (!btn) return;
-        btn.classList.toggle('recording', recording);
-        btn.title = recording
+        const title = recording
             ? 'Voice input (recording — click to stop)'
             : (_voiceStatusMessages[index]
                 ? `Voice input (${_voiceStatusMessages[index]})`
                 : 'Voice input (click to start recording)');
+        _voiceButtonsFor(index).forEach(btn => {
+            btn.classList.toggle('recording', recording);
+            btn.title = title;
+        });
     }
 
     function _showVoicePreview(index, text) {
-        const btn = document.getElementById(`tvoice-${index}`);
-        if (!btn) return;
-        let preview = btn.querySelector('.voice-partial-preview');
-        if (!preview) {
-            preview = document.createElement('span');
-            preview.className = 'voice-partial-preview';
-            btn.appendChild(preview);
-        }
-        preview.textContent = text;
+        _voiceButtonsFor(index).forEach(btn => {
+            let preview = btn.querySelector('.voice-partial-preview');
+            if (!preview) {
+                preview = document.createElement('span');
+                preview.className = 'voice-partial-preview';
+                btn.appendChild(preview);
+            }
+            preview.textContent = text;
+        });
     }
 
     function _clearVoicePreview(index) {
-        const btn = document.getElementById(`tvoice-${index}`);
-        if (!btn) return;
-        const preview = btn.querySelector('.voice-partial-preview');
-        if (preview) preview.remove();
+        _voiceButtonsFor(index).forEach(btn => {
+            btn.querySelector('.voice-partial-preview')?.remove();
+        });
     }

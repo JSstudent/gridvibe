@@ -2771,13 +2771,31 @@ def _open_ssh_sftp(session: Any) -> Tuple[Any, Any]:
     return client, client.open_sftp()
 
 
+class _PooledSSHClient:
+    """One pooled SSH transport, with the bookkeeping the reaper needs.
+
+    `in_use` counts the explorer requests currently holding this client. It
+    lives on the record rather than in a parallel map so an entry cannot exist
+    without its count, and evicting the entry drops the count with it — a
+    stranded count would spare a client from the reaper forever, which is this
+    guard's own failure mode inverted.
+    """
+
+    __slots__ = ("client", "last_used", "in_use")
+
+    def __init__(self, client: Any, in_use: int = 0) -> None:
+        self.client = client
+        self.last_used = time.monotonic()
+        self.in_use = in_use
+
+
 # Remote explorer requests reuse one live SSH transport per session instead of
 # paying a TCP + SSH handshake + auth round-trip on every click. Each request
 # still opens its own SFTP channel from the pooled client (paramiko SFTP
 # channels are not safe for concurrent use, but opening a channel on a live
 # transport is cheap). Only genuine paramiko clients with an active transport
 # are pooled; anything else keeps the historical open/close-per-request path.
-_ssh_client_pool: Dict[str, Tuple[float, Any]] = {}  # session_id -> (last_used, client)
+_ssh_client_pool: Dict[str, _PooledSSHClient] = {}  # session_id -> pooled client
 _ssh_client_pool_lock = threading.Lock()
 SSH_CLIENT_POOL_IDLE_TIMEOUT = 60.0
 
@@ -2803,29 +2821,42 @@ def _reap_idle_pooled_ssh_clients() -> None:
     now = time.monotonic()
     stale_clients = []
     with _ssh_client_pool_lock:
-        for session_id, (last_used, client) in list(_ssh_client_pool.items()):
-            if now - last_used > SSH_CLIENT_POOL_IDLE_TIMEOUT:
-                stale_clients.append(client)
+        for session_id, entry in list(_ssh_client_pool.items()):
+            # A client a request is still holding is not idle, however old its
+            # stamp: `last_used` is written at acquire and release only, so a
+            # transfer or search running longer than the timeout would
+            # otherwise have its transport closed underneath it by whatever
+            # concurrent request on the same session happens to reap next.
+            if entry.in_use:
+                continue
+            if now - entry.last_used > SSH_CLIENT_POOL_IDLE_TIMEOUT:
+                stale_clients.append(entry.client)
                 del _ssh_client_pool[session_id]
     for client in stale_clients:
         _close_ssh_client_quietly(client)
 
 
 def _evict_pooled_ssh_client(session_id: str, client: Any = None) -> None:
-    """Drop one pooled SSH client (optionally only when it matches `client`)."""
+    """Drop one pooled SSH client (optionally only when it matches `client`).
+
+    Unlike the idle reaper this ignores `in_use`: every caller either found the
+    transport already dead or is tearing the session down, and in both cases a
+    request still holding the client has nothing left to hold. Its `release`
+    then finds the entry gone and closes its own handle.
+    """
     with _ssh_client_pool_lock:
         entry = _ssh_client_pool.get(session_id)
-        if entry is None or (client is not None and entry[1] is not client):
+        if entry is None or (client is not None and entry.client is not client):
             return
         del _ssh_client_pool[session_id]
-        pooled_client = entry[1]
+        pooled_client = entry.client
     _close_ssh_client_quietly(pooled_client)
 
 
 def _evict_all_pooled_ssh_clients() -> None:
     """Close and forget every pooled SSH client."""
     with _ssh_client_pool_lock:
-        clients = [client for _, client in _ssh_client_pool.values()]
+        clients = [entry.client for entry in _ssh_client_pool.values()]
         _ssh_client_pool.clear()
     for client in clients:
         _close_ssh_client_quietly(client)
@@ -2838,7 +2869,7 @@ def _acquire_ssh_sftp(session: Any) -> Tuple[Any, Any]:
     with _ssh_client_pool_lock:
         entry = _ssh_client_pool.get(session_id)
     if entry is not None:
-        client = entry[1]
+        client = entry.client
         if _ssh_client_transport_active(client):
             try:
                 sftp = client.open_sftp()
@@ -2847,8 +2878,12 @@ def _acquire_ssh_sftp(session: Any) -> Tuple[Any, Any]:
             else:
                 with _ssh_client_pool_lock:
                     current = _ssh_client_pool.get(session_id)
-                    if current is not None and current[1] is client:
-                        _ssh_client_pool[session_id] = (time.monotonic(), client)
+                    # If the entry was evicted and replaced meanwhile this
+                    # client is no longer pooled: leave it uncounted so
+                    # release closes it rather than charging another record.
+                    if current is not None and current.client is client:
+                        current.last_used = time.monotonic()
+                        current.in_use += 1
                 return client, sftp
         else:
             _evict_pooled_ssh_client(session_id, client)
@@ -2859,7 +2894,7 @@ def _acquire_ssh_sftp(session: Any) -> Tuple[Any, Any]:
             # A concurrent request may have pooled its own client meanwhile;
             # leave that one in place and let release close this one instead.
             if session_id not in _ssh_client_pool:
-                _ssh_client_pool[session_id] = (time.monotonic(), client)
+                _ssh_client_pool[session_id] = _PooledSSHClient(client, in_use=1)
     return client, sftp
 
 
@@ -2875,9 +2910,14 @@ def _release_ssh_sftp(session: Any, client: Any, sftp: Any) -> None:
     session_id = getattr(session, "session_id", "")
     with _ssh_client_pool_lock:
         entry = _ssh_client_pool.get(session_id)
-        if entry is not None and entry[1] is client:
+        if entry is not None and entry.client is client:
+            # Only a holder counted at acquire gives one back; an entry that
+            # was evicted and re-pooled under this session id never counted
+            # this request, and `entry.client is client` cannot match it.
+            if entry.in_use:
+                entry.in_use -= 1
             if _ssh_client_transport_active(client):
-                _ssh_client_pool[session_id] = (time.monotonic(), client)
+                entry.last_used = time.monotonic()
                 return
             del _ssh_client_pool[session_id]
     _close_ssh_client_quietly(client)

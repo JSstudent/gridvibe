@@ -24,7 +24,7 @@
 | --- | --- |
 | **A grid, not a tab pile** | Pick 1, 2, 3, 4, 6, or 8 panes, pick a target per pane, hit launch. SSH, WSL, PowerShell, cmd, or a local repo — side by side, resizable, splittable. |
 | **Agents are a dropdown, not a chore** | Six agent CLIs are first-class pane types, most with an **Auto mode** toggle. GridVibe detects them on the target machine before you launch, so you find out about a missing binary *before* the pane opens. |
-| **Talk to your agents** | Fully offline voice input (Vosk or faster-whisper) dictates straight into any pane. Push-to-talk keybind included. Off by default. |
+| **Talk to your agents** | Fully offline voice input (Vosk or faster-whisper) dictates straight into any terminal — or, with a file open in the explorer's editor, straight into the file. Push-to-talk keybind included. Off by default. |
 | **Set it up once** | Save a tab as a preset, save the whole workspace, restart, get it all back — right down to which group you were working in. |
 
 Everything else — the file explorer, the Git sidebar, the browser preview — exists so you never have to leave the grid mid-flow.
@@ -96,7 +96,9 @@ GridVibe does not bundle the CLIs. If everything shows `Missing`, install it and
 
 ## Voice Input
 
-Optional, fully offline, **off by default**. Turn it on in **App Settings** (the gear on either page), pick a backend (`Vosk` or `faster-whisper`), a language, and optionally a capture profile, microphone, and push-to-talk keybind. Then hit the 🎙️ button on any pane.
+Optional, fully offline, **off by default**. Turn it on in **App Settings** (the gear on either page), pick a backend (`Vosk` or `faster-whisper`), a language, and optionally a capture profile, microphone, and push-to-talk keybind. Then hit the 🎙️ button in any terminal pane's header.
+
+Open a file in the explorer's in-place editor and it gets its own 🎙️, beside **Save** and **Cancel** — dictation lands at the caret, undoes with `Ctrl+Z` in one step, and saves through the same revision check as anything you typed. Save is held while dictation is in flight so the two can't overwrite each other, and leaving edit mode stops the mic. Only one pane records at a time, terminals and editors alike. Push-to-talk reaches the editor only if your keybind uses `Ctrl`, `Alt`, or `Cmd` — a bare letter would be swallowed out of the file you're editing.
 
 If the packages are missing, App Settings says so and offers **Install voice dependencies** — installed into GridVibe's own environment and loaded without a restart. Or do it yourself:
 
@@ -126,7 +128,7 @@ Swap any pane between a terminal and a file explorer with one button — same di
 | | |
 | --- | --- |
 | **Browse & preview** | Use breadcrumbs, a lazy file tree, draggable file tabs, syntax-coloured source, rendered Markdown and Mermaid, inline images, downloads, and `Ctrl+F` find. |
-| **Edit** | Edit complete UTF-8 text files in place and save with `Ctrl+S`. Saves are atomic, and a conflict prompt protects files changed on disk. |
+| **Edit** | Edit complete UTF-8 text files in place and save with `Ctrl+S`. Saves are atomic, and a conflict prompt protects files changed on disk. With voice input on, the editor gets its own 🎙️ button and dictates at the caret. |
 | **Git** | See branch and file status, inspect current or historical diffs, and stage, unstage, commit, publish, or discard changes. Diff views also support line and block undo. |
 | **Search** | Press `Ctrl+Shift+F` for repository-wide search with case, whole-word, regex, file-pattern, scope, and `.gitignore` controls. |
 | **Restore fidelity** | Saved sessions and workspaces preserve the explorer root, ordered file tabs, Preview/Source/Diff intent, per-panel and directory scroll, wrapping, folds, sidebar width/scroll, Files-tree expansion, Git commit expansion, theme, and workspace-wide Markdown/source appearance. Content-relative scroll and folds restore only when their file, directory, or rendered Diff revision still matches; queries and fetched results are always refetched, never stored. |
@@ -217,7 +219,7 @@ GridVibe generates a Flask session signing key at startup unless `GRIDVIBE_SECRE
 
 GridVibe is a local tool, not a public web service: it binds to `127.0.0.1` by default, has no built-in authentication, and should not be exposed to the internet.
 
-- Socket.IO CORS defaults to same-origin; state-changing cross-origin requests are rejected. Set `security.cors_origins` only if you serve GridVibe from another origin.
+- Socket.IO CORS defaults to same-origin, following the address the server actually resolved (so `--host`/`--port` are covered) plus the host each request was addressed to; state-changing cross-origin requests are rejected on the same rule. Set `security.cors_origins` only if you serve GridVibe from another origin — an explicit list is used verbatim and replaces both defaults.
 - SSH host keys persist to `.known_hosts`; `ssh.host_key_policy` can be `auto-add` (default), `known-hosts`, or `strict`.
 - Saved SSH passwords are Fernet-encrypted; the key lives in `.encryption_key`.
 

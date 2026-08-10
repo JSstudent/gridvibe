@@ -4761,6 +4761,17 @@
         if (!pane || !code) {
             return;
         }
+        /* While an in-place edit is open the Source panel holds the editor's
+           textarea, not rendered rows — the editor owns this element until it
+           is torn down. Rebuilding it here would drop the live draft on the
+           floor and leave the Save/Cancel chrome pointing at nothing (the
+           user's only way out being Cancel). Every caller that legitimately
+           leaves edit mode clears the state first, so this costs them nothing;
+           the one that made it reachable was a group switch, whose cached-view
+           restore re-applies the Source view through applyExplorerSearch. */
+        if (pane._explorerEdit) {
+            return;
+        }
 
         const content = pane._explorerFileContent || '';
         const language = pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '');

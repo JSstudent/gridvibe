@@ -28,7 +28,7 @@
                     throw new Error(data.error || 'GridVibe could not be closed.');
                 }
             },
-            onError: error => showMessage(
+            onError: error => showGridVibeNotice(
                 error.message || 'GridVibe remains open because saving did not finish.',
                 'error'
             )
@@ -69,17 +69,21 @@
         }
     }
 
-    /* App Settings dialog hooks (app-settings.js owns the dialog itself). */
+    /* App Settings dialog hooks (app-settings.js owns the dialog itself).
+
+       Both of the dialog's outcomes go to the banner, so they finally land in
+       the same place — they used to be split across the two old sinks. There
+       is no onAppSettingsSaved hook here for the same reason: app-settings.js
+       already reports the save through notifyAppSettings, and adding a second
+       report was the bug. The banner sits behind the dialog, so a failure
+       raised while it is open persists and is read once it closes; giving the
+       dialog its own status slot is pass 2. */
     function appSettingsNotify(text, type = '') {
-        showMessage(text, type);
+        showGridVibeNotice(text, type);
     }
 
     function onAppSettingsApplied(data) {
         installKind = data?.install_kind === 'source' ? 'source' : 'git';
-    }
-
-    function onAppSettingsSaved() {
-        setUpdateStatus('App settings saved.', 'success');
     }
 
     initTheme();
@@ -397,33 +401,29 @@
             activeSavedSessionId = '';
             activeSavedSessionName = '';
         }
+        /* A reload restores the preset without going through
+           setActiveSavedSession, so the CTA has to be re-rendered here too —
+           otherwise the button forgets the preset's name across an F5. */
+        syncLaunchDestinationControl();
     }
 
-    function showMessage(text, type = '') {
-        const message = document.getElementById('message');
-        message.textContent = text;
-        message.className = `message ${type}`.trim();
-    }
+    /* ── Messages ──
+       Every message the launcher raises goes to showGridVibeNotice
+       (notice-banner.js): one surface, one message at a time. The page used to
+       have two sinks of its own — `#message` inside the Terminal Layout card
+       and `#quickUpdateStatus` under the icon row — and the update flow wrote
+       to both. `#message` is now static helper copy and the second sink is
+       gone; do not add a third. */
 
-    let updateStatusClearTimer = null;
-
-    function setUpdateStatus(text, type = '') {
-        const status = document.getElementById('quickUpdateStatus');
-        if (!status) {
-            return;
+    /* Composes the one prefix a failure family owns with whatever detail the
+       error carries. A rejected fetch often carries no message at all, which
+       is how "Launch failed: ." reached the screen. */
+    function describeFailure(summary, error) {
+        const detail = String(error?.message || '').trim();
+        if (!detail) {
+            return summary;
         }
-
-        status.textContent = text;
-        status.className = `inline-status ${type}`.trim();
-
-        window.clearTimeout(updateStatusClearTimer);
-        updateStatusClearTimer = null;
-        if (text) {
-            updateStatusClearTimer = window.setTimeout(() => {
-                status.textContent = '';
-                status.className = 'inline-status';
-            }, 6000);
-        }
+        return /[.!?]$/.test(detail) ? `${summary} ${detail}` : `${summary} ${detail}.`;
     }
 
     function shortCommit(value) {
@@ -1155,7 +1155,7 @@
         refreshVisibleAgentPreflights();
 
         if (!target) {
-            showMessage(
+            showGridVibeNotice(
                 targetMode === 'ssh'
                     ? 'Cleared the SSH target.'
                     : 'Cleared the local repository.',
@@ -1182,7 +1182,7 @@
             }
         }
 
-        showMessage(
+        showGridVibeNotice(
             `Started a new session on ${describeConnectionTarget(targetMode, target)}.`,
             'success'
         );
@@ -1274,10 +1274,10 @@
             if (message.includes('Native folder picker support is unavailable')) {
                 const input = document.getElementById('wsl_default_dir');
                 input?.focus();
-                showMessage('Native folder picker is unavailable in browser mode. Type or paste the local repository path.', 'info');
+                showGridVibeNotice('Native folder picker is unavailable in browser mode. Type or paste the local repository path.', 'info');
                 return;
             }
-            showMessage(`Folder selection failed: ${error.message}`, 'error');
+            showGridVibeNotice(describeFailure('The folder could not be selected.', error), 'error');
         }
     }
 
@@ -2050,6 +2050,9 @@
         activeSavedSessionName = String(meta?.name || '').trim();
         persistActiveSavedSessionMeta();
         if (typeof updateHeaderBadges === 'function') updateHeaderBadges();
+        /* The launch CTA names the active preset, so importing, saving, or
+           dropping one has to re-render it. */
+        syncLaunchDestinationControl();
     }
 
     function savedSessionUpdateToken(payload) {
@@ -2086,9 +2089,9 @@
 
             setActiveSavedSession(data);
             applySessionConfig(data.config);
-            showMessage(`Refreshed active session "${data.name}".`, 'success');
+            showGridVibeNotice(`Refreshed active session "${data.name}".`, 'success');
         } catch (error) {
-            showMessage(`Refresh failed: ${error.message}`, 'error');
+            showGridVibeNotice(describeFailure('The active session could not be refreshed.', error), 'error');
         }
     }
 
@@ -2166,10 +2169,10 @@
             }
 
             setActiveSavedSession(data.saved_session || data);
-            showMessage(`Saved session "${data.name}".`, 'success');
+            showGridVibeNotice(`Saved session "${data.name}".`, 'success');
             applySessionConfig(data.config);
         } catch (error) {
-            showMessage(`Save failed: ${error.message}`, 'error');
+            showGridVibeNotice(describeFailure('The session could not be saved.', error), 'error');
         }
     }
 
@@ -2184,11 +2187,14 @@
             setActiveSavedSession(data.saved_session);
             applySessionConfig(data);
             if (!silent) {
-                showMessage('Imported startup session settings.', 'success');
+                showGridVibeNotice('Imported startup session settings.', 'success');
             }
         } catch (error) {
             if (!silent) {
-                showMessage(`Import failed: ${error.message}`, 'error');
+                showGridVibeNotice(
+                    describeFailure('The startup session settings could not be imported.', error),
+                    'error'
+                );
             }
         }
     }
@@ -2326,9 +2332,9 @@
             setActiveSavedSession(data);
             applySessionConfig(data.config);
             await persistLastUsedConfig(data.id);
-            showMessage('Started a new session from the default preset.', 'success');
+            showGridVibeNotice('Started a new session from the default preset.', 'success');
         } catch (error) {
-            showMessage(`New session failed: ${error.message}`, 'error');
+            showGridVibeNotice(describeFailure('The new session could not be started.', error), 'error');
         }
     }
 
@@ -2360,9 +2366,9 @@
             setActiveSavedSession(data);
             applySessionConfig(data.config);
             await persistLastUsedConfig(data.id);
-            showMessage(`Imported session "${data.name}".`, 'success');
+            showGridVibeNotice(`Imported session "${data.name}".`, 'success');
         } catch (error) {
-            showMessage(`Import failed: ${error.message}`, 'error');
+            showGridVibeNotice(describeFailure('The session could not be imported.', error), 'error');
         }
     }
 
@@ -2375,7 +2381,7 @@
             }
 
             if (!listData.sessions || listData.sessions.length === 0) {
-                showMessage('No saved sessions found yet.', 'error');
+                showGridVibeNotice('No saved sessions found yet.', 'info');
                 return;
             }
 
@@ -2401,9 +2407,9 @@
                 applySessionConfig(data.config);
             }
 
-            showMessage(`Deleted ${selectedIds.length} saved session${selectedIds.length === 1 ? '' : 's'}.`, 'success');
+            showGridVibeNotice(`Deleted ${selectedIds.length} saved session${selectedIds.length === 1 ? '' : 's'}.`, 'success');
         } catch (error) {
-            showMessage(`Delete failed: ${error.message}`, 'error');
+            showGridVibeNotice(describeFailure('The saved sessions could not be deleted.', error), 'error');
         }
     }
 
@@ -2424,10 +2430,13 @@
             return;
         }
 
+        /* The button's .loading spinner is the in-progress signal, so the
+           check raises exactly one notice and it is the outcome. It used to
+           write every outcome to both of the page's message sinks, which is
+           how one failed update arrived twice, in two corners. */
         const button = document.getElementById('checkUpdatesBtn');
         button.disabled = true;
         button.classList.add('loading');
-        setUpdateStatus('Checking the git remote for new commits...');
 
         try {
             const response = await fetch('/api/app-update', {
@@ -2436,7 +2445,10 @@
             });
             const data = await response.json();
             if (!response.ok) {
-                throw new Error(data.error || 'Update check failed');
+                /* The catch below owns this failure's prefix, so an empty
+                   server error becomes the bare summary rather than
+                   "Update failed: Update check failed". */
+                throw new Error(data.error || '');
             }
 
             const updateSummary = data.message || (
@@ -2448,21 +2460,18 @@
             if (data.updated && data.restart_required) {
                 button.disabled = false;
                 button.classList.remove('loading');
-                setUpdateStatus(`${updateSummary} Choose how to save before restarting.`, 'success');
-                showMessage(`${updateSummary} Choose how to save before restarting.`, 'success');
+                showGridVibeNotice(`${updateSummary} Choose how to save before restarting.`, 'success');
                 requestRestartLifecycle(updateSummary, button);
                 return;
             }
 
             button.disabled = false;
             button.classList.remove('loading');
-            setUpdateStatus(updateSummary, 'success');
-            showMessage(updateSummary, 'success');
+            showGridVibeNotice(updateSummary, 'success');
         } catch (error) {
             button.disabled = false;
             button.classList.remove('loading');
-            setUpdateStatus(error.message, 'error');
-            showMessage(`Update failed: ${error.message}`, 'error');
+            showGridVibeNotice(describeFailure('The update check failed.', error), 'error');
         }
     }
 
@@ -2471,16 +2480,17 @@
             action: 'restart',
             onReady: async decisionToken => {
                 if (!window.pywebview?.api?.restart_application) {
-                    const message = `${prefix ? `${prefix} ` : ''}State prepared. Restart GridVibe manually to reload the app.`;
-                    setUpdateStatus(message, 'success');
-                    showMessage(message, 'success');
+                    showGridVibeNotice(
+                        `${prefix ? `${prefix} ` : ''}State prepared. Restart GridVibe manually to reload the app.`,
+                        'success'
+                    );
                     return;
                 }
                 if (button) {
                     button.disabled = true;
                     button.classList.add('loading');
                 }
-                setUpdateStatus('Restarting GridVibe...', 'success');
+                showGridVibeNotice('Restarting GridVibe…', 'info');
                 const result = await window.pywebview.api.restart_application(decisionToken);
                 if (!result?.ok) {
                     if (button) {
@@ -2490,11 +2500,10 @@
                     throw new Error(result?.error || 'Automatic restart failed.');
                 }
             },
-            onError: error => {
-                const message = error.message || 'GridVibe remains open because saving did not finish.';
-                setUpdateStatus(message, 'error');
-                showMessage(message, 'error');
-            }
+            onError: error => showGridVibeNotice(
+                error.message || 'GridVibe remains open because saving did not finish.',
+                'error'
+            )
         });
     }
 
@@ -2566,7 +2575,7 @@
                     : []
             });
             if (!data.sessions || data.sessions.length === 0) {
-                showMessage('No active sessions to display.', 'info');
+                showGridVibeNotice('No active sessions to display.', 'info');
                 return;
             }
 
@@ -2587,7 +2596,7 @@
                 requested_group_id: targetGroupId || 'all'
             });
         } catch {
-            showMessage('Could not check active sessions.', 'error');
+            showGridVibeNotice('The active sessions could not be checked.', 'error');
         }
     }
 
@@ -2678,7 +2687,7 @@
                 restorableWorkspaceIsOffered = false;
                 const groupCount = Number(restored.group_count || 0);
                 const failed = (restored.groups || []).filter(group => !group.started);
-                showMessage(
+                showGridVibeNotice(
                     `Restored ${groupCount} session${groupCount === 1 ? '' : 's'} from the previous workspace.`
                     + (failed.length ? ` ${failed.length} could not be relaunched.` : ''),
                     failed.length ? 'warning' : 'success'
@@ -2689,16 +2698,13 @@
                     normalizeNativeZoomFactor(restored.native_zoom_factor)
                 );
             } else {
-                showMessage(
-                    'Could not restore the previous workspace — try again.',
-                    'error'
-                );
+                showGridVibeNotice('The previous workspace could not be restored.', 'error');
             }
         } catch (error) {
-            showMessage(
+            showGridVibeNotice(
                 error.conflict
                     ? error.message
-                    : `Workspace restore failed: ${error.message} — try again.`,
+                    : describeFailure('The previous workspace could not be restored.', error),
                 'error'
             );
         } finally {
@@ -2804,21 +2810,37 @@
             const applied = await setMultiWorkspaceEnabled(next);
             if (applied !== next) {
                 syncMultiWorkspaceToggle(applied);
-                showMessage('Multiple workspaces stays on.', '');
+                showGridVibeNotice('Multiple workspaces stays on.', 'info');
             }
         } catch (error) {
             syncMultiWorkspaceToggle();
-            showMessage(`Could not change the workspace mode: ${error.message}`, 'error');
+            showGridVibeNotice(describeFailure('The workspace mode could not be changed.', error), 'error');
         } finally {
             multiWorkspaceToggleInFlight = false;
             toggle?.classList.remove('is-busy');
         }
     }
 
+    /* What the CTA launches, not just that it launches. "Launch Workspace" was
+       the same sentence whether the form held a freshly imported preset or an
+       untouched scratch setup, so once the import notice cleared there was
+       nothing left on screen naming what the button would run. The primary
+       line answers that; the destination line under it answers "where". */
+    function launchSessionName() {
+        const isDefaultSelection = !activeSavedSessionId || activeSavedSessionId === DEFAULT_SESSION_ID;
+        return isDefaultSelection ? '' : activeSavedSessionName;
+    }
+
+    function launchButtonLabelText() {
+        return launchSessionName() || 'new session';
+    }
+
     /* The CTA carries the destination so there is nothing to link it to. With
        the flag off it stays exactly today's single-workspace button. */
     function syncLaunchDestinationControl() {
         const caret = document.getElementById('launchDestinationBtn');
+        const launchButton = document.getElementById('launchBtn');
+        const primaryLabel = document.getElementById('launchPrimaryLabel');
         const destinationLabel = document.getElementById('launchDestinationLabel');
         const viewButton = document.getElementById('viewActiveTerminalsBtn');
         const enabled = isMultiWorkspaceEnabled();
@@ -2826,6 +2848,17 @@
             caret.hidden = !enabled;
             /* The split seam only exists when the caret does. */
             document.getElementById('launchSplit')?.classList.toggle('has-destination', enabled);
+        }
+        /* A launch in flight owns the label until it settles — resyncing the
+           destination mid-launch must not wipe "Launching…". */
+        if (primaryLabel && !launchButton?.classList.contains('loading')) {
+            primaryLabel.textContent = `Launch ${launchButtonLabelText()}`;
+        }
+        if (launchButton) {
+            /* Long preset names ellipsize, so the full sentence stays reachable. */
+            launchButton.title = enabled
+                ? `Launch ${launchButtonLabelText()} into ${workspaceDestinationName()}`
+                : `Launch ${launchButtonLabelText()}`;
         }
         if (destinationLabel) {
             destinationLabel.hidden = !enabled;
@@ -2959,13 +2992,13 @@
                 saveButton.classList.add('is-busy');
                 try {
                     const result = await saveLiveWorkspace(workspace.workspace_id);
-                    showMessage(`Saved ${result.label || workspaceDisplayLabel(workspace, index)}.`, 'success');
+                    showGridVibeNotice(`Saved ${result.label || workspaceDisplayLabel(workspace, index)}.`, 'success');
                 } catch (error) {
                     if (error.status === 409) {
-                        showMessage(error.message, 'info');
+                        showGridVibeNotice(error.message, 'info');
                     } else {
-                        showMessage(
-                            `Could not save the workspace: ${error.message}${error.retryable ? ' — try again.' : ''}`,
+                        showGridVibeNotice(
+                            describeFailure('The workspace could not be saved.', error),
                             'error'
                         );
                     }
@@ -2990,10 +3023,10 @@
                 closeButton.classList.add('is-busy');
                 try {
                     await closeLiveWorkspace(workspace.workspace_id);
-                    showMessage(`Closed ${workspaceDisplayLabel(workspace, index)}.`, 'success');
+                    showGridVibeNotice(`Closed ${workspaceDisplayLabel(workspace, index)}.`, 'success');
                 } catch (error) {
-                    showMessage(
-                        `Could not close the workspace: ${error.message} — try again.`,
+                    showGridVibeNotice(
+                        describeFailure('The workspace could not be closed.', error),
                         'error'
                     );
                 } finally {
@@ -3190,7 +3223,15 @@
         } catch (error) {
             /* A close that succeeded but could not forget says so, and the row
                stays so the user can retry just the forget. */
-            showMessage(`${error.message}${error.retryable ? ' — try again' : ''}`, 'error');
+            showGridVibeNotice(
+                describeFailure(
+                    live
+                        ? 'The workspace could not be closed and forgotten.'
+                        : 'The saved workspace could not be forgotten.',
+                    error
+                ),
+                'error'
+            );
         }
         if (live) {
             await refreshWorkspaceDestinations();
@@ -3210,7 +3251,7 @@
             .filter(checkbox => checkbox.checked && !checkbox.disabled)
             .map(checkbox => checkbox.value);
         if (!workspaceIds.length) {
-            showMessage('Select at least one workspace to restore.', 'info');
+            showGridVibeNotice('Select at least one workspace to restore.', 'info');
             return;
         }
 
@@ -3232,21 +3273,21 @@
             }
             const failed = (result.workspaces || []).filter(entry => !entry.restored);
             if (restored.length) {
-                showMessage(
+                showGridVibeNotice(
                     `Relaunch started for ${restored.length} workspace${restored.length === 1 ? '' : 's'}.`
                     + (failed.length ? ` ${failed.length} could not be restored.` : ''),
                     failed.length ? 'warning' : 'success'
                 );
             } else {
-                showMessage('Could not restore the selected workspaces.', 'error');
+                showGridVibeNotice('The selected workspaces could not be restored.', 'error');
             }
         } catch (error) {
             /* A preflight conflict is not a transient failure: nothing was
                restored and retrying the same selection fails the same way. */
-            showMessage(
+            showGridVibeNotice(
                 error.conflict
                     ? error.message
-                    : `Workspace restore failed: ${error.message} — try again.`,
+                    : describeFailure('The selected workspaces could not be restored.', error),
                 'error'
             );
         } finally {
@@ -3315,18 +3356,40 @@
         return sessions;
     }
 
+    /* A refused launch says why in the banner and marks which field it meant:
+       the banner is the only message surface, but it cannot point at a control
+       three cards away. The outline clears itself on the next keystroke, so
+       there is no second piece of state to keep in sync. */
+    function refuseLaunchForField(fieldId, text) {
+        showGridVibeNotice(text, 'error');
+        const input = document.getElementById(fieldId);
+        if (!input) {
+            return;
+        }
+        input.classList.add('is-invalid');
+        input.addEventListener(
+            'input',
+            () => input.classList.remove('is-invalid'),
+            { once: true }
+        );
+        input.focus();
+    }
+
     async function launchSessions() {
         const config = collectFormConfig();
         const button = document.getElementById('launchBtn');
         const sessionName = buildDefaultSessionName();
 
         if (config.connection_mode === 'ssh' && !config.ssh.host) {
-            showMessage('Enter an SSH host before launching.', 'error');
+            refuseLaunchForField('ssh_host', 'Enter an SSH host before launching.');
             return;
         }
 
         if (config.connection_mode === 'wsl' && !config.wsl.default_dir) {
-            showMessage('Select a local repository folder before launching.', 'error');
+            refuseLaunchForField(
+                'wsl_default_dir',
+                'Select a local repository folder before launching.'
+            );
             return;
         }
 
@@ -3334,7 +3397,7 @@
         try {
             sessions = buildSessionsFromConfig(config, selectedCount);
         } catch (error) {
-            showMessage(error.message, 'error');
+            showGridVibeNotice(describeFailure('The launch could not be prepared.', error), 'error');
             return;
         }
 
@@ -3402,7 +3465,7 @@
             const launchMessage = launchWarnings.length
                 ? `${launchIntro} ${launchWarnings.length === 1 ? launchWarnings[0] : `${launchWarnings.length} startup commands were cleared after preflight failed.`}`
                 : launchIntro;
-            showMessage(launchMessage, launchWarnings.length ? 'warning' : 'success');
+            showGridVibeNotice(launchMessage, launchWarnings.length ? 'warning' : 'success');
             if (data.launch_target === 'web') {
                 setTimeout(async () => {
                     const workspaceId = String(data.workspace_id || 'default');
@@ -3416,18 +3479,20 @@
             }
         } catch (error) {
             setLaunchButtonLoading(button, false);
-            showMessage(`Launch failed: ${error.message}`, 'error');
+            showGridVibeNotice(describeFailure('The launch failed.', error), 'error');
         }
     }
 
     /* Toggle the launch CTA's loading state via classes instead of rewriting
-       the button's markup, so the label/arrow structure survives a launch. */
+       the button's markup, so the label/arrow structure survives a launch.
+       Settling restores whatever the CTA names *now* — never a hardcoded
+       string that would erase the active preset's name. */
     function setLaunchButtonLoading(button, loading) {
         button.disabled = loading;
         button.classList.toggle('loading', loading);
         const label = button.querySelector('.action-btn-label');
         if (label) {
-            label.textContent = loading ? 'Launching…' : 'Launch Workspace';
+            label.textContent = loading ? 'Launching…' : `Launch ${launchButtonLabelText()}`;
         }
     }
 
@@ -3520,7 +3585,7 @@
            that stops adding at 8. */
         const nextValid = COUNT_OPTIONS.find(count => count > selectedCount);
         if (!nextValid) {
-            showMessage(`Maximum ${LAUNCHER_MAX_TERMINALS} terminals allowed.`, 'error');
+            showGridVibeNotice(`Maximum ${LAUNCHER_MAX_TERMINALS} terminals allowed.`, 'warning');
             return;
         }
         const drafts = collectTerminalDrafts();

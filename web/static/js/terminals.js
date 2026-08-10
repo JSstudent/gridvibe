@@ -859,12 +859,19 @@
             }
             if (isExplorerPaneInstance(terminal)) {
                 restoreExplorerFileScroll(index, terminal._cachedExplorerScroll);
+                resyncExplorerEditorOnAttach(index);
             }
+            /* The cards were detached while another group was shown, so any
+               voice stop that completed in that window addressed elements no
+               document lookup could reach. Re-derive each mic from live
+               capture state now they are back. */
+            _syncVoiceControls(index);
             if (clearTerminalViewports) {
                 terminal._cachedTerminalViewport = null;
             }
             terminal._cachedExplorerScroll = null;
         });
+        _setVoiceBtnsDisabled(_voiceActiveIndex);
     }
 
     /* Which workspace this window is. Nothing else on screen says so once two
@@ -6908,7 +6915,7 @@
         _pttStopRequested = false;
 
         try {
-            const index = _voiceActiveIndex !== -1 ? _voiceActiveIndex : _findPttTerminalIndex();
+            const index = _voiceActiveIndex !== -1 ? _voiceActiveIndex : _findVoiceTargetIndex();
             if (index === -1) return;
             if (!_voiceState[index]?.recording) {
                 await _startVoice(index);
@@ -7974,7 +7981,30 @@
             const index = _voiceIndexForSession(session_id);
             if (index === -1) return;
 
-            if (isFinal && text) {
+            /* Where a transcript goes is decided by the recording pane's own
+               state, in one pure rule (voice-dictation.js). A pane with an
+               explorer edit session bound to the capture receives the words in
+               its buffer; every other pane keeps the direct terminal
+               injection; a pane with neither receives nothing, so an explorer
+               or browser pane can never be sent terminal_input. */
+            const { target, reason } = GridVibeVoiceDictation.resolveVoiceDelivery({
+                hasTerm: Boolean(terminals[index]?.term),
+                edit: explorerDictationBinding(index),
+                epoch: explorerDictationExpectedEpoch(index),
+                isFinal: Boolean(isFinal),
+                hasText: Boolean(text)
+            });
+
+            if (target === 'preview') {
+                _showVoicePreview(index, text);
+                return;
+            }
+            if (target === 'editor') {
+                deliverExplorerDictation(index, text);
+                _clearVoicePreview(index);
+                return;
+            }
+            if (target === 'terminal') {
                 /* A committed transcript honours Broadcast typing the same way
                    keyboard input does (ISSUE-2026-026): deliver to the recording
                    pane, then fan out to every other plain pane through the shared
@@ -7983,9 +8013,9 @@
                 _sendToTerminal(index, text);
                 broadcastInputToPeers(index, text);
                 _clearVoicePreview(index);
-            } else if (text) {
-                _showVoicePreview(index, text);
+                return;
             }
+            noteExplorerDictationDropped(index, reason);
         });
 
         socket.on('voice_status', async ({ session_id, status, message }) => {

@@ -14,12 +14,13 @@ Use this file when you need to:
 
 ## Scope
 
-In GridVibe, "voice" means speech-to-text for terminal input.
+In GridVibe, "voice" means speech-to-text into whatever the recording pane is: a
+terminal, or a file open in the explorer's in-place editor.
 
 - The browser captures microphone audio.
 - Audio is normalized into 16 kHz mono PCM through an `AudioWorklet`.
 - The backend routes that audio to the configured engine.
-- Final transcript text is injected into the terminal as typed input.
+- Final transcript text is delivered according to the recording pane's own state — into the terminal as typed input, or at the caret of an open edit buffer. See **Transcript Delivery Guideline**.
 - Raw microphone audio is not sent into the shell.
 
 ## Current Source Of Truth
@@ -28,6 +29,8 @@ Primary implementation files:
 
 - `web/voice.py` — both STT backends, the Vosk proxy and its locks, voice preference persistence. This is where the voice logic lives; `web/api.py` re-exports its names for backwards compatibility and owns only the REST routes and Socket.IO handlers.
 - `web/static/js/voice-input.js` — browser mic capture, the recording overlay, hold/push-to-talk.
+- `web/static/js/voice-dictation.js` — DOM-free and `require()`-able: the transcript routing rule (`resolveVoiceDelivery`) and the caret insertion string math (`composeDictationInsert`). Every decision with a right and a wrong answer lives here so tests execute it instead of asserting on source text.
+- `web/static/js/explorer-editor.js` — the editor's own mic and the binding between a running capture and the edit buffer that started it.
 - `web/static/voice-capture-worklet.js` — the audio format boundary (resample, frame, Float32 → PCM int16).
 - `web/static/js/app-settings.js` and `templates/partials/app_settings_modal.html` — the voice/mic settings UI, shared by both pages.
 - `services/vosk_service.py` — the standalone local recognizer service.
@@ -40,6 +43,8 @@ Verification coverage lives primarily in:
 
 - `tests/test_api.py`
 - `tests/test_vosk_service.py`
+- `tests/test_voice_dictation.py` — the routing and insertion rules, executed in Node against the real module
+- `tests/test_explorer_editor_group_switch.py` — leaving edit mode across a session-group switch, including a capture stopped by the switch
 
 ## Architecture Summary
 
@@ -63,8 +68,11 @@ At the UX level, both engines share the same terminal mic toggle and launcher-ow
 
 These are current implementation rules and should be preserved unless deliberately changed:
 
-- Voice is per terminal pane, but only one pane may record at a time.
+- Voice is per pane, but only one pane may record at a time. That rule spans terminals **and** explorer editors — an editor capture and a terminal capture use the same `_voiceState` / `_voiceActiveIndex` machinery and stop each other exactly as two terminals do.
+- Save and dictation are mutually exclusive on the same edit buffer. Neither can silently overwrite the other; see **Transcript Delivery Guideline**.
+- Dictated text is ordinary buffer text from the moment it is inserted: same dirty tracking, same unsaved-changes guards, same revision-checked save as text typed by hand.
 - Voice preferences are machine-local and user-local, not part of saved launcher session presets.
+- Nothing voice-related is persisted. The capture↔buffer binding lives on the transient `pane._explorerEdit` and never reaches saved presets, `runtime_state.json`, or `localStorage`.
 - Browser mode is the preferred and more reliable microphone environment.
 - `pywebview` support is best-effort, even with permission patches.
 
@@ -135,6 +143,21 @@ Per terminal, the UI includes:
 
 - mic toggle button
 - live partial preview above the mic button
+
+While a file is open in the explorer's **in-place editor**, a second mic sits in
+that editor's Save/Cancel group. It exists only while an edit session is active —
+no editor, no mic — so there is no disabled-with-a-tooltip state to explain. It
+behaves like the terminal mic (click to toggle, press-and-hold to talk) and
+carries the same recording ring and partial-preview bubble.
+
+The **pane-header mic stays hidden on explorer and browser panes**
+(`terminals.css`, `.explorer-pane .voice-control`), and that is deliberate: the
+editor mic is the only dictation surface on an explorer pane. Push-to-talk
+reaches the editor only when the configured keybind carries `Ctrl`, `Alt`, or
+`Cmd` — a bare printable keybind would start a recording *and* swallow that
+character every time it was typed into the file, because the push-to-talk
+handler calls `preventDefault()`. Terminal panes are unchanged here; a text
+buffer is where that would destroy work.
 
 App Settings exposes:
 
@@ -319,6 +342,14 @@ Behavior:
 
 - lazily loads a singleton `WhisperModel`
 - buffers raw PCM bytes per session in `_whisper_audio_buffers`
+- only buffers into a session `voice_start` opened; a chunk for a recording that
+  was never started, or has already been finalized, is dropped rather than
+  allocating a buffer nothing would flush
+- caps that buffer at `WHISPER_MAX_RECORDING_SECONDS` (5 minutes ≈ 9.6 MB at
+  16 kHz mono PCM16). Reaching the cap finalizes the recording through the
+  normal stop path — everything said so far is transcribed and delivered —
+  and then emits a `voice_status` error naming the limit, which is what stops
+  the browser's capture
 - does not emit live partials
 - transcribes once on `voice_stop`
 - maps language tags like `en-US` to `en`
@@ -378,6 +409,24 @@ There are a few important implementation details here — all in `web/voice.py` 
 
 These behaviors exist because voice start/stop and proxy I/O had race conditions before the current locking and cleanup logic.
 
+### Every recording has an owner, and a lost socket releases it
+
+`voice_stop` is not the only way a recording ends. A closed tab, a crash, a
+dropped network, or a suspended laptop ends it too, and none of those send
+anything — so voice state must not depend on the client asking for it back.
+
+`register_voice_session` records, under `_active_voice_sessions_lock`, both the
+engine a recording started with and the socket that started it; `handle_disconnect`
+calls `abandon_client_voice_sessions(request.sid)`, which releases exactly the
+recordings that socket owned: the whisper PCM buffer is dropped and the Vosk
+WebSocket is closed. Nothing is emitted and nothing is transcribed on that path —
+the client that would have received the transcript is already gone.
+
+Ownership moves on re-registration. A second window that starts recording on the
+same pane takes the session over (the start path already replaces the Vosk
+connection), so the first window's later disconnect can never tear down a
+recording it no longer drives.
+
 ## Native `pywebview` Guideline
 
 `pywebview` is supported, but not treated as the primary mic environment.
@@ -397,15 +446,73 @@ Do not remove the warning language in the UI unless native capture reliability m
 
 ## Transcript Delivery Guideline
 
-Transcript injection behavior is intentionally simple today:
+Delivery is chosen by the **recording pane's own state**, in one pure rule —
+`resolveVoiceDelivery` in `web/static/js/voice-dictation.js`, called from the
+single `voice_result` handler in `terminals.js`. There is exactly one decision
+point; nothing downstream re-decides.
 
-- Vosk partials show only in the preview bubble.
-- Final transcript text is sent directly into the terminal input stream.
-- There is no draft-review or confirm-before-send step.
+| Recording pane | Final transcript goes to |
+| --- | --- |
+| A pane with an active explorer edit session bound to this capture | The caret in that editor's textarea |
+| Any other pane that has a terminal | The terminal input stream, then the shared broadcast fan-out |
+| A pane with neither a terminal nor an active edit (explorer, browser) | Nowhere. It is dropped, never sent as `terminal_input` |
 
-That means voice can dictate shell commands directly into the live terminal input.
+Partials (Vosk only) show in the preview bubble on the recording pane's visible
+mic and are never written into a buffer. There is still **no draft-review or
+confirm-before-send step** — it was considered for the editor and rejected, on
+the grounds that a review step for dictation into a text buffer is friction the
+buffer itself already provides (you can see and edit the words before saving).
 
-If this changes in the future, the product decision should be documented clearly because it alters both safety expectations and user workflow.
+So voice can still dictate shell commands directly into a live terminal, and can
+now dictate prose and code directly into an open file.
+
+### The capture ↔ buffer binding
+
+A capture that starts while an edit session is open is *bound* to it, through one
+field on the transient edit state (`pane._explorerEdit.voice`), with three phases:
+
+```
+(none) → recording → settling → (none)
+```
+
+- **recording** — Save is unavailable on that buffer.
+- **settling** — the capture stopped but the words may still be in flight. With
+  the shipped Whisper engine the transcript is produced *after* `voice_stop`, so
+  this window is precisely where a `Ctrl+S` would lose it. Save stays
+  unavailable, bounded by a 5 s settle timer.
+- The transcript arriving (or the timer expiring) clears the binding and Save
+  returns.
+
+The binding is established from the tail of `_startVoice` and moved on from the
+tail of `_stopVoice`, not from their callers — which is what makes every entry
+point correct at once: mic click, press-and-hold, push-to-talk, a backend error,
+a group switch, teardown.
+
+`clearExplorerEditState` is the single choke point for the reverse direction:
+every route that drops an edit (Cancel, discard, save success, reload from disk,
+tab or pane close) already funnels through it, so leaving edit mode by any means
+stops the capture without one hook per exit path.
+
+### What is refused, and what is reported
+
+A transcript that cannot be applied is dropped with a machine-readable reason,
+and the reasons a user could mistake for lost words raise exactly one toast:
+
+- `no-edit` — the editor closed before the words arrived.
+- `epoch-mismatch` — the transcript belonged to an earlier capture on that pane.
+- `saving` — a save was in flight, so the draft was already being discarded.
+- `no-target` / `no-text` — nothing to say; silent.
+
+Insertion prefers `document.execCommand('insertText', …)` over `setRangeText`,
+because only the former feeds the native undo stack — `Ctrl+Z` after dictation
+must restore the pre-dictation buffer in one step. `setRangeText` plus an
+explicit input notification is the fallback when the textarea does not hold
+focus or `execCommand` is unavailable. The caret's own selection is read from the
+textarea rather than from focus, so text lands where the user left the caret and
+focus is never stolen.
+
+If delivery routing changes in the future, the product decision should be
+documented clearly because it alters both safety expectations and user workflow.
 
 ## Verified Behavior In Tests
 
@@ -414,6 +521,8 @@ The existing test suite already covers key voice behavior. That coverage should 
 Notable verified areas:
 
 - terminals page exposes the voice toggle and worklet wiring
+- transcript routing: editor, terminal, preview, and each drop reason
+- caret insertion: one leading space only where it belongs, never a newline, selections replaced without touching the rest of the buffer
 - App Settings exposes the global microphone and push-to-talk controls
 - `voice-status` reports engine, model, and language correctly
 - `voice-prefs` defaults and persistence behavior
@@ -430,7 +539,9 @@ These are current design constraints, not necessarily bugs:
 - voice preferences are shared globally, not per terminal or per session group
 - `whisper` only emits final text on stop
 - Vosk proxying is still chunk-send then response-read, not a full duplex event pump
-- transcript text is injected directly into the terminal
+- transcript text is applied directly, with no review step, to whichever destination the recording pane resolves to
+- an explorer editor receives one block on stop under `whisper`; the settling window is what makes that safe
+- push-to-talk into an explorer editor requires a modifier keybind, so a bare-key keybind leaves the editor with the mic button only
 - voice is browser-first; desktop embedded mode is less reliable
 - the capture path depends on `AudioWorklet`; older browsers without it will not use the upgraded path
 
@@ -439,12 +550,14 @@ These are current design constraints, not necessarily bugs:
 If you modify voice behavior, keep these rules in mind:
 
 - Treat `web/static/js/voice-input.js`, `web/static/voice-capture-worklet.js`, and `web/voice.py` as one coordinated system.
+- Keep delivery decisions in `web/static/js/voice-dictation.js`. It is DOM-free on purpose: a second `if` in the `voice_result` handler is a rule no test can execute.
 - Any change to audio format must preserve or intentionally update the 16 kHz PCM contract for both engines.
 - If you change UI wording around mic reliability, verify it still matches real `pywebview` behavior.
 - If you change engine semantics, update both `/api/voice-status` and the terminal panel summary text.
 - If you touch Vosk session lifecycle, keep the lock discipline and leaked-handle cleanup.
 - If you add a new backend, decide explicitly whether it behaves like Vosk streaming or Whisper batch-finalization.
-- If you make voice safer with a draft-confirm flow, document how that affects current direct terminal injection.
+- If you make voice safer with a draft-confirm flow, document how that affects current direct injection into both terminals and edit buffers.
+- If you add a pane kind that can receive dictation, add it to `resolveVoiceDelivery` and to the delivery table above. A pane the rule does not recognise receives nothing, which is the correct default but a silent one.
 
 ## Historical Material
 

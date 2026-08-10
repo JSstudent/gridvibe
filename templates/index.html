@@ -6,6 +6,7 @@
     <title>GridVibe</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/launcher.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/notice-banner.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app-settings.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/workspaces.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/lifecycle.css') }}?v={{ version }}">
@@ -42,6 +43,8 @@
         {% endif %}
     </div>
 </header>
+
+{% include 'partials/notice_banner.html' %}
 
 <div id="restoreWorkspaceBanner" class="restore-banner" hidden>
     <span id="restoreWorkspaceText" class="restore-banner-text">Previous workspace found.</span>
@@ -255,12 +258,13 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
                     <span>View Active Terminals</span>
                 </button>
-                <!-- Split CTA: the primary half launches and names its
-                     destination, the caret half picks a different one. -->
+                <!-- Split CTA: the primary half names what it launches and,
+                     under it, where that lands; the caret half picks a
+                     different destination. -->
                 <div class="launch-split" id="launchSplit">
                     <button id="launchBtn" type="button" class="action-btn" onclick="launchSessions()">
                         <span class="action-btn-text">
-                            <span class="action-btn-label">Launch Workspace</span>
+                            <span class="action-btn-label" id="launchPrimaryLabel">Launch new session</span>
                             <span class="action-btn-destination" id="launchDestinationLabel" hidden></span>
                         </span>
                         <span class="arrow" aria-hidden="true">→</span>
@@ -308,7 +312,6 @@
                         </svg>
                     </button>
                 </div>
-                <div id="quickUpdateStatus" class="inline-status"></div>
             </div>
         </div>
     </section>
@@ -405,6 +408,7 @@
     const AGENT_OPTIONS = {{ agent_options|tojson }};
     const LOCAL_WINDOWS_SHELLS_AVAILABLE = {{ local_windows_shells_available|tojson }};
 </script>
+<script src="{{ url_for('static', filename='js/notice-banner.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/shared.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/workspaces.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/app-settings.js') }}?v={{ version }}"></script>

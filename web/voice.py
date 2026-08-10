@@ -114,7 +114,20 @@ _whisper_audio_lock = threading.Lock()
 # Engine each active recording started with, so audio/stop keep routing to it
 # even if the user switches engines in App Settings mid-recording.
 _active_voice_sessions: Dict[str, str] = {}
+# Which socket started each recording, and what each socket currently owns, so
+# a client that vanishes without a voice_stop releases exactly its own state.
+# All three maps are guarded by _active_voice_sessions_lock.
+_voice_session_owners: Dict[str, str] = {}
+_voice_sessions_by_client: Dict[str, set] = {}
 _active_voice_sessions_lock = threading.Lock()
+
+# faster-whisper buffers raw PCM16 mono at 16 kHz — 32 KB per second, ~1.9 MB
+# per minute — until the recording stops, so an unbounded buffer is both a leak
+# and one enormous array handed to a single transcribe call. A held (or wedged)
+# push-to-talk key is capped here instead.
+WHISPER_AUDIO_BYTES_PER_SECOND = 16000 * 2
+WHISPER_MAX_RECORDING_SECONDS = 300
+WHISPER_MAX_BUFFERED_AUDIO_BYTES = WHISPER_MAX_RECORDING_SECONDS * WHISPER_AUDIO_BYTES_PER_SECOND
 
 
 def _whisper_engine_available() -> bool:
@@ -548,6 +561,11 @@ def _stop_vosk_service():
     with _whisper_audio_lock:
         _whisper_audio_buffers.clear()
 
+    with _active_voice_sessions_lock:
+        _active_voice_sessions.clear()
+        _voice_session_owners.clear()
+        _voice_sessions_by_client.clear()
+
 
 atexit.register(_stop_vosk_service)
 
@@ -576,6 +594,119 @@ def _save_voice_prefs(prefs: Dict[str, Any]):
         cfg = load_config()
         cfg['voice_prefs'] = prefs
         save_config(cfg)
+
+
+# ==================== Active recording registry ====================
+# One recording is one row here: the engine it started with and the socket that
+# started it. The owner is what lets a dropped socket release its own state —
+# before it was tracked, voice state was only ever cleared by voice_stop or at
+# process exit, so a recording interrupted by a closed tab, a crash, or a
+# suspended laptop kept its buffer (and, on Vosk, a live WebSocket) for the life
+# of the process.
+
+
+def register_voice_session(client_id: str, session_id: str, engine: str) -> None:
+    """Record the engine a recording started with and the socket that owns it.
+
+    Ownership moves on re-registration: a second window that starts recording on
+    the same pane takes the session over — the start path already replaces the
+    Vosk connection — so the first window's disconnect can never tear down a
+    recording it no longer drives.
+    """
+    with _active_voice_sessions_lock:
+        _active_voice_sessions[session_id] = engine
+        previous_owner = _voice_session_owners.get(session_id)
+        if previous_owner is not None and previous_owner != client_id:
+            _forget_owned_session(previous_owner, session_id)
+        _voice_session_owners[session_id] = client_id
+        _voice_sessions_by_client.setdefault(client_id, set()).add(session_id)
+
+
+def resolve_voice_session_engine(session_id: str, default_engine: str) -> str:
+    """Return the engine a recording started with, or ``default_engine``."""
+    with _active_voice_sessions_lock:
+        return _active_voice_sessions.get(session_id, default_engine)
+
+
+def release_voice_session(session_id: str, default_engine: Optional[str] = None) -> Optional[str]:
+    """Forget one recording and return the engine it started with."""
+    with _active_voice_sessions_lock:
+        engine = _active_voice_sessions.pop(session_id, default_engine)
+        owner = _voice_session_owners.pop(session_id, None)
+        if owner is not None:
+            _forget_owned_session(owner, session_id)
+        return engine
+
+
+def _forget_owned_session(client_id: str, session_id: str) -> None:
+    """Drop one session from a client's owned set. Caller holds the lock.
+
+    A client with nothing left owns no row at all, so the map only ever holds
+    sockets with a recording actually in flight.
+    """
+    owned = _voice_sessions_by_client.get(client_id)
+    if owned is None:
+        return
+    owned.discard(session_id)
+    if not owned:
+        _voice_sessions_by_client.pop(client_id, None)
+
+
+def abandon_client_voice_sessions(client_id: str) -> List[str]:
+    """Release every recording one socket started, emitting nothing.
+
+    Called from the ``disconnect`` handler, where the client that would have
+    received a transcript is already gone — so this releases the resources and
+    delivers nothing, rather than reusing the stop path.
+    """
+    with _active_voice_sessions_lock:
+        session_ids = _voice_sessions_by_client.pop(client_id, set())
+        engines = {
+            session_id: _active_voice_sessions.pop(session_id, None)
+            for session_id in session_ids
+        }
+        for session_id in session_ids:
+            _voice_session_owners.pop(session_id, None)
+
+    for session_id, engine in engines.items():
+        if engine == 'whisper':
+            _discard_whisper_voice_session(session_id)
+        else:
+            _discard_vosk_voice_session(session_id)
+
+    if engines:
+        logger.debug(
+            "Released %d abandoned voice session(s) for client %s",
+            len(engines),
+            client_id,
+        )
+    return sorted(engines)
+
+
+def _discard_vosk_voice_session(session_id: str) -> None:
+    """Close an abandoned Vosk connection without flushing or emitting."""
+    with _vosk_lock:
+        ws = _vosk_ws_connections.pop(session_id, None)
+        session_lock = _vosk_session_locks.pop(session_id, None)
+    if ws is None:
+        return
+
+    # Same courtesy the stop path pays: wait briefly for an in-flight chunk to
+    # finish its send/recv rather than closing the socket underneath it.
+    acquired = session_lock.acquire(timeout=2) if session_lock is not None else False
+    try:
+        ws.close()
+    except Exception as exc:
+        logger.debug("Error closing abandoned Vosk connection for %s: %s", session_id, exc)
+    finally:
+        if session_lock is not None and acquired:
+            session_lock.release()
+
+
+def _discard_whisper_voice_session(session_id: str) -> None:
+    """Drop an abandoned recording's buffered PCM without transcribing it."""
+    with _whisper_audio_lock:
+        _whisper_audio_buffers.pop(session_id, None)
 
 
 def _start_vosk_voice_session(session_id: str):
@@ -728,14 +859,46 @@ def _handle_vosk_audio_chunk(session_id: str, audio: Any):
 
 
 def _handle_whisper_audio_chunk(session_id: str, audio: Any):
-    """Buffer raw PCM audio for later faster-whisper transcription."""
+    """Buffer raw PCM audio for later faster-whisper transcription.
+
+    Audio only lands in a buffer ``voice_start`` created. A chunk for a
+    recording that was never started — or that has already been finalized —
+    is dropped rather than allocating a buffer nothing would ever flush.
+
+    The buffer is capped at ``WHISPER_MAX_RECORDING_SECONDS``. Reaching the cap
+    finalizes the recording through the normal stop path, so everything said so
+    far is still transcribed and delivered, and the client is told why its
+    recording stopped.
+    """
     raw = audio if isinstance(audio, bytes) else bytes(audio)
     with _whisper_audio_lock:
         buffer = _whisper_audio_buffers.get(session_id)
         if buffer is None:
-            buffer = bytearray()
-            _whisper_audio_buffers[session_id] = buffer
-        buffer.extend(raw)
+            return
+        remaining = WHISPER_MAX_BUFFERED_AUDIO_BYTES - len(buffer)
+        if remaining > 0:
+            buffer.extend(raw[:remaining])
+        reached_cap = len(buffer) >= WHISPER_MAX_BUFFERED_AUDIO_BYTES
+
+    if not reached_cap:
+        return
+
+    logger.warning(
+        "faster-whisper recording for session %s reached the %ss cap; finalizing early",
+        session_id,
+        WHISPER_MAX_RECORDING_SECONDS,
+    )
+    release_voice_session(session_id)
+    _stop_whisper_voice_session(session_id)
+    emit('voice_status', {
+        'session_id': session_id,
+        'status': 'error',
+        'message': (
+            f"Recording stopped at the {WHISPER_MAX_RECORDING_SECONDS // 60}-minute "
+            "faster-whisper limit. Everything said so far was transcribed; "
+            "start recording again to continue."
+        ),
+    })
 
 
 def _stop_vosk_voice_session(session_id: str):

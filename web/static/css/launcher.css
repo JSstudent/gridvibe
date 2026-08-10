@@ -252,21 +252,25 @@
             padding: 0;
         }
 
-        /* Rows are placed explicitly because the middle one — the restore
-           banner — is usually absent: with only two named rows the banner
-           landed in the 1fr row and grew to fill whatever the window gave it,
-           which is why it ballooned as the window was resized. */
+        /* Rows are placed explicitly because the two middle ones — the
+           notification banner and the restore banner — are usually absent:
+           with only two named rows a banner landed in the 1fr row and grew to
+           fill whatever the window gave it, which is why it ballooned as the
+           window was resized. Each optional banner owns a content-sized row of
+           its own, so they can never share a row or overlap, and a hidden one
+           collapses its row to nothing. */
         .app-frame {
             display: grid;
-            grid-template-rows: auto auto 1fr;
+            grid-template-rows: auto auto auto 1fr;
             min-height: 100vh;
             max-height: 100vh;
             overflow: hidden;
         }
 
         .app-titlebar { grid-row: 1; }
-        .restore-banner { grid-row: 2; }
-        .shell { grid-row: 3; }
+        .gv-notice-banner { grid-row: 2; }
+        .restore-banner { grid-row: 3; }
+        .shell { grid-row: 4; }
 
         .app-titlebar {
             display: flex;
@@ -529,17 +533,17 @@
             letter-spacing: 1px;
         }
 
+        /* Static helper copy for the card it sits in — nothing writes it from
+           JS any more. It used to be the page's global message sink, which is
+           how "Launch failed" ended up painted inside step 01; every message
+           now goes to the notification banner instead, so the severity
+           variants this line used to carry are gone with it. */
         .message {
             min-height: 0;
             margin-bottom: 8px;
             font-size: 0.82rem;
             color: var(--muted);
         }
-
-        .message.success { color: var(--success); }
-        .message.error { color: var(--danger); }
-        .message.info { color: var(--accent); }
-        .message.warning { color: var(--warning); }
 
         .terminal-layout-card .message {
             margin-bottom: 10px;
@@ -870,19 +874,6 @@
             animation: tf-spin 0.9s linear infinite;
         }
 
-        .inline-status {
-            min-height: 18px;
-            text-align: center;
-            color: var(--muted);
-            font-size: 0.76rem;
-            line-height: 1.35;
-        }
-
-        .inline-status.success { color: var(--success); }
-        .inline-status.error { color: var(--danger); }
-        .inline-status.info { color: var(--accent); }
-        .inline-status.warning { color: var(--warning); }
-
         .app-footer {
             display: flex;
             align-items: center;
@@ -1078,6 +1069,14 @@
         .field select:focus {
             border-color: var(--border-active);
             box-shadow: 0 0 0 3px rgba(0, 217, 255, 0.12);
+        }
+
+        /* The one contextual crumb the banner cannot carry: which field the
+           refused launch was talking about. Cleared on the next keystroke. */
+        .field input.is-invalid,
+        .field input.is-invalid:focus {
+            border-color: var(--danger);
+            box-shadow: 0 0 0 3px var(--gv-danger-soft);
         }
 
         .field select {
@@ -1857,6 +1856,17 @@
             align-items: flex-start;
             gap: 1px;
             min-width: 0;
+        }
+
+        /* The two lines answer different questions, so they are sized apart:
+           *what* launches reads as the CTA, *where* it lands rides under it. */
+        .action-btn-label {
+            font-size: 1.02rem;
+            line-height: 1.2;
+            max-width: 260px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .action-btn-destination {

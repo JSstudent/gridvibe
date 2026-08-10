@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import unittest
+from collections import deque
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -102,6 +103,20 @@ class RealpathFakeSftp(FakeSftp):
         return normalized
 
 
+class _CountedChunk(str):
+    """A terminal output chunk that records every ``len()`` taken of it.
+
+    Lets the rolling-buffer tests assert *how much* of the deque the cache
+    touches per chunk without timing anything (audit F3).
+    """
+
+    len_calls = 0
+
+    def __len__(self):
+        type(self).len_calls += 1
+        return super().__len__()
+
+
 class FakeSshStream:
     def __init__(self, data=b"", returncode=0):
         self._data = data
@@ -180,6 +195,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             api._vosk_ws_connections.clear()
         with api._whisper_audio_lock:
             api._whisper_audio_buffers.clear()
+        self._clear_active_voice_sessions()
         web_voice._whisper_model_instance = None
         cfg = api.load_config()
         self._saved_appearance = json.loads(json.dumps(cfg.get("appearance", {})))
@@ -187,6 +203,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self._saved_voice_prefs = cfg.pop("voice_prefs", None)
         api.save_config(cfg)
         api._refresh_runtime_config()
+
+    def _clear_active_voice_sessions(self):
+        with api._active_voice_sessions_lock:
+            api._active_voice_sessions.clear()
+            web_voice._voice_session_owners.clear()
+            web_voice._voice_sessions_by_client.clear()
 
     def _create_explorer_session(self, repo_dir: Path) -> str:
         response = self.client.post(
@@ -269,6 +291,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             api._vosk_ws_connections.clear()
         with api._whisper_audio_lock:
             api._whisper_audio_buffers.clear()
+        self._clear_active_voice_sessions()
         web_voice._whisper_model_instance = None
         cfg = api.load_config()
         cfg["appearance"] = self._saved_appearance
@@ -1927,7 +1950,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("panel.querySelector('.explorer-source-view')", viewer)
         self.assertIn("view.querySelector('.explorer-source-editor')", viewer)
         exit_mode = editor[
-            editor.index("function exitExplorerEditMode(index)"):
+            editor.index("function exitExplorerEditMode("):
             editor.index("async function cancelExplorerEdit(index)")
         ]
         self.assertIn("const editViewport = captureScrollMetrics(textarea);", exit_mode)
@@ -3691,9 +3714,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("pip install -r requirements-voice.txt", payload["status_message"])
 
     def test_voice_status_endpoint_reports_per_engine_availability(self):
+        # ws_client is patched for the same reason WhisperModel and np are in the
+        # sibling test above: both Vosk paths short-circuit on `ws_client is None`
+        # before the packages check, so an environment without websocket-client
+        # would exercise a different branch than the one under test.
         with patch.object(api.runtime_config, "voice_engine", "vosk"), patch.object(
             api, "_vosk_service_reachable", return_value=False
-        ), patch.object(
+        ), patch.object(web_voice, "ws_client", object()), patch.object(
             web_voice, "_vosk_service_packages_available", return_value=False
         ), patch.object(web_voice, "WhisperModel", object()), patch.object(
             web_voice, "np", object()
@@ -3711,7 +3738,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_voice_status_endpoint_trusts_a_running_external_vosk_service(self):
         with patch.object(api.runtime_config, "voice_engine", "vosk"), patch.object(
             api, "_vosk_service_reachable", return_value=True
-        ), patch.object(
+        ), patch.object(web_voice, "ws_client", object()), patch.object(
             web_voice, "_vosk_service_packages_available", return_value=False
         ):
             response = self.client.get("/api/voice-status")
@@ -11227,6 +11254,170 @@ class ApiRoutesTestCase(unittest.TestCase):
         with api._whisper_audio_lock:
             self.assertNotIn("session-whisper", api._whisper_audio_buffers)
 
+    def test_disconnect_releases_an_abandoned_whisper_recording(self):
+        """Audit F2a — a recording nobody stopped must not outlive its socket."""
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+
+        with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
+            api.runtime_config, "voice_engine", "whisper"
+        ), patch.object(web_voice, "_ensure_whisper_model", return_value=MagicMock()):
+            socket_client.emit("voice_start", {"session_id": "session-dropped"})
+            socket_client.emit(
+                "voice_audio",
+                {"session_id": "session-dropped", "audio": b"\x00\x01\x02\x03"},
+            )
+
+        with api._whisper_audio_lock:
+            self.assertIn("session-dropped", api._whisper_audio_buffers)
+
+        # The tab closes / the laptop suspends: no voice_stop ever arrives.
+        socket_client.disconnect()
+
+        with api._whisper_audio_lock:
+            self.assertNotIn("session-dropped", api._whisper_audio_buffers)
+        with api._active_voice_sessions_lock:
+            self.assertNotIn("session-dropped", api._active_voice_sessions)
+            self.assertEqual(web_voice._voice_sessions_by_client, {})
+
+    def test_disconnect_closes_an_abandoned_vosk_connection(self):
+        """Audit F2a — the dropped socket's Vosk WebSocket is closed, not leaked."""
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+
+        mock_ws = MagicMock()
+        mock_ws_client = MagicMock()
+        mock_ws_client.create_connection.return_value = mock_ws
+
+        with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
+            api.runtime_config, "voice_engine", "vosk"
+        ), patch.object(web_voice, "ws_client", mock_ws_client), patch.object(
+            web_voice, "_ensure_vosk_service", return_value=True
+        ):
+            socket_client.emit("voice_start", {"session_id": "session-vosk-dropped"})
+
+        with api._vosk_lock:
+            self.assertIs(api._vosk_ws_connections["session-vosk-dropped"], mock_ws)
+
+        socket_client.disconnect()
+
+        mock_ws.close.assert_called()
+        with api._vosk_lock:
+            self.assertNotIn("session-vosk-dropped", api._vosk_ws_connections)
+            self.assertNotIn("session-vosk-dropped", api._vosk_session_locks)
+        with api._active_voice_sessions_lock:
+            self.assertNotIn("session-vosk-dropped", api._active_voice_sessions)
+
+    def test_disconnect_leaves_another_window_recording_alone(self):
+        """Ownership moves with the recording, so a stale window releases nothing."""
+        first_window = api.socketio.test_client(api.app, flask_test_client=self.client)
+        second_window = api.socketio.test_client(api.app, flask_test_client=self.client)
+        self.addCleanup(second_window.disconnect)
+
+        with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
+            api.runtime_config, "voice_engine", "whisper"
+        ), patch.object(web_voice, "_ensure_whisper_model", return_value=MagicMock()):
+            first_window.emit("voice_start", {"session_id": "session-shared"})
+            second_window.emit("voice_start", {"session_id": "session-shared"})
+
+        first_window.disconnect()
+
+        with api._whisper_audio_lock:
+            self.assertIn("session-shared", api._whisper_audio_buffers)
+        with api._active_voice_sessions_lock:
+            self.assertEqual(api._active_voice_sessions["session-shared"], "whisper")
+
+    def test_whisper_buffer_is_capped_and_finalizes_the_recording(self):
+        """Audit F2b — a held push-to-talk key stops at the cap instead of growing."""
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+        self.addCleanup(socket_client.disconnect)
+
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = (
+            iter([SimpleNamespace(text="capped words")]),
+            SimpleNamespace(language="en"),
+        )
+
+        with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
+            api.runtime_config, "voice_engine", "whisper"
+        ), patch.object(
+            web_voice, "_ensure_whisper_model", return_value=mock_model
+        ), patch.object(
+            web_voice, "_pcm16le_to_float32", return_value="audio-array"
+        ) as to_float32, patch.object(web_voice, "WHISPER_MAX_BUFFERED_AUDIO_BYTES", 6):
+            socket_client.emit("voice_start", {"session_id": "session-capped"})
+            socket_client.get_received()
+
+            socket_client.emit(
+                "voice_audio", {"session_id": "session-capped", "audio": b"\x00\x01\x02\x03"}
+            )
+            socket_client.emit(
+                "voice_audio", {"session_id": "session-capped", "audio": b"\x04\x05\x06\x07"}
+            )
+            cap_events = socket_client.get_received()
+
+            # Audio still arriving after the cap is dropped, not re-buffered.
+            socket_client.emit(
+                "voice_audio", {"session_id": "session-capped", "audio": b"\x08\x09"}
+            )
+
+        # The buffer stopped exactly at the cap rather than swallowing the chunk.
+        mock_model.transcribe.assert_called_once()
+        to_float32.assert_called_once_with(b"\x00\x01\x02\x03\x04\x05")
+        with api._whisper_audio_lock:
+            self.assertNotIn("session-capped", api._whisper_audio_buffers)
+        with api._active_voice_sessions_lock:
+            self.assertNotIn("session-capped", api._active_voice_sessions)
+
+        # What was said before the cap is still delivered...
+        self.assertIn(
+            {
+                "name": "voice_result",
+                "args": [
+                    {
+                        "session_id": "session-capped",
+                        "text": "capped words",
+                        "final": True,
+                    }
+                ],
+                "namespace": "/",
+            },
+            cap_events,
+        )
+        # ...and the client is told why its recording stopped.
+        errors = [
+            event["args"][0]
+            for event in cap_events
+            if event["name"] == "voice_status" and event["args"][0].get("status") == "error"
+        ]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("limit", errors[0]["message"])
+
+    def test_whisper_audio_without_a_started_recording_is_dropped(self):
+        """No buffer is allocated for audio no voice_start asked for."""
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+        self.addCleanup(socket_client.disconnect)
+
+        with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
+            api.runtime_config, "voice_engine", "whisper"
+        ):
+            socket_client.emit(
+                "voice_audio", {"session_id": "session-unstarted", "audio": b"\x00\x01"}
+            )
+
+        with api._whisper_audio_lock:
+            self.assertNotIn("session-unstarted", api._whisper_audio_buffers)
+
     # ── Theme support tests ──
 
     def test_launcher_page_includes_theme_css_variables(self):
@@ -12554,6 +12745,97 @@ class TerminalOutputBufferCacheTestCase(unittest.TestCase):
 
         self.assertEqual(api._get_buffered_terminal_output("buf-e"), "")
 
+    def test_caching_a_chunk_does_not_rescan_the_whole_buffer(self):
+        """Audit F3 — the append path must not walk the deque under the lock."""
+        with patch.object(web_terminal_io, "TERMINAL_OUTPUT_BUFFER_MAX_CHARS", 500):
+            for _ in range(600):
+                api._cache_terminal_output("buf-f", _CountedChunk("x"))
+            # 1-character chunks are the worst case: one deque entry per char,
+            # which is the keystroke-echo path the finding measured.
+            self.assertEqual(len(api.session_output_buffers["buf-f"]), 500)
+
+            _CountedChunk.len_calls = 0
+            api._cache_terminal_output("buf-f", _CountedChunk("y"))
+
+        # The old implementation re-summed the deque on every chunk, so this was
+        # 501 measurements instead of a handful.
+        self.assertLessEqual(_CountedChunk.len_calls, 4)
+        self.assertEqual(api._get_buffered_terminal_output("buf-f"), "x" * 499 + "y")
+
+    def test_running_total_stays_exact_across_mixed_chunk_sizes(self):
+        limit = api.TERMINAL_OUTPUT_BUFFER_MAX_CHARS
+        api._cache_terminal_output("buf-g", "a" * (limit - 10))
+        api._cache_terminal_output("buf-g", "b" * 5)
+        api._cache_terminal_output("buf-g", "c" * 200)  # partially trims the head
+        api._cache_terminal_output("buf-g", "d")
+
+        buffered = api._get_buffered_terminal_output("buf-g")
+        self.assertEqual(len(buffered), limit)
+        self.assertTrue(buffered.endswith("b" * 5 + "c" * 200 + "d"))
+        # The carried total must still describe what the deque actually holds;
+        # a drifted total trims to the wrong length on some later chunk.
+        self.assertEqual(
+            api.session_output_buffers["buf-g"].total_chars, len(buffered)
+        )
+
+    def test_a_plain_deque_is_adopted_without_losing_its_tail(self):
+        with api.connection_lock:
+            api.session_output_buffers["buf-h"] = deque(["old "])
+
+        api._cache_terminal_output("buf-h", "new")
+
+        self.assertEqual(api._get_buffered_terminal_output("buf-h"), "old new")
+
+
+class BrowserPaneConnectDispatchTestCase(unittest.TestCase):
+    """Audit F5 — _connect_session must recognise browser panes itself."""
+
+    def _browser_session(self):
+        group = api.session_manager.create_group(
+            name="Local",
+            connection_mode="wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        self.addCleanup(api.session_manager.remove_group, group.group_id)
+        return api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Browser",
+            directory=os.getcwd(),
+            mode="wsl",
+            startup_mode="browser",
+            initial_command="http://127.0.0.1:3000",
+            initial_command_mode="browser",
+            browser_tabs=["http://127.0.0.1:3000"],
+        )
+
+    def test_a_browser_pane_never_reaches_a_shell_connector(self):
+        session = self._browser_session()
+
+        with patch.object(web_terminal_io, "_connect_local_session") as local, \
+                patch.object(web_terminal_io, "_connect_ssh_session") as ssh, \
+                patch.object(web_terminal_io, "_broadcast_session_status"):
+            api._connect_session(session.session_id)
+
+        # A browser pane is always mode == "wsl", so without its own branch it
+        # falls into the local shell and gets its tab URL typed at the prompt.
+        local.assert_not_called()
+        ssh.assert_not_called()
+        self.assertEqual(
+            api.session_manager.get_session(session.session_id).status,
+            api.SessionStatus.CONNECTED,
+        )
+
+    def test_a_browser_pane_reports_connected_to_the_room(self):
+        session = self._browser_session()
+
+        with patch.object(web_terminal_io, "_connect_local_session"), \
+                patch.object(web_terminal_io, "_connect_ssh_session"), \
+                patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            api._connect_session(session.session_id)
+
+        broadcast.assert_called_once_with(session.session_id)
+
 
 class SshSftpPoolTestCase(unittest.TestCase):
     """Perf finding 3.1 — explorer SSH transports are pooled per session."""
@@ -12572,6 +12854,20 @@ class SshSftpPoolTestCase(unittest.TestCase):
         client.open_sftp = MagicMock(side_effect=lambda: MagicMock())
         client.close = MagicMock()
         return client
+
+    def _pool(self, session_id, client, idle_for=0.0):
+        """Seed one pooled client, optionally already idle past the timeout."""
+        entry = web_explorer._PooledSSHClient(client)
+        if idle_for:
+            entry.last_used -= web_explorer.SSH_CLIENT_POOL_IDLE_TIMEOUT + idle_for
+        with web_explorer._ssh_client_pool_lock:
+            web_explorer._ssh_client_pool[session_id] = entry
+
+    def _age_out(self, session_id):
+        """Backdate a pooled client's stamp past the idle timeout."""
+        with web_explorer._ssh_client_pool_lock:
+            entry = web_explorer._ssh_client_pool[session_id]
+            entry.last_used -= web_explorer.SSH_CLIENT_POOL_IDLE_TIMEOUT + 1
 
     def test_acquire_reuses_pooled_transport_for_next_request(self):
         session = SimpleNamespace(session_id="pool-1")
@@ -12611,8 +12907,7 @@ class SshSftpPoolTestCase(unittest.TestCase):
     def test_dead_pooled_client_is_replaced_with_a_fresh_connection(self):
         session = SimpleNamespace(session_id="pool-3")
         dead_client = self._fake_client(active=False)
-        with web_explorer._ssh_client_pool_lock:
-            web_explorer._ssh_client_pool["pool-3"] = (time.monotonic(), dead_client)
+        self._pool("pool-3", dead_client)
 
         fresh_client = self._fake_client()
         fresh_sftp = MagicMock()
@@ -12626,11 +12921,7 @@ class SshSftpPoolTestCase(unittest.TestCase):
 
     def test_idle_pooled_clients_are_reaped(self):
         idle_client = self._fake_client()
-        with web_explorer._ssh_client_pool_lock:
-            web_explorer._ssh_client_pool["pool-idle"] = (
-                time.monotonic() - web_explorer.SSH_CLIENT_POOL_IDLE_TIMEOUT - 1,
-                idle_client,
-            )
+        self._pool("pool-idle", idle_client, idle_for=1)
 
         web_explorer._reap_idle_pooled_ssh_clients()
 
@@ -12640,14 +12931,98 @@ class SshSftpPoolTestCase(unittest.TestCase):
 
     def test_close_ssh_connection_evicts_the_pool_entry(self):
         client = self._fake_client()
-        with web_explorer._ssh_client_pool_lock:
-            web_explorer._ssh_client_pool["pool-close"] = (time.monotonic(), client)
+        self._pool("pool-close", client)
 
         api._close_ssh_connection("pool-close")
 
         with web_explorer._ssh_client_pool_lock:
             self.assertNotIn("pool-close", web_explorer._ssh_client_pool)
         client.close.assert_called_once()
+
+    def test_a_request_in_flight_past_the_idle_timeout_is_not_reaped(self):
+        """F8 — `last_used` is stamped at acquire, not continuously.
+
+        A download or repository search that runs longer than the idle timeout
+        leaves a stale stamp on a client it is still using; a concurrent
+        request on the same session reaps on acquire and would close the
+        transport underneath it.
+        """
+        session = SimpleNamespace(session_id="pool-inflight")
+        client = self._fake_client()
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(client, MagicMock())):
+            held_client, held_sftp = api._acquire_ssh_sftp(session)
+            # The long request is still running; its stamp has aged out.
+            self._age_out("pool-inflight")
+
+            web_explorer._reap_idle_pooled_ssh_clients()
+
+        client.close.assert_not_called()
+        with web_explorer._ssh_client_pool_lock:
+            self.assertIn("pool-inflight", web_explorer._ssh_client_pool)
+
+        # Once it finishes, the client is idle again and reapable as before.
+        api._release_ssh_sftp(session, held_client, held_sftp)
+        self._age_out("pool-inflight")
+        web_explorer._reap_idle_pooled_ssh_clients()
+
+        with web_explorer._ssh_client_pool_lock:
+            self.assertNotIn("pool-inflight", web_explorer._ssh_client_pool)
+        client.close.assert_called_once()
+
+    def test_concurrent_requests_hold_the_transport_until_the_last_one_ends(self):
+        """The count is a count: one finishing request does not free the other."""
+        session = SimpleNamespace(session_id="pool-shared")
+        client = self._fake_client()
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(client, MagicMock())):
+            first_client, first_sftp = api._acquire_ssh_sftp(session)
+            second_client, second_sftp = api._acquire_ssh_sftp(session)
+
+        self.assertIs(second_client, first_client)
+
+        api._release_ssh_sftp(session, first_client, first_sftp)
+        self._age_out("pool-shared")
+        web_explorer._reap_idle_pooled_ssh_clients()
+
+        # The second request is still holding it.
+        client.close.assert_not_called()
+        with web_explorer._ssh_client_pool_lock:
+            self.assertIn("pool-shared", web_explorer._ssh_client_pool)
+
+        api._release_ssh_sftp(session, second_client, second_sftp)
+        self._age_out("pool-shared")
+        web_explorer._reap_idle_pooled_ssh_clients()
+
+        with web_explorer._ssh_client_pool_lock:
+            self.assertNotIn("pool-shared", web_explorer._ssh_client_pool)
+
+    def test_an_unpooled_client_does_not_discharge_the_pooled_entry(self):
+        """Releasing a client that lost the pooling race leaves the count alone.
+
+        Otherwise the loser's release would decrement the winner's count to
+        zero while the winner is still mid-request — reopening F8 through the
+        one path where acquire deliberately returns an unpooled client.
+        """
+        session = SimpleNamespace(session_id="pool-loser")
+        winner = self._fake_client()
+        loser = self._fake_client()
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(winner, MagicMock())):
+            winner_client, winner_sftp = api._acquire_ssh_sftp(session)
+
+        loser_sftp = MagicMock()
+        api._release_ssh_sftp(session, loser, loser_sftp)
+
+        loser.close.assert_called_once()
+        self._age_out("pool-loser")
+        web_explorer._reap_idle_pooled_ssh_clients()
+
+        winner.close.assert_not_called()
+        with web_explorer._ssh_client_pool_lock:
+            self.assertIn("pool-loser", web_explorer._ssh_client_pool)
+
+        api._release_ssh_sftp(session, winner_client, winner_sftp)
 
 
 class SessionGroupsUpdatedBroadcastTestCase(unittest.TestCase):
@@ -12803,6 +13178,12 @@ class SessionStatusRoomScopeTestCase(unittest.TestCase):
 
 class SharedRunServerTestCase(unittest.TestCase):
     """Deep-dive 5.7 — one server entry point with a consistent flag set."""
+
+    def setUp(self):
+        # run_server re-points the Socket.IO origins (audit F1); keep that off
+        # the shared server object once the test is done.
+        eio = web_app.socketio.server.eio
+        self.addCleanup(setattr, eio, "cors_allowed_origins", eio.cors_allowed_origins)
 
     def test_run_server_passes_the_full_flag_set(self):
         with patch.object(api.socketio, "run") as mock_run:
@@ -13352,6 +13733,15 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             terminals_html.index("js/terminal-icons.js"),
             terminals_html.index("js/voice-input.js"),
         )
+        # voice-dictation.js is the DOM-free transcript routing/insertion rule
+        # voice-input.js and terminals.js consume, so it loads first. It is not
+        # referenced by the launcher, which has no explorer panes.
+        self.assertIn(f"/static/js/voice-dictation.js?v={__version__}", terminals_html)
+        self.assertNotIn("js/voice-dictation.js", launcher_html)
+        self.assertLess(
+            terminals_html.index("js/voice-dictation.js"),
+            terminals_html.index("js/voice-input.js"),
+        )
         self.assertLess(
             terminals_html.index("js/voice-input.js"),
             terminals_html.index("js/explorer-viewer.js"),
@@ -13647,6 +14037,139 @@ class CorsOriginDefaultsTestCase(unittest.TestCase):
             origins = api._resolve_cors_origins()
 
         self.assertEqual(origins, ["*"])
+
+    def test_resolved_settings_beat_the_configured_port(self):
+        config = {"security": {}, "server": {"host": "127.0.0.1", "port": 5050}}
+        with patch.object(api.runtime_config, "app_config", config):
+            origins = api._resolve_cors_origins("192.168.1.20", 8080)
+
+        self.assertEqual(
+            origins,
+            [
+                "http://127.0.0.1:8080",
+                "http://localhost:8080",
+                "http://192.168.1.20:8080",
+            ],
+        )
+
+
+class ResolvedServerOriginsTestCase(unittest.TestCase):
+    """Audit F1 — Socket.IO must authorise the port the server actually binds."""
+
+    def setUp(self):
+        eio = web_app.socketio.server.eio
+        self.addCleanup(setattr, eio, "cors_allowed_origins", eio.cors_allowed_origins)
+        # Stand in for the import-time construction, which only ever sees the
+        # configured port — every test below then binds a different one.
+        eio.cors_allowed_origins = ["http://127.0.0.1:5050", "http://localhost:5050"]
+        self.client = web_app.app.test_client()
+
+    def _handshake(self, origin, host="127.0.0.1:8080"):
+        """Run a Socket.IO polling handshake and report whether it was allowed."""
+        response = self.client.get(
+            "/socket.io/?EIO=4&transport=polling",
+            headers={"Origin": origin, "Host": host},
+        )
+        if response.status_code == 400:
+            self.assertIn("accepted origin", response.get_data(as_text=True))
+            return False
+        self.assertEqual(response.status_code, 200)
+        return True
+
+    def _start_server(self, host, port, config):
+        with patch.object(api.runtime_config, "app_config", config), \
+                patch.object(api.socketio, "run"), \
+                patch.object(api, "start_workspace_autosave"):
+            api.run_server(host, port)
+
+    def test_running_on_a_flag_port_authorises_that_port(self):
+        config = {"security": {"cors_origins": []}, "server": {"host": "127.0.0.1", "port": 5050}}
+        self._start_server("127.0.0.1", 8080, config)
+
+        self.assertTrue(self._handshake("http://127.0.0.1:8080"))
+        self.assertTrue(self._handshake("http://localhost:8080", host="localhost:8080"))
+        self.assertFalse(self._handshake("http://127.0.0.1:5050"))
+
+    def test_wildcard_bind_authorises_the_host_the_request_arrived_on(self):
+        config = {"security": {}, "server": {"host": "127.0.0.1", "port": 5050}}
+        self._start_server("0.0.0.0", 8080, config)
+
+        self.assertTrue(
+            self._handshake("http://192.168.1.20:8080", host="192.168.1.20:8080")
+        )
+        self.assertTrue(self._handshake("http://127.0.0.1:8080"))
+        self.assertFalse(self._handshake("http://evil.example", host="192.168.1.20:8080"))
+
+    def test_a_hostile_origin_is_still_rejected_on_the_resolved_port(self):
+        config = {"security": {"cors_origins": []}, "server": {"host": "127.0.0.1", "port": 5050}}
+        self._start_server("127.0.0.1", 8080, config)
+
+        self.assertFalse(self._handshake("http://evil.example"))
+        self.assertFalse(self._handshake("null"))
+
+    def test_explicit_configuration_is_applied_verbatim(self):
+        config = {
+            "security": {"cors_origins": ["https://proxy.example"]},
+            "server": {"host": "127.0.0.1", "port": 5050},
+        }
+        self._start_server("127.0.0.1", 8080, config)
+
+        self.assertTrue(self._handshake("https://proxy.example"))
+        # An explicit list is the whole answer — the request host is not folded in.
+        self.assertFalse(self._handshake("http://127.0.0.1:8080"))
+
+    def test_explicit_wildcard_still_allows_every_origin(self):
+        config = {
+            "security": {"cors_origins": ["*"]},
+            "server": {"host": "127.0.0.1", "port": 5050},
+        }
+        self._start_server("127.0.0.1", 8080, config)
+
+        self.assertTrue(self._handshake("http://evil.example"))
+
+    def test_an_explicit_wildcard_is_named_in_the_startup_log(self):
+        """Audit F4 — `*` turns off both origin defences, so say so on start."""
+        config = {
+            "security": {"cors_origins": ["*"]},
+            "server": {"host": "127.0.0.1", "port": 5050},
+        }
+
+        with self.assertLogs("web.app", level="WARNING") as logs:
+            self._start_server("127.0.0.1", 8080, config)
+
+        warning = "\n".join(logs.output)
+        self.assertIn("security.cors_origins", warning)
+        self.assertIn("write guard", warning)
+
+    def test_the_derived_default_logs_no_wildcard_warning(self):
+        config = {"security": {"cors_origins": []}, "server": {"host": "127.0.0.1", "port": 5050}}
+
+        with self.assertLogs("web.app", level="INFO") as logs:
+            self._start_server("127.0.0.1", 8080, config)
+
+        self.assertNotIn("WARNING", "\n".join(logs.output))
+
+    def test_same_origin_policy_ignores_a_missing_or_null_origin(self):
+        policy = web_app.SameOriginPolicy(["http://127.0.0.1:8080"])
+        environ = {"wsgi.url_scheme": "http", "HTTP_HOST": "127.0.0.1:8080"}
+
+        self.assertFalse(policy(None, environ))
+        self.assertFalse(policy("", environ))
+        self.assertFalse(policy("null", environ))
+        self.assertTrue(policy("http://127.0.0.1:8080", environ))
+        self.assertTrue(policy("http://127.0.0.1:8080", None))
+
+    def test_same_origin_policy_honours_a_reverse_proxy(self):
+        policy = web_app.SameOriginPolicy([])
+        environ = {
+            "wsgi.url_scheme": "http",
+            "HTTP_HOST": "127.0.0.1:8080",
+            "HTTP_X_FORWARDED_PROTO": "https",
+            "HTTP_X_FORWARDED_HOST": "gridvibe.example",
+        }
+
+        self.assertTrue(policy("https://gridvibe.example", environ))
+        self.assertFalse(policy("http://127.0.0.1:8080", environ))
 
 
 class CrossOriginWriteGuardTestCase(unittest.TestCase):
@@ -14007,13 +14530,14 @@ class VoiceEngineSwitchTestCase(unittest.TestCase):
     """Finding 2.6 — audio/stop route to the engine the recording started with."""
 
     def setUp(self):
-        with api._active_voice_sessions_lock:
-            api._active_voice_sessions.clear()
+        self._clear_state()
         self.addCleanup(self._clear_state)
 
     def _clear_state(self):
         with api._active_voice_sessions_lock:
             api._active_voice_sessions.clear()
+            web_voice._voice_session_owners.clear()
+            web_voice._voice_sessions_by_client.clear()
 
     @patch("web.api.emit")
     def test_stop_routes_to_engine_recorded_at_start(self, _mock_emit):
@@ -14294,6 +14818,10 @@ class FinalModuleSplitTestCase(unittest.TestCase):
             "_whisper_engine_available",
             "_load_voice_prefs",
             "_save_voice_prefs",
+            "register_voice_session",
+            "resolve_voice_session_engine",
+            "release_voice_session",
+            "abandon_client_voice_sessions",
         ):
             with self.subTest(name=name):
                 self.assertIs(getattr(api, name), getattr(web_voice, name))
@@ -14947,22 +15475,65 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         self.assertIn(".action-btn.loading .arrow { display: none; }", launcher_css)
         self.assertIn(".action-btn.loading .action-btn-spinner", launcher_css)
 
-    # ── 8.3: one update-status area with an auto-clear ──────────────────────
+    # ── 8.3: exactly one global message surface ─────────────────────────────
 
-    def test_update_status_renders_in_one_place_and_auto_clears(self):
+    def test_launcher_has_exactly_one_global_message_surface(self):
+        """The launcher used to have two independent message sinks: `#message`,
+        which was markup inside the Terminal Layout card, and
+        `#quickUpdateStatus` under the icon row. The update flow wrote to both,
+        so one failure arrived twice. The notification banner is the only
+        global surface left, and neither old sink can be written."""
         html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="gvNoticeBanner"', html)
+        self.assertIn('id="gvNoticeText"', html)
+        self.assertNotIn('id="quickUpdateStatus"', html)
         self.assertNotIn('id="updateStatus"', html)
-        self.assertIn('id="quickUpdateStatus"', html)
+        # The banner still needs somewhere to be written from and painted.
+        self.assertIn("js/notice-banner.js", html)
+        self.assertIn("css/notice-banner.css", html)
         launcher_js = self._static("js/launcher.js")
+        self.assertNotIn("setUpdateStatus", launcher_js)
         self.assertNotIn("getElementById('updateStatus')", launcher_js)
-        set_fn = launcher_js[
-            launcher_js.index("function setUpdateStatus"):
-            launcher_js.index("function shortCommit")
-        ]
-        self.assertIn("quickUpdateStatus", set_fn)
-        self.assertIn("6000", set_fn)
+        # #message survives only as the Terminal Layout card's helper copy.
+        self.assertIn('id="message"', html)
+        self.assertNotIn("getElementById('message')", launcher_js)
         launcher_css = self._static("css/launcher.css")
         self.assertNotIn(".toolbar-status", launcher_css)
+        self.assertNotIn(".inline-status", launcher_css)
+        self.assertNotIn(".message.error", launcher_css)
+
+    def test_notice_banner_stays_below_every_dialog_layer(self):
+        """The banner is launcher content, not an overlay: it takes no
+        position and no stacking order of its own, so every dialog paints over
+        it. Floating a minutes-old notice on top of a modal the user just
+        opened reads as a bug — a persistent one is still there when the
+        dialog closes."""
+        notice_css = self._static("css/notice-banner.css")
+        banner = re.search(r"\.gv-notice-banner \{(.*?)\}", notice_css, re.DOTALL)
+        self.assertIsNotNone(banner)
+        self.assertNotIn("z-index", banner.group(1))
+        self.assertNotIn("position:", banner.group(1))
+        # Nothing anywhere in the banner's own stylesheet lifts it either
+        # (comments stripped — the rule is about declarations).
+        self.assertNotIn("z-index", re.sub(r"/\*.*?\*/", "", notice_css, flags=re.DOTALL))
+        # The dialog layers it has to lose to are real.
+        dialog_layers = [
+            int(match)
+            for sheet in ("css/workspaces.css", "css/app-settings.css")
+            for match in re.findall(r"z-index:\s*(\d+)", self._static(sheet))
+        ]
+        self.assertTrue(dialog_layers)
+
+    def test_notice_banner_text_is_height_bounded(self):
+        """D2 — no message length can eat the page: the text wraps to a capped
+        height and scrolls inside itself, and an unbroken path or git blob
+        cannot force horizontal overflow."""
+        notice_css = self._static("css/notice-banner.css")
+        text = re.search(r"\.gv-notice-text \{(.*?)\}", notice_css, re.DOTALL)
+        self.assertIsNotNone(text)
+        self.assertIn("max-height", text.group(1))
+        self.assertIn("overflow-y: auto", text.group(1))
+        self.assertIn("overflow-wrap: anywhere", text.group(1))
 
     # ── 8.5: save-settings button keeps only the custom tooltip ─────────────
 
@@ -15609,24 +16180,15 @@ class BroadcastInputTestCase(unittest.TestCase):
 
     def test_voice_transcript_honours_broadcast_typing(self):
         """ISSUE-2026-026: a committed voice transcript fans out to every plain
-        pane through the same broadcast filter keyboard input uses; interim
-        previews stay on the recording pane only."""
+        pane through the same broadcast filter keyboard input uses.
+
+        Which destination a transcript reaches (terminal, editor, preview
+        bubble, nowhere) is executed against the real routing rule in
+        tests/test_voice_dictation.py; what remains here is the DRY contract
+        that the voice path forwards through the *same* peer helper as
+        keyboard input rather than growing a second fan-out.
+        """
         terminals_js = self._static("js/terminals.js")
-        handler = terminals_js[
-            terminals_js.index("socket.on('voice_result'"):
-            terminals_js.index("socket.on('voice_status'")
-        ]
-        # final branch: deliver to recorder + fan out via the shared helper
-        self.assertIn("_sendToTerminal(index, text);", handler)
-        self.assertIn("broadcastInputToPeers(index, text);", handler)
-        self.assertIn("_clearVoicePreview(index);", handler)
-        # interim (non-final) previews are isolated to the recording pane
-        self.assertIn("_showVoicePreview(index, text);", handler)
-        self.assertLess(
-            handler.index("broadcastInputToPeers(index, text)"),
-            handler.index("_showVoicePreview(index, text)"),
-        )
-        # the voice path reuses the *same* peer helper as keyboard forwarding
         self.assertEqual(
             terminals_js.count("broadcastInputToPeers(index, "), 2
         )
@@ -16262,15 +16824,18 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
     def test_restore_banner_keeps_a_content_sized_row(self):
         """Todo 2 — the banner used to land in .app-frame's 1fr row and grow
         with the window. Rows are placed explicitly so its row is content
-        sized, and its margins line it up with the columns below."""
+        sized, and its margins line it up with the columns below. The
+        notification banner owns a row of its own for the same reason, so the
+        two optional banners can never share a row or overlap."""
         launcher_css = self._static("css/launcher.css")
         app_frame = re.search(r"\n        \.app-frame \{(.*?)\}", launcher_css, re.DOTALL)
         self.assertIsNotNone(app_frame)
-        self.assertIn("grid-template-rows: auto auto 1fr", app_frame.group(1))
+        self.assertIn("grid-template-rows: auto auto auto 1fr", app_frame.group(1))
         for placement in (
             ".app-titlebar { grid-row: 1; }",
-            ".restore-banner { grid-row: 2; }",
-            ".shell { grid-row: 3; }",
+            ".gv-notice-banner { grid-row: 2; }",
+            ".restore-banner { grid-row: 3; }",
+            ".shell { grid-row: 4; }",
         ):
             self.assertIn(placement, launcher_css)
         # The declaration block, not the one-line grid-row placement above it.
