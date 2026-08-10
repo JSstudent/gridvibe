@@ -910,3 +910,186 @@ both deliberately.
 mistaken for an oversight: F8's adjacent keepalive observation is *not* fixed.
 It is a resilience item, tracked in §4.4, and belongs with the optimization
 pass rather than with the race it was noticed beside.
+
+---
+
+## 8. Implementation plan — §4 optimizations and improvements
+
+One stage per §4 subsection, in the order they should be executed. Each stage
+is independently shippable: nothing in a later stage depends on an earlier one,
+and each ends with the suite green, so the pass can be paused between stages
+without leaving the tree in a half-migrated state. Suggested order is
+**4.4 → 4.3 → 4.2 → 4.1** — smallest blast radius first, so the mechanical
+test-split (4.3) is in place to localise failures before the two large
+frontend passes (4.2, 4.1), and the 8k-line viewer split lands last, when
+everything it might conflict with is already settled.
+
+Every stage ends with the same gate: `python tests/run_tests.py` green,
+`python -m ruff check .` clean, and for frontend stages the Node behavioral
+tests for the touched modules. No stage touches SSH host-key handling,
+secrets, the cross-origin write guard, or the explorer mutation contract.
+
+### Stage 1 — §4.4 smaller items · **Low risk** · ~1 session
+
+Three independent backend tweaks; each is a few lines plus a behavioral test.
+Do them as three separate commits so a revert stays surgical.
+
+1. **Bound `pane_order` in `normalize_group_presentation`**
+   (`web/session_presentation.py:1003`). Reject a `pane_order` longer than
+   `MAX_STORED_SESSION_PANES` (64, defined at line 69) with
+   `PresentationValidationError` before the pane map is built, matching the
+   early-reject style already used for duplicates and type checks at
+   lines 1005–1010.
+   - *Scope:* one validation branch + one test asserting a 65-pane payload
+     raises, and that 64 still passes.
+   - *Risk:* a legitimate client payload over 64 panes would start failing
+     with 409. Not realistic — the manager caps live panes well below this —
+     but confirm against `SessionManager`'s own pane ceiling before choosing
+     the bound semantics (reject vs truncate; reject, per the audit).
+2. **Explorer pool keepalive** (F8 closing note). Set
+   `transport.set_keepalive(ssh.keepalive_interval)` when a pooled client is
+   created in `web/explorer.py`, reusing the existing config key read at
+   `web/terminal_io.py:960`.
+   - *Scope:* pool-client creation path only; no change to the reaper or the
+     `in_use` refcounting from F8.
+   - *Risk:* negligible — keepalive packets on an idle transport; a broken
+     keepalive surfaces as the same dead-transport reconnect the pool already
+     performs. Keep it out of any lock hold (guardrail 2).
+   - *Test:* assert `set_keepalive` is called with the configured interval on
+     pool creation, and not called when the interval is 0/disabled.
+3. **Tombstone for `_evict_excess_auto_slots`** (`web/runtime_state.py:1113`).
+   Route the eviction through the module's revision bookkeeping so the
+   `workspaces` map mutation is recorded like every other.
+   - *Scope:* the eviction branch only; eviction *policy* (live-workspace
+     exemption, MW-14) is unchanged.
+   - *Risk:* the revision counter drives restore-chooser staleness decisions;
+     a tombstone that bumps revisions where the chooser doesn't expect it
+     could spuriously invalidate. Check the read path before choosing the
+     bookkeeping shape.
+   - *Test:* evict past the cap and assert the tombstone/bookkeeping entry
+     exists and a subsequent capture is unaffected.
+
+### Stage 2 — §4.3 test file split · **Low–medium risk** · mechanical
+
+Split `tests/test_api.py` (17,630 lines — grown past the audit's 17,111) along
+the module boundaries the audit names: `test_api_explorer_git.py`,
+`test_api_voice.py`, `test_api_sessions.py`, `test_api_workspaces.py`,
+`test_api_lifecycle.py`, leaving a core `test_api.py`. `SshSftpPoolTestCase`
+moves with the explorer-git group or into its own file.
+`tests/test_multi_workspace.py` (6,055) stays whole for now — it is one
+domain; split only if it keeps growing.
+
+- *Scope:* file moves plus shared-fixture extraction only. **No test logic
+  changes** — a moved test must run unmodified; anything that needs editing
+  to survive the move is a smell and gets fixed in its own commit.
+- *Approach:* extract shared setUp helpers/mixins into a
+  `tests/api_test_base.py` first, run the suite, then move class-by-class in
+  separate commits (git, voice, sessions/workspaces/lifecycle), running the
+  suite after each move.
+- *Risks:*
+  - **Lost tests** — the count must not drop. Gate each move on the runner
+    reporting the same or higher total (baseline 1425 + whatever Stage 1
+    adds). `tests/run_tests.py` discovery must pick up the new file names.
+  - **Hidden inter-test coupling** — classes in one file can share import-time
+    state or ordering assumptions; moving them exposes it. This is the main
+    reason for class-at-a-time moves with a suite run between.
+  - **Fixture duplication drift** — the extracted base becomes a second place
+    to maintain; keep it thin (fixtures only, no assertions).
+- *Validation:* suite green after every move commit; final count ≥ baseline.
+
+### Stage 3 — §4.2 legacy CSS token debt · **Medium risk** · no automated safety net
+
+One focused pass over `terminals.css` (417 literals), then `launcher.css`
+(168), mapping hex/`rgb()` literals onto `tokens.css` variables. New tokens
+are added to `tokens.css` where no existing variable fits, rather than
+inventing one-off names.
+
+- *Scope:* the two legacy files plus additive tokens in `tokens.css`. The
+  zero-literal files (`app-settings.css`, `lifecycle.css`,
+  `notice-banner.css`, `workspaces.css`) are not touched. Guardrail 7's
+  incremental rule stays in force alongside.
+- *Approach:* work rule-block by rule-block in small commits grouped by
+  surface (e.g. scrollbars, modals, tab strip, launcher cards), so a visual
+  regression bisects to one block. Where several near-identical literals map
+  to one token, normalise to the token and note the deliberate colour change
+  in the commit message — do not silently "fix" colours.
+- *Risks:*
+  - **Visual regression is the only real check** — there is no automated
+    coverage for CSS. Manual sweep of both pages (launcher + terminals,
+    including the explorer, git sidebar, modals, and both colour-relevant
+    states like busy/error) is required before closing the stage. This is the
+    stage's dominant cost.
+  - **Specificity/cascade accidents** if a token substitution is paired with
+    selector cleanup — forbid selector changes in this pass; literals only.
+  - **Dynamic literals in JS** — inline styles set from `terminals.js` /
+    `launcher.js` that mirror the CSS literals stay out of scope unless they
+    block a token; mixing JS and CSS changes would double the regression
+    surface.
+- *Validation:* `tokens.css` gains only additive definitions; literal counts
+  (re-run the audit's counting method) drop to ~0 in both files; manual
+  visual sweep signed off; suite green (CSS-adjacent tests exist for the
+  explorer theme store).
+
+### Stage 4 — §4.1 `explorer-viewer.js` split · **Highest risk of the four** · multi-step
+
+Split the 8,119-line / 315-function file in the audit's order — most
+separation per unit of risk:
+
+1. `explorer-diff.js` — Diff rendering, patch identity, staged/worktree modes
+   (~300 refs; most self-contained, own persistence-identity rules already).
+2. `explorer-git-sidebar.js` — staging, commit, publish, discard UI (~180
+   refs; natural seam at the `/git/*` endpoint boundary).
+3. `explorer-tabs.js` — tab strip and ordering/activation rules (~319 refs).
+
+Markdown/Preview stays in `explorer-viewer.js` — smallest domain, entangled
+with the mermaid vendoring, and splitting it buys the least.
+
+- *Scope:* moves and wiring only. Function bodies are carried verbatim; the
+  only new code is the cross-module surface (exports/registration) and the
+  `<script>` tags in `templates/terminals.html`. No behaviour changes, no
+  renames beyond what the move forces.
+- *Approach, per extraction:*
+  1. Map the domain's inbound/outbound references first (who calls into the
+     domain from the rest of the viewer, what shared helpers it uses). Shared
+     helpers either stay in `explorer-viewer.js` and are imported, or move to
+     a small `explorer-shared.js` if both sides need them — decided per
+     helper, not by a blanket rule.
+  2. Move the domain in one commit; keep the global-namespace wiring style
+     the existing explorer modules already use (`explorer-fs.js`,
+     `browser-pane.js`) — no module-system migration in this pass.
+  3. Run the Node behavioral tests and the full suite before starting the
+     next extraction.
+- *Risks:*
+  - **Load-order breakage** — the viewer's functions reference each other
+    through the global scope; a new file loaded after something that calls it
+    at init time breaks at runtime, not at test time. Mitigate by keeping
+    init-time call edges in `explorer-viewer.js` where possible and adding
+    the new `<script>` tags before the viewer's.
+  - **Hidden coupling past the reference counts** — the audit's counts are
+    density estimates; the tab strip in particular touches activation state
+    shared with the editor and preview. Expect `explorer-tabs.js` to be the
+    hardest of the three despite landing last; if its seam proves worse than
+    estimated, stop after diff + git sidebar and re-plan rather than forcing
+    it.
+  - **Test coverage is thin at the seams** — the Node suites cover the
+    DOM-free modules; viewer behaviour is mostly covered indirectly. Add
+    behavioral tests for the moved domains' public entry points where the
+    pattern allows (the `require()`-able DOM-free style), but do not block
+    the split on retrofitting full coverage.
+  - **Merge churn** — anyone with in-flight viewer work collides; schedule
+    each extraction to land quickly.
+- *Validation:* after each extraction — suite green, ruff clean, file loads
+  in both pages with no console errors, and a manual smoke of the extracted
+  surface (open a diff, stage/commit/discard via the sidebar, reorder and
+  activate tabs). Final state: `explorer-viewer.js` holds viewer + Markdown /
+  Preview only, and `AGENTS.md`'s regrowth-risk note is updated to describe
+  the new layout.
+
+### What this plan deliberately excludes
+
+- §5 feature candidates — separate pass, as the audit states.
+- `terminals.js` (8,089 lines) — the same size as the viewer, but not flagged
+  by the audit; if a second pass is wanted it gets its own plan.
+- Behaviour changes of any kind in Stages 2–4. Any "while we're here" fix
+  discovered mid-pass goes in its own commit with its own test, per the
+  audit's own F1–F9 discipline.
