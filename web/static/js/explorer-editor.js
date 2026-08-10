@@ -73,27 +73,47 @@
     }
 
     /* Group-level guard: one prompt covers every rendered pane with a dirty
-       edit, clearing them all on confirmation. */
+       edit, and on confirmation *every* open editor in the group leaves edit
+       mode — not only the dirty ones.
+
+       Both halves matter because this guard's callers (group switch, group
+       close, session move) do not rebuild these cards: `cacheVisibleGroupView`
+       detaches them into a fragment exactly as they stand. Dropping the state
+       without rebuilding the view cached a read-only Source panel still
+       wearing Save/Cancel and a locked file chrome, and leaving a clean editor
+       untouched contradicted the promise this very dialog makes. Both come
+       back on the next visit with no way out but Cancel. */
     async function confirmDiscardAllExplorerEdits(actionLabel = '') {
-        if (!hasAnyDirtyExplorerEdit()) {
-            return true;
+        if (hasAnyDirtyExplorerEdit()) {
+            const dirtyCount = terminals.filter(
+                (_, index) => hasDirtyExplorerEdit(index)
+            ).length;
+            const confirmed = await openGenericConfirmModal({
+                title: 'Discard unsaved changes?',
+                copy: dirtyCount > 1
+                    ? `${dirtyCount} open files have unsaved changes.`
+                    : 'An open file has unsaved changes.',
+                note: actionLabel ? `${actionLabel} will discard them.` : '',
+                confirmLabel: 'Discard changes',
+                danger: true
+            });
+            if (!confirmed) {
+                return false;
+            }
         }
-        const dirtyIndexes = terminals
-            .map((_, index) => index)
-            .filter(index => hasDirtyExplorerEdit(index));
-        const confirmed = await openGenericConfirmModal({
-            title: 'Discard unsaved changes?',
-            copy: dirtyIndexes.length > 1
-                ? `${dirtyIndexes.length} open files have unsaved changes.`
-                : 'An open file has unsaved changes.',
-            note: actionLabel ? `${actionLabel} will discard them.` : '',
-            confirmLabel: 'Discard changes',
-            danger: true
+        exitAllExplorerEditModes();
+        return true;
+    }
+
+    /* Leave edit mode on every pane that has one, restoring each pane's
+       read-only Source view and file chrome. No focus is moved: the caller is
+       about to replace or detach this grid. */
+    function exitAllExplorerEditModes() {
+        terminals.forEach((pane, index) => {
+            if (explorerEditState(pane)) {
+                exitExplorerEditMode(index, { focusEditButton: false });
+            }
         });
-        if (confirmed) {
-            dirtyIndexes.forEach(clearExplorerEditState);
-        }
-        return confirmed;
     }
 
     function explorerEditDisabledTooltip(reason) {
@@ -324,7 +344,7 @@
     /* Leave edit mode for the same file (Cancel or after a discarded conflict).
        Rebuilds the read-only highlighted Source view from the unchanged buffer
        and restores the file chrome + Edit button. */
-    function exitExplorerEditMode(index) {
+    function exitExplorerEditMode(index, { focusEditButton = true } = {}) {
         const pane = terminals[index];
         if (!pane) {
             return;
@@ -341,9 +361,8 @@
         setExplorerEditChromeDisabled(index, false);
         refreshExplorerEditControls(index);
         applyExplorerSearch(index);
-        const editButton = document.querySelector(`[data-explorer-edit="${index}"]`);
-        if (editButton) {
-            editButton.focus();
+        if (focusEditButton) {
+            document.querySelector(`[data-explorer-edit="${index}"]`)?.focus();
         }
     }
 
@@ -836,6 +855,23 @@
             handleExplorerEditInput(index);
         }
         explorerEditorClearVoiceBinding(index, state);
+        refreshExplorerEditControls(index);
+    }
+
+    /* A cached group view is detached from the document while another group is
+       shown, and every control lookup here goes through document.getElementById.
+       So a capture that _stopAllVoice() ended during the switch could not clear
+       this pane's mic or re-render its Save/Cancel group — the card came back
+       with a stale recording ring and a Save button disabled by a binding that
+       has since expired. Re-derive both from live state once the card is back
+       in the document. */
+    function resyncExplorerEditorOnAttach(index) {
+        if (!explorerEditState(terminals[index])) {
+            return;
+        }
+        // The Source-view restore ran the search machinery, which re-derives
+        // the prev/next buttons edit mode had locked down.
+        setExplorerEditChromeDisabled(index, true);
         refreshExplorerEditControls(index);
     }
 

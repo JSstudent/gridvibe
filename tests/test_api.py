@@ -1927,7 +1927,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("panel.querySelector('.explorer-source-view')", viewer)
         self.assertIn("view.querySelector('.explorer-source-editor')", viewer)
         exit_mode = editor[
-            editor.index("function exitExplorerEditMode(index)"):
+            editor.index("function exitExplorerEditMode("):
             editor.index("async function cancelExplorerEdit(index)")
         ]
         self.assertIn("const editViewport = captureScrollMetrics(textarea);", exit_mode)

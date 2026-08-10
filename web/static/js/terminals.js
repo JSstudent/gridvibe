@@ -859,12 +859,19 @@
             }
             if (isExplorerPaneInstance(terminal)) {
                 restoreExplorerFileScroll(index, terminal._cachedExplorerScroll);
+                resyncExplorerEditorOnAttach(index);
             }
+            /* The cards were detached while another group was shown, so any
+               voice stop that completed in that window addressed elements no
+               document lookup could reach. Re-derive each mic from live
+               capture state now they are back. */
+            _syncVoiceControls(index);
             if (clearTerminalViewports) {
                 terminal._cachedTerminalViewport = null;
             }
             terminal._cachedExplorerScroll = null;
         });
+        _setVoiceBtnsDisabled(_voiceActiveIndex);
     }
 
     /* Which workspace this window is. Nothing else on screen says so once two
