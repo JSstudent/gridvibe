@@ -1684,6 +1684,19 @@ class _LocalExplorerBackend:
             root_path, scope_path, options, limits, deadline
         )
 
+    # -- file/directory name search (read-only) --------------------------------
+    def find_names(
+        self,
+        *,
+        root_path: str,
+        limits: Any,
+        deadline: float,
+    ) -> Tuple[str, Any]:
+        """Yield bounded (rel path, is directory) pairs for the tree filter."""
+        from web import explorer_search
+
+        return "walk", explorer_search.walk_names(root_path, deadline)
+
 
 class _SftpExplorerBackend:
     """SSH/SFTP implementation of the explorer backend."""
@@ -1966,6 +1979,32 @@ class _SftpExplorerBackend:
             yield from explorer_search.parse_remote_grep_output(self, root_path, stream)
 
         return "remote-grep", generate()
+
+    # -- file/directory name search (read-only) --------------------------------
+    def find_names(
+        self,
+        *,
+        root_path: str,
+        limits: Any,
+        deadline: float,
+    ) -> Tuple[str, Any]:
+        """Yield bounded (rel path, is directory) pairs via one remote `find`."""
+        from web import explorer_search
+
+        def generate() -> Any:
+            command = explorer_search.build_remote_find_command(root_path)
+            try:
+                _stdin, stdout, _stderr = self.client.exec_command(
+                    command, timeout=limits.timeout_seconds
+                )
+                stream = stdout.read()
+            except (socket.timeout, TimeoutError) as exc:
+                raise explorer_search.SearchDeadlineExceeded() from exc
+            if isinstance(stream, str):
+                stream = stream.encode("utf-8", errors="replace")
+            yield from explorer_search.parse_remote_find_output(self, root_path, stream)
+
+        return "remote-find", generate()
 
 
 @contextmanager

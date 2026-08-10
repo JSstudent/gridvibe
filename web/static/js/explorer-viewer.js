@@ -1983,7 +1983,11 @@
         return entries.find(entry => (entry.path || '') === value) || null;
     }
 
-    function explorerTreeRowHtml(pane, entry, depth) {
+    /* One tree row. `options.nameHtml` supplies already-escaped markup for the
+       name (the filter's match highlight); `options.staticChevron` drops the
+       fold control, which is what a filtered result tree wants — its folders
+       are always expanded, so an arrow there would toggle nothing. */
+    function explorerTreeRowHtml(pane, entry, depth, options = {}) {
         const isDirectory = entry.type === 'directory';
         const path = entry.path || '';
         const expanded = isDirectory && pane._explorerTreeExpanded.has(path);
@@ -1995,7 +1999,7 @@
            never navigates, so browsing the tree can't evict whatever the
            Preview tab is showing. Only the name button opens the target. */
         const indent = `style="padding-left:${7 + depth * EXPLORER_TREE_INDENT_PX}px"`;
-        const chevron = isDirectory
+        const chevron = isDirectory && !options.staticChevron
             ? `<button
                 type="button"
                 class="explorer-tree-chevron-btn"
@@ -2027,7 +2031,7 @@
                 ${chevron}
                 <button type="button" class="explorer-tree-main" ${action} title="${escHtml(path)}">
                     ${isDirectory ? EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(entry.name || path)}
-                    <span class="explorer-tree-name">${escHtml(entry.name || path)}</span>
+                    <span class="explorer-tree-name">${options.nameHtml || escHtml(entry.name || path)}</span>
                 </button>
                 ${badge}
                 ${openFolder}
@@ -2073,12 +2077,38 @@
         wireExplorerCopyPathMenu(panel, index);
 
         ensureExplorerTreeState(pane);
-        panel.innerHTML = `
-            <div class="explorer-tree-section">
-                <div class="explorer-tree-title">Files</div>
-                <div class="explorer-tree-children">${renderExplorerTreeNodes(pane, '', 0)}</div>
-            </div>
-        `;
+        /* The head — "FILES" plus the name filter — is built once and left
+           alone: rebuilding it on every render would drop the caret out of the
+           filter box on the keystroke that triggered the render. */
+        if (!panel.querySelector('.explorer-tree-section')) {
+            panel.innerHTML = `
+                <div class="explorer-tree-section">
+                    <div class="explorer-tree-head">
+                        <div class="explorer-tree-title">Files</div>
+                        ${typeof explorerTreeSearchHeadHtml === 'function'
+                            ? explorerTreeSearchHeadHtml(index)
+                            : ''}
+                    </div>
+                    <div class="explorer-tree-children" data-explorer-tree-body></div>
+                </div>
+            `;
+            if (typeof wireExplorerTreeSearchControls === 'function') {
+                wireExplorerTreeSearchControls(index);
+            }
+        }
+        if (typeof syncExplorerTreeSearchControls === 'function') {
+            syncExplorerTreeSearchControls(index);
+        }
+        const body = panel.querySelector('[data-explorer-tree-body]');
+        if (!body) {
+            return;
+        }
+        /* With a filter query typed, the body is the filtered result tree
+           instead of the browsable one — same row markup, same click targets. */
+        body.innerHTML = (typeof explorerTreeSearchActive === 'function'
+            && explorerTreeSearchActive(pane))
+            ? renderExplorerTreeSearchNodes(index)
+            : renderExplorerTreeNodes(pane, '', 0);
         panel.querySelectorAll('[data-explorer-tree-chevron]').forEach(button => {
             button.addEventListener('click', event => {
                 event.stopPropagation();
@@ -2278,6 +2308,13 @@
         }
         resetExplorerFsWatchBaseline(pane);
         renderExplorerTreePanel(index);
+        /* A reload means the tree on disk moved under us (a create, a delete, a
+           rename). With a filter typed, its result set is what the panel is
+           showing, so it has to be re-read too — once, on the same explicit
+           trigger, never on a timer. */
+        if (typeof explorerTreeSearchActive === 'function' && explorerTreeSearchActive(pane)) {
+            await runExplorerTreeSearch(index);
+        }
     }
 
     function ensureExplorerDiffExpandedCommits(pane) {

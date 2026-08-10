@@ -142,6 +142,7 @@ from web.explorer_fs import (
     rename_explorer_entry_payload,
 )
 from web.explorer_search import (  # noqa: F401 - re-exported for backwards compatibility
+    run_explorer_find,
     run_explorer_search,
 )
 from web.hostkeys import (  # noqa: F401 - re-exported for backwards compatibility
@@ -1674,6 +1675,26 @@ def search_explorer(session_id: str):
 
     def handler(backend: Any) -> Dict[str, Any]:
         return run_explorer_search(backend, request.args)
+
+    return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/find', methods=['GET'])
+def find_explorer_entries(session_id: str):
+    """Run a bounded read-only file/directory name search for the Files tree.
+
+    Names only — file contents are never opened here; that is the `/search`
+    route above. Like every other explorer read it is a GET, so it stays
+    outside the cross-origin write guard.
+    """
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if not _is_explorer_session(session):
+        return jsonify({"error": "Session is not a file explorer pane"}), 400
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return run_explorer_find(backend, request.args)
 
     return _explorer_route_response(session, handler)
 
