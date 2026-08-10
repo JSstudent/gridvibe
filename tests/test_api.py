@@ -12855,6 +12855,20 @@ class SshSftpPoolTestCase(unittest.TestCase):
         client.close = MagicMock()
         return client
 
+    def _pool(self, session_id, client, idle_for=0.0):
+        """Seed one pooled client, optionally already idle past the timeout."""
+        entry = web_explorer._PooledSSHClient(client)
+        if idle_for:
+            entry.last_used -= web_explorer.SSH_CLIENT_POOL_IDLE_TIMEOUT + idle_for
+        with web_explorer._ssh_client_pool_lock:
+            web_explorer._ssh_client_pool[session_id] = entry
+
+    def _age_out(self, session_id):
+        """Backdate a pooled client's stamp past the idle timeout."""
+        with web_explorer._ssh_client_pool_lock:
+            entry = web_explorer._ssh_client_pool[session_id]
+            entry.last_used -= web_explorer.SSH_CLIENT_POOL_IDLE_TIMEOUT + 1
+
     def test_acquire_reuses_pooled_transport_for_next_request(self):
         session = SimpleNamespace(session_id="pool-1")
         client = self._fake_client()
@@ -12893,8 +12907,7 @@ class SshSftpPoolTestCase(unittest.TestCase):
     def test_dead_pooled_client_is_replaced_with_a_fresh_connection(self):
         session = SimpleNamespace(session_id="pool-3")
         dead_client = self._fake_client(active=False)
-        with web_explorer._ssh_client_pool_lock:
-            web_explorer._ssh_client_pool["pool-3"] = (time.monotonic(), dead_client)
+        self._pool("pool-3", dead_client)
 
         fresh_client = self._fake_client()
         fresh_sftp = MagicMock()
@@ -12908,11 +12921,7 @@ class SshSftpPoolTestCase(unittest.TestCase):
 
     def test_idle_pooled_clients_are_reaped(self):
         idle_client = self._fake_client()
-        with web_explorer._ssh_client_pool_lock:
-            web_explorer._ssh_client_pool["pool-idle"] = (
-                time.monotonic() - web_explorer.SSH_CLIENT_POOL_IDLE_TIMEOUT - 1,
-                idle_client,
-            )
+        self._pool("pool-idle", idle_client, idle_for=1)
 
         web_explorer._reap_idle_pooled_ssh_clients()
 
@@ -12922,14 +12931,98 @@ class SshSftpPoolTestCase(unittest.TestCase):
 
     def test_close_ssh_connection_evicts_the_pool_entry(self):
         client = self._fake_client()
-        with web_explorer._ssh_client_pool_lock:
-            web_explorer._ssh_client_pool["pool-close"] = (time.monotonic(), client)
+        self._pool("pool-close", client)
 
         api._close_ssh_connection("pool-close")
 
         with web_explorer._ssh_client_pool_lock:
             self.assertNotIn("pool-close", web_explorer._ssh_client_pool)
         client.close.assert_called_once()
+
+    def test_a_request_in_flight_past_the_idle_timeout_is_not_reaped(self):
+        """F8 — `last_used` is stamped at acquire, not continuously.
+
+        A download or repository search that runs longer than the idle timeout
+        leaves a stale stamp on a client it is still using; a concurrent
+        request on the same session reaps on acquire and would close the
+        transport underneath it.
+        """
+        session = SimpleNamespace(session_id="pool-inflight")
+        client = self._fake_client()
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(client, MagicMock())):
+            held_client, held_sftp = api._acquire_ssh_sftp(session)
+            # The long request is still running; its stamp has aged out.
+            self._age_out("pool-inflight")
+
+            web_explorer._reap_idle_pooled_ssh_clients()
+
+        client.close.assert_not_called()
+        with web_explorer._ssh_client_pool_lock:
+            self.assertIn("pool-inflight", web_explorer._ssh_client_pool)
+
+        # Once it finishes, the client is idle again and reapable as before.
+        api._release_ssh_sftp(session, held_client, held_sftp)
+        self._age_out("pool-inflight")
+        web_explorer._reap_idle_pooled_ssh_clients()
+
+        with web_explorer._ssh_client_pool_lock:
+            self.assertNotIn("pool-inflight", web_explorer._ssh_client_pool)
+        client.close.assert_called_once()
+
+    def test_concurrent_requests_hold_the_transport_until_the_last_one_ends(self):
+        """The count is a count: one finishing request does not free the other."""
+        session = SimpleNamespace(session_id="pool-shared")
+        client = self._fake_client()
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(client, MagicMock())):
+            first_client, first_sftp = api._acquire_ssh_sftp(session)
+            second_client, second_sftp = api._acquire_ssh_sftp(session)
+
+        self.assertIs(second_client, first_client)
+
+        api._release_ssh_sftp(session, first_client, first_sftp)
+        self._age_out("pool-shared")
+        web_explorer._reap_idle_pooled_ssh_clients()
+
+        # The second request is still holding it.
+        client.close.assert_not_called()
+        with web_explorer._ssh_client_pool_lock:
+            self.assertIn("pool-shared", web_explorer._ssh_client_pool)
+
+        api._release_ssh_sftp(session, second_client, second_sftp)
+        self._age_out("pool-shared")
+        web_explorer._reap_idle_pooled_ssh_clients()
+
+        with web_explorer._ssh_client_pool_lock:
+            self.assertNotIn("pool-shared", web_explorer._ssh_client_pool)
+
+    def test_an_unpooled_client_does_not_discharge_the_pooled_entry(self):
+        """Releasing a client that lost the pooling race leaves the count alone.
+
+        Otherwise the loser's release would decrement the winner's count to
+        zero while the winner is still mid-request — reopening F8 through the
+        one path where acquire deliberately returns an unpooled client.
+        """
+        session = SimpleNamespace(session_id="pool-loser")
+        winner = self._fake_client()
+        loser = self._fake_client()
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(winner, MagicMock())):
+            winner_client, winner_sftp = api._acquire_ssh_sftp(session)
+
+        loser_sftp = MagicMock()
+        api._release_ssh_sftp(session, loser, loser_sftp)
+
+        loser.close.assert_called_once()
+        self._age_out("pool-loser")
+        web_explorer._reap_idle_pooled_ssh_clients()
+
+        winner.close.assert_not_called()
+        with web_explorer._ssh_client_pool_lock:
+            self.assertIn("pool-loser", web_explorer._ssh_client_pool)
+
+        api._release_ssh_sftp(session, winner_client, winner_sftp)
 
 
 class SessionGroupsUpdatedBroadcastTestCase(unittest.TestCase):

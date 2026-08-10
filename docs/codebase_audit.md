@@ -7,11 +7,15 @@ Regression Guardrails in `CLAUDE.md`, defects introduced or left behind, race
 conditions, and worthwhile optimizations. Every defect below was reproduced
 locally; the reproduction is shown with the finding.
 
-This started as a report rather than a patch. Findings are being worked off in
-the order set out in §6; each one that lands keeps its original text and gains a
-**Resolution** block, so the reasoning that justified the fix stays next to it.
-The status column in §2 is the index. Everything outside a Resolution block
-describes the code as it stood at `e03c03b`.
+This started as a report rather than a patch. The findings were worked off in
+the order set out in §6; each one that landed kept its original text and gained
+a **Resolution** block, so the reasoning that justified the fix stays next to
+it. The status column in §2 is the index. Everything outside a Resolution block
+describes the code as it stood at `e03c03b` — including §3's guardrail table,
+which records the baseline rather than the current state.
+
+**F1–F9 are all closed**; §7 is the re-verification of the set as a whole. §4
+and §5 (optimizations and feature candidates) are deliberately deferred.
 
 ---
 
@@ -49,9 +53,9 @@ The findings below are concentrated in two places — the process entry points
 | F4 | **Medium** | Local config | `config.json` sets `cors_origins: ["*"]`, disabling both origin defences | **Fixed 2026-08-10** |
 | F5 | Low | Correctness | `_connect_session` has no browser-pane branch (guardrail 6 corollary) | **Fixed 2026-08-10** |
 | F6 | Low | Tests | Two voice tests depend on an unpatched module-level import | **Fixed 2026-08-10** |
-| F7 | Low | Docs | `CLAUDE.md` line 116 describes a test contract that no longer exists | Open |
-| F8 | Low | Explorer | Pooled SSH client can be reaped underneath an in-flight request | Open |
-| F9 | Info | Docs | `GET /api/explorer/<id>/image` is missing from the read-only contract text | Open |
+| F7 | Low | Docs | `CLAUDE.md` line 116 describes a test contract that no longer exists | **Fixed 2026-08-10** |
+| F8 | Low | Explorer | Pooled SSH client can be reaped underneath an in-flight request | **Fixed 2026-08-10** |
+| F9 | Info | Docs | `GET /api/explorer/<id>/image` is missing from the read-only contract text | **Fixed 2026-08-10** |
 
 ---
 
@@ -543,7 +547,7 @@ two failures are gone. Ruff clean.
 
 ---
 
-### F7 — `CLAUDE.md` describes a test contract that no longer exists · Low
+### F7 — `CLAUDE.md` describes a test contract that no longer exists · Low · *Fixed 2026-08-10*
 
 `CLAUDE.md:116` documents `tests/test_session_persistence_contract.py` as:
 
@@ -560,9 +564,25 @@ reader trusting `CLAUDE.md` would take failures there as expected rather than
 as regressions — which is exactly the inversion the Working Rules warn about
 ("a stale contract is worse than a missing one"). One-line fix.
 
+#### Resolution — 2026-08-10
+
+The entry now says what a failure there *means*, rather than restating the
+decorator's absence:
+
+> `# (all stages shipped — a failure here is a regression, and a new`
+> `#  expectedFailure would mean a newly deferred contract)`
+
+Writing it as "no `expectedFailure` remains" would have been accurate today and
+stale the moment a future stage adds one — the same failure this finding is.
+The line as written stays true either way, because it describes the rule the
+module's own docstring already states: a decorator here marks a deferred
+contract, never a known defect. The two documents now agree without duplicating
+each other, and a reader who sees a red test in that file reads it as the
+regression it is.
+
 ---
 
-### F8 — Pooled SSH client can be reaped underneath an in-flight request · Low
+### F8 — Pooled SSH client can be reaped underneath an in-flight request · Low · *Fixed 2026-08-10*
 
 `_acquire_ssh_sftp` (`web/explorer.py:2834`) calls
 `_reap_idle_pooled_ssh_clients()` on every acquisition, which closes any client
@@ -585,9 +605,64 @@ means a pooled client behind an aggressive NAT can go dead before the reaper
 notices, and the first request to reuse it pays a failed `open_sftp()` and a
 reconnect.
 
+#### Resolution — 2026-08-10
+
+The refcount was taken; the keepalive was not, deliberately (below).
+
+**The pool entry is now a record, not a tuple.** `_PooledSSHClient`
+(`web/explorer.py`) carries `client`, `last_used`, and `in_use` — the number of
+explorer requests currently holding that transport. `_reap_idle_pooled_ssh_clients`
+skips any entry with a non-zero count: *a client a request is holding is not
+idle, however old its stamp*. That is the whole fix, and it is the correct
+framing — the bug was never that 60 s is too short, it was that `last_used`
+answers "when was this last checked in or out", which is not the question the
+reaper is asking.
+
+The count went on the record rather than into a parallel map for the same
+reason F3's running total went onto the deque: a count that can exist without
+its entry (or an entry without its count) drifts silently, and here the drift
+fails *inverted* — a stranded increment makes a client immortal, so a
+connection leak replaces the connection-close race. Bundling them makes both
+impossible: creating an entry creates its count, evicting the entry drops it.
+The three `_acquire_ssh_sftp` call sites all release in a `finally`, so a
+request cannot leak a count by raising.
+
+Two edges were closed along with it, both in the paths where acquire
+deliberately returns a client that is *not* the pooled one:
+
+- **Only a counted holder gives one back.** `_release_ssh_sftp` decrements only
+  when the entry's client is the one being released — the pre-existing identity
+  check now guards the count too. A request that lost the pooling race (a
+  concurrent acquire pooled its own client first) closes its own handle without
+  discharging the winner's count, which would otherwise have re-opened this
+  finding through the one path that hands out an unpooled client.
+- **Eviction ignores the count, on purpose.** `_evict_pooled_ssh_client` and
+  `_evict_all_pooled_ssh_clients` still close unconditionally: their callers
+  either found the transport already dead or are tearing the session down, and
+  a holder of a dead-or-closing transport has nothing left to hold. It then
+  finds the entry gone at release and closes its own handle. The distinction
+  from the reaper is the point — the reaper is a guess about idleness, and a
+  guess is what must yield to a fact.
+
+**The keepalive was left for the optimization pass.** It is real (§4.4 lists
+it), but it is a different problem with a different failure — a NAT dropping an
+*idle* transport, costing one failed `open_sftp()` and a reconnect on next use,
+which the pool already recovers from. Folding it in here would have mixed a
+correctness fix with a resilience tuning knob (`ssh.keepalive_interval`) in one
+change.
+
+**Covered by three tests** added to `SshSftpPoolTestCase` (`tests/test_api.py`),
+none of which sleep — they backdate `last_used` to simulate the long request. A
+request in flight past the timeout survives a reap and is reaped normally once
+released; two concurrent holders keep the transport until the *second* one
+finishes; and an unpooled loser's release leaves the winner's count intact.
+All three fail with the `in_use` guard neutralised, and the third also fails
+against an unconditional decrement — so they hold both halves rather than
+describing them.
+
 ---
 
-### F9 — `/image` missing from the documented read-only contract · Info
+### F9 — `/image` missing from the documented read-only contract · Info · *Fixed 2026-08-10*
 
 The read-only explorer contract in `CLAUDE.md` enumerates the reads that stay
 in scope (`/download`, `/git/state`, `/file/state`, `/entries`, `/search`) and
@@ -599,6 +674,20 @@ The route itself is exemplary — root-confined through `backend.resolve_file`,
 default-src 'none'; ... sandbox` and `X-Content-Type-Options: nosniff` for the
 direct-navigation case. It is unambiguously a read and belongs in the read
 list. Only the documentation needs the addition.
+
+#### Resolution — 2026-08-10
+
+`GET /api/explorer/<id>/image` now sits beside `/download` in the read list in
+`CLAUDE.md`, with the properties that make it a read rather than a hole: the
+25 MB cap on both the `stat` and the read, the restriction to recognised image
+types, and the CSP/`nosniff` pair the route sets because it is directly
+navigable. No code changed.
+
+Naming the defences and not just the route is the part worth keeping. The read
+list is what a future contributor consults before adding the next byte-serving
+read; "`/image` is a read" invites one modelled on the route's *shape* alone,
+and the sandbox headers are exactly the detail that would be dropped. `/reveal`
+is documented the same way, and for the same reason.
 
 ---
 
@@ -753,15 +842,71 @@ already exist rather than opening new ones.
    **Done 2026-08-10** (local config cleared; upstream startup warning added).
 3. ~~**F2** — resource leak in the newest feature, cheapest to fix while it is
    still fresh.~~ **Done 2026-08-10.**
-4. ~~**F6**~~ **Done 2026-08-10** — the suite is green again. **F7** remains
-   open: an accurate `CLAUDE.md` is still minutes of work and still misleads.
+4. ~~**F6**~~ **Done 2026-08-10** — the suite is green again. ~~**F7**~~
+   **Done 2026-08-10.**
 5. ~~**F3** — measurable, contained, and the fix is a running total.~~
    **Done 2026-08-10.**
-6. ~~**F5**~~ **Done 2026-08-10.** **F8, F9** remain — narrow/documentation;
-   batch them.
+6. ~~**F5**~~ **Done 2026-08-10.** ~~**F8, F9**~~ **Done 2026-08-10** — batched
+   as planned.
 7. **§4.1** — schedule the `explorer-viewer.js` split before it grows further.
 
-**Remaining after this round: F7, F8, F9, and §4.** Every **High** and **Medium**
-finding is closed; what is left is one stale documentation line, one narrow race
-that needs a same-session concurrent request during a >60 s transfer, one missing
-entry in a contract list, and the standing refactor/optimization items.
+**Every finding F1–F9 is closed.** What remains of this audit is §4
+(optimizations — the `explorer-viewer.js` split, the legacy CSS token debt, the
+test-file split, the explorer pool keepalive, and the three smaller items) and
+§5 (feature candidates), both deliberately deferred to a separate pass.
+
+---
+
+## 7. Close-out — 2026-08-10
+
+A full re-verification after F9, covering the nine findings together rather than
+one at a time. The concern this answers is not "did each fix work" — each was
+verified when it landed — but "do they still hold *as a set*, and did closing
+them cost anything elsewhere".
+
+| Check | Result |
+| --- | --- |
+| `python tests/run_tests.py` | 1425 tests, **0 failures**, 7 skipped |
+| `python -m ruff check .` | **All checks passed** |
+| Baseline comparison | +23 tests, −2 failures (the F6 pair) |
+
+**Each fix still holds under a forced regression.** Every finding that changed
+behaviour was re-checked by breaking it deliberately and confirming its tests
+go red — F1 and F4 with `apply_resolved_server_origins` stubbed out (6 red), F2
+with the disconnect release suppressed (2) and again with the buffer left
+unbounded (1), F3 with the running total replaced by the old `sum()` (1), F5
+with the browser check forced off (2), F8 with the `in_use` guard neutralised
+(3) and again with an unconditional decrement (1). Each fails on the assertion
+that names its finding, not on a bystander, which is the property that
+distinguishes a regression test from a description of the current code. F6 and
+F7/F9 are excluded because they changed no production behaviour — a test patch
+and two documentation lines.
+
+**Interactions between the fixes were checked, not assumed.** The two pairs
+that touch shared state:
+
+- **F1 + F4** both write the origin posture at startup. They compose in one
+  direction only — `apply_resolved_server_origins` derives the allowlist, then
+  warns if a configured `*` overrode it — and the F4 warning is emitted from
+  inside the F1 function, so there is no path that sets origins without
+  evaluating the warning.
+- **F2 + F3** both touch per-session teardown. The voice registries and
+  `session_output_buffers` are independent maps with no shared lock, and the
+  `_OutputBuffer` change is confined to `_cache_terminal_output`; a disconnect
+  that abandons a voice session and a session close that drops an output
+  buffer do not meet.
+
+**The guardrails the fixes could have bent were re-checked.** No new
+`socketio.emit` call happens under a lock (F2's release closes the Vosk socket
+outside `_active_voice_sessions_lock`, and emits nothing on the abandon path by
+design); no new config key bypasses `RuntimeConfig`; F8's refcount work stays
+inside `_ssh_client_pool_lock` and calls nothing blocking while holding it. The
+`web/api.py` re-export surface is unchanged, which is what keeps F2's and F8's
+internal reshaping invisible to callers — `_active_voice_sessions` is still
+session→engine and `session_output_buffers` is still a plain dict of deques,
+both deliberately.
+
+**One thing was left deliberately incomplete**, stated here so it is not
+mistaken for an oversight: F8's adjacent keepalive observation is *not* fixed.
+It is a resilience item, tracked in §4.4, and belongs with the optimization
+pass rather than with the race it was noticed beside.
