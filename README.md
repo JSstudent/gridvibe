@@ -219,7 +219,7 @@ GridVibe generates a Flask session signing key at startup unless `GRIDVIBE_SECRE
 
 GridVibe is a local tool, not a public web service: it binds to `127.0.0.1` by default, has no built-in authentication, and should not be exposed to the internet.
 
-- Socket.IO CORS defaults to same-origin; state-changing cross-origin requests are rejected. Set `security.cors_origins` only if you serve GridVibe from another origin.
+- Socket.IO CORS defaults to same-origin, following the address the server actually resolved (so `--host`/`--port` are covered) plus the host each request was addressed to; state-changing cross-origin requests are rejected on the same rule. Set `security.cors_origins` only if you serve GridVibe from another origin — an explicit list is used verbatim and replaces both defaults.
 - SSH host keys persist to `.known_hosts`; `ssh.host_key_policy` can be `auto-add` (default), `known-hosts`, or `strict`.
 - Saved SSH passwords are Fernet-encrypted; the key lives in `.encryption_key`.
 

@@ -12804,6 +12804,12 @@ class SessionStatusRoomScopeTestCase(unittest.TestCase):
 class SharedRunServerTestCase(unittest.TestCase):
     """Deep-dive 5.7 — one server entry point with a consistent flag set."""
 
+    def setUp(self):
+        # run_server re-points the Socket.IO origins (audit F1); keep that off
+        # the shared server object once the test is done.
+        eio = web_app.socketio.server.eio
+        self.addCleanup(setattr, eio, "cors_allowed_origins", eio.cors_allowed_origins)
+
     def test_run_server_passes_the_full_flag_set(self):
         with patch.object(api.socketio, "run") as mock_run:
             api.run_server("192.0.2.1", 8080, True)
@@ -13656,6 +13662,117 @@ class CorsOriginDefaultsTestCase(unittest.TestCase):
             origins = api._resolve_cors_origins()
 
         self.assertEqual(origins, ["*"])
+
+    def test_resolved_settings_beat_the_configured_port(self):
+        config = {"security": {}, "server": {"host": "127.0.0.1", "port": 5050}}
+        with patch.object(api.runtime_config, "app_config", config):
+            origins = api._resolve_cors_origins("192.168.1.20", 8080)
+
+        self.assertEqual(
+            origins,
+            [
+                "http://127.0.0.1:8080",
+                "http://localhost:8080",
+                "http://192.168.1.20:8080",
+            ],
+        )
+
+
+class ResolvedServerOriginsTestCase(unittest.TestCase):
+    """Audit F1 — Socket.IO must authorise the port the server actually binds."""
+
+    def setUp(self):
+        eio = web_app.socketio.server.eio
+        self.addCleanup(setattr, eio, "cors_allowed_origins", eio.cors_allowed_origins)
+        # Stand in for the import-time construction, which only ever sees the
+        # configured port — every test below then binds a different one.
+        eio.cors_allowed_origins = ["http://127.0.0.1:5050", "http://localhost:5050"]
+        self.client = web_app.app.test_client()
+
+    def _handshake(self, origin, host="127.0.0.1:8080"):
+        """Run a Socket.IO polling handshake and report whether it was allowed."""
+        response = self.client.get(
+            "/socket.io/?EIO=4&transport=polling",
+            headers={"Origin": origin, "Host": host},
+        )
+        if response.status_code == 400:
+            self.assertIn("accepted origin", response.get_data(as_text=True))
+            return False
+        self.assertEqual(response.status_code, 200)
+        return True
+
+    def _start_server(self, host, port, config):
+        with patch.object(api.runtime_config, "app_config", config), \
+                patch.object(api.socketio, "run"), \
+                patch.object(api, "start_workspace_autosave"):
+            api.run_server(host, port)
+
+    def test_running_on_a_flag_port_authorises_that_port(self):
+        config = {"security": {"cors_origins": []}, "server": {"host": "127.0.0.1", "port": 5050}}
+        self._start_server("127.0.0.1", 8080, config)
+
+        self.assertTrue(self._handshake("http://127.0.0.1:8080"))
+        self.assertTrue(self._handshake("http://localhost:8080", host="localhost:8080"))
+        self.assertFalse(self._handshake("http://127.0.0.1:5050"))
+
+    def test_wildcard_bind_authorises_the_host_the_request_arrived_on(self):
+        config = {"security": {}, "server": {"host": "127.0.0.1", "port": 5050}}
+        self._start_server("0.0.0.0", 8080, config)
+
+        self.assertTrue(
+            self._handshake("http://192.168.1.20:8080", host="192.168.1.20:8080")
+        )
+        self.assertTrue(self._handshake("http://127.0.0.1:8080"))
+        self.assertFalse(self._handshake("http://evil.example", host="192.168.1.20:8080"))
+
+    def test_a_hostile_origin_is_still_rejected_on_the_resolved_port(self):
+        config = {"security": {"cors_origins": []}, "server": {"host": "127.0.0.1", "port": 5050}}
+        self._start_server("127.0.0.1", 8080, config)
+
+        self.assertFalse(self._handshake("http://evil.example"))
+        self.assertFalse(self._handshake("null"))
+
+    def test_explicit_configuration_is_applied_verbatim(self):
+        config = {
+            "security": {"cors_origins": ["https://proxy.example"]},
+            "server": {"host": "127.0.0.1", "port": 5050},
+        }
+        self._start_server("127.0.0.1", 8080, config)
+
+        self.assertTrue(self._handshake("https://proxy.example"))
+        # An explicit list is the whole answer — the request host is not folded in.
+        self.assertFalse(self._handshake("http://127.0.0.1:8080"))
+
+    def test_explicit_wildcard_still_allows_every_origin(self):
+        config = {
+            "security": {"cors_origins": ["*"]},
+            "server": {"host": "127.0.0.1", "port": 5050},
+        }
+        self._start_server("127.0.0.1", 8080, config)
+
+        self.assertTrue(self._handshake("http://evil.example"))
+
+    def test_same_origin_policy_ignores_a_missing_or_null_origin(self):
+        policy = web_app.SameOriginPolicy(["http://127.0.0.1:8080"])
+        environ = {"wsgi.url_scheme": "http", "HTTP_HOST": "127.0.0.1:8080"}
+
+        self.assertFalse(policy(None, environ))
+        self.assertFalse(policy("", environ))
+        self.assertFalse(policy("null", environ))
+        self.assertTrue(policy("http://127.0.0.1:8080", environ))
+        self.assertTrue(policy("http://127.0.0.1:8080", None))
+
+    def test_same_origin_policy_honours_a_reverse_proxy(self):
+        policy = web_app.SameOriginPolicy([])
+        environ = {
+            "wsgi.url_scheme": "http",
+            "HTTP_HOST": "127.0.0.1:8080",
+            "HTTP_X_FORWARDED_PROTO": "https",
+            "HTTP_X_FORWARDED_HOST": "gridvibe.example",
+        }
+
+        self.assertTrue(policy("https://gridvibe.example", environ))
+        self.assertFalse(policy("http://127.0.0.1:8080", environ))
 
 
 class CrossOriginWriteGuardTestCase(unittest.TestCase):

@@ -5,8 +5,13 @@ Branch `szua_gridvibe-wrk-feat` @ `e03c03b`. Working tree clean.
 A general review after the session/workspace and voice work: conformance to the
 Regression Guardrails in `CLAUDE.md`, defects introduced or left behind, race
 conditions, and worthwhile optimizations. Every defect below was reproduced
-locally; the reproduction is shown with the finding. Nothing in this document
-was changed in the code — it is a report, not a patch.
+locally; the reproduction is shown with the finding.
+
+This started as a report rather than a patch. Findings are being worked off in
+the order set out in §6; each one that lands keeps its original text and gains a
+**Resolution** block, so the reasoning that justified the fix stays next to it.
+The status column in §2 is the index. Everything outside a Resolution block
+describes the code as it stood at `e03c03b`.
 
 ---
 
@@ -36,21 +41,21 @@ The findings below are concentrated in two places — the process entry points
 
 ## 2. Findings
 
-| # | Severity | Area | Summary |
-| --- | --- | --- | --- |
-| F1 | **High** | Entry points / security | `--host`/`--port` silently break realtime transport |
-| F2 | **Medium** | Voice | Per-session voice state leaks on disconnect; PCM buffer unbounded |
-| F3 | **Medium** | Performance | `_cache_terminal_output` is O(n) per chunk under the global lock |
-| F4 | **Medium** | Local config | `config.json` sets `cors_origins: ["*"]`, disabling both origin defences |
-| F5 | Low | Correctness | `_connect_session` has no browser-pane branch (guardrail 6 corollary) |
-| F6 | Low | Tests | Two voice tests depend on an unpatched module-level import |
-| F7 | Low | Docs | `CLAUDE.md` line 116 describes a test contract that no longer exists |
-| F8 | Low | Explorer | Pooled SSH client can be reaped underneath an in-flight request |
-| F9 | Info | Docs | `GET /api/explorer/<id>/image` is missing from the read-only contract text |
+| # | Severity | Area | Summary | Status |
+| --- | --- | --- | --- | --- |
+| F1 | **High** | Entry points / security | `--host`/`--port` silently break realtime transport | **Fixed 2026-08-10** |
+| F2 | **Medium** | Voice | Per-session voice state leaks on disconnect; PCM buffer unbounded | Open |
+| F3 | **Medium** | Performance | `_cache_terminal_output` is O(n) per chunk under the global lock | Open |
+| F4 | **Medium** | Local config | `config.json` sets `cors_origins: ["*"]`, disabling both origin defences | Open (local machine) |
+| F5 | Low | Correctness | `_connect_session` has no browser-pane branch (guardrail 6 corollary) | Open |
+| F6 | Low | Tests | Two voice tests depend on an unpatched module-level import | Open |
+| F7 | Low | Docs | `CLAUDE.md` line 116 describes a test contract that no longer exists | Open |
+| F8 | Low | Explorer | Pooled SSH client can be reaped underneath an in-flight request | Open |
+| F9 | Info | Docs | `GET /api/explorer/<id>/image` is missing from the read-only contract text | Open |
 
 ---
 
-### F1 — `--host`/`--port` silently break all realtime transport · **High**
+### F1 — `--host`/`--port` silently break all realtime transport · **High** · *Fixed 2026-08-10*
 
 `web/app.py:71` builds the Socket.IO server **at import time**:
 
@@ -106,7 +111,57 @@ already does exactly this in `_allowed_write_origin_netlocs()`
 while Socket.IO does not.
 
 **Workaround** for users today: set `security.cors_origins` explicitly in
-`config.json` to match the port actually in use.
+`config.json` to match the port actually in use. *(No longer needed — see
+below.)*
+
+#### Resolution — 2026-08-10
+
+Both halves of the suggested fix were taken.
+
+**1. Origins now follow the resolved bind settings.** `_resolve_cors_origins`
+(`web/app.py`) takes optional `host`/`port` that beat the config values, and
+`apply_resolved_server_origins(host, port)` re-points the live
+`socketio.server.eio.cors_allowed_origins` at them. `run_server(host, port, …)`
+(`web/api.py`) calls it before `socketio.run(...)`, so both entry points —
+`main.py` and `web/webview_launcher.py`, which already shared `run_server` —
+get it without either of them learning about origins. The import-time
+construction is unchanged and still config-derived; nothing else in the module
+had to move.
+
+**2. The request host is trusted when `security.cors_origins` is unset.** A
+static list cannot answer a wildcard bind: `--host 0.0.0.0 --port 8080` browsed
+by LAN IP has no origin the server can enumerate, so the derived list alone
+would still have failed that case. When nothing is configured, engine.io is
+handed a `SameOriginPolicy` callable instead of a list — it allows the derived
+origins plus the origin the request was actually addressed to (honouring
+`X-Forwarded-Proto`/`-Host`). That is deliberately the same rule
+`_allowed_write_origin_netlocs` already applies to HTTP writes, which is why
+writes kept working on a custom port while Socket.IO did not; the two defences
+now agree by construction. An explicit `security.cors_origins` list is still
+honoured verbatim — including `["*"]`, and including *not* folding in the
+request host — so a reverse-proxy configuration means exactly what it says.
+
+`run_server` logs the effective allowlist once at startup, which is the single
+line that would have made this finding obvious on first run.
+
+**Verified** against the real server (not the test client) on `--port 8080`
+with a shipped-default config:
+
+```
+handshake Origin :8080 (the bind port)   -> 200
+data POST Origin :8080                   -> 200
+websocket Origin :8080                   -> HTTP/1.1 101 Switching Protocols
+handshake Origin :5050 (the config port) -> 400
+handshake Origin http://evil.example     -> 400
+```
+
+Covered by `ResolvedServerOriginsTestCase` in `tests/test_api.py`, which drives
+real handshakes through the WSGI stack: the flag port is authorised, a wildcard
+bind is authorised by request host, a hostile origin and `null` are still
+rejected, an explicit list is applied verbatim, and an explicit `*` still allows
+everything. The four transport tests fail with the `run_server` call stubbed
+out, so they hold the regression rather than merely describing it. Suite:
+1410 tests, same 2 environmental failures as the baseline (F6); ruff clean.
 
 ---
 
@@ -507,8 +562,8 @@ already exist rather than opening new ones.
 
 ## 6. Recommended order of work
 
-1. **F1** — a documented flag that silently breaks the app is the only
-   user-facing breakage here.
+1. ~~**F1** — a documented flag that silently breaks the app is the only
+   user-facing breakage here.~~ **Done 2026-08-10.**
 2. **F4** — one line of local config; removes a real drive-by risk today.
 3. **F2** — resource leak in the newest feature, cheapest to fix while it is
    still fresh.

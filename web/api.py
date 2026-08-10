@@ -63,6 +63,7 @@ from web.app import (  # noqa: F401 - re-exported for backwards compatibility
     _resolve_cors_origins,
     _resolve_secret_key,
     app,
+    apply_resolved_server_origins,
     session_manager,
     socketio,
 )
@@ -3349,6 +3350,10 @@ def run_server(
     `allow_unsafe_werkzeug` cannot drift between them.
     """
     logger.info(f"Starting GridVibe server on {host}:{port}")
+    # The Socket.IO origins were derived from config at import time; only here is
+    # the resolved bind address known, and authorising the wrong one silently
+    # kills every terminal's transport (audit F1).
+    apply_resolved_server_origins(host, port)
     start_workspace_autosave()
     socketio.run(
         app,
