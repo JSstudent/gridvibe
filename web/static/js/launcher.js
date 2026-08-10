@@ -401,6 +401,10 @@
             activeSavedSessionId = '';
             activeSavedSessionName = '';
         }
+        /* A reload restores the preset without going through
+           setActiveSavedSession, so the CTA has to be re-rendered here too —
+           otherwise the button forgets the preset's name across an F5. */
+        syncLaunchDestinationControl();
     }
 
     /* ── Messages ──
@@ -2046,6 +2050,9 @@
         activeSavedSessionName = String(meta?.name || '').trim();
         persistActiveSavedSessionMeta();
         if (typeof updateHeaderBadges === 'function') updateHeaderBadges();
+        /* The launch CTA names the active preset, so importing, saving, or
+           dropping one has to re-render it. */
+        syncLaunchDestinationControl();
     }
 
     function savedSessionUpdateToken(payload) {
@@ -2814,10 +2821,26 @@
         }
     }
 
+    /* What the CTA launches, not just that it launches. "Launch Workspace" was
+       the same sentence whether the form held a freshly imported preset or an
+       untouched scratch setup, so once the import notice cleared there was
+       nothing left on screen naming what the button would run. The primary
+       line answers that; the destination line under it answers "where". */
+    function launchSessionName() {
+        const isDefaultSelection = !activeSavedSessionId || activeSavedSessionId === DEFAULT_SESSION_ID;
+        return isDefaultSelection ? '' : activeSavedSessionName;
+    }
+
+    function launchButtonLabelText() {
+        return launchSessionName() || 'new session';
+    }
+
     /* The CTA carries the destination so there is nothing to link it to. With
        the flag off it stays exactly today's single-workspace button. */
     function syncLaunchDestinationControl() {
         const caret = document.getElementById('launchDestinationBtn');
+        const launchButton = document.getElementById('launchBtn');
+        const primaryLabel = document.getElementById('launchPrimaryLabel');
         const destinationLabel = document.getElementById('launchDestinationLabel');
         const viewButton = document.getElementById('viewActiveTerminalsBtn');
         const enabled = isMultiWorkspaceEnabled();
@@ -2825,6 +2848,17 @@
             caret.hidden = !enabled;
             /* The split seam only exists when the caret does. */
             document.getElementById('launchSplit')?.classList.toggle('has-destination', enabled);
+        }
+        /* A launch in flight owns the label until it settles — resyncing the
+           destination mid-launch must not wipe "Launching…". */
+        if (primaryLabel && !launchButton?.classList.contains('loading')) {
+            primaryLabel.textContent = `Launch ${launchButtonLabelText()}`;
+        }
+        if (launchButton) {
+            /* Long preset names ellipsize, so the full sentence stays reachable. */
+            launchButton.title = enabled
+                ? `Launch ${launchButtonLabelText()} into ${workspaceDestinationName()}`
+                : `Launch ${launchButtonLabelText()}`;
         }
         if (destinationLabel) {
             destinationLabel.hidden = !enabled;
@@ -3450,13 +3484,15 @@
     }
 
     /* Toggle the launch CTA's loading state via classes instead of rewriting
-       the button's markup, so the label/arrow structure survives a launch. */
+       the button's markup, so the label/arrow structure survives a launch.
+       Settling restores whatever the CTA names *now* — never a hardcoded
+       string that would erase the active preset's name. */
     function setLaunchButtonLoading(button, loading) {
         button.disabled = loading;
         button.classList.toggle('loading', loading);
         const label = button.querySelector('.action-btn-label');
         if (label) {
-            label.textContent = loading ? 'Launching…' : 'Launch Workspace';
+            label.textContent = loading ? 'Launching…' : `Launch ${launchButtonLabelText()}`;
         }
     }
 

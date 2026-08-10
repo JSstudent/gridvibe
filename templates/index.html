@@ -258,12 +258,13 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
                     <span>View Active Terminals</span>
                 </button>
-                <!-- Split CTA: the primary half launches and names its
-                     destination, the caret half picks a different one. -->
+                <!-- Split CTA: the primary half names what it launches and,
+                     under it, where that lands; the caret half picks a
+                     different destination. -->
                 <div class="launch-split" id="launchSplit">
                     <button id="launchBtn" type="button" class="action-btn" onclick="launchSessions()">
                         <span class="action-btn-text">
-                            <span class="action-btn-label">Launch Workspace</span>
+                            <span class="action-btn-label" id="launchPrimaryLabel">Launch new session</span>
                             <span class="action-btn-destination" id="launchDestinationLabel" hidden></span>
                         </span>
                         <span class="arrow" aria-hidden="true">→</span>

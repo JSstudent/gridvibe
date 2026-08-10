@@ -57,6 +57,11 @@
 .gv-notice-text {
     flex: 1 1 auto;
     min-width: 0;
+    /* Centred: the banner spans the full content width, so a short message
+       left-aligned behind the icon reads as a stray fragment rather than as
+       the page's one announcement. The icon and the dismiss button stay
+       pinned to the two edges. */
+    text-align: center;
     /* Four lines at this size, then scroll — the height is bounded by the
        content, never by the window. */
     max-height: 6rem;

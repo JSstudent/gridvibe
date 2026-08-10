@@ -1858,6 +1858,17 @@
             min-width: 0;
         }
 
+        /* The two lines answer different questions, so they are sized apart:
+           *what* launches reads as the CTA, *where* it lands rides under it. */
+        .action-btn-label {
+            font-size: 1.02rem;
+            line-height: 1.2;
+            max-width: 260px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
         .action-btn-destination {
             font-size: 0.68rem;
             font-weight: 700;
