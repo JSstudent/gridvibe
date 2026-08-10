@@ -305,6 +305,10 @@ from web.voice import (  # noqa: F401 - re-exported for backwards compatibility
     _whisper_engine_available,
     _whisper_language_code,
     _whisper_model_lock,
+    abandon_client_voice_sessions,
+    register_voice_session,
+    release_voice_session,
+    resolve_voice_session_engine,
 )
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
@@ -2968,6 +2972,9 @@ def handle_disconnect():
     """Handle client disconnection."""
     logger.info(f"Client disconnected: {request.sid}") # type: ignore
     _clear_client_joined_sessions(request.sid) # type: ignore
+    # A recording the client never stopped (closed tab, crash, suspended
+    # laptop) is released here; nothing is emitted, the client is gone.
+    abandon_client_voice_sessions(request.sid) # type: ignore
     lifecycle_coordinator.disconnect_client(request.sid) # type: ignore
 
 
@@ -3279,8 +3286,7 @@ def handle_voice_start(data):
         return
 
     engine = 'whisper' if runtime_config.voice_engine == 'whisper' else 'vosk'
-    with _active_voice_sessions_lock:
-        _active_voice_sessions[session_id] = engine
+    register_voice_session(request.sid, session_id, engine)  # type: ignore[arg-type]
 
     if engine == 'whisper':
         _start_whisper_voice_session(session_id)
@@ -3300,8 +3306,7 @@ def handle_voice_audio(data):
     if not session_id or not audio:
         return
 
-    with _active_voice_sessions_lock:
-        engine = _active_voice_sessions.get(session_id, runtime_config.voice_engine)
+    engine = resolve_voice_session_engine(session_id, runtime_config.voice_engine)
 
     if engine == 'whisper':
         _handle_whisper_audio_chunk(session_id, audio)
@@ -3322,8 +3327,7 @@ def handle_voice_stop(data):
     if not session_id:
         return
 
-    with _active_voice_sessions_lock:
-        engine = _active_voice_sessions.pop(session_id, runtime_config.voice_engine)
+    engine = release_voice_session(session_id, runtime_config.voice_engine)
 
     if engine == 'whisper':
         _stop_whisper_voice_session(session_id)

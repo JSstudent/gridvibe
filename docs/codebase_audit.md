@@ -44,7 +44,7 @@ The findings below are concentrated in two places — the process entry points
 | # | Severity | Area | Summary | Status |
 | --- | --- | --- | --- | --- |
 | F1 | **High** | Entry points / security | `--host`/`--port` silently break realtime transport | **Fixed 2026-08-10** |
-| F2 | **Medium** | Voice | Per-session voice state leaks on disconnect; PCM buffer unbounded | Open |
+| F2 | **Medium** | Voice | Per-session voice state leaks on disconnect; PCM buffer unbounded | **Fixed 2026-08-10** |
 | F3 | **Medium** | Performance | `_cache_terminal_output` is O(n) per chunk under the global lock | Open |
 | F4 | **Medium** | Local config | `config.json` sets `cors_origins: ["*"]`, disabling both origin defences | Open (local machine) |
 | F5 | Low | Correctness | `_connect_session` has no browser-pane branch (guardrail 6 corollary) | Open |
@@ -165,7 +165,7 @@ out, so they hold the regression rather than merely describing it. Suite:
 
 ---
 
-### F2 — Voice session state leaks on disconnect; PCM buffer is unbounded · **Medium**
+### F2 — Voice session state leaks on disconnect; PCM buffer is unbounded · **Medium** · *Fixed 2026-08-10*
 
 Two distinct problems in the same path.
 
@@ -205,6 +205,66 @@ with (a), an abandoned recording holds that memory permanently.
 `_active_voice_sessions` can carry alongside the engine. Separately, cap the
 whisper buffer at a defensible maximum recording length and emit a
 `voice_status` error when it is hit, rather than growing without limit.
+
+#### Resolution — 2026-08-10
+
+Both halves were taken, with one deliberate departure from the suggested shape.
+
+**(a) Every recording now has an owner, and a lost socket releases it.** The
+sid→session mapping went beside `_active_voice_sessions` rather than inside it:
+`_voice_session_owners` (session→sid) and `_voice_sessions_by_client`
+(sid→sessions), all three guarded by the existing
+`_active_voice_sessions_lock`. Keeping `_active_voice_sessions` as
+session→engine left its re-export contract and every existing caller untouched,
+and it makes both directions O(1) — the alternative, a record per session,
+would have made release scan every client on a lock the audio path also takes.
+The registry is manipulated only through four functions in `web/voice.py`
+(`register_voice_session`, `resolve_voice_session_engine`,
+`release_voice_session`, `abandon_client_voice_sessions`), so `web/api.py`'s
+handlers no longer reach into the dicts at all.
+
+`handle_disconnect` calls `abandon_client_voice_sessions(request.sid)`, which
+drops the whisper buffer and closes the Vosk WebSocket for exactly the sessions
+that socket owned. It deliberately does **not** reuse the stop path: stopping
+exists to deliver a final transcript to the window that asked for it, and on
+this path that window is gone — so nothing is transcribed and nothing is
+emitted. The Vosk close still waits up to 2 s on the per-session lock, the same
+courtesy `_stop_vosk_voice_session` pays an in-flight chunk. The map only holds
+sockets with a recording actually in flight (a client's row is removed when its
+last session is released), so it needs no arbitrary ceiling the way
+`client_joined_sessions` does.
+
+Ownership *moves* on re-registration, which is the case the naive fix gets
+wrong: two windows showing the same pane can both start recording on the same
+`session_id`, and the start path already replaces the Vosk connection, so the
+second window is the real owner. Without the transfer, the first window's
+disconnect would tear down a recording the second window is still driving.
+
+**(b) The whisper buffer is capped at five minutes** — `WHISPER_MAX_RECORDING_SECONDS`,
+9.6 MB of 16 kHz mono PCM16. Reaching the cap does not raise an error and throw
+the audio away; it finalizes the recording through the normal stop path, so
+everything said so far is transcribed and delivered, and *then* emits the
+`voice_status` error naming the limit. That ordering matters at the client:
+`terminals.js` reacts to an error by calling `_stopVoice(index, { notifyServer: false })`,
+so no `voice_stop` ever arrives and the server must free the buffer itself.
+
+One consequence of finalizing from inside the audio path had to be closed:
+`_handle_whisper_audio_chunk` used to create a buffer for any session id it was
+handed, so the chunks still in flight after the cap would have started a fresh
+buffer that nothing would ever flush — the same leak, one order of magnitude
+smaller. Audio now only lands in a buffer `voice_start` created; a chunk for a
+recording that was never started, or has already been finalized, is dropped.
+
+**Covered by five behavioral tests** in `tests/test_api.py`, driven through the
+real Socket.IO test client rather than by calling the registry directly: an
+abandoned whisper recording and an abandoned Vosk recording are both released by
+a genuine `disconnect` (the Vosk one asserting `close()` on the connection), a
+window that lost ownership releases nothing on disconnect, the cap finalizes at
+exactly the cap boundary — asserting the bytes handed to transcription, so a
+chunk straddling the limit is truncated rather than swallowed whole — delivers
+the transcript, emits exactly one error, and drops the buffer, and post-cap
+audio does not re-create it. Suite: 1415 tests, same 2 environmental failures as
+the baseline (F6); ruff clean.
 
 ---
 
@@ -565,8 +625,8 @@ already exist rather than opening new ones.
 1. ~~**F1** — a documented flag that silently breaks the app is the only
    user-facing breakage here.~~ **Done 2026-08-10.**
 2. **F4** — one line of local config; removes a real drive-by risk today.
-3. **F2** — resource leak in the newest feature, cheapest to fix while it is
-   still fresh.
+3. ~~**F2** — resource leak in the newest feature, cheapest to fix while it is
+   still fresh.~~ **Done 2026-08-10.**
 4. **F6, F7** — restore a green suite and an accurate `CLAUDE.md`; both are
    minutes of work and both currently mislead.
 5. **F3** — measurable, contained, and the fix is a running total.

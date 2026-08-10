@@ -180,6 +180,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             api._vosk_ws_connections.clear()
         with api._whisper_audio_lock:
             api._whisper_audio_buffers.clear()
+        self._clear_active_voice_sessions()
         web_voice._whisper_model_instance = None
         cfg = api.load_config()
         self._saved_appearance = json.loads(json.dumps(cfg.get("appearance", {})))
@@ -187,6 +188,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self._saved_voice_prefs = cfg.pop("voice_prefs", None)
         api.save_config(cfg)
         api._refresh_runtime_config()
+
+    def _clear_active_voice_sessions(self):
+        with api._active_voice_sessions_lock:
+            api._active_voice_sessions.clear()
+            web_voice._voice_session_owners.clear()
+            web_voice._voice_sessions_by_client.clear()
 
     def _create_explorer_session(self, repo_dir: Path) -> str:
         response = self.client.post(
@@ -269,6 +276,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             api._vosk_ws_connections.clear()
         with api._whisper_audio_lock:
             api._whisper_audio_buffers.clear()
+        self._clear_active_voice_sessions()
         web_voice._whisper_model_instance = None
         cfg = api.load_config()
         cfg["appearance"] = self._saved_appearance
@@ -11227,6 +11235,170 @@ class ApiRoutesTestCase(unittest.TestCase):
         with api._whisper_audio_lock:
             self.assertNotIn("session-whisper", api._whisper_audio_buffers)
 
+    def test_disconnect_releases_an_abandoned_whisper_recording(self):
+        """Audit F2a — a recording nobody stopped must not outlive its socket."""
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+
+        with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
+            api.runtime_config, "voice_engine", "whisper"
+        ), patch.object(web_voice, "_ensure_whisper_model", return_value=MagicMock()):
+            socket_client.emit("voice_start", {"session_id": "session-dropped"})
+            socket_client.emit(
+                "voice_audio",
+                {"session_id": "session-dropped", "audio": b"\x00\x01\x02\x03"},
+            )
+
+        with api._whisper_audio_lock:
+            self.assertIn("session-dropped", api._whisper_audio_buffers)
+
+        # The tab closes / the laptop suspends: no voice_stop ever arrives.
+        socket_client.disconnect()
+
+        with api._whisper_audio_lock:
+            self.assertNotIn("session-dropped", api._whisper_audio_buffers)
+        with api._active_voice_sessions_lock:
+            self.assertNotIn("session-dropped", api._active_voice_sessions)
+            self.assertEqual(web_voice._voice_sessions_by_client, {})
+
+    def test_disconnect_closes_an_abandoned_vosk_connection(self):
+        """Audit F2a — the dropped socket's Vosk WebSocket is closed, not leaked."""
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+
+        mock_ws = MagicMock()
+        mock_ws_client = MagicMock()
+        mock_ws_client.create_connection.return_value = mock_ws
+
+        with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
+            api.runtime_config, "voice_engine", "vosk"
+        ), patch.object(web_voice, "ws_client", mock_ws_client), patch.object(
+            web_voice, "_ensure_vosk_service", return_value=True
+        ):
+            socket_client.emit("voice_start", {"session_id": "session-vosk-dropped"})
+
+        with api._vosk_lock:
+            self.assertIs(api._vosk_ws_connections["session-vosk-dropped"], mock_ws)
+
+        socket_client.disconnect()
+
+        mock_ws.close.assert_called()
+        with api._vosk_lock:
+            self.assertNotIn("session-vosk-dropped", api._vosk_ws_connections)
+            self.assertNotIn("session-vosk-dropped", api._vosk_session_locks)
+        with api._active_voice_sessions_lock:
+            self.assertNotIn("session-vosk-dropped", api._active_voice_sessions)
+
+    def test_disconnect_leaves_another_window_recording_alone(self):
+        """Ownership moves with the recording, so a stale window releases nothing."""
+        first_window = api.socketio.test_client(api.app, flask_test_client=self.client)
+        second_window = api.socketio.test_client(api.app, flask_test_client=self.client)
+        self.addCleanup(second_window.disconnect)
+
+        with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
+            api.runtime_config, "voice_engine", "whisper"
+        ), patch.object(web_voice, "_ensure_whisper_model", return_value=MagicMock()):
+            first_window.emit("voice_start", {"session_id": "session-shared"})
+            second_window.emit("voice_start", {"session_id": "session-shared"})
+
+        first_window.disconnect()
+
+        with api._whisper_audio_lock:
+            self.assertIn("session-shared", api._whisper_audio_buffers)
+        with api._active_voice_sessions_lock:
+            self.assertEqual(api._active_voice_sessions["session-shared"], "whisper")
+
+    def test_whisper_buffer_is_capped_and_finalizes_the_recording(self):
+        """Audit F2b — a held push-to-talk key stops at the cap instead of growing."""
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+        self.addCleanup(socket_client.disconnect)
+
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = (
+            iter([SimpleNamespace(text="capped words")]),
+            SimpleNamespace(language="en"),
+        )
+
+        with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
+            api.runtime_config, "voice_engine", "whisper"
+        ), patch.object(
+            web_voice, "_ensure_whisper_model", return_value=mock_model
+        ), patch.object(
+            web_voice, "_pcm16le_to_float32", return_value="audio-array"
+        ) as to_float32, patch.object(web_voice, "WHISPER_MAX_BUFFERED_AUDIO_BYTES", 6):
+            socket_client.emit("voice_start", {"session_id": "session-capped"})
+            socket_client.get_received()
+
+            socket_client.emit(
+                "voice_audio", {"session_id": "session-capped", "audio": b"\x00\x01\x02\x03"}
+            )
+            socket_client.emit(
+                "voice_audio", {"session_id": "session-capped", "audio": b"\x04\x05\x06\x07"}
+            )
+            cap_events = socket_client.get_received()
+
+            # Audio still arriving after the cap is dropped, not re-buffered.
+            socket_client.emit(
+                "voice_audio", {"session_id": "session-capped", "audio": b"\x08\x09"}
+            )
+
+        # The buffer stopped exactly at the cap rather than swallowing the chunk.
+        mock_model.transcribe.assert_called_once()
+        to_float32.assert_called_once_with(b"\x00\x01\x02\x03\x04\x05")
+        with api._whisper_audio_lock:
+            self.assertNotIn("session-capped", api._whisper_audio_buffers)
+        with api._active_voice_sessions_lock:
+            self.assertNotIn("session-capped", api._active_voice_sessions)
+
+        # What was said before the cap is still delivered...
+        self.assertIn(
+            {
+                "name": "voice_result",
+                "args": [
+                    {
+                        "session_id": "session-capped",
+                        "text": "capped words",
+                        "final": True,
+                    }
+                ],
+                "namespace": "/",
+            },
+            cap_events,
+        )
+        # ...and the client is told why its recording stopped.
+        errors = [
+            event["args"][0]
+            for event in cap_events
+            if event["name"] == "voice_status" and event["args"][0].get("status") == "error"
+        ]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("limit", errors[0]["message"])
+
+    def test_whisper_audio_without_a_started_recording_is_dropped(self):
+        """No buffer is allocated for audio no voice_start asked for."""
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+        self.addCleanup(socket_client.disconnect)
+
+        with patch.object(api.runtime_config, "voice_enabled", True), patch.object(
+            api.runtime_config, "voice_engine", "whisper"
+        ):
+            socket_client.emit(
+                "voice_audio", {"session_id": "session-unstarted", "audio": b"\x00\x01"}
+            )
+
+        with api._whisper_audio_lock:
+            self.assertNotIn("session-unstarted", api._whisper_audio_buffers)
+
     # ── Theme support tests ──
 
     def test_launcher_page_includes_theme_css_variables(self):
@@ -14133,13 +14305,14 @@ class VoiceEngineSwitchTestCase(unittest.TestCase):
     """Finding 2.6 — audio/stop route to the engine the recording started with."""
 
     def setUp(self):
-        with api._active_voice_sessions_lock:
-            api._active_voice_sessions.clear()
+        self._clear_state()
         self.addCleanup(self._clear_state)
 
     def _clear_state(self):
         with api._active_voice_sessions_lock:
             api._active_voice_sessions.clear()
+            web_voice._voice_session_owners.clear()
+            web_voice._voice_sessions_by_client.clear()
 
     @patch("web.api.emit")
     def test_stop_routes_to_engine_recorded_at_start(self, _mock_emit):
@@ -14420,6 +14593,10 @@ class FinalModuleSplitTestCase(unittest.TestCase):
             "_whisper_engine_available",
             "_load_voice_prefs",
             "_save_voice_prefs",
+            "register_voice_session",
+            "resolve_voice_session_engine",
+            "release_voice_session",
+            "abandon_client_voice_sessions",
         ):
             with self.subTest(name=name):
                 self.assertIs(getattr(api, name), getattr(web_voice, name))

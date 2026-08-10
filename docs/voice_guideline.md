@@ -342,6 +342,14 @@ Behavior:
 
 - lazily loads a singleton `WhisperModel`
 - buffers raw PCM bytes per session in `_whisper_audio_buffers`
+- only buffers into a session `voice_start` opened; a chunk for a recording that
+  was never started, or has already been finalized, is dropped rather than
+  allocating a buffer nothing would flush
+- caps that buffer at `WHISPER_MAX_RECORDING_SECONDS` (5 minutes ≈ 9.6 MB at
+  16 kHz mono PCM16). Reaching the cap finalizes the recording through the
+  normal stop path — everything said so far is transcribed and delivered —
+  and then emits a `voice_status` error naming the limit, which is what stops
+  the browser's capture
 - does not emit live partials
 - transcribes once on `voice_stop`
 - maps language tags like `en-US` to `en`
@@ -400,6 +408,24 @@ There are a few important implementation details here — all in `web/voice.py` 
 - the frontend disables mic buttons on other terminals while one terminal is recording.
 
 These behaviors exist because voice start/stop and proxy I/O had race conditions before the current locking and cleanup logic.
+
+### Every recording has an owner, and a lost socket releases it
+
+`voice_stop` is not the only way a recording ends. A closed tab, a crash, a
+dropped network, or a suspended laptop ends it too, and none of those send
+anything — so voice state must not depend on the client asking for it back.
+
+`register_voice_session` records, under `_active_voice_sessions_lock`, both the
+engine a recording started with and the socket that started it; `handle_disconnect`
+calls `abandon_client_voice_sessions(request.sid)`, which releases exactly the
+recordings that socket owned: the whisper PCM buffer is dropped and the Vosk
+WebSocket is closed. Nothing is emitted and nothing is transcribed on that path —
+the client that would have received the transcript is already gone.
+
+Ownership moves on re-registration. A second window that starts recording on the
+same pane takes the session over (the start path already replaces the Vosk
+connection), so the first window's later disconnect can never tear down a
+recording it no longer drives.
 
 ## Native `pywebview` Guideline
 
