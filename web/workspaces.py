@@ -16,7 +16,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -1029,44 +1029,121 @@ def _restore_group_request(
 
     from web.saved_sessions import DEFAULT_SAVED_SESSION_ID
 
+    warning = ""
     saved_session_id = str(snapshot_group.get("saved_session_id") or "").strip()
     # The blank built-in default holds no real host/credential, so it is never
     # treated as a preset a restore should consult — nor as one that went
     # missing when it is not in saved_sessions.json.
-    if not saved_session_id or saved_session_id == DEFAULT_SAVED_SESSION_ID:
-        return body, ""
+    if saved_session_id and saved_session_id != DEFAULT_SAVED_SESSION_ID:
+        preset = _find_saved_preset(saved_session_id)
+        if preset is None:
+            # Reported, not fatal: the shape is captured, so only the credential
+            # is gone and the panes relaunch into their own retry state.
+            warning = "preset_missing"
+        else:
+            credential = _preset_ssh_credential(preset)
+            if credential is not None:
+                ssh_panes = 0
+                matched_panes = 0
+                for session in snapshot_sessions:
+                    if _pane_connection_mode(session, snapshot_group) != "ssh":
+                        continue
+                    ssh_panes += 1
+                    if _pane_matches_credential(session, credential):
+                        # Resolved in-process: the decrypted credential goes
+                        # straight into the launch service and never into a
+                        # response body, a snapshot, or the log.
+                        session["password"] = credential["password"]
+                        matched_panes += 1
+                if ssh_panes and matched_panes < ssh_panes:
+                    # The preset now points at a different machine or account.
+                    # Handing its password to a pane that names another target is
+                    # exactly what matching by position used to do; the pane keeps
+                    # its shape and authenticates on its own instead.
+                    warning = "credentials_unmatched"
 
-    preset = _find_saved_preset(saved_session_id)
-    if preset is None:
-        # Reported, not fatal: the shape is captured, so only the credential is
-        # gone and the panes relaunch into their own retry state.
-        return body, "preset_missing"
+    _apply_target_credentials(snapshot_sessions, snapshot_group)
+    return body, warning
 
-    credential = _preset_ssh_credential(preset)
-    if credential is None:
-        return body, ""
 
-    ssh_panes = 0
-    matched_panes = 0
-    for session in snapshot_sessions:
-        mode = str(session.get("mode") or snapshot_group.get("connection_mode") or "")
-        if mode != "ssh":
+def _pane_connection_mode(session: Dict[str, Any], snapshot_group: Dict[str, Any]) -> str:
+    """The connection mode one captured pane will be relaunched under."""
+    return str(session.get("mode") or snapshot_group.get("connection_mode") or "")
+
+
+def _preset_passwords_by_target() -> Dict[Tuple[str, str, int], str]:
+    """Map each saved SSH target to the one password that is unambiguously its.
+
+    The launcher's saved-target menu starts a **scratch** session: picking
+    ``172.29.2.68`` fills the address *and* fetches that preset's password, then
+    deliberately drops the preset identity so the same target can be launched
+    repeatedly without stealing the one group that owns the preset
+    (``applyConnectionTarget`` in ``launcher.js``). The group is therefore born
+    with no ``saved_session_id``, and restore — which only ever looked up the
+    credential *through* that id — had nothing to authenticate with. The
+    workspace saved, restored, and failed to log in every time.
+
+    Resolving by target closes that without inventing any new storage: it is the
+    same lookup the launcher already performs, over the same presets, keyed by
+    the same host/user/port that :func:`_preset_ssh_credential` already treats as
+    a password's meaning. A target several presets disagree about is skipped
+    rather than guessed at — restoring the wrong account's password would lock
+    somebody out.
+    """
+    from web.saved_sessions import load_saved_sessions
+
+    candidates: Dict[Tuple[str, str, int], Set[str]] = {}
+    for entry in load_saved_sessions():
+        credential = _preset_ssh_credential(entry)
+        if credential is None:
             continue
-        ssh_panes += 1
-        if _pane_matches_credential(session, credential):
-            # Resolved in-process: the decrypted credential goes straight into
-            # the launch service and never into a response body, a snapshot, or
-            # the log.
-            session["password"] = credential["password"]
-            matched_panes += 1
+        key = (credential["host"], credential["username"], credential["port"])
+        candidates.setdefault(key, set()).add(credential["password"])
+    return {
+        key: next(iter(passwords))
+        for key, passwords in candidates.items()
+        if len(passwords) == 1
+    }
 
-    if ssh_panes and matched_panes < ssh_panes:
-        # The preset now points at a different machine or account. Handing its
-        # password to a pane that names another target is exactly what matching
-        # by position used to do; the pane keeps its shape and authenticates on
-        # its own instead.
-        return body, "credentials_unmatched"
-    return body, ""
+
+def _apply_target_credentials(
+    snapshot_sessions: List[Dict[str, Any]],
+    snapshot_group: Dict[str, Any],
+) -> None:
+    """Credential any still-uncredentialed SSH pane from its own saved target.
+
+    Runs after the attached preset has had its say, so an explicitly referenced
+    preset always wins; this only fills panes that would otherwise relaunch with
+    nothing. Per pane rather than per group, because a group's panes may name
+    different hosts.
+    """
+    pending = [
+        session
+        for session in snapshot_sessions
+        if _pane_connection_mode(session, snapshot_group) == "ssh"
+        and not session.get("password")
+    ]
+    if not pending:
+        # The common path reads no files at all.
+        return
+
+    by_target = _preset_passwords_by_target()
+    if not by_target:
+        return
+    for session in pending:
+        try:
+            port = int(session.get("port") or 22)
+        except (TypeError, ValueError):
+            continue
+        password = by_target.get(
+            (
+                str(session.get("host") or "").strip(),
+                str(session.get("username") or ""),
+                port,
+            )
+        )
+        if password:
+            session["password"] = password
 
 
 def restore_workspace(workspace_id: Any) -> Dict[str, Any]:

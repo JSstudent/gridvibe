@@ -1975,15 +1975,39 @@
         if (!value || !(pane?._explorerTreeChildren instanceof Map)) {
             return null;
         }
-        const separator = value.lastIndexOf('/');
-        const entries = pane._explorerTreeChildren.get(separator === -1 ? '' : value.slice(0, separator));
+        const entries = pane._explorerTreeChildren.get(explorerTreeParentPath(value));
         if (!Array.isArray(entries)) {
             return null;
         }
         return entries.find(entry => (entry.path || '') === value) || null;
     }
 
-    function explorerTreeRowHtml(pane, entry, depth) {
+    /* The directory a tree path sits in; '' for a root-level entry, which is
+       also the key its children are cached under. */
+    function explorerTreeParentPath(path) {
+        const value = String(path || '');
+        const separator = value.lastIndexOf('/');
+        return separator === -1 ? '' : value.slice(0, separator);
+    }
+
+    /* Every directory sharing this path's parent, itself included — the set an
+       Alt+click fans a fold out over. Empty whenever the parent's listing is
+       not loaded, which leaves the gesture a no-op rather than a guess. */
+    function explorerTreeSiblingDirectories(pane, path) {
+        const entries = pane._explorerTreeChildren.get(explorerTreeParentPath(path));
+        if (!Array.isArray(entries)) {
+            return [];
+        }
+        return entries
+            .filter(entry => entry.type === 'directory' && entry.path)
+            .map(entry => entry.path);
+    }
+
+    /* One tree row. `options.nameHtml` supplies already-escaped markup for the
+       name (the filter's match highlight); `options.staticChevron` drops the
+       fold control, which is what a filtered result tree wants — its folders
+       are always expanded, so an arrow there would toggle nothing. */
+    function explorerTreeRowHtml(pane, entry, depth, options = {}) {
         const isDirectory = entry.type === 'directory';
         const path = entry.path || '';
         const expanded = isDirectory && pane._explorerTreeExpanded.has(path);
@@ -1995,13 +2019,13 @@
            never navigates, so browsing the tree can't evict whatever the
            Preview tab is showing. Only the name button opens the target. */
         const indent = `style="padding-left:${7 + depth * EXPLORER_TREE_INDENT_PX}px"`;
-        const chevron = isDirectory
+        const chevron = isDirectory && !options.staticChevron
             ? `<button
                 type="button"
                 class="explorer-tree-chevron-btn"
                 data-explorer-tree-chevron="${escHtml(path)}"
                 aria-expanded="${expanded ? 'true' : 'false'}"
-                title="${expanded ? 'Collapse folder' : 'Expand folder'}"
+                title="${expanded ? 'Collapse folder (Alt: collapse all at this level)' : 'Expand folder (Alt: expand all at this level)'}"
                 aria-label="${expanded ? 'Collapse' : 'Expand'} ${escHtml(entry.name || path)}"
                 ${indent}
             >${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</button>`
@@ -2027,7 +2051,7 @@
                 ${chevron}
                 <button type="button" class="explorer-tree-main" ${action} title="${escHtml(path)}">
                     ${isDirectory ? EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(entry.name || path)}
-                    <span class="explorer-tree-name">${escHtml(entry.name || path)}</span>
+                    <span class="explorer-tree-name">${options.nameHtml || escHtml(entry.name || path)}</span>
                 </button>
                 ${badge}
                 ${openFolder}
@@ -2073,16 +2097,47 @@
         wireExplorerCopyPathMenu(panel, index);
 
         ensureExplorerTreeState(pane);
-        panel.innerHTML = `
-            <div class="explorer-tree-section">
-                <div class="explorer-tree-title">Files</div>
-                <div class="explorer-tree-children">${renderExplorerTreeNodes(pane, '', 0)}</div>
-            </div>
-        `;
+        /* The head — "FILES" plus the name filter — is built once and left
+           alone: rebuilding it on every render would drop the caret out of the
+           filter box on the keystroke that triggered the render. */
+        if (!panel.querySelector('.explorer-tree-section')) {
+            panel.innerHTML = `
+                <div class="explorer-tree-section">
+                    <div class="explorer-tree-head">
+                        <div class="explorer-tree-title">Files</div>
+                        ${typeof explorerTreeSearchHeadHtml === 'function'
+                            ? explorerTreeSearchHeadHtml(index)
+                            : ''}
+                    </div>
+                    <div class="explorer-tree-children" data-explorer-tree-body></div>
+                </div>
+            `;
+            if (typeof wireExplorerTreeSearchControls === 'function') {
+                wireExplorerTreeSearchControls(index);
+            }
+        }
+        if (typeof syncExplorerTreeSearchControls === 'function') {
+            syncExplorerTreeSearchControls(index);
+        }
+        const body = panel.querySelector('[data-explorer-tree-body]');
+        if (!body) {
+            return;
+        }
+        /* With a filter query typed, the body is the filtered result tree
+           instead of the browsable one — same row markup, same click targets. */
+        body.innerHTML = (typeof explorerTreeSearchActive === 'function'
+            && explorerTreeSearchActive(pane))
+            ? renderExplorerTreeSearchNodes(index)
+            : renderExplorerTreeNodes(pane, '', 0);
         panel.querySelectorAll('[data-explorer-tree-chevron]').forEach(button => {
             button.addEventListener('click', event => {
                 event.stopPropagation();
-                toggleExplorerTreeDirectory(index, button.dataset.explorerTreeChevron || '');
+                const path = button.dataset.explorerTreeChevron || '';
+                if (event.altKey) {
+                    toggleExplorerTreeLevel(index, path);
+                } else {
+                    toggleExplorerTreeDirectory(index, path);
+                }
             });
         });
         panel.querySelectorAll('[data-explorer-tree-dir]').forEach(button => {
@@ -2135,6 +2190,83 @@
         pane._explorerTreeErrors.delete(path);
         renderExplorerTreePanel(index);
         await loadExplorerTreeChildren(index, path);
+        notePanePresentationChanged(index);
+    }
+
+    /* Expanding a whole level is one directory listing per folder, so run a few
+       at a time: a wide level over SFTP should not fire a request per folder at
+       once. Already-visited folders come back from the children cache free. */
+    const EXPLORER_TREE_LEVEL_LOAD_CONCURRENCY = 4;
+
+    async function loadExplorerTreeLevelChildren(index, paths) {
+        const queue = paths.slice();
+        const workers = [];
+        const width = Math.min(EXPLORER_TREE_LEVEL_LOAD_CONCURRENCY, queue.length);
+        for (let worker = 0; worker < width; worker += 1) {
+            workers.push((async () => {
+                while (queue.length) {
+                    await loadExplorerTreeChildren(index, queue.shift());
+                }
+            })());
+        }
+        await Promise.all(workers);
+    }
+
+    /* Drop a folder and everything expanded beneath it, so re-opening it later
+       gives a collapsed folder instead of restoring the old subtree. */
+    function collapseExplorerTreeSubtree(pane, path) {
+        const prefix = `${path}/`;
+        pane._explorerTreeExpanded.forEach(value => {
+            if (value === path || value.startsWith(prefix)) {
+                pane._explorerTreeExpanded.delete(value);
+            }
+        });
+    }
+
+    /* Alt+click on a fold arrow fans the toggle out to every directory sharing
+       the clicked one's parent — the Files tree's answer to the Markdown source
+       view's fold-all-at-this-level. The new state mirrors the clicked row, so
+       Alt+clicking an open root-level folder folds the whole tree in one
+       gesture. Collapsing forgets the level's deeper expansions rather than
+       just hiding them: "fold everything I opened" should hand back a clean
+       tree, not spring the old subtree back on the next click. */
+    async function toggleExplorerTreeLevel(index, path) {
+        const pane = terminals[index];
+        if (!pane || !path) {
+            return;
+        }
+
+        ensureExplorerTreeState(pane);
+        const siblings = explorerTreeSiblingDirectories(pane, path);
+        if (!siblings.length) {
+            return;
+        }
+
+        if (pane._explorerTreeExpanded.has(path)) {
+            siblings.forEach(sibling => collapseExplorerTreeSubtree(pane, sibling));
+            renderExplorerTreePanel(index);
+            /* Folding a level removes most of the rows under the scroll
+               position, and the browser answers a shrunken scroll height by
+               clamping scrollTop to the new bottom — so the tree lands
+               somewhere unrelated to the folder that was just clicked. The
+               clicked row is the one thing the gesture is about, so it becomes
+               the anchor. */
+            scrollExplorerTreeRowIntoView(index, path);
+            notePanePresentationChanged(index);
+            return;
+        }
+
+        siblings.forEach(sibling => {
+            pane._explorerTreeExpanded.add(sibling);
+            pane._explorerTreeErrors.delete(sibling);
+        });
+        renderExplorerTreePanel(index);
+        scrollExplorerTreeRowIntoView(index, path);
+        await loadExplorerTreeLevelChildren(index, siblings);
+        /* Siblings listed above the clicked one insert their children between
+           it and the top of the panel, so re-anchor once the level has filled
+           in. Both calls leave a row that is already visible alone. */
+        scrollExplorerTreeRowIntoView(index, path);
         notePanePresentationChanged(index);
     }
 
@@ -2278,6 +2410,13 @@
         }
         resetExplorerFsWatchBaseline(pane);
         renderExplorerTreePanel(index);
+        /* A reload means the tree on disk moved under us (a create, a delete, a
+           rename). With a filter typed, its result set is what the panel is
+           showing, so it has to be re-read too — once, on the same explicit
+           trigger, never on a timer. */
+        if (typeof explorerTreeSearchActive === 'function' && explorerTreeSearchActive(pane)) {
+            await runExplorerTreeSearch(index);
+        }
     }
 
     function ensureExplorerDiffExpandedCommits(pane) {

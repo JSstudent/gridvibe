@@ -1280,6 +1280,30 @@ class SessionManager:
             result.extend(sessions.values())
             return result
 
+    def group_ssh_credential(self, group_id: str) -> Optional[Dict[str, Any]]:
+        """Return one live group's SSH credential, or ``None``.
+
+        The narrow counterpart to :meth:`snapshot_lifecycle_workspaces`: a
+        workspace save needs exactly one group's password, not every
+        workspace's.  Like :func:`web.lifecycle._live_group_config` it reads the
+        group's first SSH pane, and it returns the target alongside the password
+        so the caller can refuse to attach it to a preset naming another machine
+        (the credential-reference rule of ``_preset_ssh_credential``).
+
+        Callers must never return this in a response body or log it.
+        """
+        with self.lock:
+            for session in self.get_group_sessions(group_id):
+                if session.mode != "ssh" or not session.password:
+                    continue
+                return {
+                    "host": str(session.host or "").strip(),
+                    "username": str(session.username or ""),
+                    "port": int(session.port or 22),
+                    "password": session.password,
+                }
+            return None
+
     def get_workspace_sessions(
         self,
         workspace_id: str = DEFAULT_WORKSPACE_ID,

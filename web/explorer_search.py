@@ -10,6 +10,12 @@ hooks is a pure function, unit-testable without a route, a repo, or SSH.
 Match ranges and snippet windowing are computed here, server-side, so the
 frontend only renders — literal/regex/case semantics never drift between the
 engine and the highlight.
+
+The second half of the module is the **name** search behind the Files tree's
+filter box: same query semantics (literal / whole word / regex, case-optional)
+applied to entry *names* instead of file contents, so it reads directory
+metadata only and never opens a file. It is a read like the content search, so
+it changes nothing about the explorer's read-only contract.
 """
 
 import fnmatch
@@ -18,6 +24,7 @@ import re
 import shlex
 import subprocess
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -55,6 +62,10 @@ class SearchDeadlineExceeded(Exception):
 
 class SearchOutputTruncated(Exception):
     """Internal signal: an engine reached its stdout byte cap."""
+
+
+class SearchScanLimitExceeded(Exception):
+    """Internal signal: the name walk reached its scanned-entry cap."""
 
 
 @dataclass(frozen=True)
@@ -507,3 +518,260 @@ def run_explorer_search(backend: Any, args: Any) -> Dict[str, Any]:
         deadline=deadline,
     )
     return collect_search_payload(raw_matches, options, limits, deadline, engine, started)
+
+
+# ==================== File / directory name search ====================
+#
+# The Files tree's filter box. It answers "which entries under this root are
+# named like this", never "which files contain this" — that is what the search
+# sidebar above is for. Only directory metadata is read, so the engines are
+# cheap enough to run on every keystroke (debounced client-side).
+
+FIND_QUERY_MAX_CHARS = 128
+# A tree filter is only useful while its result set still reads as a tree, and
+# the caps below are what keep one keystroke over a dependency-heavy root from
+# burning the shared search deadline.
+FIND_MAX_RESULTS = 500
+FIND_MAX_DEPTH = 12
+FIND_MAX_SCANNED_ENTRIES = 20000
+FIND_DEADLINE_CHECK_INTERVAL = 512
+FIND_REMOTE_MAX_OUTPUT_BYTES = 2 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class FindOptions:
+    """Name-search query semantics.
+
+    Field names match `SearchOptions` on purpose: `compile_search_matcher()` is
+    the one matcher factory for both searches, so a literal/regex/case/word
+    query means exactly the same thing in the tree filter as in the sidebar.
+    """
+
+    query: str
+    case_sensitive: bool = False
+    whole_word: bool = False
+    regex: bool = False
+
+
+# One raw engine entry: explorer-root-relative path, and whether it is a
+# directory. Nothing else is read off disk.
+RawEntry = Tuple[str, bool]
+
+
+def parse_find_options(args: Any) -> FindOptions:
+    """Validate the query-string mapping into FindOptions (400 on bad input)."""
+    query = args.get("q", "")
+    if not isinstance(query, str):
+        query = str(query)
+    if not query:
+        raise ExplorerRouteError("A search query is required")
+    if len(query) > FIND_QUERY_MAX_CHARS:
+        raise ExplorerRouteError(
+            f"Search query exceeds the {FIND_QUERY_MAX_CHARS}-character limit"
+        )
+    return FindOptions(
+        query=query,
+        case_sensitive=_flag(args, "case"),
+        whole_word=_flag(args, "word"),
+        regex=_flag(args, "regex"),
+    )
+
+
+def find_result_limit(limits: SearchLimits) -> int:
+    """Result cap for one name search: the tighter of the config and tree caps."""
+    return max(1, min(int(limits.max_files), FIND_MAX_RESULTS))
+
+
+def walk_names(root_path: str, deadline: float) -> Iterator[RawEntry]:
+    """Local engine: a bounded breadth-first scan of directory metadata.
+
+    Breadth-first so a truncated result set is the *shallow* part of the tree —
+    the part a filter box is most likely to have been aiming at. Symlinks are
+    never followed (a symlinked directory is reported as a plain entry and not
+    descended into), which is both the confinement rule and the loop guard;
+    SEARCH_EXCLUDE_DIRS are reported by name but not descended into.
+    """
+    root_real = os.path.realpath(os.path.abspath(root_path))
+    queue = deque([(root_real, "", 0)])
+    scanned = 0
+    while queue:
+        directory, rel_dir, depth = queue.popleft()
+        if time.monotonic() > deadline:
+            raise SearchDeadlineExceeded()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            scanned += 1
+            if scanned > FIND_MAX_SCANNED_ENTRIES:
+                raise SearchScanLimitExceeded()
+            if scanned % FIND_DEADLINE_CHECK_INTERVAL == 0 and time.monotonic() > deadline:
+                raise SearchDeadlineExceeded()
+            rel_path = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+            try:
+                is_directory = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                is_directory = False
+            yield rel_path, is_directory
+            if (
+                is_directory
+                and entry.name not in SEARCH_EXCLUDE_DIRS
+                and depth + 1 < FIND_MAX_DEPTH
+            ):
+                queue.append((os.path.join(directory, entry.name), rel_path, depth + 1))
+
+
+def build_remote_find_command(root_path: str) -> str:
+    """Build the bounded `find` command for a remote POSIX shell.
+
+    Two prunes over the same tree rather than one: `find -printf` is GNU-only,
+    so the entry kind is carried by a `d `/`f ` prefix stamped on each pass.
+    """
+    prune: List[str] = []
+    for dirname in SEARCH_EXCLUDE_DIRS:
+        if prune:
+            prune.append("-o")
+        prune += ["-name", dirname]
+    base = ["find", root_path, "-maxdepth", str(FIND_MAX_DEPTH), "("]
+    base += prune
+    base += [")", "-prune", "-o"]
+
+    def quoted(parts: List[str]) -> str:
+        return " ".join(shlex.quote(part) for part in parts)
+
+    directories = f"{quoted(base + ['-type', 'd', '-print'])} | sed 's|^|d |'"
+    files = f"{quoted(base + ['!', '-type', 'd', '-print'])} | sed 's|^|f |'"
+    return (
+        f"{{ {directories}; {files}; }} 2>/dev/null"
+        f" | head -c {FIND_REMOTE_MAX_OUTPUT_BYTES}"
+    )
+
+
+def parse_remote_find_output(
+    backend: Any,
+    root_path: str,
+    stream: bytes,
+) -> Iterator[RawEntry]:
+    """Parse the `d `/`f ` prefixed `find` output with root confinement."""
+    if not stream:
+        return
+    text = stream.decode("utf-8", errors="replace")
+    lines = text.split("\n")
+    # A head-truncated stream ends mid-line; the partial record is unusable.
+    if len(stream) >= FIND_REMOTE_MAX_OUTPUT_BYTES and lines and not text.endswith("\n"):
+        lines = lines[:-1]
+    for line in lines:
+        if len(line) < 3 or line[1] != " " or line[0] not in ("d", "f"):
+            continue
+        abs_path = line[2:]
+        if not backend.path_inside_root(root_path, abs_path):
+            continue
+        rel_path = backend.rel_explorer_path(root_path, abs_path)
+        if not rel_path:
+            # The pruned root itself, which is not an entry under the root.
+            continue
+        yield rel_path, line[0] == "d"
+
+
+def collect_find_payload(
+    raw_entries: Iterator[RawEntry],
+    options: FindOptions,
+    limits: SearchLimits,
+    deadline: float,
+    engine: str,
+    started: float,
+) -> Dict[str, Any]:
+    """Filter raw engine entries by name into the bounded response payload.
+
+    The matcher runs against the entry *name*, and the highlight ranges it
+    produces are computed here, server-side, exactly like the content search's
+    — the tree only paints what this returns.
+    """
+    matcher = compile_search_matcher(options)
+    entries: List[Dict[str, Any]] = []
+    result_limit = find_result_limit(limits)
+    truncated = {"results": False, "scanned": False, "deadline": False, "output": False}
+
+    iterator = iter(raw_entries)
+    while True:
+        try:
+            rel_path, is_directory = next(iterator)
+        except StopIteration:
+            break
+        except SearchDeadlineExceeded:
+            truncated["deadline"] = True
+            break
+        except SearchScanLimitExceeded:
+            truncated["scanned"] = True
+            break
+        except SearchOutputTruncated:
+            truncated["output"] = True
+            break
+        if time.monotonic() > deadline:
+            truncated["deadline"] = True
+            break
+        rel_path = str(rel_path).replace(os.sep, "/").strip("/")
+        if not rel_path:
+            continue
+        name = rel_path.rsplit("/", 1)[-1]
+        if not matcher.search(name):
+            continue
+        if len(entries) >= result_limit:
+            truncated["results"] = True
+            break
+        entries.append(
+            {
+                "path": rel_path,
+                "name": name,
+                "dir": rel_path.rsplit("/", 1)[0] if "/" in rel_path else "",
+                "type": "directory" if is_directory else "file",
+                # Zero-width matches ("^", ".*" at the end) carry no visible
+                # span, so they filter the entry in without painting anything.
+                "ranges": [
+                    list(match.span())
+                    for match in matcher.finditer(name)
+                    if match.end() > match.start()
+                ],
+            }
+        )
+
+    entries.sort(
+        key=lambda entry: (
+            entry["dir"],
+            entry["type"] != "directory",
+            entry["name"].lower(),
+        )
+    )
+    return {
+        "query": options.query,
+        "options": {
+            "case": options.case_sensitive,
+            "word": options.whole_word,
+            "regex": options.regex,
+        },
+        "engine": engine,
+        "entries": entries,
+        "total": len(entries),
+        "truncated": truncated,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "error": None,
+    }
+
+
+def run_explorer_find(backend: Any, args: Any) -> Dict[str, Any]:
+    """Route handler body for the Files tree filter: validate, walk, collect."""
+    options = parse_find_options(args)
+    limits = search_limits_from_config()
+    started = time.monotonic()
+    deadline = started + limits.timeout_seconds
+    # Always the whole root: the tree the filter replaces is rooted there too,
+    # so a narrower scope would silently hide entries the tree can show.
+    root_path = backend.root_directory()
+    engine, raw_entries = backend.find_names(
+        root_path=root_path,
+        limits=limits,
+        deadline=deadline,
+    )
+    return collect_find_payload(raw_entries, options, limits, deadline, engine, started)

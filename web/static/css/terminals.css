@@ -2453,6 +2453,81 @@
             text-transform: uppercase;
         }
 
+        /* Tree head: the FILES label and the name filter share one row, so the
+           filter reads as part of the tree rather than as a fourth panel. */
+        .explorer-tree-head {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 0 8px 6px;
+        }
+
+        .explorer-tree-head .explorer-tree-title {
+            flex: 0 0 auto;
+            padding: 0;
+        }
+
+        /* The toggles sit inside the field's border, so the query and the way
+           it is interpreted read as one control. */
+        .explorer-tree-search {
+            display: flex;
+            flex: 1 1 auto;
+            align-items: center;
+            gap: 2px;
+            min-width: 0;
+            padding: 1px 2px 1px 0;
+            border: 1px solid var(--explorer-row-border);
+            border-radius: 5px;
+            background: var(--explorer-bg);
+        }
+
+        .explorer-tree-search:focus-within {
+            border-color: var(--t-accent);
+            outline: 2px solid var(--t-accent);
+            outline-offset: 0;
+        }
+
+        .explorer-tree-search .explorer-search-input {
+            flex: 1 1 auto;
+            min-width: 0;
+            height: 22px;
+            border: 0;
+            border-radius: 0;
+            background: transparent;
+            font-size: .72rem;
+        }
+
+        .explorer-tree-search .explorer-search-input:focus {
+            outline: none;
+        }
+
+        .explorer-tree-search .explorer-search-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px;
+            height: 20px;
+            font-size: .64rem;
+        }
+
+        .explorer-tree-search .explorer-search-btn[aria-pressed="true"] {
+            border-color: var(--t-accent);
+            background: var(--explorer-row-active);
+            color: var(--t-accent);
+        }
+
+        .explorer-tree-search-note {
+            padding: 4px 10px 0;
+            color: var(--explorer-muted);
+            font-size: .66rem;
+        }
+
+        /* Busy: the previous result set stays on screen, dimmed, rather than
+           blanking between keystrokes. */
+        .explorer-tree-panel.searching [data-explorer-tree-body] {
+            opacity: .55;
+        }
+
         .explorer-tree-children {
             display: grid;
             align-content: start;

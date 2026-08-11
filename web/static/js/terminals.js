@@ -1822,6 +1822,25 @@
         return true;
     }
 
+    /* One saved preset, credentials included. Returns null rather than throwing:
+       every caller has a usable fallback and none of them should lose a launch
+       to a failed re-read. */
+    async function fetchSavedSession(savedSessionId) {
+        const sessionId = String(savedSessionId || '').trim();
+        if (!sessionId) {
+            return null;
+        }
+        try {
+            const response = await fetch(`/api/saved-sessions/${encodeURIComponent(sessionId)}`);
+            if (!response.ok) {
+                return null;
+            }
+            return await response.json();
+        } catch (_error) {
+            return null;
+        }
+    }
+
     async function launchSavedSession(savedSession) {
         const payload = buildSavedSessionLaunchPayload(savedSession);
         const postLaunch = () => fetch('/api/sessions', {
@@ -1859,6 +1878,16 @@
         const warnings = Array.isArray(data.warnings)
             ? data.warnings.filter(item => String(item || '').trim())
             : [];
+        /* Say so when the preset carries no password. SSH authentication runs
+           after this response, so a credential-free launch otherwise reported
+           itself as a clean success and only became visible as "No
+           authentication methods available" in every pane a moment later, with
+           nothing connecting the two. Not an error and never a block — key
+           authentication is a legitimate way to have no stored password. */
+        if (payload.connection_mode === 'ssh'
+            && !payload.sessions.some(session => session.password)) {
+            warnings.push('No password is saved for this session — panes will authenticate with an SSH key, or fail.');
+        }
         setWorkspaceSaveMessage(
             warnings.length
                 ? `Launched "${payload.session_name}". ${warnings.length === 1 ? warnings[0] : `${warnings.length} startup commands were cleared after preflight failed.`}`
@@ -2503,7 +2532,13 @@
                 if (!silent) {
                     setWorkspaceSaveMessage(`Saved session "${savedName}". Opening...`, 'success');
                 }
-                await launchSavedSession(data);
+                /* Read the preset back before launching it. A workspace save
+                   resolves the SSH password server-side and deliberately does
+                   not echo it, so launching straight from this response would
+                   open every pane without the credential it was just saved
+                   with. `GET /api/saved-sessions/<id>` is the same fetch the
+                   New Session picker uses. */
+                await launchSavedSession(await fetchSavedSession(data.id) || data);
             } else if (!silent) {
                 setWorkspaceSaveMessage(`Saved session "${savedName}".`, 'success');
             }
