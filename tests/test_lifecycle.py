@@ -601,6 +601,64 @@ class LifecycleRouteTestCase(unittest.TestCase):
         self.assertNotIn("password", runtime)
         self.assertNotIn("live-secret", runtime)
 
+    def test_exit_save_repairs_a_preset_saved_without_its_password(self):
+        """A credential-free preset must not make a group permanently unrestorable.
+
+        Saving a workspace from the terminal page used to store an empty
+        ``ssh.password``. The exit save then merged onto that preset, and the
+        merge keeps the base's ``ssh`` block verbatim — so the live password was
+        discarded and the group failed every restore from then on.
+        """
+        empty_preset = web_saved_sessions.upsert_saved_session(
+            {
+                "connection_mode": "ssh",
+                "terminal_count": 1,
+                "layout": "single",
+                "ssh": {
+                    "host": "private.example",
+                    "username": "ubuntu",
+                    "password": "",
+                    "port": 22,
+                    "default_dir": "/srv/private",
+                },
+            },
+            name="Private host",
+        )
+        group = api.session_manager.create_group(
+            "Private host",
+            "ssh",
+            "single",
+            1,
+            group_id="private-host-repair",
+        )
+        api.session_manager.create_session(
+            group.group_id,
+            host="private.example",
+            directory="/srv/private",
+            username="ubuntu",
+            port=22,
+            password="live-secret",
+            title="Shell",
+            mode="ssh",
+        )
+        api.session_manager.update_group_saved_session(
+            group.group_id, empty_preset["id"], empty_preset["name"]
+        )
+
+        response = self.client.post(
+            "/api/lifecycle/prepare",
+            json={"action": "close", "save": "sessions+workspaces"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        repaired = next(
+            entry
+            for entry in web_saved_sessions.load_saved_sessions()
+            if entry["id"] == empty_preset["id"]
+        )
+        self.assertEqual(repaired["config"]["ssh"]["password"], "live-secret")
+        self.assertNotIn("live-secret", self.state_path.read_text(encoding="utf-8"))
+
     def test_shared_lifecycle_assets_are_loaded_on_both_pages(self):
         launcher = self.client.get("/").get_data(as_text=True)
         terminals = self.client.get("/terminals?workspace=default").get_data(as_text=True)

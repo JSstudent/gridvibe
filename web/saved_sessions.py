@@ -369,6 +369,57 @@ def _normalize_session_config(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def apply_live_ssh_credential(
+    config: Dict[str, Any],
+    credential: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Fill a preset's *empty* SSH password from the live group being saved.
+
+    The browser has no password to send — it never receives one — so a config
+    arriving from the terminal page always carries ``ssh.password: ""``.  Saving
+    a group that way therefore used to store a credential-free preset, and every
+    later launch from it failed on "No authentication methods available".  The
+    password the user actually authenticated with was in memory the whole time;
+    the server just never looked.
+
+    Two invariants keep this narrow:
+
+    * **Never clobber.**  A preset that already stores a password keeps it, so
+      re-saving a workspace can never downgrade a working credential — the same
+      property ``_merge_workspace_session_config`` gets from leaving ``ssh``
+      alone.
+    * **Never mismatch.**  The credential is attached only when the preset still
+      names that exact host, user, and port — the same rule
+      ``web.workspaces._preset_ssh_credential`` applies when reading one back.
+
+    The caller resolves ``credential`` in-process; it must never reach a
+    response body, a runtime snapshot, or the log.
+    """
+    if not isinstance(credential, dict) or not credential.get("password"):
+        return config
+    if str(config.get("connection_mode") or "ssh") != "ssh":
+        return config
+
+    ssh_config = config.get("ssh") if isinstance(config.get("ssh"), dict) else None
+    if not ssh_config or ssh_config.get("password"):
+        return config
+
+    try:
+        stored_port = int(ssh_config.get("port") or 22)
+        live_port = int(credential.get("port") or 22)
+    except (TypeError, ValueError):
+        return config
+    if (
+        str(ssh_config.get("host") or "").strip() != str(credential.get("host") or "").strip()
+        or str(ssh_config.get("username") or "") != str(credential.get("username") or "")
+        or stored_port != live_port
+    ):
+        return config
+
+    ssh_config["password"] = credential["password"]
+    return config
+
+
 def _merge_workspace_session_config(
     base_config: Dict[str, Any],
     workspace_config: Dict[str, Any],

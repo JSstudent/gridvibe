@@ -28,6 +28,7 @@ from web.saved_sessions import (
     _load_saved_sessions_payload,
     _merge_workspace_session_config,
     _normalize_session_config,
+    apply_live_ssh_credential,
     build_live_session_view_updates,
     build_unique_session_name,
     upsert_saved_session,
@@ -565,6 +566,31 @@ def _live_group_config(group: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _live_ssh_credential(live_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Read one live group's SSH credential back out of its preset candidate.
+
+    :func:`_live_group_config` already carried the credential snapshot's
+    password into ``ssh``; this just re-shapes it for
+    :func:`apply_live_ssh_credential`, so the exit save keeps its single
+    credential source rather than querying the manager a second time.
+    """
+    if str(live_config.get("connection_mode") or "") != "ssh":
+        return None
+    ssh_config = live_config.get("ssh") if isinstance(live_config.get("ssh"), dict) else None
+    if not ssh_config or not ssh_config.get("password"):
+        return None
+    try:
+        port = int(ssh_config.get("port") or 22)
+    except (TypeError, ValueError):
+        port = 22
+    return {
+        "host": str(ssh_config.get("host") or "").strip(),
+        "username": str(ssh_config.get("username") or ""),
+        "port": port,
+        "password": ssh_config["password"],
+    }
+
+
 def normalize_workspace_metadata(
     metadata_by_workspace: Any,
     live_snapshots: Dict[str, Dict[str, Any]],
@@ -665,6 +691,15 @@ def _save_live_presets(
             live_config = _live_group_config(group)
             if existing is not None:
                 config = _merge_workspace_session_config(existing["config"], live_config)
+                # The merge keeps the base preset's `ssh` block verbatim, which
+                # is what stops a re-save from downgrading a stored password —
+                # but it also meant an *empty* one could never be repaired. A
+                # group whose preset was created without a credential (a
+                # workspace save from the terminal page) stayed unrestorable
+                # forever, even though the exit save holds the live password.
+                config = apply_live_ssh_credential(
+                    config, _live_ssh_credential(live_config)
+                )
                 preset_name = existing["name"]
                 preset_id = existing["id"]
             else:

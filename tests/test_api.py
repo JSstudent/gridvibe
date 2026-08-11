@@ -9536,6 +9536,342 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(snapshot_session["explorer_open_tabs"], ["README.md"])
         self.assertEqual(snapshot_session["explorer_tab_views"]["README.md"]["mode"], "preview")
 
+    def _live_ssh_group(self, group_id, password, host="10.0.0.5", pane_count=2):
+        """One live password-authenticated SSH group with no attached preset."""
+        group = api.session_manager.create_group(
+            name=host,
+            connection_mode="ssh",
+            layout="vertical",
+            terminal_count=pane_count,
+            group_id=group_id,
+        )
+        api.session_manager.create_sessions(
+            [
+                {
+                    "mode": "ssh",
+                    "host": host,
+                    "username": "ubuntu",
+                    "port": 22,
+                    "password": password,
+                    "directory": "/srv/app",
+                    "title": f"Terminal {index + 1}",
+                }
+                for index in range(pane_count)
+            ],
+            group_id=group.group_id,
+        )
+        return group
+
+    def _workspace_save_body(self, group, host="10.0.0.5", pane_count=2):
+        """The password-free config the terminal page sends for a workspace save."""
+        return {
+            "name": group.name,
+            "group_id": group.group_id,
+            "workspace_only": True,
+            "config": {
+                "connection_mode": "ssh",
+                "terminal_count": pane_count,
+                "layout": "vertical",
+                "ssh": {
+                    "host": host,
+                    "username": "ubuntu",
+                    "password": "",
+                    "port": 22,
+                    "default_dir": "/srv/app",
+                },
+                "terminals": [
+                    {
+                        "title": f"Terminal {index + 1}",
+                        "directory": "/srv/app",
+                        "startup_mode": "terminal",
+                    }
+                    for index in range(pane_count)
+                ],
+            },
+        }
+
+    def test_workspace_save_of_a_launcher_form_group_keeps_its_ssh_password(self):
+        """A scratch SSH group must be restorable after a restart.
+
+        Restore's only credential source is the preset named by the group's
+        ``saved_session_id``. The browser has no password to send, so saving a
+        launcher-form group used to mint a credential-free preset and every
+        pane came back on "No authentication methods available", with a Retry
+        that could never succeed.
+        """
+        group = self._live_ssh_group("group-scratch-ssh", "hunter2")
+
+        response = self.client.post(
+            "/api/saved-sessions", json=self._workspace_save_body(group)
+        )
+
+        self.assertEqual(response.status_code, 201)
+        created = response.get_json()
+        # The credential is resolved in-process and must not travel back out.
+        self.assertEqual(created["config"]["ssh"]["password"], "")
+        self.assertEqual(
+            api.session_manager.get_group(group.group_id).saved_session_id,
+            created["id"],
+        )
+
+        stored = next(
+            entry
+            for entry in web_saved_sessions.load_saved_sessions()
+            if entry["id"] == created["id"]
+        )
+        self.assertEqual(stored["config"]["ssh"]["password"], "hunter2")
+        # At rest it is encrypted, never the plaintext the pane authenticated with.
+        on_disk = json.loads(self.saved_sessions_path.read_text(encoding="utf-8"))
+        raw_entry = next(
+            entry for entry in on_disk["sessions"] if entry["id"] == created["id"]
+        )
+        self.assertNotEqual(raw_entry["config"]["ssh"]["password"], "hunter2")
+
+    def test_restore_relaunches_a_saved_scratch_ssh_workspace_with_its_password(self):
+        group = self._live_ssh_group("group-scratch-restore", "hunter2")
+        saved = self.client.post(
+            "/api/saved-sessions", json=self._workspace_save_body(group)
+        )
+        self.assertEqual(saved.status_code, 201)
+        captured = self.client.post(
+            "/api/runtime-state/save",
+            json={"workspace_id": "default", "active_group_id": group.group_id},
+        )
+        self.assertEqual(captured.status_code, 200)
+        # The snapshot itself stays password-free; only the preset carries one.
+        snapshot_pane = captured.get_json()["groups"][0]["sessions"][0]
+        self.assertNotIn("password", snapshot_pane)
+
+        api.session_manager.reset_sessions()
+        launched = []
+        with patch.object(
+            web_workspaces,
+            "launch_session_group",
+            side_effect=lambda body: (launched.append(body), ({"group_id": "g", "count": 2}, 201))[1],
+        ):
+            result = web_workspaces.restore_workspace("default")
+
+        self.assertTrue(result["restored"])
+        self.assertEqual(len(launched), 1)
+        self.assertEqual(
+            [pane["password"] for pane in launched[0]["sessions"]],
+            ["hunter2", "hunter2"],
+        )
+        self.assertEqual(result["groups"][0]["warning"], "")
+
+    def _restore_launch_bodies(self, workspace_id="default"):
+        launched = []
+        with patch.object(
+            web_workspaces,
+            "launch_session_group",
+            side_effect=lambda body: (
+                launched.append(body),
+                ({"group_id": "g", "count": len(body["sessions"])}, 201),
+            )[1],
+        ):
+            result = web_workspaces.restore_workspace(workspace_id)
+        return result, launched
+
+    def test_restore_credentials_a_saved_target_group_that_owns_no_preset(self):
+        """The launcher's saved-target menu launches a *scratch* session.
+
+        Picking a saved SSH target fills the address and fetches that preset's
+        password, then drops the preset identity on purpose, so the group is
+        born with no `saved_session_id`. Restore only ever resolved a credential
+        *through* that id, so this workspace saved, restored, and then failed to
+        authenticate in every pane — the reported bug.
+        """
+        web_saved_sessions.upsert_saved_session(
+            {
+                "connection_mode": "ssh",
+                "terminal_count": 1,
+                "layout": "single",
+                "ssh": {
+                    "host": "10.0.0.5",
+                    "username": "ubuntu",
+                    "password": "target-secret",
+                    "port": 22,
+                    "default_dir": "/srv/app",
+                },
+            },
+            name="saved target preset",
+        )
+        group = self._live_ssh_group("group-target-scratch", "target-secret")
+        # Exactly what the launcher's target menu produces: no preset identity.
+        self.assertEqual(
+            api.session_manager.get_group(group.group_id).saved_session_id, ""
+        )
+        captured = self.client.post(
+            "/api/runtime-state/save",
+            json={"workspace_id": "default", "active_group_id": group.group_id},
+        )
+        self.assertEqual(captured.status_code, 200)
+        self.assertEqual(captured.get_json()["groups"][0]["saved_session_id"], "")
+
+        api.session_manager.reset_sessions()
+        result, launched = self._restore_launch_bodies()
+
+        self.assertTrue(result["restored"])
+        self.assertEqual(
+            [pane["password"] for pane in launched[0]["sessions"]],
+            ["target-secret", "target-secret"],
+        )
+
+    def test_restore_never_guesses_between_presets_that_disagree_on_a_target(self):
+        for index, password in enumerate(("first-secret", "second-secret")):
+            web_saved_sessions.upsert_saved_session(
+                {
+                    "connection_mode": "ssh",
+                    "terminal_count": 1,
+                    "layout": "single",
+                    "ssh": {
+                        "host": "10.0.0.5",
+                        "username": "ubuntu",
+                        "password": password,
+                        "port": 22,
+                        "default_dir": "/srv/app",
+                    },
+                },
+                name=f"same target {index}",
+            )
+        group = self._live_ssh_group("group-ambiguous-target", "first-secret")
+        self.client.post(
+            "/api/runtime-state/save",
+            json={"workspace_id": "default", "active_group_id": group.group_id},
+        )
+
+        api.session_manager.reset_sessions()
+        _result, launched = self._restore_launch_bodies()
+
+        self.assertTrue(all(not pane.get("password") for pane in launched[0]["sessions"]))
+
+    def test_an_attached_preset_still_wins_over_a_matching_target(self):
+        attached = web_saved_sessions.upsert_saved_session(
+            {
+                "connection_mode": "ssh",
+                "terminal_count": 2,
+                "layout": "vertical",
+                "ssh": {
+                    "host": "10.0.0.5",
+                    "username": "ubuntu",
+                    "password": "attached-secret",
+                    "port": 22,
+                    "default_dir": "/srv/app",
+                },
+            },
+            name="attached preset",
+        )
+        web_saved_sessions.upsert_saved_session(
+            {
+                "connection_mode": "ssh",
+                "terminal_count": 1,
+                "layout": "single",
+                "ssh": {
+                    "host": "10.0.0.5",
+                    "username": "ubuntu",
+                    "password": "other-secret",
+                    "port": 22,
+                    "default_dir": "/srv/app",
+                },
+            },
+            name="unrelated preset naming the same target",
+        )
+        group = self._live_ssh_group("group-attached-wins", "attached-secret")
+        api.session_manager.update_group_saved_session(
+            group.group_id, attached["id"], attached["name"]
+        )
+        self.client.post(
+            "/api/runtime-state/save",
+            json={"workspace_id": "default", "active_group_id": group.group_id},
+        )
+
+        api.session_manager.reset_sessions()
+        _result, launched = self._restore_launch_bodies()
+
+        self.assertEqual(
+            [pane["password"] for pane in launched[0]["sessions"]],
+            ["attached-secret", "attached-secret"],
+        )
+
+    def test_restore_never_credentials_a_pane_naming_an_unsaved_target(self):
+        web_saved_sessions.upsert_saved_session(
+            {
+                "connection_mode": "ssh",
+                "terminal_count": 1,
+                "layout": "single",
+                "ssh": {
+                    "host": "10.0.0.5",
+                    "username": "ubuntu",
+                    "password": "target-secret",
+                    "port": 22,
+                    "default_dir": "/srv/app",
+                },
+            },
+            name="only this target is saved",
+        )
+        group = self._live_ssh_group(
+            "group-unsaved-target", "typed-secret", host="10.0.0.99"
+        )
+        self.client.post(
+            "/api/runtime-state/save",
+            json={"workspace_id": "default", "active_group_id": group.group_id},
+        )
+
+        api.session_manager.reset_sessions()
+        _result, launched = self._restore_launch_bodies()
+
+        self.assertTrue(all(not pane.get("password") for pane in launched[0]["sessions"]))
+
+    def test_workspace_save_never_overwrites_a_stored_password(self):
+        original = web_saved_sessions.upsert_saved_session(
+            {
+                "connection_mode": "ssh",
+                "terminal_count": 2,
+                "layout": "vertical",
+                "ssh": {
+                    "host": "10.0.0.5",
+                    "username": "ubuntu",
+                    "password": "stored-secret",
+                    "port": 22,
+                    "default_dir": "/srv/app",
+                },
+            },
+            name="preset with credential",
+        )
+        group = self._live_ssh_group("group-attached-ssh", "live-secret")
+        api.session_manager.update_group_saved_session(
+            group.group_id, original["id"], original["name"]
+        )
+
+        body = self._workspace_save_body(group)
+        body["id"] = original["id"]
+        body["source_saved_session_id"] = original["id"]
+        response = self.client.post("/api/saved-sessions", json=body)
+
+        self.assertEqual(response.status_code, 201)
+        stored = next(
+            entry
+            for entry in web_saved_sessions.load_saved_sessions()
+            if entry["id"] == original["id"]
+        )
+        self.assertEqual(stored["config"]["ssh"]["password"], "stored-secret")
+
+    def test_workspace_save_refuses_a_password_for_another_target(self):
+        """A preset renamed onto another machine must not inherit this login."""
+        group = self._live_ssh_group("group-moved-ssh", "hunter2", host="10.0.0.5")
+        body = self._workspace_save_body(group)
+        body["config"]["ssh"]["host"] = "10.0.0.9"
+
+        response = self.client.post("/api/saved-sessions", json=body)
+
+        self.assertEqual(response.status_code, 201)
+        stored = next(
+            entry
+            for entry in web_saved_sessions.load_saved_sessions()
+            if entry["id"] == response.get_json()["id"]
+        )
+        self.assertEqual(stored["config"]["ssh"]["password"], "")
+
     def test_saving_a_workspace_never_touches_the_production_state_file(self):
         """MW-01: this class saves and captures workspaces for real.
 

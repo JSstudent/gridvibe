@@ -1,5 +1,5 @@
 # GridVibe Testing Issues
-Last updated: 2026-07-31
+Last updated: 2026-08-11
 
 ## Open Issues
 
@@ -34,6 +34,44 @@ Confirmed by code inspection. Nothing in GridVibe enables or disables mouse trac
 Make the recovery explicit instead of incidental. In `web/static/js/terminals.js`, have both `clearTerminalDisplay()` and `refreshTerminalDisplay()` write an explicit mouse-tracking teardown into the pane after `term.reset()` — `\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l` through `term.write()`, which changes only the client's mode state and sends nothing to the shell, so it stays inside the pane's existing behavior and touches no route. For `refreshTerminalDisplay()` the write must happen *after* the replayed buffer is applied, not before the `join_session` round trip, or the replay will overwrite it again; sequencing it against the async replay is the main implementation question. Consider whether the replay itself should be sanitized instead — filtering mode-setting sequences out of `_get_buffered_terminal_output()` is more invasive, risks corrupting a legitimately running TUI's state on rejoin, and should not be done without deciding what a rejoin to a *live* TUI is supposed to look like. A visible affordance is worth considering separately: a pane that is receiving mouse reports at a shell prompt could surface a one-click "Reset terminal modes" action rather than requiring the user to guess. Regression tests belong in `tests/test_api.py` alongside `test_terminals_page_clear_sends_shell_command_and_purges_replay_buffer`, asserting that both handlers emit the teardown sequence and that the refresh path emits it after the rejoin.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-039
+- Title: Restored SSH workspaces fail to authenticate because the launch that created them references no saved session
+- Priority: High
+- Status: Closed
+- Area: `web/workspaces.py`, `web/saved_sessions.py`, `web/api.py`, `web/lifecycle.py`, `sessions/manager.py`, `web/static/js/terminals.js`, `tests/test_api.py`, `tests/test_lifecycle.py`
+- Assignee: Unassigned
+- Tags: `session`, `workspace`, `ssh`, `launcher`, `tests`
+- Reported: 2026-08-11
+- Closed: 2026-08-11
+
+Description:
+`runtime_state.json` is deliberately password-free, so a restored SSH pane took its credential from the preset named by its group's `saved_session_id` (`web/workspaces.py::_preset_ssh_credential`). Two independent defects left that reference empty or useless, and both ended in the same place: every pane of a restored workspace reporting `No authentication methods available`, with a **Retry connection** that could not succeed either, because `/reconnect` reuses the same credential-free session record.
+
+**1 — the dominant cause: a launch that references nothing.** The launcher's saved-target menu (`applyConnectionTarget`, `web/static/js/launcher.js`) is the ordinary way to start a session against a known host. It fills the address from a saved preset *and* fetches that preset's password, then calls `setActiveSavedSession(null)` **on purpose**, so the launch stays a scratch session — otherwise the same target could not be launched twice without stealing the one group that owns the preset. The resulting group is captured with `saved_session_id: ""`, so no amount of saving attaches it to anything, and restore had no reference to follow. Confirmed against a real `runtime_state.json`: both groups of the reporter's `testing` workspace carried an empty `saved_session_id` while a preset naming the same host, user, and port held a usable password.
+
+**2 — a saved session written without its password.** `buildActiveWorkspaceSessionConfig()` sends `ssh.password: ""` (the browser has no password to send — it never receives one), and `POST /api/saved-sessions` could only recover one by merging from a *source* preset, which a launcher-form group does not have. **Save Session** therefore produced a preset that could never authenticate. The state was self-perpetuating: once that preset was attached, `_save_live_presets()` merged onto it through `_merge_workspace_session_config()`, which keeps the base preset's `ssh` block verbatim — the property that stops a re-save downgrading a stored password, which also protected the empty one — so the live password was discarded on every subsequent close.
+
+Steps to reproduce:
+1. Save an SSH preset for a password-authenticated host.
+2. In the launcher, pick that host from the saved-target menu (**not** by importing the preset), and launch a multi-pane group. The panes connect: the password was fetched into the form.
+3. Close GridVibe with **Save open workspaces**, restart, and restore the workspace.
+4. Observe every SSH pane report `Connection Error — No authentication methods available`, and **Retry connection** fail identically.
+5. Inspect `runtime_state.json` and observe the restored group carries `saved_session_id: ""`.
+6. For defect 2: launch from the launcher form, use **Save Session** from the terminal page's dropdown, and observe the new entry in `saved_sessions.json` holds an empty `ssh.password`.
+
+Expected behavior:
+A workspace whose panes authenticated with a password must restore able to authenticate again, without the user having to know which save button attaches which credential; and no save may replace a stored password with an empty one.
+
+Actual behavior / logs:
+Confirmed against the reporter's real state files. `runtime_state.json` held two SSH groups with `saved_session_id: ""`; `saved_sessions.json` held a usable password for the same host/user/port, plus a second preset for that host written by a terminal-page save with `password: ""`.
+
+Resolution:
+**Restore resolves by connection target.** `_restore_group_request()` applies the explicitly attached preset first, then fills any still-uncredentialed SSH pane from its own host/user/port via `_preset_passwords_by_target()` — the same lookup the launcher's target menu performs, over the same presets, adding no storage and writing nothing. An attached preset always wins. A target that several presets disagree about is skipped rather than guessed at, since restoring the wrong account's password could lock someone out, and a pane naming an unsaved target is left alone. The common path reads no files: the lookup is built only when an uncredentialed SSH pane exists.
+
+**Saves that write a preset now write its password.** `SessionManager.group_ssh_credential()` exposes one live group's credential in-process and `apply_live_ssh_credential()` (`web/saved_sessions.py`) fills an *empty* `ssh.password` from it, bounded by two invariants: a preset that already stores a password keeps it, and the credential is attached only when the preset still names that exact host, user, and port. Two callers, both already authoring or updating a preset outright — `POST /api/saved-sessions` (`workspace_only` + `group_id`) and `_save_live_presets()`. The saves that deliberately write no presets (**Save open workspaces**, in-window **Save Workspace**, the launcher's per-row **Save**) are untouched; restore covers those groups by target. The credential is encrypted by `upsert_saved_session()`, the `workspace_only` response blanks it rather than echoing back a password the caller never sent, and `runtime_state.json` remains password-free.
+
+**Two consequences handled with it.** Blanking that response broke "Save Session As… → Open now" in `web/static/js/terminals.js`, which launched straight from it and so opened every pane uncredentialed; it now re-reads the preset through `GET /api/saved-sessions/<id>`, the same fetch the New Session picker uses. And because SSH authentication runs after `POST /api/sessions` returns, a credential-free launch reported success and filled the panes with errors a moment later with nothing connecting the two; `launchSavedSession()` now warns when an SSH launch carries no password — a warning, not a block, since key authentication legitimately has none.
 
 ### Issue ID: ISSUE-2026-037
 - Title: SSH workspace restore still mishandles unavailable credentials and reports relaunch as connection success

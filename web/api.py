@@ -198,6 +198,7 @@ from web.saved_sessions import (  # noqa: F401 - re-exported for backwards compa
     _saved_session_meta,
     _saved_session_response,
     _utc_timestamp,
+    apply_live_ssh_credential,
     build_connection_target_proposals,
     build_live_session_view_updates,
     build_unique_session_name,
@@ -2339,6 +2340,7 @@ def create_saved_session():
     data = request.get_json(silent=True) or {}
     raw_config = data.get("config") if isinstance(data.get("config"), dict) else {}
     config = _normalize_session_config(raw_config)
+    group_id = str(data.get("group_id") or "").strip()
     if data.get("workspace_only") is True:
         state = _load_saved_sessions_payload()
         source_session_id = str(
@@ -2351,7 +2353,15 @@ def create_saved_session():
         )
         if source_entry:
             config = _merge_workspace_session_config(source_entry["config"], raw_config)
-    group_id = str(data.get("group_id") or "").strip()
+        # The browser never sends a password (it does not have one), so a group
+        # saved from the terminal page — especially a launcher-form group with
+        # no source preset — would otherwise store a credential-free preset and
+        # fail every pane on the next restore. Resolved in-process from the live
+        # group and encrypted by `upsert_saved_session`; it is not echoed back.
+        if group_id:
+            config = apply_live_ssh_credential(
+                config, session_manager.group_ssh_credential(group_id)
+            )
     activate_saved_session = data.get("activate", True) is not False
     try:
         saved_entry = upsert_saved_session(
@@ -2384,9 +2394,19 @@ def create_saved_session():
     )
     state = _load_saved_sessions_payload()
     last_entry = _find_saved_session_entry(state["sessions"], state["last_session"])
+    response = _saved_session_response(saved_entry, include_config=True)
+    if data.get("workspace_only") is True:
+        # The terminal page reads only the id, name, and live group off this
+        # response — it has no password field to repopulate, unlike the launcher
+        # form. A workspace save resolves the credential server-side, so echoing
+        # it back would ship a password the caller never sent and cannot use.
+        response["config"] = {
+            **response["config"],
+            "ssh": {**response["config"]["ssh"], "password": ""},
+        }
     return jsonify(
         {
-            **_saved_session_response(saved_entry, include_config=True),
+            **response,
             "last_session": state["last_session"],
             "saved_session": _saved_session_meta(last_entry),
             "activated": activate_saved_session,
