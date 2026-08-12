@@ -208,6 +208,34 @@
         };
     }
 
+    /* Should this keystroke drop the selection?
+
+       Escape is the way out of a selection you no longer want, but it is a
+       heavily shared key: a context menu, the in-place editor, a find bar, the
+       two search boxes and every dialog and header menu on the page all mean
+       something by it. So this only claims an Escape that is unmodified, not
+       aimed at a text field, not already handled (`defaultPrevented` — the
+       signal the editor and the find bars set), not owed to an open dialog or
+       menu (`claimedElsewhere` — the ones that close on Escape without marking
+       it), and that actually has a selection to clear. One Escape never costs
+       two things, and an Escape with nothing selected stays free for whatever
+       else the page wants to do with it. */
+    function shouldClearOnEscape(context) {
+        if (!context || context.key !== 'Escape') {
+            return false;
+        }
+        if (context.defaultPrevented || context.claimedElsewhere) {
+            return false;
+        }
+        if (context.altKey || context.ctrlKey || context.metaKey || context.shiftKey) {
+            return false;
+        }
+        if (context.editableTarget) {
+            return false;
+        }
+        return Boolean(context.hasSelection);
+    }
+
     /* Resolve what a right-click acts on.
 
        Right-clicking a row that is part of the live selection acts on the whole
@@ -409,6 +437,7 @@
         matchesScope,
         scopedSelection,
         applyPointerSelection,
+        shouldClearOnEscape,
         resolveContextTargets,
         dropPaths,
         topmostTargets,

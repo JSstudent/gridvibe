@@ -1269,6 +1269,91 @@
         return !activate;
     }
 
+    /* Escape clears the selection.
+
+       Which pane it means comes from findExplorerShortcutTargetIndex() — the
+       same pointer-first resolver Ctrl+Shift+F and the explorer's other
+       shortcuts already use. Focus alone is not enough: most explorer controls
+       suppress mousedown focus so a toolbar click cannot steal a selection, and
+       clicking blank space in the listing leaves focus on nothing at all, so a
+       focus-scoped Escape stopped working the moment the user clicked anywhere
+       but a row. Pointer interaction is what the user actually means by "this
+       pane", and it survives all of that.
+
+       These are the dialogs and menus that close on Escape without marking the
+       event handled; the editor, the find bars and the context menu all
+       preventDefault, which the model reads separately. */
+    const EXPLORER_ESCAPE_CLAIM_SELECTOR = [
+        '.modal-shell.visible',
+        '.terminal-container.actions-open',
+        '.pane-shell-menu:not([hidden])',
+        '#sessionsMenuRoot.open',
+        '#workspaceMenuRoot.open',
+        '#workspaceContextMenu:not([hidden])'
+    ].join(', ');
+
+    function handleExplorerSelectionEscape(event) {
+        /* Cheap gate before any DOM work: this listener sees every keystroke in
+           the window, and the pane lookup and claim query below must not run
+           once per character typed into a terminal or the editor. The model
+           still owns the decision — this only says "not our key at all". */
+        if (event.key !== 'Escape' || typeof findExplorerShortcutTargetIndex !== 'function') {
+            return;
+        }
+        const index = findExplorerShortcutTargetIndex(event.target);
+        if (index === -1) {
+            return;
+        }
+        const sessionId = sessionIds[index] || '';
+        const target = event.target;
+        const decision = GridVibeExplorerSelection.shouldClearOnEscape({
+            key: event.key,
+            defaultPrevented: event.defaultPrevented,
+            claimedElsewhere: Boolean(
+                document.querySelector(EXPLORER_ESCAPE_CLAIM_SELECTOR)
+            ),
+            altKey: event.altKey,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            shiftKey: event.shiftKey,
+            editableTarget: Boolean(
+                target?.isContentEditable
+                || target?.matches?.('input, textarea, select')
+            ),
+            hasSelection: !GridVibeExplorerSelection.isEmpty(
+                sessionId ? explorerSelections.get(sessionId) : null
+            )
+        });
+        if (!decision) {
+            return;
+        }
+        event.preventDefault();
+        storeExplorerSelection(index, null);
+        releaseExplorerRowFocus(index);
+    }
+
+    /* A row keeps DOM focus after a Ctrl+click, and `.explorer-row:focus-visible`
+       paints the same `--explorer-row-active` fill the selection does — which
+       Chrome turns on the moment a key is pressed. So clearing with Escape left
+       exactly one row still looking selected. Drop the focus, then re-assert the
+       pane as the active explorer so the *next* Escape still resolves here. */
+    function releaseExplorerRowFocus(index) {
+        const active = document.activeElement;
+        const card = document.getElementById(`tc-${index}`);
+        if (active?.blur && card?.contains(active) && active.closest('[data-explorer-context-path]')) {
+            active.blur();
+        }
+        if (typeof markActiveExplorerPane === 'function') {
+            markActiveExplorerPane(index);
+        }
+    }
+
+    function installExplorerSelectionEscape() {
+        document.addEventListener('keydown', handleExplorerSelectionEscape);
+    }
+
+    installExplorerSelectionEscape();
+
     let _explorerContextMenuInvoker = null;
 
     function dismissExplorerContextMenu() {

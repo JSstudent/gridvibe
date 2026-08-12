@@ -5363,6 +5363,14 @@
             : -1;
     }
 
+    /* Re-assert the pointer-driven mark by hand. A pane that clears its own
+       state by blurring a row (Escape over a multi-entry selection) would
+       otherwise leave the resolver below with nothing to answer from, and the
+       next press would land on a different pane — or on none. */
+    function markActiveExplorerPane(index) {
+        _activeExplorerIndex = isExplorerSession(terminals[index]?._session) ? index : -1;
+    }
+
     function findExplorerShortcutTargetIndex(target = document.activeElement) {
         /* Pointer interaction is the source of truth for explorer panes. Many
            explorer controls deliberately prevent mousedown focus so toolbar

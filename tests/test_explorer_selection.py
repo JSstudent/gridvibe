@@ -220,6 +220,81 @@ class SelectionScopeTestCase(ExplorerSelectionHarness):
         self.assertEqual(result["treeSurface"], "tree")
 
 
+class EscapeTestCase(ExplorerSelectionHarness):
+    """Escape drops the selection, but only when nothing else wants the key."""
+
+    ESCAPE = (
+        "const escape = (overrides = {}) => selection_model.shouldClearOnEscape("
+        "Object.assign({ key: 'Escape', hasSelection: true }, overrides));\n"
+    )
+
+    def _escape(self, body: str):
+        return self._run_node(self.ESCAPE + body)
+
+    def test_a_plain_escape_over_a_selection_clears_it(self):
+        result = self._escape("process.stdout.write(JSON.stringify(escape()));")
+        self.assertTrue(result)
+
+    def test_escape_with_nothing_selected_is_left_alone(self):
+        # Nothing to clear means nothing to claim: the key stays free for
+        # whatever else the page does with it.
+        result = self._escape(
+            "process.stdout.write(JSON.stringify(escape({ hasSelection: false })));"
+        )
+        self.assertFalse(result)
+
+    def test_an_escape_another_handler_already_took_is_not_claimed_twice(self):
+        # The context menu, the in-place editor and the find bars all
+        # preventDefault first; one Escape must never cost two things.
+        result = self._escape(
+            "process.stdout.write(JSON.stringify(escape({ defaultPrevented: true })));"
+        )
+        self.assertFalse(result)
+
+    def test_an_open_dialog_or_menu_keeps_the_escape(self):
+        # Dialogs and header menus close on Escape without marking the event,
+        # so cancelling a delete confirmation must not also drop the selection
+        # the confirmation was about.
+        result = self._escape(
+            "process.stdout.write(JSON.stringify(escape({ claimedElsewhere: true })));"
+        )
+        self.assertFalse(result)
+
+    def test_escape_inside_a_text_field_belongs_to_the_field(self):
+        result = self._escape(
+            "process.stdout.write(JSON.stringify(escape({ editableTarget: true })));"
+        )
+        self.assertFalse(result)
+
+    def test_a_modified_escape_is_not_the_clear_gesture(self):
+        result = self._escape(
+            """
+            process.stdout.write(JSON.stringify({
+                alt: escape({ altKey: true }),
+                ctrl: escape({ ctrlKey: true }),
+                meta: escape({ metaKey: true }),
+                shift: escape({ shiftKey: true })
+            }));
+            """
+        )
+        self.assertEqual(
+            result, {"alt": False, "ctrl": False, "meta": False, "shift": False}
+        )
+
+    def test_no_other_key_clears_the_selection(self):
+        result = self._escape(
+            """
+            process.stdout.write(JSON.stringify({
+                del: escape({ key: 'Delete' }),
+                esc: escape({ key: 'Esc' }),
+                missing: selection_model.shouldClearOnEscape(null)
+            }));
+            """
+        )
+        # 'Esc' is the legacy IE spelling; modern browsers only emit 'Escape'.
+        self.assertEqual(result, {"del": False, "esc": False, "missing": False})
+
+
 class ContextTargetTestCase(ExplorerSelectionHarness):
     """Right-clicking inside the selection keeps it; outside collapses it."""
 
