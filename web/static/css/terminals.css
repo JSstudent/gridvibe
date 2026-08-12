@@ -1663,15 +1663,20 @@
             display: none;
         }
 
-        /* The reveal target. 4px so it can never take a click aimed at a
-           session tab's top edge (the tab strip starts 5px down even in
-           surface-max), and inert until the bar is actually hidden. */
+        /* The reveal target: the handle's own footprint and nothing more. The
+           rest of the top edge stays inert, so passing along it — or reaching
+           for a pane's top corner — never summons the bar. Shrink-to-fit plus
+           symmetrical padding keeps the hit area tied to the handle's width,
+           with just enough forgiveness either side to be aimable. 4px tall so
+           it can never take a click meant for a session tab's top edge (the
+           tab strip starts 5px down even in surface-max). */
         .topbar-peek-zone {
             position: fixed;
             top: 0;
-            left: 0;
-            right: 0;
+            left: 50%;
+            transform: translateX(-50%);
             height: 4px;
+            padding: 0 12px;
             display: flex;
             justify-content: center;
             align-items: flex-start;
