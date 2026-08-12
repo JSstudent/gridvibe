@@ -15811,6 +15811,8 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         self.assertIn('id="closeSessionConfirmModal"', html)
         self.assertIn('id="closeSessionConfirmAccept"', html)
         self.assertIn('id="closeSessionConfirmCancel"', html)
+        # the third way out: keep the group as a preset, then close it
+        self.assertIn('id="closeSessionConfirmSave"', html)
 
     def test_close_session_group_gates_on_confirmation(self):
         terminals_js = self._static("js/terminals.js")
@@ -15827,8 +15829,28 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         self.assertIn("session.status === 'connected'", confirm_fn)
         self.assertIn("connectedCount === 0", confirm_fn)
         # Escape / backdrop / Cancel all resolve to "keep the session"
-        self.assertIn("closeCloseSessionConfirmModal(false)", terminals_js)
-        self.assertIn("closeCloseSessionConfirmModal(true)", terminals_js)
+        self.assertIn("closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL)", terminals_js)
+        self.assertIn("closeCloseSessionConfirmModal(CLOSE_SESSION_CLOSE)", terminals_js)
+        self.assertIn(
+            "closeCloseSessionConfirmModal(CLOSE_SESSION_SAVE_AND_CLOSE)", terminals_js
+        )
+
+    def test_save_and_close_saves_before_teardown_and_aborts_on_failure(self):
+        """A requested save that failed must not cost the terminals it was
+        meant to preserve, and the save has to run before the group is
+        torn down (a DELETE first would leave nothing to snapshot)."""
+        terminals_js = self._static("js/terminals.js")
+        close_fn = terminals_js[
+            terminals_js.index("async function closeSessionGroup"):
+            terminals_js.index("async function _closeWindowAfterLastSession")
+        ]
+        save_at = close_fn.index("saveActiveWorkspaceSession(null, { groupId })")
+        self.assertLess(close_fn.index("CLOSE_SESSION_SAVE_AND_CLOSE"), save_at)
+        # the teardown request comes after the save, and only if it succeeded
+        self.assertLess(save_at, close_fn.index("method: 'DELETE'"))
+        abort = close_fn[save_at:close_fn.index("method: 'DELETE'")]
+        self.assertIn("if (!saved?.ok) {", abort)
+        self.assertIn("return;", abort)
 
     # ── 8.2: launch CTA keeps its structure and gains a spinner ─────────────
 

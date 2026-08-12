@@ -1703,7 +1703,13 @@
         });
     }
 
-    function closeCloseSessionConfirmModal(result = false) {
+    /* The three outcomes of the close prompt. Anything that is not an explicit
+       button press (Escape, the backdrop) keeps the session. */
+    const CLOSE_SESSION_CANCEL = 'cancel';
+    const CLOSE_SESSION_CLOSE = 'close';
+    const CLOSE_SESSION_SAVE_AND_CLOSE = 'save-and-close';
+
+    function closeCloseSessionConfirmModal(decision = CLOSE_SESSION_CANCEL) {
         const modal = document.getElementById('closeSessionConfirmModal');
         modal.classList.remove('visible');
         modal.setAttribute('aria-hidden', 'true');
@@ -1711,7 +1717,7 @@
         if (closeSessionConfirmResolver) {
             const resolver = closeSessionConfirmResolver;
             closeSessionConfirmResolver = null;
-            resolver(result);
+            resolver(decision);
         }
     }
 
@@ -1737,7 +1743,9 @@
 
     /* One misclick on a tab's × must not silently kill live terminals
        (sessions are memory-only), so closing a group with ≥1 connected
-       terminal asks first. Dead groups close without the dialog. */
+       terminal asks first, and offers to save the group as a preset on the
+       way out. Dead groups close without the dialog. Resolves to one of the
+       CLOSE_SESSION_* decisions. */
     async function confirmCloseSessionGroup(groupId) {
         let sessions = [];
         try {
@@ -1752,7 +1760,7 @@
 
         const connectedCount = sessions.filter(session => session.status === 'connected').length;
         if (sessions.length > 0 && connectedCount === 0) {
-            return true;
+            return CLOSE_SESSION_CLOSE;
         }
 
         return openCloseSessionConfirmModal(getGroupById(groupId), connectedCount, sessions.length);
@@ -2006,16 +2014,20 @@
 
     document.getElementById('closeSessionConfirmModal').addEventListener('click', event => {
         if (event.target.id === 'closeSessionConfirmModal') {
-            closeCloseSessionConfirmModal(false);
+            closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL);
         }
     });
 
     document.getElementById('closeSessionConfirmCancel').addEventListener('click', () => {
-        closeCloseSessionConfirmModal(false);
+        closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL);
+    });
+
+    document.getElementById('closeSessionConfirmSave').addEventListener('click', () => {
+        closeCloseSessionConfirmModal(CLOSE_SESSION_SAVE_AND_CLOSE);
     });
 
     document.getElementById('closeSessionConfirmAccept').addEventListener('click', () => {
-        closeCloseSessionConfirmModal(true);
+        closeCloseSessionConfirmModal(CLOSE_SESSION_CLOSE);
     });
 
     document.addEventListener('keydown', event => {
@@ -2032,7 +2044,7 @@
                 closeSaveSessionAsModal();
             }
             if (document.getElementById('closeSessionConfirmModal').classList.contains('visible')) {
-                closeCloseSessionConfirmModal(false);
+                closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL);
             }
         }
     });
@@ -7787,8 +7799,18 @@
             return;
         }
 
-        if (!(await confirmCloseSessionGroup(groupId))) {
+        const decision = await confirmCloseSessionGroup(groupId);
+        if (decision === CLOSE_SESSION_CANCEL) {
             return;
+        }
+        /* A requested save that failed must not cost the terminals it was
+           meant to preserve — keep the session and leave the reason on the
+           session line, the same way an explicit Save Session reports it. */
+        if (decision === CLOSE_SESSION_SAVE_AND_CLOSE) {
+            const saved = await saveActiveWorkspaceSession(null, { groupId });
+            if (!saved?.ok) {
+                return;
+            }
         }
         // Past both confirmations, so this close is really happening: drop the
         // per-session/per-group entries that would otherwise outlive it.
