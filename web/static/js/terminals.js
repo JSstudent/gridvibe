@@ -7632,6 +7632,12 @@
             event.preventDefault();
         }
 
+        /* The single place a workspace window hands over to the launcher, so
+           the launcher's Alt+W return key learns where it came from here and
+           nowhere else — and re-learns it every time, so opening the launcher
+           again from a different workspace retargets the way back. */
+        rememberLauncherOriginWorkspace(currentWorkspaceId);
+
         if (window.pywebview?.api?.open_launcher_window) {
             try {
                 logSessionWindowAction('+ New Session clicked', {

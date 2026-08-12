@@ -2557,6 +2557,56 @@
         return false;
     }
 
+    /* ── Alt+W: back to the workspace that opened this launcher ──
+       In a session window Alt+W walks the workspaces. The launcher has no
+       workspace of its own to walk from, so the same keystroke walks back out
+       of it, to the window that handed over (goToSettings records which one)
+       or, if that workspace has since closed, to whichever one is still open.
+
+       Reuses the launcher's existing Open path — focus the window, open it if
+       the native host has none — so the arrival pulse and the group targeting
+       are the ones every other workspace switch already gets (guardrail 6).
+       The in-flight guard keeps a held key from queueing a burst of opens. */
+    let launcherWorkspaceReturnInFlight = false;
+
+    async function returnToLauncherOriginWorkspace() {
+        if (launcherWorkspaceReturnInFlight) {
+            return;
+        }
+        launcherWorkspaceReturnInFlight = true;
+        try {
+            const target = launcherReturnWorkspace(
+                await fetchLiveWorkspaces(),
+                readLauncherOriginWorkspace()
+            );
+            if (!target) {
+                showGridVibeNotice('No workspace is open to switch back to.', 'info');
+                return;
+            }
+            if (!(await focusWorkspaceWindow(target.workspace_id))) {
+                await openWorkspaceWindow(target.workspace_id, {
+                    groupId: target.active_group_id
+                });
+            }
+        } catch (error) {
+            console.error('[GridVibe Launcher] workspace return failed:', error);
+            showGridVibeNotice(`Could not switch workspace: ${error.message}`, 'error');
+        } finally {
+            launcherWorkspaceReturnInFlight = false;
+        }
+    }
+
+    /* Unlike the session page, a focused text field does not block this
+       shortcut: the launcher is almost entirely form fields, and Alt+W means
+       nothing to any of them. The keybind capture field is the one control on
+       this page that is *supposed* to swallow arbitrary combinations. */
+    function isLauncherShortcutBlockingTarget(target) {
+        if (!(target instanceof Element)) {
+            return false;
+        }
+        return Boolean(target.closest('.voice-ptt-keybind')) || target.isContentEditable;
+    }
+
     async function openTerminalsIfActive(
         preferredGroupId = '',
         nativeZoomFactor = null,
@@ -3631,4 +3681,22 @@
         if (event.key === 'Escape' && isWorkspaceRestoreModalVisible() && !workspaceRestoreInFlight) {
             dismissWorkspaceRestorePanel();
         }
+    });
+
+    /* The launcher half of the Alt+W workspace switch. Shift is not read: there
+       is no cycle to run backwards from a window that is not a workspace, so
+       both directions mean the same thing here — go back. */
+    document.addEventListener('keydown', event => {
+        if (!event.altKey || event.ctrlKey || event.metaKey || event.repeat) {
+            return;
+        }
+        if (event.code !== 'KeyW' || isLauncherShortcutBlockingTarget(event.target)) {
+            return;
+        }
+        if (!isMultiWorkspaceEnabled()) {
+            return;
+        }
+
+        event.preventDefault();
+        returnToLauncherOriginWorkspace();
     });

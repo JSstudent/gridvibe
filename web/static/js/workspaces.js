@@ -121,6 +121,56 @@
         return next && next.workspace_id !== currentWorkspaceId ? next : null;
     }
 
+    /* ── The launcher's way back ──
+       The launcher is a window, not a workspace, so it has no place in the
+       Alt+W walk — but it is almost always reached *from* a workspace (Alt+`,
+       or the launcher button at the head of the session line), and the way back
+       was a mouse trip through the Workspaces card. Every path that opens the
+       launcher records the workspace it left, so the same keystroke that walks
+       workspaces in a session window walks back out of the launcher.
+
+       Stored, not broadcast, for the same reason the arrival pulse is: the
+       launcher window may not exist yet when the workspace hands over, and the
+       record has to outlive the handover for as long as the launcher stays
+       open. It is a hint and never an authority — a workspace can be closed
+       while the launcher sits in front of it — so it is resolved against the
+       live list on every use rather than trusted on its own. */
+    const WORKSPACE_LAUNCHER_ORIGIN_STORAGE_KEY = 'gridvibe.launcherOrigin';
+
+    function rememberLauncherOriginWorkspace(workspaceId) {
+        try {
+            localStorage.setItem(WORKSPACE_LAUNCHER_ORIGIN_STORAGE_KEY, JSON.stringify({
+                workspaceId: normalizeWorkspaceId(workspaceId),
+                timestamp: Date.now()
+            }));
+        } catch (_error) {}
+    }
+
+    /* '' rather than the normalized default when nothing was recorded: no
+       origin is not the same claim as "the default workspace", and only the
+       first can fall back to whatever window is actually open. */
+    function readLauncherOriginWorkspace() {
+        let payload = null;
+        try {
+            payload = JSON.parse(localStorage.getItem(WORKSPACE_LAUNCHER_ORIGIN_STORAGE_KEY) || 'null');
+        } catch (_error) {
+            payload = null;
+        }
+        return payload?.workspaceId ? normalizeWorkspaceId(payload.workspaceId) : '';
+    }
+
+    /* Resolve that hint against what is open, through the same user-visible
+       predicate the walk uses — a record without a window must never be
+       "switched" to, because that opens a blank one instead. The origin wins
+       when its window is still there; otherwise the first open workspace is the
+       honest way back (with one window open it is the window the user means),
+       and with none there is nowhere to go and the caller says so. */
+    function launcherReturnWorkspace(workspaces, originWorkspaceId = '') {
+        const open = (Array.isArray(workspaces) ? workspaces : []).filter(isUserVisibleWorkspace);
+        const origin = String(originWorkspaceId || '');
+        return open.find(workspace => workspace.workspace_id === origin) || open[0] || null;
+    }
+
     /* ── Cross-window workspace invalidation ──
        The launcher has no Socket.IO connection, so the workspace rooms cannot
        reach it. Terminal windows announce every change that alters a workspace

@@ -57,6 +57,19 @@ def _js_function_source(script, name):
     raise AssertionError(f"unbalanced braces in {name}")
 
 
+def _js_const_source(script, name):
+    """Return one top-level `const NAME = …;` line from `script`.
+
+    A helper extracted with `_js_function_source` still needs the module
+    constants it closes over. Taking them from the file rather than restating
+    them in the test keeps a harness from quietly disagreeing with the shipped
+    value — a storage key restated here would let both ends of a round trip
+    pass while the real pages wrote and read different keys.
+    """
+    start = script.index(f"const {name} = ")
+    return script[start:script.index("\n", start)].strip()
+
+
 def _workspace_events(socket_client):
     """Return the session_groups_updated payloads one socket received."""
     return [
@@ -2844,6 +2857,115 @@ async function fetch(path, options) {
         )
         with TemporaryDirectory() as script_dir:
             script_path = Path(script_dir) / "cycle.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path), json.dumps(cases)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        return json.loads(completed.stdout)
+
+    def test_alt_w_in_the_launcher_returns_to_the_workspace_that_opened_it(self):
+        """The launcher's Alt+W walks back, and only to a window that exists.
+
+        The launcher is a window, not a workspace, so it cannot walk the cycle:
+        it walks back to the workspace that handed over. That record outlives
+        the handover (the launcher window may not exist yet when it is written)
+        and is therefore a hint, never an authority — the workspace behind it
+        can be closed while the launcher sits in front. Resolving it against the
+        live list is what stops the return key from "switching" onto a record
+        with no window and opening a blank one, exactly as the cycle does.
+        """
+        work = {"workspace_id": "aaaaaaaaaaaa", "group_count": 1}
+        other = {"workspace_id": "bbbbbbbbbbbb", "group_count": 2}
+        main = {"workspace_id": "default", "group_count": 1}
+        empty_default = {"workspace_id": "default", "group_count": 0}
+
+        returns = self._js_launcher_return(
+            [
+                # The ordinary trip: opened from a workspace still on screen.
+                ("aaaaaaaaaaaa", [work, other]),
+                ("default", [main, work]),
+                # The origin closed while the launcher was in front — the way
+                # back is the workspace that is still open, not a blank window.
+                ("aaaaaaaaaaaa", [other]),
+                ("aaaaaaaaaaaa", [{**work, "group_count": 0}, other]),
+                # A launcher opened first, at startup: no origin was ever
+                # recorded, so "back" is the one window there is.
+                (None, [other]),
+                (None, [empty_default, work]),
+                # Nowhere to go: records without windows are not destinations.
+                ("aaaaaaaaaaaa", []),
+                ("aaaaaaaaaaaa", [empty_default]),
+            ]
+        )
+
+        self.assertEqual(
+            returns,
+            [
+                "aaaaaaaaaaaa",
+                "default",
+                "bbbbbbbbbbbb",
+                "bbbbbbbbbbbb",
+                "bbbbbbbbbbbb",
+                "aaaaaaaaaaaa",
+                None,
+                None,
+            ],
+        )
+
+    def _js_launcher_return(self, cases):
+        """Round-trip the shipped origin record through the shipped resolver.
+
+        Both halves run for real against a stubbed localStorage — the record is
+        written by the workspace window and read by the launcher, so a test that
+        supplied the id directly could not catch the two ends disagreeing about
+        what is stored. The constants come from the file too, for the same
+        reason. Each case is (recorded origin or None, live workspace list).
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        workspaces_js = self._static("js/workspaces.js")
+        source = "\n".join(
+            [
+                _js_const_source(workspaces_js, name)
+                for name in (
+                    "WORKSPACE_DEFAULT_ID",
+                    "WORKSPACE_ID_PATTERN",
+                    "WORKSPACE_LAUNCHER_ORIGIN_STORAGE_KEY",
+                )
+            ]
+            + [
+                _js_function_source(workspaces_js, name)
+                for name in (
+                    "isUserVisibleWorkspace",
+                    "normalizeWorkspaceId",
+                    "rememberLauncherOriginWorkspace",
+                    "readLauncherOriginWorkspace",
+                    "launcherReturnWorkspace",
+                )
+            ]
+        )
+        script = (
+            "const store = new Map();\n"
+            "const localStorage = {\n"
+            "    getItem: key => (store.has(key) ? store.get(key) : null),\n"
+            "    setItem: (key, value) => store.set(key, String(value)),\n"
+            "    removeItem: key => store.delete(key)\n"
+            "};\n"
+            f"{source}\n"
+            "const out = JSON.parse(process.argv[2]).map(([origin, list]) => {\n"
+            "    store.clear();\n"
+            "    if (origin !== null) { rememberLauncherOriginWorkspace(origin); }\n"
+            "    const target = launcherReturnWorkspace(list, readLauncherOriginWorkspace());\n"
+            "    return target ? target.workspace_id : null;\n"
+            "});\n"
+            "process.stdout.write(JSON.stringify(out));\n"
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "launcher-return.js"
             script_path.write_text(script, encoding="utf-8")
             completed = subprocess.run(
                 [node, str(script_path), json.dumps(cases)],
