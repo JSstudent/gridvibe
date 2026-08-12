@@ -184,6 +184,8 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 
 **Top bar:** theme · max surface · broadcast typing · fullscreen · App Settings · chevron to hide the bar. Plus a `Workspace…` menu and a `Sessions…` menu.
 
+**A hidden top bar comes back on hover.** Rest the pointer on the window's top edge — a small handle marks it — and the bar slides down over the workspace for as long as you are using it, so `Save Session` and `Save Workspace` stay reachable with the bar hidden. It stays while a menu is open and hides again shortly after you move away (or on `Esc`); clicking the handle reveals the bar and puts focus in it, which is the keyboard route in. Fullscreen hides the bar for its duration and reveals it the same way; leaving fullscreen gives back whatever the chevron last said. Nothing about the reveal is saved.
+
 **Session tab line:** the back-to-launcher button sits at the head of the tab line, ahead of the first tab, so it stays reachable with the top bar hidden.
 
 | Shortcut | Action |

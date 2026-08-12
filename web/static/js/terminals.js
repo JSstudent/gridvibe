@@ -365,28 +365,59 @@
         noteWorkspacePresentationChanged();
     }
 
-    function applyTopbarVisibility(
-        visible,
-        { persist = false, refit = false, report = false } = {}
-    ) {
+    /* Hiding the bar took the Sessions… and Workspace… menus with it — the
+       only place Save Session and Save Workspace live — so a hidden bar is
+       revealed on demand by GridVibeTopbarPeek. It owns *when*; the page owns
+       what that looks like. Two body classes, two meanings:
+
+       - topbar-collapsed is the chevron's persisted choice, and stays the one
+         thing every topbar_visible read-back looks at;
+       - topbar-hidden is the derived "not in the flow" state, which fullscreen
+         also raises for its duration without ever touching the stored value.
+
+       topbar-peek is the transient overlay and is never persisted. */
+    const topbarPeek = window.GridVibeTopbarPeek.create({
+        getElement: id => document.getElementById(id),
+        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+        clearTimeout: handle => window.clearTimeout(handle),
+        onChange: ({ hidden, peeking, hiddenChanged }) => {
+            document.body.classList.toggle('topbar-hidden', hidden);
+            document.body.classList.toggle('topbar-peek', peeking);
+            /* Only a flow change resizes anything: the peek is an overlay, so
+               a pointer trip to the top edge costs no terminal refit. */
+            if (hiddenChanged && gridBuilt) {
+                refitAttachedTerminalsForSurfaceMode();
+            }
+        }
+    });
+
+    /* Kept in step with the two app menus, which must hold the peek open while
+       one of them is showing. */
+    function reportAppMenuState() {
+        topbarPeek.setMenuOpen(
+            Boolean(
+                document.getElementById('sessionsMenuRoot')?.classList.contains('open')
+                || document.getElementById('workspaceMenuRoot')?.classList.contains('open')
+            )
+        );
+    }
+
+    function applyTopbarVisibility(visible, { persist = false, report = false } = {}) {
         const shouldShow = Boolean(visible);
         document.body.classList.toggle('topbar-collapsed', !shouldShow);
         updateTopbarToggleButton(shouldShow);
+        topbarPeek.setCollapsed(!shouldShow);
         if (persist) {
             storeWorkspaceTopbarVisible(currentWorkspaceId, shouldShow);
         }
         if (report) {
             reportTopbarVisibility();
         }
-        if (refit) {
-            refitAttachedTerminalsForSurfaceMode();
-        }
     }
 
     function toggleTopbarVisibility() {
         applyTopbarVisibility(document.body.classList.contains('topbar-collapsed'), {
             persist: true,
-            refit: true,
             report: true
         });
     }
@@ -1230,6 +1261,7 @@
         const button = document.getElementById('sessionsMenuBtn');
         root?.classList.remove('open');
         button?.setAttribute('aria-expanded', 'false');
+        reportAppMenuState();
     }
 
     function toggleSessionsMenu(event) {
@@ -1247,6 +1279,7 @@
         if (shouldOpen) {
             closeWorkspaceMenu();
         }
+        reportAppMenuState();
     }
 
     function closeWorkspaceMenu() {
@@ -1254,6 +1287,7 @@
         const button = document.getElementById('workspaceMenuBtn');
         root?.classList.remove('open');
         button?.setAttribute('aria-expanded', 'false');
+        reportAppMenuState();
     }
 
     function toggleWorkspaceMenu(event) {
@@ -1272,6 +1306,7 @@
             closeSessionsMenu();
             refreshWorkspaceMenuLists();
         }
+        reportAppMenuState();
     }
 
     /* ─────────────────────────────────────────────
@@ -1987,6 +2022,9 @@
         if (event.key === 'Escape') {
             closeSessionsMenu();
             closeWorkspaceMenu();
+            /* After the menus, so a peek held open by one of them is released
+               by the same keypress that closed it. */
+            topbarPeek.dismiss();
             if (document.getElementById('savedSessionsModal').classList.contains('visible')) {
                 closeSavedSessionModal();
             }
@@ -7412,11 +7450,9 @@
         const previousActiveGroupId = activeGroupId;
         const previousGroupIds = knownGroupIds.slice();
         if (typeof data.topbar_visible === 'boolean') {
-            const currentTopbarVisible = !document.body.classList.contains('topbar-collapsed');
-            applyTopbarVisibility(data.topbar_visible, {
-                persist: true,
-                refit: gridBuilt && currentTopbarVisible !== data.topbar_visible
-            });
+            /* The refit rides on the flow actually changing, which the peek
+               controller reports; nothing to decide here. */
+            applyTopbarVisibility(data.topbar_visible, { persist: true });
         }
         setExplorerWorkspaceAppearance({
             preset: data.md_preset,
@@ -7459,12 +7495,20 @@
         return Boolean(window.pywebview && window.pywebview.api);
     }
 
+    /* The one funnel for "is this window fullscreen right now" — every
+       fullscreen transition already ends here, so the top bar's auto-hide is
+       wired once rather than at each of the four call sites. Fullscreen hides
+       the bar for its duration only: the stored topbar_visible is untouched,
+       so leaving fullscreen gives back whatever the chevron last said. */
     function updateFullscreenButton() {
+        const isBrowserFullscreen = Boolean(document.fullscreenElement);
+        const active = isPywebviewAvailable() ? nativeFullscreen : isBrowserFullscreen;
+        document.body.classList.toggle('chrome-fullscreen', active);
+        topbarPeek.setFullscreen(active);
+
         const button = document.getElementById('fullscreenBtn');
         if (!button) return;
 
-        const isBrowserFullscreen = Boolean(document.fullscreenElement);
-        const active = isPywebviewAvailable() ? nativeFullscreen : isBrowserFullscreen;
         const label = active ? 'Exit fullscreen' : 'Enter fullscreen';
         button.innerHTML = active ? FULLSCREEN_EXIT_ICON : FULLSCREEN_ENTER_ICON;
         button.title = label;
@@ -8109,6 +8153,7 @@
        Boot
     ───────────────────────────────────────────── */
     initSurfaceMode();
+    topbarPeek.attach();
     applyTopbarVisibility(getStoredTopbarVisible());
     setupAppConfigUpdateListeners();
     updateFullscreenButton();

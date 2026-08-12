@@ -22,6 +22,23 @@
     data-terminal-font-family="{{ terminal_font_family | e }}"
 >
 
+<!-- Hover reveal for a hidden top bar. The bar leaves the layout for two
+     independent reasons — the session-bar chevron (persisted) and fullscreen
+     (for its duration only) — and both used to take the Sessions… and
+     Workspace… menus with it. Resting the pointer on this strip, or activating
+     the handle, brings the bar back as an overlay; the handle is also the
+     keyboard route in, since a hidden bar has no control to Tab into. -->
+<div class="topbar-peek-zone" id="topbarPeekZone">
+    <button
+        type="button"
+        class="topbar-peek-handle"
+        id="topbarPeekHandle"
+        title="Show top bar"
+        aria-label="Show top bar"
+        aria-controls="terminalTopbar"
+    ></button>
+</div>
+
 <!-- Top bar -->
 <div class="topbar" id="terminalTopbar">
     <div class="topbar-brand">
@@ -389,6 +406,7 @@
 <script src="{{ url_for('static', filename='js/explorer-overview.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/browser-pane.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminal-shell.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/topbar-peek.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminals.js') }}?v={{ version }}"></script>
 </body>
 </html>

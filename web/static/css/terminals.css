@@ -1623,8 +1623,94 @@
             padding: 5px 8px;
         }
 
-        body.topbar-collapsed .topbar {
+        /* The top bar leaves the layout for two independent reasons — the
+           chevron, which is persisted as topbar_visible and keeps its own
+           body.topbar-collapsed marker for that read-back, and fullscreen,
+           which auto-hides for its duration and must never write the setting.
+           body.topbar-hidden is the one derived state the layout keys on. */
+        body.topbar-hidden .topbar {
             display: none;
+        }
+
+        /* The reveal: the hidden bar comes back as an overlay rather than
+           rejoining the flow, so resting on the top edge to reach Sessions… or
+           Workspace… never resizes a single terminal. */
+        body.topbar-hidden.topbar-peek .topbar {
+            display: grid;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 4000;
+            box-shadow: var(--gv-dialog-shadow);
+            animation: topbar-peek-in .16s ease-out;
+        }
+
+        @keyframes topbar-peek-in {
+            from { transform: translateY(-100%); }
+            to   { transform: none; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            body.topbar-hidden.topbar-peek .topbar {
+                animation: none;
+            }
+        }
+
+        /* Fullscreen owns the bar's visibility for its duration, so the
+           chevron would toggle a stored value with nothing to show for it. */
+        body.chrome-fullscreen .topbar-toggle-btn {
+            display: none;
+        }
+
+        /* The reveal target. 4px so it can never take a click aimed at a
+           session tab's top edge (the tab strip starts 5px down even in
+           surface-max), and inert until the bar is actually hidden. */
+        .topbar-peek-zone {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            z-index: 3900;
+            pointer-events: none;
+        }
+
+        body.topbar-hidden .topbar-peek-zone {
+            pointer-events: auto;
+        }
+
+        /* The one hint that a bar is still up there, and the keyboard route to
+           it. Invisible while the bar is in the flow — there is nothing to
+           reveal — and hidden again under a bar that is already revealed. */
+        .topbar-peek-handle {
+            width: 46px;
+            height: 3px;
+            padding: 0;
+            border: 0;
+            border-radius: 0 0 3px 3px;
+            background: var(--t-border);
+            opacity: 0;
+            cursor: pointer;
+            transition: opacity .18s, background .18s;
+        }
+
+        body.topbar-hidden .topbar-peek-handle {
+            opacity: .7;
+        }
+
+        body.topbar-hidden .topbar-peek-handle:hover,
+        body.topbar-hidden .topbar-peek-handle:focus-visible {
+            background: var(--t-accent);
+            opacity: 1;
+            outline: none;
+        }
+
+        body.topbar-peek .topbar-peek-handle {
+            opacity: 0;
         }
 
         body.surface-max .topbar-icon {
