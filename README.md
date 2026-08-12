@@ -182,7 +182,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | 🔍 | Repository search sidebar (`Ctrl+Shift+F`) |
 | 🖥️ | Reveal the current location in the system file manager (local panes only) |
 
-**Top bar:** theme · refresh all · max surface · broadcast typing · fullscreen · App Settings · chevron to hide the bar. Plus a `Workspace…` menu and a `Sessions…` menu.
+**Top bar:** theme · max surface · broadcast typing · fullscreen · App Settings · chevron to hide the bar. Plus a `Workspace…` menu and a `Sessions…` menu.
 
 **Session tab line:** the back-to-launcher button sits at the head of the tab line, ahead of the first tab, so it stays reachable with the top bar hidden.
 

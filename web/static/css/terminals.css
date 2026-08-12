@@ -957,11 +957,6 @@
             display: block;
             filter: drop-shadow(0 0 5px color-mix(in srgb, currentColor 32%, transparent));
         }
-        .refresh-all-icon {
-            width: 18px;
-            height: 18px;
-            display: block;
-        }
         /* Every topbar icon states its own size: an unsized inline SVG falls
            back to the 300x150 replaced-element default and only *looks* right
            while the button has room to squeeze it, which max surface mode (a

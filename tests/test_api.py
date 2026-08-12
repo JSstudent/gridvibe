@@ -865,7 +865,6 @@ class ApiRoutesTestCase(unittest.TestCase):
             "broadcast-icon",
             "app-settings-icon",
             "surface-mode-icon",
-            "refresh-all-icon",
             "fullscreen-icon",
             "vibe-flow-icon",
         ):
@@ -3421,9 +3420,6 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        self.assertIn('aria-label="Refresh all"', html)
-        self.assertIn('class="refresh-all-icon"', html)
-        self.assertNotIn(">Refresh all</button>", html)
         self.assertNotIn("Close Session</button>", html)
         self.assertIn("closeButton.className = 'session-tab-close';", html)
         self.assertIn("closeSessionGroup(group.group_id);", html)
