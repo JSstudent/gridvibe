@@ -18,6 +18,11 @@
     padding: 12px 20px;
 }
 
+/* The choices speak for themselves; only progress and failure text takes room. */
+.lifecycle-status:empty {
+    display: none;
+}
+
 .lifecycle-status.is-error {
     color: var(--gv-danger);
 }

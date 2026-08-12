@@ -97,10 +97,6 @@
         return messages.join(' ') || 'Saving did not finish. GridVibe remains open.';
     }
 
-    function showChoices() {
-        setStatus('Choose what GridVibe should do before continuing.');
-    }
-
     function showFailure(result) {
         setStatus(`${errorSummary(result)} Choose an option to try again or continue without saving.`, true);
     }
@@ -168,7 +164,7 @@
         choices?.querySelector(`[data-lifecycle-save="${SAVE_SESSIONS_AND_WORKSPACES}"]`)?.replaceChildren(
             `Save open sessions + workspaces & ${words.verb}`
         );
-        showChoices();
+        setStatus('');
         modal.classList.add('visible');
         modal.setAttribute('aria-hidden', 'false');
         return true;

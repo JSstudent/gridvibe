@@ -1219,7 +1219,8 @@ class LifecycleClientTestCase(unittest.TestCase):
                 const opened = {{
                     visible: classes.has('visible'),
                     ariaHidden: attributes['aria-hidden'],
-                    labels: choiceButtons.map(button => button.textContent)
+                    labels: choiceButtons.map(button => button.textContent),
+                    status: status.textContent
                 }};
                 choiceButtons[1].listeners.click();
                 await failed;
@@ -1250,6 +1251,7 @@ class LifecycleClientTestCase(unittest.TestCase):
                 "Save open sessions + workspaces & restart",
             ],
         )
+        self.assertEqual(result["opened"]["status"], "")
         self.assertTrue(result["afterFailure"]["visible"])
         self.assertFalse(result["afterFailure"]["choicesHidden"])
         self.assertIn("disk full", result["afterFailure"]["status"])
