@@ -1464,7 +1464,38 @@
         document.addEventListener('keydown', _explorerContextMenuKeydown, true);
     }
 
+    /* A commit row names a repository object, not a path under the explorer
+       root, so it takes its own branch: no selection, no filesystem entries,
+       and no path copies. The expanded file rows below a commit are siblings
+       of this button rather than children, so they still reach the entry
+       menu below. */
+    function handleExplorerCommitContextMenu(event, commitRow) {
+        event.preventDefault();
+        document.querySelectorAll('.explorer-context-target')
+            .forEach(node => node.classList.remove('explorer-context-target'));
+        commitRow.classList.add('explorer-context-target');
+        _explorerContextMenuInvoker = commitRow;
+        const items = window.GridVibeExplorerGitMenu.commitMenuItems({
+            hash: commitRow.dataset.explorerGitCommitToggle || '',
+            fullHash: commitRow.dataset.explorerGitCommitFull || '',
+            message: commitRow.dataset.explorerGitCommitMessage || ''
+        }, _copyText);
+        let x = event.clientX;
+        let y = event.clientY;
+        if (x <= 0 && y <= 0) {
+            const rect = commitRow.getBoundingClientRect();
+            x = rect.left + Math.min(24, rect.width);
+            y = rect.top + Math.min(rect.height, 24);
+        }
+        showExplorerContextMenu(x, y, items);
+    }
+
     function handleExplorerContextMenu(event, index) {
+        const commitRow = event.target.closest('[data-explorer-git-commit-toggle]');
+        if (commitRow) {
+            handleExplorerCommitContextMenu(event, commitRow);
+            return;
+        }
         const row = event.target.closest('[data-explorer-copy-path]');
         const pane = terminals[index];
         let blankContext = null;
@@ -1650,7 +1681,7 @@
                 const hash = commit.hash || '';
                 const expanded = hash && expandedCommits.has(`explorer:${hash}`);
                 return `
-                    <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
+                    <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" data-explorer-git-commit-full="${escHtml(commit.full_hash || '')}" data-explorer-git-commit-message="${escHtml(commit.message || '')}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
                         <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
                         <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</span>
                         <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${escHtml(commit.subject || commit.line || '')}</span>

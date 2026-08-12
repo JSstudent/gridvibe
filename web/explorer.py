@@ -61,6 +61,14 @@ EXPLORER_GIT_DIFF_MAX_LINES = 4000
 EXPLORER_GIT_LOG_MAX_COMMITS = 60
 EXPLORER_GIT_REVISION_LENGTH = 16
 
+# The sidebar's commit rows are parsed field-by-field rather than scraped out
+# of `--oneline`, so a subject keeps whatever spaces and parentheses it has and
+# the full object id travels beside the abbreviated one. ASCII unit separator:
+# `%x1f` is a git format escape (git expands it), so the argument itself stays
+# plain text and needs no special quoting on the SSH path.
+_GIT_LOG_FIELD_SEPARATOR = "\x1f"
+_GIT_LOG_GRAPH_FORMAT = "--format=%x1f%H%x1f%h%x1f%D%x1f%s"
+
 
 def _is_explorer_session(session: Any) -> bool:
     """Return whether a session should render as a file explorer pane."""
@@ -2199,22 +2207,38 @@ def _git_diff_args_for_mode(mode: str, pathspec: str, commit: Optional[str] = No
 
 
 def _parse_git_graph_log(raw_output: bytes) -> List[Dict[str, Any]]:
-    """Parse bounded `git log --graph --oneline` output for the diff sidebar."""
+    """Parse bounded `git log --graph` output for the diff sidebar.
+
+    Each commit line is the graph prefix followed by four unit-separated
+    fields — full hash, abbreviated hash, ref decorations, subject. The
+    explicit separator is what lets a subject keep its own spaces and
+    parentheses while the full object id travels beside the short one the
+    rows display and the file lists join on. Graph-only connector lines carry
+    no separator and are skipped.
+    """
     commits: List[Dict[str, Any]] = []
     for raw_line in raw_output.decode("utf-8", errors="replace").split("\n"):
         line = raw_line.rstrip()
-        if not line:
+        graph, separator, payload = line.partition(_GIT_LOG_FIELD_SEPARATOR)
+        if not separator:
             continue
-        match = re.match(r"^(?P<graph>[\s*|\\/._-]*?)(?P<hash>[0-9a-fA-F]{7,40})\s+(?P<subject>.*)$", line)
-        if not match:
+        fields = payload.split(_GIT_LOG_FIELD_SEPARATOR, 3)
+        if len(fields) != 4:
             continue
-        commit_hash = match.group("hash") if match else ""
+        full_hash, short_hash, refs, subject = fields
+        if not full_hash or not short_hash:
+            continue
+        # `--oneline --decorate` renders decorations ahead of the subject, and
+        # the rows still show that; only the copyable message drops them.
+        decorated = f"({refs}) {subject}" if refs else subject
         commits.append(
             {
-                "line": line,
-                "graph": match.group("graph").rstrip() if match else "",
-                "hash": commit_hash,
-                "subject": match.group("subject") if match else line,
+                "line": f"{graph}{short_hash} {decorated}",
+                "graph": graph.rstrip(),
+                "hash": short_hash,
+                "full_hash": full_hash,
+                "subject": decorated,
+                "message": subject,
             }
         )
     return commits[:EXPLORER_GIT_LOG_MAX_COMMITS]
@@ -2316,8 +2340,8 @@ def _bounded_git_graph_log(backend: Any, repo_root: str, pathspec: str) -> List[
             "log",
             "--graph",
             "--decorate",
-            "--oneline",
             "--date-order",
+            _GIT_LOG_GRAPH_FORMAT,
             f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
             "--",
             pathspec,

@@ -6862,14 +6862,46 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_parse_git_graph_log_skips_connector_only_lines(self):
         commits = web_explorer._parse_git_graph_log(
-            b"* a1b2c3d initial\n"
+            b"* \x1fa1b2c3d4e5f60718293a4b5c6d7e8f9012345678\x1fa1b2c3d\x1f\x1finitial\n"
             b"|\\\n"
-            b"| * b2c3d4e branch work\n"
+            b"| * \x1fb2c3d4e5f60718293a4b5c6d7e8f90123456789a\x1fb2c3d4e\x1f\x1fbranch work\n"
             b"|/\n"
         )
 
         self.assertEqual([commit["hash"] for commit in commits], ["a1b2c3d", "b2c3d4e"])
         self.assertEqual([commit["subject"] for commit in commits], ["initial", "branch work"])
+        # The graph prefix stays attached to its own field, and the abbreviated
+        # hash the rows display keeps travelling beside the full object id the
+        # commit context menu copies.
+        self.assertEqual([commit["graph"] for commit in commits], ["*", "| *"])
+        self.assertEqual(
+            [commit["full_hash"] for commit in commits],
+            [
+                "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+                "b2c3d4e5f60718293a4b5c6d7e8f90123456789a",
+            ],
+        )
+
+    def test_parse_git_graph_log_separates_decorations_from_the_message(self):
+        commits = web_explorer._parse_git_graph_log(
+            b"* \x1f" + b"a" * 40 + b"\x1faaaaaaa\x1fHEAD -> main, tag: v1.2\x1f(fix) ship it\n"
+        )
+
+        self.assertEqual(len(commits), 1)
+        # The row still reads the way `--oneline --decorate` rendered it...
+        self.assertEqual(commits[0]["subject"], "(HEAD -> main, tag: v1.2) (fix) ship it")
+        self.assertIn("(HEAD -> main, tag: v1.2)", commits[0]["line"])
+        # ...while the copyable message is the subject the author actually
+        # wrote, including a leading "(fix)" that is part of it.
+        self.assertEqual(commits[0]["message"], "(fix) ship it")
+
+    def test_parse_git_graph_log_keeps_a_subject_with_spacing(self):
+        commits = web_explorer._parse_git_graph_log(
+            b"* \x1f" + b"b" * 40 + b"\x1fbbbbbbb\x1f\x1ffix:  two  spaces and (parens)\n"
+        )
+
+        self.assertEqual(commits[0]["message"], "fix:  two  spaces and (parens)")
+        self.assertEqual(commits[0]["subject"], "fix:  two  spaces and (parens)")
 
     def test_explorer_git_diff_rejects_invalid_mode_and_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
