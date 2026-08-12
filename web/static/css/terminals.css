@@ -5478,6 +5478,17 @@
         .explorer-fs-cut-source {
             opacity: .55;
         }
+        /* Multi-entry selection. A filled tint rather than the outline the
+           context target uses, so the row a menu is open against stays
+           distinguishable from the rest of the selection under it. */
+        .explorer-selected {
+            background: var(--explorer-row-active);
+            box-shadow: inset 2px 0 0 var(--t-accent);
+        }
+        .explorer-row.explorer-selected,
+        .explorer-tree-row.explorer-selected {
+            border-radius: var(--gv-radius-s);
+        }
         .terminal-container.explorer-fs-busy {
             cursor: progress;
         }

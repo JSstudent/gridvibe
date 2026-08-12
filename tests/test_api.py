@@ -16128,11 +16128,15 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         viewer_js = self._static("js/explorer-viewer.js")
         self.assertIn("label: 'Download file'", viewer_js)
         self.assertIn(
-            "action: () => downloadExplorerFile(index, { path: downloadPath })",
+            "action: () => downloadExplorerFile(index, { path: downloadTargets[0].path })",
             viewer_js,
         )
+        self.assertIn("row.dataset.explorerDownloadPath", viewer_js)
+        # With several rows selected the entry downloads each of them as its
+        # own capped, root-confined read — there is no archive endpoint.
+        self.assertIn("async function downloadExplorerFiles(index, targets)", viewer_js)
         self.assertIn(
-            "const downloadPath = row?.dataset.explorerDownloadPath || '';",
+            "await downloadExplorerFile(index, { path: entry.path });",
             viewer_js,
         )
         # Offered next to the copy entries, and only for file rows.

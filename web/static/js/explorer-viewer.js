@@ -1117,6 +1117,158 @@
         return `${trimmedBase}${separator}${nativeRel}`;
     }
 
+    /* ── Multi-entry selection: the DOM half ────────────────────────────────
+       The rules live in explorer-selection.js (DOM-free, Node-tested). This
+       side only reads rows out of the DOM, hands them to the model, and paints
+       the answer back. Selections are per session id and deliberately not
+       persisted — they are a pointer gesture, not pane state. */
+
+    const explorerSelections = new Map();
+
+    function explorerSelectionScope(index, surface) {
+        return {
+            sessionId: sessionIds[index] || '',
+            rootRevision: terminals[index]?._explorerRootRevision || '',
+            surface
+        };
+    }
+
+    function explorerSelectionFor(index, surface) {
+        const scope = explorerSelectionScope(index, surface);
+        if (!scope.sessionId) {
+            return null;
+        }
+        return GridVibeExplorerSelection.scopedSelection(
+            explorerSelections.get(scope.sessionId) || null,
+            scope
+        );
+    }
+
+    function storeExplorerSelection(index, selection) {
+        const sessionId = sessionIds[index] || '';
+        if (!sessionId) {
+            return;
+        }
+        if (GridVibeExplorerSelection.isEmpty(selection)) {
+            explorerSelections.delete(sessionId);
+        } else {
+            explorerSelections.set(sessionId, selection);
+        }
+        refreshExplorerSelectionHighlight(index);
+    }
+
+    function clearExplorerSelection(sessionId) {
+        explorerSelections.delete(String(sessionId || ''));
+    }
+
+    /* Drop entries a completed mutation removed (deleted, or moved away),
+       including anything that was beneath a removed directory. */
+    function dropExplorerSelectionPaths(index, removedPaths) {
+        const sessionId = sessionIds[index] || '';
+        const selection = sessionId ? explorerSelections.get(sessionId) : null;
+        if (GridVibeExplorerSelection.isEmpty(selection)) {
+            return;
+        }
+        const next = GridVibeExplorerSelection.dropPaths(selection, removedPaths);
+        if (GridVibeExplorerSelection.isEmpty(next)) {
+            explorerSelections.delete(sessionId);
+        } else {
+            explorerSelections.set(sessionId, next);
+        }
+    }
+
+    function explorerRowEntry(row) {
+        return row ? {
+            path: row.dataset.explorerContextPath || '',
+            kind: row.dataset.explorerContextKind || '',
+            revision: row.dataset.explorerContextRevision || ''
+        } : null;
+    }
+
+    function explorerSurfaceContainer(index, surface) {
+        return surface === 'tree'
+            ? document.getElementById(`explorer-tree-panel-${index}`)
+            : document.getElementById(`explorer-viewer-${index}`);
+    }
+
+    /* Rows in render order — the ordering a shift+click range is taken over, so
+       it must be what the user actually sees (filtered, folded) rather than the
+       underlying entry list. */
+    function explorerOrderedRows(index, surface) {
+        const container = explorerSurfaceContainer(index, surface);
+        if (!container) {
+            return [];
+        }
+        return Array.from(container.querySelectorAll('[data-explorer-context-path]'))
+            .map(explorerRowEntry)
+            .filter(entry => entry && entry.path);
+    }
+
+    /* Paint the stored selection onto whatever rows exist right now. Called
+       after every render, so a reload, a filter keystroke, or a folded branch
+       re-applies it without the selection itself knowing about the DOM. */
+    function refreshExplorerSelectionHighlight(index) {
+        const card = document.getElementById(`tc-${index}`);
+        if (!card) {
+            return;
+        }
+        /* Styling only, no `aria-selected`: these rows are plain buttons and
+           divs, and that attribute is only valid on option/row/treeitem-style
+           roles. Claiming one would mean also owning the listbox/tree keyboard
+           model, which this does not implement — the menu names the count
+           instead ("Delete 3 files…"), so the action is never ambiguous. */
+        card.querySelectorAll('.explorer-selected').forEach(node => {
+            node.classList.remove('explorer-selected');
+        });
+        const sessionId = sessionIds[index] || '';
+        const selection = sessionId ? explorerSelections.get(sessionId) : null;
+        if (GridVibeExplorerSelection.isEmpty(selection)) {
+            return;
+        }
+        const scoped = GridVibeExplorerSelection.scopedSelection(
+            selection,
+            explorerSelectionScope(index, selection.surface)
+        );
+        if (!scoped) {
+            // The root revision moved on: drop it rather than paint stale rows.
+            explorerSelections.delete(sessionId);
+            return;
+        }
+        const container = explorerSurfaceContainer(index, scoped.surface);
+        if (!container) {
+            return;
+        }
+        const selected = new Set(GridVibeExplorerSelection.selectionPaths(scoped));
+        container.querySelectorAll('[data-explorer-context-path]').forEach(node => {
+            if (selected.has(node.dataset.explorerContextPath)) {
+                node.classList.add('explorer-selected');
+            }
+        });
+    }
+
+    /* Resolve a modifier click on a row. Returns true when the click was a
+       selection gesture and the row's normal open/navigate action must not
+       run. A plain click always returns false, so an explorer with nothing
+       selected behaves exactly as it did before multi-select existed. */
+    function handleExplorerRowSelectionClick(event, index, surface, row) {
+        const entry = explorerRowEntry(row);
+        if (!entry) {
+            return false;
+        }
+        const { selection, activate } = GridVibeExplorerSelection.applyPointerSelection(
+            explorerSelections.get(sessionIds[index] || '') || null,
+            Object.assign(explorerSelectionScope(index, surface), {
+                entry,
+                ctrlKey: event.ctrlKey,
+                metaKey: event.metaKey,
+                shiftKey: event.shiftKey
+            }),
+            explorerOrderedRows(index, surface)
+        );
+        storeExplorerSelection(index, selection);
+        return !activate;
+    }
+
     let _explorerContextMenuInvoker = null;
 
     function dismissExplorerContextMenu() {
@@ -1268,6 +1420,20 @@
             ? (row.dataset.explorerCopyPath || '')
             : blankContext.path;
         const absolutePath = explorerJoinRootPath(explorerRootDirectory(index), relativePath);
+        /* Right-clicking a row that is part of the live selection acts on the
+           whole selection; anything else collapses to that row alone, so a
+           forgotten selection elsewhere can never be swept into a delete the
+           user aimed at one file. The model owns that rule. */
+        const rowSurface = row?.dataset.explorerContextSurface || '';
+        const contextSurface = rowSurface === 'tree' ? 'tree' : 'preview';
+        const resolved = GridVibeExplorerSelection.resolveContextTargets(
+            explorerSelections.get(sessionIds[index] || '') || null,
+            Object.assign(explorerSelectionScope(index, contextSurface), {
+                entry: explorerRowEntry(row)
+            })
+        );
+        storeExplorerSelection(index, resolved.selection);
+        const selectedTargets = resolved.targets;
         let filesystemItems = [];
         if (typeof explorerFilesystemMenuItems === 'function') {
             if (row?.dataset.explorerContextKind) {
@@ -1275,30 +1441,55 @@
                     path: row.dataset.explorerContextPath || relativePath,
                     kind: row.dataset.explorerContextKind || '',
                     revision: row.dataset.explorerContextRevision || '',
-                    surface: row.dataset.explorerContextSurface || ''
-                });
+                    surface: rowSurface
+                }, selectedTargets);
             } else if (blankContext) {
                 filesystemItems = explorerFilesystemMenuItems(index, blankContext);
             }
         }
         const beforePath = filesystemItems.filter(item => item.placement !== 'after-path');
         const afterPath = filesystemItems.filter(item => item.placement === 'after-path');
-        const pathItems = [
-            { label: 'Copy path', action: () => _copyText(absolutePath || relativePath) },
-        ];
-        if (relativePath) {
+        /* With several rows selected the path entries copy the whole set, one
+           path per line — the same read the single-row entries perform. */
+        const multiTarget = selectedTargets.length > 1;
+        const targetRoot = explorerRootDirectory(index);
+        const pathItems = multiTarget
+            ? [{
+                label: `Copy ${selectedTargets.length} paths`,
+                action: () => _copyText(selectedTargets
+                    .map(entry => explorerJoinRootPath(targetRoot, entry.path) || entry.path)
+                    .join('\n'))
+            }, {
+                label: `Copy ${selectedTargets.length} relative paths`,
+                action: () => _copyText(selectedTargets.map(entry => entry.path).join('\n'))
+            }]
+            : [{ label: 'Copy path', action: () => _copyText(absolutePath || relativePath) }];
+        if (!multiTarget && relativePath) {
             pathItems.push({ label: 'Copy relative path', action: () => _copyText(relativePath) });
         }
         /* Downloading is a read, so it belongs with the copy entries. It is
            offered per row (not only for the open file) because a format the
            viewer can't render never reaches editor mode and its toolbar
-           download button. */
-        const downloadPath = row?.dataset.explorerDownloadPath || '';
-        if (downloadPath) {
+           download button. Folders have no download endpoint, so a mixed
+           selection offers only the files in it. */
+        const downloadTargets = multiTarget
+            ? selectedTargets.filter(entry => entry.kind === 'file')
+            : (row?.dataset.explorerDownloadPath
+                ? [{ path: row.dataset.explorerDownloadPath, kind: 'file' }]
+                : []);
+        if (downloadTargets.length === 1) {
             pathItems.push({
                 label: 'Download file',
-                title: `Download ${downloadPath}`,
-                action: () => downloadExplorerFile(index, { path: downloadPath })
+                title: `Download ${downloadTargets[0].path}`,
+                action: () => downloadExplorerFile(index, { path: downloadTargets[0].path })
+            });
+        } else if (downloadTargets.length > 1) {
+            pathItems.push({
+                label: `Download ${downloadTargets.length} files`,
+                title: downloadTargets.length === selectedTargets.length
+                    ? `Download the ${downloadTargets.length} selected files`
+                    : `Download the ${downloadTargets.length} files in the selection; folders are skipped`,
+                action: () => downloadExplorerFiles(index, downloadTargets)
             });
         }
         if (beforePath.length) {
@@ -2140,13 +2331,28 @@
                 }
             });
         });
+        panel.querySelectorAll('.explorer-tree-main').forEach(button => {
+            button.addEventListener('mousedown', event => {
+                if (event.shiftKey) {
+                    event.preventDefault();
+                }
+            });
+        });
         panel.querySelectorAll('[data-explorer-tree-dir]').forEach(button => {
-            button.addEventListener('click', () => {
+            button.addEventListener('click', event => {
+                const row = button.closest('.explorer-tree-row');
+                if (handleExplorerRowSelectionClick(event, index, 'tree', row)) {
+                    return;
+                }
                 openExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');
             });
         });
         panel.querySelectorAll('[data-explorer-tree-file]').forEach(button => {
-            button.addEventListener('click', () => {
+            button.addEventListener('click', event => {
+                const row = button.closest('.explorer-tree-row');
+                if (handleExplorerRowSelectionClick(event, index, 'tree', row)) {
+                    return;
+                }
                 openExplorerFile(index, button.dataset.explorerTreeFile || '');
             });
         });
@@ -2168,6 +2374,7 @@
         if (typeof refreshExplorerFilesystemCutSource === 'function') {
             refreshExplorerFilesystemCutSource(index);
         }
+        refreshExplorerSelectionHighlight(index);
     }
 
     /* Fold arrow only: expand or collapse in place. It never touches the
@@ -5290,13 +5497,29 @@
             return;
         }
 
+        /* Shift+click would otherwise extend the browser's text selection
+           across the rows it spans, leaving the listing highlighted blue under
+           our own selection styling. */
+        viewer.querySelectorAll('.explorer-row').forEach(button => {
+            button.addEventListener('mousedown', event => {
+                if (event.shiftKey) {
+                    event.preventDefault();
+                }
+            });
+        });
         viewer.querySelectorAll('.explorer-row.directory').forEach(button => {
-            button.addEventListener('click', () => {
+            button.addEventListener('click', event => {
+                if (handleExplorerRowSelectionClick(event, index, 'preview', button)) {
+                    return;
+                }
                 loadExplorerPane(index, button.dataset.explorerPath || '');
             });
         });
         viewer.querySelectorAll('.explorer-row.file').forEach(button => {
-            button.addEventListener('click', () => {
+            button.addEventListener('click', event => {
+                if (handleExplorerRowSelectionClick(event, index, 'preview', button)) {
+                    return;
+                }
                 openExplorerFile(index, button.dataset.explorerPath || '');
             });
         });
@@ -5340,6 +5563,7 @@
         if (typeof refreshExplorerFilesystemCutSource === 'function') {
             refreshExplorerFilesystemCutSource(index);
         }
+        refreshExplorerSelectionHighlight(index);
     }
 
     function updateExplorerSearchControls(index, query, activeIndex, matchCount, capped = false) {
@@ -6209,6 +6433,47 @@
         link.click();
         link.remove();
         showTerminalToast(`Downloading ${fileName}…`, 'success');
+    }
+
+    /* Download several selected files as N sequential single-file downloads.
+
+       There is no archive endpoint and this must not become one: each transfer
+       stays the existing root-confined, size-capped read. Sequential because in
+       the native window every file opens its own Save dialog through the
+       pywebview bridge, and firing those concurrently would stack modal dialogs
+       over each other. Past a threshold it asks first — N transfers (and in the
+       native window, N dialogs) is not what a mis-click should cost. */
+    async function downloadExplorerFiles(index, targets) {
+        const sessionId = sessionIds[index];
+        const files = (targets || []).filter(entry => entry && entry.path);
+        if (!sessionId || !files.length) {
+            return;
+        }
+        if (files.length === 1) {
+            await downloadExplorerFile(index, { path: files[0].path });
+            return;
+        }
+        const confirmCopy = GridVibeExplorerSelection.downloadConfirmCopy(files);
+        if (confirmCopy) {
+            const confirmed = await openGenericConfirmModal({
+                title: confirmCopy.title,
+                copy: GridVibeExplorerSelection.targetsCopyLine(files),
+                note: 'Each file downloads separately.',
+                confirmLabel: confirmCopy.confirmLabel,
+                owner: `explorer-download:${sessionId}`
+            });
+            if (!confirmed) {
+                return;
+            }
+        }
+        for (const entry of files) {
+            // The pane can be closed or restarted mid-run; stop rather than
+            // keep pulling files for a session that is gone.
+            if (sessionIds[index] !== sessionId) {
+                return;
+            }
+            await downloadExplorerFile(index, { path: entry.path });
+        }
     }
 
     function getDownloadBaseName(fullPath) {
