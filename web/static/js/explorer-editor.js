@@ -478,9 +478,15 @@
         // Prefer the in-place refresh; fall back to a full render when the
         // available panels changed (a clean file commonly gains a Diff panel
         // after its first edit).
+        /* The fallback needs the captured position as much as the in-place
+           path does, and it is the *common* one on a first save: a clean file
+           gains a Diff panel the moment it differs from HEAD, which is exactly
+           the panel-set change that sends us here. Without it the whole point
+           of capturing a scroll position was lost — the file came back at the
+           top on the one save most likely to happen mid-document. */
         const applied = updateExplorerFileInPlace(index, data, scrollState);
         if (!applied) {
-            renderExplorerFile(index, data, { tab: pane._explorerActiveTabId });
+            renderExplorerFile(index, data, { tab: pane._explorerActiveTabId, scrollState });
         } else {
             setExplorerEditChromeDisabled(index, false);
             refreshExplorerEditControls(index);
@@ -491,9 +497,10 @@
             invalidateExplorerGitRepo(index);
             loadExplorerGitRepo(index);
         }
-        if (pane._explorerTreeSidebarOpen) {
-            reloadExplorerTree(index);
-        }
+        // A save cannot create, delete or rename a path, so the tree needs the
+        // saved file's own row re-read and nothing else — a full reload threw
+        // the reader's expansion and scroll away for a change it cannot show.
+        refreshExplorerTreeFileEntry(index, data.path || pane._explorerFilePath || '');
         showTerminalToast(`Saved ${data.name || pane._explorerFileName || 'file'}`, 'success');
     }
 

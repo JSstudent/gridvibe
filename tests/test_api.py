@@ -1405,8 +1405,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
         self.assertIn(".explorer-source-line-number", html)
-        self.assertIn("function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines)", html)
-        self.assertIn("function highlightExplorerCode(content, language, searchRanges = [])", html)
+        # Presence, not signature: what these two renderers actually produce is
+        # executed against the real modules in tests/test_explorer_edit_highlight.py
+        # and tests/test_explorer_source_frame.py, so pinning their parameter
+        # lists here only broke the page test whenever one gained an argument.
+        self.assertIn("function renderExplorerSourceLines(", html)
+        self.assertIn("function highlightExplorerCode(", html)
         self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
         self.assertIn("const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({", html)
         self.assertIn("'.py': 'python'", html)
@@ -1777,9 +1781,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function toggleExplorerTreeSidebar(index)", html)
         self.assertIn("function toggleExplorerTreeDirectory(index, path)", html)
         self.assertIn("function renderExplorerTreePanel(index)", html)
-        self.assertIn("function loadExplorerTreeChildren(index, path)", html)
+        # Presence, not signature — pinning the parameter list only broke this
+        # page test when the loader gained its cached-directory refresh option.
+        self.assertIn("function loadExplorerTreeChildren(", html)
         self.assertIn("function revealExplorerTreePath(index, targetPath = '')", html)
         self.assertIn("function reloadExplorerTree(index)", html)
+        # A save re-reads one directory rather than dropping the whole tree.
+        self.assertIn("function refreshExplorerTreeFileEntry(index, path)", html)
         self.assertIn(
             'wireCardButton(card, `[data-explorer-tree-toggle="${i}"]`, () => toggleExplorerTreeSidebar(i));',
             html,
@@ -12873,8 +12881,18 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
     def test_find_only_unfolds_the_markdown_sections_holding_matches(self):
         viewer = self._static("js/explorer-viewer.js")
         # A find used to disable Markdown collapse outright, unfolding the whole
-        # document; the fold state now survives it.
-        self.assertIn("const allowMarkdownCollapse = normalizedLanguage === 'markdown';", viewer)
+        # document; the fold state now survives it. Stated as "the collapse
+        # decision does not consult searchRanges" rather than as a snapshot of
+        # the expression, which broke whenever the decision gained an unrelated
+        # term (the editor underlay's fold opt-out).
+        renderer = viewer[
+            viewer.index("function renderExplorerSourceLines("):
+            viewer.index("function explorerRevealMarkdownSearchMatches")
+        ]
+        collapse_decision = next(
+            line for line in renderer.splitlines() if "const allowMarkdownCollapse" in line
+        )
+        self.assertNotIn("searchRanges", collapse_decision)
         self.assertNotIn(
             "normalizedLanguage === 'markdown' && !searchRanges.length", viewer
         )

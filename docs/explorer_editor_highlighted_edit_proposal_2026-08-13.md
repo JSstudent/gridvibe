@@ -1,6 +1,6 @@
 # Highlighted Edit Mode for the Explorer Text Editor
 
-Status: Stages 0 and 1 shipped 2026-08-13; Stages 2 and 3 not started. Drafted
+Status: Stages 0, 1 and 2 shipped 2026-08-13; Stage 3 not started. Drafted
 2026-08-13.
 
 Everything below describes the plan as drafted. Where the shipped code departs
@@ -360,6 +360,58 @@ editor's own token cache. Textarea text becomes transparent.
 
 Outcome: full syntax highlighting while editing, identical to the read-only view
 because it is literally the same renderer.
+
+**Shipped, with three departures from the plan above.**
+
+*A second cache slot was not needed, and adding one would have been dead
+state.* The proposal's rule was really a negative — never write a draft into
+`pane._explorerHighlightCache`, because that entry is what makes the post-save
+re-render free — and the positive half assumed the editor would render the same
+draft more than once. It does not: mount renders once, `refreshDecision()`
+skips an unmoved draft, and no other path re-renders an open editor's underlay
+(`renderExplorerSource()` returns early while `pane._explorerEdit` is set). So
+a moved draft passes `undefined` for the token map, the renderer's existing
+"tokenize this content yourself" argument.
+
+What the viewer's cache *does* answer is the mount. At that moment the draft
+still is the file, and the Source view being replaced was rendered from exactly
+that content and language, so `explorerEditMountRuns()` reads the cached entry
+and entering edit mode costs no tokenizing pass at all. It is guarded by string
+equality against `pane._explorerFileContent`, which is what keeps a CRLF file
+safe: its draft has been newline-normalized into a different string, so it
+misses the guard and tokenizes like any other draft rather than rewriting the
+file's own entry.
+
+*Markdown needed a fold opt-out in the renderer, not just an empty collapsed
+set.* Passing the real language re-enables the heading `<button>`s regardless
+of what is collapsed, and hazard 6 forbids a focusable element under the
+textarea. `renderExplorerSourceLines()` therefore takes a sixth argument,
+`options.foldControls`; the underlay passes `false` and gets plain number cells
+while keeping the heading tint. The gutter width deliberately does *not* follow
+that flag — it still reserves the chevron's width on any Markdown document — so
+entering edit mode on a Markdown file no longer slides the code column 7px left
+the way Stage 1 did.
+
+*Hazard 1 has a fourth face the plan did not name: glyph advance.* The underlay
+paints bold keywords and italic comments; the textarea above it is one uniform
+weight. A real bold face in a monospace family carries the same advance width,
+so the layers agree — but a *synthesized* bold does not, and a widened token
+wraps at a different column and desynchronises everything below it. The
+underlay sets `font-synthesis-weight: none`, so a family with no 700 face
+renders that token at regular weight (visible, metric-safe) instead of a
+widened fake. Oblique synthesis is a skew and keeps advances, so italics are
+left alone. The other two faces of the hazard are handled as planned:
+`caret-color` is explicit because `color` is now transparent, and the
+textarea's `::selection` is a translucent accent wash (`--gv-accent-rgb`, new
+in `tokens.css` alongside the existing `--gv-match-rgb`) so the selection
+rectangle tints the coloured rows instead of hiding them.
+
+Two legacy source-text assertions had to move rather than be re-pinned:
+`test_api.py` pinned `renderExplorerSourceLines`' full parameter list and the
+exact text of the Markdown-collapse expression. Both are now contract-level —
+the renderers are asserted present by name, and the collapse decision is
+asserted not to consult `searchRanges`, which is what that test was actually
+protecting.
 
 ### Stage 3 — optional, later
 

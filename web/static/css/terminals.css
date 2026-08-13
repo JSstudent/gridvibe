@@ -3476,17 +3476,23 @@
             min-width: 0;
         }
 
-        /* Geometry only, and never a hit target: the rows exist so the gutter
-           survives and every line keeps its rendered height.
+        /* The visible layer, and never a hit target: the rows carry the gutter,
+           every line's rendered height, and — since the underlay is the
+           read-only renderer's own output — the syntax colours. The textarea
+           above holds the same text with `color: transparent`, so what the
+           reader sees is these rows and what they type into is the textarea.
 
-           The textarea still carries the glyphs at this stage, so the rows
-           behind it contribute their shape and nothing else. Both number cells
-           set a colour of their own, so the gutter — the visible half — is
-           untouched by the transparency. */
+           Synthetic bold is the one thing that would break that: it widens
+           glyph advances, and a bolded token that measures wider here than in
+           the textarea wraps at a different column and desynchronises the two
+           layers down the rest of the file. Every source font offered has a
+           real 700 face, so switching synthesis off costs nothing when one is
+           there and drops to regular weight — metrics intact — when it is not.
+           Oblique synthesis is a skew and keeps advances, so it stays. */
         .explorer-edit-underlay {
             pointer-events: none;
             user-select: none;
-            color: transparent;
+            font-synthesis-weight: none;
         }
 
         .explorer-edit-stack > .explorer-source-editor {
@@ -3496,7 +3502,16 @@
             min-height: 0;
             overflow: hidden;
             padding: 0 14px 0 calc(var(--explorer-source-gutter-width, 42px) + 14px);
+            color: transparent;
+            caret-color: var(--explorer-text);
             background: transparent;
+        }
+
+        /* The selection rectangle is painted by the top layer, so an opaque
+           one would blank out the coloured text underneath it. A translucent
+           wash of the accent tints the rows instead of hiding them. */
+        .explorer-edit-stack > .explorer-source-editor::selection {
+            background: rgba(var(--gv-accent-rgb), .28);
         }
 
         /* The stacked textarea is as tall as the whole document, so its own

@@ -4,12 +4,14 @@
    optional hooks.
 
    Entering edit mode used to replace the rendered, numbered Source rows with a
-   bare textarea in one frame: the gutter vanished and every glyph jumped left
-   by the gutter's width and down by the textarea's 8px of padding. The overlay
-   keeps the rows — painted *behind* a textarea with a transparent background —
-   so the geometry never moves. The textarea still does all the real editing:
-   edit state, the save/conflict flow and every unsaved-work guard are
-   untouched, and `state.draft` is still `textarea.value`.
+   bare textarea in one frame: the colours and the gutter vanished and every
+   glyph jumped left by the gutter's width and down by the textarea's 8px of
+   padding. The overlay keeps the rows — painted *behind* a textarea whose own
+   text and background are transparent — so the geometry never moves and the
+   syntax colours are the read-only view's, because they come from the read-only
+   view's renderer. The textarea still does all the real editing: edit state,
+   the save/conflict flow and every unsaved-work guard are untouched, and
+   `state.draft` is still `textarea.value`.
 
    Which element scrolls is the decision that keeps this small. The textarea is
    absolutely positioned over the whole stack with `overflow: hidden`, so it is
@@ -41,27 +43,73 @@ function explorerEditLineCount(draft) {
     return lines;
 }
 
+/* The language the read-only Source view would render this file in — the same
+   expression renderExplorerSource() uses, so the underlay colours the draft
+   exactly as the panel it is standing in for coloured the file. A file past
+   the plain-preview threshold carries no language there and carries none here
+   either. */
+function explorerEditLanguage(pane) {
+    if (!pane || pane._explorerFilePlain) {
+        return '';
+    }
+    return pane._explorerFileLanguage || '';
+}
+
 /* The same arithmetic the rendered rows use, hoisted onto the stack: the
    textarea's left padding is this plus the code cell's own 14px, which is what
    puts its first glyph exactly on the underlay's code column. The rows inherit
-   it here too, so both layers move together when a new digit appears. */
-function explorerEditGutterWidthCss(draft) {
-    return explorerSourceGutterWidthCss(explorerEditLineCount(draft), false);
+   it here too, so both layers move together when a new digit appears.
+
+   Markdown reserves the fold chevron's width even though the underlay renders
+   no fold buttons, because that is what the read-only view reserved — the
+   gutter has to survive the transition at the width it already had. */
+function explorerEditGutterWidthCss(draft, language) {
+    return explorerSourceGutterWidthCss(
+        explorerEditLineCount(draft),
+        normalizeExplorerLanguage(language) === 'markdown'
+    );
 }
 
-/* The read-only renderer, called as the viewer calls it bar two deliberate
+/* The read-only renderer, called as the viewer calls it bar three deliberate
    arguments:
 
-   * no search ranges — the search chrome is disabled while editing anyway; and
-   * no language — which suppresses the Markdown fold <button>s. A focusable
-     control under a covering textarea is an unclickable tab trap, and folding
-     a buffer being typed into is incoherent regardless. It also means no
-     tokenizer runs, so this stage costs no per-keystroke highlighting.
+   * no search ranges — the search chrome is disabled while editing anyway;
+   * no fold controls — a focusable control under a covering textarea is an
+     unclickable tab trap, and folding a buffer being typed into is incoherent
+     regardless; and
+   * no token cache of its own. The viewer memoizes its map on
+     `pane._explorerHighlightCache` because a file's content rarely moves; a
+     draft moves on every keystroke, so a slot for it would never hit — and
+     writing drafts into *that* slot would evict the entry which currently
+     makes the post-save re-render free. `undefined` is the renderer's existing
+     "tokenize this yourself" argument (an explicit `null` means a cached
+     miss), so a moved draft tokenizes and the viewer's cache is untouched.
 
-   Stage 1 shows the gutter only: the textarea keeps its own glyphs and CSS
-   paints the underlay's code column transparent. */
-function explorerEditUnderlayHtml(draft) {
-    return renderExplorerSourceLines(draft, '', [], new Set(), null);
+   The tokenizing pass is a whole-document one, which is why this is only ever
+   reached through the rAF-coalesced refresh below and only under the viability
+   bound. */
+function explorerEditUnderlayHtml(draft, language, runs) {
+    return renderExplorerSourceLines(
+        draft, language, [], new Set(), runs, { foldControls: false }
+    );
+}
+
+/* The one moment the viewer's cache legitimately answers for a draft: at
+   mount the draft still *is* the file, and the Source view this overlay is
+   standing in for was rendered from exactly that content+language pair — so
+   entering edit mode costs no tokenizing at all.
+
+   The equality guard is what keeps it honest. A CRLF file's draft has been
+   newline-normalized and is a different string; handing that to the cache
+   would rewrite the entry under the file's own key and cost the post-save
+   re-render its free hit. Such a draft simply tokenizes like any other. */
+function explorerEditMountRuns(pane, draft, language) {
+    if (!pane || draft !== pane._explorerFileContent) {
+        return undefined;
+    }
+    return explorerHighlightDocumentLinesCached(
+        pane, draft, normalizeExplorerLanguage(language)
+    );
 }
 
 function explorerEditOverlayViable(draft) {
@@ -91,14 +139,15 @@ function mountExplorerEditOverlay(index, code, textareaHtml) {
         code.innerHTML = textareaHtml;
         return;
     }
+    const language = explorerEditLanguage(pane);
 
     code.innerHTML = `
         <div
             class="explorer-edit-stack"
             data-explorer-edit-stack="${index}"
-            style="--explorer-source-gutter-width: ${explorerEditGutterWidthCss(draft)};"
+            style="--explorer-source-gutter-width: ${explorerEditGutterWidthCss(draft, language)};"
         >
-            <div class="explorer-edit-underlay" aria-hidden="true">${explorerEditUnderlayHtml(draft)}</div>
+            <div class="explorer-edit-underlay" aria-hidden="true">${explorerEditUnderlayHtml(draft, language, explorerEditMountRuns(pane, draft, language))}</div>
             ${textareaHtml}
         </div>
     `;
@@ -126,8 +175,11 @@ function paintExplorerEditUnderlay(index) {
         return;
     }
     const draft = String(state.draft == null ? '' : state.draft);
-    stack.style.setProperty('--explorer-source-gutter-width', explorerEditGutterWidthCss(draft));
-    underlay.innerHTML = explorerEditUnderlayHtml(draft);
+    const language = explorerEditLanguage(pane);
+    stack.style.setProperty(
+        '--explorer-source-gutter-width', explorerEditGutterWidthCss(draft, language)
+    );
+    underlay.innerHTML = explorerEditUnderlayHtml(draft, language);
     pane._explorerEditOverlayDraft = draft;
 }
 

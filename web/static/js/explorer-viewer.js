@@ -2222,7 +2222,11 @@
         return pane;
     }
 
-    async function loadExplorerTreeChildren(index, path) {
+    /* `refresh` re-reads a directory the tree has already cached. The cached
+       rows stay on screen for the whole round trip — a re-read the reader did
+       not ask for must not blank the folder they are looking at — so the
+       loading placeholder is only rendered when there is nothing to show. */
+    async function loadExplorerTreeChildren(index, path, { refresh = false } = {}) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !sessionId) {
@@ -2231,8 +2235,9 @@
 
         ensureExplorerTreeState(pane);
         const key = String(path || '');
-        if (pane._explorerTreeChildren.has(key)) {
-            return pane._explorerTreeChildren.get(key);
+        const cached = pane._explorerTreeChildren.get(key);
+        if (cached && !refresh) {
+            return cached;
         }
         if (pane._explorerTreeLoading.has(key)) {
             return [];
@@ -2240,7 +2245,9 @@
 
         pane._explorerTreeLoading.add(key);
         pane._explorerTreeErrors.delete(key);
-        renderExplorerTreePanel(index);
+        if (!cached) {
+            renderExplorerTreePanel(index);
+        }
         try {
             const entriesUrl = `/api/explorer/${encodeURIComponent(sessionId)}/entries`;
             // Always send an explicit path (empty === the explorer root) so the tree stays
@@ -2373,13 +2380,14 @@
         if (error) {
             return `<div class="explorer-tree-error" ${indent}>${escHtml(error)}</div>`;
         }
-        if (pane._explorerTreeLoading.has(path)) {
-            return `<div class="explorer-tree-loading" ${indent}>Loading...</div>`;
-        }
 
         const entries = pane._explorerTreeChildren.get(path);
+        // A folder being re-read keeps showing what it has; only a folder with
+        // nothing cached yet is worth a placeholder.
         if (!entries) {
-            return '';
+            return pane._explorerTreeLoading.has(path)
+                ? `<div class="explorer-tree-loading" ${indent}>Loading...</div>`
+                : '';
         }
         if (!entries.length) {
             return `<div class="explorer-tree-empty" ${indent}>Empty folder.</div>`;
@@ -2740,6 +2748,37 @@
         if (typeof explorerTreeSearchActive === 'function' && explorerTreeSearchActive(pane)) {
             await runExplorerTreeSearch(index);
         }
+    }
+
+    /* One file's row, re-read in place. Saving changes a file's *contents*, so
+       the set of paths the tree draws cannot have moved — only that one row
+       can (its Git badge turns a clean file modified, and its filesystem
+       revision is what the delete/move guards check). Running the full
+       reloadExplorerTree() for that dropped every cached directory, flashed a
+       near-empty panel, refetched one request per expanded folder and left the
+       reader scrolled back to the top of a tree they had navigated by hand.
+
+       So only the file's own directory is re-read, its rows stay on screen for
+       the round trip, every other folder keeps its cache and its expansion,
+       and the panel's scroll is put back afterwards — the rebuild that follows
+       the response resets it, the same way it resets on any tree render. A
+       file whose directory the tree has not loaded has no row to refresh. */
+    async function refreshExplorerTreeFileEntry(index, path) {
+        const pane = terminals[index];
+        const target = String(path || '');
+        if (!pane?._explorerTreeSidebarOpen || !target) {
+            return;
+        }
+        ensureExplorerTreeState(pane);
+        const cut = target.lastIndexOf('/');
+        const parent = cut === -1 ? '' : target.slice(0, cut);
+        if (!pane._explorerTreeChildren.has(parent)) {
+            return;
+        }
+        const panel = document.getElementById(`explorer-tree-panel-${index}`);
+        const viewport = captureScrollMetrics(panel);
+        await loadExplorerTreeChildren(index, parent, { refresh: true });
+        applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), viewport);
     }
 
     function ensureExplorerDiffExpandedCommits(pane) {
@@ -5062,12 +5101,21 @@
         return `max(42px, calc(${digits}ch + ${fixed}px))`;
     }
 
-    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines) {
+    /* `options.foldControls: false` renders the Markdown heading rows without
+       their fold <button>s — the in-place editor's underlay needs the rows for
+       their geometry and their colour, but a focusable control beneath a
+       covering textarea is an unclickable tab trap, and folding a buffer being
+       typed into is incoherent anyway. The gutter still reserves the chevron's
+       width, so the code column sits exactly where the read-only view put it
+       and entering edit mode moves no glyph. */
+    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines, options = {}) {
         const normalizedLanguage = normalizeExplorerLanguage(language);
         const records = explorerSourceLineRecords(content);
         const languageClass = explorerLanguageClass(language);
         const codeClass = languageClass ? ` language-${languageClass}` : '';
-        const markdownHeadings = normalizedLanguage === 'markdown'
+        const markdownDocument = normalizedLanguage === 'markdown';
+        const foldControls = !options || options.foldControls !== false;
+        const markdownHeadings = markdownDocument
             ? explorerMarkdownHeadingLevels(records)
             : new Map();
         /* Folds survive a find: a search used to unfold the whole document so
@@ -5075,7 +5123,7 @@
            reader's fold state on every Ctrl+F. Only the sections a match
            actually lands in are opened now, by
            explorerRevealMarkdownSearchMatches() before this renders. */
-        const allowMarkdownCollapse = normalizedLanguage === 'markdown';
+        const allowMarkdownCollapse = markdownDocument && foldControls;
         // Whole-document Highlight.js pass (Phase 1); null for unsupported
         // languages, the log/markdown special renderers, oversized files, or any
         // Highlight.js failure, in which case each line uses the fallback lexer.
@@ -5108,7 +5156,7 @@
                 : lineHtml;
             rows.push(`
                 <div class="explorer-source-line" data-explorer-line="${record.number}">
-                    ${explorerSourceLineNumberHtml(record, headingLevel, collapsed)}
+                    ${explorerSourceLineNumberHtml(record, foldControls ? headingLevel : 0, collapsed)}
                     <code class="explorer-source-line-code${codeClass}">${contentHtml || '&nbsp;'}</code>
                 </div>
             `);
@@ -5118,7 +5166,10 @@
             }
         });
 
-        const gutterWidth = explorerSourceGutterWidthCss(records.length, allowMarkdownCollapse);
+        // Width follows the document, not the controls: a Markdown underlay
+        // with its buttons suppressed still keeps the read-only gutter, so the
+        // code column does not shift under the caret on entering edit mode.
+        const gutterWidth = explorerSourceGutterWidthCss(records.length, markdownDocument);
         return `<div class="explorer-source-lines" style="--explorer-source-gutter-width: ${gutterWidth};">${rows.join('')}</div>`;
     }
 

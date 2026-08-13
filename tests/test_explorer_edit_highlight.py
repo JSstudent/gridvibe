@@ -5,9 +5,16 @@ run in Node against the real module rather than being asserted as source text.
   oversized buffer — or the policy module never loading — has to leave edit
   mode exactly as it was: a bare textarea, no notice, no second global sink.
 * The refresh rule keeps the underlay's rebuild off the keystroke path. It is
-  a whole-document render, so it is coalesced into one animation frame and
-  skipped outright when the draft has not moved (arrow keys, a click, a
-  keystroke that inserted nothing all reach the same input handler).
+  a whole-document render — tokenizing included — so it is coalesced into one
+  animation frame and skipped outright when the draft has not moved (arrow
+  keys, a click, a keystroke that inserted nothing all reach the same input
+  handler).
+
+The adapter half additionally covers what the underlay paints: the draft's own
+syntax colours, from the read-only renderer and without disturbing the token
+cache that renderer keeps for the read-only view, and Markdown headings
+coloured but stripped of the fold buttons that would be a tab trap under a
+covering textarea.
 """
 
 import json
@@ -92,7 +99,11 @@ const sandbox = {
     terminals: [],
     sessionIds: [],
     applyExplorerChangeMarks: () => {},
-    escHtml: value => String(value == null ? '' : value)
+    escHtml: value => String(value == null ? '' : value),
+    // Owned by terminal-icons.js, which this harness does not load; only the
+    // read-only fold buttons reference them.
+    UI_CHEVRON_DOWN_ICON: '<svg data-icon="chevron-down"></svg>',
+    UI_CHEVRON_RIGHT_ICON: '<svg data-icon="chevron-right"></svg>'
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
@@ -104,13 +115,26 @@ sandbox.window.GridVibeExplorerEditHighlight = sandbox.GridVibeExplorerEditHighl
 
 const TEXTAREA = '<textarea id="explorer-edit-textarea-0"></textarea>';
 
-function openEditor(draft) {
+function openEditor(draft, language, pane) {
     const view = element('view');
     nodes['explorer-code-0'] = view;
     nodes['explorer-edit-textarea-0'] = element('textarea');
-    sandbox.terminals[0] = { _explorerEdit: { draft } };
+    sandbox.terminals[0] = Object.assign({
+        _explorerEdit: { draft },
+        _explorerFileLanguage: language || ''
+    }, pane || {});
     sandbox.mountExplorerEditOverlay(0, view, TEXTAREA);
     return view;
+}
+
+// The token map the viewer would already be holding for a rendered file, with
+// a marker span no tokenizer would produce, so reuse is unambiguous.
+function seededCache(content, language) {
+    return {
+        content,
+        language,
+        lines: new Map([[1, [{ className: 'seeded-token', text: 'SEEDED', start: 0 }]]])
+    };
 }
 
 // Once mounted, the stack and its underlay are children of the panel; the
@@ -195,6 +219,75 @@ const results = {};
         paints: underlay.paints,
         focusRing: view.classes.has('editor-focused'),
         frame: sandbox.terminals[0]._explorerEditOverlayFrame
+    };
+}
+
+// 6. The draft is coloured by the read-only renderer, and tokenizing it must
+//    not touch the cache the read-only view's own re-render depends on.
+{
+    openEditor('x = 1\\n', 'python');
+    const { underlay } = wireStack();
+    sandbox.terminals[0]._explorerEdit.draft = 'def go():\\n    return 1\\n';
+    sandbox.refreshExplorerEditOverlay(0);
+    runFrames();
+    results.coloured = {
+        html: underlay.innerHTML,
+        viewerCache: sandbox.terminals[0]._explorerHighlightCache === undefined
+    };
+}
+
+// 7. A file too big to colour keeps the plain rows, exactly as the read-only
+//    view does past the same threshold.
+{
+    const view = openEditor('def go():\\n', 'python');
+    sandbox.terminals[0]._explorerFilePlain = true;
+    sandbox.mountExplorerEditOverlay(0, view, TEXTAREA);
+    results.plainPreview = { html: view.innerHTML };
+}
+
+// 8. Markdown: headings still get their colour, but the fold buttons that
+//    carry it in the read-only view are gone — and the gutter keeps the width
+//    it reserved for their chevrons, so the code column does not shift.
+{
+    const view = openEditor('# Title\\nbody\\n', 'markdown');
+    results.markdown = { html: view.innerHTML };
+}
+
+// 9. The read-only renderer is unchanged: called as the viewer calls it, the
+//    same document still folds.
+{
+    results.readOnlyMarkdown = {
+        html: sandbox.renderExplorerSourceLines('# Title\\nbody\\n', 'markdown')
+    };
+}
+
+// 10. At mount the draft still is the file, so the map the viewer tokenized to
+//     render the Source view answers for it and edit mode costs no pass.
+{
+    const source = 'def go():\\n';
+    const cache = seededCache(source, 'python');
+    const view = openEditor(source, 'python', {
+        _explorerFileContent: source,
+        _explorerHighlightCache: cache
+    });
+    results.mountReusesCache = {
+        html: view.innerHTML,
+        sameEntry: sandbox.terminals[0]._explorerHighlightCache === cache
+    };
+}
+
+// 11. A CRLF file's draft has been newline-normalized, so it is not the file
+//     and must not be written into the file's cache entry.
+{
+    const source = 'def go():\\r\\n';
+    const cache = seededCache(source, 'python');
+    const view = openEditor('def go():\\n', 'python', {
+        _explorerFileContent: source,
+        _explorerHighlightCache: cache
+    });
+    results.normalizedDraftKeepsCache = {
+        html: view.innerHTML,
+        sameEntry: sandbox.terminals[0]._explorerHighlightCache === cache
     };
 }
 
@@ -420,6 +513,60 @@ class EditOverlayAdapterTestCase(unittest.TestCase):
         self.assertEqual(
             self.results["grown"]["gutter"], "max(42px, calc(4ch + 19px))"
         )
+
+    def test_the_underlay_carries_the_draft_s_syntax_colours(self):
+        coloured = self.results["coloured"]
+        # The same renderer the read-only Source view uses, so the tokens are
+        # the tokens — and they follow the draft, not the file on disk.
+        self.assertIn('<span class="explorer-code-keyword">def</span>', coloured["html"])
+        self.assertIn("return", coloured["html"])
+
+    def test_colouring_a_draft_leaves_the_read_only_token_cache_alone(self):
+        # The viewer caches its token map on the pane so a re-render after
+        # saving is free; writing every keystroke's draft into that slot would
+        # evict the entry that makes it free.
+        self.assertTrue(self.results["coloured"]["viewerCache"])
+
+    def test_a_plain_preview_file_is_edited_without_colour(self):
+        # Past the viewer's plain-preview threshold the read-only view drops
+        # the language, and the underlay has to drop it too or edit mode would
+        # be doing tokenizing work the viewer already refused.
+        html = self.results["plainPreview"]["html"]
+        self.assertIn('data-explorer-edit-stack="0"', html)
+        self.assertNotIn("explorer-code-keyword", html)
+
+    def test_markdown_headings_keep_their_colour_without_a_fold_button(self):
+        html = self.results["markdown"]["html"]
+        self.assertIn("explorer-md-source-heading-1", html)
+        # Hazard 6: nothing focusable may sit under the covering textarea.
+        self.assertNotIn("<button", html)
+        # …and the gutter still reserves the chevron's width, so entering edit
+        # mode on a Markdown file does not slide the code column left.
+        self.assertIn("max(42px, calc(1ch + 34px))", html)
+
+    def test_the_read_only_view_still_folds(self):
+        # The fold opt-out is the underlay's alone; the viewer's own call is
+        # untouched and its Markdown sections stay collapsible.
+        html = self.results["readOnlyMarkdown"]["html"]
+        self.assertIn("data-explorer-markdown-section=\"1\"", html)
+        self.assertIn("max(42px, calc(1ch + 34px))", html)
+
+    def test_entering_edit_mode_reuses_the_tokens_the_viewer_already_has(self):
+        # The Source view this overlay stands in for was rendered from exactly
+        # this content and language, so opening the editor should cost no
+        # whole-document pass — and it must reuse the entry, not replace it.
+        mounted = self.results["mountReusesCache"]
+        self.assertIn('<span class="seeded-token">SEEDED</span>', mounted["html"])
+        self.assertTrue(mounted["sameEntry"])
+
+    def test_a_newline_normalized_draft_does_not_overwrite_the_file_s_tokens(self):
+        # A CRLF file's draft is a different string from the file, so it is not
+        # the cache's answer and must not become its new one — that entry is
+        # what makes the re-render after saving free.
+        normalized = self.results["normalizedDraftKeepsCache"]
+        self.assertNotIn("SEEDED", normalized["html"])
+        self.assertTrue(normalized["sameEntry"])
+        self.assertIn('<span class="explorer-code-keyword">def</span>', normalized["html"])
 
     def test_teardown_releases_the_queued_frame_and_the_focus_ring(self):
         torn = self.results["tornDown"]
