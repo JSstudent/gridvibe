@@ -42,6 +42,9 @@
             const capturedEpoch = state && state.voice ? state.voice.epoch : null;
             explorerEditorCancelVoiceSettle(state);
             pane._explorerEdit = null;
+            // Releases the overlay's queued frame and its focus ring. Every
+            // exit route already funnels through here.
+            window.teardownExplorerEditOverlay?.(index);
             if (capturedEpoch !== null) {
                 explorerEditorExpireOrphanedDictation(index, capturedEpoch);
                 Promise.resolve(_stopVoice(index)).catch(() => {});
@@ -257,8 +260,27 @@
         if (textarea) {
             textarea.setSelectionRange(0, 0);
             textarea.focus({ preventScroll: true });
-            restoreExplorerEditViewport(textarea, sourceViewport);
+            /* Inside the overlay's stack the Source view goes on scrolling
+               both layers — it is never replaced and the content height does
+               not change, so the position survives on its own and this is a
+               cheap safety net. Without the overlay the full-height textarea
+               is the scroller, exactly as before, and the transfer is real. */
+            restoreExplorerEditViewport(
+                explorerEditScrollElement(index) || textarea, sourceViewport
+            );
         }
+    }
+
+    /* The element that actually scrolls the Source panel while editing. The
+       overlay's textarea is `overflow: hidden` and exactly as tall as its own
+       content, so the scroller is the same `.explorer-source-view` as in
+       read-only mode; only the bare fallback textarea scrolls itself. */
+    function explorerEditScrollElement(index) {
+        const view = document.getElementById(`explorer-code-${index}`);
+        if (view && document.querySelector(`[data-explorer-edit-stack="${index}"]`)) {
+            return view;
+        }
+        return document.getElementById(`explorer-edit-textarea-${index}`) || view;
     }
 
     function renderExplorerEditTextarea(index) {
@@ -271,7 +293,16 @@
         // The editor honours the tab's Source line-wrap flag; `soft` never
         // rewrites the value, so the saved bytes are the same either way.
         const wrap = explorerLineWrapPreference(index, 'source') ? 'soft' : 'off';
-        code.innerHTML = `<textarea id="explorer-edit-textarea-${index}" class="explorer-source-editor" spellcheck="false" wrap="${wrap}" aria-label="Edit ${escHtml(pane._explorerFileName || 'file')}"></textarea>`;
+        const textareaHtml = `<textarea id="explorer-edit-textarea-${index}" class="explorer-source-editor" spellcheck="false" wrap="${wrap}" aria-label="Edit ${escHtml(pane._explorerFileName || 'file')}"></textarea>`;
+        /* explorer-edit-overlay.js paints the read-only rows behind the
+           textarea so the gutter survives and no glyph moves. It is an
+           enhancement — an oversized buffer, or the file failing to load at
+           all, leaves the panel holding exactly this bare textarea. */
+        if (typeof window.mountExplorerEditOverlay === 'function') {
+            window.mountExplorerEditOverlay(index, code, textareaHtml);
+        } else {
+            code.innerHTML = textareaHtml;
+        }
         const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
         if (!textarea) {
             return;
@@ -296,6 +327,9 @@
             return;
         }
         state.draft = textarea.value;
+        // The overlay's rows are the draft's own geometry: a new line, or a
+        // line that now wraps, has to reach the layer behind the caret.
+        window.refreshExplorerEditOverlay?.(index);
         const dirty = state.draft !== state.originalContent;
         if (dirty !== state.dirty) {
             state.dirty = dirty;
@@ -349,8 +383,7 @@
         if (!pane) {
             return;
         }
-        const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
-        const editViewport = captureScrollMetrics(textarea);
+        const editViewport = captureScrollMetrics(explorerEditScrollElement(index));
         clearExplorerEditState(index);
         clearExplorerEditBar(index);
         renderExplorerSource(index);

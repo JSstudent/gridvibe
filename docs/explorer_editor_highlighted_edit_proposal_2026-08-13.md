@@ -1,6 +1,11 @@
 # Highlighted Edit Mode for the Explorer Text Editor
 
-Status: proposal / not started. Drafted 2026-08-13.
+Status: Stages 0 and 1 shipped 2026-08-13; Stages 2 and 3 not started. Drafted
+2026-08-13.
+
+Everything below describes the plan as drafted. Where the shipped code departs
+from it, the **Shipped** notes in the Staging section say so — read those
+before treating a paragraph here as a description of the code.
 
 ## Goal
 
@@ -146,7 +151,7 @@ Three things already point this way and need no work:
 | --- | --- |
 | `web/static/js/explorer-edit-overlay.js` | The whole feature: builds the stack, refreshes the underlay, owns the degraded fallback. |
 | `web/static/js/explorer-edit-highlight.js` | DOM-free policy: viability + re-highlight scheduling. Node-testable. |
-| `tests/test_explorer_edit_highlight.py` | Node-executed behavioural tests for the above. |
+| `tests/test_explorer_edit_highlight.py` | Node-executed behavioural tests for the above, plus the adapter run against the real row renderer. |
 
 Splitting policy from adapter follows the pattern already used by
 `topbar-peek.js`, `explorer-selection.js`, and `notice-banner.js`, and keeps the
@@ -301,6 +306,12 @@ Hazard 2, on its own. Replace the per-row `minmax(42px, auto)` with a computed
 real (if subtle) read-only misalignment on files over 999 lines, and is a
 prerequisite for anything overlaid.
 
+**Shipped.** `explorerSourceGutterWidthCss()` in `explorer-viewer.js` publishes
+`--explorer-source-gutter-width` as an inline custom property on the lines
+block; `.explorer-source-line`'s first grid track reads it. The formula floors
+at the old 42px and adds the fold chevron's width on Markdown, where any row
+may become a heading button.
+
 ### Stage 1 — geometry parity, no colour
 
 Introduce the stack with an underlay rendered numbers-only. Match padding,
@@ -310,6 +321,37 @@ line-height, font, tab-size and wrap between the layers; delete the
 Outcome: entering and leaving edit mode no longer moves the text, the gutter
 survives, and scroll position survives both transitions exactly. Most of the
 perceived harshness is gone here, at zero per-keystroke cost.
+
+**Shipped, with two corrections to the plan above.**
+
+*"Numbers-only" could not be numbers-only.* Row heights are the whole point of
+geometry parity, and a wrapped line's height depends on its text. An underlay
+of empty code cells would hold every row at one line while the textarea wrapped
+long lines to several, and the gutter would desynchronise progressively down
+exactly the files where it matters. The underlay therefore renders the real
+draft — plainly, with no language passed, so no tokenizer runs and no fold
+`<button>` is emitted — and CSS paints it transparent while the textarea still
+carries the glyphs. Stage 2 flips which layer is transparent and passes the
+language. The cost is that the underlay is rebuilt as the draft changes, which
+is why `refreshDecision()` (rAF-coalesced, skipping an unmoved draft) and the
+viability bound arrived in Stage 1 rather than Stage 2; the bound reuses the
+viewer's existing `EXPLORER_PLAIN_PREVIEW_THRESHOLD` rather than inventing a
+second number.
+
+*The `explorerPanelScrollTarget()` edit branch was kept, not deleted.* Deleting
+it would have been correct for the overlay and wrong for the degraded path,
+where the bare full-height textarea really is the scroller and really does hold
+the position Save restores. The branch now asks which of the two is in the
+panel (`.explorer-edit-stack` present ⇒ the view scrolls both layers), and
+`explorerEditScrollElement()` in `explorer-editor.js` answers the same question
+for the enter/exit transfers. `explorer-viewer.js` grew by four lines instead
+of shrinking.
+
+Two consequences of rendering rows during an edit that the plan did not name:
+`explorerOverviewGeometry()` gained an explicit `pane._explorerEdit` guard,
+because "rows exist" had been standing in for "there is a read-only document to
+survey"; and the stacked textarea's focus ring moved to the scroller, since its
+own outline would be drawn around the whole document and never seen.
 
 ### Stage 2 — colour the underlay
 

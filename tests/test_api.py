@@ -1938,21 +1938,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         ]
         self.assertIn("const sourceViewport = captureScrollMetrics(sourcePanel);", enter)
         self.assertIn("textarea.focus({ preventScroll: true });", enter)
-        self.assertIn("restoreExplorerEditViewport(textarea, sourceViewport);", enter)
+        self.assertIn("restoreExplorerEditViewport(", enter)
         self.assertLess(
             enter.index("textarea.setSelectionRange(0, 0);"),
             enter.index("textarea.focus({ preventScroll: true });"),
         )
-        # Save captures the textarea (the real edit-mode scroller), allowing
-        # the highlighted Source view to return to the same location. The
-        # scroll target sees through the fixed source frame to the inner view.
+        # Both transfers address whichever element actually scrolls in edit
+        # mode — the Source view under the highlight overlay, the full-height
+        # textarea when the overlay stood down. The scroll target sees through
+        # the fixed source frame to the inner view either way.
+        self.assertIn("explorerEditScrollElement(index)", enter)
         self.assertIn("panel.querySelector('.explorer-source-view')", viewer)
         self.assertIn("view.querySelector('.explorer-source-editor')", viewer)
         exit_mode = editor[
             editor.index("function exitExplorerEditMode("):
             editor.index("async function cancelExplorerEdit(index)")
         ]
-        self.assertIn("const editViewport = captureScrollMetrics(textarea);", exit_mode)
+        self.assertIn(
+            "const editViewport = captureScrollMetrics(explorerEditScrollElement(index));",
+            exit_mode,
+        )
         self.assertIn("restoreExplorerEditViewport(", exit_mode)
 
     def test_terminals_page_explorer_editor_conflict_branches_on_code(self):

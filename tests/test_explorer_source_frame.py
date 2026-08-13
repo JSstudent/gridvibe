@@ -6,9 +6,92 @@ its own, so the suite is contract-level on the served assets (selectors,
 ``data-*`` hooks, named functions) plus ordering guarantees the CSS relies on.
 """
 
+import json
+import shutil
+import subprocess
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import api
+
+VIEWER_JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js" / "explorer-viewer.js"
+NODE = shutil.which("node")
+
+# Enough document for explorer-viewer.js to evaluate, plus a panel whose
+# querySelector answers the handful of selectors the scroll target asks for.
+SCROLL_TARGET_HARNESS = """
+const fs = require('fs');
+const vm = require('vm');
+
+function panelStub(kind, children) {
+    const nodes = new Map(Object.entries(children || {}));
+    const make = selector => {
+        const entry = nodes.get(selector);
+        if (!entry) { return null; }
+        return {
+            name: entry.name,
+            querySelector: inner => (entry.children || []).includes(inner)
+                ? { name: `${entry.name}${inner}` }
+                : null
+        };
+    };
+    return {
+        name: 'panel',
+        dataset: { explorerFilePanel: kind },
+        querySelector: selector => make(selector)
+    };
+}
+
+const sandbox = {
+    console,
+    document: {
+        getElementById: () => null,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+        body: { dataset: {}, addEventListener() {} }
+    },
+    window: {
+        addEventListener() {},
+        setTimeout,
+        clearTimeout,
+        matchMedia: () => ({ matches: false }),
+        localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+        requestAnimationFrame: () => 0
+    },
+    navigator: {},
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: () => 0,
+    terminals: [],
+    sessionIds: [],
+    applyExplorerChangeMarks: () => {},
+    escHtml: value => String(value == null ? '' : value)
+};
+sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+
+const view = children => ({ '.explorer-source-view': { name: 'view', children } });
+const cases = {
+    // The overlay's textarea is overflow:hidden and content-height, so the
+    // view goes on scrolling both layers.
+    overlay: panelStub('source', view(['.explorer-edit-stack', '.explorer-source-editor'])),
+    // Overlay stood down: the full-height textarea scrolls itself.
+    bareEditor: panelStub('source', view(['.explorer-source-editor'])),
+    readOnly: panelStub('source', view([])),
+    frameOnly: panelStub('source', {}),
+    diff: panelStub('diff', { '.explorer-diff-content': { name: 'diffContent' } })
+};
+
+const resolved = {};
+Object.entries(cases).forEach(([key, panel]) => {
+    resolved[key] = sandbox.explorerPanelScrollTarget(panel).name;
+});
+resolved.missing = String(sandbox.explorerPanelScrollTarget(null));
+process.stdout.write(JSON.stringify(resolved));
+"""
 
 
 class ExplorerSourceFrameTestCase(unittest.TestCase):
@@ -44,25 +127,36 @@ class ExplorerSourceFrameTestCase(unittest.TestCase):
             viewer,
         )
 
+    @unittest.skipUnless(NODE, "Node.js is required for scroll-target tests")
     def test_panel_scroll_target_sees_through_the_source_frame(self):
-        viewer = self._viewer()
-        target = viewer[
-            viewer.index("function explorerPanelScrollTarget(panel)"):
-            viewer.index("function captureScrollMetrics(el)")
-        ]
-        # The source branch resolves the inner scroller — without it, scroll
-        # capture/restore would read the overflow:hidden frame and pin every
-        # restored file to the top.
-        self.assertIn("panel.dataset.explorerFilePanel === 'source'", target)
-        self.assertIn("panel.querySelector('.explorer-source-view')", target)
-        self.assertIn("return editor || view;", target)
-        # Edit mode still wins: its full-height textarea is the scroller while
-        # it lives inside the view.
-        self.assertIn("view.querySelector('.explorer-source-editor')", target)
-        # The source branch runs before the diff branch, and the diff branch
-        # keeps its existing inner-scroller behaviour.
-        self.assertLess(target.index("=== 'source'"), target.index("=== 'diff'"))
-        self.assertIn("return panel.querySelector('.explorer-diff-content') || panel;", target)
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "harness.js"
+            script_path.write_text(SCROLL_TARGET_HARNESS, encoding="utf-8")
+            completed = subprocess.run(
+                ["node", str(script_path), str(VIEWER_JS)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        resolved = json.loads(completed.stdout)
+
+        # Without the source branch, scroll capture/restore would read the
+        # overflow:hidden frame and pin every restored file to the top.
+        self.assertEqual(resolved["readOnly"], "view")
+        # Under the in-place editor's highlight overlay the textarea is
+        # overflow:hidden and exactly as tall as its content, so the view goes
+        # on scrolling both layers — reading the textarea would capture a
+        # permanent zero and lose the position on every save.
+        self.assertEqual(resolved["overlay"], "view")
+        # Overlay stood down: the full-height textarea is the real scroller.
+        self.assertEqual(resolved["bareEditor"], "view.explorer-source-editor")
+        # A frame with no inner view falls back to the frame itself, and the
+        # diff panel keeps its own inner-scroller behaviour.
+        self.assertEqual(resolved["frameOnly"], "panel")
+        self.assertEqual(resolved["diff"], "diffContent")
+        self.assertEqual(resolved["missing"], "null")
 
     def test_source_frame_css_keeps_the_frame_fixed(self):
         css = self._static("css/terminals.css")

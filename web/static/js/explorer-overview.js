@@ -631,6 +631,15 @@ function explorerOverviewGeometry(index, parts) {
     if (!pane) {
         return null;
     }
+    /* The in-place editor's highlight overlay renders these same rows behind
+       its textarea for geometry parity, so "rows exist" no longer means "there
+       is a read-only document to survey". The column's model is HEAD versus
+       disk and a dirty draft is neither, so it stays stood down — exactly as
+       it did when edit mode left nothing but a textarea here. */
+    if (pane._explorerEdit) {
+        pane._explorerOverviewGeometry = null;
+        return null;
+    }
     if (!rows.length) {
         pane._explorerOverviewGeometry = null;
         return null;

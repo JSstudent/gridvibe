@@ -3449,6 +3449,69 @@
             outline-offset: -2px;
         }
 
+        /* ── Highlight overlay: the read-only rows painted behind the editor ──
+           The stack is the underlay's own height, and the textarea covers it
+           absolutely with `overflow: hidden`, so the textarea never scrolls
+           and the surrounding .explorer-source-view scrolls both layers
+           together exactly as it does in read-only mode. That is what keeps
+           the caret following typing with no scroll-sync code.
+
+           Wrap-column parity is the whole game: the textarea's content box has
+           to be exactly the underlay's code column, so its left padding is the
+           shared gutter variable plus the code cell's own 14px, and the two
+           inherit the same font, line-height, tab-size and wrap rules from the
+           view. One pixel of drift and long lines break at different columns,
+           and the layers desynchronise progressively down the file. */
+        .explorer-edit-stack {
+            position: relative;
+            /* Unwrapped, the stack grows to the widest rendered line so the
+               covering textarea is that wide too; wrapped, it drops the floor
+               and both layers reflow inside the pane. Mirrors the same pair of
+               rules on .explorer-source-lines. */
+            min-width: max-content;
+            min-height: 100%;
+        }
+
+        .explorer-source-view.wrap-lines .explorer-edit-stack {
+            min-width: 0;
+        }
+
+        /* Geometry only, and never a hit target: the rows exist so the gutter
+           survives and every line keeps its rendered height.
+
+           The textarea still carries the glyphs at this stage, so the rows
+           behind it contribute their shape and nothing else. Both number cells
+           set a colour of their own, so the gutter — the visible half — is
+           untouched by the transparency. */
+        .explorer-edit-underlay {
+            pointer-events: none;
+            user-select: none;
+            color: transparent;
+        }
+
+        .explorer-edit-stack > .explorer-source-editor {
+            position: absolute;
+            inset: 0;
+            height: auto;
+            min-height: 0;
+            overflow: hidden;
+            padding: 0 14px 0 calc(var(--explorer-source-gutter-width, 42px) + 14px);
+            background: transparent;
+        }
+
+        /* The stacked textarea is as tall as the whole document, so its own
+           focus ring would be drawn around the buffer and never seen. The ring
+           moves to the scroller — the box the user actually looks at — which
+           explorer-edit-overlay.js marks on focus. */
+        .explorer-edit-stack > .explorer-source-editor:focus {
+            outline: none;
+        }
+
+        .explorer-source-view.editor-focused {
+            outline: 2px solid var(--t-accent);
+            outline-offset: -2px;
+        }
+
         /* Line wrapping and the appearance menu stay live while editing (like
            zoom, they only restyle the surface), so their buttons are not dimmed
            with the disabled chrome. */
@@ -3773,9 +3836,15 @@
             min-width: 0;
         }
 
+        /* One gutter track for every row in the document, written once by
+           renderExplorerSourceLines() from the digit count of the last line
+           (plus the fold chevron on Markdown). Each row is its own grid
+           container, so the `minmax(42px, auto)` this replaced sized each
+           gutter from that row's own number and pushed the code column right
+           on the four-digit rows of any file past 999 lines. */
         .explorer-source-line {
             display: grid;
-            grid-template-columns: minmax(42px, auto) minmax(0, 1fr);
+            grid-template-columns: var(--explorer-source-gutter-width, 42px) minmax(0, 1fr);
             align-items: stretch;
             min-height: 1.45em;
         }
@@ -3959,9 +4028,13 @@
 
         /* Old (HEAD) lines stack above new (worktree) lines, tinted from the
            same two tokens the Diff panel's cells use. */
+        /* The peek is inserted among the source rows and shares their cell
+           geometry, so it reads the document's one gutter width too — sizing
+           its own would step away from the rows it sits between on any file
+           past 999 lines. */
         .explorer-change-peek-line {
             display: grid;
-            grid-template-columns: minmax(42px, auto) minmax(0, 1fr);
+            grid-template-columns: var(--explorer-source-gutter-width, 42px) minmax(0, 1fr);
             min-height: 1.45em;
         }
 

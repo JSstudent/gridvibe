@@ -5043,6 +5043,25 @@
         `;
     }
 
+    /* One gutter width for the whole document, published as a custom property
+       on the lines block. Each row is its own grid container, so the per-row
+       `minmax(42px, auto)` track this replaced sized every gutter from *that
+       row's own* number: under 1000 lines every number fit the 42px floor and
+       the columns agreed, but past it the four-digit rows started their code
+       column further right than their three-digit neighbours.
+
+       The width is arithmetic on the line count — no layout read, no observer,
+       nothing that needs the element to be in the document — so it is equally
+       safe to compute for a detached card. */
+    function explorerSourceGutterWidthCss(lineCount, foldable) {
+        const digits = String(Math.max(1, Number(lineCount) || 1)).length;
+        /* 9px of cell padding either side plus the 1px separator, and on a
+           foldable document the fold chevron (10px) and its 5px gap, which
+           share the cell with the number on every heading row. */
+        const fixed = 19 + (foldable ? 15 : 0);
+        return `max(42px, calc(${digits}ch + ${fixed}px))`;
+    }
+
     function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines) {
         const normalizedLanguage = normalizeExplorerLanguage(language);
         const records = explorerSourceLineRecords(content);
@@ -5099,7 +5118,8 @@
             }
         });
 
-        return `<div class="explorer-source-lines">${rows.join('')}</div>`;
+        const gutterWidth = explorerSourceGutterWidthCss(records.length, allowMarkdownCollapse);
+        return `<div class="explorer-source-lines" style="--explorer-source-gutter-width: ${gutterWidth};">${rows.join('')}</div>`;
     }
 
     /* A match hidden inside a collapsed Markdown section has no row to
@@ -6152,9 +6172,15 @@
             if (!view) {
                 return panel;
             }
-            // Edit mode moves Source scrolling into its full-height textarea.
-            // Capture that inner viewport so Save can restore the same location
-            // when the highlighted read-only Source panel is rebuilt.
+            /* The in-place editor's highlight overlay keeps that same view as
+               the scroller: its textarea is `overflow: hidden` and exactly as
+               tall as its own content, so both layers scroll together. Only
+               the bare fallback textarea — the overlay stood down — is a
+               scroller of its own, and its inner viewport is what Save needs
+               to restore onto the rebuilt read-only panel. */
+            if (view.querySelector('.explorer-edit-stack')) {
+                return view;
+            }
             const editor = view.querySelector('.explorer-source-editor');
             return editor || view;
         }
